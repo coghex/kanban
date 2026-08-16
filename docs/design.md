@@ -241,6 +241,8 @@ Initial options:
 --usage                           print both providers' usage windows and exit
 --fresh                           with --usage, probe live instead of reading the cache
 --json                            with --usage, write the machine-readable document
+--ping codex|claude               start that provider's window with one deliberate
+                                  model request, then exit
 --ascii                            emergency non-Unicode border fallback
 --no-cache                        do not read or write snapshots
 --config FILE                     override the global configuration path
@@ -249,6 +251,10 @@ Initial options:
 ```
 
 `--fresh` and `--json` modify `--usage` and are inert without it.
+
+`--ping` takes a required brand argument. Omitting it, naming an unknown
+brand, and supplying `--ping` more than once — including twice with the same
+brand — are all errors that exit non-zero without launching any provider.
 
 Startup sequence:
 
@@ -282,6 +288,17 @@ resolves no `owner/name` and applies no repository override: it honors
 `--config` and the global usage, timeout, and cache settings, and answers
 normally from a directory that is not a checkout or has no configured
 remote. It never enters the TUI and never starts a background refresh.
+
+`--ping` short-circuits it on the same terms as `--usage`, and after it: the
+run-and-exit modes are selected in the fixed order `--glyph-test`, `--doctor`,
+`--usage`, `--ping`, and exactly one of them runs. A ping is the only mode
+that spends the user's quota (section 14), so every observational mode wins
+over it; an invocation naming one of them — `kanban --doctor --ping codex` —
+runs that mode and launches no ping. Like `--usage`, ping mode resolves
+configuration but no repository, so it needs no checkout and no configured
+remote and the global ping timeouts apply; the per-repository keys are
+ordinary timeout overrides and inherit by section 16's rules wherever a
+repository is resolved.
 
 ## 6. Layout
 
@@ -1681,6 +1698,63 @@ reader's zone. Configuration warnings and cache warnings go to standard error
 in both renderings, so a `--json` consumer's standard output carries the
 document alone.
 
+### Deliberate consumption
+
+Everything above is observational: the sidebar, `u`, `--usage`, `--doctor`,
+preflight, and release verification read account status and submit no model
+prompt. Decision D-2 keeps it that way, and nothing in this section weakens it.
+
+A *deliberate-consumption action* is the explicit opposite. It submits a model
+prompt and spends the user's quota on purpose, and the rules that make it safe
+to have alongside the observers are:
+
+- It runs only when the user invokes it by name. It never runs at startup, from
+  a board or usage refresh, from `u`, from `--usage`, from `--doctor`, from
+  preflight, or from any release-verification path, and it has no key binding.
+- It is never retried. A failure is reported, not reissued: a second attempt
+  would be a second charge nobody asked for.
+- It never replaces or intercepts an observational path, and no configured
+  external usage command can become one. A configured `[usage.codex]` or
+  `[usage.claude]` command still replaces only the refresh.
+
+`kanban --ping BRAND` is the only such action. It starts the named provider's
+rolling window on purpose, so spare capacity in a window that never started can
+be discovered before it is needed rather than after.
+
+- The brand is required and singular (section 5).
+- The request is one fixed prompt, `Reply OK.`, at the client's minimum effort,
+  under non-mutating permissions, from a private Kanban-owned scratch directory
+  under the XDG cache root rather than the user's repository. It never uses a
+  bypass-approvals or bypass-sandbox mode. Claude runs from the probe's own
+  scratch directory, whose folder-trust question is therefore already settled;
+  a fresh directory would strand a non-interactive ping at that prompt.
+- It is bounded by `timeouts.ping_codex_seconds` and
+  `timeouts.ping_claude_seconds`, both defaulting to 120 seconds. These are
+  separate keys from `codex_seconds` and `claude_seconds`, which bound reading a
+  number rather than waiting on a model.
+- Kanban launches exactly one ping process. Retries internal to a vendor client
+  are that client's own and are neither controlled nor observed here.
+
+Exactly one usage refresh follows any ping process that started — whether it
+succeeded, exited non-zero, or timed out, because all three may already have
+spent quota — and none follows a ping whose executable could never start,
+because nothing ran. That refresh is the ordinary one and routes through the
+same escape hatch everything else does. Its result is printed with every
+returned window's end time.
+
+The exit status is deterministic. A ping that fails to start, exits non-zero,
+or times out fails the command; so does a failed refresh; so does a failed
+cache write, even though the refreshed result was already printed. A ping that
+failed stays a failure however well the refresh after it went.
+
+With caching enabled, a successful refresh is merged into `usage.json` under
+the pinged brand alone, leaving the other provider's stored entry intact, and
+the replacement is the same atomic rename every other cache write uses. A
+failed refresh or a failed write leaves the previous cache as it was.
+`--no-cache` and a global `cache = false` suppress those reads and writes and
+nothing else: the ping, the refresh, the printed result, and the exit rules
+above are unchanged, and persistence the user switched off is not a failure.
+
 ## 15. Refresh and event model
 
 - Brick owns the blocking terminal event loop.
@@ -2222,9 +2296,13 @@ Configurable repository semantics include:
 - GitHub remote name, default `origin`.
 - Approval predicate mode: label, review decision, or either; default label.
 - Card excerpt line count, default 3.
-- Provider timeouts, defaults: GitHub 30 s, Codex 10 s, Claude 45 s. The GitHub
-  timeout bounds one page of a traversal — open or completed — rather than the
-  whole of either (section 13).
+- Provider timeouts, defaults: GitHub 30 s, Codex 10 s, Claude 45 s, and the
+  deliberate-ping bounds `ping_codex_seconds` and `ping_claude_seconds`, both
+  120 s (section 14). The GitHub timeout bounds one page of a traversal — open
+  or completed — rather than the whole of either (section 13). Every one of
+  them is a positive whole number of seconds, small enough to convert to
+  microseconds without overflowing, and inherits globally or per repository on
+  the same terms.
 - External usage provider commands (section 14).
 
 ## 17. Error presentation
@@ -6181,6 +6259,11 @@ The Codex app-server rate-limit request and Claude `/usage` interaction are
 account-status probes. A release check that submits an ordinary prompt would
 change user-visible account consumption and would not verify the promised
 bounded behavior.
+
+Unchanged by section 14's deliberate-consumption class. This decision is about
+probes and release verification, which still submit no prompt; a ping is a
+separate action the user invokes by name, and no probe or release-verification
+path may launch one.
 
 ### D-3. Publication follows every manual gate and required CI
 

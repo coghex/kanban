@@ -7,6 +7,7 @@ import Kanban.CLI (Options (..), optionsParserInfo)
 import Kanban.Config (RawConfig (..), cacheEnabled, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
+import Kanban.Ping (PingMode (..), resolvePingBrand, runPingMode)
 import Kanban.Preflight (doctorLines, doctorReady, gatherPreflightEnvironment)
 import Kanban.Repository (resolveRepository)
 import Kanban.UI (runDashboard)
@@ -59,6 +60,33 @@ main = do
                   }
           produced <- runUsageMode mode resolvedConfig
           unless produced exitFailure
+    -- Last of the run-and-exit modes, and deliberately so: it is the only one
+    -- that spends the user's quota (§14), so every observational mode above
+    -- wins over it and an invocation naming one of them pings nothing. Like
+    -- --usage it resolves configuration but no repository, because a ping is
+    -- global and needs no checkout.
+    Nothing | not (null parsedOptions.optionPing) ->
+      case resolvePingBrand parsedOptions.optionPing of
+        Left message -> do
+          hPutStrLn stderr ("kanban: " <> Text.unpack message)
+          exitFailure
+        Right brand -> do
+          absoluteConfigPath <- resolveConfigPathOption parsedOptions.optionConfig
+          configResult <- loadRawConfig absoluteConfigPath
+          case configResult of
+            Left message -> do
+              hPutStrLn stderr ("kanban: " <> Text.unpack message)
+              exitFailure
+            Right (rawConfig, warnings) -> do
+              mapM_ (\warning -> hPutStrLn stderr ("kanban: warning: " <> Text.unpack warning)) warnings
+              let resolvedConfig = resolveGlobalConfig rawConfig
+                  mode =
+                    PingMode
+                      { pingModeBrand = brand,
+                        pingModeCache = cacheEnabled parsedOptions resolvedConfig
+                      }
+              succeeded <- runPingMode mode resolvedConfig
+              unless succeeded exitFailure
     Nothing -> do
       -- An explicit --config is resolved against kanban's own launch
       -- directory here, then threaded onward (canonical issue-review and

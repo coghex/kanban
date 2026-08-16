@@ -95,6 +95,7 @@ library
     Kanban.GitHub
     Kanban.Layout
     Kanban.Paths
+    Kanban.Ping
     Kanban.Preflight
     Kanban.Process
     Kanban.Provider
@@ -206,6 +207,7 @@ test-suite kanban-test
     Spec.Agent.ManagedProcess
     Spec.Agent.ManagedProcess.Deadline
     Spec.Agent.ManagedProcess.Lifecycle
+    Spec.Agent.Ping
     Spec.Agent.Preflight
     Spec.Agent.Protocol
     Spec.Agent.PullRequestFlow

@@ -6,6 +6,7 @@ module Main (main) where
 import qualified Spec.Agent.Capture as Capture
 import qualified Spec.Agent.IssueReviewer as IssueReviewer
 import qualified Spec.Agent.ManagedProcess as ManagedProcess
+import qualified Spec.Agent.Ping as Ping
 import qualified Spec.Agent.Preflight as Preflight
 import qualified Spec.Agent.Protocol as Protocol
 import qualified Spec.Agent.PullRequestFlow as PullRequestFlow
@@ -92,4 +93,5 @@ suite = do
   Incidents.spec
   Keys.spec
   Search.spec
+  Ping.spec
   Preflight.spec

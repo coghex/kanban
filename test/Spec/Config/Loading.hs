@@ -28,7 +28,7 @@ spec = do
           defaultRawConfig.rawRemoteName `shouldBe` "origin"
           defaultRawConfig.rawWorkflow `shouldBe` defaultWorkflowConfig
           defaultRawConfig.rawLimits `shouldBe` LimitsConfig 3
-          defaultRawConfig.rawTimeouts `shouldBe` TimeoutsConfig 30 10 45
+          defaultRawConfig.rawTimeouts `shouldBe` TimeoutsConfig 30 10 45 120 120
 
     it "honors an explicit --config path pointing at a fixture" $
       withTemporaryCacheRoot $ \configRoot -> do
@@ -66,7 +66,7 @@ spec = do
             coordinationPaths = Set.fromList ["docs/status.md", "ROADMAP.md"]
           }
       config.rawLimits `shouldBe` LimitsConfig 5
-      config.rawTimeouts `shouldBe` TimeoutsConfig 60 20 90
+      config.rawTimeouts `shouldBe` TimeoutsConfig 60 20 90 130 140
       config.rawUsage
         `shouldBe` UsageConfig
           (Just (UsageCommandConfig ["/usr/local/bin/my-codex-usage", "--json"]))
@@ -81,7 +81,7 @@ spec = do
       resolved.resolvedWorkflow.approvalLabel `shouldBe` "ship-it"
       resolved.resolvedWorkflow.changesRequestedLabel `shouldBe` "needs-work"
       resolved.resolvedLimits `shouldBe` LimitsConfig 7
-      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90
+      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90 130 150
       resolved.resolvedCache `shouldBe` False
       resolved.resolvedRemoteName `shouldBe` "upstream"
 
@@ -96,7 +96,7 @@ spec = do
       -- Merge and precedence survive the normalized lookup unchanged.
       (selected "Coghex/Kanban").resolvedWorkflow.changesRequestedLabel `shouldBe` "needs-work"
       (selected "Coghex/Kanban").resolvedLimits `shouldBe` LimitsConfig 7
-      (selected "Coghex/Kanban").resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90
+      (selected "Coghex/Kanban").resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90 130 150
 
     it "folds the resolved identity ASCII-only, the way tools/kanban_config.py does" $ do
       -- A Unicode fold (Data.Text.toLower here, str.lower() there) maps the
@@ -225,6 +225,18 @@ spec = do
         `shouldSatisfy` errorContains ["github_seconds"]
       (decodeConfigText ("[timeouts]\ngithub_seconds = " <> Data.Text.pack (show largestSafeSeconds) <> "\n"))
         `shouldSatisfy` isRight
+
+    -- The ping bounds are timeouts like any other, so they are held to the
+    -- same rules rather than to a second, looser copy of them.
+    it "gives both ping timeouts the same positive, overflow-safe validation" $ do
+      let overflowingSeconds = (maxBound :: Int) `div` 1000000 + 1
+          rejects key value =
+            decodeConfigText ("[timeouts]\n" <> key <> " = " <> Data.Text.pack (show value) <> "\n")
+              `shouldSatisfy` errorContains [key]
+      mapM_
+        (\key -> mapM_ (rejects key) [0, -1, overflowingSeconds])
+        ["ping_codex_seconds", "ping_claude_seconds"]
+      decodeConfigText "[timeouts]\nping_codex_seconds = 1\nping_claude_seconds = 1\n" `shouldSatisfy` isRight
 
     it "rejects the global-only keys cache, remote_name, and usage inside a repository override" $ do
       decodeConfigText "[repositories.\"a/b\"]\ncache = true\n" `shouldSatisfy` errorContains ["cache"]
