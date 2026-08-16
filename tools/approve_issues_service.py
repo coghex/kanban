@@ -393,10 +393,17 @@ def _escape_identity_segment(segment: str) -> str:
 
 
 # Escaping can double a segment's length, so an identity spelled almost
-# entirely in separators could outgrow what a directory name may hold. The
-# limit is deliberately well under the 255-byte filename ceiling, leaving room
-# for the file names inside the directory it names.
-SLUG_LIMIT = 180
+# entirely in separators could outgrow both what a directory name may hold and
+# what a service manager's identifier may hold. The tighter of those two is the
+# manager's, and it is the boundary's answer rather than a number restated
+# here: one slug names the identifier, the runtime directory, and the log
+# directory together, so a slug that fit a directory name but not a job label
+# would leave an installed job nothing could address. It is also well under the
+# 255-byte filename ceiling, leaving room for the file names inside the
+# directory it names.
+SLUG_LIMIT = service_manager.namespace_slug_limit(
+    service_manager.ISSUE_APPROVAL_NAMESPACE
+)
 
 
 def repository_slug(identity: str) -> str:
@@ -409,9 +416,13 @@ def repository_slug(identity: str) -> str:
     `normalize_identity` folded them together first -- which is what keeps two
     clones of one GitHub repository from partitioning two runtimes.
 
-    An identity whose escaped slug would outgrow `SLUG_LIMIT` falls back to a
-    hash of the whole identity, which cannot collide with an escaped slug
-    because it contains no `.` at all.
+    An identity whose escaped slug would outgrow `SLUG_LIMIT` -- the longest
+    every service manager can carry an identifier for -- falls back to a hash
+    of the whole identity, which cannot collide with an escaped slug because it
+    contains no `.` at all. The fallback is decided here rather than inside a
+    backend because this one slug names the identifier and both directories,
+    and a fallback taken in only one of the three would leave them naming
+    different repositories.
     """
     owner, _, name = identity.partition("/")
     slug = f"{_escape_identity_segment(owner)}.{_escape_identity_segment(name)}"
@@ -536,8 +547,22 @@ def discovery_remote_name() -> str:
 
 
 def resolve_job(repo_path: Path, *, config_path: str | None = None) -> ApprovalJob:
+    """This checkout's job, with the configuration its installation selected.
+
+    An explicit `--config` wins; otherwise the one recorded for this identity
+    at install time is used. That fallback is what makes the selection durable:
+    a `start` issued with no flags, or a job relaunched by a service manager
+    into an empty environment, has to run with the configuration the operator
+    installed rather than silently reverting to the shared default and
+    rewriting the definition without it.
+
+    Resolvable only because the identity above does not depend on `--config`:
+    the record is keyed by identity, so a configuration that could move the
+    identity could not be found by it.
+    """
     identity = repository_identity(repo_path, discovery_remote_name())
-    return job_for_identity(repo_path, identity, config_path=config_path)
+    selected = config_path or installed_config_path(identity)
+    return job_for_identity(repo_path, identity, config_path=selected)
 
 
 def require_requested_identity(job: ApprovalJob, requested: str | None) -> None:
@@ -2154,15 +2179,29 @@ def update_json_document(
     return path
 
 
-def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
+def merge_repository_record(
+    identity: str,
+    updates: dict[str, Any],
+    *,
+    discard: frozenset[str] | tuple[str, ...] = (),
+) -> Path:
     """Merge `updates` into one repository's entry, leaving every sibling entry
     and every top-level key untouched.
 
     Two levels of merge, not one: replacing the value of each key given would
     hand over a `repositories` table built from `updates` alone, deleting every
     other installed repository. The entry itself is merged one level down for
-    the same reason -- the installer persists `config_path` and the install
-    performs the service-manager keys, and either may run without the other.
+    the same reason -- the install performs the service-manager keys while
+    `config_path` and `install_dir` outlive any one of them.
+
+    `discard` is the exception a merge alone cannot express: keys the writer
+    owns outright and must therefore replace rather than add to. Only the
+    service-manager keys are ever discarded, and only by the writer about to
+    restate them, so everything else in the entry survives. Without it,
+    reinstalling a repository under the other service manager would leave the
+    first manager's keys beside the second's -- the mixed shape a reader is
+    required to fail closed on, arrived at by reinstalling rather than by
+    hand-editing.
 
     The read that computes the merge happens inside `update_json_document`'s
     lock, so a repository installed between another writer's read and its write
@@ -2174,6 +2213,7 @@ def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
         records = dict(records) if isinstance(records, dict) else {}
         existing = records.get(identity)
         entry = dict(existing) if isinstance(existing, dict) else {}
+        entry = {key: value for key, value in entry.items() if key not in discard}
         entry.update(updates)
         records[identity] = entry
         return {**document, RECORD_REPOSITORIES_KEY: records}
@@ -2493,7 +2533,16 @@ def write_discovery_record(
     }
     if job.config_path:
         updates["config_path"] = job.config_path
-    return merge_repository_record(job.identity, updates)
+    return merge_repository_record(
+        job.identity,
+        updates,
+        # Every service-manager key, not just this backend's: reinstalling a
+        # repository under the other manager must leave the entry naming one
+        # backend rather than carrying both, and the merge that keeps
+        # `config_path` and `install_dir` alive would otherwise keep the
+        # superseded manager's keys alive with them.
+        discard=service_manager.RECORD_KEYS,
+    )
 
 
 def install_job(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:

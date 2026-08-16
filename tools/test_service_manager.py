@@ -867,6 +867,41 @@ class NamespaceTests(unittest.TestCase):
                     backend.retire_legacy()
         self.assertEqual(self.runner.commands, [])
 
+    def test_the_slug_limit_leaves_room_for_every_backends_identifier(self):
+        # The limit a caller partitions its runtime by has to be the smallest
+        # any backend imposes, or a slug that named a directory perfectly well
+        # would name a job label no manager could carry.
+        for namespace in (
+            service_manager.DRAINER_NAMESPACE,
+            service_manager.ISSUE_APPROVAL_NAMESPACE,
+        ):
+            with self.subTest(namespace=namespace.name):
+                limit = service_manager.namespace_slug_limit(namespace)
+                backends = self.backends(namespace)
+                for backend in backends:
+                    self.assertTrue(backend.identifier_fits("a" * limit))
+                    self.assertLessEqual(
+                        len(backend.service_identifier("a" * limit)),
+                        service_manager.MAX_LABEL_LENGTH,
+                    )
+                # And it is the largest such value: one more character stops
+                # fitting somewhere, so the limit is not merely conservative.
+                self.assertFalse(
+                    all(backend.identifier_fits("a" * (limit + 1)) for backend in backends)
+                )
+
+    def test_the_limit_is_a_property_of_the_namespace_rather_than_the_host(self):
+        # Asked without selecting a backend and without spawning anything, so a
+        # foreground caller that has no service manager still names the same
+        # directories as one that does.
+        self.assertGreater(
+            service_manager.namespace_slug_limit(service_manager.DRAINER_NAMESPACE),
+            service_manager.namespace_slug_limit(
+                service_manager.ISSUE_APPROVAL_NAMESPACE
+            ),
+        )
+        self.assertEqual(self.runner.commands, [])
+
     def test_an_approval_definition_describes_the_approval_service(self):
         definition = service_manager.ServiceDefinition(
             identifier="com.coghex.issue-approval.acme.widgets.service",

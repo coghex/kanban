@@ -760,6 +760,34 @@ class SystemdBackend(ServiceManagerBackend):
         return (proc.stdout or "").strip()
 
 
+def namespace_slug_limit(namespace: ServiceNamespace) -> int:
+    """The longest slug every backend can carry an identifier for.
+
+    Answered without selecting one, and deliberately as the *smallest* limit
+    any backend imposes, because a slug names a repository's runtime and log
+    directories as well as its identifier. A limit that varied by manager
+    would let one checkout resolve one slug on macOS and another on Linux,
+    partitioning one repository's state twice — and a caller that has no
+    service manager at all, as a foreground run deliberately does not, still
+    has to name those directories.
+
+    Measured by asking each backend what identifier it builds from a probe
+    slug, rather than by restating either shape here: a backend that changed
+    how it spells an identifier changes this with it. The probe runner is
+    never called — no backend spawns anything to name a job.
+    """
+
+    def unusable(*_arguments: Any, **_options: Any) -> Any:  # pragma: no cover
+        raise ServiceManagerError("Naming an identifier runs no command.")
+
+    probe = "s"
+    overhead = max(
+        len(backend(unusable, namespace).service_identifier(probe)) - len(probe)
+        for backend in (LaunchdBackend, SystemdBackend)
+    )
+    return MAX_LABEL_LENGTH - overhead
+
+
 def no_legacy_singleton_message(namespace: ServiceNamespace) -> str:
     return (
         f"The {namespace.name} service has no machine-wide singleton: its jobs "

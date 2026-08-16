@@ -734,6 +734,62 @@ class LinkSafetyTests(unittest.TestCase):
         self.assertTrue(self.source.exists())
 
 
+class SlugLimitTests(unittest.TestCase):
+    """Every identity this service accepts yields a job a manager can carry.
+
+    The slug names the identifier, the runtime directory, and the log directory
+    together, so a limit measured against the directory alone would let a
+    perfectly valid identity install a job nothing could address.
+    """
+
+    def backends(self):
+        runner = lambda *arguments, **options: None  # noqa: E731 - never called
+        return (
+            service_manager.LaunchdBackend(
+                runner, service_manager.ISSUE_APPROVAL_NAMESPACE
+            ),
+            service_manager.SystemdBackend(
+                runner, service_manager.ISSUE_APPROVAL_NAMESPACE
+            ),
+        )
+
+    def test_a_long_identity_still_yields_a_manageable_identifier(self):
+        identities = [
+            "acme/widgets",
+            "o" * 39 + "/" + "n" * 100,
+            # An escaped slug just over the limit, and one far over it: both
+            # would have fitted the old directory-shaped limit of 180 while
+            # overflowing the identifier this service actually installs.
+            "o" * 80 + "/" + "n" * 80,
+            "o" * 200 + "/" + "-" * 200,
+        ]
+        for identity in identities:
+            with self.subTest(identity=len(identity)):
+                slug = service.repository_slug(identity)
+                self.assertTrue(slug)
+                for backend in self.backends():
+                    self.assertTrue(backend.identifier_fits(slug), backend.backend_name())
+                    self.assertLessEqual(
+                        len(backend.service_identifier(slug)),
+                        service_manager.MAX_LABEL_LENGTH,
+                    )
+
+    def test_the_overflow_fallback_is_still_injective(self):
+        # Two identities that both overflow must not collapse onto one job.
+        first = service.repository_slug("o" * 200 + "/" + "-" * 200)
+        second = service.repository_slug("o" * 200 + "/" + "." * 200)
+        self.assertNotEqual(first, second)
+        self.assertNotIn(".", first)
+
+    def test_naming_a_slug_needs_no_service_manager(self):
+        # `run` and `status` name their own directories, and neither may
+        # require a host to have a service manager at all.
+        with mock.patch.object(
+            service_manager, "detect_service_manager", return_value=None
+        ):
+            self.assertTrue(service.repository_slug("acme/widgets"))
+
+
 class SideBySideTests(InstallerFixture):
     def test_two_repositories_install_side_by_side(self):
         gadgets = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
@@ -1129,7 +1185,7 @@ class UninstallTests(InstallerFixture):
         self.install()
         self.install(gadgets)
         result = self.uninstall()
-        self.assertEqual(result["remaining_repositories"], ["acme/gadgets"])
+        self.assertEqual(result["dependent_repositories"], ["acme/gadgets"])
         self.assertEqual(
             [link["result"] for link in result["links"].values()],
             ["kept"] * len(installer.LINKED_MODULES),
@@ -1140,6 +1196,46 @@ class UninstallTests(InstallerFixture):
         # And the repository that is still installed keeps its own job.
         self.assertEqual(sorted(self.record()["repositories"]), ["acme/gadgets"])
         self.assertTrue(self.manager.is_loaded(self.label("acme/gadgets")))
+
+    def test_a_job_installed_elsewhere_does_not_keep_these_links(self):
+        # The links are shared within one install directory, not across all of
+        # them. A second repository installed into its own directory runs its
+        # own copies, so keeping this directory's links for its sake would
+        # strand them with nothing to remove them.
+        gadgets = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
+        elsewhere = self.root / "elsewhere"
+        self.install()
+        installer.install(gadgets, elsewhere, config_path=None, dry_run=False)
+
+        result = self.uninstall()
+        self.assertEqual(result["dependent_repositories"], [])
+        self.assertEqual(
+            [link["result"] for link in result["links"].values()],
+            ["removed"] * len(installer.LINKED_MODULES),
+        )
+        for name in installer.LINKED_MODULES:
+            with self.subTest(module=name):
+                self.assertFalse(os.path.lexists(self.install_dir / name))
+                # And the other installation is untouched, because it is a
+                # different installation.
+                self.assertTrue((elsewhere / name).is_symlink())
+        self.assertEqual(sorted(self.record()["repositories"]), ["acme/gadgets"])
+
+    def test_an_entry_naming_no_install_directory_keeps_the_links(self):
+        # Fails closed: such a record could have been written by this
+        # installation, and a kept link nothing needs is recoverable while a
+        # removed one a live job runs from is not.
+        gadgets = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
+        self.install()
+        self.install(gadgets)
+        service.merge_repository_record(
+            "acme/gadgets", {}, discard=("install_dir",)
+        )
+        result = self.uninstall()
+        self.assertEqual(result["dependent_repositories"], ["acme/gadgets"])
+        for name in installer.LINKED_MODULES:
+            with self.subTest(module=name):
+                self.assertTrue((self.install_dir / name).is_symlink())
 
     def test_uninstall_never_removes_a_link_it_does_not_recognize(self):
         self.install()
@@ -1218,7 +1314,7 @@ class DryRunTests(InstallerFixture):
         self.assert_plan_matches(plan["links"], performed["links"])
         self.assert_plan_matches(plan["job"], performed["job"])
         self.assertEqual(
-            plan["remaining_repositories"], performed["remaining_repositories"]
+            plan["dependent_repositories"], performed["dependent_repositories"]
         )
 
     def test_a_refused_install_is_refused_by_the_dry_run_too(self):
@@ -1350,6 +1446,84 @@ class RediscoveryTests(InstallerFixture):
         self.assertTrue(Path(recorded).is_absolute())
         self.assertEqual(Path(recorded).resolve(), config.resolve())
 
+    def test_a_later_start_keeps_the_recorded_config_without_being_told(self):
+        # The definition is refreshed on every start. A start issued with no
+        # flags -- which is what Kanban and a service manager both do -- must
+        # therefore rebuild it with the configuration the install selected,
+        # rather than silently dropping `--config` from the job.
+        config = self.root / "kanban.toml"
+        config.write_text("", encoding="utf-8")
+        self.install(config_path=str(config))
+
+        refreshed = service.resolve_job(self.repo)
+        self.assertEqual(refreshed.config_path, str(config.resolve()))
+        service.install_job(refreshed, self.install_dir)
+        definition = json.loads(
+            self.manager.definition_path(self.label()).read_text(encoding="utf-8")
+        )
+        arguments = definition["program_arguments"]
+        self.assertIn("--config", arguments)
+        self.assertEqual(
+            arguments[arguments.index("--config") + 1], str(config.resolve())
+        )
+        self.assertEqual(
+            self.record()["repositories"]["acme/widgets"]["config_path"],
+            str(config.resolve()),
+        )
+
+    def test_a_process_holding_no_environment_resolves_the_recorded_config(self):
+        config = self.root / "kanban.toml"
+        config.write_text("", encoding="utf-8")
+        self.install(config_path=str(config))
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(self.wrapper),
+                str(self.install_dir),
+                str(self.account),
+                "controller",
+                "--json",
+                "--path",
+                str(self.repo),
+                "status",
+            ],
+            capture_output=True,
+            text=True,
+            env={"PATH": os.defpath},
+            timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["repository"], self.identity)
+        # And the same process resolves the recorded selection rather than the
+        # shared default, which is what a relaunched job depends on.
+        reread = subprocess.run(
+            [
+                sys.executable,
+                str(self.wrapper),
+                str(TOOLS_DIR),
+                str(self.account),
+                "record",
+                self.identity,
+            ],
+            capture_output=True,
+            text=True,
+            env={"PATH": os.defpath},
+            timeout=60,
+        )
+        self.assertEqual(reread.returncode, 0, reread.stderr)
+        self.assertEqual(
+            json.loads(reread.stdout)["config_path"], str(config.resolve())
+        )
+
+    def test_an_explicit_config_still_overrides_the_recorded_one(self):
+        installed = self.root / "installed.toml"
+        chosen = self.root / "chosen.toml"
+        for path in (installed, chosen):
+            path.write_text("", encoding="utf-8")
+        self.install(config_path=str(installed))
+        job = service.resolve_job(self.repo, config_path=str(chosen))
+        self.assertEqual(job.config_path, str(chosen))
+
     def test_one_repositorys_config_path_never_displaces_anothers(self):
         gadgets = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
         widgets_config = self.root / "widgets.toml"
@@ -1430,6 +1604,30 @@ class RecordSerializationTests(InstallerFixture):
 
         self.assertEqual(failures, [])
         self.assertEqual(sorted(self.record()["repositories"]), sorted(identities))
+
+    def test_reinstalling_under_another_backend_leaves_one_backends_keys(self):
+        # The entry is a discriminated union. A reinstall that added the second
+        # manager's keys beside the first's would produce the mixed shape a
+        # reader is required to fail closed on -- reached by reinstalling
+        # rather than by hand-editing, which is what makes it worth refusing.
+        service.merge_repository_record(
+            "acme/widgets",
+            {
+                "backend": "launchd",
+                "launchd_label": "com.coghex.issue-approval.acme.widgets",
+                "plist_path": "/somewhere/com.coghex.issue-approval.acme.widgets.plist",
+                "config_path": "/home/user/kanban.toml",
+            },
+        )
+        self.install()
+        entry = self.record()["repositories"]["acme/widgets"]
+        self.assertEqual(entry["backend"], "fake-manager")
+        for superseded in ("launchd_label", "plist_path", "systemd_unit", "unit_path"):
+            with self.subTest(key=superseded):
+                self.assertNotIn(superseded, entry)
+        # And nothing an installer persisted goes with them.
+        self.assertEqual(entry["config_path"], "/home/user/kanban.toml")
+        self.assertEqual(entry["install_dir"], str(self.install_dir))
 
     def test_a_record_written_by_this_service_is_private(self):
         self.install()

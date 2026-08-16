@@ -340,20 +340,35 @@ def link_sources(repo: Path, install_dir: Path) -> dict[str, tuple[Path, Path]]:
     }
 
 
-def other_installed_repositories(identity: str) -> list[str]:
-    """Every repository whose job would still be installed after this one is
-    removed.
+def dependent_repositories(identity: str, install_dir: Path) -> list[str]:
+    """Every other repository whose job runs from *these* links.
+
+    The links are shared, so this is what decides whether any of them may go —
+    but they are shared only within one install directory. A repository
+    installed into a different one runs its own copies, and treating it as a
+    dependant would strand this directory's links forever.
+
+    Fails closed on an entry that names no install directory it can be read
+    from: such a record could have been written by this installation, and
+    keeping a link nothing needs is recoverable while removing one a live job
+    runs from is not.
 
     Computed from the record before the uninstall rather than after it, so the
-    plan a dry run reports and the decision the uninstall makes are the same
-    computation over the same document. The links are shared, so this is what
-    decides whether any of them may go.
+    plan a dry run reports and the decision the uninstall makes are one
+    computation over one document.
     """
-    return sorted(
-        other
-        for other in approve_issues_service.installed_repository_records()
-        if other != identity
-    )
+    here = os.path.realpath(install_dir)
+    dependants = []
+    for other, record in approve_issues_service.installed_repository_records().items():
+        if other == identity:
+            continue
+        recorded = record.get("install_dir")
+        if not isinstance(recorded, str) or not recorded:
+            dependants.append(other)
+            continue
+        if os.path.realpath(recorded) == here:
+            dependants.append(other)
+    return sorted(dependants)
 
 
 def require_matching_controller(repo: Path) -> None:
@@ -485,16 +500,16 @@ def uninstall(repo: Path, install_dir: Path, *, dry_run: bool) -> dict[str, Any]
     """Remove one repository's job, and the shared links if nothing is left.
 
     The job, its definition, and its record entry are this repository's alone.
-    The links are not: they are what every installed repository's job runs
-    from, so they may go only once no other repository has an installed job,
-    and only for a link positively recognized as Kanban's own.
+    The links are not: they are what every job installed into *this* directory
+    runs from, so they may go only once no such job is left, and only for a
+    link positively recognized as Kanban's own.
     """
     backend = service_backend()
     job = repository_job(repo, None)
     plan = controller_operation("uninstall_plan", job)
-    remaining = other_installed_repositories(job.identity)
+    dependants = dependent_repositories(job.identity, install_dir)
     sources = link_sources(repo, install_dir)
-    if remaining:
+    if dependants:
         link_plans = {name: "kept" for name in sources}
     else:
         link_plans = {
@@ -505,7 +520,7 @@ def uninstall(repo: Path, install_dir: Path, *, dry_run: bool) -> dict[str, Any]
         "repo": str(repo),
         "install_dir": str(install_dir),
         "service_manager": backend.backend_name(),
-        "remaining_repositories": remaining,
+        "dependent_repositories": dependants,
         "links": {
             name: {"destination": str(destination), "result": link_plans[name]}
             for name, (_source, destination) in sources.items()
@@ -519,7 +534,7 @@ def uninstall(repo: Path, install_dir: Path, *, dry_run: bool) -> dict[str, Any]
     # was still loaded would leave a job the manager could start and nothing
     # could satisfy.
     document["job"] = controller_operation("uninstall_job", job)
-    if not remaining:
+    if not dependants:
         for name, (_source, destination) in sources.items():
             document["links"][name]["result"] = remove_symlink(destination, name)
     return {**document, "uninstalled": True, "dry_run": False}
@@ -602,10 +617,10 @@ def print_plan(result: dict[str, Any], *, uninstalling: bool) -> None:
     for _name, link in sorted(result["links"].items()):
         print(f"Link {link['destination']}: {link['result']}")
     print(f"Record: {job['record']}")
-    if uninstalling and result["remaining_repositories"]:
+    if uninstalling and result["dependent_repositories"]:
         print(
             "Shared links kept for still-installed "
-            + ", ".join(result["remaining_repositories"])
+            + ", ".join(result["dependent_repositories"])
         )
     if dry_run:
         print("Dry run; nothing was changed.")
