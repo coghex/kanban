@@ -1726,14 +1726,22 @@ be discovered before it is needed rather than after.
   under non-mutating permissions, from a private Kanban-owned scratch directory
   under the XDG cache root rather than the user's repository. It never uses a
   bypass-approvals or bypass-sandbox mode. Claude runs from the probe's own
-  scratch directory, whose folder-trust question is therefore already settled;
-  a fresh directory would strand a non-interactive ping at that prompt.
+  scratch directory, so both Kanban-launched Claude processes leave their
+  session state in one place outside the user's project. No part of a ping
+  depends on that directory having been used before: the first ping on a cold
+  cache creates it, and what keeps that run off the client's folder-trust
+  prompt is the non-interactive invocation, which the client documents as
+  skipping that dialog, together with giving the process no input to wait on.
 - It is bounded by `timeouts.ping_codex_seconds` and
   `timeouts.ping_claude_seconds`, both defaulting to 120 seconds. These are
   separate keys from `codex_seconds` and `claude_seconds`, which bound reading a
   number rather than waiting on a model.
-- Kanban launches exactly one ping process. Retries internal to a vendor client
-  are that client's own and are neither controlled nor observed here.
+- Kanban launches exactly one ping process, in a process group of its own, and
+  sweeps that group once the process ends however it ended. A client that
+  forked a helper would otherwise leave it spending the window past the bound,
+  and a leader exiting is not the same thing as the ping being over. Nothing is
+  signalled when nothing survives. Retries internal to a vendor client are that
+  client's own and are neither controlled nor observed here.
 
 Exactly one usage refresh follows any ping process that started — whether it
 succeeded, exited non-zero, or timed out, because all three may already have

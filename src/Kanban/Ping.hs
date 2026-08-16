@@ -35,7 +35,7 @@ module Kanban.Ping
 where
 
 import Control.Exception (IOException, finally, try)
-import Control.Monad (void)
+import Control.Monad (unless, void)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -46,6 +46,7 @@ import Kanban.Claude (claudeEnvironment, claudeScratchDirectory)
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..))
 import Kanban.Domain (UsageProvider (..))
 import Kanban.Paths (createPrivateDirectory)
+import Kanban.Process (ProcessIdentity (..), defaultProcessSnapshot, killVerifiedGroup)
 import Kanban.Provider (ProviderError (..))
 import Kanban.Usage
   ( UsageOutcome (..),
@@ -58,8 +59,6 @@ import System.Directory (XdgDirectory (XdgCache), findExecutable, getXdgDirector
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
-import System.Posix.Signals (Signal, sigKILL, sigTERM, signalProcessGroup)
-import System.Posix.Types (ProcessGroupID)
 import System.Process
   ( CreateProcess (..),
     ProcessHandle,
@@ -127,6 +126,11 @@ pingExecutableName PingClaude = "claude"
 -- minimum effort each client offers and the most restrictive permissions that
 -- still let a model answer.  @--skip-git-repo-check@ is what lets Codex run
 -- from the scratch directory below, which is deliberately not a checkout.
+--
+-- @--print@ is load-bearing beyond producing output: the Claude client
+-- documents the workspace-trust dialog as skipped in non-interactive mode, so
+-- a ping in a directory the client has never seen answers rather than stalling
+-- at a prompt it has no way to reach.
 pingArguments :: PingBrand -> [String]
 pingArguments PingCodex =
   [ "exec",
@@ -150,11 +154,17 @@ pingArguments PingClaude =
 -- user's repository.
 --
 -- Claude reuses the probe's own scratch directory rather than getting a fresh
--- one of its own: the client asks whether it may trust a folder the first time
--- it runs there (§14), and a never-trusted directory would leave a
--- non-interactive ping sitting at that prompt until its timeout expired — a
--- failed ping that still charged a refresh.  Sharing the settled directory
--- means that question has already been answered.
+-- one of its own, so the two Kanban-launched Claude processes leave their
+-- session state in one place outside the user's project (§14).
+--
+-- Nothing about the ping's correctness rests on that directory having been
+-- used before, and it must not: the very first @kanban --ping claude@ on a
+-- cold cache creates this directory itself, so any guarantee that reads "the
+-- probe already answered the trust prompt here" would be false exactly when it
+-- was needed.  What actually keeps the ping off that prompt is the invocation:
+-- @--print@ is non-interactive and the client documents the workspace-trust
+-- dialog as skipped in that mode, and 'launchPing' additionally gives the
+-- process no input to wait on.
 pingScratchDirectory :: PingBrand -> IO FilePath
 pingScratchDirectory PingClaude = claudeScratchDirectory
 pingScratchDirectory PingCodex = do
@@ -264,6 +274,8 @@ launchPing timeoutMicros brand = do
       (proc executablePath (pingArguments brand))
         { cwd = Just scratchDirectory,
           env = environment,
+          -- No input to wait on, so a client that did somehow ask a question
+          -- reads end-of-file and ends rather than holding the whole timeout.
           std_in = NoStream,
           std_out = NoStream,
           std_err = NoStream,
@@ -278,41 +290,70 @@ pingEnvironment :: PingBrand -> IO (Maybe [(String, String)])
 pingEnvironment PingCodex = pure Nothing
 pingEnvironment PingClaude = Just <$> claudeEnvironment
 
--- | Waits out the model round trip, and stops a client that overran it.
+-- | Waits out the model round trip, then sweeps the process group Kanban
+-- created for this ping — on every path, not only after a timeout.
 --
--- Termination goes to the process group Kanban created for this ping, not to
--- the leader alone, so a client that spawned helpers cannot leave them behind.
--- Signalling that group is safe without a census: the leader is this process's
--- own unreaped child until the waits below succeed, so its identifier — and
--- therefore the group's — stays reserved to it and cannot have been reissued.
+-- The leader exiting is not the same thing as the ping being over. A client
+-- that forked a helper leaves it running in that group, still doing model work
+-- and still spending the window this command was supposed to bound, whether
+-- the leader exited cleanly, exited non-zero, or was terminated. So the sweep
+-- is unconditional; when nothing survives it sends no signal at all, because
+-- 'killVerifiedGroup' checks membership before each phase.
 awaitPing :: Int -> ProcessHandle -> IO PingLaunch
 awaitPing timeoutMicros processHandle = do
+  ownedGroup <- pingGroupPid processHandle
   finished <- timeout timeoutMicros (waitForProcess processHandle)
   case finished of
-    Just exitCode -> pure (PingExited exitCode)
+    Just exitCode -> do
+      -- The leader is gone; anything left in its group is a helper still
+      -- spending the window.
+      sweepOwnedGroup ownedGroup
+      pure (PingExited exitCode)
     Nothing -> do
-      stopPing processHandle
+      -- The leader is still running, so this sweep is what stops it, its
+      -- helpers along with it.
+      sweepOwnedGroup ownedGroup
+      void (timeout reapTimeoutMicros (waitForProcess processHandle))
       pure (PingTimedOut (timeoutMicros `div` 1000000))
 
-stopPing :: ProcessHandle -> IO ()
-stopPing processHandle = do
-  maybePid <- getPid processHandle
-  case maybePid of
-    Nothing -> pure ()
-    Just pid -> do
-      signalOwnGroup sigTERM pid
-      settled <- timeout terminationGraceMicros (waitForProcess processHandle)
-      case settled of
-        Just _ -> pure ()
-        Nothing -> do
-          signalOwnGroup sigKILL pid
-          void (timeout terminationGraceMicros (waitForProcess processHandle))
-  where
-    signalOwnGroup :: Signal -> ProcessGroupID -> IO ()
-    signalOwnGroup signal pid = void (try @IOException (signalProcessGroup signal pid))
+-- | The group Kanban made this ping lead, read before any wait can reap it.
+--
+-- 'create_group' makes the child its own group leader, so the group's id is
+-- the child's pid, and while this process's own child is unreaped POSIX keeps
+-- that pid reserved to it. Reading it here is therefore a claim that this
+-- group id was ours; 'sweepOwnedGroup' is what establishes it still is.
+pingGroupPid :: ProcessHandle -> IO (Maybe Int)
+pingGroupPid processHandle = fmap fromIntegral <$> getPid processHandle
 
-terminationGraceMicros :: Int
-terminationGraceMicros = 2 * 1000 * 1000
+-- | Terminates whatever is still in the ping's own process group, censusing it
+-- fresh so a helper forked at any point during the run is included rather than
+-- only one that existed when the ping started.
+--
+-- Censusing after the leader may already have been reaped is safe here, and
+-- for a specific reason: a process group exists only while it still has a
+-- member. If a helper is in this group, the group never emptied, so its id was
+-- never free to be handed out again — the leader's pid was released by the
+-- reap, but a process taking that pid cannot create a group whose id is
+-- already in use, and joining an existing group takes being a child of one of
+-- its members, which makes it ours too. If instead the group did empty, this
+-- census is empty and nothing is signalled at all. Either way no signal
+-- reaches a process Kanban did not start.
+--
+-- 'killVerifiedGroup' then re-checks that censused membership by pid, start
+-- time, and current group before each of TERM and KILL, and sends neither when
+-- nothing matches.
+sweepOwnedGroup :: Maybe Int -> IO ()
+sweepOwnedGroup Nothing = pure ()
+sweepOwnedGroup (Just groupPid) = do
+  snapshotResult <- defaultProcessSnapshot
+  case snapshotResult of
+    Left _ -> pure ()
+    Right snapshot -> do
+      let members = [process | process <- snapshot, process.processIdentityGroupPid == groupPid]
+      unless (null members) (void (killVerifiedGroup groupPid members))
+
+reapTimeoutMicros :: Int
+reapTimeoutMicros = 2 * 1000 * 1000
 
 -- | The refreshed window state, including every returned window's end time.
 --

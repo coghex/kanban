@@ -47,7 +47,13 @@ import Kanban.Ping
 import Kanban.Preflight (gatherPreflightEnvironment)
 import Kanban.Usage (UsageAcquisition (..), acquireUsageReport)
 import Options.Applicative (defaultPrefs, execParserPure, getParseResult)
-import Spec.Support.Env (createTemporaryDirectory, withEnvironmentValue, withTemporaryCacheRoot, writeExecutableScript)
+import Spec.Support.Env
+  ( createTemporaryDirectory,
+    waitForFileToExist,
+    withEnvironmentValue,
+    withTemporaryCacheRoot,
+    writeExecutableScript,
+  )
 import Spec.Support.Fixtures (testResolvedConfig)
 import System.Directory
   ( createDirectoryIfMissing,
@@ -59,7 +65,10 @@ import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (readFile')
+import System.Posix.Signals (nullSignal, signalProcess)
+import System.Posix.Types (ProcessID)
 import Test.Hspec
+import Text.Read (readMaybe)
 
 spec :: Spec
 spec = do
@@ -158,6 +167,21 @@ spec = do
         pingsRecorded root `shouldReturn` [("codex", unwords (pingArguments PingCodex))]
         nonPingLaunches root `shouldReturn` [("codex", "app-server --stdio")]
 
+    -- The first ping on a machine creates its own scratch directory, so
+    -- nothing about the run may depend on that directory having been used
+    -- before. Claude is the brand that would notice: its client asks about
+    -- folder trust, and the non-interactive invocation is what keeps this off
+    -- that prompt rather than any earlier probe having answered it.
+    it "runs the same ping on a cold cache where the scratch directory has never existed" $
+      withPingRoot $ \root -> do
+        scratch <- pingScratchDirectory PingClaude
+        doesDirectoryExist scratch `shouldReturn` False
+        result <- runPing (PingMode PingClaude False) =<< refreshingConfig root
+        doesDirectoryExist scratch `shouldReturn` True
+        result.pingResultLaunch `shouldBe` PingExited ExitSuccess
+        pingsRecorded root `shouldReturn` [("claude", unwords (pingArguments PingClaude))]
+        refreshesRecorded root `shouldReturn` ["claude"]
+
     it "answers from a directory that is not a Git repository at all" $
       withPingRoot $ \root -> do
         outsideRepository <- createTemporaryDirectory
@@ -165,6 +189,27 @@ spec = do
         result <- withCurrentDirectory outsideRepository (runPing (PingMode PingCodex False) config)
         removePathForcibly outsideRepository
         pingResultSucceeded result `shouldBe` True
+
+  -- A leader that exits is not a ping that is over. The client is free to fork
+  -- a helper that keeps working — and keeps spending the window this command
+  -- exists to bound — so the group has to be swept however the leader ended.
+  describe "what a ping leaves running" $ do
+    it "kills a helper that outlived a ping whose leader exited successfully" $
+      withPingRoot $ \root ->
+        withEnvironmentValue pingModeVariable "orphan" $ do
+          result <- runPing (PingMode PingCodex False) =<< refreshingConfig root
+          result.pingResultLaunch `shouldBe` PingExited ExitSuccess
+          helper <- helperPid root
+          processAlive helper `shouldReturn` False
+
+    it "kills a helper that outlived a ping that timed out" $
+      withPingRoot $ \root ->
+        withEnvironmentValue pingModeVariable "orphan-hang" $ do
+          config <- refreshingConfig root
+          result <- runPing (PingMode PingCodex False) config {resolvedTimeouts = timedTimeouts 1 1}
+          result.pingResultLaunch `shouldBe` PingTimedOut 1
+          helper <- helperPid root
+          processAlive helper `shouldReturn` False
 
   describe "the refresh a launched ping owes" $ do
     it "refreshes once after a ping that succeeded" $
@@ -382,6 +427,10 @@ installRecordingProviders root = do
           "case \"${KANBAN_PING_TEST_MODE:-ok}\" in",
           "  fail) exit 3 ;;",
           "  hang) sleep 30 ;;",
+          -- A helper in the launched process group that outlives its leader,
+          -- which is the survivor the sweep has to reach.
+          "  orphan) sh -c 'sleep 30' & printf '%s' \"$!\" > \"" <> ByteString.pack (helperPidFile root) <> "\" ;;",
+          "  orphan-hang) sh -c 'sleep 30' & printf '%s' \"$!\" > \"" <> ByteString.pack (helperPidFile root) <> "\"; sleep 30 ;;",
           "esac",
           "exit 0"
         ]
@@ -453,6 +502,27 @@ pingModeVariable = "KANBAN_PING_TEST_MODE"
 
 invocationLog :: FilePath -> FilePath
 invocationLog root = root </> "invocations.log"
+
+helperPidFile :: FilePath -> FilePath
+helperPidFile root = root </> "helper.pid"
+
+-- | The pid of the helper the fake forked into the launched process group.
+-- Written by the fake before its leader exits, so it is there to read whether
+-- the leader ended on its own or was terminated.
+helperPid :: FilePath -> IO ProcessID
+helperPid root = do
+  waitForFileToExist (helperPidFile root) 50
+  recorded <- readFile' (helperPidFile root)
+  case readMaybe (filter (/= '\n') recorded) of
+    Just pid -> pure (fromInteger pid)
+    Nothing -> fail ("helper pid file did not hold a pid: " <> show recorded)
+
+-- | Whether a pid still names a live process, asked the way the shell's
+-- @kill -0@ does. A swept helper is killed and reaped by its new parent, so it
+-- stops existing rather than lingering as a zombie this could mistake for
+-- alive.
+processAlive :: ProcessID -> IO Bool
+processAlive pid = either (const False) (const True) <$> try @IOException (signalProcess nullSignal pid)
 
 -- | Every recorded launch as @(executable, joined arguments)@. An absent log
 -- is no launches, which is the state the never-ping cases assert.
