@@ -288,7 +288,9 @@ Some details worth knowing:
   ping fails or times out, Kanban still refreshes and prints the window — a
   request that timed out may already have counted — and still exits non-zero.
 - It needs no repository, so it works from any directory, and it honors
-  `--config`.
+  `--config`. If you happen to run it inside a checkout Kanban can identify, or
+  pass `--repo`, that repository's timeout overrides apply; otherwise the
+  global ones do.
 - `--no-cache` and a global `cache = false` stop it from reading or writing the
   stored snapshot. The ping, the refresh, and the printed result happen either
   way.
@@ -296,7 +298,9 @@ Some details worth knowing:
 The wait for that request is bounded by `ping_codex_seconds` and
 `ping_claude_seconds` in `config.toml`, both 120 seconds by default. They are
 separate from `codex_seconds` and `claude_seconds`, which bound the much
-quicker usage reads.
+quicker usage reads, and they can be overridden per repository like any other
+timeout. When the wait runs out, Kanban stops the request and anything it
+started.
 
 ## Local files
 

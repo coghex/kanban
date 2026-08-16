@@ -22,20 +22,24 @@ import Kanban.CLI (Options (..), optionsParserInfo)
 import Kanban.Cache (UsageCacheLoad (..), loadUsageCache, writeUsageCache)
 import Kanban.Claude (claudeScratchDirectory)
 import Kanban.Config
-  ( ResolvedConfig (..),
+  ( RawConfig,
+    ResolvedConfig (..),
     TimeoutsConfig (..),
     UsageCommandConfig (..),
     UsageConfig (..),
+    decodeConfigText,
     defaultTimeoutsConfig,
   )
-import Kanban.Domain (UsageProvider (..), UsageSnapshot (..), UsageWindow (..))
+import Kanban.Domain (Repository (..), UsageProvider (..), UsageSnapshot (..), UsageWindow (..))
 import Kanban.Ping
   ( PingBrand (..),
     PingLaunch (..),
     PingMode (..),
     PingResult (..),
+    ownedGroupToSweep,
     pingArguments,
     pingPrompt,
+    pingResolvedConfig,
     pingResultLines,
     pingResultProblems,
     pingResultSucceeded,
@@ -45,6 +49,7 @@ import Kanban.Ping
     runPing,
   )
 import Kanban.Preflight (gatherPreflightEnvironment)
+import Kanban.Process (ProcessIdentity (..))
 import Kanban.Usage (UsageAcquisition (..), acquireUsageReport)
 import Options.Applicative (defaultPrefs, execParserPure, getParseResult)
 import Spec.Support.Env
@@ -54,7 +59,7 @@ import Spec.Support.Env
     withTemporaryCacheRoot,
     writeExecutableScript,
   )
-import Spec.Support.Fixtures (testResolvedConfig)
+import Spec.Support.Fixtures (fullFixtureToml, testResolvedConfig)
 import System.Directory
   ( createDirectoryIfMissing,
     doesDirectoryExist,
@@ -129,9 +134,10 @@ spec = do
           claudeScratch <- pingScratchDirectory PingClaude
           codexScratch `shouldSatisfy` (root `isInfixOf`)
           claudeScratch `shouldSatisfy` (root `isInfixOf`)
-          -- The Claude client asks whether it may trust a folder the first
-          -- time it runs there; sharing the probe's settled directory is what
-          -- keeps a non-interactive ping off that prompt.
+          -- Shared with the probe so Claude's session state lands in one
+          -- place outside the user's project. What keeps the ping off the
+          -- client's folder-trust prompt is the non-interactive invocation,
+          -- which the cold-cache case below exercises directly.
           claudeScratch `shouldBe` (root </> "kanban" </> "claude-probe")
           probeScratch <- claudeScratchDirectory
           claudeScratch `shouldBe` probeScratch
@@ -210,6 +216,55 @@ spec = do
           result.pingResultLaunch `shouldBe` PingTimedOut 1
           helper <- helperPid root
           processAlive helper `shouldReturn` False
+
+    -- A group id is only a number, and the leader's exit frees the pid it was
+    -- named after. Whether the group is still Kanban's therefore has to be
+    -- re-proved from identities pinned while the leader was unreaped, not
+    -- assumed from the number, or a sweep could signal whichever unrelated
+    -- group inherited it. Only the decision is testable deterministically —
+    -- real pid reuse cannot be provoked — so it is a pure function of the
+    -- pinned identities and a snapshot.
+    it "sweeps nothing when the group id has been reissued to an unrelated group" $
+      ownedGroupToSweep 500 [leader 500 "Thu Aug 15 10:00:00 2026"] reusedGroupSnapshot
+        `shouldBe` []
+
+    it "sweeps the group while a pinned identity is still in it" $
+      ownedGroupToSweep 500 [leader 500 "Thu Aug 15 10:00:00 2026"] ownedGroupSnapshot
+        `shouldBe` [ leader 500 "Thu Aug 15 10:00:00 2026",
+                     member 501 500 "Thu Aug 15 10:00:01 2026"
+                   ]
+
+    -- The pinned leader dying is not the group being clear, and a helper
+    -- forked after the pin still has to be verified dead rather than merely
+    -- signalled, so it joins the list the sweep confirms against.
+    it "promotes a helper forked after the pin once ownership is proven" $
+      ownedGroupToSweep 500 [leader 500 "Thu Aug 15 10:00:00 2026", member 501 500 "Thu Aug 15 10:00:01 2026"] survivingHelperSnapshot
+        `shouldBe` [ leader 500 "Thu Aug 15 10:00:00 2026",
+                     member 501 500 "Thu Aug 15 10:00:01 2026",
+                     member 777 500 "Thu Aug 15 10:00:09 2026"
+                   ]
+
+    -- Same pid, different process: a start time that moved on is a different
+    -- process wearing a recycled number, and proves nothing.
+    it "sweeps nothing when the pinned pid is present but its start time moved" $
+      ownedGroupToSweep 500 [leader 500 "Thu Aug 15 10:00:00 2026"] [leader 500 "Thu Aug 15 11:30:00 2026"]
+        `shouldBe` []
+
+  describe "the configuration a ping runs under" $ do
+    -- Requirement 11: a ping needs no checkout, but where repository context
+    -- does exist its timeout override applies on the ordinary terms.
+    it "applies the repository's ping override when a repository was resolved" $ do
+      let resolved = pingResolvedConfig pingFixtureConfig (Right kanbanRepository)
+      resolved.resolvedTimeouts.timeoutsPingClaudeSeconds `shouldBe` 150
+      pingTimeoutMicros PingClaude resolved `shouldBe` 150000000
+      -- The key the repository table leaves unset still inherits the global.
+      resolved.resolvedTimeouts.timeoutsPingCodexSeconds `shouldBe` 130
+
+    it "falls back to the global table when no repository could be resolved" $ do
+      let resolved = pingResolvedConfig pingFixtureConfig (Left "not a checkout")
+      resolved.resolvedTimeouts.timeoutsPingClaudeSeconds `shouldBe` 140
+      resolved.resolvedTimeouts.timeoutsPingCodexSeconds `shouldBe` 130
+      pingTimeoutMicros PingClaude resolved `shouldBe` 140000000
 
   describe "the refresh a launched ping owes" $ do
     it "refreshes once after a ping that succeeded" $
@@ -502,6 +557,52 @@ pingModeVariable = "KANBAN_PING_TEST_MODE"
 
 invocationLog :: FilePath -> FilePath
 invocationLog root = root </> "invocations.log"
+
+-- | A process snapshot entry, in the shape 'Kanban.Process' parses from @ps@.
+member :: Int -> Int -> Text -> ProcessIdentity
+member pid groupPid startedAt =
+  ProcessIdentity
+    { processIdentityPid = pid,
+      processIdentityParentPid = 1,
+      processIdentityGroupPid = groupPid,
+      processIdentityStartedAt = startedAt,
+      processIdentityCommand = "provider"
+    }
+
+leader :: Int -> Text -> ProcessIdentity
+leader pid = member pid pid
+
+-- | The group emptied, its id was reissued, and an unrelated process group now
+-- occupies the same number with entirely different processes.
+reusedGroupSnapshot :: [ProcessIdentity]
+reusedGroupSnapshot =
+  [ leader 500 "Thu Aug 15 12:00:00 2026",
+    member 640 500 "Thu Aug 15 12:00:00 2026"
+  ]
+
+ownedGroupSnapshot :: [ProcessIdentity]
+ownedGroupSnapshot =
+  [ leader 500 "Thu Aug 15 10:00:00 2026",
+    member 501 500 "Thu Aug 15 10:00:01 2026"
+  ]
+
+-- | The pinned leader is gone, a pinned helper proves the group is still ours,
+-- and a helper forked after the pin is in it too.
+survivingHelperSnapshot :: [ProcessIdentity]
+survivingHelperSnapshot =
+  [ member 501 500 "Thu Aug 15 10:00:01 2026",
+    member 777 500 "Thu Aug 15 10:00:09 2026"
+  ]
+
+-- | The shared full-file fixture, whose global block sets both ping timeouts
+-- and whose @coghex/kanban@ table overrides only the Claude one.
+pingFixtureConfig :: RawConfig
+pingFixtureConfig = case decodeConfigText fullFixtureToml of
+  Right (config, _) -> config
+  Left message -> error ("ping fixture configuration did not decode: " <> Text.unpack message)
+
+kanbanRepository :: Repository
+kanbanRepository = Repository {repositoryRoot = "/tmp/kanban", repositoryOwner = "coghex", repositoryName = "kanban"}
 
 helperPidFile :: FilePath -> FilePath
 helperPidFile root = root </> "helper.pid"

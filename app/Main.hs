@@ -7,7 +7,7 @@ import Kanban.CLI (Options (..), optionsParserInfo)
 import Kanban.Config (RawConfig (..), cacheEnabled, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
-import Kanban.Ping (PingMode (..), resolvePingBrand, runPingMode)
+import Kanban.Ping (PingMode (..), pingResolvedConfig, resolvePingBrand, runPingMode)
 import Kanban.Preflight (doctorLines, doctorReady, gatherPreflightEnvironment)
 import Kanban.Repository (resolveRepository)
 import Kanban.UI (runDashboard)
@@ -62,9 +62,7 @@ main = do
           unless produced exitFailure
     -- Last of the run-and-exit modes, and deliberately so: it is the only one
     -- that spends the user's quota (§14), so every observational mode above
-    -- wins over it and an invocation naming one of them pings nothing. Like
-    -- --usage it resolves configuration but no repository, because a ping is
-    -- global and needs no checkout.
+    -- wins over it and an invocation naming one of them pings nothing.
     Nothing | not (null parsedOptions.optionPing) ->
       case resolvePingBrand parsedOptions.optionPing of
         Left message -> do
@@ -79,7 +77,12 @@ main = do
               exitFailure
             Right (rawConfig, warnings) -> do
               mapM_ (\warning -> hPutStrLn stderr ("kanban: warning: " <> Text.unpack warning)) warnings
-              let resolvedConfig = resolveGlobalConfig rawConfig
+              -- Attempted, never required: a resolved repository lets the ping
+              -- timeouts pick up that repository's override, and a failure to
+              -- resolve one is not an error here, because a ping needs no
+              -- checkout and no configured remote.
+              repositoryResult <- resolveRepository rawConfig.rawRemoteName parsedOptions.optionPath parsedOptions.optionRepo
+              let resolvedConfig = pingResolvedConfig rawConfig repositoryResult
                   mode =
                     PingMode
                       { pingModeBrand = brand,
