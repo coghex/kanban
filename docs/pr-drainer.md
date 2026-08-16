@@ -5,7 +5,7 @@ The PR drainer watches one repository and merges open pull requests that are app
 The drainer is optional. Kanban works without it.
 
 Each canonical GitHub repository gets its own drainer. Install as many as you
-like on one account: they have separate LaunchAgents, runtime state, logs, and
+like on one account: they have separate service jobs, runtime state, logs, and
 incidents, and starting or stopping one does not touch another. What a drainer
 is *named* by is the checkout's canonical GitHub `owner/name`, compared without
 regard to case — so `Acme/Widgets` and `acme/widgets` are one drainer, and two
@@ -25,9 +25,9 @@ the dashboard and the drainer together.
 
 ### Changing `remote_name` after installing
 
-An installed job is pinned to the repository it was installed for: its plist
-records that identity, and its LaunchAgent refuses to drain anything if the
-checkout stops resolving to it. So changing `remote_name` in the shared
+An installed job is pinned to the repository it was installed for: its service
+definition records that identity, and the managed runner refuses to drain
+anything if the checkout stops resolving to it. So changing `remote_name` in the shared
 configuration does not silently re-point an existing drainer at whatever
 repository the new remote names — it stops that drainer instead, with a line in
 its own service log saying so.
@@ -39,16 +39,45 @@ python3 tools/install_drainer.py
 ```
 
 That installs a job for the repository now configured. The superseded job stays
-loaded but inert; remove it when convenient with
+loaded but inert; remove it when convenient with, on macOS,
 
 ```console
 launchctl bootout gui/$(id -u)/com.coghex.drain-prs.<old-slug>
 rm ~/Library/LaunchAgents/com.coghex.drain-prs.<old-slug>.plist
 ```
 
+or, on Linux,
+
+```console
+systemctl --user stop com.coghex.drain-prs.<old-slug>.service
+rm ~/.config/systemd/user/com.coghex.drain-prs.<old-slug>.service
+systemctl --user daemon-reload
+```
+
 ## Install
 
-The installer is for macOS and does not require `sudo`.
+The installer does not require `sudo`.
+
+### Which service manager runs it
+
+The drainer is run by whichever service manager the host has, chosen by probing
+for one rather than by naming a platform: launchd on a macOS host that has
+`launchctl`, and systemd on a host whose `systemctl --user` reaches a live user
+manager. A host that is neither is the only one refused, and the refusal names
+that condition rather than the operating system.
+
+Every service-manager interaction goes through one backend boundary, so
+installing, starting, stopping, and uninstalling behave identically on both.
+What differs is only the artifact the manager reads — a LaunchAgent plist under
+`~/Library/LaunchAgents`, or a user unit under `~/.config/systemd/user`
+(`$XDG_CONFIG_HOME/systemd/user` when that names an absolute directory). The
+unit preserves the LaunchAgent's semantics exactly: the same argument vector
+with no shell between, the same working directory, environment, and output
+routing, no restart, and no `[Install]` section, so nothing enables it and no
+login starts it.
+
+Everything else this document describes is the same on both, including the
+managed paths below, which still use their macOS `~/Library` shapes on Linux.
 
 Preview the changes:
 
@@ -56,7 +85,7 @@ Preview the changes:
 python3 tools/install_drainer.py --dry-run --json
 ```
 
-Install the stopped LaunchAgent:
+Install the stopped job:
 
 ```console
 python3 tools/install_drainer.py
@@ -68,11 +97,15 @@ The installer:
 - refuses to overwrite ordinary files;
 - creates stable links under `~/Library/Application Support/kanban/pr-drainer/`,
   shared by every repository;
-- installs `~/Library/LaunchAgents/com.coghex.drain-prs.<owner>.<name>.plist`,
-  named for this repository's normalized identity;
-- records that job's label, plist path, and checkout under this repository's
-  entry in `~/Library/Application Support/kanban/pr-drainer/config.json`, which
-  is how Kanban finds it;
+- installs the service definition named for this repository's normalized
+  identity — `~/Library/LaunchAgents/com.coghex.drain-prs.<owner>.<name>.plist`
+  under launchd, or
+  `~/.config/systemd/user/com.coghex.drain-prs.<owner>.<name>.service` under
+  systemd;
+- records the backend that wrote it, that job's identifier, the definition's
+  path, and the checkout under this repository's entry in
+  `~/Library/Application Support/kanban/pr-drainer/config.json`, which is how
+  Kanban finds it;
 - loads the job without starting it.
 
 Run it once per repository, from that repository's own main checkout. Installing
@@ -81,7 +114,9 @@ a second repository adds its entry beside the first; it never replaces it.
 Rerun the installer after moving the repository checkout. Rerun it as well if
 Kanban reports that the drainer is not installed for this repository or that its
 install record is unreadable — an installation predating the record is repaired
-in place, with no uninstall first and no change to the LaunchAgent's identity.
+in place, with no uninstall first and no change to the job's identity. A record
+written before the drainer gained a systemd backend names no backend at all; it
+is read as launchd, so an existing macOS install keeps working untouched.
 
 Rerun it once more after pulling a Kanban revision that adds a module the
 controller imports. The installed scripts are links, and the controller is
@@ -95,8 +130,9 @@ rerun per repository, which changes nothing else about the job.
 ### Migrating from the single machine-wide drainer
 
 Before per-repository jobs there was one drainer for the whole account, labelled
-`com.coghex.drain-prs`. To migrate, stop it and rerun the installer from each
-repository you want drained:
+`com.coghex.drain-prs`. That singleton only ever existed under launchd, so this
+section is macOS-only; a systemd host has nothing to migrate from. To migrate,
+stop it and rerun the installer from each repository you want drained:
 
 ```console
 python3 tools/install_drainer.py
@@ -138,13 +174,15 @@ Installation never starts the drainer. Starting it can merge eligible pull reque
 
 ### Run lifecycle
 
-The LaunchAgent is non-resident by design. Every generated job sets `RunAtLoad`
-and `KeepAlive` to false and carries no `StartInterval`, so launchd never starts
-a drainer on its own — not at login, not after a run ends, not on a timer. A run
+The installed job is non-resident by design, under either manager. Every
+generated LaunchAgent sets `RunAtLoad` and `KeepAlive` to false and carries no
+`StartInterval`; every generated systemd unit sets `Restart=no` and carries no
+`[Install]` section, so nothing enables it. Neither manager ever starts a
+drainer on its own — not at login, not after a run ends, not on a timer. A run
 begins only when something explicitly asks for one: the `d` key in Kanban, or
 the controller's `start`.
 
-Once started, the run outlives whatever asked for it. The LaunchAgent
+Once started, the run outlives whatever asked for it. The managed job
 supervises a polling drainer that keeps sweeping the queue on its own interval
 until it is stopped explicitly or exits unexpectedly. Quitting Kanban does not
 stop it — that repository's drainer keeps merging, and the next Kanban window
@@ -203,11 +241,12 @@ Two documented paths drain it without opening Kanban:
 
 #### Why there is no periodic trigger
 
-The obvious way to close that gap — a `StartInterval`, or `KeepAlive` to hold
-one up permanently — is withheld deliberately rather than overlooked. The
-installer links the drainer, the controller, their shared configuration
-module, and the service-manager backend the controller drives launchd through
-to the tracked sources in the live Kanban checkout, so what launchd
+The obvious way to close that gap — a `StartInterval` or a timer unit, or
+`KeepAlive`/`Restart` to hold one up permanently — is withheld deliberately
+rather than overlooked. The installer links the drainer, the controller, their
+shared configuration module, and the service-manager backend the controller
+drives its host's manager through to the tracked sources in the live Kanban
+checkout, so what the manager
 executes is whatever those files contain at that moment, including a
 half-finished edit sitting in that checkout's working tree. The exposure is the
 executable code, not the tree being merged: each job's working directory is the
@@ -860,25 +899,30 @@ Crash, merge-conflict, and cleanup notifications are off by default. To use a pr
 python3 tools/install_drainer.py --ntfy-url https://your-server.example/topic
 ```
 
-The endpoint is stored in a private configuration file and is not written into the LaunchAgent plist.
+The endpoint is stored in a private configuration file and is not written into the service definition.
 
 ## Files and logs
 
 Below, `<slug>` is the repository's normalized `owner/name` encoded for a
 filename — `coghex/kanban` becomes `coghex.kanban`. It is the same slug the
-LaunchAgent label ends with, so the log directory, the runtime directory, and
-the plist of one repository all carry the same name.
+job identifier ends with, so the log directory, the runtime directory, and the
+service definition of one repository all carry the same name.
+
+These paths keep their macOS shapes on Linux as well; only the service
+definition differs between the two managers.
 
 - Installed links, shared by every repository: `~/Library/Application Support/kanban/pr-drainer/`
-- Install record Kanban resolves each LaunchAgent through, and the global
+- Install record Kanban resolves each job through, and the global
   private configuration (`ntfy_url`) that shares it:
   `~/Library/Application Support/kanban/pr-drainer/config.json` — this path is
   fixed, and `--install-dir` does not move it. Its `repositories` table holds
-  one entry per installed repository, carrying that job's label, plist path,
-  checkout, and `config_path`.
+  one entry per installed repository, carrying the backend that wrote it, that
+  job's identifier, the definition's path, the checkout, and `config_path`.
 - Runtime status and incidents: `~/Library/Application Support/kanban/pr-drainer/runtime/<slug>/`
 - Logs: `~/Library/Logs/kanban/pr-drainer/<slug>/`
-- LaunchAgent: `~/Library/LaunchAgents/com.coghex.drain-prs.<slug>.plist`
+- Service definition: `~/Library/LaunchAgents/com.coghex.drain-prs.<slug>.plist`
+  under launchd, or `~/.config/systemd/user/com.coghex.drain-prs.<slug>.service`
+  under systemd
 - Repository queue state: `.git/drain_prs_state.json`
 - Repository run lock: the `.git` directory, plus `.git/drain_prs.lock` holding
   the holder's PID, beside `.git/drain_prs.lock.owner.json`, which records

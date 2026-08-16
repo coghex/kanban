@@ -34,7 +34,7 @@ Run the Python drainer, controller, and installer suite:
 python3 -m unittest discover -s tools -p 'test_*.py'
 ```
 
-The Python tests use temporary repositories and fake command-line tools. They do not contact GitHub or modify the user's LaunchAgents. The one exception is the source-release check below, which runs the real `cabal` against this checkout; it still writes only to a temporary directory.
+The Python tests use temporary repositories and fake command-line tools. They do not contact GitHub or modify the user's LaunchAgents or systemd user units. The one exception is the source-release check below, which runs the real `cabal` against this checkout; it still writes only to a temporary directory.
 
 The Haskell suite includes the golden-frame tests, which compare rendered
 terminal frames with the files checked in under `test/golden/`. A normal run

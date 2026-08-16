@@ -70,30 +70,41 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
 
 Modules live in `src/Kanban/`; search the group that matches the change.
 
-- `Domain`, `Workflow`, `Card`, `Tracker` — board state, column classification, and
-  tracker hierarchy.
-- `Repository`, `GitHub`, `Cache`, `Config`, `Settings`, `Paths`, `CLI` — repository
+- `Domain`, `Workflow`, `Card`, `Tracker`, `Filter` — board state, column
+  classification, tracker hierarchy, and the composable card filter criteria.
+- `Repository`, `GitHub` with `GitHub.*`, `Cache`, `Config`, `Settings`, `Paths`, `CLI` — repository
   resolution, GitHub data, the last-good snapshot, configuration, and the private
   directories under the XDG roots.
+- `Usage` with `Usage.Render`, `UsageCommand`, `Ping` — provider quota windows, the
+  wording the sidebar and `--usage` share, the configured external usage commands,
+  and the deliberate window-starting ping.
 - `UI` with `UI.*`, `Layout`, `Text`, `GlyphTest` — terminal presentation, responsive
   layout, and external-text sanitization. `UI` itself is only the composition root;
-  the seams live beside it — `UI.Types` (state), `UI.Theme`, `UI.Board`, `UI.Overlay`,
-  and `UI.Details` (drawing), `UI.Events` (dispatch), `UI.Session`, `UI.Solve`,
-  `UI.Review`, `UI.PullRequest`, `UI.Worker` (lifecycles), `UI.Refresh` and
-  `UI.Reconcile` (refresh), and `UI.AutoSolve`, the autosolve loop as pure functions.
-- `Worker`, `Solve`, `Review` with `Review.*`, `PullRequestFlow`, `Codex`, `Claude`,
-  `Process`, `Transcript`, `Preflight`, `Provider`, `StreamReader`, `CommandCapture` —
+  the seams live beside it — `UI.Types` and `UI.State` (state), `UI.Theme`,
+  `UI.Board`, `UI.Overlay`, and `UI.Details` (drawing), `UI.Events` (dispatch),
+  `UI.Keys` (the one declaration site for a board key binding, held against
+  `docs/design.md` §7 by a test), `UI.Search`, `UI.Filter`, `UI.Selection`
+  (column search, filter panel, and selection), `UI.Session` with `UI.SessionCore`
+  and `UI.SessionEvents`, `UI.Solve`, `UI.Review`, `UI.PullRequest`, `UI.Worker`
+  (lifecycles), `UI.Transcript`, `UI.Refresh` and `UI.Reconcile` (refresh),
+  `UI.AutoSolve`, the autosolve loop as pure functions, and `UI.Util`.
+- `Worker` with `Worker.*`, `Solve` with `Solve.*`, `Review` with `Review.*`,
+  `PullRequestFlow`, `Codex`, `Claude`, `Process`, `Transcript`, `Preflight` with
+  `Preflight.*`, `Provider`, `StreamReader`, `CommandCapture` —
   the agent execution layer. `Review` itself is the Codex app-server client and the
   compatibility facade every consumer imports; its seams live beside it —
   `Review.Types` (wire and result payloads), `Review.Client` (the `ReviewClient`
   record and its tool registry), `Review.Tools` (the `gh` and `claude` tool runners),
   `Review.Canonical` (the `approve_issues.py` gate), `Review.Prompts` (instructions
   and JSON schemas), and `Review.Diagnostics` (shared failure vocabulary).
-- `Drainer` with `tools/` — the launchd-managed PR drainer and its Python tests.
+- `Drainer` with `tools/` — the service-managed PR drainer and its Python tests.
+  One backend boundary in `tools/service_manager.py` drives launchd on macOS and
+  systemd user units on Linux.
 
-Elsewhere: `app/` is the executable entry point, `test/` the Haskell tests, and
-`codex-plugin/` and `claude-plugin/` the tracked workflow bundles Kanban's AI actions
-invoke by name.
+Elsewhere: `app/` is the executable entry point, `test/` the Haskell tests,
+`Fixture` the invented board the golden frames and the tracked screenshot are drawn
+from, and `codex-plugin/` and `claude-plugin/` the tracked workflow bundles Kanban's
+AI actions invoke by name.
 
 ## Pipeline conventions
 

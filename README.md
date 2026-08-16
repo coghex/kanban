@@ -118,14 +118,15 @@ code on the current branch.
 ## Platform and component support
 
 macOS is Kanban's supported platform for the first release. The table records
-what that means per component; nothing here promises Linux or systemd support.
+what that means per component. The PR drainer is the one component with a
+supported Linux path so far; nothing here promises Linux support for the rest.
 
 | Component | macOS | Linux | Notes |
 | --- | --- | --- | --- |
 | Core board | Supported | Built and tested in CI, not a supported user path | The required CI job builds the application and runs both test suites on Linux. Interactive board operation there has not been manually verified. |
 | Optional AI actions | Supported | Not a documented setup path | [Workflow setup and preflight](docs/workflow-setup.md) describes a macOS setup path, not a cross-platform port. |
 | Codex / Claude usage sidebar | Supported | Not verified | Kanban spawns the provider's own CLI and applies no platform check of its own. macOS is simply the only platform where the sidebar is verified. |
-| PR drainer | Supported | Not available | The drainer is a launchd job and refuses to install anywhere but macOS. |
+| PR drainer | Supported | Supported on a host with a systemd user session | The drainer is managed by whichever service manager the host has — launchd on macOS, a systemd user unit on Linux — and refuses only where neither is reachable. A dedicated CI job runs the whole install, start, status, stop, and uninstall lifecycle against a real systemd user session. Its install record, runtime state, and logs still sit under macOS-shaped `~/Library` paths on both platforms. |
 
 Only the core board row is needed to use Kanban. Every other row is an optional
 feature you can leave uninstalled.
@@ -166,7 +167,8 @@ dependency list and what each action requires.
 ## Optional PR drainer
 
 The PR drainer merges approved pull requests after their required checks pass.
-It is a launchd job, so it is macOS-only. Preview the installation before
+It installs as a launchd job on macOS and as a systemd user unit on Linux, and
+refuses only on a host managed by neither. Preview the installation before
 enabling it:
 
 ```console
