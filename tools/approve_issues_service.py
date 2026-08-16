@@ -1359,10 +1359,15 @@ def parse_gate_result(stdout: str, issue: int, exit_code: int) -> bool:
             f"The gate check for issue #{issue} reports no Boolean approval: "
             f"{approved!r}."
         )
+    # Required, and required to be exactly this issue's plain positive
+    # integer. An answer that names no issue is not an answer about the
+    # barrier's, and `==` alone would accept `true` for #1 and `5.0` for #5 --
+    # so a document a future or foreign backend produced could clear a barrier
+    # without ever having been asked about it.
     checked = document.get("issue")
-    if checked is not None and checked != issue:
+    if positive_issue(checked) != issue:
         raise BackendFailure(
-            f"The gate check answered for issue #{checked!r}, not #{issue}."
+            f"The gate check answered for issue {checked!r}, not #{issue}."
         )
     if approved != (exit_code == GATE_APPROVED_EXIT):
         raise BackendFailure(
@@ -1514,6 +1519,7 @@ class Controller:
         )
         self.write_status(STATE_STARTING, message="Checking the approval queue.")
         try:
+            self.reconcile_barrier_state()
             while not self._stop_requested:
                 barrier = read_barrier(self.job)
                 if barrier is not None:
@@ -1556,6 +1562,35 @@ class Controller:
             state, message=summary, barrier_issue=self.current_barrier_for_status()
         )
         return 1
+
+    def reconcile_barrier_state(self) -> None:
+        """Restore the invariant the barrier's two documents share.
+
+        The record is what stops the queue and the warning is what shows it, so
+        a warning left open for an issue that is not barriered describes
+        nothing -- and `poll_barrier` never runs without a record, so nothing
+        else would ever resolve it. The sidebar would go on naming a barrier
+        the queue had already crossed, permanently.
+
+        Clearing in the safe order means this run cannot create that state, but
+        it does not undo one already on disk: a state written by an older
+        clearance order, or edited by hand, arrives that way. Reconciling once
+        per start is what makes the pair converge from wherever it is found.
+        """
+        barrier = read_barrier(self.job)
+        for path, document in incident_documents(
+            self.job, open_only=True, kind=BARRIER_INCIDENT_KIND
+        ):
+            issue = positive_issue(document.get("issue"))
+            if issue == barrier:
+                continue
+            document["status"] = "resolved"
+            document["resolved_at"] = utc_stamp()
+            document["resolution"] = (
+                "The queue is no longer barriered at this issue."
+            )
+            _write_incident(self.job, path, document)
+            self.log(f"Resolved a stale barrier warning for issue #{issue}.")
 
     def current_barrier_for_status(self) -> int | None:
         """The barrier a terminal status document should carry, or None when it
@@ -1931,10 +1966,16 @@ class Controller:
             )
             self.sleep(self.interval)
             return
-        clear_barrier(self.job)
+        # Resolved before the record is removed, never the other way round.
+        # The record is what stops the queue and the warning is what shows it,
+        # so a clearance interrupted between the two has to leave the queue
+        # barriered with a stale warning -- which the next poll reconciles --
+        # rather than resumed with a warning no later path could ever resolve,
+        # since `poll_barrier` does not run without a record.
         resolved = resolve_barrier_incidents(
             self.job, issue, f"Issue #{issue} holds a current canonical approval."
         )
+        clear_barrier(self.job)
         self.log(
             f"Issue #{issue} is approved; cleared the barrier and resolved "
             f"{len(resolved)} incident(s)."

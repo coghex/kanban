@@ -1049,7 +1049,30 @@ class GateResultParsingTests(unittest.TestCase):
     def test_an_answer_about_another_issue_is_refused(self):
         with self.assertRaises(service.BackendFailure) as raised:
             service.parse_gate_result(json.dumps({"approved": True, "issue": 6}), 5, 0)
-        self.assertIn("#6", str(raised.exception))
+        self.assertIn("6", str(raised.exception))
+
+    def test_an_answer_naming_no_issue_at_all_is_refused(self):
+        # An approved document that never says what it approved would clear
+        # whatever barrier happened to be open.
+        with self.assertRaises(service.BackendFailure) as raised:
+            service.parse_gate_result(json.dumps({"approved": True}), 5, 0)
+        self.assertIn("not #5", str(raised.exception))
+
+    def test_an_issue_of_the_wrong_type_is_refused(self):
+        # `==` alone accepts `true` for #1 and `5.0` for #5, so the check is on
+        # a plain positive integer rather than on equality.
+        for issue, checked in (
+            (1, True),
+            (5, 5.0),
+            (5, "5"),
+            (5, None),
+            (5, 0),
+            (5, -5),
+        ):
+            with self.subTest(checked=checked):
+                document = json.dumps({"approved": True, "issue": checked})
+                with self.assertRaises(service.BackendFailure):
+                    service.parse_gate_result(document, issue, 0)
 
     def test_an_absent_or_unreadable_answer_is_refused(self):
         # A usage error exits 2 with nothing on stdout, which must never read
@@ -2062,6 +2085,102 @@ class BarrierLifecycleTests(ApprovalFixture):
 # ---------------------------------------------------------------------------
 # Stopping
 # ---------------------------------------------------------------------------
+
+
+class BarrierClearanceConvergesTests(ApprovalFixture):
+    """The barrier's two documents must converge from any state on disk.
+
+    The record stops the queue; the warning shows it. A clearance that gets
+    half-way through must never leave the queue resumed with a warning open,
+    because nothing runs `poll_barrier` once the record is gone and the sidebar
+    would name that barrier forever.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job_ = self.job()
+        service.ensure_dirs(self.job_)
+        self.controller = service.Controller(
+            self.job_, backend=self.backend, interval=0.0, legacy_policy="dual"
+        )
+
+    def barriered(self, issue=5):
+        service.write_barrier(self.job_, issue)
+        return service.ensure_barrier_incident(self.job_, issue, "detail")
+
+    def open_warnings(self):
+        return self.incidents(
+            self.job_, open_only=True, kind=service.BARRIER_INCIDENT_KIND
+        )
+
+    def test_a_failed_resolution_leaves_the_queue_barriered(self):
+        self.barriered()
+        self.write_gate({"5": True})
+        with mock.patch.object(
+            service, "resolve_barrier_incidents", side_effect=OSError("read-only")
+        ):
+            with self.assertRaises(OSError):
+                self.controller.poll_barrier(5)
+        # The record outlives the failure, so the queue has not crossed #5 and
+        # the next poll can try the whole clearance again.
+        self.assertEqual(service.read_barrier(self.job_), 5)
+        self.assertEqual(len(self.open_warnings()), 1)
+
+    def test_the_clearance_completes_on_a_later_poll(self):
+        self.barriered()
+        self.write_gate({"5": True})
+        with mock.patch.object(
+            service, "resolve_barrier_incidents", side_effect=OSError("read-only")
+        ):
+            with self.assertRaises(OSError):
+                self.controller.poll_barrier(5)
+        self.controller.poll_barrier(5)
+        self.assertIsNone(service.read_barrier(self.job_))
+        self.assertEqual(self.open_warnings(), [])
+
+    def test_a_warning_left_open_with_no_barrier_is_reconciled_at_startup(self):
+        # The state an older clearance order could leave behind: queue
+        # resumed, warning open, and no `poll_barrier` path that would ever
+        # resolve it.
+        warning = self.barriered()
+        service.clear_barrier(self.job_)
+        self.assertEqual(len(self.open_warnings()), 1)
+
+        self.write_plan([{"outcome": "idle", "signal_parent": True}])
+        proc = self.start_controller()
+        self.assertEqual(self.finish(proc, timeout=60)[0], 0)
+
+        self.assertEqual(self.open_warnings(), [])
+        resolved = [
+            document
+            for document in self.incidents(
+                self.job_, kind=service.BARRIER_INCIDENT_KIND
+            )
+            if document["incident_id"] == warning["incident_id"]
+        ]
+        self.assertEqual(resolved[0]["status"], "resolved")
+        # And the queue really did resume rather than sit on a phantom barrier.
+        self.assertGreaterEqual(len(self.queue_calls()), 1)
+
+    def test_a_live_barriers_warning_is_not_reconciled_away(self):
+        self.barriered(7)
+        self.write_gate({"7": False})
+        self.write_plan([])
+        proc = self.start_controller()
+        wait_until(lambda: len(self.check_calls()) >= 2, message="the barrier poll")
+        proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.finish(proc, timeout=60)[0], 0)
+        self.assertEqual(service.read_barrier(self.job_), 7)
+        self.assertEqual(len(self.open_warnings()), 1)
+        self.assertEqual(self.queue_calls(), [])
+
+    def test_a_gate_that_names_no_issue_never_clears_the_barrier(self):
+        self.barriered()
+        self.write_gate({"5": "malformed"})
+        proc = self.start_controller()
+        self.assertEqual(self.finish(proc, timeout=60)[0], 1)
+        self.assertEqual(service.read_barrier(self.job_), 5)
+        self.assertEqual(self.queue_calls(), [])
 
 
 class IntentionalStopTests(ApprovalFixture):
