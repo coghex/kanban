@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest import mock
 
 import fake_cli
+import kanban_config
 import setup_workflows
 
 
@@ -64,6 +65,13 @@ class HermeticSetupTests(unittest.TestCase):
         self.home = self.root / "home"
         self.home.mkdir()
         self.repo = self.root / "checkout"
+        # macOS, simulated rather than read: since issue #357 the managed
+        # install and record locations differ per platform, and this fixture's
+        # expectations are the macOS ones -- unchanged, and asserted on the
+        # Linux CI runner too. `platform_is` also redirects both XDG base
+        # directories in run_setup below, so an ambient one cannot decide the
+        # answer either. IssueReviewDiscoveryRecordTests covers the XDG host.
+        self.platform_is("darwin")
         self.install_dir = (
             self.home / "Library" / "Application Support" / "kanban" / "issue-review"
         )
@@ -80,6 +88,13 @@ class HermeticSetupTests(unittest.TestCase):
         # absence rather than a mocked one.
         for required in ("git", "python3"):
             (self.fake.bin_dir / required).symlink_to(shutil.which(required))
+
+    def platform_is(self, platform):
+        """Which convention kanban_config resolves the managed locations by,
+        for the rest of this case."""
+        patcher = mock.patch.object(kanban_config.sys, "platform", platform)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _make_checkout(self):
         (self.repo / "tools").mkdir(parents=True)
@@ -179,6 +194,11 @@ class HermeticSetupTests(unittest.TestCase):
             "PATH": str(self.fake.bin_dir),
             "FAKE_CLI_STATE_DIR": str(self.fake.state_dir),
             "HOME": str(self.home),
+            # Redirected rather than left to the host: kanban_config reads
+            # both when it resolves the managed locations, so an ambient one
+            # would point these cases at a real install.
+            "XDG_DATA_HOME": str(self.home / ".local" / "share"),
+            "XDG_STATE_HOME": str(self.home / ".local" / "state"),
         }
         if codex_home is not None:
             environment["CODEX_HOME"] = str(codex_home)
@@ -994,6 +1014,33 @@ class IssueReviewDiscoveryRecordTests(HermeticSetupTests):
         entry = self.component(payload, "issue-review")
         self.assertEqual(entry["status"], "unchanged")
         self.assertEqual(entry["record"]["result"], "unchanged")
+
+    def test_an_xdg_host_records_through_its_own_platforms_location(self):
+        # Setup shares one resolver with the installer, so the platform's
+        # answer has to reach it rather than only the installer (issue #357).
+        # Driven end to end rather than by calling the resolver again: the
+        # record this writes is what a dashboard later reads.
+        self.platform_is("linux")
+        self.record_path = (
+            self.home / ".local" / "share" / "kanban" / "issue-review" / "config.json"
+        )
+        self.install_dir = self.root / "opt" / "kanban-review"
+
+        code, payload = self.run_setup("--component", "issue-review", "--apply")
+
+        self.assertEqual(code, 0, payload)
+        entry = self.component(payload, "issue-review")
+        self.assertEqual(entry["record"]["path"], str(self.record_path))
+        self.assertEqual(
+            self.record()["backend_path"],
+            str(self.install_dir.resolve() / "approve_issues.py"),
+        )
+        # And nothing is written to the other platform's location.
+        self.assertFalse(
+            (
+                self.home / "Library" / "Application Support" / "kanban" / "issue-review"
+            ).exists()
+        )
 
 
 class DryRunPurityTests(unittest.TestCase):
