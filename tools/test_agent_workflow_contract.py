@@ -76,6 +76,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
     "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
@@ -99,6 +100,8 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/repair.md",
     "claude-plugin/plugins/kanban/commands/design-epic.md",
     "claude-plugin/plugins/kanban/commands/process-design-doc.md",
+    "claude-plugin/plugins/kanban/commands/draft-report.md",
+    "claude-plugin/plugins/kanban/commands/note-problem.md",
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
@@ -153,22 +156,26 @@ REREVIEW_SURFACE_EXPECTED_COMMANDS = {
     },
 }
 
-# The seven design and report document-workflow assets declared in
-# docs/document-workflow-contract.md §2 — the five vendored by issue #229 plus
-# the Claude design pair issue #241 transposed from the tracked Codex skills —
-# covered exactly the way the drafting
-# assets above are: all seven are members of the two plugin surface lists, so
-# their bash fences are already scanned for external commands, and all seven are
+# The ten design and report document-workflow assets declared in
+# docs/document-workflow-contract.md §2 — the five vendored by issue #229, the
+# Claude design pair issue #241 transposed from the tracked Codex skills, and
+# the report write side issue #328 completed with /draft-report and both
+# note-problem variants — covered exactly the way the drafting
+# assets above are: all ten are members of the two plugin surface lists, so
+# their bash fences are already scanned for external commands, and all ten are
 # scanned here for user-scoped paths. They name none today — which is why the
 # assertion below pins what the extractor actually recovers from them, rather
 # than only asserting that nothing undeclared was found.
 DOCUMENT_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/design-epic.md",
     "claude-plugin/plugins/kanban/commands/process-design-doc.md",
+    "claude-plugin/plugins/kanban/commands/draft-report.md",
+    "claude-plugin/plugins/kanban/commands/note-problem.md",
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
     "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
 ]
 
@@ -183,13 +190,20 @@ DOCUMENT_SURFACE_FILES = [
 # sources' fences, so it inherits their command sets too. Pinned so a rewrite
 # that stops invoking anything cannot leave the completeness check with nothing
 # to discover.
-# The four processing assets invoke `python3` and the three drafting assets do
+# The four processing assets invoke `python3` and the four drafting assets do
 # not: issue #315 moved the publication mechanism into
 # tools/publish_coordination_doc.py, which the processing assets call and the
-# drafting assets have no reason to, since they publish nothing.
+# drafting assets have no reason to, since they publish nothing. Issue #328
+# added a third shape: both note-problem variants invoke `python3` without ever
+# reaching tools/tracker_transaction.py, because they publish an appended
+# observation to an existing report while mutating no tracker.
 DOCUMENT_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/design-epic.md": {"git", "awk", "gh"},
     "claude-plugin/plugins/kanban/commands/process-design-doc.md": {
+        "git", "awk", "gh", "python3",
+    },
+    "claude-plugin/plugins/kanban/commands/draft-report.md": {"git", "awk", "gh"},
+    "claude-plugin/plugins/kanban/commands/note-problem.md": {
         "git", "awk", "gh", "python3",
     },
     "claude-plugin/plugins/kanban/commands/process-report.md": {
@@ -200,6 +214,9 @@ DOCUMENT_SURFACE_EXPECTED_COMMANDS = {
         "git", "awk", "gh", "python3",
     },
     "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": {"git", "awk", "gh"},
+    "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md": {
+        "git", "awk", "gh", "python3",
+    },
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": {
         "git", "awk", "gh", "python3",
     },
