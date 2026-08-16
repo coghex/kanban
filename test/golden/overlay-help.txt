@@ -10,9 +10,9 @@
 ║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope     ┃ j / Down             next card                                                                  ┃     │ ┃  │ updated 3h ago                     │ ┃║
 ║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature     ┃ k / Up               previous card                                                              ┃     │ ┃  │ Updates the branch after the       │ ┃║
 ║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · ┃ x                    kill selected working process tree                                         ┃ the │ ┃  │ persistence registry changed on    │ ┃║
-║┃                          ┃┃     │ Write the env┃ h / Left             previous column                                                            ┃     │ ┃  │ master.                            │ ┃║
-║┃                          ┃┃     │ of the payloa┃ l / Right            next column                                                                ┃     │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃                          ┃┃     │ write is dete┃ g                    first visible item in the column                                           ┃─────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃ ┏━━━┓                    ┃┃     │ Write the env┃ h / Left             previous column                                                            ┃     │ ┃  │ master.                            │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃     │ of the payloa┃ l / Right            next column                                                                ┃     │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃ ┗━━━┛                    ┃┃     │ write is dete┃ g                    first visible item in the column                                           ┃─────╯ ┃  ╰────────────────────────────────────╯ ┃║
 ║┃                          ┃┃     ╰──────────────┃ G                    last visible item in the column                                            ┃       ┃                                         ┃║
 ║┃                          ┃┃                    ┃ s                    search a column; h/l type into the query, Left/Right move the search       ┃─────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃                    ┃ f                    filter cards; j/k move, Left/Right change group, space toggles, d defaults ┃     │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
@@ -24,7 +24,7 @@
 ║┃                          ┃┃  │ overlay         ┃ A                    autosolve selected issue (choose model brand)                              ┃     │ ┃  │ ordinary wheel events.             │ ┃║
 ║┃                          ┃┃  │  reviewed:approv┃ p                    processes and agent sessions                                               ┃     │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
 ║┃                          ┃┃  │ unassigned · upd┃ i                    everything needing attention; Enter goes to its work                       ┃     │ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ Empty modal area┃ u                    update board and both usage providers                                      ┃─────╯ ┃                                         ┃║
+║┃                          ┃┃  │ Empty modal area┃ u / click            update board and both usage providers                                      ┃─────╯ ┃                                         ┃║
 ║┃                          ┃┃  │ pointer events t┃ d / click            start or stop PR drainer                                                   ┃       ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃  │ pages. This is v┃ m                    merge the selected approved PR in Done                                     ┃       ┃  │ PR #861 Adopt the envelope in the  │ ┃║
 ║┃                          ┃┃  ╰─────────────────┃ c                    collapse / expand sidebar                                                  ┃       ┃  │ snapshot loader                    │ ┃║

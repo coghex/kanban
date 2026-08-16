@@ -10,9 +10,9 @@
 || in 2h 30m · Thu 17:30    ||     | versioned save envelope | |     | terrain cache reader   | |  | master · updated 3h ago   | |  | master · updated 3h ago   | ||
 || week    [##........] 22% ||     |  feature                | |     |  code-health           | |  | Moves per-domain dispatch | |  | Updates the branch after  | ||
 || in 1d 18h · Sat 09:10    ||     | unassigned · updated 4h | |     | @codex-agent · updated | |  | into small modules while  | |  | the persistence registry  | ||
-||                          ||     | ago                     | |     | 4h ago                 | |  | preserving the public…    | |  | changed on master.        | ||
-||                          ||     | Write the envelope      | |     | Read through the       | |  | ◐ CI 12/14 · behind       | |  | ✓ CI 12/12 · merge        | ||
-||                          ||     | header ahead of the     | |     | envelope and reject a  | |  +---------------------------+ |  | conflict                  | ||
+|| +---+                    ||     | ago                     | |     | 4h ago                 | |  | preserving the public…    | |  | changed on master.        | ||
+|| | ↻ |                    ||     | Write the envelope      | |     | Read through the       | |  | ◐ CI 12/14 · behind       | |  | ✓ CI 12/12 · merge        | ||
+|| +---+                    ||     | header ahead of the     | |     | envelope and reject a  | |  +---------------------------+ |  | conflict                  | ||
 ||                          ||     | payload so a partial…   | |     | payload whose recorde… | |                                |  +---------------------------+ ||
 ||                          ||     +-------------------------+ |     +------------------------+ |  +---------------------------+ |                                ||
 ||                          ||                                 |                                |  | DRAFT #847 Prototype      | |  +---------------------------+ ||

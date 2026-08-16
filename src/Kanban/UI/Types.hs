@@ -121,6 +121,10 @@ data Name
   | IncidentsPanel
   | IncidentTarget IncidentRef
   | DrainerButton
+  | -- | The usage sidebar's update control. Registered only while the
+    -- sidebar is drawn, so a collapsed sidebar leaves no extent for a press
+    -- to land on and the control is unclickable exactly when it is invisible.
+    UpdateButton
   deriving stock (Eq, Ord, Show)
 
 data Overlay

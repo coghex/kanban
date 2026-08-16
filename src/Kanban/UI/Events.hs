@@ -211,6 +211,7 @@ data BoardMouseAction
   = -- | Move the live search to this column, consuming the press.
     TransferSearch BoardColumn
   | ToggleDrainerFromClick
+  | RefreshAllFromClick
   | ToggleFilterBoxFromClick FilterBox
   | ToggleEpicFromClick BoardColumn Int Int
   | SelectOrOpenCardAt BoardColumn Int
@@ -222,21 +223,26 @@ data BoardMouseAction
 --
 -- A live search outranks every column press: a left or right press aimed at
 -- any column but the searched one moves the search there and does nothing
--- else, wherever in that column it landed. It does not outrank the drainer
--- button or a filter checkbox, neither of which is a column target at all and
--- both of which are answered first, and it claims neither the wheel — which
+-- else, wherever in that column it landed. It does not outrank the two sidebar
+-- controls or a filter checkbox, none of which is a column target at all and
+-- all of which are answered first, and it claims neither the wheel — which
 -- retargets nothing, so it keeps scrolling whatever is under the pointer — nor
 -- the middle button.
+--
+-- Both sidebar controls take a plain left press and nothing else. A middle,
+-- right, wheel, or modifier-carrying press over one falls through every arm
+-- below, which name only column targets, and the board claims nothing for it.
 --
 -- The completed-history blocker outranks every /card/ press and nothing else.
 -- No column is drawn under it, so a @CardTarget@, @EpicTarget@, or
 -- @ColumnViewport@ press arriving there names a row from a frame that is no
 -- longer on screen; resolving one would act on whatever the criteria have
--- since put at that index. The drainer button and the filter panel are drawn
+-- since put at that index. The sidebar controls and the filter panel are drawn
 -- through the blocker and keep working.
 boardMouseAction :: AppState -> Name -> Vty.Button -> [Vty.Modifier] -> Maybe BoardMouseAction
 boardMouseAction state name button modifiers = case (name, button, modifiers) of
   (DrainerButton, Vty.BLeft, []) -> Just ToggleDrainerFromClick
+  (UpdateButton, Vty.BLeft, []) -> Just RefreshAllFromClick
   (FilterBoxTarget box, Vty.BLeft, _) -> Just (ToggleFilterBoxFromClick box)
   _ | completedCardsBlocked state -> Nothing
   _ | Just column <- searchMouseTransfer state name button -> Just (TransferSearch column)
@@ -259,6 +265,11 @@ boardMousePress :: BoardMouseAction -> AppState -> AppState
 boardMousePress = \case
   TransferSearch column -> transferSearchTo column
   ToggleDrainerFromClick -> fst . drainerTogglePress
+  -- The update is not a state transition of its own. Every mark it leaves —
+  -- the loading freshness, the notice, the coalesced follow-up — is made by
+  -- the same 'startAllRefreshes' the key reaches, which is where a press made
+  -- during a cycle in flight is decided.
+  RefreshAllFromClick -> id
   ToggleFilterBoxFromClick box -> toggleFilterBoxFromClick box
   ToggleEpicFromClick column row trackerNumber -> toggleTrackerState column row trackerNumber
   SelectOrOpenCardAt column row -> applyCardClick column row
@@ -268,9 +279,9 @@ boardMousePress = \case
   ScrollColumnBy _ _ -> \state -> state {appEnsureSelectionVisible = False}
 
 -- | Carries out one decided press: its effect on the state, and then the
--- three things that are not state — the viewport scroll, the controller
--- handoff a drainer press makes, and the transcript a newly opened session
--- overlay has to be shown the tail of.
+-- four things that are not state — the viewport scroll, the controller
+-- handoff a drainer press makes, the update an update press starts, and the
+-- transcript a newly opened session overlay has to be shown the tail of.
 applyBoardMouseAction :: BoardMouseAction -> EventM Name AppState ()
 applyBoardMouseAction action = do
   before <- get
@@ -278,6 +289,9 @@ applyBoardMouseAction action = do
   case action of
     ScrollColumnBy column amount -> vScrollBy (viewportScroll (ColumnViewport column)) amount
     ToggleDrainerFromClick -> runDrainerToggleHandoff before
+    -- The key's own dispatch, not a second call to whatever it happens to
+    -- reach today, so the click cannot acquire a refresh path of its own.
+    RefreshAllFromClick -> applyBoardAction RefreshAll
     OpenRunningProcessAt _ _ -> do
       after <- get
       when (after.appOverlay /= before.appOverlay) $ do
