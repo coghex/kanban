@@ -1555,13 +1555,50 @@ class Controller:
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
-        # Registered before the flag is read again, so the two reads overlap
-        # rather than leaving a gap between them.
-        self._child = child
-        if self._stop_requested:
-            self.log("A stop raced this pass's start; signalling the backend it spawned.")
-            self.signal_child_group(child, signal.SIGINT)
+        try:
+            # Registered before the flag is read again, so the two reads
+            # overlap rather than leaving a gap between them.
+            self._child = child
+            if self._stop_requested:
+                self.log(
+                    "A stop raced this pass's start; signalling the backend it spawned."
+                )
+                self.signal_child_group(child, signal.SIGINT)
+        except BaseException:
+            self._child = None
+            self.abandon_child(child)
+            raise
         return child
+
+    def abandon_child(self, child: subprocess.Popen[str]) -> None:
+        """End a pass nothing will be left to supervise.
+
+        Reached when a step after the spawn fails. The run is about to record
+        a controller failure and release the per-identity run lock, and a
+        backend still alive past that point keeps making model calls and
+        GitHub mutations with nothing watching it -- and can then be overlapped
+        by the very next controller the released lock admits, which is the one
+        thing that lock exists to prevent.
+
+        Asked politely first and reaped either way, so the failure this is
+        clearing up after cannot be replaced by a wait that never returns.
+        Nothing here re-raises: the original failure is the one worth
+        reporting.
+        """
+        self.signal_child_group(child, signal.SIGINT)
+        try:
+            child.wait(timeout=STOP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            self.terminate_process_group(child)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                child.wait(timeout=STOP_GRACE_SECONDS)
+        # Whatever the backend started and did not reap goes with it.
+        self.terminate_process_group(child)
+        with contextlib.suppress(OSError):
+            self.log(
+                "A pass could not be supervised to completion; its backend process "
+                "group was ended."
+            )
 
     def spawn(
         self,
@@ -1589,6 +1626,13 @@ class Controller:
                 backend_pid=child.pid,
             )
             stdout, stderr = self.wait_for(child)
+        except BaseException:
+            # Every exceptional exit from here, not only an intentional stop:
+            # a status write that fails and a wait that raises both end this
+            # run, and neither may leave the pass running behind it.
+            self._child = None
+            self.abandon_child(child)
+            raise
         finally:
             self._child = None
             if self._stop_requested:

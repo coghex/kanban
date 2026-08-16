@@ -2027,6 +2027,137 @@ class StopRacingASpawnTests(ApprovalFixture):
         )
 
 
+class FailureAfterSpawnTests(ApprovalFixture):
+    """A pass that cannot be supervised to completion must not outlive the run.
+
+    The run is about to record a controller failure and release the
+    per-identity run lock. A backend left alive past that point keeps making
+    model calls and GitHub mutations unwatched, and the next controller the
+    released lock admits would overlap it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.orphan_path = self.root / "orphan.pid"
+        # Long enough that the backend is unmistakably still running, and it
+        # spawns a grandchild of its own so the assertion is about the whole
+        # process group rather than the one process the controller holds.
+        self.write_plan(
+            [{"outcome": "idle", "sleep": 120, "spawn_orphan": str(self.orphan_path)}]
+        )
+        self.job_ = self.job()
+        service.ensure_dirs(self.job_)
+        self.controller = service.Controller(
+            self.job_, backend=self.backend, interval=0.0, legacy_policy="dual"
+        )
+
+    def fail_once_the_backend_is_up(self, error):
+        """A side effect that waits for the pass to be genuinely running --
+        grandchild and all -- and only then fails it."""
+
+        def side_effect(*_args, **_kwargs):
+            wait_until(self.orphan_path.exists, message="the backend to spawn its child")
+            raise error
+
+        return side_effect
+
+    def assert_group_is_gone(self):
+        orphan_pid = int(self.orphan_path.read_text(encoding="utf-8"))
+        self.addCleanup(_kill_quietly, orphan_pid)
+        backend_pid = self.queue_calls()[0]["pid"]
+        self.addCleanup(_kill_quietly, backend_pid)
+        wait_until(lambda: process_gone(backend_pid), message="the backend to be gone")
+        # The grandchild ignores SIGINT and SIGTERM, so only a signal to the
+        # whole group can have removed it.
+        wait_until(lambda: process_gone(orphan_pid), message="the orphan to be gone")
+
+    def test_a_status_write_that_fails_after_the_spawn_ends_the_group(self):
+        with mock.patch.object(
+            self.controller,
+            "write_status",
+            side_effect=self.fail_once_the_backend_is_up(OSError("no space left")),
+        ):
+            with self.assertRaises(OSError):
+                self.controller.spawn(
+                    self.controller.backend_argv("--review-queue"),
+                    state=service.STATE_RUNNING,
+                    message="Advancing the approval queue.",
+                )
+        self.assert_group_is_gone()
+
+    def test_a_wait_that_fails_after_the_spawn_ends_the_group(self):
+        with mock.patch.object(
+            self.controller,
+            "wait_for",
+            side_effect=self.fail_once_the_backend_is_up(RuntimeError("collection failed")),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.controller.spawn(
+                    self.controller.backend_argv("--review-queue"),
+                    state=service.STATE_RUNNING,
+                    message="Advancing the approval queue.",
+                )
+        self.assert_group_is_gone()
+
+    def test_a_registration_step_that_fails_ends_the_group_too(self):
+        # `start_child`'s own post-spawn work can fail as well -- writing the
+        # service log, for one -- and the child is already running by then.
+        real_popen = subprocess.Popen
+
+        def racing_popen(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            self.controller._stop_requested = True
+            return child
+
+        with (
+            mock.patch.object(service.subprocess, "Popen", racing_popen),
+            mock.patch.object(
+                self.controller,
+                "log",
+                side_effect=self.fail_once_the_backend_is_up(OSError("log is unwritable")),
+            ),
+        ):
+            with self.assertRaises(OSError):
+                self.controller.start_child(
+                    self.controller.backend_argv("--review-queue")
+                )
+        self.assert_group_is_gone()
+
+    def test_the_whole_run_records_the_failure_with_nothing_left_running(self):
+        # End to end, through a genuine write failure rather than a patched
+        # method: the run has to record its controller failure and release the
+        # run lock with the backend already gone, since the next controller
+        # that lock admits would otherwise overlap it.
+        real_write = service.atomic_write_json
+        failed = []
+
+        def failing_write(path, value):
+            if (
+                not failed
+                and Path(path) == self.job_.status_path
+                and value.get("state") == service.STATE_RUNNING
+            ):
+                wait_until(
+                    self.orphan_path.exists, message="the backend to spawn its child"
+                )
+                failed.append(path)
+                raise OSError("no space left on device")
+            return real_write(path, value)
+
+        with mock.patch.object(service, "atomic_write_json", failing_write):
+            code = service.run_service(self.job_, interval=0.0, legacy_policy="dual")
+        self.assertEqual(code, 1)
+        self.assert_group_is_gone()
+        incidents = self.incidents(open_only=True, kind=service.ERROR_INCIDENT_KIND)
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(
+            service.status_snapshot(self.job_)["state"], service.STATE_CONTROLLER_FAILURE
+        )
+        # Released: the failed run holds nothing that would refuse the next one.
+        with service.run_lock(self.job_):
+            pass
+
+
 class GraceEscalationTests(ApprovalFixture):
     def test_a_child_that_ignores_the_stop_is_killed_after_the_grace_period(self):
         job = self.job()
