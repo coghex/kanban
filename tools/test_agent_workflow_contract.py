@@ -503,25 +503,34 @@ def discovered_tool_commands(content):
     return {match.group("name") for match in TOOL_COMMAND_CALL_RE.finditer(content)}
 
 
-# The one module allowed to speak launchd, and every way of speaking it that
-# must therefore appear nowhere else on the tools/ surface. Issue #291 pulled
-# this boundary out of the controller and the installer so a second service
-# manager can be added without rewriting either; a `launchctl` call, a plist
-# read or written, or a hand-built target that drifted back outside it would
-# make that boundary a comment rather than a fact.
+# The one module allowed to speak a service manager, and every way of speaking
+# one that must therefore appear nowhere else on the tools/ surface. Issue #291
+# pulled this boundary out of the controller and the installer so a second
+# service manager could be added without rewriting either, and issue #329 added
+# that second one; a `launchctl` or `systemctl` call, a plist or unit file read
+# or written, or a hand-built target that drifted back outside it would make
+# that boundary a comment rather than a fact.
 #
-# All three artifacts are checked, not just the command name: `plistlib.dumps`
-# or an f-string starting `gui/` outside the backend is launchd knowledge in
-# exactly the same way, and a check that only caught the token `launchctl`
-# would pass over both. The domain is what every launchd target is built from
-# (`gui/<uid>`, then `<domain>/<label>`), so forbidding the domain literal
-# forbids the targets built on it too.
+# Every artifact is checked, not just the command names: `plistlib.dumps`, an
+# f-string starting `gui/`, or a `[Service]` section rendered outside the
+# backend is service-manager knowledge in exactly the same way, and a check
+# that only caught the two command tokens would pass over all of them. Each
+# manager's target is what every address is built from — `gui/<uid>` then
+# `<domain>/<label>`, and `user@<uid>.service` then `<manager>/<unit>` — so
+# forbidding the address literals forbids the targets built on them too.
 LAUNCHD_BACKEND_PATH = "tools/service_manager.py"
+SERVICE_MANAGER_BACKEND_PATH = LAUNCHD_BACKEND_PATH
 LAUNCHD_ARTIFACTS = (
     ("a launchctl invocation", re.compile(r"\blaunchctl\b")),
     ("a plist read or written", re.compile(r"\bplistlib\b")),
     ("a launchd domain", re.compile(r"""["']gui/""")),
 )
+SYSTEMD_ARTIFACTS = (
+    ("a systemctl invocation", re.compile(r"\bsystemctl\b")),
+    ("a systemd unit section", re.compile(r"""["']\[(?:Unit|Service|Install)\]""")),
+    ("a systemd user-manager target", re.compile(r"""["']user@""")),
+)
+SERVICE_MANAGER_ARTIFACTS = LAUNCHD_ARTIFACTS + SYSTEMD_ARTIFACTS
 
 
 def tool_surface_files(tools_dir=TOOLS_DIR):
@@ -1100,18 +1109,18 @@ class AgentWorkflowContractTests(unittest.TestCase):
     def test_tool_command_discovery_covers_the_run_command_wrapper(self):
         # Pins the extractor against the modules that actually spawn these
         # commands rather than a synthetic snippet. tools/service_manager.py is
-        # now the only launchctl invoker, and it reaches it through the
-        # injected `self._run` wrapper — a run-family callee rather than
-        # `run(`/`subprocess.run(`, so an extractor keyed to those two
+        # now the only launchctl and systemctl invoker, and it reaches both
+        # through the injected `self._run` wrapper — a run-family callee rather
+        # than `run(`/`subprocess.run(`, so an extractor keyed to those two
         # spellings finds zero commands here and the completeness check
         # silently has nothing to discover. Its two callers keep git, which is
         # what proves this pin is reading real modules and not a fixture.
         self.assertEqual(
             discovered_tool_commands(
-                (REPO_ROOT / LAUNCHD_BACKEND_PATH).read_text(encoding="utf-8")
+                (REPO_ROOT / SERVICE_MANAGER_BACKEND_PATH).read_text(encoding="utf-8")
             ),
-            {"launchctl"},
-            LAUNCHD_BACKEND_PATH,
+            {"launchctl", "systemctl"},
+            SERVICE_MANAGER_BACKEND_PATH,
         )
         for relative_path in ("tools/drain_prs_service.py", "tools/install_drainer.py"):
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -1136,63 +1145,72 @@ class AgentWorkflowContractTests(unittest.TestCase):
     def test_tool_surface_reconciles_against_the_existing_executable_rows(self):
         # Adding this surface must not require re-declaring commands that
         # already have rows: the whole eligible surface spawns exactly these
-        # five, and only launchctl was missing before issue #149.
+        # six, and only launchctl was missing before issue #149 — systemctl
+        # joined it with the systemd backend in issue #329.
         found = set()
         for path in tool_surface_files():
             found |= discovered_tool_commands(path.read_text(encoding="utf-8"))
-        self.assertEqual(found, {"gh", "git", "codex", "claude", "launchctl"})
-
-    def test_launchctl_is_declared_and_its_removal_fails_the_check(self):
-        by_id = {row["id"]: row for row in self.manifest}
-        self.assertIn("launchctl-cli", by_id)
-        entry = by_id["launchctl-cli"]
-        self.assertEqual(entry["kind"], "executable")
-        self.assertEqual(entry["token"], "launchctl")
-        self.assertEqual(entry["files"], [LAUNCHD_BACKEND_PATH])
-        # mandatory: no, matching §2.6 — the drainer is an optional component.
-        self.assertEqual(entry["mandatory"], "no")
-        # And the row is load-bearing rather than decorative: drop it while
-        # the invocations remain and both invoking modules are reported.
-        without_launchctl = {
-            row["token"]
-            for row in self.manifest
-            if row["kind"] == "executable" and row["token"] != "launchctl"
-        }
         self.assertEqual(
-            tool_surface_findings(without_launchctl),
-            [(LAUNCHD_BACKEND_PATH, "launchctl")],
+            found, {"gh", "git", "codex", "claude", "launchctl", "systemctl"}
         )
 
-    def test_launchd_artifacts_are_confined_to_the_service_manager_backend(self):
+    def test_each_service_manager_cli_is_declared_and_load_bearing(self):
+        by_id = {row["id"]: row for row in self.manifest}
+        for row_id, token in (("launchctl-cli", "launchctl"), ("systemctl-cli", "systemctl")):
+            with self.subTest(token=token):
+                self.assertIn(row_id, by_id)
+                entry = by_id[row_id]
+                self.assertEqual(entry["kind"], "executable")
+                self.assertEqual(entry["token"], token)
+                self.assertEqual(entry["files"], [SERVICE_MANAGER_BACKEND_PATH])
+                # mandatory: no, matching §2.6 — the drainer is an optional
+                # component, and each manager is needed only on its own host.
+                self.assertEqual(entry["mandatory"], "no")
+                # And each row is load-bearing rather than decorative: drop it
+                # while the invocations remain and the invoking module is
+                # reported.
+                without = {
+                    row["token"]
+                    for row in self.manifest
+                    if row["kind"] == "executable" and row["token"] != token
+                }
+                self.assertEqual(
+                    tool_surface_findings(without),
+                    [(SERVICE_MANAGER_BACKEND_PATH, token)],
+                )
+
+    def test_service_manager_artifacts_are_confined_to_the_backend(self):
         # Grounded against the tracked tree rather than a fixture, and in both
-        # directions: the backend must still contain all three artifacts, so
-        # deleting the launchd implementation cannot make this pass vacuously,
-        # and no other module on the scanned surface may contain any of them.
-        # The scan is the same discovered surface the manifest check walks, so
-        # a tools/ module added later is covered the moment it lands.
-        backend = (REPO_ROOT / LAUNCHD_BACKEND_PATH).read_text(encoding="utf-8")
-        for description, pattern in LAUNCHD_ARTIFACTS:
+        # directions: the backend must still contain every artifact, so
+        # deleting either implementation cannot make this pass vacuously, and
+        # no other module on the scanned surface may contain any of them. The
+        # scan is the same discovered surface the manifest check walks, so a
+        # tools/ module added later is covered the moment it lands. Both
+        # managers are held to one rule — the seam issue #291 drew is only
+        # real if the backend issue #329 added lives inside it too.
+        backend = (REPO_ROOT / SERVICE_MANAGER_BACKEND_PATH).read_text(encoding="utf-8")
+        for description, pattern in SERVICE_MANAGER_ARTIFACTS:
             self.assertRegex(
                 backend,
                 pattern,
-                f"{LAUNCHD_BACKEND_PATH} no longer contains {description}; the "
-                "launchd backend is where it belongs",
+                f"{SERVICE_MANAGER_BACKEND_PATH} no longer contains {description}; "
+                "the service-manager backend is where it belongs",
             )
         offenders = []
         for path in tool_surface_files():
             relative_path = path.relative_to(TOOLS_DIR.parent).as_posix()
-            if relative_path == LAUNCHD_BACKEND_PATH:
+            if relative_path == SERVICE_MANAGER_BACKEND_PATH:
                 continue
             content = path.read_text(encoding="utf-8")
-            for description, pattern in LAUNCHD_ARTIFACTS:
+            for description, pattern in SERVICE_MANAGER_ARTIFACTS:
                 if pattern.search(content):
                     offenders.append((relative_path, description))
         self.assertEqual(
             offenders,
             [],
             "; ".join(
-                f"{relative_path} contains {description}; reach launchd through "
-                f"{LAUNCHD_BACKEND_PATH} instead"
+                f"{relative_path} contains {description}; reach the service "
+                f"manager through {SERVICE_MANAGER_BACKEND_PATH} instead"
                 for relative_path, description in offenders
             ),
         )

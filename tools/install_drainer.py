@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 
-"""Safely install Kanban's user-scoped macOS PR drainer LaunchAgent.
+"""Safely install Kanban's user-scoped PR drainer job.
 
 The installer never starts the drainer. It only installs stable script links and
-loads a stopped LaunchAgent definition for the selected repository. An optional
+loads a stopped service definition for the selected repository — a LaunchAgent
+on macOS, a systemd user unit on Linux, whichever
+`tools/service_manager.select_backend` says this host is managed by. An optional
 --config path is persisted against that repository and forwarded to its
 installed drain_prs.py runs.
 
-One LaunchAgent per canonical GitHub repository. The script links are shared —
+One job per canonical GitHub repository. The script links are shared —
 one installed copy of the drainer, the controller, the configuration parser,
 and the service-manager backend serves every repository — while the job, its
 runtime state, its logs, and its `--config` selection are the repository's own.
 Installing a second repository therefore adds an entry beside the first rather
 than replacing it.
 
-Installing runs drain_prs_service.py's own install step, which writes the plist
-and records where it put it. Re-running this installer therefore also repairs a
-missing or stale discovery record in place.
+Installing runs drain_prs_service.py's own install step, which writes the
+definition and records where it put it. Re-running this installer therefore
+also repairs a missing or stale discovery record in place.
 """
 
 from __future__ import annotations
@@ -84,8 +86,8 @@ def repository_job(repo: Path) -> drain_prs_service.DrainerJob:
 
     A checkout whose remote does not resolve to a repository on github.com
     cannot be given a drainer at all: its identity is what names the job, and
-    inventing one from an unsupported value would install a LaunchAgent Kanban
-    could never find.
+    inventing one from an unsupported value would install a job Kanban could
+    never find.
     """
     try:
         return drain_prs_service.resolve_job(repo)
@@ -101,9 +103,19 @@ def service_backend() -> service_manager.ServiceManagerBackend:
     resolved per call so a test can replace either this function or that
     wrapper. The installer spawns the *installed* controller as a subprocess,
     which selects its own backend in its own process — there is deliberately
-    no flag or environment variable threading a selection between the two.
+    no flag or environment variable threading a selection between the two,
+    because both ask the same host the same question.
+
+    This is also the installer's only platform refusal. A host managed by
+    neither launchd nor systemd is rejected by the selection itself, which is
+    the condition that actually blocks an install; `sys.platform` never
+    decides, so a Linux host with a live user session installs here exactly as
+    a macOS host does.
     """
-    return service_manager.select_backend(run)
+    try:
+        return service_manager.select_backend(run)
+    except service_manager.NoServiceManagerError as exc:
+        raise InstallError(str(exc)) from exc
 
 
 def managed_job_running(job: drain_prs_service.DrainerJob) -> bool:
@@ -194,7 +206,7 @@ def merge_installed_config_json(updates: dict[str, Any]) -> Path:
     """Merge `updates` into that document rather than overwriting it, so a
     later installer run that sets one key does not delete a different key
     persisted by an earlier run. The merge itself lives with the controller,
-    which records the installed LaunchAgent in the same document and must not
+    which records the installed job in the same document and must not
     clobber these keys either."""
     try:
         return drain_prs_service.merge_json_document(shared_config_path(), updates)
@@ -236,7 +248,7 @@ def migrate_legacy_installed_config(install_dir: Path) -> list[str]:
 def installed_ntfy_url() -> str | None:
     """The notification endpoint a previous run persisted, if any. Read out of
     the document rather than inferred from its existence: the controller also
-    records the installed LaunchAgent there, so the file is present after every
+    records the installed job there, so the file is present after every
     install whether or not notifications were ever configured."""
     url = read_config_document(shared_config_path()).get("ntfy_url")
     return url if isinstance(url, str) and url else None
@@ -272,8 +284,11 @@ def install(
     config_path: str | None = None,
     dry_run: bool,
 ) -> dict[str, Any]:
-    if sys.platform != "darwin":
-        raise InstallError("The PR drainer LaunchAgent installer requires macOS.")
+    # First, and before any path below writes or links anything: resolving the
+    # backend is what refuses a host with no service manager, and a refusal
+    # after the script links were installed would leave an installation that
+    # can never be completed or controlled.
+    backend = service_backend()
     job = repository_job(repo)
     if managed_job_running(job) or repository_drainer_running(repo):
         raise InstallError(
@@ -314,7 +329,7 @@ def install(
                 key: {"source": str(sources[key]), "destination": str(destination)}
                 for key, destination in destinations.items()
             },
-            "plist": str(job.plist_path),
+            backend.definition_label(): str(job.definition_path),
             "record": str(drain_prs_service.DISCOVERY_RECORD_PATH),
             "config_path": resolved_config_path,
             "started": False,
@@ -378,7 +393,7 @@ def install(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Install Kanban's stopped, user-scoped PR drainer LaunchAgent."
+        description="Install Kanban's stopped, user-scoped PR drainer job."
     )
     parser.add_argument(
         "--repo",
@@ -422,14 +437,17 @@ def main() -> int:
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
         elif result.get("dry_run"):
-            print(f"Dry run passed for {repo}; no files or LaunchAgents were changed.")
+            print(f"Dry run passed for {repo}; no files or services were changed.")
         else:
             print(f"Installed PR drainer for {result['repository']} at {repo}")
-            print(f"LaunchAgent: {result['label']}")
+            print(f"Service: {result['label']}")
             print(f"Controller: {install_dir / 'drain_prs_service.py'}")
-            print("The LaunchAgent is loaded but stopped; start it from Kanban when ready.")
+            print("The job is loaded but stopped; start it from Kanban when ready.")
         return 0
-    except (InstallError, OSError) as exc:
+    # `ServiceManagerError` is the service-manager seam's own vocabulary for a
+    # fault no injected runner can carry, and reaches here whenever it was raised
+    # past the point `service_backend` translates the selection itself.
+    except (InstallError, service_manager.ServiceManagerError, OSError) as exc:
         if args.json:
             print(json.dumps({"error": str(exc)}, indent=2), file=sys.stderr)
         else:

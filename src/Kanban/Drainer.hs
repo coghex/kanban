@@ -3,6 +3,7 @@ module Kanban.Drainer
     DirectMergeEffect (..),
     DirectMergeOutcome (..),
     DrainerActivity (..),
+    DrainerBackend (..),
     DrainerController (..),
     DrainerIncident (..),
     DrainerObservation (..),
@@ -24,21 +25,25 @@ module Kanban.Drainer
     drainerRecordFromBytes,
     drainerRecordPath,
     drainerToggle,
+    hostServiceManager,
     normalizedRepositoryIdentity,
     queryDrainerStatus,
-    resolveDrainerPlist,
+    resolveDrainerDefinition,
     resolveSinglePullRequestDrainer,
     resolveSinglePullRequestDrainerAt,
     runDirectMerge,
     runDrainerCommand,
     selectSinglePullRequestDrainer,
+    serviceDefinitionNoun,
+    serviceManagerName,
     setDrainerRunning,
     singlePullRequestDrainerPath,
     statusFromControllerExit,
+    unitExecStartArguments,
     -- | Exported for the discovery-wording tests, which cannot reach this
-    -- branch through 'discoverDrainerController': it needs a plist that
-    -- @plutil@ rejects, and the test host may have neither.
-    unreadablePlist,
+    -- branch through 'discoverDrainerController': it needs a definition the
+    -- reader rejects, and the test host may have neither manager.
+    unreadableDefinition,
   )
 where
 
@@ -46,6 +51,8 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (IOException, try)
 import Control.Monad (void)
 import Data.Aeson (FromJSON (..), Value, eitherDecode, eitherDecodeStrict, withObject, (.!=), (.:), (.:?))
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
@@ -54,6 +61,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 import Kanban.Domain
   ( BoardColumn (..),
     BoardItem (..),
@@ -87,9 +95,39 @@ import System.Process
   )
 import System.Timeout (timeout)
 
+-- | Which service manager an installed drainer is managed by.
+--
+-- Read out of the discovery record rather than inferred from the host, because
+-- the record is what the installer actually wrote — and carried through every
+-- diagnostic below, so a Linux user is never told to look for a LaunchAgent
+-- and a macOS user is never told anything but what they have always been told.
+data DrainerBackend
+  = DrainerLaunchd
+  | DrainerSystemd
+  deriving stock (Eq, Show)
+
+-- | What each manager calls the file it reads a definition from. The noun
+-- every "missing", "unreadable", or "incomplete installation" message names,
+-- so the wording follows the install rather than the reader.
+serviceDefinitionNoun :: DrainerBackend -> Text
+serviceDefinitionNoun DrainerLaunchd = "LaunchAgent"
+serviceDefinitionNoun DrainerSystemd = "systemd unit"
+
+-- | What each manager is called where a message names the manager itself
+-- rather than its definition file. Matches the @service_manager@ the
+-- controller reports, and the @backend@ the record is keyed on.
+serviceManagerName :: DrainerBackend -> Text
+serviceManagerName DrainerLaunchd = "launchd"
+serviceManagerName DrainerSystemd = "systemd"
+
 data DrainerController = DrainerController
   { controllerExecutable :: FilePath,
-    controllerArguments :: [String]
+    controllerArguments :: [String],
+    -- | The manager whose definition this command was read out of. Carried so
+    -- a later diagnostic about the installation behind it — @m@'s
+    -- "the installed LaunchAgent still runs its controller from …" — names
+    -- the artifact the user would actually go and look at.
+    controllerBackend :: DrainerBackend
   }
   deriving stock (Eq, Show)
 
@@ -118,9 +156,12 @@ data DrainerActivity
   | -- | A stop is still in flight. Only ever set locally: the controller
     -- reports no such state, because a stop it has returned from is settled.
     DrainerServiceStopping
-  | -- | A drainer process holds this repository's run lock without launchd
-    -- having started it.
-    DrainerServiceExternal
+  | -- | A drainer process holds this repository's run lock without the named
+    -- service manager having started it. The name travels with the state
+    -- rather than being assumed by whoever renders it: "outside launchd" is
+    -- false on a systemd host, and every message that says it is derived from
+    -- here.
+    DrainerServiceExternal Text
   | -- | The checkout is stopped part-way through a git operation, which the
     -- drainer cannot act through.
     DrainerServiceBlocked
@@ -258,7 +299,12 @@ data RawStatus = RawStatus
     -- state. 'Nothing' is not an empty set: a controller predating the field,
     -- or one that could not read that state, has said nothing about the debt,
     -- and the sidebar then says nothing about it either.
-    rawObligations :: Maybe [RawObligation]
+    rawObligations :: Maybe [RawObligation],
+    -- | Which service manager answered the controller's own liveness probe.
+    -- Absent from every controller predating the systemd backend, and every
+    -- one of those is a macOS controller, so launchd is what an absent field
+    -- means rather than an unknown.
+    rawServiceManager :: Text
   }
   deriving stock (Eq, Show)
 
@@ -270,6 +316,7 @@ instance FromJSON RawStatus where
       <*> value .:? "open_incident"
       <*> value .:? "open_incidents"
       <*> value .:? "cleanup_obligations"
+      <*> value .:? "service_manager" .!= serviceManagerName DrainerLaunchd
 
 -- | One controller response: the sidebar's status projection, and the
 -- complete repository-scoped set of open incidents behind it.
@@ -290,21 +337,25 @@ data DrainerObservation = DrainerObservation
   }
   deriving stock (Eq, Show)
 
--- | What the drainer's installer recorded about the launchd job it wrote for
--- one repository. The record carries the job's location, never its content:
--- discovery still reads @ProgramArguments@ out of the plist itself, so a
--- hand-edited plist remains what Kanban reports and controls. Reading the
--- label from here rather than deriving it is what keeps this side from having
--- to reimplement the installer's per-repository naming — a disagreement there
--- would present as "drainer not found" with both sides looking correct in
--- isolation.
+-- | What the drainer's installer recorded about the job it wrote for one
+-- repository. The record carries the job's location, never its content:
+-- discovery still reads the command out of the definition itself, so a
+-- hand-edited plist or unit remains what Kanban reports and controls. Reading
+-- the identifier from here rather than deriving it is what keeps this side
+-- from having to reimplement the installer's per-repository naming — a
+-- disagreement there would present as "drainer not found" with both sides
+-- looking correct in isolation.
 data DrainerRecord = DrainerRecord
-  { -- | The launchd label the plist was written for. Kanban composes no path
-    -- from it — the record carries the plist path directly — but a record
-    -- naming no label describes no job, so it is required and checked here
-    -- rather than accepted and ignored.
-    drainerRecordLabel :: Text,
-    drainerRecordPlist :: FilePath,
+  { -- | Which service manager wrote this entry, and therefore which keys it
+    -- was read out of and which manager's vocabulary describes it.
+    drainerRecordBackend :: DrainerBackend,
+    -- | The identifier the definition was written for — a launchd label or a
+    -- systemd unit name. Kanban composes no path from it, since the record
+    -- carries the definition's path directly, but an entry naming no
+    -- identifier describes no job, so it is required and checked rather than
+    -- accepted and ignored.
+    drainerRecordIdentifier :: Text,
+    drainerRecordDefinition :: FilePath,
     -- | Which checkout the job was installed for. Metadata only: the
     -- controller is deliberately rebound to the dashboard's own checkout by
     -- 'controllerFromProgramArguments', and a second checkout of the same
@@ -313,12 +364,82 @@ data DrainerRecord = DrainerRecord
   }
   deriving stock (Eq, Show)
 
-instance FromJSON DrainerRecord where
-  parseJSON = withObject "PR drainer install record" $ \value ->
-    DrainerRecord
-      <$> value .: "launchd_label"
-      <*> value .: "plist_path"
-      <*> value .: "repository"
+-- | The keys one backend's entry is spelled with. Paired here rather than
+-- spread through the parser so that adding a backend is one row, and so that
+-- "which keys belong to which backend" is a single readable fact — which is
+-- what the mixed-shape rejection below is stated against.
+recordKeysFor :: DrainerBackend -> (Key.Key, Key.Key)
+recordKeysFor DrainerLaunchd = ("launchd_label", "plist_path")
+recordKeysFor DrainerSystemd = ("systemd_unit", "unit_path")
+
+-- | Every backend, so a check that must consider all of them cannot silently
+-- consider fewer after one is added.
+allDrainerBackends :: [DrainerBackend]
+allDrainerBackends = [DrainerLaunchd, DrainerSystemd]
+
+-- | Reads one repository's entry as a discriminated union on @backend@.
+--
+-- Three shapes are accepted and everything else is refused. An entry naming
+-- @backend@ must carry that backend's own identifier and definition path, and
+-- nothing about the other backend. An entry naming no @backend@ at all can
+-- only have been written before the field existed, which makes it launchd's
+-- and is exactly how a live macOS install keeps working with no reinstall —
+-- so it is read as launchd, and only if it carries launchd's keys and no
+-- systemd key. Everything else — an unknown backend name, a launchd entry
+-- carrying a unit path, an entry naming a backend but not its identifier —
+-- fails closed with the reinstall guidance, because each of those is a record
+-- that would otherwise be guessed at, and a guess here controls the wrong job
+-- or none at all.
+parseDrainerRecord :: Value -> Parser (Either Text DrainerRecord)
+parseDrainerRecord = withObject "PR drainer install record" $ \value -> do
+  declared <- value .:? "backend"
+  let presentKeys backend =
+        filter (`KeyMap.member` value) [fst (recordKeysFor backend), snd (recordKeysFor backend)]
+      others backend = filter (/= backend) allDrainerBackends
+      strayKeys backend = concatMap presentKeys (others backend)
+      -- The identifier and the definition are read before `repository`, so a
+      -- shapeless entry is reported as missing the key that says which job it
+      -- names rather than the key that says which checkout it was for. Both
+      -- are required; which one the message leads with is what makes it
+      -- actionable.
+      read' backend = do
+        let (identifierKey, definitionKey) = recordKeysFor backend
+        identifier <- value .: identifierKey
+        definition <- value .: definitionKey
+        repository <- value .: "repository"
+        pure (DrainerRecord backend identifier definition repository)
+      strayDetail backend =
+        Text.intercalate " and " (map Key.toText (strayKeys backend))
+  case declared :: Maybe Text of
+    Just name -> case lookup name [(serviceManagerName backend, backend) | backend <- allDrainerBackends] of
+      Nothing ->
+        pure
+          ( Left
+              ( "it names an unknown service-manager backend: "
+                  <> sanitizeText name
+              )
+          )
+      Just backend
+        | not (null (strayKeys backend)) ->
+            pure
+              ( Left
+                  ( "it names the "
+                      <> serviceManagerName backend
+                      <> " backend but also carries "
+                      <> strayDetail backend
+                  )
+              )
+        | otherwise -> Right <$> read' backend
+    Nothing
+      | not (null (strayKeys DrainerLaunchd)) ->
+          pure
+            ( Left
+                ( "it names no backend, which is the shape only a launchd install \
+                  \predating that field can have, yet carries "
+                    <> strayDetail DrainerLaunchd
+                )
+            )
+      | otherwise -> Right <$> read' DrainerLaunchd
 
 -- | The installed document, which holds one record per canonical GitHub
 -- repository plus the installer's own shared keys. Entries stay unparsed until
@@ -349,10 +470,10 @@ drainerRecordPath = do
   pure (home <> "/Library/Application Support/kanban/pr-drainer/config.json")
 
 -- | Selects this repository's record, rejecting a document that cannot name a
--- launchd job for it. A missing entry is reported separately from a malformed
--- one: the first is an uninstalled — or unmigrated — repository, and the
--- second is a record that parses without identifying anything, since an empty
--- label or a relative plist path names no job either. Both send the user back
+-- job for it. A missing entry is reported separately from a malformed one: the
+-- first is an uninstalled — or unmigrated — repository, and the second is a
+-- record that parses without identifying anything, since an empty identifier
+-- or a relative definition path names no job either. Both send the user back
 -- to the installer rather than on to a lookup that cannot succeed.
 drainerRecordFromBytes ::
   Text -> ByteString.ByteString -> Either Text (Maybe DrainerRecord)
@@ -364,25 +485,49 @@ drainerRecordFromBytes identity bytes = do
     Nothing -> Right Nothing
     Just value -> Just <$> validated value
   where
-    validated value = case parseEither parseJSON value of
+    validated value = case parseEither parseDrainerRecord value of
       Left message -> Left (withoutJsonPath (Text.pack message))
-      Right record
-        | Text.null (Text.strip record.drainerRecordLabel) ->
-            Left "it names no launchd label"
-        | not (isAbsolute record.drainerRecordPlist) ->
-            Left ("its plist path is not absolute: " <> Text.pack record.drainerRecordPlist)
+      Right (Left message) -> Left message
+      Right (Right record)
+        | Text.null (Text.strip record.drainerRecordIdentifier) ->
+            Left ("it names no " <> serviceManagerName record.drainerRecordBackend <> " identifier")
+        | not (isAbsolute record.drainerRecordDefinition) ->
+            Left
+              ( "its "
+                  <> serviceDefinitionNoun record.drainerRecordBackend
+                  <> " path is not absolute: "
+                  <> Text.pack record.drainerRecordDefinition
+              )
         | otherwise -> Right record
 
--- | Resolves this repository's installed plist through that document, naming
--- the remediation for every way the lookup can fail rather than letting an
--- @IOException@ render itself as the drainer's status. Parameterised by the
--- host operating system, the repository identity, and the document path so
--- each branch is exercisable off a macOS host.
-resolveDrainerPlist :: String -> Text -> FilePath -> IO (Either Text FilePath)
-resolveDrainerPlist hostOperatingSystem identity recordPath
-  | hostOperatingSystem /= "darwin" =
-      pure (Left "the PR drainer is a launchd job and needs macOS to run")
-  | otherwise = do
+-- | The service manager a given host is managed through, or nothing at all.
+--
+-- The only platform question this side asks, and it is about capability rather
+-- than about a name: a host that is neither macOS nor Linux has no drainer to
+-- discover because there is no backend that could have installed one. Which of
+-- the two an installed job actually uses is still the record's answer, not
+-- this one — this only says which answer the host could possibly support.
+hostServiceManager :: String -> Maybe DrainerBackend
+hostServiceManager "darwin" = Just DrainerLaunchd
+hostServiceManager "linux" = Just DrainerSystemd
+hostServiceManager _ = Nothing
+
+-- | Resolves this repository's installed service definition through that
+-- document, naming the remediation for every way the lookup can fail rather
+-- than letting an @IOException@ render itself as the drainer's status.
+-- Parameterised by the host operating system, the repository identity, and the
+-- document path so each branch is exercisable off any one host.
+resolveDrainerDefinition ::
+  String -> Text -> FilePath -> IO (Either Text (DrainerBackend, FilePath))
+resolveDrainerDefinition hostOperatingSystem identity recordPath =
+  case hostServiceManager hostOperatingSystem of
+    Nothing ->
+      pure
+        ( Left
+            "no supported service manager was found; the PR drainer needs macOS \
+            \launchd or a systemd user session"
+        )
+    Just hostBackend -> do
       recorded <- doesFileExist recordPath
       if not recorded
         then pure (Left notInstalled)
@@ -392,7 +537,15 @@ resolveDrainerPlist hostOperatingSystem identity recordPath
             Left _ -> pure (Left (unreadableRecord "it could not be read"))
             Right (Left message) -> pure (Left (unreadableRecord message))
             Right (Right Nothing) -> pure (Left notInstalled)
-            Right (Right (Just record)) -> plistOf record
+            Right (Right (Just record))
+              -- A record written by the manager this host does not have is a
+              -- document that travelled between hosts, not an install. Reading
+              -- it anyway would parse a plist as a unit file, or spawn a
+              -- controller no manager here holds, and report either as the
+              -- drainer's state.
+              | record.drainerRecordBackend /= hostBackend ->
+                  pure (Left (foreignBackend record.drainerRecordBackend hostBackend))
+              | otherwise -> definitionOf record
   where
     notInstalled =
       "the PR drainer is not installed for "
@@ -400,15 +553,25 @@ resolveDrainerPlist hostOperatingSystem identity recordPath
         <> ", or predates its per-repository install record; "
         <> reinstallHint
 
-    plistOf record = do
-      installed <- doesFileExist record.drainerRecordPlist
+    foreignBackend recorded hostBackend =
+      "the PR drainer's install record describes a "
+        <> serviceManagerName recorded
+        <> " job, which this "
+        <> serviceManagerName hostBackend
+        <> " host cannot run; "
+        <> reinstallHint
+
+    definitionOf record = do
+      installed <- doesFileExist record.drainerRecordDefinition
       pure $
         if installed
-          then Right record.drainerRecordPlist
+          then Right (record.drainerRecordBackend, record.drainerRecordDefinition)
           else
             Left
-              ( "the PR drainer's LaunchAgent is missing at "
-                  <> Text.pack record.drainerRecordPlist
+              ( "the PR drainer's "
+                  <> serviceDefinitionNoun record.drainerRecordBackend
+                  <> " is missing at "
+                  <> Text.pack record.drainerRecordDefinition
                   <> "; "
                   <> reinstallHint
               )
@@ -427,33 +590,104 @@ reinstallHint = "run `python3 tools/install_drainer.py` from the Kanban checkout
 discoverDrainerController :: Repository -> IO (Either Text DrainerController)
 discoverDrainerController repository = do
   recordPath <- drainerRecordPath
-  resolved <- resolveDrainerPlist os (normalizedRepositoryIdentity repository) recordPath
+  resolved <- resolveDrainerDefinition os (normalizedRepositoryIdentity repository) recordPath
   case resolved of
     Left message -> pure (Left message)
-    Right plist -> do
+    Right (DrainerLaunchd, plist) -> do
       result <- runProcess (Just discoveryTimeoutSeconds) "/usr/bin/plutil" ["-extract", "ProgramArguments", "json", "-o", "-", plist]
       pure $ do
         output <- case result of
-          Left failure -> Left (unreadablePlist plist (invocationFailureMessage discoveryTimeoutSeconds "reading the launchd job" False failure))
+          Left failure -> Left (unreadableDefinition DrainerLaunchd plist (invocationFailureMessage discoveryTimeoutSeconds "reading the launchd job" False failure))
           Right (ExitSuccess, standardOutput, _) -> Right standardOutput
-          Right (ExitFailure _, standardOutput, errors) -> Left (unreadablePlist plist (diagnosticMessage standardOutput errors))
+          Right (ExitFailure _, standardOutput, errors) -> Left (unreadableDefinition DrainerLaunchd plist (diagnosticMessage standardOutput errors))
         arguments <- case eitherDecode (LazyByteString.pack output) of
           Left message -> Left ("could not decode launchd ProgramArguments: " <> Text.pack message)
           Right values -> Right values
-        controllerFromProgramArguments repository arguments
+        controllerFromProgramArguments DrainerLaunchd repository arguments
+    Right (DrainerSystemd, unit) -> do
+      -- Read rather than shelled out to. `systemctl cat` would answer the same
+      -- question, but the unit file is the definition — the same thing the
+      -- record already led to — and reading it directly keeps discovery from
+      -- depending on a live user session merely to find out what the job runs.
+      contents <- try @IOException (ByteString.readFile unit)
+      pure $ do
+        text <- case contents of
+          Left _ -> Left (unreadableDefinition DrainerSystemd unit "it could not be read")
+          Right bytes -> Right (Text.decodeUtf8Lenient bytes)
+        arguments <- case unitExecStartArguments text of
+          Left message -> Left (unreadableDefinition DrainerSystemd unit message)
+          Right values -> Right values
+        controllerFromProgramArguments DrainerSystemd repository arguments
 
--- | A plist that is present but will not parse is the one failure the record
--- cannot diagnose, so it carries @plutil@'s own complaint — and, like every
--- other branch, the repair: rewriting the plist is exactly what re-running
--- the installer does.
-unreadablePlist :: FilePath -> Text -> Text
-unreadablePlist plist detail =
-  "could not read the PR drainer's LaunchAgent at "
-    <> Text.pack plist
+-- | A definition that is present but will not parse is the one failure the
+-- record cannot diagnose, so it carries the reader's own complaint — and, like
+-- every other branch, the repair: rewriting that file is exactly what
+-- re-running the installer does.
+unreadableDefinition :: DrainerBackend -> FilePath -> Text -> Text
+unreadableDefinition backend definition detail =
+  "could not read the PR drainer's "
+    <> serviceDefinitionNoun backend
+    <> " at "
+    <> Text.pack definition
     <> ": "
     <> detail
     <> "; "
     <> reinstallHint
+
+-- | The argument vector a systemd unit's @ExecStart@ names.
+--
+-- systemd's own quoting, which is what the backend writes and what a user
+-- hand-editing the unit would reasonably spell: words separated by whitespace,
+-- any word optionally double-quoted, @\\\\@ and @\\"@ escaping themselves
+-- inside the quotes, and @%%@ standing for a literal @%@ once specifiers have
+-- been expanded. Nothing else is interpreted — no shell, no globbing, no
+-- variable expansion — because @ExecStart@ without @\/bin\/sh -c@ has none of
+-- those either, and inventing one here would make Kanban report a command
+-- systemd would not run.
+--
+-- A unit with no @ExecStart@, or one whose value is empty, names no controller
+-- and is rejected rather than turned into an empty command.
+unitExecStartArguments :: Text -> Either Text [String]
+unitExecStartArguments contents = case execStartValues of
+  [] -> Left "it declares no ExecStart"
+  values -> case concatMap unitWords values of
+    [] -> Left "its ExecStart names no command"
+    arguments -> Right (map Text.unpack arguments)
+  where
+    -- Every ExecStart in the file, in order: systemd itself lets a later one
+    -- append, and a reader that took only the first would report a command
+    -- that is not the whole of what runs.
+    execStartValues =
+      [ Text.strip value
+        | line <- Text.lines contents,
+          let stripped = Text.strip line,
+          Just value <- [Text.stripPrefix "ExecStart=" stripped],
+          not (Text.null (Text.strip value))
+      ]
+
+-- | One @ExecStart@ value, split into words under systemd's quoting rules.
+unitWords :: Text -> [Text]
+unitWords = go . Text.unpack
+  where
+    go [] = []
+    go (character : rest)
+      | character `elem` (" \t" :: String) = go rest
+      | character == '"' = let (word, remaining) = quoted rest "" in word : go remaining
+      | otherwise = let (word, remaining) = bare (character : rest) "" in word : go remaining
+
+    quoted [] acc = (finish acc, [])
+    quoted ('\\' : escaped : rest) acc = quoted rest (escaped : acc)
+    quoted ('"' : rest) acc = (finish acc, rest)
+    quoted (character : rest) acc = quoted rest (character : acc)
+
+    bare [] acc = (finish acc, [])
+    bare (character : rest) acc
+      | character `elem` (" \t" :: String) = (finish acc, rest)
+      | otherwise = bare rest (character : acc)
+
+    -- `%%` is systemd's escape for a literal `%`, resolved after the word has
+    -- been assembled because it is a specifier rule rather than a quoting one.
+    finish = Text.replace "%%" "%" . Text.pack . reverse
 
 -- | Rebinds the installed job's command to this dashboard's own checkout, and
 -- states which repository that checkout is expected to be a clone of.
@@ -465,8 +699,9 @@ unreadablePlist plist detail =
 -- nothing to do with. The controller compares it against the remote and
 -- refuses a mismatch, so the containment lives on the side that owns the job
 -- rather than in a check this side could skip.
-controllerFromProgramArguments :: Repository -> [String] -> Either Text DrainerController
-controllerFromProgramArguments repository arguments = case arguments of
+controllerFromProgramArguments ::
+  DrainerBackend -> Repository -> [String] -> Either Text DrainerController
+controllerFromProgramArguments backend repository arguments = case arguments of
   executable : rawControllerArguments
     | not (null controllerArguments) ->
         Right
@@ -479,10 +714,18 @@ controllerFromProgramArguments repository arguments = case arguments of
                        Text.unpack (normalizedRepositoryIdentity repository)
                      ]
               )
+              backend
           )
     where
       controllerArguments = stripManagedArguments rawControllerArguments
-  _ -> Left "launchd ProgramArguments do not identify the PR drainer controller"
+  _ -> Left (definitionCommandField backend <> " do not identify the PR drainer controller")
+
+-- | What the command this was read out of is called in its own definition, so
+-- a user told the command does not identify a controller is told which
+-- directive to go and look at.
+definitionCommandField :: DrainerBackend -> Text
+definitionCommandField DrainerLaunchd = "launchd ProgramArguments"
+definitionCommandField DrainerSystemd = "the systemd unit's ExecStart"
 
 queryDrainerStatus :: DrainerController -> IO (Either Text DrainerObservation)
 queryDrainerStatus controller = runDrainerCommand statusTimeoutSeconds controller "status"
@@ -503,8 +746,10 @@ decodeDrainerStatus bytes = do
 -- which is what previously made "on outside launchd" and "on · unresolved
 -- incident" depend on both beginning with the word @on@.
 drainerIsRunning :: DrainerStatus -> Bool
-drainerIsRunning status =
-  status.drainerActivity `elem` [DrainerServiceRunning, DrainerServiceExternal]
+drainerIsRunning status = case status.drainerActivity of
+  DrainerServiceRunning -> True
+  DrainerServiceExternal _ -> True
+  _ -> False
 
 -- | A start is only ever issued from a settled off state. @busy@ is a
 -- transition this dashboard started and is still waiting on; a reported
@@ -778,7 +1023,11 @@ statusFromRaw rawStatus = case (rawStatus.rawState, incident) of
   ("running", Nothing) -> reported DrainerOn DrainerServiceRunning "on"
   ("running", Just _) -> reported DrainerWarning DrainerServiceRunning ("on · unresolved incident" <> incidentDetail)
   ("starting", _) -> reported DrainerStarting DrainerServiceStarting "starting…"
-  ("external", _) -> reported DrainerWarning DrainerServiceExternal "on outside launchd"
+  ("external", _) ->
+    reported
+      DrainerWarning
+      (DrainerServiceExternal rawStatus.rawServiceManager)
+      ("on outside " <> rawStatus.rawServiceManager)
   ("mid_operation", _) -> reported DrainerError DrainerServiceBlocked (operationDetail rawStatus.rawOperation)
   ("stopped", Nothing) -> reported DrainerOff DrainerServiceStopped "off"
   ("stopped", Just _) -> reported DrainerError DrainerServiceStopped ("stopped · unresolved incident" <> incidentDetail)
@@ -829,9 +1078,12 @@ singlePullRequestDrainerPath installDir = installDir </> "drain_prs.py"
 data DrainerScriptSource
   = -- | @KANBAN_DRAINER_INSTALL_DIR@ selected this install directory.
     DrainerScriptFromEnvironment FilePath
-  | -- | The discovered LaunchAgent runs its controller from this directory,
-    -- so the drainer installed beside it is the one that job would run.
-    DrainerScriptFromController FilePath
+  | -- | The discovered service definition runs its controller from this
+    -- directory, so the drainer installed beside it is the one that job would
+    -- run. The backend travels with it because the repair names the artifact
+    -- the user would go and look at, which is a plist on one host and a unit
+    -- file on the other.
+    DrainerScriptFromController DrainerBackend FilePath
   | -- | Neither was available, so the directory holding the discovery record
     -- is the install.
     DrainerScriptFromDefault FilePath
@@ -874,10 +1126,13 @@ selectSinglePullRequestDrainer override controller recordPath = case selectedOve
   Nothing -> case controller of
     Nothing -> Right (selected DrainerScriptFromDefault (takeDirectory recordPath))
     Just discovered -> case controllerInstallDir discovered of
-      Just installDir -> Right (selected DrainerScriptFromController installDir)
+      Just installDir ->
+        Right (selected (DrainerScriptFromController discovered.controllerBackend) installDir)
       Nothing ->
         Left
-          ( "the installed LaunchAgent does not run the PR drainer's controller from an "
+          ( "the installed "
+              <> serviceDefinitionNoun discovered.controllerBackend
+              <> " does not run the PR drainer's controller from an "
               <> "absolute path, so the installation it belongs to cannot be located; "
               <> reinstallHint
           )
@@ -913,8 +1168,10 @@ singlePullRequestDrainerNotFound source scriptPath =
           <> ", so install there with `python3 tools/install_drainer.py --install-dir "
           <> Text.pack installDir
           <> "`, or unset that variable to use the recorded installation"
-      DrainerScriptFromController installDir ->
-        "the installed LaunchAgent still runs its controller from "
+      DrainerScriptFromController backend installDir ->
+        "the installed "
+          <> serviceDefinitionNoun backend
+          <> " still runs its controller from "
           <> Text.pack installDir
           <> ", so that installation is incomplete; "
           <> reinstallHint
@@ -994,8 +1251,9 @@ directMergeDecision config pending status selection
                 RefuseDirectMerge "the PR drainer is starting; wait for it to settle, then stop it with d to merge one directly"
               DrainerServiceStopping ->
                 RefuseDirectMerge "the PR drainer is stopping; wait for it to settle"
-              DrainerServiceExternal ->
-                RefuseDirectMerge "a PR drainer is already running outside launchd and holds this repository"
+              DrainerServiceExternal manager ->
+                RefuseDirectMerge
+                  ("a PR drainer is already running outside " <> manager <> " and holds this repository")
               DrainerServiceBlocked ->
                 RefuseDirectMerge ("this checkout cannot be merged into yet: " <> status.drainerDetail)
               DrainerServiceUnknown ->

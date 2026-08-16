@@ -69,7 +69,8 @@ limit and no repository snapshot on disk. Checklist-based tracker hierarchy, inh
 tracker progress, and the on-demand Codex and Claude usage providers are also
 implemented. Malformed tracker diagnostics now fail visibly while preserving
 valid membership and standalone fallbacks. The sidebar also controls and
-monitors the local launchd-managed PR drainer. Native GitHub sub-issue membership,
+monitors the local service-managed PR drainer, which runs as a launchd job on
+macOS and a systemd user unit on Linux. Native GitHub sub-issue membership,
 canonical v2 issue-review sessions, embedded revision questions, and
 the first resumable issue-solve flow are implemented. The external
 usage-command escape hatch is also implemented. Broader provider-version
@@ -138,7 +139,7 @@ The dashboard combines:
   assignees, linked work, mergeability, and CI state.
 - Epic/tracker grouping based on ordered issue checklists such as `A1`, `A2`,
   `B1`, `C1`, and `C2`.
-- Local status and start/stop control for the launchd-managed PR drainer, plus
+- Local status and start/stop control for the service-managed PR drainer, plus
   a direct merge of one approved pull request through that drainer's own
   single-pull-request path.
 - Hideable issue-review sessions backed by the canonical v2 reviewer, with
@@ -390,7 +391,7 @@ Initial bindings:
 | `p` | Open the process/session inspector; Enter opens a session and `x` kills its live process tree |
 | `i` | Open the incidents panel listing everything needing attention; Enter goes to that work |
 | `u` | Update GitHub board data and both usage providers |
-| `d` or click | Start or stop the launchd-managed PR drainer |
+| `d` or click | Start or stop the service-managed PR drainer |
 | `m` | Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path |
 | `c` | Collapse or expand the usage sidebar |
 | `o` | Open settings, including chat-output verbosity |
@@ -416,7 +417,7 @@ Mouse interaction is intentionally complete but narrow:
 - Right-clicking anywhere while a details panel is open closes it.
 - The mouse wheel scrolls the board column under the pointer by three rows per
   wheel event.
-- The launchd PR drainer button remains directly clickable.
+- The PR drainer button remains directly clickable.
 
 Cards, columns, and overlays do not otherwise acquire hover, drag, context-menu,
 or pointer-only behavior.
@@ -2092,8 +2093,23 @@ above are unchanged, and persistence the user switched off is not a failure.
   holds the owner, and every later fetch of either kind is turned away by it
   before it spawns anything — reported as the in-memory case it is, since a
   restart cannot know to hold back over a group nothing wrote down.
-- Every canonical GitHub repository has its own PR drainer: its own LaunchAgent
-  label and plist, its own runtime status, its own service and dated logs, and
+- The drainer is managed by whichever service manager its host has, decided by
+  probing rather than by naming a platform: launchd on a macOS host that has
+  `launchctl`, systemd on a host whose `systemctl --user` reaches a live user
+  manager, and a refusal naming that condition — not macOS — on a host that is
+  neither. Every service-manager interaction goes through one backend
+  boundary, so the lifecycle above is the same on both. Installing, starting,
+  stopping and uninstalling therefore behave identically; what differs is only
+  the artifact each manager reads, a LaunchAgent plist under
+  `~/Library/LaunchAgents` or a user unit under `~/.config/systemd/user`. The
+  systemd unit preserves the LaunchAgent's own semantics: the exact argument
+  vector with no shell between, the same working directory, environment, and
+  output routing, no restart, no `[Install]` section and therefore no start at
+  login, and a stop that signals only the runner so it performs its own
+  shutdown.
+- Every canonical GitHub repository has its own PR drainer: its own job
+  identifier and definition, its own runtime status, its own service and dated
+  logs, and
   its own `--config` selection. Starting, stopping, querying, logs, status, and
   incidents for one repository do not affect another. One installed copy of the
   controller, the drainer, and the configuration parser serves all of them.
@@ -2111,16 +2127,25 @@ above are unchanged, and persistence the user switched off is not a failure.
   repositories from one checkout. The `--config` still decides everything its
   drainer runs with, including the remote its default-branch check and merges
   use.
-- The PR drainer controller discovers the installed LaunchAgent through the
+- The PR drainer controller discovers the installed job through the
   record its installer writes at
   `~/Library/Application Support/kanban/pr-drainer/config.json`, whose
-  `repositories` table holds one entry per installed repository naming that
-  job's launchd label, the plist's absolute path, and the installed checkout.
+  `repositories` table holds one entry per installed repository naming the
+  backend that wrote it, that job's identifier, the definition's absolute path,
+  and the installed checkout.
   Kanban derives none of those: it selects the entry by its own normalized
-  repository identity, reads the plist path from that entry, and reads the
-  controller command from the plist, which stays authoritative for what launchd
-  runs. Each way that lookup can fail — a host that is not macOS, no document,
-  no entry for this repository, an entry that does not name a job, or a plist
+  repository identity, reads the definition's path from that entry, and reads
+  the controller command from the definition — `ProgramArguments` from a plist,
+  `ExecStart` from a unit file — which stays authoritative for what the service
+  manager
+  runs. That entry is a discriminated union on its `backend`, and an entry
+  naming none is the shape written before that field existed, so it is read as
+  launchd and a macOS drainer installed before this keeps working with no
+  reinstall and no manual edit. Each way that lookup can fail — a host with no
+  supported service manager, no document,
+  no entry for this repository, an entry that does not name a job, an entry
+  whose backend is unknown or whose keys mix the two, an entry describing the
+  manager this host does not have, or a definition
   that cannot be read — is reported as its own status naming the remediation,
   never as a raw exception. Discovery then reads its
   wrapper's JSON status every ten seconds, and never contacts a network. Start
@@ -2135,8 +2160,9 @@ above are unchanged, and persistence the user switched off is not a failure.
   repository. The refusal names the shared configuration's `remote_name`, and
   re-running the installer, as what moves the dashboard and the drainer
   together.
-- The installed plist records the identity its label was derived from, and the
-  launchd runner is held to it by the same check. A plist outlives the
+- The installed definition records the identity its identifier was derived
+  from, and the
+  managed runner is held to it by the same check. A definition outlives the
   configuration it was written from, so a runner that re-derived its identity
   at launch would follow a changed `remote_name` into another repository's
   status file, incidents, and logs under a label the dashboard cannot
@@ -2148,11 +2174,12 @@ above are unchanged, and persistence the user switched off is not a failure.
   not a foreign one: it is reported as running, and a second install or start
   is refused naming the checkout that already holds it.
 - The installer links the controller, the drainer, the shared configuration
-  module, and the service-manager backend the controller drives launchd
+  module, and the service-manager backend the controller drives its host's
+  manager
   through out of one live development checkout, so whatever is on disk there —
   a mid-edit file, a checked-out feature branch, a checkout the remote has moved
   past — is what every repository's drain actually runs, and nothing in the run
-  says so. Each launchd run therefore compares those four executing sources
+  says so. Each managed run therefore compares those four executing sources
   against that checkout's local `origin/master` and reports what it finds to the
   same service log, ahead of both of its refusals: one line naming every
   differing source and every cause the comparison can attribute to it — a
@@ -2250,12 +2277,13 @@ above are unchanged, and persistence the user switched off is not a failure.
   so neither a `kanban --repo` nor a `kanban --config` override can merge
   another repository's pull request.
 - That script is resolved from the Kanban-managed drainer install directory:
-  `KANBAN_DRAINER_INSTALL_DIR` first, then the directory the discovered
-  LaunchAgent runs its controller from — which is what keeps an install made
+  `KANBAN_DRAINER_INSTALL_DIR` first, then the directory the discovered service
+  definition runs its controller from — which is what keeps an install made
   with `--install-dir` usable by a dashboard that inherited no environment from
   the installer — and otherwise the directory holding the discovery record. A
   source that is present but resolves to no directory, such as a relative
-  override or a plist that does not name its controller absolutely, fails there
+  override or a definition that does not name its controller absolutely, fails
+  there
   rather than falling through to the next: falling through would merge with an
   installation other than the configured one and report nothing unusual. A
   missing installation reports a remediation naming
@@ -2268,7 +2296,8 @@ above are unchanged, and persistence the user switched off is not a failure.
   naming the pull request still running, so a repeated key press starts no
   second process. An unresolved incident then outranks every service state and
   is refused with its summary. Only a service *known* to be stopped may launch:
-  running, starting, stopping, a drainer running outside launchd, a checkout
+  running, starting, stopping, a drainer running outside the service manager
+  the controller reported, a checkout
   stopped part-way through a git operation, and a state that could not be
   established at all — including one no status was ever obtained for — all
   refuse without invoking anything.
@@ -2308,13 +2337,18 @@ above are unchanged, and persistence the user switched off is not a failure.
   `~/Library/Application Support/kanban/pr-drainer/`; rerunning it refreshes
   those links after repository relocation, and repairs a missing or stale
   discovery record in place without an uninstall and without changing the
-  LaunchAgent's identity. Installing a second repository adds its entry beside
+  job's identity. Installing a second repository adds its entry beside
   the first rather than replacing it. Before enabling a repository's derived
   job, the installer retires the machine-wide `com.coghex.drain-prs` singleton
   that predates per-repository jobs when that singleton served the same
   repository — unloading it and setting its plist aside so the two can never
   run together — and leaves a singleton installed for a different repository to
-  migrate on its own next install.
+  migrate on its own next install. That singleton only ever existed under
+  launchd, so a systemd host has none to retire. Removing one repository is the
+  same operation in reverse and equally scoped: its stopped job is unloaded,
+  its definition deleted, and its one entry dropped from the discovery record,
+  leaving every other repository's install, the shared links, and this
+  repository's own runtime state, logs and incidents untouched.
 - Worker results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, resize, provider result, active review
   event/spinner tick, or explicit terminal repaint.
@@ -2711,27 +2745,39 @@ Claude version.
 
 ### Milestone 6 — Local PR drainer control
 
-Implemented for one independently controlled LaunchAgent per canonical GitHub
-repository, whose label is derived from that repository's normalized identity.
+Implemented for one independently controlled service job per canonical GitHub
+repository, whose identifier is derived from that repository's normalized
+identity, on both supported service managers.
 
 - Track the canonical drainer and controller implementations under `tools/`.
+- Reach every service manager through one backend boundary, selected by probing
+  the host: launchd on macOS, systemd user units on Linux, and a refusal naming
+  the absent service manager on a host with neither.
 - Install stable per-user links, shared by every repository, and one
-  LaunchAgent per repository through an idempotent installer that refuses
+  job per repository through an idempotent installer that refuses
   active services and ordinary-file replacement, and never starts the drainer
   implicitly.
-- Discover the controller command from the LaunchAgent plist, located through
+- Discover the controller command from that job's own definition, located
+  through
   this repository's entry in the installer-written discovery record rather than
-  a label Kanban derives.
-- Partition the launchd label, plist, runtime status, service logs, dated logs,
+  an identifier Kanban derives, reading the record as a discriminated union on
+  the backend that wrote it and resolving a backend-less entry as the launchd
+  install it can only be.
+- Partition the job identifier, its definition, runtime status, service logs,
+  dated logs,
   incidents, and `--config` selection by normalized repository identity, so
   several repositories drain independently on one account.
 - Bind controller status and start/stop operations to the current repository,
   and refuse a `--repo` identity the checkout's own remote contradicts.
-- Reinstall this repository's stopped LaunchAgent with that repository path
+- Reinstall this repository's stopped job with that repository path
   before starting it, refuse a second concurrent drainer for the same canonical
   repository from another checkout, and retire the machine-wide singleton that
   predates per-repository jobs before its replacement starts.
-- Record the installed identity in the plist and hold the launchd runner to it,
+- Remove one repository's stopped job, its definition, and its discovery entry
+  through that same boundary, leaving every sibling repository's install and
+  the shared configuration alone.
+- Record the installed identity in the definition and hold the managed runner
+  to it,
   so a configuration change after installation stops that job instead of
   re-pointing it at another repository.
 - Decode the managed wrapper's structured status and incident data, including
@@ -5430,7 +5476,7 @@ would validate a copy of this file that does not contain this record.
 
 The script is keyboard-only and sends just the bindings D-6 names. The mutating
 ones — `r` review, `S` solve, `A` autosolve, `m` merge, `x` kill, and `d`, which
-starts or stops the operator's launchd-managed PR drainer — are refused by the
+starts or stops the operator's service-managed PR drainer — are refused by the
 driver *before* tmux is invoked, so a typo in the step sequence raises rather
 than reaching the application. The complete key sequence actually sent was:
 
@@ -5749,7 +5795,7 @@ cat > "$TMP/smoke_script.py" <<'SMOKE'
 Keyboard-only, under a detached tmux session of a stated geometry. The script
 sends ONLY the navigation, overlay, sidebar, refresh, repaint and quit keys D-6
 names; the mutating keys -- `r` review, `S` solve, `A` autosolve, `m` merge,
-`x` kill, and above all `d`, which toggles the operator's launchd-managed PR
+`x` kill, and above all `d`, which toggles the operator's service-managed PR
 drainer -- are rejected by `send` before tmux is ever invoked.
 
 Screen state is read from `capture-pane`, which returns content rather than

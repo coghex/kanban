@@ -1,0 +1,22 @@
+[Unit]
+# Ordered after the user manager the check drives, so `systemctl --user` has
+# something to talk to the moment the check starts. Without this the check
+# races the very session it is testing and fails as "no supported service
+# manager" on a host that has one. There is deliberately no [Install] section:
+# booting the image runs nothing, and CI starts this explicitly so that
+# `systemctl start` reports the check's own verdict.
+Description=Kanban PR drainer systemd lifecycle check
+After=user@1001.service
+Requires=user@1001.service
+
+[Service]
+Type=oneshot
+User=drainer
+WorkingDirectory=/workspace
+Environment=HOME=/home/drainer
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /workspace/.github/systemd-lifecycle/lifecycle_check.py
+StandardOutput=journal+console
+StandardError=journal+console
+RemainAfterExit=yes

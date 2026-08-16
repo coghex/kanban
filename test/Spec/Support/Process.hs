@@ -60,7 +60,7 @@ import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (UTCTime (..))
 import Kanban.Domain
-import Kanban.Drainer (DrainerController (..))
+import Kanban.Drainer (DrainerBackend (..), DrainerController (..))
 import Kanban.Process
   ( ManagedProcess,
     ProcessIdentity (..),
@@ -513,7 +513,7 @@ fakeController temporaryRoot scriptLines = do
   let scriptPath = temporaryRoot </> "drain-prs-controller"
   ByteString.writeFile scriptPath (ByteString.unlines ("#!/bin/sh" : scriptLines))
   setFileMode scriptPath 0o700
-  pure (DrainerController scriptPath [])
+  pure (DrainerController scriptPath [] DrainerLaunchd)
 
 -- | The PID a fixture recorded for itself. Read only after the invocation
 -- under test has returned, by which point the shell has long since written

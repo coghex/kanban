@@ -349,32 +349,54 @@ arithmetic, which §2.3 owns.
 
 - **Owning source:** `tools/drain_prs_service.py` (incident storage and
   lifecycle, plus the service loop), `tools/service_manager.py` (the one
-  service-manager backend both of the others reach launchd through), and
+  service-manager boundary both of the others reach their host's manager
+  through), and
   `tools/install_drainer.py` (installer), surfaced in-app by
   `src/Kanban/Drainer.hs`. The
   drainer (`tools/drain_prs.py`) records and resolves its own per-pull
   -request conflict incidents through that same storage. Kanban's in-app
   surface is read-only for everything the *service* owns — status, incidents,
-  logs — and adds exactly two mutations: starting or stopping the LaunchAgent
+  logs — and adds exactly two mutations: starting or stopping the installed job
   through the controller, and running `tools/drain_prs.py --pr` once for one
   selected pull request. It owns neither merge policy nor cleanup; every gate,
   the merge, and the post-merge obligations stay with `tools/drain_prs.py`.
+- **Backend selection:** `tools/service_manager.select_backend` decides which
+  service manager a host's drainer is managed by, and it is the only place
+  that decides. It selects launchd on a macOS host that has `launchctl`,
+  systemd on a host whose `systemctl --user` reaches a live user manager, and
+  refuses a host that is neither with a message naming that condition rather
+  than naming macOS. The order makes an ambiguous host — a macOS machine that
+  also has `systemctl` installed — resolve the same way every time, and the
+  probe answers before anything is written, so a host that cannot be managed
+  never gets a half-installed drainer. The refusal is the installer's only
+  platform refusal: `tools/install_drainer.py` does not consult `sys.platform`
+  at all. Every backend implements the whole
+  `ServiceManagerBackend` interface — naming, definition rendering and
+  writing, load, uninstall, liveness, kick, stop, and the legacy-singleton
+  operations — so a caller can never need one verb the seam does not expose.
+  The systemd backend reports no legacy singleton, because the machine-wide
+  job that per-repository jobs replaced only ever existed under launchd.
 - **Invocation:** `launchctl` (`bootstrap`/`bootout`/`kickstart`/`print`/
-  `kill`) manages the LaunchAgent, spawned only by `tools/service_manager.py`
-  — the controller and the installer both reach it through that backend, and
-  neither builds a `launchctl` argument vector, reads its output, or writes or
-  parses a plist. The drainer's own PR-merge loop
+  `kill`) manages the LaunchAgent on macOS, and `systemctl --user`
+  (`daemon-reload`/`reset-failed`/`start`/`stop`/`show`) manages the user unit
+  on Linux. Both are spawned only by `tools/service_manager.py`
+  — the controller and the installer both reach their host's manager through
+  that backend, and neither builds a `launchctl` or `systemctl` argument
+  vector, reads either one's output, or writes or parses a plist or a unit
+  file. The drainer's own PR-merge loop
   (`tools/drain_prs.py`) shells out to `git` and `gh` for every repository
   operation, and, only for automated stale-head rereview rounds, to
   `codex exec`. Every executable these Python tools spawn is declared in the
   §4 manifest and reconciled against it the same way the Haskell and
   packaged-workflow surfaces are: every non-test module under `tools/` is a
-  scanned surface, so `launchctl` carries both a manifest row and a §2.6
+  scanned surface, so `launchctl` and `systemctl` each carry both a manifest
+  row and a §2.6
   host-prerequisite entry. That surface is executable-only. The home-relative
   paths these modules build are neither asserted nor scanned from here: some
   have `personal-path` rows (the drainer's install directory, its discovery
   record, its LaunchAgent label), others deliberately have none yet
-  (`~/Library/LaunchAgents`, the drainer's log root, the legacy
+  (`~/Library/LaunchAgents`, `~/.config/systemd/user`, the drainer's log root,
+  the legacy
   `~/work/approve-issues.py` launcher), and reconciling them is #146's work,
   not this surface's. Their behavior stays covered by
   `tools/test_pure_logic.py`, `tools/test_drain_prs_service.py`,
@@ -387,11 +409,12 @@ arithmetic, which §2.3 owns.
   `python3 <install dir>/drain_prs.py --path <root> --repo OWNER/NAME --pr
   <number> [--config <path>]`, for the board's `m` key. The script is resolved
   from the Kanban-managed install directory — `KANBAN_DRAINER_INSTALL_DIR`,
-  then the directory the discovered LaunchAgent runs its controller from, then
+  then the directory the discovered service definition runs its controller
+  from, then
   the directory holding the discovery record — rather than from the repository
   checkout, so an install made with `--install-dir` stays usable by a dashboard
   that inherits none of the installer's environment. A source that is present
-  but names no resolvable directory — a relative override, or a LaunchAgent
+  but names no resolvable directory — a relative override, or a definition
   that does not run its controller from an absolute path — fails there rather
   than falling through to the next source, since falling through would merge
   with a different installation than the one configured and say nothing. A
@@ -403,22 +426,37 @@ arithmetic, which §2.3 owns.
   outcome, and no contradiction between the outcome, the merge flag, and the
   dry-run flag — since resolving a path means whatever is installed there
   answers, and a claimed merge is both shown to the user and acted on.
-- **Inputs:** repository path and repository identity; the repository's drainer
-  LaunchAgent plist under `~/Library/LaunchAgents`, which is a Kanban-owned
-  convention (see §5), not a personal path. There is one such plist per
-  canonical GitHub repository, named for the label
-  `tools/drain_prs_service.py` derives from that repository's normalized
+- **Inputs:** repository path and repository identity; the repository's own
+  service definition — a LaunchAgent plist under `~/Library/LaunchAgents` on
+  macOS, a unit file under `~/.config/systemd/user` on Linux — each of which is
+  a Kanban-owned convention (see §5), not a personal path. There is one such
+  definition per
+  canonical GitHub repository, named for the identifier
+  `tools/service_manager.py` derives from that repository's normalized
   identity. Kanban names none of them: it selects this repository's entry in
   the discovery record `tools/drain_prs_service.py` writes at
   `~/Library/Application Support/kanban/pr-drainer/config.json`, resolves the
-  plist path from that entry, then reads `ProgramArguments` out of the plist
-  itself, which stays authoritative for what launchd will actually run. Kanban
+  definition's path from that entry, then reads the command out of the
+  definition itself — `ProgramArguments` from the plist through
+  `/usr/bin/plutil`, `ExecStart` from the unit file read directly — which stays
+  authoritative for what the service manager will actually run. That entry is a
+  discriminated union: it names the `backend` that wrote it, and carries that
+  backend's own `launchd_label`/`plist_path` or `systemd_unit`/`unit_path`.
+  An entry naming no backend at all is the shape written before that field
+  existed, which makes it launchd's and is why a macOS drainer installed before
+  this survives with no reinstall and no manual edit; an unknown backend name,
+  an entry mixing one backend's keys with the other's, and an entry naming a
+  backend without its identifier or an absolute definition path all fail closed
+  with reinstall guidance rather than being resolved as launchd. So does a
+  record describing the manager the reading host does not have, which is a
+  record that travelled between hosts rather than an install. Kanban
   passes its own repository identity as `--repo OWNER/NAME` alongside
   `--path`; the controller resolves the checkout's own remote and refuses any
   identity but that one, including another remote of the same checkout, so
   neither a `kanban --repo` nor a `kanban --config` override can select or
   create another repository's drainer, or act on this checkout's job while the
-  dashboard reports a different repository. The installed plist carries the
+  dashboard reports a different repository. The installed definition carries
+  the
   same `--repo` for its own `run` invocation, so a shared `remote_name` changed
   after installation stops that job rather than re-pointing it: it drains
   nothing and logs the refusal until `tools/install_drainer.py` is re-run.
@@ -466,21 +504,26 @@ arithmetic, which §2.3 owns.
   (repository, pull request), never asks the drainer to exit, and resolves
   itself once every step succeeds. Only the crash kind means the drainer is
   not running.
-- **Required authority:** the same GitHub write scope, plus local launchd
-  control for the signed-in user.
-- **Durable state:** per canonical GitHub repository — a LaunchAgent plist
-  under `~/Library/LaunchAgents`, named for the label
-  `tools/drain_prs_service.py` derives from that repository's normalized
+- **Required authority:** the same GitHub write scope, plus local control of
+  the signed-in user's own service manager — launchd's GUI domain on macOS,
+  that user's systemd manager on Linux. Neither requires root, and neither
+  backend installs anything system-wide.
+- **Durable state:** per canonical GitHub repository — one service definition,
+  a LaunchAgent plist under `~/Library/LaunchAgents` or a unit file under
+  `~/.config/systemd/user`, named for the identifier
+  `tools/service_manager.py` derives from that repository's normalized
   identity; a runtime directory holding the status file and incidents at
   `~/Library/Application Support/kanban/pr-drainer/runtime/<slug>`; and a log
   directory holding the service and dated logs at
   `~/Library/Logs/kanban/pr-drainer/<slug>`. Shared across repositories — the
   discovery record at
   `~/Library/Application Support/kanban/pr-drainer/config.json`, whose
-  `repositories` table carries one entry per installed repository naming that
-  job's label, the plist's absolute path, the checkout it was installed for,
+  `repositories` table carries one entry per installed repository naming the
+  backend that wrote it, that job's identifier, the definition's absolute path,
+  the checkout it was installed for,
   and that repository's optional `config_path`, and which every path that
-  writes a plist refreshes from those same values without disturbing another
+  writes a definition refreshes from those same values without disturbing
+  another
   repository's entry — every read-modify-write of that document happens under
   an exclusive `flock` on a sibling lock file, because installs and starts for
   different repositories run concurrently and an unserialized merge would drop
@@ -500,10 +543,18 @@ arithmetic, which §2.3 owns.
   at every instant. That lock is per checkout and remains a secondary guard:
   two clones of one repository resolve to one job identity, and the second
   install or start is refused on that basis, which the lock cannot see.
+  Uninstalling is repository-scoped and goes through the same seam:
+  `drain_prs_service.py uninstall` refuses while the drainer is running, then
+  unloads the stopped job, deletes its definition, and removes that one entry
+  from the discovery record — leaving every sibling repository's entry, the
+  global `ntfy_url`, the shared script links, and this repository's own runtime
+  state, logs, and open incidents exactly as they were, since an uninstall is
+  not an acknowledgement.
 - **Mandatory/optional:** fully optional. The board's `d` key starts or
   stops it and its `m` key runs one `--pr` merge, and nothing in Kanban's
   build or normal startup path installs or runs it. With nothing installed,
-  both keys report the installer rather than failing opaquely.
+  both keys report the installer rather than failing opaquely. A host with no
+  supported service manager cannot install one at all, and says so.
 
 ### 2.5 Workflow setup and the preflight/doctor path
 
@@ -613,8 +664,9 @@ arithmetic, which §2.3 owns.
 | `git` | Yes | Repository identity, worktree creation, and status. |
 | `python3` | No | Only needed for the canonical issue-review backend and the Python tool suite. |
 | `ps` | Yes | Kanban's own worker/job-liveness snapshot (`src/Kanban/Process.hs`, which `src/Kanban/Worker.hs` consumes rather than spawns) runs it unconditionally. |
-| `launchctl` | No | Only needed to install and control the optional drainer's LaunchAgent; `/usr/bin/plutil` below only reads the job it installs. |
-| `/usr/bin/plutil` | No | Only needed to read the drainer's LaunchAgent status. |
+| `launchctl` | No | Only needed to install and control the optional drainer's LaunchAgent on macOS; `/usr/bin/plutil` below only reads the job it installs. |
+| `/usr/bin/plutil` | No | Only needed to read the drainer's LaunchAgent status on macOS. |
+| `systemctl`, with a live `systemctl --user` session | No | The Linux counterpart of the two rows above: only needed to install and control the optional drainer's user unit. Kanban reads that unit's own file directly, so Linux needs no reader alongside it. |
 | GHC + Cabal | Build-time only | Not invoked by any runtime workflow. |
 
 ### 2.7 Pull-request repair (`$repair` / `/repair`)
@@ -819,6 +871,7 @@ python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/P
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
 launchctl-cli | executable | launchctl | tools/service_manager.py | kanban | supported | no
+systemctl-cli | executable | systemctl | tools/service_manager.py | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/Review/Canonical.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/service_manager.py | kanban | supported | no
@@ -840,14 +893,16 @@ dashboard that inherited no environment can still find an install that moved.
 Both sides therefore spell the default, and neither derives it from the other.
 
 `drainer-launchagent-label`'s token is the shared prefix, which is all a single
-token can be: an installed job's label appends the repository's own slug to it
-(`com.coghex.drain-prs.coghex.kanban`), so there is one label per canonical
+token can be: an installed job's identifier appends the repository's own slug
+to it (`com.coghex.drain-prs.coghex.kanban`, plus a `.service` suffix on
+systemd), so there is one identifier per canonical
 GitHub repository rather than one for the account. The bare prefix is also the
 label of the machine-wide singleton that predates per-repository jobs, which
-`tools/service_manager.py` retires rather than installs. The label belongs to
-that module because the label is launchd's: it is the service-manager backend
+`tools/service_manager.py` retires rather than installs, and which only ever
+existed under launchd. The identifier belongs to
+that module because it is the service manager's: it is the backend
 that names, writes, and targets a job, and every other component reads the
-label from it or out of the discovery record rather than restating it.
+identifier from it or out of the discovery record rather than restating it.
 
 `codex-plugin-cache-root` is the only user-scoped path this repository declares
 that Kanban does not own: `$CODEX_HOME` (default `~/.codex`) is Codex's own
@@ -893,25 +948,33 @@ search step and nothing else, which is what `mandatory: no` records.
 - **Project-scoped assets are preferred.** Where Kanban must write outside
   the repository at all, it prefers a small, clearly namespaced footprint:
   the drainer installer's default install directory is
-  `~/Library/Application Support/kanban/pr-drainer`, and its LaunchAgent
-  labels and plist paths are a Kanban-owned convention rather than a personal
-  one. The component that writes the plists owns the labels, and that is the
+  `~/Library/Application Support/kanban/pr-drainer`, and its job identifiers
+  and definition paths — LaunchAgent labels and plists under
+  `~/Library/LaunchAgents`, unit names and files under
+  `~/.config/systemd/user` — are a Kanban-owned convention rather than a
+  personal one. The component that writes the definitions owns the
+  identifiers, and that is the
   service-manager backend:
   `tools/drain_prs_service.py` resolves each repository's normalized canonical
   GitHub identity — through the remote the shared Kanban configuration names,
   the same one the dashboard resolves its own repository through — and
-  `tools/service_manager.py` derives that job's label from it, renders and
-  writes the plist, and builds every `launchctl` target from the same label.
+  `tools/service_manager.py` derives that job's identifier from it, renders and
+  writes the definition, and builds every manager target from the same
+  identifier. One slug names the identifier and the runtime and log directories
+  together, and both backends hold it to the same escaping and length
+  discipline, so a repository names one job whichever host it is installed on.
   The controller partitions the runtime and log paths by that identity and —
-  from those same values — records the job's label, the plist's absolute path,
+  from those same values — records the backend that wrote the entry, the job's
+  identifier, the definition's absolute path,
   and the checkout it was installed for under that repository's entry in
   `~/Library/Application Support/kanban/pr-drainer/config.json`. The
   derivation is total, produces a valid nonempty label for every supported
   `owner/name`, and is injective across distinct normalized identities, so no
   two repositories can name one job. `tools/install_drainer.py` resolves a job
   through those two modules rather than restating any of it, and
-  `src/Kanban/Drainer.hs` derives no label at all: it selects the entry for
-  the identity it resolved and reads the label and plist path out of it.
+  `src/Kanban/Drainer.hs` derives no identifier at all: it selects the entry
+  for the identity it resolved and reads the backend, the identifier, and the
+  definition path out of it.
   Haskell cannot import a Python constant, so a record one side writes and the
   other reads is the only coupling here that cannot drift. Its location stays
   fixed even when `--install-dir` moves everything
@@ -954,8 +1017,10 @@ search step and nothing else, which is what `mandatory: no` records.
   that will not parse, or whose `backend_path` is wrong-typed or relative,
   is its own failure naming that document.
 - **User-scoped installation is explicit and opt-in.** Nothing in Kanban's
-  build (`cabal build all`) or normal startup path installs the drainer's
-  LaunchAgent or the issue-review backend's stable link; the latter is only
+  build (`cabal build all`) or normal startup path installs the drainer's job
+  or the issue-review backend's stable link; the installed definition is
+  loaded but never started, never enabled, and carries no `[Install]` section
+  on systemd, so no login brings a drainer up on its own; the latter is only
   installed by running `tools/install_issue_review.py`, or
   `tools/setup_workflows.py --component issue-review --apply`, directly,
   and neither starts a daemon.

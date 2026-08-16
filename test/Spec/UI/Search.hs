@@ -23,7 +23,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as Vty
 import Kanban.Domain
-import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..))
+import Kanban.Drainer (DrainerBackend (..), DrainerController (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Workflow (entryItem)
 import Kanban.UI.Events (BoardMouseAction (..), applyCardClick, applyRunningProcessClick, boardMouseAction, boardMousePress)
 import Kanban.UI.Filter (refreshVisibleBoard)
@@ -819,7 +819,7 @@ mouseSpec = describe "mouse precedence" $ do
   it "still takes the drainer button's toggle while a search is live" $ do
     searching <- transferring
     plain <- searchState
-    let installed state = state {appDrainerController = Right (DrainerController "/nonexistent/kanban-test-drainer" [])}
+    let installed state = state {appDrainerController = Right (DrainerController "/nonexistent/kanban-test-drainer" [] DrainerLaunchd)}
         press state = boardMousePress <$> boardMouseAction state DrainerButton Vty.BLeft [] <*> pure (installed state)
     boardMouseAction searching DrainerButton Vty.BLeft [] `shouldBe` Just ToggleDrainerFromClick
     boardMouseAction plain DrainerButton Vty.BLeft [] `shouldBe` Just ToggleDrainerFromClick
