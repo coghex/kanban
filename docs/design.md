@@ -1762,10 +1762,17 @@ group takes being a child of one of its members. That covers a descendant at
 any depth forked at any point in the run, including one whose own parent has
 already exited — which a census pinned earlier would have missed. Termination
 then re-checks each member by pid, start time, and current group before each of
-TERM and KILL, and sends neither when nothing matches. A snapshot that cannot
-be taken signals no group at all, falling back — only for a ping that overran
-its deadline — to terminating Kanban's own unreaped child by pid, which needs
-no census to be safe.
+TERM and KILL, and sends neither when nothing matches.
+
+A machine whose process snapshots fail entirely loses the ability to see the
+ping finish, never the cleanup. Such a snapshot is treated as a poll that
+learned nothing rather than as a reason to wait on the handle, because that
+wait would reap the leader and take the group's only ownership proof with it.
+The ping is then noticed only at its deadline — the user's own configured bound
+— and the group is cleared there without a census, on a timer rather than on
+evidence. That is the one case in which a group is signalled unverified, and it
+remains safe for the same reason as every other: the leader is unreaped, so the
+id still names the group Kanban created.
 
 Exactly one usage refresh follows any ping process that started — whether it
 succeeded, exited non-zero, or timed out, because all three may already have

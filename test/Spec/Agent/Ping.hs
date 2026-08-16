@@ -238,6 +238,31 @@ spec = do
           helper <- helperPid root
           processAlive helper `shouldReturn` False
 
+    -- Without a process snapshot there is no census, but the leader is still
+    -- unreaped and Kanban still made it this group's leader, so the id is
+    -- still provably Kanban's and the group is still cleared. Losing `ps`
+    -- costs the ability to notice an early exit, never the cleanup.
+    it "kills a helper after a clean exit even when no process snapshot can be taken" $
+      withPingRoot $ \root ->
+        withEnvironmentValue pingModeVariable "orphan" $
+          withFailingProcessSnapshot root $ do
+            config <- refreshingConfig root
+            result <- runPing (PingMode PingCodex False) config {resolvedTimeouts = timedTimeouts 2 2}
+            helper <- helperPid root
+            processAlive helper `shouldReturn` False
+            -- Blind to the leader's exit, the deadline is what ends the wait.
+            result.pingResultLaunch `shouldBe` PingTimedOut 2
+
+    it "kills a helper after a timeout even when no process snapshot can be taken" $
+      withPingRoot $ \root ->
+        withEnvironmentValue pingModeVariable "orphan-hang" $
+          withFailingProcessSnapshot root $ do
+            config <- refreshingConfig root
+            result <- runPing (PingMode PingCodex False) config {resolvedTimeouts = timedTimeouts 1 1}
+            result.pingResultLaunch `shouldBe` PingTimedOut 1
+            helper <- helperPid root
+            processAlive helper `shouldReturn` False
+
     it "takes the whole group and nothing outside it" $
       ownedGroupMembers 500 mixedSnapshot
         `shouldBe` [ leader 500 "Thu Aug 15 10:00:00 2026",
@@ -621,6 +646,14 @@ mixedSnapshot =
     leader 700 "Thu Aug 15 10:00:02 2026",
     member 502 700 "Thu Aug 15 10:00:03 2026"
   ]
+
+-- | Puts a @ps@ that refuses to answer ahead of the real one, so every process
+-- snapshot fails the way it would on a machine whose @ps@ is unusable.
+withFailingProcessSnapshot :: FilePath -> IO result -> IO result
+withFailingProcessSnapshot root action = do
+  let binaryRoot = root </> "bin"
+  _ <- writeExecutableScript (binaryRoot </> "ps") ["echo 'ps is unavailable' >&2", "exit 1"]
+  action
 
 -- | A process group whose leader has been waited on, leaving a helper running
 -- and the group id no longer provably Kanban's.

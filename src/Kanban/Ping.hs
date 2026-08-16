@@ -18,11 +18,11 @@ module Kanban.Ping
     PingLaunch (..),
     PingMode (..),
     PingResult (..),
+    ownedGroupMembers,
     pingArguments,
     pingBrandName,
     pingBrandProvider,
     pingExecutableName,
-    ownedGroupMembers,
     pingPrompt,
     pingRepositoryIdentity,
     pingResolvedConfig,
@@ -30,11 +30,11 @@ module Kanban.Ping
     pingResultProblems,
     pingResultSucceeded,
     pingScratchDirectory,
-    sweepOwnedGroup,
     pingTimeoutMicros,
     resolvePingBrand,
     runPing,
     runPingMode,
+    sweepOwnedGroup,
   )
 where
 
@@ -72,6 +72,7 @@ import System.Directory (XdgDirectory (XdgCache), findExecutable, getXdgDirector
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
+import System.Posix.Signals (sigKILL, sigTERM, signalProcessGroup)
 import System.Process
   ( CreateProcess (..),
     ProcessHandle,
@@ -374,6 +375,13 @@ awaitPing timeoutMicros processHandle = do
 -- The poll backs off from 'minimumPollMicros' to 'maximumPollMicros' so a ping
 -- that answers in a second is noticed promptly while a long one costs a
 -- handful of snapshots rather than hundreds.
+-- A snapshot that cannot be taken is a poll that learned nothing, never a
+-- reason to fall back to waiting on the handle: that wait reaps, and a reaped
+-- leader takes the group's only ownership proof with it, leaving a helper
+-- running with nothing able to prove it may be signalled. So a failing @ps@
+-- costs responsiveness — a ping that finished early is not noticed until its
+-- deadline — rather than costing the cleanup. The deadline is the user's own
+-- configured bound, and the sweep that follows it still clears the group.
 watchOwnedGroup :: Int -> ProcessHandle -> IO Bool
 watchOwnedGroup timeoutMicros processHandle = do
   maybePid <- getPid processHandle
@@ -383,14 +391,13 @@ watchOwnedGroup timeoutMicros processHandle = do
   where
     watch leaderPid interval remaining = do
       snapshotResult <- defaultProcessSnapshot
-      case snapshotResult of
-        -- Without a snapshot there is nothing to watch, so this degrades to
-        -- the plain bounded wait rather than guessing.
-        Left _ -> maybe False (const True) <$> timeout (max 0 remaining) (waitForProcess processHandle)
-        Right snapshot
-          | not (any ((== leaderPid) . (.processIdentityPid)) snapshot) -> pure True
-          | remaining <= 0 -> pure False
-          | otherwise -> do
+      let leaderGone = either (const False) (not . any ((== leaderPid) . (.processIdentityPid))) snapshotResult
+      if leaderGone
+        then pure True
+        else
+          if remaining <= 0
+            then pure False
+            else do
               let slept = min interval remaining
               threadDelay slept
               watch leaderPid (min maximumPollMicros (interval * 2)) (remaining - slept)
@@ -398,9 +405,10 @@ watchOwnedGroup timeoutMicros processHandle = do
 ignoreIOException :: IO () -> IO ()
 ignoreIOException action = void (try @IOException action)
 
-minimumPollMicros, maximumPollMicros :: Int
+minimumPollMicros, maximumPollMicros, blindTerminationGraceMicros :: Int
 minimumPollMicros = 100 * 1000
 maximumPollMicros = 2 * 1000 * 1000
+blindTerminationGraceMicros = 750 * 1000
 
 -- | Everything a snapshot currently shows in the ping's process group.
 --
@@ -436,13 +444,31 @@ sweepOwnedGroup processHandle = do
   case maybePid of
     Nothing -> pure ()
     Just pid -> do
+      let groupPid = fromIntegral pid
       snapshotResult <- defaultProcessSnapshot
       case snapshotResult of
-        Left _ -> pure ()
+        Left _ -> terminateOwnedGroupBlind groupPid
         Right snapshot -> do
-          let groupPid = fromIntegral pid
-              members = ownedGroupMembers groupPid snapshot
+          let members = ownedGroupMembers groupPid snapshot
           unless (null members) (void (killVerifiedGroup groupPid members))
+
+-- | Clears the group without a census, for when no process snapshot can be
+-- taken at all.
+--
+-- Verification is what is lost here, not safety: the caller has already
+-- established that the leader is unreaped, and Kanban created this group with
+-- that child as its leader, so the id still names Kanban's own group and
+-- nothing else. Without a snapshot there is no way to check who is in it or to
+-- confirm they are gone afterwards, so this escalates on a timer rather than
+-- on evidence — the one case where a group is signalled unverified, and the
+-- alternative is leaving a helper running with no bound at all.
+terminateOwnedGroupBlind :: Int -> IO ()
+terminateOwnedGroupBlind groupPid = do
+  signalOwnedGroup sigTERM
+  threadDelay blindTerminationGraceMicros
+  signalOwnedGroup sigKILL
+  where
+    signalOwnedGroup signal = ignoreIOException (signalProcessGroup signal (fromIntegral groupPid))
 
 reapTimeoutMicros :: Int
 reapTimeoutMicros = 2 * 1000 * 1000
