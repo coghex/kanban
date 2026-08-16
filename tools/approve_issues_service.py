@@ -151,7 +151,6 @@ STOP_GRACE_SECONDS = 10.0
 # How much of a failed pass's stderr is kept in its incident.
 CAPTURED_STDERR_LINES = 60
 
-INSTALL_DIR_ENV = "KANBAN_ISSUE_APPROVAL_INSTALL_DIR"
 INCIDENT_ID_RE = re.compile(r"\Aincident-[A-Za-z0-9TZ-]+\Z")
 
 
@@ -174,22 +173,47 @@ class BackendFailure(ServiceError):
         self.detail = detail
 
 
-def install_dir() -> Path:
-    """This service's own install and runtime root.
+def service_root() -> Path:
+    """This service's one root for this account.
+
+    There is deliberately no environment or flag override. The run lock that
+    makes one canonical identity run one controller hangs off this root, so a
+    root a caller could move is a root that lets two runs for one repository
+    both start -- each taking its own lock, writing its own status, and
+    alternating backend passes as the other releases the canonical approval
+    lock between issues. A configurable location cannot serialize anything a
+    configuration can change.
 
     Resolved per call rather than frozen at import, exactly as
     `kanban_config.default_issue_review_install_dir` is and for the same
     reason: freezing it would bind whatever `$HOME` held when the module first
-    loaded, which any process that changes it would then silently escape.
+    loaded, which any process that changes it would then silently escape. That
+    leaves the user account as the one boundary this root varies across, which
+    is the boundary it should vary across.
     """
-    override = os.environ.get(INSTALL_DIR_ENV)
-    if override and override.strip():
-        return Path(override).expanduser()
     return Path.home() / "Library" / "Application Support" / "kanban" / "issue-approval"
 
 
 def runtime_root() -> Path:
-    return install_dir() / "runtime"
+    """Where each identity's status, barrier, and incidents live.
+
+    IAQ-3 owns installation and may one day let an installer relocate this.
+    `run_lock_path` is deliberately not written against it, so that a movable
+    runtime could never move the lock with it.
+    """
+    return service_root() / "runtime"
+
+
+def run_lock_path(slug: str) -> Path:
+    """The one lock a `run` takes for one canonical identity.
+
+    Anchored to `service_root` rather than to the runtime root, and named by
+    the identity rather than by the checkout, so every controller for one
+    GitHub repository contends for one file however it was started: from a
+    second clone, from a linked worktree, or -- if the runtime ever becomes
+    relocatable -- from a second installation.
+    """
+    return service_root() / "locks" / f"{slug}.lock"
 
 
 def log_root() -> Path:
@@ -310,7 +334,7 @@ def job_for_identity(
         incident_dir=runtime_dir / "incidents",
         status_path=runtime_dir / "status.json",
         barrier_path=runtime_dir / "barrier.json",
-        lock_path=runtime_dir / "run.lock",
+        lock_path=run_lock_path(slug),
         log_dir=log_root() / slug,
         service_log_path=log_root() / slug / "service.log",
         config_path=config_path,
@@ -725,9 +749,11 @@ def run_lock(job: ApprovalJob) -> Iterator[None]:
     per-identity status document and both opened incidents against it.
 
     Taken before any status or incident is written, so a refused second run
-    changes nothing the first run owns.
+    changes nothing the first run owns -- including a first run whose runtime
+    is somewhere this one would never look, since the lock is named by the
+    identity alone.
     """
-    job.runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    job.lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         handle = open(job.lock_path, "a+", encoding="utf-8")
     except OSError as exc:

@@ -260,7 +260,6 @@ class ApprovalFixture(unittest.TestCase):
             "PYTHONUNBUFFERED": "1",
         }
         self.env.pop("XDG_CONFIG_HOME", None)
-        self.env.pop(service.INSTALL_DIR_ENV, None)
         patched = mock.patch.dict(os.environ, self.env, clear=True)
         patched.start()
         self.addCleanup(patched.stop)
@@ -557,6 +556,47 @@ class PerIdentityPartitioningTests(ApprovalFixture):
                 self.assertNotEqual(
                     getattr(first, attribute), getattr(second, attribute)
                 )
+
+    def test_no_configuration_can_move_the_run_lock(self):
+        # The lock is what makes one identity run one controller. A root a
+        # caller could move is a root that lets two runs both start, each
+        # taking its own lock, so this root answers to `$HOME` and to nothing
+        # else. Every variable below is one a caller controls; none of them is
+        # a knob this service has.
+        expected = service.run_lock_path(service.repository_slug(self.identity))
+        with mock.patch.dict(
+            os.environ,
+            {
+                "KANBAN_ISSUE_APPROVAL_INSTALL_DIR": str(self.root / "elsewhere"),
+                "KANBAN_DRAINER_INSTALL_DIR": str(self.root / "elsewhere"),
+                "KANBAN_ISSUE_REVIEW_INSTALL_DIR": str(self.root / "elsewhere"),
+            },
+        ):
+            self.assertEqual(self.job().lock_path, expected)
+            self.assertEqual(service.service_root(), expected.parent.parent)
+
+    def test_the_run_lock_does_not_follow_a_relocated_runtime(self):
+        # IAQ-3 owns installation and may relocate the runtime. If the lock
+        # moved with it, two installations of one repository would both run.
+        expected = self.job().lock_path
+        with mock.patch.object(
+            service, "runtime_root", return_value=self.root / "another-runtime"
+        ):
+            relocated = self.job()
+        self.assertEqual(relocated.lock_path, expected)
+        self.assertNotEqual(relocated.runtime_dir, self.job().runtime_dir)
+
+    def test_the_run_lock_is_named_by_identity_rather_than_by_checkout(self):
+        # Two clones of one GitHub repository are one canonical identity, so
+        # they must contend rather than each taking a lock of their own.
+        other_clone = self.root / "second-clone"
+        other_clone.mkdir()
+        first = service.job_for_identity(self.repo, self.identity)
+        second = service.job_for_identity(other_clone, self.identity)
+        self.assertEqual(first.lock_path, second.lock_path)
+        self.assertNotEqual(
+            first.lock_path, self.job(identity="acme/gadgets").lock_path
+        )
 
     def test_the_namespace_is_not_the_pr_drainers(self):
         job = self.job()
@@ -1300,6 +1340,41 @@ class SingleRunTests(ApprovalFixture):
         first.send_signal(signal.SIGTERM)
         code, _out, _err = self.finish(first)
         self.assertEqual(code, 0)
+
+    def test_a_second_clone_of_one_repository_is_refused_too(self):
+        # The canonical approval lock cannot catch this: two clones have two
+        # shared Git directories, and the pass releases that lock between
+        # issues anyway. One identity is one controller, wherever it is run
+        # from and whatever runtime it would have written.
+        other_clone = self.checkout("widgets-again", self.remote_url)
+        self.write_plan([{"outcome": "idle"}])
+        first = self.start_controller()
+        wait_until(lambda: len(self.queue_calls()) >= 1, message="the first run to poll")
+
+        second = subprocess.Popen(
+            [
+                sys.executable,
+                str(CONTROLLER),
+                "--path",
+                str(other_clone),
+                "run",
+                "--interval",
+                "0.01",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=dict(os.environ),
+        )
+        self.processes.append(second)
+        _out, err = second.communicate(timeout=60)
+        self.assertEqual(second.returncode, 1)
+        self.assertIn("already running", err)
+        self.assertNotIn(second.pid, {call["ppid"] for call in self.calls()})
+        self.assertEqual(self.incidents(), [])
+
+        first.send_signal(signal.SIGTERM)
+        self.assertEqual(self.finish(first)[0], 0)
 
     def test_the_lock_is_released_so_the_next_run_starts(self):
         self.write_plan([{"outcome": "idle", "signal_parent": True}])
