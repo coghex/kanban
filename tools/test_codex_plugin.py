@@ -113,15 +113,17 @@ HASKELL_PARITY_SKILL_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise", 
 # (docs/drafting-workflow-contract.md §3.2).
 DRAFTING_SKILL_NAMES = {"issue", "autoissue", "issue-review", "issue-rereview"}
 
-# The design and report document workflows vendored by issue #229. Also user-
-# invoked and excluded from Haskell name parity. One of the four —
-# draft-report — is Codex-only by declaration
-# (docs/document-workflow-contract.md §3.5); the other three are cross-brand
-# pairs since issue #241 transposed the design pair into the Claude bundle.
+# The design and report document workflows vendored by issue #229, plus the
+# note-problem observation-capture skill vendored by issue #328. Also user-
+# invoked and excluded from Haskell name parity. All five are cross-brand pairs
+# since #328 closed docs/document-workflow-contract.md §3.5's Codex-only set,
+# which had held $draft-report alone after issue #241 transposed the design
+# pair into the Claude bundle.
 DOCUMENT_SKILL_NAMES = {
     "design-epic",
     "process-design-doc",
     "draft-report",
+    "note-problem",
     "process-report",
 }
 

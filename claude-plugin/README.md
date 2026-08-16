@@ -5,8 +5,9 @@ packages the Claude-side workflows Kanban invokes by name — `/solve`,
 `/pr-review`, `/pr-rereview`, `/pr-revise`, and `/repair` — plus the issue-drafting and
 canonical issue-review workflows a user or the review daemon invokes directly:
 `/issue`, `/draft-issues`, `/autoissue`, and `/issue-review`. Since issue #229
-it also packages `/process-report`, the one design/report document workflow
-with a Claude counterpart. It exists so a
+it also packages the design and report document workflows a user invokes
+directly — `/design-epic`, `/process-design-doc`, `/draft-report`,
+`/note-problem`, and `/process-report`. It exists so a
 clean Claude Code installation can perform these actions without depending on
 any developer's personal command collection. See
 [docs/agent-workflow-contract.md](../docs/agent-workflow-contract.md) for the
@@ -88,10 +89,11 @@ Verify discovery:
 claude plugin list
 ```
 
-`kanban@kanban` should be listed, and all thirteen workflow names should be
+`kanban@kanban` should be listed, and all fifteen workflow names should be
 available as `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/issue`,
 `/draft-issues`, `/autoissue`, `/issue-review`, `/issue-rereview`, `/repair`,
-`/design-epic`, `/process-design-doc`, and `/process-report`.
+`/design-epic`, `/process-design-doc`, `/draft-report`, `/note-problem`, and
+`/process-report`.
 
 Verified against Claude Code `2.1.216` (`claude --version`), the version
 that provides the `claude plugin` / `claude plugin marketplace` subcommand
@@ -122,10 +124,12 @@ which covers exactly the names Kanban's own code spawns.
 | `commands/issue-review.md` | `/issue-review` | Runs the canonical opposite-agent readiness gate for one numbered issue through the portable backend. Never drafts, creates, or posts a competing verdict. |
 | `commands/issue-rereview.md` | `/issue-rereview` | Repairs one `reviewed:changes` issue's specification with explicit signoff and resubmits it through the same backend until that backend approves it. Never solves the issue, posts a verdict, or sets a verdict label. |
 | `commands/repair.md` | `/repair` | Diagnoses why a pull request cannot merge — merge conflict, any failed check, or a blocking label, in `pullRequestStatus` order — repairs it in the worktree already on the PR's head branch, pushes without force, and hands off to exactly one canonical rereview. Never merges, closes, or sets a verdict label; never removes a blocking label without asking. |
+| `commands/draft-report.md` | `/draft-report` | Turns free-form notes or an audit request into one evidence-backed `*_findings.md` report, presented in full and written only after explicit approval. Files no issues and chooses no dispositions. Paired with the Codex `$draft-report` skill it is transposed from. |
+| `commands/note-problem.md` | `/note-problem` | Appends **exactly one** verified observation to an existing findings report: preserve the user's wording as a claim, investigate only that claim, classify the result, and record evidence and handoff context. Stops for approval before touching the report, applies no disposition, and creates no tracker item. Paired with the Codex `$note-problem` skill. |
 | `commands/process-report.md` | `/process-report` | Processes **exactly one** finding per invocation from an existing findings report: verify, deduplicate, recommend one disposition, stop for approval, then mark the report. The report file is the durable cursor, so a fresh session resumes in the right place. |
 
-`/process-report` is user-invoked only. Kanban's CLI never spawns it, because
-it has a mandatory human approval stop in the middle; see
+The five document commands are user-invoked only. Kanban's CLI never spawns
+one, because each has a mandatory human approval stop in the middle; see
 [docs/document-workflow-contract.md §5](../docs/document-workflow-contract.md#5-one-artifact-per-invocation-and-the-approval-stop).
 Its status markers are a cross-brand compatibility surface rather than local
 formatting: `$process-report` in [codex-plugin/](../codex-plugin/README.md) is
@@ -139,18 +143,19 @@ to the `/design-epic`/`/process-design-doc` pipeline (see the
 not part of this drafting contract. The personal `/epic` command that once
 created epic trees directly was retired 2026-08-11 in that pipeline's favor.
 
-One document workflow is deliberately not packaged here either.
-`draft-report` is **Codex-only** — a
-declared gap rather than an oversight, because authoring a Claude counterpart
-would be new behavior no pinned source defines, which the SHA-pinned vendoring
-model of issue #118 refused to do. The asymmetry runs opposite to the
-Claude-only `/draft-issues` boundary above, and is recorded the same way rather
-than closed; see
-[docs/document-workflow-contract.md §3.5](../docs/document-workflow-contract.md#35-declared-codex-only-asymmetry-partially-closed).
-`design-epic` and `process-design-doc` were Codex-only under the same rule
-until issue #239 landed their decision-authority guardrails in the tracked
-Codex skills; `/design-epic` and `/process-design-doc` are transposed from
-that pinned source, which is what cleared them to ship here.
+Every document workflow is packaged here now. `design-epic` and
+`process-design-doc` were Codex-only until issue #239 landed their
+decision-authority guardrails in the tracked Codex skills, and `draft-report`
+was the last one; `/design-epic`, `/process-design-doc`, and `/draft-report`
+are each transposed from that brand's pinned tracked source, which is what
+cleared them to ship here, and issue #328 vendored `note-problem` into both
+marketplaces at once. The rule those gaps recorded still stands for whatever is
+proposed next: a counterpart is transposed from a reviewed, pinned source
+rather than authored from scratch, because authoring one would be new behavior
+no pinned source defines — which the SHA-pinned vendoring model of issue #118
+refused to do. The `/draft-issues` boundary above is now the only asymmetry
+left, and it runs the other way; see
+[docs/document-workflow-contract.md §3.5](../docs/document-workflow-contract.md#35-declared-codex-only-asymmetry-now-closed).
 
 `pr-review`, `pr-rereview`, `pr-revise`, and `repair` all delegate publication
 to the bundled coordinator at `scripts/review_pr.py`. Claude Code exposes
@@ -234,13 +239,13 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the commands directory contains exactly the thirteen packaged workflows, and
+- the commands directory contains exactly the fifteen packaged workflows, and
   the five Kanban spawns exactly match the `/`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  five drafting commands or the three document commands;
-- the one remaining Codex-only document workflow has no counterpart here,
-  keeping the declared asymmetry;
+  five drafting commands or the five document commands;
+- the Codex-only document-workflow set is empty, so no counterpart is withheld
+  from this bundle;
 - no packaged manifest sets model/effort/permission-mode/working-directory
   configuration, and every packaged command — drafting commands included —
   declares a `description:` and no forbidden frontmatter key;
@@ -300,17 +305,19 @@ that makes it apply only when the consuming repo declares a gate, and
 `/issue-review` must stay free of gate language.
 
 `tools/test_document_workflow_contract.py` does the same for `/design-epic`,
-`/process-design-doc`, and `/process-report`
+`/process-design-doc`, `/draft-report`, `/note-problem`, and `/process-report`
 against
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md):
 every declared asset must exist, no undeclared design or report workflow may
-appear here, the document must keep stating the remaining Codex-only asymmetry,
-the design-pair closure record, and the
+appear here, the document must keep stating §3.5's standing rule and closure
+record and the
 design-pipeline epic-planner boundary, the decision-authority clauses of §5.1
 must survive in both Claude design commands, and the exact `[#N]`, `[no-issue]`,
 `[deferred]`, `- [x]`, and `- [ ]` literals must survive in the document and in
 every cross-brand pair — the surface that makes a report or design document
-portable between the brands.
+portable between the brands. It also holds `/note-problem` on the publishing
+side of §9 rather than the novel-document side: it writes no checked box, but
+what it appends to is a report that may already be classified `coordination`.
 
 ## Project-scoped locations
 
