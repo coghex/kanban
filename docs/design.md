@@ -6224,9 +6224,14 @@ the same automated gates, and is verified below as a consumer receives it.
 `docs/public_release_design.md` D-7 assigns consumer-side verification of the
 published archive to this slice. The sole asset was downloaded from the Release,
 unpacked in a clean directory outside any checkout, and built and tested there —
-macOS 15.6 on arm64, GHC 9.12.2, Cabal 3.16.1.0:
+macOS 15.6 on arm64, GHC 9.12.2, Cabal 3.16.1.0. `$CONS` is that directory; the
+run used a scratch path outside every checkout, and the sequence below is
+self-contained from the assignment onward, because a consumer reproducing this
+gets no shell state from here:
 
 ```console
+CONS="${TMPDIR:-/tmp}/kanban-1.0.0.0-consumer"
+rm -rf "$CONS" && mkdir -p "$CONS" && cd "$CONS"
 gh release download v1.0.0.0 --repo coghex/kanban \
   --pattern 'kanban-1.0.0.0.tar.gz' --dir "$CONS"
 tar -xzf kanban-1.0.0.0.tar.gz
@@ -6236,6 +6241,11 @@ cabal build all
 cabal test all --test-show-details=direct
 "$(cabal list-bin exe:kanban)" --version
 ```
+
+The directory is removed and recreated rather than reused so the build cannot
+read anything an earlier attempt left behind, and it is entered before the
+download so every later relative path — the archive, the unpacked
+`kanban-1.0.0.0/` — resolves inside it.
 
 The unpacked `kanban.cabal` declares `version:            1.0.0.0`, the build
 succeeds, the suite reports `1202 examples, 0 failures` and `Test suite
