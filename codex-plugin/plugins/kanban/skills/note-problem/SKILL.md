@@ -330,10 +330,24 @@ on the one structured result it returns:
 
 ## Handoff
 
-Report the key, verification result, chapter, path, and outstanding checkbox
-count, then the publication outcome the helper returned. End by stating that the
-observation is captured unprocessed and that `process-report` will decide its
-disposition, one finding per invocation.
+Report the key, verification classification, chapter, and resolved path, then
+what the helper actually did — and let that decide what you claim. The three
+outcomes are not interchangeable, because only two of them left an observation
+in the report:
+
+- **Published.** Report the commit and its changed-line summary, the report's
+  outstanding checkbox count, and that the observation is captured unprocessed
+  for `process-report` to dispose of, one finding per invocation.
+- **Not published, but the document was written.** The observation is in the
+  report in the write root and not on the publication branch. Say both halves
+  and why publication was declined, and name the write root and path.
+- **Nothing was written.** The report is unchanged and the observation is **not
+  captured** — this is the outcome for a document absent from the publication
+  tip, an unenrolled report included. Say exactly that, name the preserved
+  `approved_blob` and that `git cat-file -p` recovers it, and do not describe
+  the run as having noted the problem. Reporting capture here would leave the
+  user believing a report holds an observation it does not, which is the one
+  failure this workflow's own output can cause.
 
 <!-- Vendored from the owner-maintained personal Codex `note-problem` skill,
      SHA-256 58d32a2f523b1f4b1b9e05ecc2e440a340396caf8a23bd3a7050f2dcbf005216.

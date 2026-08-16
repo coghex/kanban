@@ -791,6 +791,29 @@ NOTE_NO_CREATE_CLAUSES = {
     ),
 }
 
+# Issue #328's round-2 review blocker. Dropping the creation path left the
+# handoff still announcing capture unconditionally, which is false on exactly
+# the path round 1 exposed: when the document is absent from the publication tip
+# the helper writes nothing, so the report is unchanged. A workflow whose own
+# closing report says "captured" there leaves the user believing a report holds
+# an observation it does not — the one failure this asset's output can cause on
+# its own, and one no other test in this module would catch, since every
+# publication clause is about what the helper does rather than what the asset
+# then claims.
+NOTE_HANDOFF_CLAUSES = {
+    "outcome-decides-the-claim": "let that decide what you claim",
+    "no-write-means-not-captured": (
+        "the report is unchanged and the observation is not captured"
+    ),
+    "no-write-forbids-the-noted-claim": (
+        "do not describe the run as having noted the problem"
+    ),
+    "states-why-a-false-claim-matters": (
+        "reporting capture here would leave the user believing a report holds "
+        "an observation it does not"
+    ),
+}
+
 # The heading that path shipped under. Forbidden outright in the note assets:
 # the clauses above could all be satisfied while a creation section sat beside
 # them contradicting every one.
@@ -1091,6 +1114,14 @@ def missing_no_create_clauses(text):
     asset = canonical(text)
     return sorted(
         key for key, clause in NOTE_NO_CREATE_CLAUSES.items() if clause not in asset
+    )
+
+
+def missing_handoff_clauses(text):
+    """The note-problem conditional-handoff clauses `text` no longer states."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in NOTE_HANDOFF_CLAUSES.items() if clause not in asset
     )
 
 
@@ -1745,6 +1776,27 @@ class PublicationTests(unittest.TestCase):
                     f"{path} reintroduces a create-the-report path that "
                     "tools/publish_coordination_doc.py cannot carry out",
                 )
+
+    def test_neither_note_asset_claims_capture_when_nothing_was_written(self):
+        for path in NOTE_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_handoff_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer conditions its handoff on what the helper "
+                    "actually wrote, so it would report a captured observation "
+                    f"against an unchanged report: {missing}",
+                )
+
+    def test_removing_a_handoff_clause_from_a_note_asset_is_reported(self):
+        for path in NOTE_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in NOTE_HANDOFF_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertEqual(
+                        missing_handoff_clauses(asset.replace(clause, "")), [key]
+                    )
 
     def test_removing_a_no_create_clause_from_a_note_asset_is_reported(self):
         for path in NOTE_ASSETS:
