@@ -294,6 +294,33 @@ class ApprovalFixture(unittest.TestCase):
         )
         return path
 
+    def worktree(self, name="linked"):
+        """A linked worktree of this fixture's checkout, committed to first
+        because `git worktree add` needs a HEAD."""
+        environment = {
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": str(self.git_config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+
+        def git(*arguments, check=True):
+            return subprocess.run(
+                ["git", "-C", str(self.repo), *arguments],
+                check=check,
+                capture_output=True,
+                env=environment,
+            )
+
+        if git("rev-parse", "--verify", "HEAD", check=False).returncode != 0:
+            git("config", "user.email", "fixture@example.com")
+            git("config", "user.name", "Fixture")
+            (self.repo / "README").write_text("fixture\n", encoding="utf-8")
+            git("add", "README")
+            git("commit", "-q", "-m", "fixture")
+        path = self.root / name
+        git("worktree", "add", "-q", "-b", name, str(path))
+        return path
+
     def write_plan(self, steps):
         self.plan_path.write_text(json.dumps(steps), encoding="utf-8")
 
@@ -474,6 +501,19 @@ class MirroredLockResolutionTests(unittest.TestCase):
         self.assertEqual(answer, self.primary / ".git" / approve_issues.APPROVAL_LOCK_NAME)
         self.assertEqual(answer, service.approval_lock_path(self.primary))
 
+    def test_a_linked_worktree_shares_the_primary_checkouts_run_lock(self):
+        # The checkout lock exists to catch one checkout started twice. A
+        # linked worktree is that same checkout, and solve and review agents
+        # work in linked worktrees, so it has to resolve the same file.
+        self.assertEqual(
+            service.checkout_lock_path(self.linked),
+            service.checkout_lock_path(self.primary),
+        )
+        self.assertEqual(
+            service.checkout_lock_path(self.linked),
+            self.primary / ".git" / service.RUN_LOCK_NAME,
+        )
+
     def test_a_checkout_with_no_resolvable_shared_directory_fails_closed(self):
         broken = self.root / "broken"
         broken.mkdir()
@@ -578,6 +618,26 @@ class PerIdentityPartitioningTests(ApprovalFixture):
         ):
             self.assertEqual(self.job().lock_path, expected)
             self.assertEqual(service.service_root(), expected.parent.parent)
+
+    def test_the_checkout_lock_cannot_be_moved_by_the_environment_at_all(self):
+        # The identity lock is under `$HOME`, which a process chooses. The
+        # checkout lock is in the repository, which it does not.
+        expected = service.checkout_lock_path(self.repo)
+        self.assertEqual(expected, self.repo / ".git" / service.RUN_LOCK_NAME)
+        # Beside the backend's lock but never the same file: the two are held
+        # for different things.
+        self.assertNotEqual(expected, service.approval_lock_path(self.repo))
+        with mock.patch.dict(
+            os.environ,
+            {
+                "HOME": str(self.root / "another-home"),
+                "KANBAN_ISSUE_APPROVAL_INSTALL_DIR": str(self.root / "elsewhere"),
+            },
+        ):
+            self.assertEqual(service.checkout_lock_path(self.repo), expected)
+            # ... while the identity lock really did move, which is why the
+            # checkout lock has to exist.
+            self.assertNotEqual(self.job().lock_path, expected)
 
     def test_the_run_lock_does_not_follow_a_relocated_runtime(self):
         # IAQ-3 owns installation and may relocate the runtime. If the lock
@@ -1344,6 +1404,70 @@ class SingleRunTests(ApprovalFixture):
         first.send_signal(signal.SIGTERM)
         code, _out, _err = self.finish(first)
         self.assertEqual(code, 0)
+
+    def test_a_second_run_under_a_different_home_is_refused_too(self):
+        # `$HOME` is a process's to choose, so an identity lock anchored to it
+        # is not by itself proof of a single run: two invocations for one
+        # checkout would take two locks, both start, and alternate passes as
+        # each released the canonical approval lock between issues. The
+        # checkout lock lives in the repository instead, which no environment
+        # can move.
+        self.write_plan([{"outcome": "idle"}])
+        first = self.start_controller()
+        wait_until(lambda: len(self.queue_calls()) >= 1, message="the first run to poll")
+
+        elsewhere = self.root / "another-home"
+        elsewhere.mkdir()
+        second = subprocess.Popen(
+            self.controller_argv("run", "--interval", "0.01"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, "HOME": str(elsewhere)},
+        )
+        self.processes.append(second)
+        _out, err = second.communicate(timeout=60)
+        self.assertEqual(second.returncode, 1)
+        self.assertIn("already running for the checkout at", err)
+        self.assertIn(str(self.repo), err)
+        # It really did resolve a different root, and still could not start.
+        self.assertFalse((elsewhere / "Library").exists())
+        self.assertNotIn(second.pid, {call["ppid"] for call in self.calls()})
+        self.assertEqual(self.incidents(), [])
+
+        first.send_signal(signal.SIGTERM)
+        self.assertEqual(self.finish(first)[0], 0)
+
+    def test_a_second_run_from_a_linked_worktree_is_refused_too(self):
+        # A linked worktree is the same checkout by every measure that
+        # matters: it shares the Git directory the checkout lock lives in.
+        self.write_plan([{"outcome": "idle"}])
+        first = self.start_controller()
+        wait_until(lambda: len(self.queue_calls()) >= 1, message="the first run to poll")
+
+        second = subprocess.Popen(
+            [
+                sys.executable,
+                str(CONTROLLER),
+                "--path",
+                str(self.worktree()),
+                "run",
+                "--interval",
+                "0.01",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=dict(os.environ),
+        )
+        self.processes.append(second)
+        _out, err = second.communicate(timeout=60)
+        self.assertEqual(second.returncode, 1)
+        self.assertIn("already running for the checkout at", err)
+        self.assertNotIn(second.pid, {call["ppid"] for call in self.calls()})
+
+        first.send_signal(signal.SIGTERM)
+        self.assertEqual(self.finish(first)[0], 0)
 
     def test_a_second_clone_of_one_repository_is_refused_too(self):
         # The canonical approval lock cannot catch this: two clones have two

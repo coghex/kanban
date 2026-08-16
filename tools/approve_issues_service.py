@@ -50,7 +50,7 @@ import sys
 import tempfile
 import time
 import traceback
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -89,6 +89,11 @@ BACKEND_NAME = "approve_issues.py"
 # resolution `approval_lock_path` below performs, which is compared against the
 # backend's own function rather than restated in prose.
 APPROVAL_LOCK_NAME = "approve_issues.lock"
+# This controller's own lock, beside it in the same shared Git directory and
+# named so it can never be mistaken for the backend's. Kept distinct because
+# the two mean different things: the backend's is held for one issue's review,
+# this one for a whole run.
+RUN_LOCK_NAME = "kanban_issue_approval_run.lock"
 # `--check`'s two ordinary exits: approved, and gated. Everything else is a
 # failure of the check rather than an answer from it.
 GATE_APPROVED_EXIT = 0
@@ -176,20 +181,23 @@ class BackendFailure(ServiceError):
 def service_root() -> Path:
     """This service's one root for this account.
 
-    There is deliberately no environment or flag override. The run lock that
-    makes one canonical identity run one controller hangs off this root, so a
-    root a caller could move is a root that lets two runs for one repository
-    both start -- each taking its own lock, writing its own status, and
-    alternating backend passes as the other releases the canonical approval
-    lock between issues. A configurable location cannot serialize anything a
-    configuration can change.
+    There is deliberately no environment or flag override. The identity lock
+    that keeps two clones of one GitHub repository from both running hangs off
+    this root, so a root a caller could move is a root that lets two runs both
+    start -- each taking its own lock, writing its own status, and alternating
+    backend passes as the other releases the canonical approval lock between
+    issues. A configurable location cannot serialize anything a configuration
+    can change.
+
+    `Path.home()` still reads `$HOME`, which one OS account can be given two
+    values of, so this root is not by itself proof of a single run. That is
+    what `checkout_lock_path` is for: it is anchored to the repository, and
+    `run_lock` holds both.
 
     Resolved per call rather than frozen at import, exactly as
     `kanban_config.default_issue_review_install_dir` is and for the same
     reason: freezing it would bind whatever `$HOME` held when the module first
-    loaded, which any process that changes it would then silently escape. That
-    leaves the user account as the one boundary this root varies across, which
-    is the boundary it should vary across.
+    loaded, which any process that changes it would then silently escape.
     """
     return Path.home() / "Library" / "Application Support" / "kanban" / "issue-approval"
 
@@ -205,13 +213,16 @@ def runtime_root() -> Path:
 
 
 def run_lock_path(slug: str) -> Path:
-    """The one lock a `run` takes for one canonical identity.
+    """The lock a `run` takes for one canonical identity.
 
     Anchored to `service_root` rather than to the runtime root, and named by
-    the identity rather than by the checkout, so every controller for one
-    GitHub repository contends for one file however it was started: from a
-    second clone, from a linked worktree, or -- if the runtime ever becomes
-    relocatable -- from a second installation.
+    the identity rather than by the checkout, so two *clones* of one GitHub
+    repository contend here even though they share no Git directory -- and so
+    would a second installation, if the runtime ever became relocatable.
+
+    One of the two locks `run_lock` holds, not the whole guarantee: this one
+    is under `$HOME`, and `checkout_lock_path` covers the invocations that
+    differ in it.
     """
     return service_root() / "locks" / f"{slug}.lock"
 
@@ -576,29 +587,27 @@ def pinned_version(value: Any, expected: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def approval_lock_path(repo_path: Path) -> Path:
-    """Where `approve_issues.acquire_lock` takes the canonical approval lock.
+def shared_git_dir(repo_path: Path) -> Path:
+    """The Git directory every checkout of this repository shares.
 
-    Resolved exactly as `approve_issues.approval_lock_path` resolves it,
-    because this has to inspect the very file the backend contends for and any
-    other answer would inspect a different one: the lock lives in the
-    repository's *shared* Git directory, which is `.git/` in an ordinary
-    checkout and the primary checkout's `.git/` for a linked worktree, whose
-    own `.git` is a regular file.
+    `.git/` in an ordinary checkout, and the primary checkout's `.git/` for a
+    linked worktree, whose own `.git` is a regular file. Resolved exactly as
+    `approve_issues.approval_lock_path` resolves it, because the canonical
+    approval lock below has to be the very file the backend contends for and
+    any other answer would name a different one.
 
     The *common* directory, not `--absolute-git-dir`: the latter answers a
-    linked worktree's own private `.git/worktrees/<name>`, and a lock no other
-    checkout can see is not the lock the backend takes. Git is asked only when
-    `.git` is not a directory, which leaves an ordinary checkout's answer free
-    of any subprocess.
+    linked worktree's own private `.git/worktrees/<name>`, which no other
+    checkout can see. Git is asked only when `.git` is not a directory, which
+    leaves an ordinary checkout's answer free of any subprocess.
 
     Fails closed. A checkout whose shared directory cannot be resolved has no
-    canonical lock location, and guessing one would make the start-time
-    refusal below inspect a file nobody ever takes.
+    location every checkout of it agrees on, and guessing one would give both
+    locks below a file nobody else ever takes.
     """
     entry = repo_path / ".git"
     if entry.is_dir():
-        return entry / APPROVAL_LOCK_NAME
+        return entry
     proc = run_command(
         ["git", "-C", str(repo_path), "rev-parse", "--git-common-dir"], check=False
     )
@@ -620,7 +629,31 @@ def approval_lock_path(repo_path: Path) -> Path:
         # checkout. Left unanchored the lock would move with the calling
         # process's working directory, which is the shared location's point.
         common = repo_path / common
-    return common / APPROVAL_LOCK_NAME
+    return common
+
+
+def approval_lock_path(repo_path: Path) -> Path:
+    """Where `approve_issues.acquire_lock` takes the canonical approval lock."""
+    return shared_git_dir(repo_path) / APPROVAL_LOCK_NAME
+
+
+def checkout_lock_path(repo_path: Path) -> Path:
+    """This repository's own run lock, in a location no environment can move.
+
+    The per-identity lock under `service_root` is anchored to `Path.home()`,
+    which reads `$HOME` -- so two processes under one OS account can be given
+    different values for it and each take a lock of its own. This one is
+    anchored to the repository instead: every invocation naming this checkout
+    resolves the same shared Git directory whatever `$HOME`, install root, or
+    working directory it was started with, and a linked worktree resolves the
+    primary checkout's.
+
+    The two are complementary rather than redundant, and `run_lock` takes both.
+    This one catches one checkout started twice however the environment
+    differs; the identity lock catches two *clones* of one GitHub repository,
+    which have two Git directories and would never contend here.
+    """
+    return shared_git_dir(repo_path) / RUN_LOCK_NAME
 
 
 def approval_lock_owner(repo_path: Path) -> dict[str, Any] | None:
@@ -738,43 +771,39 @@ def require_no_legacy_daemon(repo_path: Path) -> None:
         )
 
 
+def describe_run_owner(owner: dict[str, Any]) -> str:
+    """Where and what the controller already holding a run lock is."""
+    pid = owner.get("pid")
+    where = owner.get("repo")
+    detail = f" (PID {pid})" if is_plain_integer(pid) else ""
+    from_where = f" from {where}" if isinstance(where, str) and where else ""
+    return f"{from_where}{detail}"
+
+
 @contextlib.contextmanager
-def run_lock(job: ApprovalJob) -> Iterator[None]:
-    """Hold this repository's single-run lock, or refuse.
+def held_exclusively(
+    path: Path, job: ApprovalJob, refusal: Callable[[str], str]
+) -> Iterator[None]:
+    """Hold one non-blocking exclusive lock, or refuse with `refusal`.
 
-    Only one `run` may own a canonical identity at a time. The backend's own
-    approval lock cannot provide that guarantee, because the whole point of a
-    bounded pass is that the lock is released between issues -- two controllers
-    would simply take turns, interleaving their passes while both wrote the one
-    per-identity status document and both opened incidents against it.
+    `refusal` is called with a description of the owner rather than
+    interpolated into, so no repository path can be read as a format field.
 
-    Taken before any status or incident is written, so a refused second run
-    changes nothing the first run owns -- including a first run whose runtime
-    is somewhere this one would never look, since the lock is named by the
-    identity alone.
+    The losing contender closes without truncating, so it cannot erase the
+    owner's own diagnostic metadata -- the discipline
+    `approve_issues.acquire_lock` follows for the canonical lock.
     """
-    job.lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
-        handle = open(job.lock_path, "a+", encoding="utf-8")
+        handle = open(path, "a+", encoding="utf-8")
     except OSError as exc:
-        raise ServiceError(f"Could not open the run lock at {job.lock_path}: {exc}") from exc
+        raise ServiceError(f"Could not open the run lock at {path}: {exc}") from exc
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
         owner = _read_lock_owner(handle)
         handle.close()
-        pid = owner.get("pid")
-        where = owner.get("repo")
-        detail = f" (PID {pid})" if is_plain_integer(pid) else ""
-        from_where = f" from {where}" if isinstance(where, str) and where else ""
-        # Closed without truncating: the losing contender must not erase the
-        # owner's own diagnostic metadata, which is the discipline
-        # `approve_issues.acquire_lock` follows for the canonical lock.
-        raise ServiceError(
-            f"An issue approval controller for {job.identity} is already "
-            f"running{from_where}{detail}. One repository runs one controller "
-            "at a time."
-        ) from exc
+        raise ServiceError(refusal(describe_run_owner(owner))) from exc
     except OSError:
         handle.close()
         raise
@@ -801,6 +830,52 @@ def run_lock(job: ApprovalJob) -> Iterator[None]:
             handle.truncate()
             handle.flush()
         handle.close()
+
+
+@contextlib.contextmanager
+def run_lock(job: ApprovalJob) -> Iterator[None]:
+    """Hold both of this run's exclusivity locks, or refuse.
+
+    Only one `run` may own a canonical identity at a time. The backend's own
+    approval lock cannot provide that guarantee, because the whole point of a
+    bounded pass is that the lock is released between issues -- two controllers
+    would simply take turns, interleaving their passes while both wrote a
+    status document and both opened incidents.
+
+    It takes two locks because one location cannot see both ways a second run
+    arrives. The checkout lock lives in the repository's shared Git directory,
+    so every invocation naming this checkout contends however its environment
+    differs -- a different `$HOME`, a different install root, a linked
+    worktree. The identity lock lives under this account's service root and is
+    named by `owner/name`, so two *clones* of one GitHub repository contend
+    even though they have two Git directories and would never meet in the
+    first one.
+
+    Both are non-blocking and taken in a fixed order, so a contended start
+    fails immediately rather than waiting, and no two runs can deadlock.
+
+    Taken before any status or incident is written, so a refused second run
+    changes nothing the first run owns -- including a first run whose runtime
+    is somewhere this one would never look.
+    """
+    with held_exclusively(
+        checkout_lock_path(job.repo_path),
+        job,
+        lambda owner: (
+            f"An issue approval controller for {job.identity} is already running "
+            f"for the checkout at {job.repo_path}{owner}. One checkout runs one "
+            "controller at a time."
+        ),
+    ):
+        with held_exclusively(
+            job.lock_path,
+            job,
+            lambda owner: (
+                f"An issue approval controller for {job.identity} is already "
+                f"running{owner}. One repository runs one controller at a time."
+            ),
+        ):
+            yield
 
 
 # ---------------------------------------------------------------------------
