@@ -8,12 +8,15 @@ module Kanban.Usage.Render
     UsageReport (..),
     formatUsageDuration,
     renderUsageReport,
+    usageDurationDayBound,
     usageProviderKey,
     usageProviderName,
     usageReportDocument,
     usageReportProduced,
+    usageResetCountdownText,
     usageResetLocalText,
     usageRfc3339,
+    usageSnapshotAgeText,
   )
 where
 
@@ -68,7 +71,7 @@ renderEntry zone now (provider, outcome) = usageProviderName provider : body
     body = case outcome of
       UsageFailed message -> ["  unavailable: " <> message]
       UsageAvailable snapshot ->
-        windowLines snapshot <> ["  snapshot " <> formatUsageDuration (diffUTCTime now snapshot.usageFetchedAt) <> " old"]
+        windowLines snapshot <> ["  snapshot " <> usageSnapshotAgeText (diffUTCTime now snapshot.usageFetchedAt)]
     windowLines snapshot
       | null snapshot.usageWindows = ["  no usage windows reported"]
       | otherwise = map (renderWindowLine zone now (labelWidth snapshot)) snapshot.usageWindows
@@ -84,11 +87,28 @@ renderWindowLine zone now width window =
     <> Text.justifyLeft width ' ' window.usageWindowLabel
     <> "  "
     <> Text.justifyRight 3 ' ' (Text.pack (show window.usagePercentLeft))
-    <> "% left · resets in "
-    <> formatUsageDuration (diffUTCTime window.usageResetsAt now)
+    <> "% left · resets "
+    <> usageResetCountdownText (diffUTCTime window.usageResetsAt now)
     <> " ("
     <> usageResetLocalText zone window.usageResetsAt
     <> ")"
+
+-- | How long until a window resets, in the one wording both the @--usage@
+-- line and the sidebar's reset row state it in.
+--
+-- A reset instant already behind the clock is named rather than counted down
+-- to. 'formatUsageDuration' clamps at zero, so an elapsed reset would
+-- otherwise read @in 0s@ — a countdown to an instant that has passed, which
+-- says something false about a window whose reset is overdue.
+usageResetCountdownText :: NominalDiffTime -> Text
+usageResetCountdownText remaining
+  | remaining <= 0 = "due now"
+  | otherwise = "in " <> formatUsageDuration remaining
+
+-- | How old the snapshot being displayed is, in the one wording both surfaces
+-- state it in.
+usageSnapshotAgeText :: NominalDiffTime -> Text
+usageSnapshotAgeText age = formatUsageDuration age <> " old"
 
 -- | A reset instant as a local wall clock, in the same shape the sidebar
 -- already prints.
@@ -101,8 +121,15 @@ usageResetLocalText zone instant =
 -- 'UsageWindow' and 'UsageSnapshot' store unrestricted 'UTCTime' values, and
 -- the clock is an input rather than the one that wrote them — and neither
 -- should ever render as a negative countdown or a negative age.
+--
+-- They are bounded above for the same reason they are clamped below: nothing
+-- restricts how distant a decoded @resets_at@ may be, so a duration counted
+-- out in full would widen without limit.  Past 'usageDurationDayBound' days
+-- the count gives way to a bound, which caps this at the seven cells of
+-- @99d 23h@ — the figure the sidebar's fixed interior is budgeted against.
 formatUsageDuration :: NominalDiffTime -> Text
 formatUsageDuration difference
+  | days > usageDurationDayBound = ">" <> Text.pack (show usageDurationDayBound) <> "d"
   | days > 0 = Text.pack (show days) <> "d " <> Text.pack (show hours) <> "h"
   | hours > 0 = Text.pack (show hours) <> "h " <> Text.pack (show minutes) <> "m"
   | minutes > 0 = Text.pack (show minutes) <> "m"
@@ -113,6 +140,11 @@ formatUsageDuration difference
     hours = (total `mod` 86400) `div` 3600
     minutes = (total `mod` 3600) `div` 60
     seconds = total `mod` 60
+
+-- | The largest number of whole days 'formatUsageDuration' counts out before
+-- reporting a bound instead.
+usageDurationDayBound :: Integer
+usageDurationDayBound = 99
 
 -- | The @--json@ document.  Its shape is a contract for scripts: lowercase
 -- provider keys, an explicit @status@ discriminator so a failed provider is

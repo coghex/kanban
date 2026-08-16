@@ -1,15 +1,15 @@
 ╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
 ║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
-║┃ Codex                    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ Codex          3h 0m old ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃ 5 hour  [██████░░░░] 63% ┃┃                                          ┃                                         ┃  STANDALONE                             ┃  STANDALONE                             ┃║
-║┃         Thu 16:05        ┃┃  ▾ #700  Persistence contract rollout    ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ in 1h 5m · Thu 16:05     ┃┃  ▾ #700  Persistence contract rollout    ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃ week    [████░░░░░░] 41% ┃┃  1/2 complete                            ┃  1/2 complete                           ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
-║┃         Tue 09:00        ┃┃  └─ ╭──────────────────────────────────╮ ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
-║┃ Claude                   ┃┃     │ A1 · tracker #7┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       │ ┃  │  reviewed:approve                  │ ┃║
+║┃ in 4d 18h · Tue 09:00    ┃┃  └─ ╭──────────────────────────────────╮ ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
+║┃ Claude         3h 0m old ┃┃     │ A1 · tracker #7┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       │ ┃  │  reviewed:approve                  │ ┃║
 ║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the ┃                                                                                             ┃       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
-║┃         Thu 17:30        ┃┃     │ envelope       ┃ j / Down             next card                                                              ┃       │ ┃  │ updated 3h ago                     │ ┃║
+║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope       ┃ j / Down             next card                                                              ┃       │ ┃  │ updated 3h ago                     │ ┃║
 ║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature       ┃ k / Up               previous card                                                          ┃to     │ ┃  │ Updates the branch after the       │ ┃║
-║┃         Sat 09:10        ┃┃     │ unassigned · up┃ x                    kill selected working process tree                                     ┃ng the │ ┃  │ persistence registry changed on    │ ┃║
+║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · up┃ x                    kill selected working process tree                                     ┃ng the │ ┃  │ persistence registry changed on    │ ┃║
 ║┃                          ┃┃     │ Write the envel┃ h / Left             previous column                                                        ┃       │ ┃  │ master.                            │ ┃║
 ║┃                          ┃┃     │ of the payload ┃ l / Right            next column                                                            ┃       │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
 ║┃                          ┃┃     │ write is detect┃ g                    first visible item in the column                                       ┃───────╯ ┃  ╰────────────────────────────────────╯ ┃║

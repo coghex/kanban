@@ -16,6 +16,10 @@ module Kanban.UI.Board
     solvePhaseGlyph,
     solvePhaseGlyphFor,
     trackerHeaderText,
+    usageAgeText,
+    usageResetRowText,
+    usageSidebarInterior,
+    usageSidebarWidth,
   )
 where
 
@@ -39,7 +43,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (UTCTime, defaultTimeLocale, formatTime, utcToZonedTime)
+import Data.Time (TimeZone, UTCTime, diffUTCTime)
 import Kanban.CLI (Options (..))
 import Kanban.Card
   ( CardChip (..),
@@ -57,6 +61,7 @@ import Kanban.Drainer
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
+import Kanban.Usage.Render (usageResetCountdownText, usageResetLocalText, usageSnapshotAgeText)
 import Kanban.Workflow (entryItem, isApproved, isProblem, itemLifecycleBadge, orderCardLabels )
 import Kanban.UI.Types
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), actionKeyText, footerHint, scopeBindings)
@@ -79,10 +84,21 @@ drawBase state
         . txt
         $ " " <> repository.repositoryOwner <> "/" <> repository.repositoryName <> " "
     body
-      | state.appSidebarVisible && usesOpenBorders state = hLimit 28 (drawUsage state) <+> str "  " <+> drawBoard state
-      | state.appSidebarVisible = hLimit 28 (drawUsage state) <+> drawBoard state
+      | state.appSidebarVisible && usesOpenBorders state = hLimit usageSidebarWidth (drawUsage state) <+> str "  " <+> drawBoard state
+      | state.appSidebarVisible = hLimit usageSidebarWidth (drawUsage state) <+> drawBoard state
       | otherwise = drawBoard state
     footer = drawFooter state
+
+-- | The sidebar's drawn width, which §6 fixes at 28 cells and derives the
+-- 164-cell four-column threshold from.
+usageSidebarWidth :: Int
+usageSidebarWidth = 28
+
+-- | The cells a sidebar row actually has to itself: the drawn width less the
+-- box border and the one-cell padding on each side. Every row 'drawProvider'
+-- composes is budgeted against this.
+usageSidebarInterior :: Int
+usageSidebarInterior = usageSidebarWidth - 4
 
 drawUsage :: AppState -> Widget Name
 drawUsage state
@@ -136,19 +152,42 @@ drawDrainerButton state =
 drainerLabel :: Text
 drainerLabel = " drain_prs.py "
 
+-- | One provider's block: its name, then either the status standing in for
+-- windows it has none of, or its windows and whatever status still qualifies
+-- them.
+--
+-- The name shares its row with the age of the snapshot being drawn. That age
+-- is a property of the snapshot, so it is drawn whenever one is, and never
+-- gated on 'Freshness': 'Kanban.UI.initialUsageState' labels a snapshot
+-- restored from the cache @Fresh@ at whatever instant it was written, so
+-- gating on the constructor would hide the age in exactly the case it exists
+-- for — a board opened on numbers days old.
 drawProvider :: AppState -> UsageProvider -> Widget Name
 drawProvider state provider =
   vBox
-    ( withAttr providerAttr (txt providerName)
-        : case Map.lookup provider state.appUsage of
-          Nothing -> [withAttr (usageStatusAttribute freshness) (txtWrap (usageStatusText provider freshness))]
-          Just snapshot -> map (drawUsageWindow state) snapshot.usageWindows <> usageSnapshotStatus freshness
+    ( case Map.lookup provider state.appUsage of
+        Nothing ->
+          [ withAttr providerAttr (txt providerName),
+            withAttr (usageStatusAttribute freshness) (txtWrap (usageStatusText provider freshness))
+          ]
+        Just snapshot ->
+          providerHeading snapshot
+            : map (drawUsageWindow state) snapshot.usageWindows
+            <> usageSnapshotStatus freshness
     )
   where
     freshness = Map.findWithDefault NotLoaded provider state.appUsageFreshness
     providerName = case provider of
       Codex -> "Codex"
       Claude -> "Claude"
+    providerHeading snapshot =
+      withAttr providerAttr (txt providerName)
+        <+> padLeft Max (withAttr dimAttr (txt (usageAgeText state.appNow snapshot)))
+
+-- | How old the snapshot on screen is, in the wording @kanban --usage@ prints
+-- it in, measured against the instant the frame is drawn for.
+usageAgeText :: UTCTime -> UsageSnapshot -> Text
+usageAgeText now snapshot = usageSnapshotAgeText (diffUTCTime now snapshot.usageFetchedAt)
 
 usageSnapshotStatus :: Freshness -> [Widget Name]
 usageSnapshotStatus Loading = [withAttr noticeAttr (txt "refreshing…")]
@@ -167,8 +206,24 @@ drawUsageWindow :: AppState -> UsageWindow -> Widget Name
 drawUsageWindow state usageWindow =
   vBox
     [ txt (padLabel usageWindow.usageWindowLabel <> " " <> usageBar state usageWindow.usagePercentLeft),
-      withAttr dimAttr . txt $ "        " <> Text.pack (formatTime defaultTimeLocale "%a %H:%M" (utcToZonedTime state.appTimeZone usageWindow.usageResetsAt))
+      withAttr dimAttr (txt (usageResetRowText state.appTimeZone state.appNow usageWindow))
     ]
+
+-- | A window's second row: how long until it resets, then the wall clock it
+-- resets at.
+--
+-- The countdown takes the indent this row used to open with rather than a
+-- third row, because the percentage row above already spends all
+-- 'usageSidebarInterior' cells and the sidebar's height per provider is
+-- fixed. Both halves are bounded — 'usageResetCountdownText' by
+-- 'Kanban.Usage.Render.usageDurationDayBound' and the wall clock by its
+-- format — so the row fits that interior for any instant a provider reports,
+-- including one already behind the clock.
+usageResetRowText :: TimeZone -> UTCTime -> UsageWindow -> Text
+usageResetRowText zone now usageWindow =
+  usageResetCountdownText (diffUTCTime usageWindow.usageResetsAt now)
+    <> " · "
+    <> usageResetLocalText zone usageWindow.usageResetsAt
 
 usageBar :: AppState -> Int -> Text
 usageBar state percentage =
