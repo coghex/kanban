@@ -83,6 +83,12 @@ BACKEND_OUTCOMES = frozenset(
 # the queue and carry no number.
 BACKEND_ISSUE_OUTCOMES = frozenset({"advanced", "changes_requested", "retry"})
 BACKEND_NAME = "approve_issues.py"
+# The canonical approval lock's file name, inside the repository's shared Git
+# directory. Mirrored from `approve_issues.APPROVAL_LOCK_NAME` for the reason
+# the module docstring gives, and held equal to it by a test -- as is the
+# resolution `approval_lock_path` below performs, which is compared against the
+# backend's own function rather than restated in prose.
+APPROVAL_LOCK_NAME = "approve_issues.lock"
 # `--check`'s two ordinary exits: approved, and gated. Everything else is a
 # failure of the check rather than an answer from it.
 GATE_APPROVED_EXIT = 0
@@ -549,11 +555,48 @@ def pinned_version(value: Any, expected: int) -> bool:
 def approval_lock_path(repo_path: Path) -> Path:
     """Where `approve_issues.acquire_lock` takes the canonical approval lock.
 
-    Spelled exactly as the backend spells it, including its naive join onto
-    `.git`: this has to inspect the very file the backend contends for, and a
-    cleverer resolution here would inspect a different one.
+    Resolved exactly as `approve_issues.approval_lock_path` resolves it,
+    because this has to inspect the very file the backend contends for and any
+    other answer would inspect a different one: the lock lives in the
+    repository's *shared* Git directory, which is `.git/` in an ordinary
+    checkout and the primary checkout's `.git/` for a linked worktree, whose
+    own `.git` is a regular file.
+
+    The *common* directory, not `--absolute-git-dir`: the latter answers a
+    linked worktree's own private `.git/worktrees/<name>`, and a lock no other
+    checkout can see is not the lock the backend takes. Git is asked only when
+    `.git` is not a directory, which leaves an ordinary checkout's answer free
+    of any subprocess.
+
+    Fails closed. A checkout whose shared directory cannot be resolved has no
+    canonical lock location, and guessing one would make the start-time
+    refusal below inspect a file nobody ever takes.
     """
-    return repo_path / ".git" / "approve_issues.lock"
+    entry = repo_path / ".git"
+    if entry.is_dir():
+        return entry / APPROVAL_LOCK_NAME
+    proc = run_command(
+        ["git", "-C", str(repo_path), "rev-parse", "--git-common-dir"], check=False
+    )
+    answer = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not answer:
+        detail = (proc.stderr or "").strip() or (
+            f"exit code {proc.returncode}"
+            if proc.returncode != 0
+            else "it printed nothing"
+        )
+        raise ServiceError(
+            f"Could not resolve the shared Git directory for {repo_path}, so the "
+            "canonical approval lock has no location every checkout of this "
+            f"repository shares: git rev-parse --git-common-dir {detail}"
+        )
+    common = Path(answer)
+    if not common.is_absolute():
+        # Git answers relative to the directory it ran in, which `-C` made this
+        # checkout. Left unanchored the lock would move with the calling
+        # process's working directory, which is the shared location's point.
+        common = repo_path / common
+    return common / APPROVAL_LOCK_NAME
 
 
 def approval_lock_owner(repo_path: Path) -> dict[str, Any] | None:
@@ -567,23 +610,16 @@ def approval_lock_owner(repo_path: Path) -> dict[str, Any] | None:
     `approve_issues.acquire_lock` follows.
 
     Raises rather than answering when the lock cannot be inspected at all --
-    the file is a directory, `.git` is a file because this is a linked
-    worktree, permissions refuse it. "Absent" and "unusable" are different
-    answers, and reporting the second as the first is how a start-time refusal
-    silently stops refusing.
+    an unresolvable shared Git directory, a path that is not a regular file,
+    permissions that refuse it. "Absent" and "unusable" are different answers,
+    and reporting the second as the first is how a start-time refusal silently
+    stops refusing.
     """
     path = approval_lock_path(repo_path)
     if not os.path.lexists(path):
         # Verifiably nobody: the backend creates this file whenever it runs, so
         # its absence means no owner. Answered without creating it, because a
         # check must leave the checkout exactly as it found it.
-        if not path.parent.is_dir():
-            raise ServiceError(
-                f"Could not inspect the canonical approval lock at {path}: "
-                f"{path.parent} is not a directory, so this checkout does not "
-                "hold the lock the backend takes. Run the controller from the "
-                "repository's primary checkout."
-            )
         return None
     try:
         handle = open(path, "a+", encoding="utf-8")

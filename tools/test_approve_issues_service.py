@@ -27,6 +27,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import approve_issues
@@ -394,21 +395,100 @@ class MirroredBackendContractTests(unittest.TestCase):
             service.BACKEND_ISSUE_OUTCOMES, approve_issues.REVIEW_QUEUE_ISSUE_OUTCOMES
         )
 
-    def test_the_lock_this_controller_inspects_is_the_one_the_backend_takes(self):
-        # Spelled independently in two modules; a backend that moved its lock
-        # would leave the start-time refusal inspecting a file nobody takes.
-        source = (Path(approve_issues.__file__)).read_text(encoding="utf-8")
-        self.assertIn('".git" / "approve_issues.lock"', source)
-        self.assertEqual(
-            service.approval_lock_path(Path("/tmp/repo")),
-            Path("/tmp/repo/.git/approve_issues.lock"),
-        )
+    def test_the_lock_file_name_matches_the_backends(self):
+        self.assertEqual(service.APPROVAL_LOCK_NAME, approve_issues.APPROVAL_LOCK_NAME)
 
     def test_the_daemon_owner_mode_matches_what_the_backend_records(self):
         # The refusal keys on this exact mode string, which the backend writes
         # when the untracked background daemon takes the lock.
-        self.assertIn('acquire_lock(ctx, mode="daemon")', Path(approve_issues.__file__).read_text(encoding="utf-8"))
+        self.assertIn(
+            'acquire_lock(ctx, mode="daemon")',
+            Path(approve_issues.__file__).read_text(encoding="utf-8"),
+        )
         self.assertTrue(service.is_legacy_daemon({"mode": "daemon"}))
+
+
+class MirroredLockResolutionTests(unittest.TestCase):
+    """The controller and the backend must resolve one file.
+
+    Compared by running both functions against real checkouts rather than by
+    matching source text: the backend resolves a linked worktree's lock through
+    the shared Git directory, and a controller that resolved anything else
+    would inspect a file nobody ever takes -- silently retiring the start-time
+    refusal exactly where solve and review agents actually work.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        # Resolved, because git answers with the real path and the temporary
+        # root reaches it through a symlink on macOS. Nothing here is about
+        # that difference.
+        self.root = Path(self.tmp.name).resolve()
+        self.environment = {
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": str(self.root / "gitconfig"),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        (self.root / "gitconfig").write_text("", encoding="utf-8")
+        self.primary = self.root / "primary"
+        self.git("init", "-q", str(self.primary))
+        self.git("-C", str(self.primary), "config", "user.email", "fixture@example.com")
+        self.git("-C", str(self.primary), "config", "user.name", "Fixture")
+        (self.primary / "README").write_text("fixture\n", encoding="utf-8")
+        self.git("-C", str(self.primary), "add", "README")
+        self.git("-C", str(self.primary), "commit", "-q", "-m", "fixture")
+        self.linked = self.root / "linked"
+        self.git(
+            "-C", str(self.primary), "worktree", "add", "-q", "-b", "side", str(self.linked)
+        )
+
+    def git(self, *arguments):
+        return subprocess.run(
+            ["git", *arguments], check=True, capture_output=True, env=self.environment
+        )
+
+    def backend_answer(self, path):
+        # `approve_issues.approval_lock_path` reads only `ctx.path`.
+        return approve_issues.approval_lock_path(SimpleNamespace(path=path))
+
+    def test_an_ordinary_checkout_resolves_the_same_lock(self):
+        self.assertEqual(
+            service.approval_lock_path(self.primary), self.backend_answer(self.primary)
+        )
+        self.assertEqual(
+            service.approval_lock_path(self.primary),
+            self.primary / ".git" / approve_issues.APPROVAL_LOCK_NAME,
+        )
+
+    def test_a_linked_worktree_resolves_the_primary_checkouts_lock(self):
+        # `.git` here is a regular file, and the private
+        # `.git/worktrees/<name>` the other resolution would answer is not a
+        # lock any other checkout can see.
+        self.assertFalse((self.linked / ".git").is_dir())
+        answer = service.approval_lock_path(self.linked)
+        self.assertEqual(answer, self.backend_answer(self.linked))
+        self.assertEqual(answer, self.primary / ".git" / approve_issues.APPROVAL_LOCK_NAME)
+        self.assertEqual(answer, service.approval_lock_path(self.primary))
+
+    def test_a_checkout_with_no_resolvable_shared_directory_fails_closed(self):
+        broken = self.root / "broken"
+        broken.mkdir()
+        (broken / ".git").write_text("gitdir: /nowhere/at/all\n", encoding="utf-8")
+        with self.assertRaises(service.ServiceError) as raised:
+            service.approval_lock_path(broken)
+        self.assertIn("shared Git directory", str(raised.exception))
+
+    def test_a_daemon_holding_the_primary_lock_is_seen_from_the_linked_worktree(self):
+        holder = LockHolder(self.linked, "daemon")
+        self.addCleanup(holder.close)
+        self.assertEqual(holder.path.parent, self.primary / ".git")
+        owner = service.approval_lock_owner(self.primary)
+        self.assertTrue(service.is_legacy_daemon(owner))
+        with self.assertRaises(service.ServiceError):
+            service.require_no_legacy_daemon(self.linked)
+        with self.assertRaises(service.ServiceError):
+            service.require_no_legacy_daemon(self.primary)
 
 
 # ---------------------------------------------------------------------------
@@ -1085,11 +1165,16 @@ class BarrierIncidentTests(ApprovalFixture):
 
 class LockHolder:
     """Another process holding the canonical approval lock, as the backend and
-    the untracked legacy daemon both hold it."""
+    the untracked legacy daemon both hold it.
+
+    Resolved through the same function the controller uses, so a holder started
+    against a linked worktree really takes the primary checkout's lock rather
+    than a private file beside it.
+    """
 
     def __init__(self, repo, mode):
-        path = repo / ".git" / "approve_issues.lock"
-        ready = repo / f".git/holder-{mode}-ready"
+        path = service.approval_lock_path(repo)
+        ready = path.with_name(f"holder-{mode}-ready")
         source = (
             "import fcntl, json, os, sys, time\n"
             "handle = open(sys.argv[1], 'a+', encoding='utf-8')\n"
@@ -1120,16 +1205,15 @@ class ApprovalLockInspectionTests(ApprovalFixture):
         self.assertIsNone(service.approval_lock_owner(self.repo))
         self.assertFalse((self.repo / ".git" / "approve_issues.lock").exists())
 
-    def test_a_checkout_whose_git_entry_is_a_file_refuses_rather_than_answering(self):
-        # A linked worktree's `.git` is a file, so the lock the backend takes
-        # is not reachable from here at all. Reporting that as "nobody holds
-        # it" would silently retire the start-time refusal.
-        linked = self.root / "linked"
-        linked.mkdir()
-        (linked / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+    def test_a_checkout_with_no_resolvable_shared_directory_refuses_to_answer(self):
+        # Reporting an unresolvable lock as "nobody holds it" would silently
+        # retire the start-time refusal.
+        broken = self.root / "broken"
+        broken.mkdir()
+        (broken / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
         with self.assertRaises(service.ServiceError) as raised:
-            service.approval_lock_owner(linked)
-        self.assertIn("not a directory", str(raised.exception))
+            service.approval_lock_owner(broken)
+        self.assertIn("shared Git directory", str(raised.exception))
 
     def test_the_legacy_daemon_is_recognised_and_refused(self):
         holder = LockHolder(self.repo, "daemon")
