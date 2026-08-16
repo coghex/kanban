@@ -35,6 +35,6 @@
 ║                                  ║
 ║                                  ║
 ║ j/↓ next  k/↑ previous  x kill   ║
-║ board: refreshing…               ║
+║ board: refreshing… · history: cu ║
 ║ Refreshing GitHub…               ║
 ╚══════════════════════════════════╝

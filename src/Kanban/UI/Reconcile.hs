@@ -187,13 +187,27 @@ applyBoardHistory :: CompletedGeneration -> HistoryOutcome -> EventM Name AppSta
 applyBoardHistory generation outcome = do
   current <- get
   when (currentCompletedGeneration current.appCompletedGeneration generation) $ case outcome of
-    HistoryProgressed progress -> modify (\state -> state {appCompletedProgress = progress})
+    -- A page answering is also how a paused traversal reports that it has
+    -- resumed: nothing else marks the end of a pause, and the status has to
+    -- stop saying paused when the work starts again.
+    HistoryProgressed progress ->
+      modify (\state -> state {appCompletedProgress = progress, appCompletedStatus = CompletedHistoryLoading})
     -- The last complete history is deliberately untouched. A generation that
     -- failed proves nothing about the one that succeeded before it, and with
-    -- no complete generation behind it the history is simply absent (§15).
+    -- no complete generation behind it the history is simply absent (§15) --
+    -- which is the whole difference between a stale history and a failed one.
     HistoryFailed providerError ->
-      modify (\state -> state {appCompletedFailure = Just (renderProviderErrorMessage providerError)})
+      modify (\state -> state {appCompletedStatus = completedFailureStatus state (renderProviderErrorMessage providerError)})
     HistoryCompleted history -> publishCompletedHistory history
+
+-- | Where a failed completed generation leaves the status: 'stale' over a
+-- complete history that still stands, and 'failed' when there is none to fall
+-- back to. Nothing partial is ever a fallback, so the presence of a history at
+-- all is the whole test (§15).
+completedFailureStatus :: AppState -> Text -> CompletedHistoryStatus
+completedFailureStatus state reason
+  | isJust state.appCompletedHistory = CompletedHistoryStale reason
+  | otherwise = CompletedHistoryFailed reason
 
 -- | Whether an outcome arriving under @arriving@ still answers the generation
 -- the board is waiting for, given that @newest@ is the newest identity it has
@@ -223,7 +237,7 @@ publishCompletedHistory history = do
     let reconciledSnapshot = openWithoutHistory history <$> current.appOpenSnapshot
      in current
           { appCompletedHistory = Just history,
-            appCompletedFailure = Nothing,
+            appCompletedStatus = CompletedHistoryCurrent,
             appCompletedProgress = completedHistoryProgress history,
             appOpenSnapshot = reconciledSnapshot,
             appBoard = case reconciledSnapshot of
@@ -273,8 +287,8 @@ publishBoardData change = do
               appOverlay = reconciledOverlay,
               -- Only when an overlay actually closed under the user. Nothing
               -- else about a completed publication is worth the notice line:
-              -- reporting the history itself is FILT-2's footer, not this
-              -- slice's.
+              -- reporting the history itself is the footer's own compact
+              -- status, which outlives every press that clears a notice.
               appNotice = maybe state.appNotice Just overlayNotice
             }
     modify (reseatSearch searchAnchor)

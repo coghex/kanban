@@ -335,7 +335,7 @@ scrollable four-column board.
 ║ ┃ drain_prs.py ┃         ║              ║              ║              ║              ║
 ║ ┗━━━━━━━━━━━━━━┛         ║              ║              ║              ║              ║
 ╚══════════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
- j/Down next  k/Up previous  x kill  h/l column  s search  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  d drainer  c sidebar  o options  ? help  q/Ctrl-C quit
+ j/Down next  k/Up previous  x kill  h/l column  s search  f filter  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  d drainer  c sidebar  o options  ? help  q/Ctrl-C quit
 ```
 
 Responsive behavior:
@@ -360,12 +360,23 @@ Responsive behavior:
   down by that amount. It is never an overlay, never leaves its column, and a
   resize rewraps both the box and the cards under it. Moving the search to
   another column moves the box with it, drawn the same way in its new column.
-- While a search is open the footer's hint line is replaced by search's own,
-  because the board's line names `h`/`l` and the arrows for column movement and
-  a search gives both a different meaning:
+- The card filter panel (section 7) draws a labelled box spanning the board
+  region, above the column headings and therefore above every column's search
+  box and cards. Its checkbox chips wrap across the current width, so a narrower
+  terminal makes the panel taller rather than clipping a box the mouse can still
+  be aimed at, and the board below moves down by exactly the height it took. It
+  is never an overlay: it sits beside the usage sidebar rather than over it, and
+  never reaches the footer.
+- While a search or the filter panel has the keyboard, the footer's hint line is
+  replaced by that surface's own, because the board's line names `h`/`l`, `d`,
+  and the arrows for meanings neither surface gives them:
 
   ```text
   h/l/any letter type  backspace delete  ←/→ move search  ↑/↓ select  enter details  s/esc close
+  ```
+
+  ```text
+  j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  f/esc close
   ```
 
 ## 7. Keyboard interaction
@@ -381,7 +392,8 @@ Initial bindings:
 | `l` / Right | Select next column |
 | `g` | Select first visible item in the column |
 | `G` | Select last visible item in the column |
-| `s` | Open the card search on the Issues column; printable keys including h and l filter it, Left and Right move it to another column, and Esc or s closes it |
+| `s` | Open the card search on the Issues column; printable keys including h and l filter it, Left and Right move it to another column, f focuses the filter panel, and Esc or s closes it |
+| `f` | Show or hide the card filter panel; j/k or Up/Down move between boxes, Left/Right between groups, Space toggles the focused box, d restores the defaults, s focuses the card search, and f or Esc hides the panel leaving the criteria unchanged |
 | `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
 | `Esc` | Close an overlay or dismiss a transient error |
@@ -410,6 +422,8 @@ Mouse interaction is intentionally complete but narrow:
 - Left-clicking an unselected issue or PR card selects it.
 - Left-clicking the selected card opens its details panel.
 - Left-clicking an epic title expands or collapses that epic.
+- Left-clicking a filter checkbox toggles it and moves the panel's own focus to
+  it, leaving the keyboard wherever it already was.
 - Left-clicking outside an open details panel closes it.
 - Right-clicking a board card opens its live issue-review, solve,
   autosolve-bound PR review, or direct PR session. With no live session it only
@@ -434,8 +448,10 @@ search declines:
 
 - A printable character typed without Ctrl, Meta, or Alt appends to the query,
   so `r`, `S`, `u`, `d`, and every other letter is text rather than a shortcut.
-  The two exceptions are `s`, which closes search, and `q`, which reaches the
-  guarded dashboard quit — so the letter `q` cannot be typed into a query.
+  The three exceptions are `s`, which closes search, lowercase `f`, which moves
+  the keyboard to the filter panel with the query intact, and `q`, which reaches
+  the guarded dashboard quit — so neither `q` nor a lowercase `f` can be typed
+  into a query. Uppercase `F` is an ordinary query character.
 - Backspace removes one Unicode code point. The query stops accepting printable
   input at 256 code points and accepts it again once a Backspace makes room.
 - Any chord carrying Ctrl, Meta, or Alt keeps its ordinary board meaning, so
@@ -461,8 +477,10 @@ saved expanded-tracker set, so closing it restores the column's collapsed and
 expanded view exactly.
 
 An empty query shows the column complete beneath the empty box. A non-empty
-query with no matches shows a `No matches` row, distinct from the `No items` row
-an empty column shows. While a non-empty query is live the column heading shows
+query with no matches shows a `No search matches` row, distinct from both the
+`No filter matches` row a criteria set that admits nothing shows and the
+`No items` row an empty column shows; the three are described together under
+the filter panel below. While a non-empty query is live the column heading shows
 the visible result count over the column's full total. Both counts are exact: a
 board is only ever drawn from a generation that followed both open connections
 to their end, so no heading total stands for more than it says.
@@ -515,6 +533,109 @@ still-matching selected item selected, falling back to the first visible result
 otherwise; a failed refresh leaves the board and the query untouched. Search
 state is presentation state only: never cached, never part of a board snapshot,
 and never restored on restart.
+
+### Card filter panel
+
+`f` shows the card filter panel and gives it the keyboard; `f` or `Esc` hides it
+again, leaving the criteria exactly as they are. The panel spans the board above
+the column headings, the search box, and the cards, described in section 6. It
+is part of the board region's own layout flow rather than an overlay, so it
+shifts the columns down by exactly its own height and never covers the usage
+sidebar, the footer, the search box, or a card at any width.
+
+It presents four labelled groups of checkboxes:
+
+- State: Open, Closed
+- Kind: Issues, Pull requests
+- Workflow: Changes, Problems, Approved, Other
+- Structure: Epic groups, Standalone
+
+Every value is checked at process start except Closed, which is what makes the
+opening board exactly the live open board section 8 describes. Values are ORed
+inside a group and the groups are ANDed, so a group with no value checked is a
+valid empty result rather than an implicit reset.
+
+Editing is live. Toggling a box changes the visible cards immediately: no Apply
+step, no GitHub request, no cache write, and no change to board freshness. While
+the panel has the keyboard:
+
+- `j`/`k` or Up/Down move between boxes along the whole inventory, across group
+  boundaries, clamped at either end.
+- Left and Right move between groups, keeping the option's position within the
+  group and clamping it to a shorter group's last option.
+- Space toggles the focused box and `d` restores the defaults.
+- `s` moves the keyboard to the column search, opening one on Issues if none is
+  live, and lowercase `f` from an open search box moves it back to the panel
+  without clearing the query. Neither surface clears the other: filter chooses
+  the eligible cards and search narrows that result.
+- `f` or `Esc` hides the panel. Every other key keeps its board meaning, so `?`,
+  `u`, `q`, and `Ctrl-C` are as usable as they always were.
+- A left click toggles the box it lands on and moves the panel's focus there,
+  wherever the chips wrapped at the current width.
+
+Each checkbox shows the number of cards its own value would admit under every
+other group's current selection, ignoring its own group's, so the figure answers
+what checking it would reveal rather than how much of what is already showing it
+accounts for. A count that would depend on an open generation that has not
+published, or on a completed generation still being traversed, shows `…` or
+loaded/total progress instead of a false total. The panel also states how many
+cards the criteria are showing out of how many the complete datasets hold.
+
+Criteria persist for exactly one application process. They survive hiding the
+panel, every overlay, both refresh generations, and every search change, and are
+never written to the cache, the settings file, or the configuration; a new
+process starts at the defaults. While the panel is hidden and the criteria are
+not the defaults, the footer marks its filter chip as `f filter*`, which is the
+one report a board quietly showing a subset of its work gets.
+
+The footer's freshness row also states where the completed generation stands —
+`loading`, `paused`, `current`, `stale`, or `failed`. It is read off a state
+rather than the notice line, so it survives every press that clears a notice,
+and it never blocks ordinary use.
+
+Selecting Closed while the completed generation has not finished replaces the
+whole card area with a centered `LOADING COMPLETED HISTORY` panel that draws no
+open, completed, cached, or search-result card, states how far the traversal has
+got, and says so again when it is paused. Unchecking Closed returns to the open
+interface immediately and does not cancel the load; checking it again restores
+the blocker until that generation publishes or fails. A generation that fails
+over a complete history keeps that history on screen with the footer marking it
+stale; one that fails with no complete history behind it shows a card-free
+`COMPLETED DATA UNAVAILABLE` panel instead.
+
+That blocker is unconditional, so it outranks the open loading and unavailable
+panels above rather than waiting behind them. On a fresh launch both generations
+are running with Open still checked, and checking Closed there reports the
+completed generation the user just asked for. Only once the completed side has
+settled does an unfinished open generation put its own panel up.
+
+While either completed panel is up, every card key and every stale card, epic,
+or column mouse target resolves to no work at all, and the filter panel, the
+footer, help, options, refresh, the drainer, `Esc`, `q`, and `Ctrl-C` stay
+exactly as usable as they were. The panel keeps the keyboard while it is up: no
+column is drawn, so a live search is unreachable and a panel that had handed
+focus to one takes it back — the box that put the blocker up is always the box
+that can take it down.
+
+A column with nothing to draw names the reason, and the three reasons are
+distinct from each other and from any loading state:
+
+- `No search matches` when a query narrowed a non-empty eligible set to nothing.
+- `No filter matches` when the criteria admit nothing there and that column held
+  something under the default criteria. If filtering already produced zero this
+  is what the row says, whether or not a query is also live.
+- `No items` when the column is empty under the default criteria, which are the
+  baseline the other two are departures from.
+
+Both questions are asked of the column itself. A criteria set that empties
+Issues says nothing about Active, so a column that was already empty under the
+defaults keeps `No items` however much the filter is hiding elsewhere.
+
+Every keyboard and mouse target resolves against the final composed view —
+criteria first, then any query — so no raw row index is ever mixed with a
+filtered one. Each criteria edit re-seats every column on the entry it was
+showing, by that entry's item or epic identity; a card the criteria hid takes
+its column's first selectable entry instead, exactly as a closed search does.
 
 ### Embedded issue reviews
 
@@ -708,7 +829,8 @@ except `Closed`, so the ordinary view is the complete live open board and the
 column rules below read exactly as they always have. Criteria are
 process-lifetime presentation state: they survive every refresh, overlay and
 dismissal, initialize to their defaults at every start, and are never written
-to the cache, the settings file, or the configuration.
+to the cache, the settings file, or the configuration. Section 7's filter panel
+is what edits them.
 
 Lifecycle outranks every other classification rule. A completed item — a closed
 issue, or a pull request that merged or was closed unmerged — is settled

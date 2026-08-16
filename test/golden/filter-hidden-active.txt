@@ -1,0 +1,64 @@
+╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
+║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  0 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  0 ━━━━━━━━━━━━━━━━┓║
+║┃ Codex          3h 0m old ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ 5 hour  [██████░░░░] 63% ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ in 1h 5m · Thu 16:05     ┃┃  ▾ #700  Persistence contract rollout    ┃  ▾ #700  Persistence contract rollout   ┃ No filter matches                       ┃ No filter matches                       ┃║
+║┃ week    [████░░░░░░] 41% ┃┃  1/2 complete                            ┃  1/2 complete                           ┃                                         ┃                                         ┃║
+║┃ in 4d 18h · Tue 09:00    ┃┃  └─ ╭──────────────────────────────────╮ ┃  └─ ╭─────────────────────────────────╮ ┃                                         ┃                                         ┃║
+║┃ Claude         3h 0m old ┃┃     │ A1 · tracker #700                │ ┃     │ A2 · tracker #700               │ ┃                                         ┃                                         ┃║
+║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the versioned save    │ ┃     │ #712 Migrate the terrain cache  │ ┃                                         ┃                                         ┃║
+║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope                         │ ┃     │ reader                          │ ┃                                         ┃                                         ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature                         │ ┃     │  code-health                    │ ┃                                         ┃                                         ┃║
+║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · updated 4h ago      │ ┃     │ @codex-agent · updated 4h ago   │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃     │ Write the envelope header ahead  │ ┃     │ Read through the envelope and   │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃     │ of the payload so a partial      │ ┃     │ reject a payload whose recorded │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃     │ write is detectable on load.     │ ┃     │ length disagrees with the file. │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃     ╰──────────────────────────────────╯ ┃     ╰─────────────────────────────────╯ ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃  STANDALONE                             ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ▸ #701  Input routing hardening  0/1    ┃  ╭────────────────────────────────────╮ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  complete                                ┃  │ #799 Repair stale world cache      │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  STANDALONE                              ┃  │ invalidation                       │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃ ▌╭─────────────────────────────────────╮ ┃  │  blocked   bug                     │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ #812 Modal input leaks through      │ ┃  │ @codex-agent · updated 4h ago      │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ overlay                             │ ┃  │ A stale cache survives a save      │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │  reviewed:approve   bug   ui        │ ┃  │ reload and exposes old terrain     │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago         │ ┃  │ data to the renderer.              │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ Empty modal areas currently allow   │ ┃  ╰────────────────────────────────────╯ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ pointer events to reach lower       │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ pages. This is visible when a…      │ ┃  ╭────────────────────────────────────╮ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ╰─────────────────────────────────────╯ ┃  │ #833 Improve notification category │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃  │ defaults                           │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ╭─────────────────────────────────────╮ ┃  │  code-health                       │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ #756 Define the persistence         │ ┃  │ @claude-agent · updated 4h ago     │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ contract                            │ ┃  │ Make the fresh-install behavior    │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │  architecture                       │ ┃  │ explicit and keep local state      │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago         │ ┃  │ outside the tracked template.      │ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ Document root owners, snapshot      │ ┃  ╰────────────────────────────────────╯ ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ barriers, and the versioned         │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ envelope before implementation…     │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │  feature                            │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago         │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ Load the last good GitHub snapshot  │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ at startup and replace it           │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ atomically after a successful…      │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┏━━━━━━━━━━━━━━┓         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┃ drain_prs.py ┃         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ off                      ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
+║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  f filter*  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p processes  i atte ║
+║ board: updated 3h ago · history: current                                                                                                                                                             ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

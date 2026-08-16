@@ -27,6 +27,18 @@ module Kanban.Filter
     defaultFilterCriteria,
     everyFacetValue,
 
+    -- * The checkbox inventory
+    FilterBox (..),
+    FilterGroup (..),
+    everyFilterBox,
+    filterBoxChecked,
+    filterBoxGroup,
+    filterBoxLabel,
+    filterGroupBoxes,
+    filterGroupLabel,
+    restrictedToBox,
+    toggleFilterBox,
+
     -- * Classification
     itemKindFacet,
     itemLifecycleFacet,
@@ -34,6 +46,7 @@ module Kanban.Filter
     entryStructureFacet,
 
     -- * The admitted board
+    boardEntryCount,
     criteriaDataset,
     filterBoardEntries,
     visibleBoardFor,
@@ -43,6 +56,7 @@ where
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Text (Text)
 import Data.Time (UTCTime (..))
 import Data.Time.Calendar (Day (..))
 import Kanban.Domain
@@ -102,6 +116,108 @@ defaultFilterCriteria =
       filterWorkflow = everyFacetValue,
       filterStructure = everyFacetValue
     }
+
+-- | One labelled group of checkboxes, in the order the panel draws them.
+data FilterGroup = LifecycleGroup | KindGroup | WorkflowGroup | StructureGroup
+  deriving stock (Eq, Ord, Enum, Bounded, Show)
+
+-- | One checkbox: a facet value qualified by the facet it belongs to, so the
+-- panel's focus, its click targets, and its predictive counts all name a box
+-- rather than a bare value two facets could both offer.
+data FilterBox
+  = LifecycleBox LifecycleFacet
+  | KindBox KindFacet
+  | WorkflowBox WorkflowFacet
+  | StructureBox StructureFacet
+  deriving stock (Eq, Ord, Show)
+
+filterGroupLabel :: FilterGroup -> Text
+filterGroupLabel = \case
+  LifecycleGroup -> "State"
+  KindGroup -> "Kind"
+  WorkflowGroup -> "Workflow"
+  StructureGroup -> "Structure"
+
+-- | A group's boxes, in facet order. Derived from 'Bounded' rather than
+-- listed, so a facet value added to a type above appears in the panel instead
+-- of being silently uneditable.
+filterGroupBoxes :: FilterGroup -> [FilterBox]
+filterGroupBoxes = \case
+  LifecycleGroup -> map LifecycleBox [minBound .. maxBound]
+  KindGroup -> map KindBox [minBound .. maxBound]
+  WorkflowGroup -> map WorkflowBox [minBound .. maxBound]
+  StructureGroup -> map StructureBox [minBound .. maxBound]
+
+-- | Every checkbox, in group order and then facet order. This is the flat list
+-- the panel's Up and Down movement walks.
+everyFilterBox :: [FilterBox]
+everyFilterBox = concatMap filterGroupBoxes [minBound .. maxBound]
+
+filterBoxGroup :: FilterBox -> FilterGroup
+filterBoxGroup = \case
+  LifecycleBox _ -> LifecycleGroup
+  KindBox _ -> KindGroup
+  WorkflowBox _ -> WorkflowGroup
+  StructureBox _ -> StructureGroup
+
+filterBoxLabel :: FilterBox -> Text
+filterBoxLabel = \case
+  LifecycleBox LifecycleOpen -> "Open"
+  LifecycleBox LifecycleClosed -> "Closed"
+  KindBox KindIssues -> "Issues"
+  KindBox KindPullRequests -> "Pull requests"
+  WorkflowBox WorkflowChanges -> "Changes"
+  WorkflowBox WorkflowProblems -> "Problems"
+  WorkflowBox WorkflowApproved -> "Approved"
+  WorkflowBox WorkflowOther -> "Other"
+  StructureBox StructureEpicGroups -> "Epic groups"
+  StructureBox StructureStandalone -> "Standalone"
+
+filterBoxChecked :: FilterCriteria -> FilterBox -> Bool
+filterBoxChecked criteria = \case
+  LifecycleBox value -> value `Set.member` criteria.filterLifecycle
+  KindBox value -> value `Set.member` criteria.filterKind
+  WorkflowBox value -> value `Set.member` criteria.filterWorkflow
+  StructureBox value -> value `Set.member` criteria.filterStructure
+
+-- | The criteria with one box's value flipped and every other value left
+-- alone. Unchecking the last value of a facet is allowed: an empty facet is a
+-- valid empty result rather than an implicit reset.
+toggleFilterBox :: FilterBox -> FilterCriteria -> FilterCriteria
+toggleFilterBox box criteria = case box of
+  LifecycleBox value -> criteria {filterLifecycle = flipMember value criteria.filterLifecycle}
+  KindBox value -> criteria {filterKind = flipMember value criteria.filterKind}
+  WorkflowBox value -> criteria {filterWorkflow = flipMember value criteria.filterWorkflow}
+  StructureBox value -> criteria {filterStructure = flipMember value criteria.filterStructure}
+  where
+    flipMember value values
+      | value `Set.member` values = Set.delete value values
+      | otherwise = Set.insert value values
+
+-- | The criteria a box's predictive count is computed under: that box's value
+-- as the /sole/ selection of its own facet, with every other facet's selection
+-- preserved.
+--
+-- That is what makes the number beside a checkbox answer \"what would checking
+-- this reveal?\" rather than \"how many of the cards already showing are
+-- this?\" — its own group's current selection is deliberately ignored, so the
+-- figure does not change as its neighbours are toggled.
+restrictedToBox :: FilterBox -> FilterCriteria -> FilterCriteria
+restrictedToBox box criteria = case box of
+  LifecycleBox value -> criteria {filterLifecycle = Set.singleton value}
+  KindBox value -> criteria {filterKind = Set.singleton value}
+  WorkflowBox value -> criteria {filterWorkflow = Set.singleton value}
+  StructureBox value -> criteria {filterStructure = Set.singleton value}
+
+-- | How many card rows a board holds, counted the way a column heading counts
+-- them: every 'ColumnEntry' once, across every column.
+--
+-- A populated group's header is synthesized while rendering rather than being
+-- an entry of its own, so it is not counted a second time; a 'TrackerHeader'
+-- left standing by the criteria is an entry and is counted once, exactly as
+-- the column it sits in counts it.
+boardEntryCount :: Board -> Int
+boardEntryCount board = sum (map length (Map.elems board.boardColumns))
 
 itemLifecycleFacet :: BoardItem -> LifecycleFacet
 itemLifecycleFacet item = if itemCompleted item then LifecycleClosed else LifecycleOpen

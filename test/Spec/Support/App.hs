@@ -33,6 +33,7 @@ import Kanban.UI.Types
   ( AgentSession (..),
     AppState (..),
     ChatTranscript (..),
+    CompletedHistoryStatus (..),
     IncidentSelection (..),
     ProcessSelection (..),
     PullRequestDetail (..),
@@ -63,6 +64,7 @@ testAppState board = do
         -- 'Kanban.UI.Filter.refreshVisibleBoard'.
         appVisibleBoard = board,
         appFilterCriteria = defaultFilterCriteria,
+        appFilterPanel = Nothing,
         appUsage = Map.empty,
         appUsageFreshness = Map.empty,
         appSelectedColumn = Issues,
@@ -85,7 +87,9 @@ testAppState board = do
         appCompletedHistory = Nothing,
         appCompletedGeneration = 0,
         appCompletedProgress = emptyCompletedProgress,
-        appCompletedFailure = Nothing,
+        -- Nothing is in flight, so no criteria set is blocked on a traversal:
+        -- a test about the completed blocker says so by naming this field.
+        appCompletedStatus = CompletedHistoryCurrent,
         appDrainerController = Left "no drainer in tests",
         appDrainerStatus = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing,
         appDrainerIncidents = Just [],

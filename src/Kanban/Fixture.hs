@@ -1,5 +1,7 @@
 module Kanban.Fixture
   ( fixtureBoard,
+    fixtureCompletedHistory,
+    fixtureSnapshot,
     fixtureUsage,
   )
 where
@@ -67,6 +69,28 @@ fixtureSnapshot =
           pullRequest 861 "Adopt the envelope in the snapshot loader" "Reads the cache through the versioned envelope and reports a truncated payload." [label "reviewed:approve" "2f9e44", label "feature" "a2eeef"] False [901] ReviewApproved MergeBehind (ChecksPending 9 12 [CheckDetail "integration-suite" CheckPending])
         ],
       snapshotFetchedAt = at 12 0
+    }
+
+-- | The settled half of the invented repository: closed issues and pull
+-- requests that are closed and merged, so a frame drawn with @Closed@ checked
+-- shows both kinds and both pull-request badges.
+--
+-- Nothing here appears in 'fixtureSnapshot'. The two generations are
+-- reconciled against each other at publication (§15), so an item in both sets
+-- is a state the board never reaches and would make every count drawn from
+-- this fixture ambiguous.
+fixtureCompletedHistory :: CompletedHistory
+fixtureCompletedHistory =
+  CompletedHistory
+    { historyIssues =
+        [ (issue 655 "Retire the legacy snapshot writer" "The pre-envelope writer is unreachable now that every reader goes through the header." [label "code-health" "1d76db"] []) {issueState = IssueClosed},
+          (issue 690 "Drop the pointer capture probe harness" "The temporary harness outlived the investigation it was written for." [label "ui" "5319e7"] []) {issueState = IssueClosed}
+        ],
+      historyPullRequests =
+        [ (pullRequest 705 "Retire the legacy snapshot writer" "Removes the writer and the two call sites that still reached it." [label "code-health" "1d76db"] False [655] ReviewApproved MergeClean (ChecksPassed 14)) {pullRequestState = PullRequestMerged},
+          (pullRequest 688 "Spike: pointer capture ownership" "Abandoned in favour of recording ownership before the overlay opens." [label "experimental" "fbca04"] False [690] ReviewUnknown MergeUnknown ChecksUnknown) {pullRequestState = PullRequestClosed}
+        ],
+      historyFetchedAt = at 12 0
     }
 
 -- | A tracker issue: the @epic@ label 'defaultWorkflowConfig' recognizes, and

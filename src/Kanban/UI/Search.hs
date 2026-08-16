@@ -423,6 +423,11 @@ data SearchInput
   = SearchInsert Char
   | SearchBackspace
   | SearchClose
+  | -- | Hand the keyboard to the card filter panel, showing it if it is
+    -- hidden and leaving the query exactly as it is. Applying it is
+    -- "Kanban.UI.Filter"'s, which this module cannot import, so dispatch
+    -- carries it out for the same reason it carries out 'SearchOpenDetails'.
+    SearchFocusFilter
   | SearchOpenDetails
   | SearchMove Int
   | -- | Move the search one column left or right, by the same clamped step
@@ -435,10 +440,13 @@ searchInput Nothing _ = Nothing
 searchInput (Just _) (Vty.EvKey key modifiers)
   | any (`elem` modifiers) [Vty.MCtrl, Vty.MMeta, Vty.MAlt] = Nothing
   | otherwise = case key of
-      -- The two printable keys search does not take: `s` closes it, and `q`
-      -- falls through to the guarded dashboard quit, which is why the letter
-      -- `q` cannot be typed into a query.
+      -- The three printable keys search does not take: `s` closes it, `f`
+      -- moves the keyboard to the filter panel with the query intact, and `q`
+      -- falls through to the guarded dashboard quit -- which is why neither
+      -- letter can be typed into a query. Uppercase `F` is claimed below as
+      -- ordinary text, exactly as every other printable key is.
       Vty.KChar 's' -> Just SearchClose
+      Vty.KChar 'f' -> Just SearchFocusFilter
       Vty.KChar 'q' -> Nothing
       Vty.KChar character | isPrint character -> Just (SearchInsert character)
       Vty.KBS -> Just SearchBackspace
@@ -467,10 +475,11 @@ backspaceQuery = Text.dropEnd 1
 
 -- | What one 'SearchInput' does to the dashboard on its own.
 --
--- 'SearchOpenDetails' is the one input this cannot finish: opening a card's
--- details is 'Kanban.UI.Selection.openSelectedDetails', so dispatch runs that
--- and then ends search on the identity it opened. Everything else, including
--- re-seating the selection after every edit, is decided here.
+-- Two inputs this cannot finish: opening a card's details is
+-- 'Kanban.UI.Selection.openSelectedDetails', so dispatch runs that and then
+-- ends search on the identity it opened, and focusing the filter panel is
+-- 'Kanban.UI.Filter.focusFilterPanel', which imports this module. Everything
+-- else, including re-seating the selection after every edit, is decided here.
 applySearchInput :: SearchInput -> AppState -> AppState
 applySearchInput = \case
   SearchInsert character -> editQuery (insertQueryChar character)
@@ -478,6 +487,7 @@ applySearchInput = \case
   SearchClose -> closeSearch
   SearchMove amount -> moveSelectionBy amount
   SearchTransfer delta -> transferSearchBy delta
+  SearchFocusFilter -> id
   SearchOpenDetails -> id
 
 -- | Refilter the target column after a query edit, keeping whichever result

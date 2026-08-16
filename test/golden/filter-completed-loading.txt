@@ -1,11 +1,11 @@
 ╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
-║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓                                                                                                                                                                          ║
-║┃ Codex          3h 0m old ┃                                                                                                                                                                          ║
-║┃ 5 hour  [██████░░░░] 63% ┃                                                                                                                                                                          ║
-║┃ in 1h 5m · Thu 16:05     ┃                                                                                                                                                                          ║
-║┃ week    [████░░░░░░] 41% ┃                                                                                                                                                                          ║
-║┃ in 4d 18h · Tue 09:00    ┃                                                                                                                                                                          ║
-║┃ Claude         3h 0m old ┃                                                                                                                                                                          ║
+║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┌──────────────────────────────────────────────────────────────────────────────── FILTER ────────────────────────────────────────────────────────────────────────────────┐║
+║┃ Codex          3h 0m old ┃│ State       [x] Open 13  ▌[x] Closed 46/149                                                                                                                            │║
+║┃ 5 hour  [██████░░░░] 63% ┃│ Kind        [x] Issues …   [x] Pull requests …                                                                                                                         │║
+║┃ in 1h 5m · Thu 16:05     ┃│ Workflow    [x] Changes …   [x] Problems …   [x] Approved …   [x] Other …                                                                                              │║
+║┃ week    [████░░░░░░] 41% ┃│ Structure   [x] Epic groups …   [x] Standalone …                                                                                                                       │║
+║┃ in 4d 18h · Tue 09:00    ┃│ showing … of … cards                                                                                                                                                   │║
+║┃ Claude         3h 0m old ┃└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘║
 ║┃ 5 hour  [████████░░] 78% ┃                                                                                                                                                                          ║
 ║┃ in 2h 30m · Thu 17:30    ┃                                                                                                                                                                          ║
 ║┃ week    [██░░░░░░░░] 22% ┃                                                                                                                                                                          ║
@@ -26,15 +26,16 @@
 ║┃                          ┃                                                                                                                                                                          ║
 ║┃                          ┃                                                                                                                                                                          ║
 ║┃                          ┃                                                                                                                                                                          ║
-║┃                          ┃                                                           ┌──────────────── LOADING OPEN DATA ───────────────┐                                                           ║
-║┃                          ┃                                                           │ Fetching every open issue and pull request.      │                                                           ║
-║┃                          ┃                                                           │ The board appears once the first complete        │                                                           ║
-║┃                          ┃                                                           │ refresh publishes.                               │                                                           ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                           ┌──────────── LOADING COMPLETED HISTORY ───────────┐                                                           ║
+║┃                          ┃                                                           │ Fetching every closed issue and completed pull   │                                                           ║
+║┃                          ┃                                                           │ request.                                         │                                                           ║
+║┃                          ┃                                                           │ 46 of 149 loaded                                 │                                                           ║
+║┃                          ┃                                                           │ press f and uncheck Closed to return to the open │                                                           ║
+║┃                          ┃                                                           │ board                                            │                                                           ║
 ║┃                          ┃                                                           └──────────────────────────────────────────────────┘                                                           ║
-║┃                          ┃                                                                                                                                                                          ║
-║┃                          ┃                                                                                                                                                                          ║
-║┃                          ┃                                                                                                                                                                          ║
-║┃                          ┃                                                                                                                                                                          ║
 ║┃                          ┃                                                                                                                                                                          ║
 ║┃                          ┃                                                                                                                                                                          ║
 ║┃                          ┃                                                                                                                                                                          ║
@@ -58,7 +59,6 @@
 ║┃ ┗━━━━━━━━━━━━━━┛         ┃                                                                                                                                                                          ║
 ║┃ off                      ┃                                                                                                                                                                          ║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛                                                                                                                                                                          ║
-║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  f filter  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p processes  i atten ║
-║ board: refreshing… · history: current                                                                                                                                                                ║
-║ Refreshing GitHub…                                                                                                                                                                                   ║
+║ j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  f/esc close                                                                                                                              ║
+║ board: updated 3h ago · history: loading 46/149                                                                                                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
