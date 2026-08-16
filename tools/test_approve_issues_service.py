@@ -109,6 +109,10 @@ def main():
         "repo": args.repo,
         "log_dir": args.log_dir,
         "at": time.time(),
+        # This process's own signal mask, read without changing it. A
+        # controller that held signals across the spawn would show up here as
+        # a backend that cannot be interrupted.
+        "blocked": sorted(signal.pthread_sigmask(signal.SIG_BLOCK, [])),
     }
 
     if args.check is not None:
@@ -1886,6 +1890,141 @@ class IntentionalStopTests(ApprovalFixture):
         code, _out, err = self.finish(proc, timeout=30)
         self.assertEqual(code, 0, err)
         wait_until(lambda: process_gone(backend_pid), message="the backend to be gone")
+
+
+class StopRacingASpawnTests(ApprovalFixture):
+    """The transition between deciding to start a pass and having one running.
+
+    A stop landing in that window must not leave a live `--review-queue` pass
+    -- model calls and GitHub mutations included -- running behind a controller
+    that has already recorded an intentional stop.
+    """
+
+    def test_a_stop_while_waiting_starts_no_further_pass(self):
+        # A long interval leaves the controller asleep between passes, which is
+        # where an operator's stop most often lands.
+        self.write_plan([{"outcome": "idle"}])
+        proc = self.start_controller(interval="30")
+        wait_until(lambda: len(self.queue_calls()) >= 1, message="the first pass")
+        # Comfortably inside the 30s wait, so the stop cannot be mistaken for
+        # the interval elapsing.
+        time.sleep(0.5)
+        proc.send_signal(signal.SIGTERM)
+        code, _out, err = self.finish(proc, timeout=30)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.queue_calls()), 1)
+        self.assertEqual(self.incidents(), [])
+        self.assertEqual(self.status()["state"], service.STATE_STOPPED)
+
+    def test_a_stop_landing_inside_the_spawn_still_reaches_the_child(self):
+        # The window between `Popen` returning and the child being registered:
+        # a handler running there finds no child to signal. This reproduces it
+        # exactly by flipping the flag from inside Popen, and asserts the child
+        # is signalled and reaped rather than left running.
+        job = self.job()
+        service.ensure_dirs(job)
+        controller = service.Controller(
+            job, backend=self.backend, interval=0.0, legacy_policy="dual"
+        )
+        real_popen = subprocess.Popen
+        spawned = []
+
+        def racing_popen(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            spawned.append(child)
+            controller._stop_requested = True
+            return child
+
+        with mock.patch.object(service.subprocess, "Popen", racing_popen):
+            child = controller.start_child(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(60)",
+                ]
+            )
+        self.assertIsNotNone(child)
+        self.assertEqual(spawned, [child])
+        self.addCleanup(_kill_quietly, child.pid)
+        # Signalled where it stands, then collected: the group is gone and
+        # nothing of the pass is left running.
+        child.wait(timeout=30)
+        self.assertEqual(child.returncode, -signal.SIGINT)
+        wait_until(lambda: process_gone(child.pid), message="the child to be reaped")
+        self.assertIn(
+            "raced this pass's start",
+            job.service_log_path.read_text(encoding="utf-8"),
+        )
+
+    def test_the_backend_can_still_be_interrupted(self):
+        # The hazard in closing the spawn race by masking signals: the mask is
+        # inherited across fork and survives exec, so every pass would run with
+        # the very signals its process group is stopped with blocked, and only
+        # the grace period's SIGKILL could ever end one.
+        self.write_plan([{"outcome": "idle", "signal_parent": True}])
+        proc = self.start_controller()
+        self.assertEqual(self.finish(proc)[0], 0)
+        blocked = self.queue_calls()[0]["blocked"]
+        self.assertNotIn(int(signal.SIGINT), blocked)
+        self.assertNotIn(int(signal.SIGTERM), blocked)
+
+    def test_a_pending_stop_spawns_nothing_at_all(self):
+        job = self.job()
+        service.ensure_dirs(job)
+        controller = service.Controller(
+            job, backend=self.backend, interval=0.0, legacy_policy="dual"
+        )
+        controller._stop_requested = True
+        with mock.patch.object(service.subprocess, "Popen") as popen:
+            self.assertIsNone(controller.start_child(["true"]))
+            self.assertIsNone(
+                controller.spawn(["true"], state=service.STATE_RUNNING, message="x")
+            )
+        popen.assert_not_called()
+
+    def test_a_pass_that_finished_before_the_stop_is_still_recorded(self):
+        # The other half of the same truthfulness rule: a stop must not claim
+        # nothing happened when the backend had already published a verdict.
+        # The fake ignores SIGINT, signals this controller, and then completes
+        # normally, so the result really is a completed pass's.
+        self.write_plan(
+            [
+                {
+                    "outcome": "changes_requested",
+                    "issue": 5,
+                    "model_called": True,
+                    "message": "Issue #5 requests changes",
+                    "ignore_sigint": True,
+                    "signal_parent": True,
+                }
+            ]
+        )
+        self.write_gate({"5": False})
+        proc = self.start_controller()
+        code, _out, err = self.finish(proc, timeout=60)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.queue_calls()), 1)
+        # The barrier the completed pass established survived the stop.
+        self.assertEqual(service.read_barrier(self.job()), 5)
+        warnings = self.incidents(open_only=True, kind=service.BARRIER_INCIDENT_KIND)
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["summary"], "Issue #5 requests changes")
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_STOPPED)
+        self.assertEqual(snapshot["barrier_issue"], 5)
+
+    def test_an_interrupted_pass_is_recorded_as_no_verdict_rather_than_a_failure(self):
+        self.write_plan([{"outcome": "idle", "sleep": 30}])
+        proc = self.start_controller()
+        wait_until(lambda: len(self.queue_calls()) >= 1, message="the pass to start")
+        proc.send_signal(signal.SIGTERM)
+        code, _out, err = self.finish(proc, timeout=30)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.incidents(), [])
+        self.assertIn(
+            "interrupted by the stop",
+            self.job().service_log_path.read_text(encoding="utf-8"),
+        )
 
 
 class GraceEscalationTests(ApprovalFixture):

@@ -1327,15 +1327,32 @@ class Controller:
         process this controller knows about is what leaves those orphaned
         (requirement 11). A second signal escalates, so an operator who asks
         twice is obeyed twice.
+
+        A handler that finds no registered child is not a handler that missed
+        one: `start_child` holds these signals across the spawn and rechecks
+        the flag afterwards, so a stop landing around a `Popen` is delivered to
+        that child by one side or the other.
         """
         self._stop_requested = True
         self._signals += 1
-        child = self._child
+        forwarded = signal.SIGINT if self._signals == 1 else signal.SIGKILL
+        self.signal_child_group(self._child, forwarded)
+
+    def signal_child_group(
+        self, child: subprocess.Popen[str] | None, forwarded: int
+    ) -> None:
+        """Signal one backend invocation's whole session, or nothing.
+
+        A group whose last member is already gone raises ProcessLookupError,
+        which is the ordinary case rather than a failure. Signalling a child
+        this controller has already reaped is refused outright, since its PID
+        may by then name something else entirely.
+        """
         if child is None or child.poll() is not None:
             return
-        forwarded = signal.SIGINT if self._signals == 1 else signal.SIGKILL
-        with contextlib.suppress(ProcessLookupError, PermissionError):
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(child.pid, forwarded)
+
 
     def sleep(self, seconds: float) -> None:
         """Wait, but never past a stop.
@@ -1500,25 +1517,36 @@ class Controller:
             argv.extend(["--config", self.job.config_path])
         return argv
 
-    def spawn(
-        self,
-        argv: list[str],
-        *,
-        state: str,
-        message: str,
-        barrier_issue: int | None = None,
-    ) -> PassCommand:
-        """One backend invocation, in its own process group.
+    def start_child(self, argv: list[str]) -> subprocess.Popen[str] | None:
+        """Spawn one backend invocation, or nothing at all when a stop is
+        already pending.
 
-        `start_new_session` is what makes an intentional stop able to end the
-        whole tree rather than the one process this controller can see: the
-        backend spawns `gh` and a reviewer model, and a signal delivered to the
-        child alone would leave those running (requirement 11).
+        A stop must never leave a live `--review-queue` pass -- model calls,
+        GitHub mutations and all -- running behind a controller that has
+        already recorded an intentional stop. Two reads of the flag around the
+        spawn are what guarantee that, and between them they leave no window:
 
-        The backend's own diagnostics are captured rather than inherited so a
-        failed pass can carry them into its incident; `--json` already keeps
-        them off the stdout this parses.
+        * the read before the spawn means an already-requested stop starts
+          nothing at all;
+        * a stop arriving from there until the child is registered finds
+          `_child` unset, so the handler signals nothing -- and the read after
+          the registration sees the flag and signals the group itself;
+        * a stop arriving after that read finds `_child` set, so the handler
+          signals the group.
+
+        Nothing is masked to achieve that, deliberately. A signal mask held
+        across `Popen` is inherited by the child and survives its `exec`, which
+        would leave every backend pass running with the very signals its
+        process group is stopped with blocked.
+
+        `start_new_session` is what makes any of this able to end the whole
+        tree rather than the one process this controller can see: the backend
+        spawns `gh` and a reviewer model, and a signal delivered to the child
+        alone would leave those running (requirement 11).
         """
+        if self._stop_requested:
+            self.log("A stop arrived before this pass began; nothing was started.")
+            return None
         child = subprocess.Popen(
             argv,
             cwd=str(self.job.repo_path),
@@ -1527,7 +1555,32 @@ class Controller:
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
+        # Registered before the flag is read again, so the two reads overlap
+        # rather than leaving a gap between them.
         self._child = child
+        if self._stop_requested:
+            self.log("A stop raced this pass's start; signalling the backend it spawned.")
+            self.signal_child_group(child, signal.SIGINT)
+        return child
+
+    def spawn(
+        self,
+        argv: list[str],
+        *,
+        state: str,
+        message: str,
+        barrier_issue: int | None = None,
+    ) -> PassCommand | None:
+        """One backend invocation and what it produced, or None when a pending
+        stop meant none was started.
+
+        The backend's own diagnostics are captured rather than inherited so a
+        failed pass can carry them into its incident; `--json` already keeps
+        them off the stdout this parses.
+        """
+        child = self.start_child(argv)
+        if child is None:
+            return None
         try:
             self.write_status(
                 state,
@@ -1585,25 +1638,49 @@ class Controller:
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(child.pid, signal.SIGKILL)
 
+    def suppressed_by_stop(self, what: str) -> bool:
+        """Whether an unusable pass result is this controller's own doing.
+
+        A pass this controller signalled did not decide anything, so treating
+        its exit or its truncated output as a backend failure would record an
+        intentional stop as one. A pass that *completed* is never suppressed
+        this way -- see `one_pass` -- because work that really happened must
+        not be reported as work that did not.
+        """
+        if not self._stop_requested:
+            return False
+        self.log(f"{what} was interrupted by the stop; recording no verdict for it.")
+        return True
+
     # -- passes ------------------------------------------------------------
 
     def one_pass(self) -> None:
+        """One `--review-queue` invocation, classified.
+
+        A stop is handled by what the pass actually produced rather than by
+        when it arrived. An interrupted pass decided nothing, so it is
+        recorded as nothing. A pass that had already exited cleanly with a
+        complete result really did what that result says -- it may have
+        published a verdict and moved a label -- so it is dispatched even on
+        the way out. Discarding it would be the stop claiming that nothing
+        happened when something did.
+        """
         command = self.spawn(
             self.backend_argv("--review-queue"),
             state=STATE_RUNNING,
             message="Advancing the approval queue.",
         )
-        if self._stop_requested:
-            # This controller signalled that exit itself, so the child's status
-            # describes the stop rather than anything the backend decided.
-            # Classifying it would record an intentional stop as a failure and
-            # claim the pass reached a state it never did (requirement 11).
+        if command is None:
             return
         if command.returncode != 0:
+            if self.suppressed_by_stop("The backend pass"):
+                return
             raise BackendFailure(classify_exit(command.returncode), tail(command.stderr))
         try:
             result = parse_backend_result(command.stdout)
         except BackendFailure as failure:
+            if self.suppressed_by_stop("The backend pass"):
+                return
             raise BackendFailure(failure.summary, tail(command.stderr)) from failure
         self.dispatch(result)
 
@@ -1659,9 +1736,11 @@ class Controller:
             message=barrier_summary(issue),
             barrier_issue=issue,
         )
-        if self._stop_requested:
+        if command is None:
             return
         if command.returncode not in (GATE_APPROVED_EXIT, GATE_REFUSED_EXIT):
+            if self.suppressed_by_stop(f"The gate check for issue #{issue}"):
+                return
             raise BackendFailure(
                 f"The gate check for issue #{issue} failed with exit code "
                 f"{command.returncode}.",
@@ -1670,6 +1749,8 @@ class Controller:
         try:
             approved = parse_gate_result(command.stdout, issue, command.returncode)
         except BackendFailure as failure:
+            if self.suppressed_by_stop(f"The gate check for issue #{issue}"):
+                return
             raise BackendFailure(failure.summary, tail(command.stderr)) from failure
         if not approved:
             # Recreated when an acknowledgement dismissed it: the barrier
