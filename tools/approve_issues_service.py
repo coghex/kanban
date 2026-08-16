@@ -1749,8 +1749,14 @@ class Controller:
             raise
         finally:
             self._child = None
-            if self._stop_requested:
-                self.terminate_process_group(child)
+            # Unconditionally, not only on a stop. Reading the flag here would
+            # be one more window: a stop landing after that read finds no
+            # registered child to signal and no later sweep, so a backend that
+            # exited leaving a detached grandchild in its session would outlive
+            # the intentional stop that follows. Sweeping every pass on its way
+            # out leaves nothing for that timing to miss -- and nothing for the
+            # next pass to inherit either.
+            self.terminate_process_group(child)
         return PassCommand(argv, stdout or "", stderr or "", child.returncode)
 
     def wait_for(self, child: subprocess.Popen[str]) -> tuple[str, str]:
@@ -1787,11 +1793,16 @@ class Controller:
     def terminate_process_group(self, child: subprocess.Popen[str]) -> None:
         """Leave nothing of this invocation's session behind.
 
-        Reached only on an intentional stop, which is the transition
-        requirement 11 makes this promise for, and where anything the backend
-        started and did not reap would otherwise keep running. Signalling a
-        group whose last member is already gone raises ProcessLookupError,
-        which is the ordinary case rather than a failure.
+        The child has been waited for by every caller, so this is about what it
+        left: the backend spawns `gh` and a reviewer model, and one it detached
+        and did not reap keeps running in that session. Requirement 11 promises
+        an intentional stop leaves no orphan, and the only way to keep that
+        promise without a window is to leave none after any pass.
+
+        Signalling a group whose last member is already gone raises
+        ProcessLookupError, which is the ordinary case rather than a failure.
+        The kernel keeps a PID reserved while it is still a live process-group
+        ID, so this is a no-op in exactly the cases where the group is empty.
         """
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(child.pid, signal.SIGKILL)

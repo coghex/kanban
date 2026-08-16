@@ -156,7 +156,20 @@ def main():
     if step.get("ignore_sigint"):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
     if step.get("spawn_orphan"):
-        subprocess.Popen([sys.executable, "-c", ORPHAN, step["spawn_orphan"]])
+        # Detached stdio, so this backend can exit while the grandchild lives:
+        # an inherited pipe would hold the controller's read open and there
+        # would be no "completed pass that left a session behind" to test.
+        subprocess.Popen(
+            [sys.executable, "-c", ORPHAN, step["spawn_orphan"]],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Announced before this pass can finish, so a test never races the
+        # grandchild for its own PID.
+        deadline = time.time() + 30
+        while not os.path.exists(step["spawn_orphan"]) and time.time() < deadline:
+            time.sleep(0.01)
     if step.get("signal_parent"):
         os.kill(os.getppid(), signal.SIGTERM)
     if step.get("sleep"):
@@ -2383,6 +2396,84 @@ class FailureAfterSpawnTests(ApprovalFixture):
         # Released: the failed run holds nothing that would refuse the next one.
         with service.run_lock(self.job_):
             pass
+
+
+class CompletedPassLeavesNoSessionTests(ApprovalFixture):
+    """A pass that exits leaving a detached grandchild.
+
+    Reading the stop flag to decide whether to sweep would be a window of its
+    own: a stop landing after that read finds no registered child to signal and
+    no later sweep, so the session would outlive the intentional stop the run
+    then records. These pin the property that makes the timing unreachable --
+    no pass leaves a session behind, whether or not a stop follows it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.orphan_path = self.root / "orphan.pid"
+
+    def orphan_pid(self):
+        pid = int(self.orphan_path.read_text(encoding="utf-8"))
+        self.addCleanup(_kill_quietly, pid)
+        return pid
+
+    def test_a_completed_pass_leaves_nothing_of_its_session_behind(self):
+        # No stop at all: the backend exits normally having detached a
+        # grandchild that ignores SIGINT and SIGTERM.
+        self.write_plan([{"outcome": "idle", "spawn_orphan": str(self.orphan_path)}])
+        job = self.job()
+        service.ensure_dirs(job)
+        controller = service.Controller(
+            job, backend=self.backend, interval=0.0, legacy_policy="dual"
+        )
+        command = controller.spawn(
+            controller.backend_argv("--review-queue"),
+            state=service.STATE_RUNNING,
+            message="Advancing the approval queue.",
+        )
+        self.assertEqual(command.returncode, 0)
+        self.assertFalse(controller._stop_requested)
+        pid = self.orphan_pid()
+        wait_until(lambda: process_gone(pid), message="the session to be swept")
+
+    def test_a_stop_arriving_around_that_transition_still_leaves_no_orphan(self):
+        # The reported timing, as closely as a fixture can pin it: the backend
+        # detaches a grandchild, signals this controller, and only then exits
+        # cleanly -- so the stop lands while the pass is finishing rather than
+        # while it is running.
+        self.write_plan(
+            [
+                {
+                    "outcome": "idle",
+                    "spawn_orphan": str(self.orphan_path),
+                    "signal_parent": True,
+                }
+            ]
+        )
+        proc = self.start_controller()
+        code, _out, err = self.finish(proc, timeout=60)
+        self.assertEqual(code, 0, err)
+        pid = self.orphan_pid()
+        wait_until(lambda: process_gone(pid), message="the session to be swept")
+        self.assertEqual(self.status()["state"], service.STATE_STOPPED)
+        self.assertEqual(self.incidents(), [])
+
+    def test_one_passs_session_is_never_inherited_by_the_next(self):
+        second_orphan = self.root / "orphan-2.pid"
+        self.write_plan(
+            [
+                {"outcome": "idle", "spawn_orphan": str(self.orphan_path)},
+                {"outcome": "idle", "spawn_orphan": str(second_orphan), "signal_parent": True},
+            ]
+        )
+        proc = self.start_controller()
+        self.assertEqual(self.finish(proc, timeout=60)[0], 0)
+        first = self.orphan_pid()
+        second = int(second_orphan.read_text(encoding="utf-8"))
+        self.addCleanup(_kill_quietly, second)
+        self.assertNotEqual(first, second)
+        for pid in (first, second):
+            wait_until(lambda pid=pid: process_gone(pid), message="the session to be swept")
 
 
 class GraceEscalationTests(ApprovalFixture):
