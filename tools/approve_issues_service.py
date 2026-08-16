@@ -66,6 +66,11 @@ try:  # pragma: no cover - the exception arm needs a non-POSIX host
 except ImportError:  # pragma: no cover - see above
     fcntl = None  # type: ignore[assignment]
 
+try:  # pragma: no cover - the exception arm needs a non-POSIX host
+    import pwd
+except ImportError:  # pragma: no cover - see above
+    pwd = None  # type: ignore[assignment]
+
 
 # The one document a `--review-queue` pass writes to stdout. Mirrored from
 # `approve_issues.REVIEW_QUEUE_SCHEMA` and its neighbours rather than imported,
@@ -178,28 +183,63 @@ class BackendFailure(ServiceError):
         self.detail = detail
 
 
+def account_home() -> Path:
+    """This OS account's home directory, from the passwd database.
+
+    Deliberately not `Path.home()`, and deliberately not `$HOME`. Everything
+    this service owns is keyed to the account, and the identity lock that keeps
+    two clones of one GitHub repository from both running hangs off it -- so a
+    root any process-controlled input can move is a root that lets two runs
+    both start, each taking a lock of its own, writing its own status, and
+    alternating backend passes as the other releases the canonical approval
+    lock between issues. `$HOME` is exactly such an input: one account can be
+    given two values of it, and `Path.home()` reads it.
+
+    The passwd entry is the account itself rather than a process's opinion of
+    it, so two invocations under one uid resolve one root whatever they were
+    started with.
+
+    Fails closed. A uid with no passwd entry, or one whose entry names no
+    absolute directory, has no account root -- and inventing one would put the
+    rendezvous somewhere the next run would not look.
+    """
+    if pwd is None:  # pragma: no cover - needs a non-POSIX host
+        raise ServiceError(
+            "This host has no passwd database, so the issue approval "
+            "controller cannot resolve the account its state belongs to."
+        )
+    uid = os.getuid()
+    try:
+        entry = pwd.getpwuid(uid)
+    except KeyError as exc:
+        raise ServiceError(
+            f"No passwd entry describes uid {uid}, so the issue approval "
+            "controller cannot resolve the account its state belongs to."
+        ) from exc
+    home = Path(entry.pw_dir) if entry.pw_dir else None
+    if home is None or not home.is_absolute():
+        raise ServiceError(
+            f"The passwd entry for uid {uid} names no absolute home directory "
+            f"({entry.pw_dir!r}), so the issue approval controller cannot "
+            "resolve the account its state belongs to."
+        )
+    return home
+
+
 def service_root() -> Path:
     """This service's one root for this account.
 
-    There is deliberately no environment or flag override. The identity lock
-    that keeps two clones of one GitHub repository from both running hangs off
-    this root, so a root a caller could move is a root that lets two runs both
-    start -- each taking its own lock, writing its own status, and alternating
-    backend passes as the other releases the canonical approval lock between
-    issues. A configurable location cannot serialize anything a configuration
-    can change.
-
-    `Path.home()` still reads `$HOME`, which one OS account can be given two
-    values of, so this root is not by itself proof of a single run. That is
-    what `checkout_lock_path` is for: it is anchored to the repository, and
-    `run_lock` holds both.
+    There is deliberately no environment or flag override, and the account it
+    hangs off is the passwd database's rather than `$HOME`'s -- see
+    `account_home`. A configurable location cannot serialize anything a
+    configuration can change.
 
     Resolved per call rather than frozen at import, exactly as
     `kanban_config.default_issue_review_install_dir` is and for the same
-    reason: freezing it would bind whatever `$HOME` held when the module first
-    loaded, which any process that changes it would then silently escape.
+    reason: freezing it would bind whatever the account resolved to when the
+    module first loaded.
     """
-    return Path.home() / "Library" / "Application Support" / "kanban" / "issue-approval"
+    return account_home() / "Library" / "Application Support" / "kanban" / "issue-approval"
 
 
 def runtime_root() -> Path:
@@ -219,16 +259,14 @@ def run_lock_path(slug: str) -> Path:
     the identity rather than by the checkout, so two *clones* of one GitHub
     repository contend here even though they share no Git directory -- and so
     would a second installation, if the runtime ever became relocatable.
-
-    One of the two locks `run_lock` holds, not the whole guarantee: this one
-    is under `$HOME`, and `checkout_lock_path` covers the invocations that
-    differ in it.
+    Because that root is the account's rather than `$HOME`'s, they contend
+    however differently the two were started.
     """
     return service_root() / "locks" / f"{slug}.lock"
 
 
 def log_root() -> Path:
-    return Path.home() / "Library" / "Logs" / "kanban" / "issue-approval"
+    return account_home() / "Library" / "Logs" / "kanban" / "issue-approval"
 
 
 def require_supported_host() -> None:
@@ -245,6 +283,9 @@ def require_supported_host() -> None:
         for name, present in (
             ("POSIX process semantics", os.name == "posix"),
             ("fcntl.flock", fcntl is not None),
+            # What answers which account this run's state and locks belong to,
+            # without asking the process that started it.
+            ("passwd database", pwd is not None and hasattr(os, "getuid")),
             ("os.killpg", hasattr(os, "killpg")),
             ("os.setsid via start_new_session", hasattr(os, "setsid")),
         )
@@ -638,20 +679,18 @@ def approval_lock_path(repo_path: Path) -> Path:
 
 
 def checkout_lock_path(repo_path: Path) -> Path:
-    """This repository's own run lock, in a location no environment can move.
+    """This checkout's own run lock, anchored to the repository.
 
-    The per-identity lock under `service_root` is anchored to `Path.home()`,
-    which reads `$HOME` -- so two processes under one OS account can be given
-    different values for it and each take a lock of its own. This one is
-    anchored to the repository instead: every invocation naming this checkout
-    resolves the same shared Git directory whatever `$HOME`, install root, or
-    working directory it was started with, and a linked worktree resolves the
-    primary checkout's.
+    Complementary to the identity lock rather than redundant, and `run_lock`
+    takes both, because one location cannot see both ways a second run
+    arrives. This one catches one checkout started twice under identities that
+    do not match -- two `--config` files naming different remotes resolve one
+    checkout to two identities, which would never meet at the identity lock.
+    That one catches two *clones* of one GitHub repository, which have two Git
+    directories and would never meet here.
 
-    The two are complementary rather than redundant, and `run_lock` takes both.
-    This one catches one checkout started twice however the environment
-    differs; the identity lock catches two *clones* of one GitHub repository,
-    which have two Git directories and would never contend here.
+    A linked worktree resolves the primary checkout's file, which is what makes
+    the pair hold for the worktrees solve and review agents actually work in.
     """
     return shared_git_dir(repo_path) / RUN_LOCK_NAME
 
@@ -843,13 +882,13 @@ def run_lock(job: ApprovalJob) -> Iterator[None]:
     status document and both opened incidents.
 
     It takes two locks because one location cannot see both ways a second run
-    arrives. The checkout lock lives in the repository's shared Git directory,
-    so every invocation naming this checkout contends however its environment
-    differs -- a different `$HOME`, a different install root, a linked
-    worktree. The identity lock lives under this account's service root and is
-    named by `owner/name`, so two *clones* of one GitHub repository contend
-    even though they have two Git directories and would never meet in the
-    first one.
+    arrives. The identity lock is named by `owner/name` under this account's
+    service root -- resolved from the passwd database rather than from `$HOME`
+    -- so two *clones* of one GitHub repository contend there however
+    differently the two invocations were started. The checkout lock lives in
+    the repository's shared Git directory, so one checkout started twice
+    contends there even when the two resolved it to different identities,
+    which is the one case the identity lock cannot see.
 
     Both are non-blocking and taken in a fixed order, so a contended start
     fails immediately rather than waiting, and no two runs can deadlock.

@@ -19,6 +19,7 @@ import ast
 import contextlib
 import json
 import os
+import pwd
 import signal
 import subprocess
 import sys
@@ -190,6 +191,31 @@ if __name__ == "__main__":
 '''
 
 
+# How a subprocess test runs the controller with its account root redirected.
+#
+# The controller resolves that root from the passwd database precisely so that
+# nothing a process is started with can move it -- which is what makes it a
+# rendezvous two invocations cannot miss, and what leaves a test no way to
+# redirect it from outside. So the redirection happens inside the process, in
+# this fixture-owned wrapper, exactly as `mock.patch.object` does for the
+# in-process cases. Nothing else is stubbed: `main`, its argument parsing, its
+# locks, its signal handling and its real backend children are the tracked
+# module's own.
+CONTROLLER_WRAPPER = '''#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+account = Path(sys.argv[2])
+del sys.argv[1:3]
+
+import approve_issues_service as service
+
+service.account_home = lambda: account
+raise SystemExit(service.main())
+'''
+
+
 def wait_until(predicate, *, timeout=20.0, message="condition"):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -222,11 +248,16 @@ def result_document(outcome, *, issue=None, model_called=False, message="ok"):
 
 
 class ApprovalFixture(unittest.TestCase):
-    """A temporary HOME, a temporary checkout, and a fake installed backend.
+    """A temporary account root, a temporary checkout, and a fake backend.
 
-    Every path the controller resolves hangs off `$HOME` or
-    `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, both of which are redirected here, so an
-    in-process test and a subprocess test see the same redirected world.
+    Two redirections, because the controller reads two different kinds of
+    location. Its own state hangs off the *account* root, which it resolves
+    from the passwd database on purpose and which is therefore redirected in
+    the process -- here for the in-process cases, and by `CONTROLLER_WRAPPER`
+    for the subprocess ones. What it reads on a caller's behalf -- the shared
+    Kanban configuration and the installed backend -- still comes from the
+    environment, so `$HOME` and `KANBAN_ISSUE_REVIEW_INSTALL_DIR` are
+    redirected too.
     """
 
     identity = "acme/widgets"
@@ -238,6 +269,17 @@ class ApprovalFixture(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.home = self.root / "home"
         self.home.mkdir()
+        # What `account_home` answers for every test in this fixture. Distinct
+        # from the redirected `$HOME` above so that a path which quietly went
+        # back to reading the environment would land somewhere visible rather
+        # than somewhere indistinguishable.
+        self.account = self.root / "account"
+        self.account.mkdir()
+        patched = mock.patch.object(service, "account_home", lambda: self.account)
+        patched.start()
+        self.addCleanup(patched.stop)
+        self.wrapper = self.root / "run_controller.py"
+        self.wrapper.write_text(CONTROLLER_WRAPPER, encoding="utf-8")
         self.backend_dir = self.root / "backend"
         self.backend_dir.mkdir()
         self.backend = self.backend_dir / "approve_issues.py"
@@ -349,8 +391,31 @@ class ApprovalFixture(unittest.TestCase):
 
     # -- running the controller -------------------------------------------
 
-    def controller_argv(self, *arguments):
-        return [sys.executable, str(CONTROLLER), "--path", str(self.repo), *arguments]
+    def argv_for(self, path, *arguments, account=None):
+        return [
+            sys.executable,
+            str(self.wrapper),
+            str(CONTROLLER.parent),
+            str(account or self.account),
+            "--path",
+            str(path),
+            *arguments,
+        ]
+
+    def controller_argv(self, *arguments, account=None):
+        return self.argv_for(self.repo, *arguments, account=account)
+
+    def launch(self, path, *arguments, account=None, env=None):
+        """A controller against some other checkout, tracked for cleanup."""
+        proc = subprocess.Popen(
+            self.argv_for(path, *arguments, account=account),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env or dict(os.environ),
+        )
+        self.processes.append(proc)
+        return proc
 
     def run_controller(self, *arguments, timeout=60):
         return subprocess.run(
@@ -539,6 +604,66 @@ class MirroredLockResolutionTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class AccountHomeTests(unittest.TestCase):
+    """The one root everything this service owns hangs off.
+
+    Exercised against the real passwd database, which these read and never
+    write; every other test in this module redirects this function instead.
+    """
+
+    def real_home(self):
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+    def test_it_reads_the_passwd_entry_rather_than_the_environment(self):
+        self.assertEqual(service.account_home(), self.real_home())
+        with mock.patch.dict(os.environ, {"HOME": "/nowhere/at/all"}):
+            # `$HOME` really did move -- `Path.home()` follows it -- and the
+            # account root did not. That difference is the whole guarantee:
+            # two invocations under one uid cannot be given two service roots.
+            self.assertEqual(Path.home(), Path("/nowhere/at/all"))
+            self.assertEqual(service.account_home(), self.real_home())
+
+    def test_every_owned_path_follows_the_account_rather_than_home(self):
+        with mock.patch.object(service, "account_home", lambda: Path("/accounts/me")):
+            self.assertEqual(
+                service.service_root(),
+                Path("/accounts/me/Library/Application Support/kanban/issue-approval"),
+            )
+            self.assertEqual(
+                service.log_root(),
+                Path("/accounts/me/Library/Logs/kanban/issue-approval"),
+            )
+            self.assertEqual(
+                service.run_lock_path("acme.widgets"),
+                Path(
+                    "/accounts/me/Library/Application Support/kanban/issue-approval"
+                    "/locks/acme.widgets.lock"
+                ),
+            )
+
+    def test_a_uid_with_no_passwd_entry_fails_closed(self):
+        with mock.patch.object(service.pwd, "getpwuid", side_effect=KeyError(4242)):
+            with self.assertRaises(service.ServiceError) as raised:
+                service.account_home()
+        self.assertIn("No passwd entry", str(raised.exception))
+
+    def test_a_passwd_entry_naming_no_absolute_directory_fails_closed(self):
+        for value in ("", "relative/home", None):
+            with self.subTest(value=value):
+                with mock.patch.object(
+                    service.pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=value)
+                ):
+                    with self.assertRaises(service.ServiceError) as raised:
+                        service.account_home()
+                self.assertIn("no absolute home directory", str(raised.exception))
+
+    def test_a_host_with_no_passwd_database_is_refused_with_a_diagnostic(self):
+        with mock.patch.object(service, "pwd", None):
+            with self.assertRaises(service.ServiceError) as raised:
+                service.require_supported_host()
+            self.assertIn("passwd database", str(raised.exception))
+
+
 class RepositoryIdentityTests(unittest.TestCase):
     def test_case_only_spellings_name_one_runtime(self):
         identities = {
@@ -619,25 +744,28 @@ class PerIdentityPartitioningTests(ApprovalFixture):
             self.assertEqual(self.job().lock_path, expected)
             self.assertEqual(service.service_root(), expected.parent.parent)
 
-    def test_the_checkout_lock_cannot_be_moved_by_the_environment_at_all(self):
-        # The identity lock is under `$HOME`, which a process chooses. The
-        # checkout lock is in the repository, which it does not.
+    def test_the_checkout_lock_is_in_the_repository(self):
         expected = service.checkout_lock_path(self.repo)
         self.assertEqual(expected, self.repo / ".git" / service.RUN_LOCK_NAME)
         # Beside the backend's lock but never the same file: the two are held
         # for different things.
         self.assertNotEqual(expected, service.approval_lock_path(self.repo))
+
+    def test_neither_lock_moves_with_the_environment(self):
+        checkout = service.checkout_lock_path(self.repo)
+        identity = self.job().lock_path
         with mock.patch.dict(
             os.environ,
             {
                 "HOME": str(self.root / "another-home"),
                 "KANBAN_ISSUE_APPROVAL_INSTALL_DIR": str(self.root / "elsewhere"),
+                "KANBAN_DRAINER_INSTALL_DIR": str(self.root / "elsewhere"),
+                "KANBAN_ISSUE_REVIEW_INSTALL_DIR": str(self.root / "elsewhere"),
+                "XDG_CONFIG_HOME": str(self.root / "elsewhere"),
             },
         ):
-            self.assertEqual(service.checkout_lock_path(self.repo), expected)
-            # ... while the identity lock really did move, which is why the
-            # checkout lock has to exist.
-            self.assertNotEqual(self.job().lock_path, expected)
+            self.assertEqual(service.checkout_lock_path(self.repo), checkout)
+            self.assertEqual(self.job().lock_path, identity)
 
     def test_the_run_lock_does_not_follow_a_relocated_runtime(self):
         # IAQ-3 owns installation and may relocate the runtime. If the lock
@@ -1127,7 +1255,7 @@ class StatusClassificationTests(ApprovalFixture):
         self.assertEqual(snapshot["open_incident"]["summary"], "Issue #12 requests changes")
 
     def test_status_repairs_nothing(self):
-        before = _tree(self.home)
+        before = _tree(self.account)
         result = self.run_controller("--json", "status")
         self.assertEqual(result.returncode, 0, result.stderr)
         snapshot = json.loads(result.stdout)
@@ -1135,17 +1263,17 @@ class StatusClassificationTests(ApprovalFixture):
         self.assertEqual(snapshot["repository"], self.identity)
         # Not one directory, status document, or incident was created by
         # asking what the state is.
-        self.assertEqual(_tree(self.home), before)
+        self.assertEqual(_tree(self.account), before)
 
     def test_status_leaves_an_unreadable_document_exactly_as_it_found_it(self):
         job = self.job()
         job.runtime_dir.mkdir(parents=True, exist_ok=True)
         job.status_path.write_text("{ not json", encoding="utf-8")
-        before = _tree(self.home)
+        before = _tree(self.account)
         result = self.run_controller("--json", "status")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(job.status_path.read_text(encoding="utf-8"), "{ not json")
-        self.assertEqual(_tree(self.home), before)
+        self.assertEqual(_tree(self.account), before)
 
 
 _REAPED_PID = None
@@ -1406,31 +1534,51 @@ class SingleRunTests(ApprovalFixture):
         self.assertEqual(code, 0)
 
     def test_a_second_run_under_a_different_home_is_refused_too(self):
-        # `$HOME` is a process's to choose, so an identity lock anchored to it
-        # is not by itself proof of a single run: two invocations for one
-        # checkout would take two locks, both start, and alternate passes as
-        # each released the canonical approval lock between issues. The
-        # checkout lock lives in the repository instead, which no environment
-        # can move.
+        # `$HOME` is a process's to choose. A service root that read it would
+        # let two invocations take two locks, both start, and alternate passes
+        # as each released the canonical approval lock between issues.
         self.write_plan([{"outcome": "idle"}])
         first = self.start_controller()
         wait_until(lambda: len(self.queue_calls()) >= 1, message="the first run to poll")
 
         elsewhere = self.root / "another-home"
         elsewhere.mkdir()
-        second = subprocess.Popen(
-            self.controller_argv("run", "--interval", "0.01"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        second = self.launch(
+            self.repo, "run", "--interval", "0.01",
             env={**os.environ, "HOME": str(elsewhere)},
         )
-        self.processes.append(second)
         _out, err = second.communicate(timeout=60)
         self.assertEqual(second.returncode, 1)
-        self.assertIn("already running for the checkout at", err)
-        self.assertIn(str(self.repo), err)
-        # It really did resolve a different root, and still could not start.
+        self.assertIn("already running", err)
+        # It really was given a different `$HOME`, and nothing followed it
+        # there.
+        self.assertFalse((elsewhere / "Library").exists())
+        self.assertNotIn(second.pid, {call["ppid"] for call in self.calls()})
+        self.assertEqual(self.incidents(), [])
+
+        first.send_signal(signal.SIGTERM)
+        self.assertEqual(self.finish(first)[0], 0)
+
+    def test_a_second_clone_under_a_different_home_is_refused_too(self):
+        # The cross-product of the two cases above, and the one neither lock
+        # catches alone: two Git directories, so the checkout lock cannot see
+        # it, and two `$HOME` values, which an environment-rooted identity lock
+        # could not have seen either. The account root is the passwd entry's,
+        # so both runs resolve one identity lock however they were started.
+        other_clone = self.checkout("widgets-again", self.remote_url)
+        self.write_plan([{"outcome": "idle"}])
+        first = self.start_controller()
+        wait_until(lambda: len(self.queue_calls()) >= 1, message="the first run to poll")
+
+        elsewhere = self.root / "another-home"
+        elsewhere.mkdir()
+        second = self.launch(
+            other_clone, "run", "--interval", "0.01",
+            env={**os.environ, "HOME": str(elsewhere)},
+        )
+        _out, err = second.communicate(timeout=60)
+        self.assertEqual(second.returncode, 1)
+        self.assertIn(f"controller for {self.identity} is already running", err)
         self.assertFalse((elsewhere / "Library").exists())
         self.assertNotIn(second.pid, {call["ppid"] for call in self.calls()})
         self.assertEqual(self.incidents(), [])
@@ -1445,22 +1593,7 @@ class SingleRunTests(ApprovalFixture):
         first = self.start_controller()
         wait_until(lambda: len(self.queue_calls()) >= 1, message="the first run to poll")
 
-        second = subprocess.Popen(
-            [
-                sys.executable,
-                str(CONTROLLER),
-                "--path",
-                str(self.worktree()),
-                "run",
-                "--interval",
-                "0.01",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=dict(os.environ),
-        )
-        self.processes.append(second)
+        second = self.launch(self.worktree(), "run", "--interval", "0.01")
         _out, err = second.communicate(timeout=60)
         self.assertEqual(second.returncode, 1)
         self.assertIn("already running for the checkout at", err)
@@ -1479,22 +1612,7 @@ class SingleRunTests(ApprovalFixture):
         first = self.start_controller()
         wait_until(lambda: len(self.queue_calls()) >= 1, message="the first run to poll")
 
-        second = subprocess.Popen(
-            [
-                sys.executable,
-                str(CONTROLLER),
-                "--path",
-                str(other_clone),
-                "run",
-                "--interval",
-                "0.01",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=dict(os.environ),
-        )
-        self.processes.append(second)
+        second = self.launch(other_clone, "run", "--interval", "0.01")
         _out, err = second.communicate(timeout=60)
         self.assertEqual(second.returncode, 1)
         self.assertIn("already running", err)
@@ -1517,22 +1635,7 @@ class SingleRunTests(ApprovalFixture):
         other = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
         self.write_plan([{"outcome": "idle"}])
         first = self.start_controller()
-        second = subprocess.Popen(
-            [
-                sys.executable,
-                str(CONTROLLER),
-                "--path",
-                str(other),
-                "run",
-                "--interval",
-                "0.02",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=dict(os.environ),
-        )
-        self.processes.append(second)
+        second = self.launch(other, "run", "--interval", "0.02")
         wait_until(
             lambda: len([c for c in self.queue_calls() if c["repo"] == "acme/gadgets"]) >= 1,
             message="the second repository to poll",
