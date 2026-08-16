@@ -31,6 +31,7 @@ import Kanban.Config
     UsageConfig (..),
     decodeConfigText,
     defaultTimeoutsConfig,
+    defaultUsageConfig,
   )
 import Kanban.Domain (UsageProvider (..), UsageSnapshot (..), UsageWindow (..))
 import Kanban.Ping
@@ -476,7 +477,7 @@ spec = do
         result <- runPing (PingMode PingCodex True) =<< refreshingConfig root
         result.pingResultCacheError `shouldSatisfy` (/= Nothing)
         pingResultSucceeded result `shouldBe` False
-        pingResultLines zone now result `shouldSatisfy` any (Text.isInfixOf "% left")
+        pingResultLines noEstimates zone now result `shouldSatisfy` any (Text.isInfixOf "% left")
         -- The failed write replaced nothing that was already there.
         doesDirectoryExist (usageCachePath root) `shouldReturn` True
 
@@ -490,16 +491,31 @@ spec = do
     it "prints every returned window with the wall clock it ends at" $
       withPingRoot $ \root -> do
         result <- runPing (PingMode PingCodex False) =<< refreshingConfig root
-        pingResultLines zone now result
+        pingResultLines noEstimates zone now result
           `shouldBe` [ "Codex",
                        "  codex-window   71% left · resets in 5h 0m (Thu 17:00)",
+                       "  snapshot 0s old"
+                     ]
+
+    -- The printed refresh comes out of the same 'renderUsageReport' as
+    -- @kanban --usage@, and 'runPingMode' holds the same resolved
+    -- configuration, so a configured provider's estimate has to appear here
+    -- in exactly the wording that command states it in. A ping that printed
+    -- the window without it would be the divergence sharing the renderer
+    -- exists to rule out.
+    it "states a configured provider's estimate exactly as kanban --usage does" $
+      withPingRoot $ \root -> do
+        result <- runPing (PingMode PingCodex False) =<< refreshingConfig root
+        pingResultLines (Map.singleton Codex 8) zone now result
+          `shouldBe` [ "Codex",
+                       "  codex-window   71% left · resets in 5h 0m (Thu 17:00) · ≈8 solve rounds left this window",
                        "  snapshot 0s old"
                      ]
 
     it "prints the failing provider's own line when the refresh failed" $
       withPingRoot $ \root -> do
         result <- runPing (PingMode PingCodex False) =<< failingRefreshConfig root
-        pingResultLines zone now result `shouldSatisfy` any (Text.isInfixOf "unavailable")
+        pingResultLines noEstimates zone now result `shouldSatisfy` any (Text.isInfixOf "unavailable")
 
   describe "what a ping does to the snapshot cache" $ do
     it "merges the pinged brand into the stored map without dropping the other" $
@@ -523,7 +539,7 @@ spec = do
         result <- runPing (PingMode PingCodex False) =<< refreshingConfig root
         pingsRecorded root `shouldReturn` [("codex", unwords (pingArguments PingCodex))]
         refreshesRecorded root `shouldReturn` ["codex"]
-        pingResultLines zone now result `shouldSatisfy` any (Text.isInfixOf "codex-window")
+        pingResultLines noEstimates zone now result `shouldSatisfy` any (Text.isInfixOf "codex-window")
         -- Deliberately disabled persistence is not a failure.
         pingResultSucceeded result `shouldBe` True
         storedPercentages `shouldReturn` Map.fromList [(Codex, [12]), (Claude, [12])]
@@ -669,11 +685,16 @@ configuredWith :: FilePath -> FilePath -> ResolvedConfig
 configuredWith codexCommand claudeCommand =
   testResolvedConfig
     { resolvedUsage =
-        UsageConfig
+        defaultUsageConfig
           { usageCodexCommand = Just (UsageCommandConfig [Text.pack codexCommand]),
             usageClaudeCommand = Just (UsageCommandConfig [Text.pack claudeCommand])
           }
     }
+
+-- | No provider configured an estimate, which is what every case that is not
+-- about the estimate prints under.
+noEstimates :: Map.Map UsageProvider Int
+noEstimates = Map.empty
 
 refreshCommand :: FilePath -> String -> Int -> IO FilePath
 refreshCommand root name percentLeft =

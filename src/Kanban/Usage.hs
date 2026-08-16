@@ -26,6 +26,9 @@ module Kanban.Usage
     usageProviders,
     usageReportDocument,
     usageReportProduced,
+    usageSolveRoundsLeft,
+    usageSolveRoundsSuffix,
+    usageSolveRoundsText,
   )
 where
 
@@ -40,7 +43,7 @@ import Data.Time (getCurrentTime, getCurrentTimeZone)
 import Kanban.Cache (UsageCacheLoad (..), loadUsageCache, writeUsageCache)
 import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
-import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), UsageCommandConfig (..), UsageConfig (..))
+import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), UsageCommandConfig (..), UsageConfig (..), usageSolveRoundEstimates)
 import Kanban.Domain (UsageProvider (..), UsageSnapshot (..))
 import Kanban.Provider (ProviderError (..))
 import Kanban.Usage.Render
@@ -53,6 +56,9 @@ import Kanban.Usage.Render
     usageProviderName,
     usageReportDocument,
     usageReportProduced,
+    usageSolveRoundsLeft,
+    usageSolveRoundsSuffix,
+    usageSolveRoundsText,
   )
 import Kanban.UsageCommand (runUsageCommand)
 import System.IO (hPutStrLn, stderr)
@@ -174,5 +180,5 @@ runUsageMode mode config = do
     else do
       zone <- getCurrentTimeZone
       now <- getCurrentTime
-      mapM_ TextIO.putStrLn (renderUsageReport zone now report)
+      mapM_ TextIO.putStrLn (renderUsageReport (usageSolveRoundEstimates config.resolvedUsage) zone now report)
   pure (usageReportProduced report)

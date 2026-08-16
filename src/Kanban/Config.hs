@@ -27,6 +27,8 @@ module Kanban.Config
     resolveGlobalConfig,
     repositoryIdentity,
     resolveConfigPathOption,
+    usageSolveRoundEstimate,
+    usageSolveRoundEstimates,
   )
 where
 
@@ -46,6 +48,7 @@ import Kanban.CLI (Options (..))
 import Kanban.Domain
   ( ApprovalMode (..),
     BlockingSeverity (..),
+    UsageProvider (..),
     WorkflowConfig (..),
     defaultWorkflowConfig,
   )
@@ -121,14 +124,44 @@ defaultTimeoutsConfig =
 newtype UsageCommandConfig = UsageCommandConfig {usageCommandArgv :: [Text]}
   deriving stock (Eq, Show)
 
+-- | One provider's usage configuration.  The estimate is a sibling of the
+-- command rather than part of it: a table carrying only
+-- @estimated_percent_per_solve_round@ is valid, and the estimate then
+-- describes whatever windows the built-in probe reports.
 data UsageConfig = UsageConfig
   { usageCodexCommand :: Maybe UsageCommandConfig,
-    usageClaudeCommand :: Maybe UsageCommandConfig
+    usageCodexEstimatedPercentPerSolveRound :: Maybe Int,
+    usageClaudeCommand :: Maybe UsageCommandConfig,
+    usageClaudeEstimatedPercentPerSolveRound :: Maybe Int
   }
   deriving stock (Eq, Show)
 
 defaultUsageConfig :: UsageConfig
-defaultUsageConfig = UsageConfig {usageCodexCommand = Nothing, usageClaudeCommand = Nothing}
+defaultUsageConfig =
+  UsageConfig
+    { usageCodexCommand = Nothing,
+      usageCodexEstimatedPercentPerSolveRound = Nothing,
+      usageClaudeCommand = Nothing,
+      usageClaudeEstimatedPercentPerSolveRound = Nothing
+    }
+
+-- | The percentage one solve round is configured to cost for this provider,
+-- if any.  Nothing is the unconfigured case, which renders no estimate at
+-- all rather than assuming a default cost.
+usageSolveRoundEstimate :: UsageConfig -> UsageProvider -> Maybe Int
+usageSolveRoundEstimate usage Codex = usage.usageCodexEstimatedPercentPerSolveRound
+usageSolveRoundEstimate usage Claude = usage.usageClaudeEstimatedPercentPerSolveRound
+
+-- | Every configured estimate, keyed by provider, in the shape the renderers
+-- take it in.  A provider that configured none is absent rather than present
+-- with a zero, so the two states stay distinguishable downstream.
+usageSolveRoundEstimates :: UsageConfig -> Map UsageProvider Int
+usageSolveRoundEstimates usage =
+  Map.fromList
+    [ (provider, estimate)
+    | provider <- [Codex, Claude],
+      Just estimate <- [usageSolveRoundEstimate usage provider]
+    ]
 
 -- | Per-field overrides for '[workflow]', decoded identically at the global
 -- and per-repository level. Global values apply defaults for any field left
@@ -494,12 +527,24 @@ timeoutsOverrideParser = do
 
 usageConfigParser :: ParseTable Position UsageConfig
 usageConfigParser = do
-  codexCommand <- optKeyOf "codex" (parseTableFromValue usageCommandTableParser)
-  claudeCommand <- optKeyOf "claude" (parseTableFromValue usageCommandTableParser)
-  pure UsageConfig {usageCodexCommand = join codexCommand, usageClaudeCommand = join claudeCommand}
+  codex <- optKeyOf "codex" (parseTableFromValue usageProviderTableParser)
+  claude <- optKeyOf "claude" (parseTableFromValue usageProviderTableParser)
+  pure
+    UsageConfig
+      { usageCodexCommand = join (fst <$> codex),
+        usageCodexEstimatedPercentPerSolveRound = join (snd <$> codex),
+        usageClaudeCommand = join (fst <$> claude),
+        usageClaudeEstimatedPercentPerSolveRound = join (snd <$> claude)
+      }
 
-usageCommandTableParser :: ParseTable Position (Maybe UsageCommandConfig)
-usageCommandTableParser = optKeyOf "command" parseCommandArgv
+-- | Both keys a provider table may carry, each optional and neither gating
+-- the other: an estimate without a command configures the built-in probe's
+-- windows, and a command without an estimate renders none.
+usageProviderTableParser :: ParseTable Position (Maybe UsageCommandConfig, Maybe Int)
+usageProviderTableParser = do
+  command <- optKeyOf "command" parseCommandArgv
+  estimate <- optKeyOf "estimated_percent_per_solve_round" parseSolveRoundPercent
+  pure (command, estimate)
 
 parseRepositories :: Value' Position -> Matcher Position (Map Text RepositoryOverride)
 parseRepositories = mapOf parseRepositoryKey (\_ value -> parseTableFromValue repositoryOverrideParser value)
@@ -619,6 +664,17 @@ parsePositiveTimeoutSeconds value = do
     else pure number
   where
     microsecondsPerSecond = 1000000 :: Int
+
+-- | The estimated percentage one solve round consumes: a whole percentage of
+-- a window, so anything outside 1 through 100 is a configuration error rather
+-- than a value silently clamped.  Zero in particular has to be rejected here,
+-- because the round count divides by it.
+parseSolveRoundPercent :: Value' l -> Matcher l Int
+parseSolveRoundPercent value = do
+  number <- fromValue value
+  if number < 1 || number > (100 :: Int)
+    then failAt (valueAnn value) "must be a whole percentage from 1 through 100"
+    else pure number
 
 parseCommandArgv :: Value' l -> Matcher l UsageCommandConfig
 parseCommandArgv value = do

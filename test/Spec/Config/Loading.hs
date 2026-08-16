@@ -69,8 +69,11 @@ spec = do
       config.rawTimeouts `shouldBe` TimeoutsConfig 60 20 90 130 140
       config.rawUsage
         `shouldBe` UsageConfig
-          (Just (UsageCommandConfig ["/usr/local/bin/my-codex-usage", "--json"]))
-          (Just (UsageCommandConfig ["/usr/local/bin/my-claude-usage", "--json"]))
+          { usageCodexCommand = Just (UsageCommandConfig ["/usr/local/bin/my-codex-usage", "--json"]),
+            usageCodexEstimatedPercentPerSolveRound = Just 8,
+            usageClaudeCommand = Just (UsageCommandConfig ["/usr/local/bin/my-claude-usage", "--json"]),
+            usageClaudeEstimatedPercentPerSolveRound = Just 12
+          }
       Map.member "coghex/kanban" config.rawRepositories `shouldBe` True
       Map.member "other/repo" config.rawRepositories `shouldBe` True
       Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "unknown_top_level_key"
@@ -217,6 +220,37 @@ spec = do
       decodeConfigText "[timeouts]\ngithub_seconds = 0\n" `shouldSatisfy` errorContains ["github_seconds"]
       decodeConfigText "[usage.codex]\ncommand = []\n" `shouldSatisfy` errorContains ["command"]
       decodeConfigText "[usage.codex]\ncommand = [\"\"]\n" `shouldSatisfy` errorContains ["command"]
+
+    -- The estimate divides the remaining percentage, so zero has to be an
+    -- error rather than a value the renderer defends against; the upper bound
+    -- is what makes it a percentage of a window rather than an arbitrary
+    -- number. Every rejection names the whole path, because the two providers
+    -- configure the key independently and the message is the only thing that
+    -- says which one was wrong.
+    it "holds both providers' solve-round estimate to a 1-100 whole percentage, naming the full key path" $ do
+      let rejects provider value =
+            decodeConfigText
+              ("[usage." <> provider <> "]\nestimated_percent_per_solve_round = " <> value <> "\n")
+              `shouldSatisfy` errorContains ["usage", provider, "estimated_percent_per_solve_round"]
+      mapM_
+        (\provider -> mapM_ (rejects provider) ["0", "-1", "101", "7.5", "true", "\"8\""])
+        ["codex", "claude"]
+      decodeConfigText "[usage.codex]\nestimated_percent_per_solve_round = 1\n" `shouldSatisfy` isRight
+      decodeConfigText "[usage.claude]\nestimated_percent_per_solve_round = 100\n" `shouldSatisfy` isRight
+
+    -- The two keys are siblings rather than one nested in the other, so a
+    -- provider table may carry either alone. An estimate without a command
+    -- describes the built-in probe's windows.
+    it "accepts each usage provider key without the other, and warns about neither" $ do
+      let (estimateOnly, estimateWarnings) =
+            unsafeConfig (decodeConfigText "[usage.codex]\nestimated_percent_per_solve_round = 8\n")
+          (commandOnly, commandWarnings) =
+            unsafeConfig (decodeConfigText "[usage.claude]\ncommand = [\"my-claude-usage\"]\n")
+      estimateOnly.rawUsage.usageCodexCommand `shouldBe` Nothing
+      estimateOnly.rawUsage.usageCodexEstimatedPercentPerSolveRound `shouldBe` Just 8
+      commandOnly.rawUsage.usageClaudeCommand `shouldBe` Just (UsageCommandConfig ["my-claude-usage"])
+      commandOnly.rawUsage.usageClaudeEstimatedPercentPerSolveRound `shouldBe` Nothing
+      (estimateWarnings, commandWarnings) `shouldBe` ([], [])
 
     it "rejects a timeout large enough to overflow when converted to microseconds, but accepts the boundary" $ do
       let overflowingSeconds = (maxBound :: Int) `div` 1000000 + 1
