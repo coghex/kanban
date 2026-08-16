@@ -288,9 +288,9 @@ Some details worth knowing:
   ping fails or times out, Kanban still refreshes and prints the window — a
   request that timed out may already have counted — and still exits non-zero.
 - It needs no repository, so it works from any directory, and it honors
-  `--config`. If you happen to run it inside a checkout Kanban can identify, or
-  pass `--repo`, that repository's timeout overrides apply; otherwise the
-  global ones do.
+  `--config`. Pass `--repo owner/name` — which needs no checkout — or run it
+  inside a checkout Kanban can identify, and that repository's timeout
+  overrides apply; otherwise the global ones do.
 - `--no-cache` and a global `cache = false` stop it from reading or writing the
   stored snapshot. The ping, the refresh, and the printed result happen either
   way.

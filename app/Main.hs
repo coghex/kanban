@@ -7,7 +7,7 @@ import Kanban.CLI (Options (..), optionsParserInfo)
 import Kanban.Config (RawConfig (..), cacheEnabled, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
-import Kanban.Ping (PingMode (..), pingResolvedConfig, resolvePingBrand, runPingMode)
+import Kanban.Ping (PingMode (..), pingRepositoryIdentity, pingResolvedConfig, resolvePingBrand, runPingMode)
 import Kanban.Preflight (doctorLines, doctorReady, gatherPreflightEnvironment)
 import Kanban.Repository (resolveRepository)
 import Kanban.UI (runDashboard)
@@ -77,19 +77,23 @@ main = do
               exitFailure
             Right (rawConfig, warnings) -> do
               mapM_ (\warning -> hPutStrLn stderr ("kanban: warning: " <> Text.unpack warning)) warnings
-              -- Attempted, never required: a resolved repository lets the ping
-              -- timeouts pick up that repository's override, and a failure to
-              -- resolve one is not an error here, because a ping needs no
-              -- checkout and no configured remote.
-              repositoryResult <- resolveRepository rawConfig.rawRemoteName parsedOptions.optionPath parsedOptions.optionRepo
-              let resolvedConfig = pingResolvedConfig rawConfig repositoryResult
-                  mode =
-                    PingMode
-                      { pingModeBrand = brand,
-                        pingModeCache = cacheEnabled parsedOptions resolvedConfig
-                      }
-              succeeded <- runPingMode mode resolvedConfig
-              unless succeeded exitFailure
+              -- An explicit --repo names a repository without needing a
+              -- checkout; without one the invoking directory is asked, and
+              -- that failing is not an error, because a ping requires neither.
+              identityResult <- pingRepositoryIdentity rawConfig.rawRemoteName parsedOptions.optionPath parsedOptions.optionRepo
+              case identityResult of
+                Left message -> do
+                  hPutStrLn stderr ("kanban: " <> Text.unpack message)
+                  exitFailure
+                Right identity -> do
+                  let resolvedConfig = pingResolvedConfig rawConfig identity
+                      mode =
+                        PingMode
+                          { pingModeBrand = brand,
+                            pingModeCache = cacheEnabled parsedOptions resolvedConfig
+                          }
+                  succeeded <- runPingMode mode resolvedConfig
+                  unless succeeded exitFailure
     Nothing -> do
       -- An explicit --config is resolved against kanban's own launch
       -- directory here, then threaded onward (canonical issue-review and

@@ -294,12 +294,15 @@ run-and-exit modes are selected in the fixed order `--glyph-test`, `--doctor`,
 `--usage`, `--ping`, and exactly one of them runs. A ping is the only mode
 that spends the user's quota (section 14), so every observational mode wins
 over it; an invocation naming one of them — `kanban --doctor --ping codex` —
-runs that mode and launches no ping. Ping mode attempts repository resolution
-but never requires it: a resolved `owner/name` — from `--repo` or from the
-directory it was invoked in — applies that repository's timeout override under
-section 16's ordinary inheritance rules, and a failure to resolve one is not
-an error, so a ping still answers from a directory that is not a checkout or
-has no configured remote, under the global timeouts.
+runs that mode and launches no ping. Ping mode establishes a repository
+identity where it can, and never requires one: `--repo` names a repository
+outright and is read as one without git or a checkout, so the override it
+selects applies from any directory; without it, the invoking directory is
+asked, and failing there is not an error. An established `owner/name` applies
+that repository's timeout override under section 16's ordinary inheritance
+rules, and an absent one leaves the global timeouts in force, so a ping still
+answers from a directory that is not a checkout or has no configured remote. A
+`--repo` that names no repository at all is reported rather than ignored.
 
 ## 6. Layout
 
@@ -1745,18 +1748,24 @@ be discovered before it is needed rather than after.
   observed here.
 
 That group is only ever signalled while it is provably still Kanban's. A group
-id is the leader's pid, which the leader's own exit releases, so the process is
-watched to its end and censused *before* it is reaped — the window in which the
-kernel still reserves that pid, and therefore that group id, to it. Signalling
-is then gated on an identity pinned in that window, matched by pid and start
-time, still being in the group; a group that emptied and had its id reissued
-matches nothing and is left alone, as is a pid whose start time has moved on.
-Once ownership is re-established the rest of the group's current membership
-joins the list the termination verifies against, so a helper forked late is
-confirmed gone rather than merely signalled. A snapshot that cannot be taken
-signals no group at all, falling back — only for a ping that overran its
-deadline — to terminating Kanban's own unreaped child by pid, which needs no
-census to be safe.
+id is the leader's pid, and reaping the leader releases it, so a group read by
+id after that point could belong to anything. The ping is therefore watched to
+its end without being reaped — its exit read from a process snapshot, which
+omits a zombie — and the group is censused and cleared inside the window where
+the kernel still reserves that pid to Kanban's own child. The check that
+enforces this is asking the process handle for its pid, which answers with
+nothing once the handle has been reaped: moving the sweep after the wait stops
+it signalling rather than starts it signalling strangers.
+
+Membership at that moment is the whole census, because joining an existing
+group takes being a child of one of its members. That covers a descendant at
+any depth forked at any point in the run, including one whose own parent has
+already exited — which a census pinned earlier would have missed. Termination
+then re-checks each member by pid, start time, and current group before each of
+TERM and KILL, and sends neither when nothing matches. A snapshot that cannot
+be taken signals no group at all, falling back — only for a ping that overran
+its deadline — to terminating Kanban's own unreaped child by pid, which needs
+no census to be safe.
 
 Exactly one usage refresh follows any ping process that started — whether it
 succeeded, exited non-zero, or timed out, because all three may already have

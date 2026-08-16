@@ -30,15 +30,16 @@ import Kanban.Config
     decodeConfigText,
     defaultTimeoutsConfig,
   )
-import Kanban.Domain (Repository (..), UsageProvider (..), UsageSnapshot (..), UsageWindow (..))
+import Kanban.Domain (UsageProvider (..), UsageSnapshot (..), UsageWindow (..))
 import Kanban.Ping
   ( PingBrand (..),
     PingLaunch (..),
     PingMode (..),
     PingResult (..),
-    ownedGroupToSweep,
+    ownedGroupMembers,
     pingArguments,
     pingPrompt,
+    pingRepositoryIdentity,
     pingResolvedConfig,
     pingResultLines,
     pingResultProblems,
@@ -47,6 +48,7 @@ import Kanban.Ping
     pingTimeoutMicros,
     resolvePingBrand,
     runPing,
+    sweepOwnedGroup,
   )
 import Kanban.Preflight (gatherPreflightEnvironment)
 import Kanban.Process (ProcessIdentity (..))
@@ -70,8 +72,16 @@ import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (readFile')
-import System.Posix.Signals (nullSignal, signalProcess)
+import System.Posix.Signals (nullSignal, sigKILL, signalProcess)
 import System.Posix.Types (ProcessID)
+import System.Process
+  ( CreateProcess (..),
+    ProcessHandle,
+    StdStream (NoStream),
+    createProcess,
+    proc,
+    waitForProcess,
+  )
 import Test.Hspec
 import Text.Read (readMaybe)
 
@@ -217,54 +227,81 @@ spec = do
           helper <- helperPid root
           processAlive helper `shouldReturn` False
 
-    -- A group id is only a number, and the leader's exit frees the pid it was
-    -- named after. Whether the group is still Kanban's therefore has to be
-    -- re-proved from identities pinned while the leader was unreaped, not
-    -- assumed from the number, or a sweep could signal whichever unrelated
-    -- group inherited it. Only the decision is testable deterministically —
-    -- real pid reuse cannot be provoked — so it is a pure function of the
-    -- pinned identities and a snapshot.
-    it "sweeps nothing when the group id has been reissued to an unrelated group" $
-      ownedGroupToSweep 500 [leader 500 "Thu Aug 15 10:00:00 2026"] reusedGroupSnapshot
-        `shouldBe` []
+    -- A descendant whose own parent has already exited was never a child of
+    -- the leader and would be absent from any census pinned at spawn, but it
+    -- is still in the group and still spending the window.
+    it "kills a grandchild whose parent exited before the leader did" $
+      withPingRoot $ \root ->
+        withEnvironmentValue pingModeVariable "chain" $ do
+          result <- runPing (PingMode PingCodex False) =<< refreshingConfig root
+          result.pingResultLaunch `shouldBe` PingExited ExitSuccess
+          helper <- helperPid root
+          processAlive helper `shouldReturn` False
 
-    it "sweeps the group while a pinned identity is still in it" $
-      ownedGroupToSweep 500 [leader 500 "Thu Aug 15 10:00:00 2026"] ownedGroupSnapshot
+    it "takes the whole group and nothing outside it" $
+      ownedGroupMembers 500 mixedSnapshot
         `shouldBe` [ leader 500 "Thu Aug 15 10:00:00 2026",
                      member 501 500 "Thu Aug 15 10:00:01 2026"
                    ]
 
-    -- The pinned leader dying is not the group being clear, and a helper
-    -- forked after the pin still has to be verified dead rather than merely
-    -- signalled, so it joins the list the sweep confirms against.
-    it "promotes a helper forked after the pin once ownership is proven" $
-      ownedGroupToSweep 500 [leader 500 "Thu Aug 15 10:00:00 2026", member 501 500 "Thu Aug 15 10:00:01 2026"] survivingHelperSnapshot
-        `shouldBe` [ leader 500 "Thu Aug 15 10:00:00 2026",
-                     member 501 500 "Thu Aug 15 10:00:01 2026",
-                     member 777 500 "Thu Aug 15 10:00:09 2026"
-                   ]
-
-    -- Same pid, different process: a start time that moved on is a different
-    -- process wearing a recycled number, and proves nothing.
-    it "sweeps nothing when the pinned pid is present but its start time moved" $
-      ownedGroupToSweep 500 [leader 500 "Thu Aug 15 10:00:00 2026"] [leader 500 "Thu Aug 15 11:30:00 2026"]
-        `shouldBe` []
+    -- The one thing that makes reading a group by its numeric id sound is
+    -- that the leader is still unreaped, because that is what reserves the
+    -- pid the id is named after. Once the handle is reaped the id could name
+    -- anything, so the sweep must refuse rather than signal — even though
+    -- refusing means leaving this helper running.
+    it "refuses to signal a group whose leader has already been reaped" $
+      withPingRoot $ \root -> do
+        (handle, helper) <- spawnReapedGroupLeader root
+        sweepOwnedGroup handle
+        processAlive helper `shouldReturn` True
+        signalProcess sigKILL helper
 
   describe "the configuration a ping runs under" $ do
     -- Requirement 11: a ping needs no checkout, but where repository context
     -- does exist its timeout override applies on the ordinary terms.
-    it "applies the repository's ping override when a repository was resolved" $ do
-      let resolved = pingResolvedConfig pingFixtureConfig (Right kanbanRepository)
+    it "applies the repository's ping override when an identity was established" $ do
+      let resolved = pingResolvedConfig pingFixtureConfig (Just "coghex/kanban")
       resolved.resolvedTimeouts.timeoutsPingClaudeSeconds `shouldBe` 150
       pingTimeoutMicros PingClaude resolved `shouldBe` 150000000
       -- The key the repository table leaves unset still inherits the global.
       resolved.resolvedTimeouts.timeoutsPingCodexSeconds `shouldBe` 130
 
-    it "falls back to the global table when no repository could be resolved" $ do
-      let resolved = pingResolvedConfig pingFixtureConfig (Left "not a checkout")
+    it "falls back to the global table when no identity could be established" $ do
+      let resolved = pingResolvedConfig pingFixtureConfig Nothing
       resolved.resolvedTimeouts.timeoutsPingClaudeSeconds `shouldBe` 140
       resolved.resolvedTimeouts.timeoutsPingCodexSeconds `shouldBe` 130
       pingTimeoutMicros PingClaude resolved `shouldBe` 140000000
+
+    -- --repo names a repository outright. Resolving it the way the dashboard
+    -- does would run `git rev-parse` first and fail here, silently dropping
+    -- the override the user asked for — and running a ping from outside any
+    -- checkout is exactly when the flag is worth having.
+    it "honors an explicit --repo from a directory that is not a checkout" $ do
+      outsideRepository <- createTemporaryDirectory
+      identity <- pingRepositoryIdentity "origin" outsideRepository (Just "coghex/kanban")
+      removePathForcibly outsideRepository
+      identity `shouldBe` Right (Just "coghex/kanban")
+      let resolved = pingResolvedConfig pingFixtureConfig (either (const Nothing) id identity)
+      pingTimeoutMicros PingClaude resolved `shouldBe` 150000000
+
+    it "accepts the GitHub URL forms --repo already takes" $ do
+      outsideRepository <- createTemporaryDirectory
+      identity <- pingRepositoryIdentity "origin" outsideRepository (Just "https://github.com/coghex/kanban")
+      removePathForcibly outsideRepository
+      identity `shouldBe` Right (Just "coghex/kanban")
+
+    -- A missing checkout is not an error; an explicit argument that names no
+    -- repository at all is a different thing and is reported rather than
+    -- quietly ignored.
+    it "establishes no identity outside a checkout when --repo was not given" $ do
+      outsideRepository <- createTemporaryDirectory
+      identity <- pingRepositoryIdentity "origin" outsideRepository Nothing
+      removePathForcibly outsideRepository
+      identity `shouldBe` Right Nothing
+
+    it "reports a --repo that names no repository" $ do
+      identity <- pingRepositoryIdentity "origin" "." (Just "not a repository")
+      identity `shouldSatisfy` either (const True) (const False)
 
   describe "the refresh a launched ping owes" $ do
     it "refreshes once after a ping that succeeded" $
@@ -486,6 +523,9 @@ installRecordingProviders root = do
           -- which is the survivor the sweep has to reach.
           "  orphan) sh -c 'sleep 30' & printf '%s' \"$!\" > \"" <> ByteString.pack (helperPidFile root) <> "\" ;;",
           "  orphan-hang) sh -c 'sleep 30' & printf '%s' \"$!\" > \"" <> ByteString.pack (helperPidFile root) <> "\"; sleep 30 ;;",
+          -- A grandchild whose own parent exits immediately: it stays in the
+          -- group with no surviving ancestor but the leader.
+          "  chain) sh -c 'sh -c \"exec sleep 30\" & printf \"%s\" \"$!\" > \"" <> ByteString.pack (helperPidFile root) <> "\"' ; sleep 1 ;;",
           "esac",
           "exit 0"
         ]
@@ -572,27 +612,29 @@ member pid groupPid startedAt =
 leader :: Int -> Text -> ProcessIdentity
 leader pid = member pid pid
 
--- | The group emptied, its id was reissued, and an unrelated process group now
--- occupies the same number with entirely different processes.
-reusedGroupSnapshot :: [ProcessIdentity]
-reusedGroupSnapshot =
-  [ leader 500 "Thu Aug 15 12:00:00 2026",
-    member 640 500 "Thu Aug 15 12:00:00 2026"
-  ]
-
-ownedGroupSnapshot :: [ProcessIdentity]
-ownedGroupSnapshot =
+-- | The ping's group beside unrelated processes, including one whose own pid
+-- matches the group's members but whose group is somebody else's.
+mixedSnapshot :: [ProcessIdentity]
+mixedSnapshot =
   [ leader 500 "Thu Aug 15 10:00:00 2026",
-    member 501 500 "Thu Aug 15 10:00:01 2026"
+    member 501 500 "Thu Aug 15 10:00:01 2026",
+    leader 700 "Thu Aug 15 10:00:02 2026",
+    member 502 700 "Thu Aug 15 10:00:03 2026"
   ]
 
--- | The pinned leader is gone, a pinned helper proves the group is still ours,
--- and a helper forked after the pin is in it too.
-survivingHelperSnapshot :: [ProcessIdentity]
-survivingHelperSnapshot =
-  [ member 501 500 "Thu Aug 15 10:00:01 2026",
-    member 777 500 "Thu Aug 15 10:00:09 2026"
-  ]
+-- | A process group whose leader has been waited on, leaving a helper running
+-- and the group id no longer provably Kanban's.
+spawnReapedGroupLeader :: FilePath -> IO (ProcessHandle, ProcessID)
+spawnReapedGroupLeader root = do
+  script <-
+    writeExecutableScript
+      (root </> "reaped-leader.sh")
+      [ByteString.pack ("sh -c 'exec sleep 30' & printf '%s' \"$!\" > \"" <> helperPidFile root <> "\"")]
+  (_, _, _, handle) <-
+    createProcess (proc script []) {std_in = NoStream, std_out = NoStream, std_err = NoStream, create_group = True}
+  _ <- waitForProcess handle
+  helper <- helperPid root
+  pure (handle, helper)
 
 -- | The shared full-file fixture, whose global block sets both ping timeouts
 -- and whose @coghex/kanban@ table overrides only the Claude one.
@@ -600,9 +642,6 @@ pingFixtureConfig :: RawConfig
 pingFixtureConfig = case decodeConfigText fullFixtureToml of
   Right (config, _) -> config
   Left message -> error ("ping fixture configuration did not decode: " <> Text.unpack message)
-
-kanbanRepository :: Repository
-kanbanRepository = Repository {repositoryRoot = "/tmp/kanban", repositoryOwner = "coghex", repositoryName = "kanban"}
 
 helperPidFile :: FilePath -> FilePath
 helperPidFile root = root </> "helper.pid"
