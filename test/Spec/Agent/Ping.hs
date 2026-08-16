@@ -18,6 +18,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (TimeZone, UTCTime, hoursToTimeZone)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
+import Data.Word (Word64)
+import GHC.Clock (getMonotonicTimeNSec)
 import Kanban.CLI (Options (..), optionsParserInfo)
 import Kanban.Cache (UsageCacheLoad (..), loadUsageCache, writeUsageCache)
 import Kanban.Claude (claudeScratchDirectory)
@@ -72,6 +74,7 @@ import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (readFile')
+import System.Posix.Process (getProcessGroupID)
 import System.Posix.Signals (nullSignal, sigKILL, signalProcess)
 import System.Posix.Types (ProcessID)
 import System.Process
@@ -262,6 +265,43 @@ spec = do
             result.pingResultLaunch `shouldBe` PingTimedOut 1
             helper <- helperPid root
             processAlive helper `shouldReturn` False
+
+    -- A `ps` that never answers is a different failure from one that answers
+    -- with an error: the deadline is counted against a monotonic clock and
+    -- every snapshot is bounded by what is left of it, so the wait cannot be
+    -- held open by the very call meant to observe it.
+    it "still ends and clears the group within the deadline when process snapshots hang" $
+      withPingRoot $ \root ->
+        withEnvironmentValue pingModeVariable "orphan-hang" $
+          withHangingProcessSnapshot root $ do
+            -- A refresh that cannot even be spawned, so the only process-table
+            -- reads in this run are the ping's own. The refresh takes one of
+            -- its own after any command it did launch, and that read belongs
+            -- to #333's usage-command sweep rather than to the bound under
+            -- test here; leaving it in would measure that instead.
+            let config = configuredWith missingCommand missingCommand
+            startedAt <- getMonotonicTimeNSec
+            result <- runPing (PingMode PingCodex False) config {resolvedTimeouts = timedTimeouts 1 1}
+            elapsed <- elapsedSeconds startedAt
+            result.pingResultLaunch `shouldBe` PingTimedOut 1
+            helper <- helperPid root
+            processAlive helper `shouldReturn` False
+            -- The bound is the point: a hung `ps` used to stop the countdown
+            -- entirely, so this must stay far below the one that hangs.
+            elapsed `shouldSatisfy` (< 30)
+
+    -- Treating everything in the group as the ping's is only sound because
+    -- the ping leads a group of its own, in a session of its own. Were it
+    -- left in Kanban's group, that same census would name Kanban and every
+    -- other child it has — so this reads the group the ping actually got.
+    it "puts the ping in a process group it leads rather than Kanban's own" $
+      withPingRoot $ \root ->
+        withEnvironmentValue pingModeVariable "group" $ do
+          _ <- runPing (PingMode PingCodex False) =<< refreshingConfig root
+          (pingPid, pingGroup) <- recordedGroup root
+          kanbanGroup <- getProcessGroupID
+          pingGroup `shouldBe` pingPid
+          pingGroup `shouldSatisfy` (/= fromIntegral kanbanGroup)
 
     it "takes the whole group and nothing outside it" $
       ownedGroupMembers 500 mixedSnapshot
@@ -551,6 +591,8 @@ installRecordingProviders root = do
           -- A grandchild whose own parent exits immediately: it stays in the
           -- group with no surviving ancestor but the leader.
           "  chain) sh -c 'sh -c \"exec sleep 30\" & printf \"%s\" \"$!\" > \"" <> ByteString.pack (helperPidFile root) <> "\"' ; sleep 1 ;;",
+          -- Reports the group the spawn actually placed this process in.
+          "  group) printf '%s %s' \"$$\" \"$(ps -o pgid= -p $$ | tr -d ' ')\" > \"" <> ByteString.pack (groupFile root) <> "\" ;;",
           "esac",
           "exit 0"
         ]
@@ -575,6 +617,11 @@ failingRefreshConfig root = do
 -- spawns the brand's own executable a second time. The probe timeouts are
 -- shortened because the fakes here answer no protocol at all and the point of
 -- the case is what got launched, not what came back.
+-- | A refresh command that does not exist, so no refresh subprocess is
+-- spawned at all.
+missingCommand :: FilePath
+missingCommand = "/nonexistent/kanban-ping-fixture"
+
 probeRefreshConfig :: ResolvedConfig
 probeRefreshConfig =
   testResolvedConfig
@@ -678,6 +725,30 @@ pingFixtureConfig = case decodeConfigText fullFixtureToml of
 
 helperPidFile :: FilePath -> FilePath
 helperPidFile root = root </> "helper.pid"
+
+groupFile :: FilePath -> FilePath
+groupFile root = root </> "ping-group"
+
+-- | The pid and process-group id the ping process itself reported.
+recordedGroup :: FilePath -> IO (Int, Int)
+recordedGroup root = do
+  waitForFileToExist (groupFile root) 50
+  recorded <- readFile' (groupFile root)
+  case traverse readMaybe (words recorded) of
+    Just [pid, groupPid] -> pure (pid, groupPid)
+    _ -> fail ("ping group file did not hold a pid and group: " <> show recorded)
+
+-- | Puts a @ps@ that never answers ahead of the real one, so every process
+-- snapshot hangs rather than failing.
+withHangingProcessSnapshot :: FilePath -> IO result -> IO result
+withHangingProcessSnapshot root action = do
+  _ <- writeExecutableScript (root </> "bin" </> "ps") ["sleep 120"]
+  action
+
+elapsedSeconds :: Word64 -> IO Word64
+elapsedSeconds startedAt = do
+  finishedAt <- getMonotonicTimeNSec
+  pure ((finishedAt - startedAt) `div` 1000000000)
 
 -- | The pid of the helper the fake forked into the launched process group.
 -- Written by the fake before its leader exits, so it is there to read whether

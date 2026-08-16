@@ -46,6 +46,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import Data.Time (TimeZone, UTCTime, getCurrentTime, getCurrentTimeZone)
+import GHC.Clock (getMonotonicTimeNSec)
 import Kanban.Cache (UsageCacheLoad (..), loadUsageCache, writeUsageCache)
 import Kanban.Claude (claudeEnvironment, claudeScratchDirectory)
 import Kanban.Config
@@ -320,7 +321,14 @@ launchPing timeoutMicros brand = do
           std_in = NoStream,
           std_out = NoStream,
           std_err = NoStream,
-          create_group = True
+          -- A new session rather than merely a new process group. A group
+          -- alone would not make its membership an ownership census: any
+          -- process in Kanban's own session may join a group of that session
+          -- with @setpgid@, and the sweep would then treat it as the ping's.
+          -- @setsid@ puts the ping in a session of its own, where the only
+          -- processes that can join its group are its own descendants, and
+          -- makes it that group's leader so the group id is its pid.
+          new_session = True
         }
 
 -- | Claude gets the probe's own hardening — no auto-update, telemetry, prompt
@@ -331,17 +339,13 @@ pingEnvironment :: PingBrand -> IO (Maybe [(String, String)])
 pingEnvironment PingCodex = pure Nothing
 pingEnvironment PingClaude = Just <$> claudeEnvironment
 
--- | Waits out the model round trip, then sweeps the process group Kanban
--- created for this ping — on every path, not only after a timeout.
---
--- The leader exiting is not the same thing as the ping being over. A client
--- that forked a helper leaves it running in that group, still doing model work
--- and still spending the window this command was supposed to bound, whether
--- the leader exited cleanly, exited non-zero, or was terminated. So the sweep
--- is unconditional; when nothing survives it sends no signal at all, because
--- 'killVerifiedGroup' checks membership before each phase.
 -- | Waits out the ping and then clears its process group, in that order and
 -- never the other way around.
+--
+-- The leader exiting is not the same thing as the ping being over: a client
+-- that forked a helper leaves it running in that group, still doing model work
+-- and still spending the window this command was supposed to bound. So the
+-- sweep is unconditional; when nothing survives it sends no signal at all.
 --
 -- The leader is deliberately left unreaped until the sweep has run. While this
 -- process's own child is unreaped POSIX keeps its pid — and therefore the id of
@@ -375,48 +379,83 @@ awaitPing timeoutMicros processHandle = do
 -- The poll backs off from 'minimumPollMicros' to 'maximumPollMicros' so a ping
 -- that answers in a second is noticed promptly while a long one costs a
 -- handful of snapshots rather than hundreds.
+--
+-- Time is measured against a monotonic deadline rather than by subtracting the
+-- intervals slept, because the snapshot itself takes time and, worse, can take
+-- unbounded time: @ps@ has no deadline of its own, and a hung one would
+-- otherwise stop the countdown and hold the ping open past
+-- @ping_*_seconds@ — the bound this loop exists to enforce. Every snapshot is
+-- therefore bounded by what is left of the deadline.
+--
 -- A snapshot that cannot be taken is a poll that learned nothing, never a
 -- reason to fall back to waiting on the handle: that wait reaps, and a reaped
 -- leader takes the group's only ownership proof with it, leaving a helper
--- running with nothing able to prove it may be signalled. So a failing @ps@
--- costs responsiveness — a ping that finished early is not noticed until its
--- deadline — rather than costing the cleanup. The deadline is the user's own
--- configured bound, and the sweep that follows it still clears the group.
+-- running with nothing able to prove it may be signalled. So a failing or
+-- hanging @ps@ costs responsiveness — a ping that finished early is not
+-- noticed until its deadline — rather than costing the cleanup.
 watchOwnedGroup :: Int -> ProcessHandle -> IO Bool
 watchOwnedGroup timeoutMicros processHandle = do
   maybePid <- getPid processHandle
   case maybePid of
     Nothing -> pure True
-    Just pid -> watch (fromIntegral pid) minimumPollMicros timeoutMicros
+    Just pid -> do
+      startedAt <- getMonotonicTimeNSec
+      watch (fromIntegral pid) startedAt minimumPollMicros
   where
-    watch leaderPid interval remaining = do
-      snapshotResult <- defaultProcessSnapshot
-      let leaderGone = either (const False) (not . any ((== leaderPid) . (.processIdentityPid))) snapshotResult
+    watch leaderPid startedAt interval = do
+      budget <- remainingMicros startedAt
+      snapshotResult <- boundedProcessSnapshot budget
+      let leaderGone = case snapshotResult of
+            Just (Right snapshot) -> not (any ((== leaderPid) . (.processIdentityPid)) snapshot)
+            _ -> False
+      remaining <- remainingMicros startedAt
       if leaderGone
         then pure True
         else
           if remaining <= 0
             then pure False
             else do
-              let slept = min interval remaining
-              threadDelay slept
-              watch leaderPid (min maximumPollMicros (interval * 2)) (remaining - slept)
+              threadDelay (min interval remaining)
+              watch leaderPid startedAt (min maximumPollMicros (interval * 2))
+
+    remainingMicros startedAt = do
+      now <- getMonotonicTimeNSec
+      pure (timeoutMicros - fromIntegral ((now - startedAt) `div` 1000))
+
+-- | A process snapshot that cannot outlast the deadline it is being taken
+-- under. 'Nothing' is "no answer in time", which every caller treats exactly
+-- as it treats a snapshot that failed outright.
+boundedProcessSnapshot :: Int -> IO (Maybe (Either Text [ProcessIdentity]))
+boundedProcessSnapshot budgetMicros
+  | budgetMicros <= 0 = pure Nothing
+  | otherwise = timeout (min budgetMicros maximumSnapshotMicros) defaultProcessSnapshot
 
 ignoreIOException :: IO () -> IO ()
 ignoreIOException action = void (try @IOException action)
 
-minimumPollMicros, maximumPollMicros, blindTerminationGraceMicros :: Int
+minimumPollMicros, maximumPollMicros, maximumSnapshotMicros, blindTerminationGraceMicros :: Int
 minimumPollMicros = 100 * 1000
 maximumPollMicros = 2 * 1000 * 1000
+maximumSnapshotMicros = 5 * 1000 * 1000
 blindTerminationGraceMicros = 750 * 1000
 
 -- | Everything a snapshot currently shows in the ping's process group.
 --
 -- Membership alone is the whole census, deliberately: whoever is in this group
 -- is Kanban's, because joining an existing group takes being a child of one of
--- its members. That covers a descendant forked at any depth and at any point
--- during the run — including one whose own parent has already exited, which a
--- census pinned earlier would have missed entirely.
+-- its members, and the ping runs in a session of its own where nothing else
+-- could have joined in the first place. That covers a descendant forked at any
+-- depth and at any point during the run — including one whose own parent has
+-- already exited, which a census pinned earlier would have missed entirely.
+--
+-- The filter also settles the precondition it rests on rather than assuming
+-- it. A process group's id is the pid of its leader, and this asks for the
+-- group whose id is the ping's own pid — which, while the ping is unreaped,
+-- only the ping can hold. So if the spawn had failed to make it a group
+-- leader, no group with that id would exist and this would select nothing,
+-- rather than selecting whichever group it had been left in. That is also why
+-- there is no separate leadership check here: @getpgid@ refuses an unreaped
+-- zombie, which is exactly what the ping is by the time a clean exit is swept.
 --
 -- What makes reading it by group id sound is /when/ it is read, which
 -- 'sweepOwnedGroup' is responsible for.
@@ -445,20 +484,20 @@ sweepOwnedGroup processHandle = do
     Nothing -> pure ()
     Just pid -> do
       let groupPid = fromIntegral pid
-      snapshotResult <- defaultProcessSnapshot
+      snapshotResult <- boundedProcessSnapshot maximumSnapshotMicros
       case snapshotResult of
-        Left _ -> terminateOwnedGroupBlind groupPid
-        Right snapshot -> do
+        Just (Right snapshot) -> do
           let members = ownedGroupMembers groupPid snapshot
           unless (null members) (void (killVerifiedGroup groupPid members))
+        _ -> terminateOwnedGroupBlind groupPid
 
 -- | Clears the group without a census, for when no process snapshot can be
 -- taken at all.
 --
 -- Verification is what is lost here, not safety: the caller has already
--- established that the leader is unreaped, and Kanban created this group with
--- that child as its leader, so the id still names Kanban's own group and
--- nothing else. Without a snapshot there is no way to check who is in it or to
+-- established that the leader is unreaped, so this id — its pid — still names
+-- either the group Kanban created for it or no group at all, and signalling a
+-- group that does not exist does nothing. Without a snapshot there is no way to check who is in it or to
 -- confirm they are gone afterwards, so this escalates on a timer rather than
 -- on evidence — the one case where a group is signalled unverified, and the
 -- alternative is leaving a helper running with no bound at all.

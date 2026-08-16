@@ -1740,8 +1740,8 @@ be discovered before it is needed rather than after.
   `timeouts.ping_claude_seconds`, both defaulting to 120 seconds. These are
   separate keys from `codex_seconds` and `claude_seconds`, which bound reading a
   number rather than waiting on a model.
-- Kanban launches exactly one ping process, in a process group of its own, and
-  clears that group once the process ends however it ended. A leader exiting is
+- Kanban launches exactly one ping process, in a session of its own, and clears
+  its process group once the process ends however it ended. A leader exiting is
   not the same thing as the ping being over: a client that forked a helper
   would otherwise leave it spending the window past the bound. Retries internal
   to a vendor client are that client's own and are neither controlled nor
@@ -1758,21 +1758,35 @@ nothing once the handle has been reaped: moving the sweep after the wait stops
 it signalling rather than starts it signalling strangers.
 
 Membership at that moment is the whole census, because joining an existing
-group takes being a child of one of its members. That covers a descendant at
-any depth forked at any point in the run, including one whose own parent has
-already exited — which a census pinned earlier would have missed. Termination
-then re-checks each member by pid, start time, and current group before each of
-TERM and KILL, and sends neither when nothing matches.
+group takes being a child of one of its members — and the ping runs in a
+session of its own, where nothing outside it could have joined at all. A
+process group is not enough on its own for that: any process in Kanban's own
+session may join a group of that session. The census therefore covers a
+descendant at any depth forked at any point in the run, including one whose own
+parent has already exited, and nothing else. Termination then re-checks each
+member by pid, start time, and current group before each of TERM and KILL, and
+sends neither when nothing matches.
 
-A machine whose process snapshots fail entirely loses the ability to see the
+Asking for the group whose id is the ping's own pid also settles the
+precondition rather than assuming it: a group's id is its leader's pid, so
+while the ping is unreaped only the ping can hold that id. Had the spawn failed
+to make it a group leader, no such group would exist and the census would
+select nothing, rather than selecting whichever group it had been left in.
+
+The deadline is measured against a monotonic clock, and every snapshot is
+bounded by what remains of it. `ps` has no deadline of its own, and a hung one
+would otherwise stop the countdown and hold the ping open past its configured
+bound — the opposite of what the timeout exists to do.
+
+A machine whose process snapshots fail or hang loses the ability to see the
 ping finish, never the cleanup. Such a snapshot is treated as a poll that
 learned nothing rather than as a reason to wait on the handle, because that
 wait would reap the leader and take the group's only ownership proof with it.
 The ping is then noticed only at its deadline — the user's own configured bound
 — and the group is cleared there without a census, on a timer rather than on
 evidence. That is the one case in which a group is signalled unverified, and it
-remains safe for the same reason as every other: the leader is unreaped, so the
-id still names the group Kanban created.
+remains safe for the same reason as every other: the leader is unreaped, so
+that id still names either the group Kanban created for it or no group at all.
 
 Exactly one usage refresh follows any ping process that started — whether it
 succeeded, exited non-zero, or timed out, because all three may already have
