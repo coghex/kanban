@@ -40,6 +40,8 @@ class MissingFileTests(unittest.TestCase):
         self.assertEqual(raw.timeouts.github_seconds, 30)
         self.assertEqual(raw.timeouts.codex_seconds, 10)
         self.assertEqual(raw.timeouts.claude_seconds, 45)
+        self.assertEqual(raw.timeouts.ping_codex_seconds, 120)
+        self.assertEqual(raw.timeouts.ping_claude_seconds, 120)
         self.assertIsNone(raw.usage.codex_command)
         self.assertIsNone(raw.usage.claude_command)
         self.assertEqual(raw.repositories, {})
@@ -81,6 +83,8 @@ excerpt_lines = 7
 github_seconds = 11
 codex_seconds = 22
 claude_seconds = 33
+ping_codex_seconds = 44
+ping_claude_seconds = 55
 
 [usage.codex]
 command = ["/usr/local/bin/my-codex-usage", "--json"]
@@ -99,6 +103,7 @@ excerpt_lines = 9
 
 [repositories."acme/widgets".timeouts]
 claude_seconds = 999
+ping_claude_seconds = 888
 """
 
 
@@ -135,6 +140,10 @@ class FullFixtureTests(unittest.TestCase):
         self.assertEqual(raw.timeouts.github_seconds, 11)
         self.assertEqual(raw.timeouts.codex_seconds, 22)
         self.assertEqual(raw.timeouts.claude_seconds, 33)
+        # Documented ping bounds decode like every other timeout instead of
+        # warning as unknown keys.
+        self.assertEqual(raw.timeouts.ping_codex_seconds, 44)
+        self.assertEqual(raw.timeouts.ping_claude_seconds, 55)
         self.assertEqual(
             raw.usage.codex_command.argv, ("/usr/local/bin/my-codex-usage", "--json")
         )
@@ -165,6 +174,10 @@ class MergeAndSelectionTests(unittest.TestCase):
         self.assertEqual(resolved.limits.excerpt_lines, 9)
         self.assertEqual(resolved.timeouts.claude_seconds, 999)
         self.assertEqual(resolved.timeouts.github_seconds, 11)
+        # The ping bounds inherit and override on exactly the same terms as
+        # the account-status timeouts beside them.
+        self.assertEqual(resolved.timeouts.ping_claude_seconds, 888)
+        self.assertEqual(resolved.timeouts.ping_codex_seconds, 44)
         # The overridden styling array replaces the global one; the omitted
         # one inherits it, exactly like every other workflow collection.
         self.assertEqual(resolved.workflow.ui_style_labels, frozenset({"widget-ui"}))
@@ -302,6 +315,15 @@ class SemanticValidationErrorTests(unittest.TestCase):
         self._expect_error(
             "[timeouts]\ngithub_seconds = 0\n", "timeouts.github_seconds"
         )
+
+    def test_ping_timeouts_get_the_same_validation_as_every_other_timeout(self):
+        overflowing = kc._MAX_TIMEOUT_SECONDS + 1
+        for key in ("ping_codex_seconds", "ping_claude_seconds"):
+            for value in (0, -1, overflowing):
+                with self.subTest(key=key, value=value):
+                    self._expect_error(
+                        f"[timeouts]\n{key} = {value}\n", f"timeouts.{key}"
+                    )
 
     def test_timeout_overflowing_microsecond_conversion_raises_but_the_boundary_is_accepted(self):
         overflowing = kc._MAX_TIMEOUT_SECONDS + 1

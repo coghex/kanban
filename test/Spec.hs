@@ -6,6 +6,7 @@ module Main (main) where
 import qualified Spec.Agent.Capture as Capture
 import qualified Spec.Agent.IssueReviewer as IssueReviewer
 import qualified Spec.Agent.ManagedProcess as ManagedProcess
+import qualified Spec.Agent.Ping as Ping
 import qualified Spec.Agent.Preflight as Preflight
 import qualified Spec.Agent.Protocol as Protocol
 import qualified Spec.Agent.PullRequestFlow as PullRequestFlow
@@ -41,6 +42,7 @@ import qualified Spec.UI.Search as Search
 import qualified Spec.UI.SessionCore as SessionCore
 import qualified Spec.UI.SolveChooser as SolveChooser
 import qualified Spec.UI.Text as UIText
+import qualified Spec.UI.Usage as UIUsage
 import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import System.Environment (lookupEnv)
 import Test.Hspec (Spec, hspec)
@@ -90,6 +92,8 @@ suite = do
   Filter.spec
   Golden.spec
   Incidents.spec
+  UIUsage.spec
   Keys.spec
   Search.spec
+  Ping.spec
   Preflight.spec

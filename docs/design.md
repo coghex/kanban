@@ -243,6 +243,8 @@ Initial options:
 --usage                           print both providers' usage windows and exit
 --fresh                           with --usage, probe live instead of reading the cache
 --json                            with --usage, write the machine-readable document
+--ping codex|claude               start that provider's window with one deliberate
+                                  model request, then exit
 --ascii                            emergency non-Unicode border fallback
 --no-cache                        do not read or write snapshots
 --config FILE                     override the global configuration path
@@ -251,6 +253,14 @@ Initial options:
 ```
 
 `--fresh` and `--json` modify `--usage` and are inert without it.
+
+`--ping` takes a required brand argument. Omitting it, naming an unknown
+brand, and supplying `--ping` more than once — including twice with the same
+brand — are all errors that exit non-zero without launching any provider.
+That refusal happens before any mode is selected, so it holds however else the
+invocation is spelled: `kanban --doctor --ping nope` reports the unknown brand
+and exits non-zero rather than running the doctor and succeeding. Only refusal
+comes first; a well-formed `--ping` still yields to the modes below.
 
 Startup sequence:
 
@@ -285,30 +295,45 @@ resolves no `owner/name` and applies no repository override: it honors
 normally from a directory that is not a checkout or has no configured
 remote. It never enters the TUI and never starts a background refresh.
 
+`--ping` short-circuits it on the same terms as `--usage`, and after it: the
+run-and-exit modes are selected in the fixed order `--glyph-test`, `--doctor`,
+`--usage`, `--ping`, and exactly one of them runs. A ping is the only mode
+that spends the user's quota (section 14), so every observational mode wins
+over it; an invocation naming one of them — `kanban --doctor --ping codex` —
+runs that mode and launches no ping. Ping mode establishes a repository
+identity where it can, and never requires one: `--repo` names a repository
+outright and is read as one without git or a checkout, so the override it
+selects applies from any directory; without it, the invoking directory is
+asked, and failing there is not an error. An established `owner/name` applies
+that repository's timeout override under section 16's ordinary inheritance
+rules, and an absent one leaves the global timeouts in force, so a ping still
+answers from a directory that is not a checkout or has no configured remote. A
+`--repo` that names no repository at all is reported rather than ignored.
+
 ## 6. Layout
 
 The normal wide-screen layout is a 28-column usage sidebar plus a horizontally
 scrollable four-column board.
 
 ```text
-╔═ USAGE ═════════════╦═ ISSUES ═════╦═ ACTIVE ═════╦═ REVIEWING ══╦═ DONE ═══════╗
-║                     ║              ║              ║              ║              ║
-║ Codex               ║ cards        ║ cards        ║ cards        ║ cards        ║
-║ 5 hour   63% left   ║              ║              ║              ║              ║
-║  resets  14:32      ║              ║              ║              ║              ║
-║ week     41% left   ║              ║              ║              ║              ║
-║  resets  Tue 09:00  ║              ║              ║              ║              ║
-║                     ║              ║              ║              ║              ║
-║ Claude              ║              ║              ║              ║              ║
-║ 5 hour   78% left   ║              ║              ║              ║              ║
-║  resets  16:05      ║              ║              ║              ║              ║
-║ week     22% left   ║              ║              ║              ║              ║
-║  resets  Fri 09:10  ║              ║              ║              ║              ║
-║                     ║              ║              ║              ║              ║
-║ ┏━━━━━━━━━━━━━━┓    ║              ║              ║              ║              ║
-║ ┃ drain_prs.py ┃    ║              ║              ║              ║              ║
-║ ┗━━━━━━━━━━━━━━┛    ║              ║              ║              ║              ║
-╚═════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
+╔═ USAGE ══════════════════╦═ ISSUES ═════╦═ ACTIVE ═════╦═ REVIEWING ══╦═ DONE ═══════╗
+║                          ║              ║              ║              ║              ║
+║ Codex          3h 0m old ║ cards        ║ cards        ║ cards        ║ cards        ║
+║ 5 hour  [██████░░░░] 63% ║              ║              ║              ║              ║
+║ in 1h 5m · Thu 16:05     ║              ║              ║              ║              ║
+║ week    [████░░░░░░] 41% ║              ║              ║              ║              ║
+║ in 4d 18h · Tue 09:00    ║              ║              ║              ║              ║
+║                          ║              ║              ║              ║              ║
+║ Claude         3h 0m old ║              ║              ║              ║              ║
+║ 5 hour  [████████░░] 78% ║              ║              ║              ║              ║
+║ in 2h 30m · Thu 17:30    ║              ║              ║              ║              ║
+║ week    [██░░░░░░░░] 22% ║              ║              ║              ║              ║
+║ in 1d 18h · Sat 09:10    ║              ║              ║              ║              ║
+║                          ║              ║              ║              ║              ║
+║ ┏━━━━━━━━━━━━━━┓         ║              ║              ║              ║              ║
+║ ┃ drain_prs.py ┃         ║              ║              ║              ║              ║
+║ ┗━━━━━━━━━━━━━━┛         ║              ║              ║              ║              ║
+╚══════════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
  j/Down next  k/Up previous  x kill  h/l column  s search  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  d drainer  c sidebar  o options  ? help  q/Ctrl-C quit
 ```
 
@@ -1590,23 +1615,35 @@ keeps users unblocked when a client update breaks a built-in parser.
 ### Sidebar display
 
 ```text
-Codex
-5 hour  [██████░░░░] 63% left
-        resets 14:32
-week    [████░░░░░░] 41% left
-        resets Tue 09:00
+Codex          3h 0m old
+5 hour  [██████░░░░] 63%
+in 1h 5m · Thu 16:05
+week    [████░░░░░░] 41%
+in 4d 18h · Tue 09:00
 
-Claude
-5 hour  [████████░░] 78% left
-        resets 16:05
-week    [██░░░░░░░░] 22% left
-        resets Fri 09:10
+Claude         3h 0m old
+5 hour  [████████░░] 78%
+in 2h 30m · Thu 17:30
+week    [██░░░░░░░░] 22%
+in 1d 18h · Sat 09:10
 ```
 
 Each window shows its own reset time; five-hour and weekly windows reset
-independently. Reset and relative times are recomputed whenever a redraw
-happens for another reason; the application never wakes on a timer to maintain
-a countdown.
+independently. A window's second row states both how long until that window
+resets and the local wall clock it resets at, and the countdown takes that
+row's former indent rather than a row of its own: the percentage row above it
+already spends the sidebar's whole interior, and a provider's block is a fixed
+height.
+
+A provider's name shares its row with the age of the snapshot on screen. That
+age is drawn for every snapshot rather than only for a stale one, because a
+snapshot restored from the cache at startup is labelled fresh at the instant it
+was written -- so a board opened on numbers days old is exactly the case the
+age exists to report.
+
+Reset and relative times are recomputed whenever a redraw happens for another
+reason, from the instant that redraw carries; the application never wakes on a
+timer to maintain a countdown.
 
 ### The `--usage` command-line surface
 
@@ -1627,10 +1664,18 @@ Claude
 
 Both the window countdowns and the snapshot-age line are computed by one pure
 function of the snapshot, an explicitly supplied current time, and the zone
-the reset wall clock is stated in. The sidebar renders through that same
-function rather than a second copy of the arithmetic, and every duration is
-clamped at zero, so a reset instant already past and a snapshot stamped ahead
-of the clock read as `0s` rather than as a negative interval.
+the reset wall clock is stated in. The sidebar states the same countdown and
+the same age through those same functions rather than a second copy of the
+arithmetic; it only arranges them into its own narrower rows.
+
+Every duration is clamped at zero and bounded above. A snapshot stamped ahead
+of the clock reads `0s old` rather than as a negative interval, and a reset
+instant already past is named `resets due now` rather than counted down to,
+since `resets in 0s` would be a countdown to an instant that has gone. Nothing
+restricts how distant a decoded `resets_at` may be, so past 99 days a duration
+reports `>99d` instead of counting out days without limit -- which is what
+keeps the sidebar's reset row inside its fixed interior for any instant a
+provider reports.
 
 Which process a provider runs is decided by the one routing path the board
 uses, so a configured `[usage.codex]` or `[usage.claude]` command replaces the
@@ -1682,6 +1727,129 @@ omitted. Timestamps are absolute RFC 3339 UTC, needing no knowledge of the
 reader's zone. Configuration warnings and cache warnings go to standard error
 in both renderings, so a `--json` consumer's standard output carries the
 document alone.
+
+### Deliberate consumption
+
+Everything above is observational: the sidebar, `u`, `--usage`, `--doctor`,
+preflight, and release verification read account status and submit no model
+prompt. Decision D-2 keeps it that way, and nothing in this section weakens it.
+
+A *deliberate-consumption action* is the explicit opposite. It submits a model
+prompt and spends the user's quota on purpose, and the rules that make it safe
+to have alongside the observers are:
+
+- It runs only when the user invokes it by name. It never runs at startup, from
+  a board or usage refresh, from `u`, from `--usage`, from `--doctor`, from
+  preflight, or from any release-verification path, and it has no key binding.
+- It is never retried. A failure is reported, not reissued: a second attempt
+  would be a second charge nobody asked for.
+- It never replaces or intercepts an observational path, and no configured
+  external usage command can become one. A configured `[usage.codex]` or
+  `[usage.claude]` command still replaces only the refresh.
+
+`kanban --ping BRAND` is the only such action. It starts the named provider's
+rolling window on purpose, so spare capacity in a window that never started can
+be discovered before it is needed rather than after.
+
+- The brand is required and singular (section 5).
+- The request is one fixed prompt, `Reply OK.`, at the client's minimum effort,
+  under non-mutating permissions, from a private Kanban-owned scratch directory
+  under the XDG cache root rather than the user's repository. It never uses a
+  bypass-approvals or bypass-sandbox mode. Claude runs from the probe's own
+  scratch directory, so both Kanban-launched Claude processes leave their
+  session state in one place outside the user's project. No part of a ping
+  depends on that directory having been used before: the first ping on a cold
+  cache creates it, and what keeps that run off the client's folder-trust
+  prompt is the non-interactive invocation, which the client documents as
+  skipping that dialog, together with giving the process no input to wait on.
+- It is bounded by `timeouts.ping_codex_seconds` and
+  `timeouts.ping_claude_seconds`, both defaulting to 120 seconds. These are
+  separate keys from `codex_seconds` and `claude_seconds`, which bound reading a
+  number rather than waiting on a model.
+- Kanban launches exactly one ping process, in a session of its own, and clears
+  its process group once the process ends however it ended. A leader exiting is
+  not the same thing as the ping being over: a client that forked a helper
+  would otherwise leave it spending the window past the bound. Retries internal
+  to a vendor client are that client's own and are neither controlled nor
+  observed here.
+
+That group is only ever signalled while it is provably still Kanban's. A group
+id is the leader's pid, and reaping the leader releases it, so a group read by
+id after that point could belong to anything. The ping is therefore watched to
+its end without being reaped — its exit read from a process snapshot, which
+omits a zombie — and the group is censused and cleared inside the window where
+the kernel still reserves that pid to Kanban's own child. The check that
+enforces this is asking the process handle for its pid, which answers with
+nothing once the handle has been reaped: moving the sweep after the wait stops
+it signalling rather than starts it signalling strangers.
+
+Membership at that moment is the whole census, because joining an existing
+group takes being a child of one of its members — and the ping runs in a
+session of its own, where nothing outside it could have joined at all. A
+process group is not enough on its own for that: any process in Kanban's own
+session may join a group of that session. The census therefore covers a
+descendant at any depth forked at any point in the run, including one whose own
+parent has already exited, and nothing else. Termination then re-checks each
+member by pid, start time, and current group before each of TERM and KILL, and
+sends neither when nothing matches.
+
+Asking for the group whose id is the ping's own pid also settles the
+precondition rather than assuming it: a group's id is its leader's pid, so
+while the ping is unreaped only the ping can hold that id. Had the spawn failed
+to make it a group leader, no such group would exist and the census would
+select nothing, rather than selecting whichever group it had been left in.
+
+The deadline is measured against a monotonic clock, and every snapshot is
+bounded by what remains of it. `ps` has no deadline of its own, and a hung one
+would otherwise stop the countdown and hold the ping open past its configured
+bound — the opposite of what the timeout exists to do.
+
+The cleanup that follows carries a deadline of the same kind, covering every
+read it makes: the census, and each of the escalation's own re-checks between
+TERM and KILL. Bounding only the first would leave a `ps` that answered once
+and then stopped answering able to hold the escalation open, and with it the
+group it was clearing. A re-check that never answers leaves the escalation
+unable to say the group is gone, so the cleanup finishes without one.
+
+The cleanup also censuses again after an escalation reports the group clear,
+and keeps going until a read shows it empty. An escalation can only verify the
+identities its census named, so a member that forks a worker and exits between
+those two reads leaves it correctly reporting everyone it was told about gone,
+while the worker it never saw carries on. Repeating is safe for the same reason
+the first read was — the leader is unreaped throughout, so the group stays
+provably Kanban's — and the deadline is what ends it: a group that kept
+producing members reaches the blind termination above, which takes it without
+naming anyone in it.
+
+A machine whose process snapshots fail or hang loses the ability to see the
+ping finish, never the cleanup. Such a snapshot is treated as a poll that
+learned nothing rather than as a reason to wait on the handle, because that
+wait would reap the leader and take the group's only ownership proof with it.
+The ping is then noticed only at its deadline — the user's own configured bound
+— and the group is cleared there without a census, on a timer rather than on
+evidence. That is the one case in which a group is signalled unverified, and it
+remains safe for the same reason as every other: the leader is unreaped, so
+that id still names either the group Kanban created for it or no group at all.
+
+Exactly one usage refresh follows any ping process that started — whether it
+succeeded, exited non-zero, or timed out, because all three may already have
+spent quota — and none follows a ping whose executable could never start,
+because nothing ran. That refresh is the ordinary one and routes through the
+same escape hatch everything else does. Its result is printed with every
+returned window's end time.
+
+The exit status is deterministic. A ping that fails to start, exits non-zero,
+or times out fails the command; so does a failed refresh; so does a failed
+cache write, even though the refreshed result was already printed. A ping that
+failed stays a failure however well the refresh after it went.
+
+With caching enabled, a successful refresh is merged into `usage.json` under
+the pinged brand alone, leaving the other provider's stored entry intact, and
+the replacement is the same atomic rename every other cache write uses. A
+failed refresh or a failed write leaves the previous cache as it was.
+`--no-cache` and a global `cache = false` suppress those reads and writes and
+nothing else: the ping, the refresh, the printed result, and the exit rules
+above are unchanged, and persistence the user switched off is not a failure.
 
 ## 15. Refresh and event model
 
@@ -2224,9 +2392,13 @@ Configurable repository semantics include:
 - GitHub remote name, default `origin`.
 - Approval predicate mode: label, review decision, or either; default label.
 - Card excerpt line count, default 3.
-- Provider timeouts, defaults: GitHub 30 s, Codex 10 s, Claude 45 s. The GitHub
-  timeout bounds one page of a traversal — open or completed — rather than the
-  whole of either (section 13).
+- Provider timeouts, defaults: GitHub 30 s, Codex 10 s, Claude 45 s, and the
+  deliberate-ping bounds `ping_codex_seconds` and `ping_claude_seconds`, both
+  120 s (section 14). The GitHub timeout bounds one page of a traversal — open
+  or completed — rather than the whole of either (section 13). Every one of
+  them is a positive whole number of seconds, small enough to convert to
+  microseconds without overflowing, and inherits globally or per repository on
+  the same terms.
 - External usage provider commands (section 14).
 
 ## 17. Error presentation
@@ -6300,6 +6472,11 @@ The Codex app-server rate-limit request and Claude `/usage` interaction are
 account-status probes. A release check that submits an ordinary prompt would
 change user-visible account consumption and would not verify the promised
 bounded behavior.
+
+Unchanged by section 14's deliberate-consumption class. This decision is about
+probes and release verification, which still submit no prompt; a ping is a
+separate action the user invokes by name, and no probe or release-verification
+path may launch one.
 
 ### D-3. Publication follows every manual gate and required CI
 

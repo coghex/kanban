@@ -34,6 +34,7 @@ import Kanban.Usage
     acquireUsageReport,
     formatUsageDuration,
     renderUsageReport,
+    usageDurationDayBound,
     usageReportDocument,
     usageReportProduced,
   )
@@ -67,10 +68,10 @@ spec = do
     -- 'UsageWindow' and 'UsageSnapshot' store unrestricted instants and the
     -- clock is an input, so both directions are reachable rather than
     -- hypothetical.
-    it "clamps a reset instant already in the past to a zero countdown" $
+    it "names a reset instant already in the past rather than counting down to it" $
       renderUsageReport (hoursToTimeZone 0) (instant "2026-07-16T12:00:00Z") (availableReport expiredSnapshot)
         `shouldBe` [ "Codex",
-                     "  5 hour   63% left · resets in 0s (Thu 09:00)",
+                     "  5 hour   63% left · resets due now (Thu 09:00)",
                      "  snapshot 1h 0m old"
                    ]
 
@@ -88,6 +89,14 @@ spec = do
       formatUsageDuration 3600 `shouldBe` "1h 0m"
       formatUsageDuration 100000 `shouldBe` "1d 3h"
       formatUsageDuration (-5000) `shouldBe` "0s"
+
+    -- Nothing bounds a decoded @resets_at@, and the sidebar draws this into a
+    -- fixed interior, so the count gives way to a bound rather than widening
+    -- with the number of days.
+    it "reports a bound instead of counting out an unbounded number of days" $ do
+      formatUsageDuration (fromInteger (usageDurationDayBound * 86400 + 86399)) `shouldBe` "99d 23h"
+      formatUsageDuration (fromInteger ((usageDurationDayBound + 1) * 86400)) `shouldBe` ">99d"
+      formatUsageDuration (fromInteger (36500 * 86400)) `shouldBe` ">99d"
 
     it "prints a failing provider's own line without disturbing the other's windows" $
       renderUsageReport (hoursToTimeZone 0) (instant "2026-07-16T12:00:00Z") partialReport
@@ -169,13 +178,13 @@ spec = do
     it "keeps the global usage commands, timeouts, and cache setting" $ do
       let resolved = resolveGlobalConfig globalOnlyRawConfig
       resolved.resolvedUsage.usageCodexCommand `shouldBe` Just (UsageCommandConfig ["global-codex"])
-      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 5 7 9
+      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 5 7 9 11 13
       resolved.resolvedCache `shouldBe` False
 
     -- The mode resolves no @owner/name@, so there is nothing for an override
     -- to be keyed by; a repository-scoped timeout must not leak in.
     it "applies no repository override" $
-      (resolveGlobalConfig overriddenRawConfig).resolvedTimeouts `shouldBe` TimeoutsConfig 5 7 9
+      (resolveGlobalConfig overriddenRawConfig).resolvedTimeouts `shouldBe` TimeoutsConfig 5 7 9 11 13
 
   describe "acquisition against real provider commands" $ do
     it "answers from a directory that is not a Git repository at all" $
@@ -316,7 +325,7 @@ globalOnlyRawConfig :: RawConfig
 globalOnlyRawConfig =
   defaultRawConfig
     { rawCache = False,
-      rawTimeouts = TimeoutsConfig 5 7 9,
+      rawTimeouts = TimeoutsConfig 5 7 9 11 13,
       rawUsage = UsageConfig (Just (UsageCommandConfig ["global-codex"])) Nothing
     }
 
@@ -328,7 +337,7 @@ overriddenRawConfig =
     { rawRepositories =
         Map.singleton
           "coghex/kanban"
-          emptyRepositoryOverride {repositoryOverrideTimeouts = TimeoutsOverride (Just 60) (Just 61) (Just 62)}
+          emptyRepositoryOverride {repositoryOverrideTimeouts = TimeoutsOverride (Just 60) (Just 61) (Just 62) (Just 63) (Just 64)}
     }
 
 -- | Both providers pointed at real executables, on top of the shared resolved

@@ -36,7 +36,8 @@ every key, its type, and its default.
 The file lets you rename the workflow labels Kanban looks for (approval,
 changes-requested, blocked, tracker), add extra tracker-section headings,
 choose how PR approval is determined, set the blocking-label severity, cap
-GitHub fetch sizes and the card excerpt height, tune provider timeouts, and
+GitHub fetch sizes and the card excerpt height, tune provider and `--ping`
+timeouts, and
 override the git remote used to resolve `owner/name`. Repository-specific
 overrides live under `[repositories."owner/name"]` and replace the matching
 global values for that repository only. That key must be a canonical lowercase
@@ -209,6 +210,22 @@ If the PR drainer has not answered yet, or could not be asked, the list says so 
 
 The sidebar shows the available Codex and Claude usage windows. Press `u` to refresh them. A failure from one service does not prevent the other service or the GitHub board from updating.
 
+Each window takes two rows. The first is its label, a bar, and the percentage left. The second says how long until that window resets and the wall-clock time it resets at, in your own timezone:
+
+```text
+Codex          3h 0m old
+5 hour  [██████░░░░] 63%
+in 1h 5m · Thu 16:05
+week    [████░░░░░░] 41%
+in 4d 18h · Tue 09:00
+```
+
+A window whose reset time has already gone by reads `due now` instead of a countdown.
+
+Beside each service's name is how old the numbers under it are. Kanban shows the snapshot it last stored, so opening the board displays whatever was cached from your last session until a refresh replaces it — the age is how you tell one from the other. Press `u` if it is older than you want.
+
+Both the countdown and the age are recomputed whenever the screen redraws for any other reason. Nothing is on a timer, so a board left open on an idle desktop stays idle; the numbers catch up the moment anything happens.
+
 Press `c` to hide or show the sidebar.
 
 ## Checking usage from a shell
@@ -252,6 +269,54 @@ Both services are always present under the lowercase keys `codex` and
 `claude`, and `status` says whether that entry carries windows or an error, so
 a failing service is reported rather than missing. Times are UTC. Warnings go
 to standard error, so the document is the only thing on standard output.
+
+## Starting a usage window on purpose
+
+Everything else Kanban does with a service only *reads* your usage. `--ping` is
+the one command that deliberately spends a little of it:
+
+```console
+$ kanban --ping codex
+Codex
+  5 hour   99% left · resets in 5h 0m (Thu 17:00)
+  weekly   41% left · resets in 3d 21h (Mon 09:00)
+  snapshot 0s old
+```
+
+It sends one short request to the named service, which starts that service's
+rolling window, then refreshes and prints the window state so you can see when
+it now ends. Use it before stepping away, so a window you want to spend has
+already started.
+
+Name exactly one service. `kanban --ping` on its own, an unknown name, and
+`--ping` given twice — including twice with the same name — are all errors, and
+none of them contacts a service.
+
+Some details worth knowing:
+
+- It runs only when you ask for it. Nothing else starts a ping: not the board,
+  not `u`, not `kanban --usage`, and not `kanban --doctor`. There is no key for
+  it on the board.
+- The request cannot change anything. It runs from a private Kanban directory
+  under `~/.cache/kanban/`, never your repository, and asks for the most
+  restricted permissions the service offers.
+- A failed ping is never retried, because a retry would cost you again. If the
+  ping fails or times out, Kanban still refreshes and prints the window — a
+  request that timed out may already have counted — and still exits non-zero.
+- It needs no repository, so it works from any directory, and it honors
+  `--config`. Pass `--repo owner/name` — which needs no checkout — or run it
+  inside a checkout Kanban can identify, and that repository's timeout
+  overrides apply; otherwise the global ones do.
+- `--no-cache` and a global `cache = false` stop it from reading or writing the
+  stored snapshot. The ping, the refresh, and the printed result happen either
+  way.
+
+The wait for that request is bounded by `ping_codex_seconds` and
+`ping_claude_seconds` in `config.toml`, both 120 seconds by default. They are
+separate from `codex_seconds` and `claude_seconds`, which bound the much
+quicker usage reads, and they can be overridden per repository like any other
+timeout. When the wait runs out, Kanban stops the request and anything it
+started.
 
 ## Local files
 

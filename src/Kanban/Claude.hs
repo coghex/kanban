@@ -1,5 +1,7 @@
 module Kanban.Claude
-  ( decodeClaudeUsageText,
+  ( claudeEnvironment,
+    claudeScratchDirectory,
+    decodeClaudeUsageText,
     fetchClaudeUsage,
     runClaudeProvider,
   )
@@ -93,11 +95,19 @@ runClaudeProvider timeoutMicros scriptPath claudePath = do
     Left exception -> Left (ProviderError RequestFailed (Text.pack (show exception)))
     Right providerResult -> providerResult
 
+-- | The fixed directory the probe runs from, so the client's folder-trust
+-- prompt happens at most once and session history lands outside the user's
+-- project (§14). Shared with @kanban --ping claude@ for exactly that reason: a
+-- directory whose trust question is already settled cannot strand a
+-- non-interactive run at that prompt.
 claudeScratchDirectory :: IO FilePath
 claudeScratchDirectory = do
   cacheRoot <- getXdgDirectory XdgCache "kanban"
   pure (cacheRoot </> "claude-probe")
 
+-- | The hardening every Kanban-launched @claude@ runs under: no auto-updater,
+-- telemetry, prompt history, or @CLAUDE.md@ loading, with normal OAuth access
+-- left intact.
 claudeEnvironment :: IO [(String, String)]
 claudeEnvironment = do
   inherited <- getEnvironment
