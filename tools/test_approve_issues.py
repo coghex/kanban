@@ -285,6 +285,16 @@ def make_ctx(root: Path, repo_slug: str = "acme/example") -> "approve_issues.Rep
     return approve_issues.RepoContext(path=root, repo_slug=repo_slug, default_branch="main")
 
 
+def git(*args: str, cwd: Path) -> str:
+    """A real git command in a temporary fixture repository."""
+    proc = subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)} failed in {cwd}:\n{proc.stderr}")
+    return proc.stdout.strip()
+
+
 class NotifyModelFailureTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1801,6 +1811,175 @@ class LegacyDaemonUnchangedTests(unittest.TestCase):
             selected = approve_issues.select_candidate(self.ctx, legacy_policy="dual")
         self.assertIsNotNone(selected)
         self.assertEqual(selected[0]["number"], 3)
+
+
+class ApprovalLockPathTests(unittest.TestCase):
+    """One lock per repository, not one per checkout.
+
+    Solve and review agents work in linked worktrees and both packaged review
+    assets pass `git rev-parse --show-toplevel` through `--path`, so a linked
+    worktree is the ordinary caller. There `.git` is a regular file, which is
+    what made the join raise NotADirectoryError -- and the repair has to keep
+    the two checkouts contending, because a per-worktree lock would trade the
+    crash for two canonical reviews of one repository running at once.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.primary = self.root / "primary"
+        git("init", "-q", "-b", "master", str(self.primary), cwd=self.root)
+        git("config", "user.email", "t@example.com", cwd=self.primary)
+        git("config", "user.name", "Test", cwd=self.primary)
+        (self.primary / "file.txt").write_text("one\n", encoding="utf-8")
+        git("add", "-A", cwd=self.primary)
+        git("commit", "-qm", "init", cwd=self.primary)
+
+    def add_worktree(self, name: str) -> Path:
+        path = self.root / name
+        git("worktree", "add", "-q", "-b", name, str(path), "master", cwd=self.primary)
+        return path
+
+    def test_a_linked_worktree_resolves_the_lock_without_crashing(self):
+        worktree = self.add_worktree("linked")
+        # The precondition the defect turned on: a linked worktree's .git is a
+        # file, so the old join opened a path under a non-directory.
+        self.assertTrue((worktree / ".git").is_file())
+        path = approve_issues.approval_lock_path(make_ctx(worktree))
+        lock = approve_issues.acquire_lock(make_ctx(worktree), mode="daemon")
+        self.addCleanup(approve_issues.release_lock, lock)
+        self.assertTrue(path.exists())
+
+    def test_a_worktree_and_the_primary_checkout_resolve_the_same_file(self):
+        worktree = self.add_worktree("linked")
+        primary_path = approve_issues.approval_lock_path(make_ctx(self.primary))
+        worktree_path = approve_issues.approval_lock_path(make_ctx(worktree))
+        self.assertEqual(worktree_path.resolve(), primary_path.resolve())
+        # Not the worktree's own administrative directory: that is what
+        # --absolute-git-dir would have answered, and nothing else can see it.
+        self.assertNotIn("worktrees", worktree_path.parts)
+
+    def test_a_second_checkout_contends_rather_than_taking_its_own_lock(self):
+        worktree = self.add_worktree("linked")
+        held = approve_issues.acquire_lock(
+            make_ctx(self.primary), mode="single", issue_number=7
+        )
+        self.addCleanup(approve_issues.release_lock, held)
+        with self.assertRaises(approve_issues.LockContentionError) as caught:
+            approve_issues.acquire_lock(make_ctx(worktree), mode="queue", issue_number=9)
+        # Contention behavior is unchanged: the owner metadata the first
+        # checkout wrote is what the second one reports.
+        self.assertEqual(caught.exception.owner_description[:22], "single-issue review #7")
+        self.assertIn("single-issue review #7", str(caught.exception))
+
+    def test_a_plain_git_directory_keeps_its_current_lock_location(self):
+        # A lock already held by a running process must still be seen by one
+        # started after this change, so the ordinary checkout's path cannot
+        # move -- and it is answered without asking git anything.
+        def refuse(args, **kwargs):
+            raise AssertionError(f"ran a subprocess for a plain .git: {args}")
+
+        with mock.patch.object(approve_issues, "run", side_effect=refuse):
+            path = approve_issues.approval_lock_path(make_ctx(self.primary))
+        self.assertEqual(path, self.primary / ".git" / "approve_issues.lock")
+
+    def test_an_unresolvable_shared_directory_is_a_named_diagnostic(self):
+        # A real git failure, from a worktree whose primary checkout is gone.
+        stale = self.root / "stale"
+        stale.mkdir()
+        (stale / ".git").write_text(
+            f"gitdir: {self.root / 'deleted' / 'worktrees' / 'stale'}\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(approve_issues.ApproveError) as caught:
+            approve_issues.approval_lock_path(make_ctx(stale))
+        self.assertNotIsInstance(caught.exception, approve_issues.LockContentionError)
+        message = str(caught.exception)
+        self.assertIn("shared Git directory", message)
+        self.assertIn(str(stale), message)
+
+    def test_an_empty_answer_is_a_named_diagnostic_rather_than_the_cwd(self):
+        # Exit zero with nothing on stdout would otherwise resolve Path("") to
+        # the process working directory.
+        worktree = self.add_worktree("linked")
+        empty = subprocess.CompletedProcess(args=[], returncode=0, stdout="\n", stderr="")
+        with mock.patch.object(approve_issues, "run", return_value=empty):
+            with self.assertRaises(approve_issues.ApproveError) as caught:
+                approve_issues.approval_lock_path(make_ctx(worktree))
+        self.assertIn("shared Git directory", str(caught.exception))
+
+    def test_a_relative_answer_is_anchored_to_the_checkout(self):
+        # Git answers relative to the directory it ran in, which is the
+        # checkout. Left unanchored the lock would follow the calling
+        # process's working directory instead of the repository.
+        worktree = self.add_worktree("linked")
+        relative = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="../primary/.git\n", stderr=""
+        )
+        with mock.patch.object(approve_issues, "run", return_value=relative):
+            path = approve_issues.approval_lock_path(make_ctx(worktree))
+        self.assertTrue(path.is_absolute())
+        self.assertEqual(
+            path.resolve(), (self.primary / ".git" / "approve_issues.lock").resolve()
+        )
+
+
+class ApprovalLockDiagnosticCLITests(unittest.TestCase):
+    """The unresolvable case reaches an operator as a diagnostic, not a
+    traceback: main() suppresses tracebacks only for handled error classes,
+    which is why the lock raises ApproveError rather than the OSError the
+    join used to."""
+
+    def test_the_daemon_reports_the_unresolved_shared_directory_and_exits_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stale = root / "stale"
+            stale.mkdir()
+            (stale / ".git").write_text(
+                f"gitdir: {root / 'deleted' / 'worktrees' / 'stale'}\n", encoding="utf-8"
+            )
+            raw = mock.MagicMock()
+            raw.remote_name = "origin"
+            resolved = mock.MagicMock()
+            resolved.workflow.approval_label = "reviewed:approve"
+            resolved.workflow.changes_requested_label = "reviewed:changes"
+            with (
+                mock.patch(
+                    "sys.argv",
+                    ["approve_issues.py", "--path", str(stale), "--once"],
+                ),
+                mock.patch.object(approve_issues, "LOG_DIR", root / "logs"),
+                mock.patch.object(approve_issues, "log"),
+                mock.patch.object(approve_issues, "append_log_line"),
+                mock.patch.object(
+                    approve_issues, "resolve_effective_config_path", return_value=None
+                ),
+                mock.patch.object(
+                    approve_issues.kanban_config,
+                    "load_raw_config",
+                    return_value=(raw, []),
+                ),
+                mock.patch.object(
+                    approve_issues.kanban_config, "resolve_config", return_value=resolved
+                ),
+                # The repository is resolved before the lock is taken; this
+                # test is about what the lock itself reports.
+                mock.patch.object(
+                    approve_issues, "get_repo_context", return_value=make_ctx(stale)
+                ),
+                mock.patch.object(
+                    approve_issues, "blocking_pipeline_incident", return_value=None
+                ),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                with self.assertRaises(SystemExit) as exit_code:
+                    approve_issues.main()
+            self.assertEqual(exit_code.exception.code, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("approve-issues.py error:", stderr.getvalue())
+            self.assertIn("shared Git directory", stderr.getvalue())
 
 
 if __name__ == "__main__":
