@@ -44,6 +44,8 @@ class MissingFileTests(unittest.TestCase):
         self.assertEqual(raw.timeouts.ping_claude_seconds, 120)
         self.assertIsNone(raw.usage.codex_command)
         self.assertIsNone(raw.usage.claude_command)
+        self.assertIsNone(raw.usage.codex_estimated_percent_per_solve_round)
+        self.assertIsNone(raw.usage.claude_estimated_percent_per_solve_round)
         self.assertEqual(raw.repositories, {})
 
     def test_default_config_path_is_under_home_config_kanban(self):
@@ -88,9 +90,11 @@ ping_claude_seconds = 55
 
 [usage.codex]
 command = ["/usr/local/bin/my-codex-usage", "--json"]
+estimated_percent_per_solve_round = 8
 
 [usage.claude]
 command = ["/usr/local/bin/my-claude-usage"]
+estimated_percent_per_solve_round = 12
 
 [repositories."acme/widgets".workflow]
 approval_label = "acme:go"
@@ -148,6 +152,10 @@ class FullFixtureTests(unittest.TestCase):
             raw.usage.codex_command.argv, ("/usr/local/bin/my-codex-usage", "--json")
         )
         self.assertEqual(raw.usage.claude_command.argv, ("/usr/local/bin/my-claude-usage",))
+        # Both providers carry the estimate rather than warning about it as an
+        # unknown key, even though nothing in Python renders the value.
+        self.assertEqual(raw.usage.codex_estimated_percent_per_solve_round, 8)
+        self.assertEqual(raw.usage.claude_estimated_percent_per_solve_round, 12)
         self.assertIn("acme/widgets", raw.repositories)
 
 
@@ -345,6 +353,48 @@ class SemanticValidationErrorTests(unittest.TestCase):
         self._expect_error(
             '[usage.codex]\ncommand = [""]\n', "usage.codex.command"
         )
+
+    def test_out_of_range_solve_round_estimate_raises_for_either_provider(self):
+        # The estimate divides the remaining percentage, so zero has to be an
+        # error; the upper bound is what makes it a percentage of a window.
+        # The message names the whole path because the two providers configure
+        # the key independently.
+        for provider in ("codex", "claude"):
+            for value in ("0", "-1", "101"):
+                with self.subTest(provider=provider, value=value):
+                    self._expect_error(
+                        f"[usage.{provider}]\nestimated_percent_per_solve_round = {value}\n",
+                        f"usage.{provider}.estimated_percent_per_solve_round",
+                    )
+
+    def test_non_integer_solve_round_estimate_raises_for_either_provider(self):
+        # `true` is the case the two schemas would otherwise disagree on: bool
+        # is a subclass of int in Python, so an isinstance check alone would
+        # read it as 1 while the Haskell integer matcher rejects it outright.
+        for provider in ("codex", "claude"):
+            for value in ("7.5", "true", '"8"'):
+                with self.subTest(provider=provider, value=value):
+                    self._expect_error(
+                        f"[usage.{provider}]\nestimated_percent_per_solve_round = {value}\n",
+                        f"usage.{provider}.estimated_percent_per_solve_round",
+                    )
+
+    def test_boundary_solve_round_estimates_are_accepted_without_warnings(self):
+        for provider, value in (("codex", 1), ("claude", 100)):
+            with self.subTest(provider=provider, value=value):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = write(
+                        Path(tmp),
+                        f"[usage.{provider}]\nestimated_percent_per_solve_round = {value}\n",
+                    )
+                    raw, warnings = kc.load_raw_config(str(path))
+                self.assertEqual(warnings, [])
+                self.assertEqual(
+                    getattr(raw.usage, f"{provider}_estimated_percent_per_solve_round"), value
+                )
+                # The estimate is a sibling of `command`, not nested inside it:
+                # a table carrying only the estimate is valid configuration.
+                self.assertIsNone(getattr(raw.usage, f"{provider}_command"))
 
     def test_limit_exceeding_the_bounded_int_raises_but_the_boundary_is_accepted(self):
         overflowing = kc._MAX_INT64 + 1

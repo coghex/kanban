@@ -23,8 +23,10 @@ import Kanban.Config
     UsageCommandConfig (..),
     UsageConfig (..),
     defaultRawConfig,
+    defaultUsageConfig,
     emptyRepositoryOverride,
     resolveGlobalConfig,
+    usageSolveRoundEstimates,
   )
 import Kanban.Domain (UsageProvider (..), UsageSnapshot (..), UsageWindow (..))
 import Kanban.Usage
@@ -37,6 +39,7 @@ import Kanban.Usage
     usageDurationDayBound,
     usageReportDocument,
     usageReportProduced,
+    usageSolveRoundsLeft,
   )
 import Options.Applicative (defaultPrefs, execParserPure, getParseResult)
 import Spec.Support.Env (createTemporaryDirectory, withEnvironmentValue, withTemporaryCacheRoot, writeExecutableScript)
@@ -50,7 +53,7 @@ spec :: Spec
 spec = do
   describe "usage rendering against an explicitly supplied clock and zone" $ do
     it "states each window's percent left, countdown, and local reset wall clock" $
-      renderUsageReport (hoursToTimeZone 2) (instant "2026-07-16T12:00:00Z") (availableReport twoWindowSnapshot)
+      renderUsageReport noEstimates (hoursToTimeZone 2) (instant "2026-07-16T12:00:00Z") (availableReport twoWindowSnapshot)
         `shouldBe` [ "Codex",
                      "  5 hour   63% left · resets in 4h 5m (Thu 18:05)",
                      "  weekly   41% left · resets in 3d 21h (Mon 11:00)",
@@ -58,7 +61,7 @@ spec = do
                    ]
 
     it "restates the same instants in a different zone without changing the countdown" $
-      renderUsageReport (hoursToTimeZone (-7)) (instant "2026-07-16T12:00:00Z") (availableReport twoWindowSnapshot)
+      renderUsageReport noEstimates (hoursToTimeZone (-7)) (instant "2026-07-16T12:00:00Z") (availableReport twoWindowSnapshot)
         `shouldBe` [ "Codex",
                      "  5 hour   63% left · resets in 4h 5m (Thu 09:05)",
                      "  weekly   41% left · resets in 3d 21h (Mon 02:00)",
@@ -69,14 +72,14 @@ spec = do
     -- clock is an input, so both directions are reachable rather than
     -- hypothetical.
     it "names a reset instant already in the past rather than counting down to it" $
-      renderUsageReport (hoursToTimeZone 0) (instant "2026-07-16T12:00:00Z") (availableReport expiredSnapshot)
+      renderUsageReport noEstimates (hoursToTimeZone 0) (instant "2026-07-16T12:00:00Z") (availableReport expiredSnapshot)
         `shouldBe` [ "Codex",
                      "  5 hour   63% left · resets due now (Thu 09:00)",
                      "  snapshot 1h 0m old"
                    ]
 
     it "clamps a snapshot stamped ahead of the supplied clock to a zero age" $
-      renderUsageReport (hoursToTimeZone 0) (instant "2026-07-16T12:00:00Z") (availableReport aheadSnapshot)
+      renderUsageReport noEstimates (hoursToTimeZone 0) (instant "2026-07-16T12:00:00Z") (availableReport aheadSnapshot)
         `shouldBe` [ "Codex",
                      "  5 hour   63% left · resets in 5h 0m (Thu 17:00)",
                      "  snapshot 0s old"
@@ -99,7 +102,7 @@ spec = do
       formatUsageDuration (fromInteger (36500 * 86400)) `shouldBe` ">99d"
 
     it "prints a failing provider's own line without disturbing the other's windows" $
-      renderUsageReport (hoursToTimeZone 0) (instant "2026-07-16T12:00:00Z") partialReport
+      renderUsageReport noEstimates (hoursToTimeZone 0) (instant "2026-07-16T12:00:00Z") partialReport
         `shouldBe` [ "Codex",
                      "  5 hour   63% left · resets in 5h 0m (Thu 17:00)",
                      "  snapshot 1h 0m old",
@@ -107,6 +110,98 @@ spec = do
                      "Claude",
                      "  unavailable: codex app-server is not installed"
                    ]
+
+  describe "the configured solve-round estimate" $ do
+    -- The count is integer division rounded down, and a remaining percentage
+    -- that does not cover one whole round is zero rounds rather than an
+    -- absent estimate: zero is the answer the user is asking for.
+    it "divides the remaining percentage by the configured cost, rounding down" $ do
+      usageSolveRoundsLeft (Just 8) 63 `shouldBe` Just 7
+      usageSolveRoundsLeft (Just 8) 64 `shouldBe` Just 8
+      usageSolveRoundsLeft (Just 8) 7 `shouldBe` Just 0
+      usageSolveRoundsLeft (Just 1) 100 `shouldBe` Just 100
+      usageSolveRoundsLeft (Just 100) 100 `shouldBe` Just 1
+
+    it "renders nothing at all for a provider that configured no estimate" $
+      usageSolveRoundsLeft Nothing 63 `shouldBe` Nothing
+
+    -- Only the live decoder bounds pct_left to 0-100. A snapshot decoded from
+    -- the cache carries whatever was stored, and 'div' rounds toward negative
+    -- infinity, so an out-of-range value would otherwise read as a negative
+    -- number of rounds.
+    it "never counts a negative number of rounds from an out-of-range stored percentage" $ do
+      usageSolveRoundsLeft (Just 8) (-1) `shouldBe` Just 0
+      usageSolveRoundsLeft (Just 8) (-200) `shouldBe` Just 0
+
+    it "prints the count against the window it describes, leaving the rest of the line unchanged" $
+      renderUsageReport (Map.singleton Codex 8) (hoursToTimeZone 2) (instant "2026-07-16T12:00:00Z") (availableReport twoWindowSnapshot)
+        `shouldBe` [ "Codex",
+                     "  5 hour   63% left · resets in 4h 5m (Thu 18:05) · ≈7 solve rounds left this window",
+                     "  weekly   41% left · resets in 3d 21h (Mon 11:00) · ≈5 solve rounds left this window",
+                     "  snapshot 30m old"
+                   ]
+
+    it "prints a zero count rather than hiding a window that buys less than one round" $
+      renderUsageReport (Map.singleton Codex 80) (hoursToTimeZone 0) (instant "2026-07-16T12:00:00Z") (availableReport oneWindowSnapshot)
+        `shouldBe` [ "Codex",
+                     "  5 hour   63% left · resets in 5h 0m (Thu 17:00) · ≈0 solve rounds left this window",
+                     "  snapshot 1h 0m old"
+                   ]
+
+    -- Requirement 6: an unconfigured provider and a provider with no window
+    -- data both render exactly what they rendered before the key existed.
+    it "adds nothing for the provider that configured no estimate, or for one reporting no windows" $ do
+      renderUsageReport (Map.singleton Claude 8) (hoursToTimeZone 0) (instant "2026-07-16T12:00:00Z") partialReport
+        `shouldBe` [ "Codex",
+                     "  5 hour   63% left · resets in 5h 0m (Thu 17:00)",
+                     "  snapshot 1h 0m old",
+                     "",
+                     "Claude",
+                     "  unavailable: codex app-server is not installed"
+                   ]
+      renderUsageReport (Map.singleton Codex 8) (hoursToTimeZone 0) (instant "2026-07-16T12:00:00Z") emptyWindowReport
+        `shouldBe` [ "Codex",
+                     "  no usage windows reported",
+                     "  snapshot 30m old"
+                   ]
+
+    -- The estimate is a sibling of the command, so configuration that sets
+    -- only one of them still reaches the renderer with the other absent.
+    it "carries each provider's configured estimate through to the renderer's input, and no other" $ do
+      usageSolveRoundEstimates defaultUsageConfig `shouldBe` Map.empty
+      usageSolveRoundEstimates defaultUsageConfig {usageCodexEstimatedPercentPerSolveRound = Just 8}
+        `shouldBe` Map.singleton Codex 8
+      usageSolveRoundEstimates
+        defaultUsageConfig
+          { usageCodexEstimatedPercentPerSolveRound = Just 8,
+            usageClaudeEstimatedPercentPerSolveRound = Just 12
+          }
+        `shouldBe` Map.fromList [(Codex, 8), (Claude, 12)]
+
+    -- Requirement 8, and the amendment pinning the script contract: the
+    -- document gains no field and keeps schema_version 1.
+    it "leaves the --json document untouched" $
+      decode (encode (usageReportDocument (availableReport oneWindowSnapshot)))
+        `shouldBe` Just
+          ( object
+              [ "schema_version" .= (1 :: Int),
+                "providers"
+                  .= object
+                    [ "codex"
+                        .= object
+                          [ "status" .= ("ok" :: Text),
+                            "fetched_at" .= ("2026-07-16T11:00:00Z" :: Text),
+                            "windows"
+                              .= [ object
+                                     [ "label" .= ("5 hour" :: Text),
+                                       "pct_left" .= (63 :: Int),
+                                       "resets_at" .= ("2026-07-16T17:00:00Z" :: Text)
+                                     ]
+                                 ]
+                          ]
+                    ]
+              ]
+          )
 
   describe "the exit status the mode reports" $ do
     it "succeeds when at least one provider produced windows" $
@@ -326,7 +421,7 @@ globalOnlyRawConfig =
   defaultRawConfig
     { rawCache = False,
       rawTimeouts = TimeoutsConfig 5 7 9 11 13,
-      rawUsage = UsageConfig (Just (UsageCommandConfig ["global-codex"])) Nothing
+      rawUsage = defaultUsageConfig {usageCodexCommand = Just (UsageCommandConfig ["global-codex"])}
     }
 
 -- | The same configuration carrying a repository-scoped timeout override,
@@ -346,11 +441,16 @@ configuredWith :: FilePath -> FilePath -> ResolvedConfig
 configuredWith codexScript claudeScript =
   testResolvedConfig
     { resolvedUsage =
-        UsageConfig
+        defaultUsageConfig
           { usageCodexCommand = Just (UsageCommandConfig [Text.pack codexScript]),
             usageClaudeCommand = Just (UsageCommandConfig [Text.pack claudeScript])
           }
     }
+
+-- | No provider configured an estimate, which is what every case that is not
+-- about the estimate renders under.
+noEstimates :: Map.Map UsageProvider Int
+noEstimates = Map.empty
 
 -- | A provider command that both answers and leaves evidence it ran, so a
 -- "did not spawn" assertion rests on a recording mechanism the neighbouring
@@ -409,6 +509,12 @@ reportWindows report = map (fmap outcome) report.usageReportEntries
 
 availableReport :: UsageSnapshot -> UsageReport
 availableReport snapshot = UsageReport [(Codex, UsageAvailable snapshot)]
+
+-- | A provider that answered with no windows at all. Reachable from the cache
+-- decoder, which establishes no non-empty invariant, and the case an estimate
+-- has nothing to be derived from.
+emptyWindowReport :: UsageReport
+emptyWindowReport = UsageReport [(Codex, UsageAvailable (UsageSnapshot [] (instant "2026-07-16T11:30:00Z")))]
 
 partialReport :: UsageReport
 partialReport =

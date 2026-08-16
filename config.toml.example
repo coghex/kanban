@@ -63,11 +63,22 @@ ping_claude_seconds = 120
 # of the built-in provider. It must print
 # {"windows": [{"label": "5 hour", "pct_left": 78, "resets_at": "2026-07-16T16:05:00Z"}]}
 # on stdout.
+#
+# `estimated_percent_per_solve_round` is what you estimate one solve round
+# costs that provider, as a whole percentage of a window: an integer from 1
+# through 100, and anything else is a startup error. It is independent of
+# `command` — either key may be set without the other — and setting it makes
+# `kanban --usage`, `kanban --ping`, and the sidebar report roughly how many
+# rounds the remaining percentage buys, rounded down. Omit it and no estimate
+# is shown; there is no default. Both keys are global, like the rest of
+# [usage]; they cannot be set per repository.
 [usage.codex]
 # command = ["/usr/local/bin/my-codex-usage", "--json"]
+# estimated_percent_per_solve_round = 8
 
 [usage.claude]
 # command = ["/usr/local/bin/my-claude-usage", "--json"]
+# estimated_percent_per_solve_round = 12
 
 # The quoted key must be a canonical lowercase owner/name: two non-empty
 # segments of [a-z0-9._-] around exactly one slash, with no uppercase letters,

@@ -126,7 +126,13 @@ class UsageCommandConfig:
 @dataclass(frozen=True)
 class UsageConfig:
     codex_command: UsageCommandConfig | None = None
+    # Kanban.Config.usageCodexEstimatedPercentPerSolveRound. Carried even
+    # though no Python consumer renders it: this schema mirrors the Haskell
+    # one field for field, and a key it did not know would be reported as
+    # unknown by every tool that loads the same file.
+    codex_estimated_percent_per_solve_round: int | None = None
     claude_command: UsageCommandConfig | None = None
+    claude_estimated_percent_per_solve_round: int | None = None
 
 
 # Per-field overrides for [workflow]/[limits]/[timeouts], decoded identically
@@ -513,23 +519,57 @@ def _parse_command_argv(value, path: str) -> UsageCommandConfig:
     return UsageCommandConfig(argv=tuple(value))
 
 
+# Kanban.Config.parseSolveRoundPercent. A whole percentage of a window, so
+# anything outside 1 through 100 is an error rather than a clamped value; zero
+# in particular has to go, because the round count divides by it. bool is a
+# subclass of int in Python but not a TOML integer, and the Haskell matcher
+# rejects `true` outright, so it is rejected here for the same reason every
+# other integer key rejects it.
+def _pop_solve_round_percent(table: dict, key: str, path: str) -> int | None:
+    if key not in table:
+        return None
+    value = table.pop(key)
+    full = _join(path, key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise KanbanConfigError(f"{full} must be an integer")
+    if value < 1 or value > 100:
+        raise KanbanConfigError(f"{full} must be a whole percentage from 1 through 100")
+    return value
+
+
 def _parse_usage_provider(table: dict, key: str, path: str, warnings: list[str]):
+    """Both keys a provider table may carry, neither gating the other.
+
+    Returns (command, estimated_percent_per_solve_round). A table holding only
+    the estimate is valid configuration: the estimate then describes whatever
+    windows the built-in probe reports.
+    """
     popped = _pop_table(table, key, path)
     if popped is None:
-        return None
+        return (None, None)
     provider_table, child_path = popped
     command = provider_table.pop("command", None)
-    result = _parse_command_argv(command, _join(child_path, "command")) if command is not None else None
+    parsed_command = (
+        _parse_command_argv(command, _join(child_path, "command")) if command is not None else None
+    )
+    estimate = _pop_solve_round_percent(
+        provider_table, "estimated_percent_per_solve_round", child_path
+    )
     _collect_unknown(provider_table, child_path, warnings)
-    return result
+    return (parsed_command, estimate)
 
 
 def _parse_usage_table(value: dict, path: str, warnings: list[str]) -> UsageConfig:
     table = dict(value)
-    codex_command = _parse_usage_provider(table, "codex", path, warnings)
-    claude_command = _parse_usage_provider(table, "claude", path, warnings)
+    codex_command, codex_estimate = _parse_usage_provider(table, "codex", path, warnings)
+    claude_command, claude_estimate = _parse_usage_provider(table, "claude", path, warnings)
     _collect_unknown(table, path, warnings)
-    return UsageConfig(codex_command=codex_command, claude_command=claude_command)
+    return UsageConfig(
+        codex_command=codex_command,
+        codex_estimated_percent_per_solve_round=codex_estimate,
+        claude_command=claude_command,
+        claude_estimated_percent_per_solve_round=claude_estimate,
+    )
 
 
 # Kanban.Config.isCanonicalKeyCharacter. A repository override key is a

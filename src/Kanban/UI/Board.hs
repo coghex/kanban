@@ -53,7 +53,7 @@ import Kanban.Card
     overflowChipText,
     wrappedLines,
   )
-import Kanban.Config (LimitsConfig (..), ResolvedConfig (..) )
+import Kanban.Config (LimitsConfig (..), ResolvedConfig (..), usageSolveRoundEstimate )
 import Kanban.Domain
 import Kanban.Drainer
   ( DrainerStatus (..)
@@ -61,7 +61,7 @@ import Kanban.Drainer
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
-import Kanban.Usage.Render (usageResetCountdownText, usageResetLocalText, usageSnapshotAgeText)
+import Kanban.Usage.Render (usageResetCountdownText, usageResetLocalText, usageSnapshotAgeText, usageSolveRoundsLeft, usageSolveRoundsSuffix)
 import Kanban.Workflow (entryItem, isApproved, isProblem, itemLifecycleBadge, orderCardLabels )
 import Kanban.UI.Types
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), actionKeyText, footerHint, scopeBindings)
@@ -172,10 +172,11 @@ drawProvider state provider =
           ]
         Just snapshot ->
           providerHeading snapshot
-            : map (drawUsageWindow state) snapshot.usageWindows
+            : map (drawUsageWindow state estimate) snapshot.usageWindows
             <> usageSnapshotStatus freshness
     )
   where
+    estimate = usageSolveRoundEstimate state.appConfig.resolvedUsage provider
     freshness = Map.findWithDefault NotLoaded provider state.appUsageFreshness
     providerName = case provider of
       Codex -> "Codex"
@@ -202,15 +203,16 @@ usageStatusText _ (Unavailable message) = message
 usageStatusText _ (Unsupported message) = message
 usageStatusText _ NotLoaded = "press " <> actionKeyText RefreshAll <> " to refresh"
 
-drawUsageWindow :: AppState -> UsageWindow -> Widget Name
-drawUsageWindow state usageWindow =
+drawUsageWindow :: AppState -> Maybe Int -> UsageWindow -> Widget Name
+drawUsageWindow state estimate usageWindow =
   vBox
     [ txt (padLabel usageWindow.usageWindowLabel <> " " <> usageBar state usageWindow.usagePercentLeft),
-      withAttr dimAttr (txt (usageResetRowText state.appTimeZone state.appNow usageWindow))
+      withAttr dimAttr (txt (usageResetRowText estimate state.appTimeZone state.appNow usageWindow))
     ]
 
 -- | A window's second row: how long until it resets, then the wall clock it
--- resets at.
+-- resets at, and — where it fits — how many solve rounds the percentage above
+-- is estimated to buy.
 --
 -- The countdown takes the indent this row used to open with rather than a
 -- third row, because the percentage row above already spends all
@@ -219,11 +221,26 @@ drawUsageWindow state usageWindow =
 -- 'Kanban.Usage.Render.usageDurationDayBound' and the wall clock by its
 -- format — so the row fits that interior for any instant a provider reports,
 -- including one already behind the clock.
-usageResetRowText :: TimeZone -> UTCTime -> UsageWindow -> Text
-usageResetRowText zone now usageWindow =
-  usageResetCountdownText (diffUTCTime usageWindow.usageResetsAt now)
-    <> " · "
-    <> usageResetLocalText zone usageWindow.usageResetsAt
+--
+-- The estimate is the one part of this row with no such bound of its own, so
+-- it is measured rather than assumed: the complete suffix is appended only
+-- when the finished row still fits 'usageSidebarInterior', and is otherwise
+-- dropped whole. Nothing already on the row is shortened to make room —
+-- a countdown and a reset instant the user can act on outrank a figure they
+-- can recompute from the percentage above.  The measurement is in terminal
+-- cells because that is what the interior is counted in, and both @·@ and
+-- @≈@ are East Asian ambiguous.
+usageResetRowText :: Maybe Int -> TimeZone -> UTCTime -> UsageWindow -> Text
+usageResetRowText estimate zone now usageWindow
+  | displayWidth withEstimate <= usageSidebarInterior = withEstimate
+  | otherwise = base
+  where
+    base =
+      usageResetCountdownText (diffUTCTime usageWindow.usageResetsAt now)
+        <> " · "
+        <> usageResetLocalText zone usageWindow.usageResetsAt
+    withEstimate =
+      base <> maybe "" usageSolveRoundsSuffix (usageSolveRoundsLeft estimate usageWindow.usagePercentLeft)
 
 usageBar :: AppState -> Int -> Text
 usageBar state percentage =

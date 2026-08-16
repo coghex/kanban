@@ -41,8 +41,9 @@ where
 import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, finally, try)
 import Control.Monad (void)
-import Data.Maybe (fromMaybe)
+import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
@@ -58,6 +59,7 @@ import Kanban.Config
     repositoryIdentity,
     resolveConfig,
     resolveGlobalConfig,
+    usageSolveRoundEstimates,
   )
 import Kanban.Domain (Repository (..), UsageProvider (..))
 import Kanban.Paths (createPrivateDirectory)
@@ -570,10 +572,13 @@ reapTimeoutMicros = 2 * 1000 * 1000
 -- | The refreshed window state, including every returned window's end time.
 --
 -- Rendered by the same pure function @kanban --usage@ and the sidebar use, so
--- one run's report cannot describe a window differently from the next.
-pingResultLines :: TimeZone -> UTCTime -> PingResult -> [Text]
-pingResultLines zone now result =
-  maybe [] (renderUsageReport zone now . singleReport result.pingResultBrand) result.pingResultRefresh
+-- one run's report cannot describe a window differently from the next.  The
+-- configured solve-round estimates are passed through for that reason too: a
+-- ping that printed a window without the estimate @--usage@ gives it would be
+-- exactly the divergence sharing this function exists to rule out.
+pingResultLines :: Map UsageProvider Int -> TimeZone -> UTCTime -> PingResult -> [Text]
+pingResultLines estimates zone now result =
+  maybe [] (renderUsageReport estimates zone now . singleReport result.pingResultBrand) result.pingResultRefresh
 
 -- | What went wrong, in the user's terms.  A refresh failure is absent here on
 -- purpose: 'pingResultLines' already prints it as that provider's own line.
@@ -629,5 +634,5 @@ runPingMode mode config = do
   mapM_ (\problem -> hPutStrLn stderr ("kanban: " <> Text.unpack problem)) (pingResultProblems result)
   zone <- getCurrentTimeZone
   now <- getCurrentTime
-  mapM_ TextIO.putStrLn (pingResultLines zone now result)
+  mapM_ TextIO.putStrLn (pingResultLines (usageSolveRoundEstimates config.resolvedUsage) zone now result)
   pure (pingResultSucceeded result)

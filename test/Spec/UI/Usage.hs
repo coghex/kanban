@@ -15,6 +15,7 @@ import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (NominalDiffTime, TimeZone, UTCTime (..), addUTCTime, diffUTCTime, fromGregorian, hoursToTimeZone, secondsToDiffTime, utc)
 import Kanban.Card (displayWidth)
+import Kanban.Config (ResolvedConfig (..), UsageConfig (..), defaultUsageConfig)
 import Kanban.Domain
   ( Freshness (..),
     UsageProvider (..),
@@ -36,9 +37,12 @@ import Kanban.Usage.Render
     renderUsageReport,
     usageResetCountdownText,
     usageSnapshotAgeText,
+    usageSolveRoundsLeft,
+    usageSolveRoundsSuffix,
   )
 import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures (fixtureBoard)
+import Spec.Support.Golden (expectGolden, goldenPath)
 import Spec.Support.Render (frameRowText, renderFrameCells)
 import Test.Hspec
 
@@ -69,15 +73,29 @@ spec = describe "usage sidebar" $ do
   -- reported: 'Kanban.UsageCommand.decodeUsageCommandDocument' bounds no
   -- decoded timestamp, so the row has to fit for a reset a century out as
   -- much as for one this afternoon.
-  it "fits the sidebar interior for every reset instant a provider can report" $ do
+  --
+  -- The estimate is swept with it rather than in a case of its own. The
+  -- suffix is the one part of this row with no bound of its own, so the
+  -- combination of a long countdown and a wide count is exactly what a golden
+  -- frame -- one instant, one count -- cannot rule out. Every configured
+  -- estimate here is a legal one, and the counts they produce against a
+  -- hundred-percent window span one, two, and three digits.
+  it "fits the sidebar interior for every reset instant a provider can report, at every estimate" $ do
     let overlong =
-          [ (offset, zone, row)
+          [ (offset, zone, estimate, row)
           | offset <- resetOffsets,
             zone <- zones,
-            let row = usageResetRowText zone goldenNow (windowAt (addUTCTime offset goldenNow)),
+            estimate <- estimates,
+            let row = usageResetRowText estimate zone goldenNow (windowAt (addUTCTime offset goldenNow)),
             displayWidth row > usageSidebarInterior
           ]
     overlong `shouldBe` []
+
+  -- The check above is only worth something if those estimates really do
+  -- reach three digits: a sweep whose counts were all one digit would pass
+  -- while saying nothing about the widest suffix.
+  it "sweeps a one-, two-, and three-digit count over that interior" $
+    map (`usageSolveRoundsLeft` 100) estimates `shouldBe` [Nothing, Just 1, Just 10, Just 100]
 
   it "fits the sidebar interior for every snapshot age, beside the longer provider name" $ do
     let overlong =
@@ -93,7 +111,7 @@ spec = describe "usage sidebar" $ do
   -- "in 0s" -- not negative, but a countdown to an instant that has passed.
   it "names an elapsed reset rather than counting down to it" $ do
     for_ elapsedOffsets $ \offset -> do
-      let row = usageResetRowText utc goldenNow (windowAt (addUTCTime (negate offset) goldenNow))
+      let row = usageResetRowText Nothing utc goldenNow (windowAt (addUTCTime (negate offset) goldenNow))
       row `shouldSatisfy` ("due now · " `Data.Text.isPrefixOf`)
 
   it "never renders a negative duration in either the countdown or the age" $ do
@@ -101,7 +119,7 @@ spec = describe "usage sidebar" $ do
           [ row
           | offset <- map negate (resetOffsets <> ageOffsets) <> resetOffsets,
             row <-
-              [ usageResetRowText utc goldenNow (windowAt (addUTCTime offset goldenNow)),
+              [ usageResetRowText Nothing utc goldenNow (windowAt (addUTCTime offset goldenNow)),
                 usageAgeText goldenNow (snapshotFetchedAt (addUTCTime offset goldenNow))
               ],
             "-" `Data.Text.isInfixOf` row
@@ -139,13 +157,74 @@ spec = describe "usage sidebar" $ do
     for_ agreementCases $ \(name, zone, snapshot) -> do
       state <- usageState (Map.singleton Codex snapshot) (Map.singleton Codex (Fresh snapshot.usageFetchedAt)) goldenNow
       let sidebar = providerBlock Codex (sidebarInterior (sidebarFrame state {appTimeZone = zone}))
-          command = renderUsageReport zone goldenNow (UsageReport [(Codex, UsageAvailable snapshot)])
+          command = renderUsageReport Map.empty zone goldenNow (UsageReport [(Codex, UsageAvailable snapshot)])
           age = usageSnapshotAgeText (diffUTCTime goldenNow snapshot.usageFetchedAt)
           countdowns = map (usageResetCountdownText . flip diffUTCTime goldenNow . (.usageResetsAt)) snapshot.usageWindows
       for_ (("snapshot " <> age) : map ("resets " <>) countdowns) $ \fragment ->
         (name, fragment, filter (fragment `Data.Text.isInfixOf`) command) `shouldNotBe` (name, fragment, [])
       for_ (age : countdowns) $ \fragment ->
         (name, fragment, filter (fragment `Data.Text.isInfixOf`) sidebar) `shouldNotBe` (name, fragment, [])
+
+  -- Requirement 5, and the amendment fixing the fit against the existing
+  -- interior constant rather than a literal 24. The base row is held constant
+  -- at 18 cells so that what varies between these cases is only the width of
+  -- the suffix itself.
+  it "appends the whole compact suffix, or none of it, according to what the finished row measures" $ do
+    let row estimate percentLeft =
+          usageResetRowText estimate utc goldenNow (UsageWindow "weekly" percentLeft (addUTCTime 1800 goldenNow))
+        base = "in 30m · Thu 15:30"
+    displayWidth base `shouldBe` 18
+    row Nothing 63 `shouldBe` base
+    row (Just 8) 63 `shouldBe` base <> " · ≈7"
+    row (Just 5) 63 `shouldBe` base <> " · ≈12"
+    -- Three digits need seven cells of suffix against an 18-cell base, which
+    -- is one cell more than the interior has. The countdown and the reset
+    -- instant are not shortened to make room; the estimate simply goes.
+    displayWidth (base <> " · ≈100") `shouldBe` usageSidebarInterior + 1
+    row (Just 1) 100 `shouldBe` base
+    -- A window that does not buy a whole round says so.
+    row (Just 80) 63 `shouldBe` base <> " · ≈0"
+
+  -- The suffix must never be the reason a row that fitted stops fitting, and
+  -- it must never be appended in part.
+  it "never overflows an otherwise-fitting row, and never appends a fragment of the suffix" $ do
+    let rows =
+          [ (offset, estimate, percentLeft, usageResetRowText estimate utc goldenNow (windowAt' percentLeft (addUTCTime offset goldenNow)))
+          | offset <- resetOffsets,
+            estimate <- estimates,
+            percentLeft <- [0, 7, 63, 100]
+          ]
+        base offset = usageResetRowText Nothing utc goldenNow (windowAt' 100 (addUTCTime offset goldenNow))
+        truncated (offset, estimate, percentLeft, row) =
+          row /= base offset
+            && Just row /= ((base offset <>) . usageSolveRoundsSuffix <$> usageSolveRoundsLeft estimate percentLeft)
+    filter truncated rows `shouldBe` []
+    filter (\(_, _, _, row) -> displayWidth row > usageSidebarInterior) rows `shouldBe` []
+
+  -- Requirement 7's consequence at the surface: the sidebar reads its count
+  -- off the same derivation the printed line does, so one configured value
+  -- and one remaining percentage cannot produce two answers.
+  it "states the same count as kanban --usage for the same configured estimate" $ do
+    let window = UsageWindow "weekly" 63 (addUTCTime 1800 goldenNow)
+        snapshot = UsageSnapshot [window] goldenNow
+        sidebar = usageResetRowText (Just 8) utc goldenNow window
+        command = renderUsageReport (Map.singleton Codex 8) utc goldenNow (UsageReport [(Codex, UsageAvailable snapshot)])
+    usageSolveRoundsLeft (Just 8) 63 `shouldBe` Just 7
+    sidebar `shouldSatisfy` ("≈7" `Data.Text.isSuffixOf`)
+    command `shouldSatisfy` any ("≈7 solve rounds left this window" `Data.Text.isSuffixOf`)
+
+  -- The frames the acceptance names, drawn through 'drawApplication' and read
+  -- back as the sidebar's own interior cells, so what is pinned is what the
+  -- application draws rather than a reconstruction of it.
+  it "draws the estimate cases the sidebar has to get right" $ do
+    blocks <- traverse renderEstimateCase estimateCases
+    expectGolden (goldenPath "usage-estimate-sidebar.txt") (concat blocks)
+
+-- | Every estimate the sweep runs the reset row under: unconfigured, and the
+-- three legal values whose counts against a hundred-percent window are one,
+-- two, and three digits wide.
+estimates :: [Maybe Int]
+estimates = [Nothing, Just 100, Just 10, Just 1]
 
 -- | One snapshot per way the two surfaces could drift apart: an ordinary
 -- future reset, one already elapsed, and one far enough out to hit the
@@ -196,6 +275,61 @@ zones = [utc, hoursToTimeZone 14, hoursToTimeZone (-12)]
 -- coexist with; only its reset instant varies.
 windowAt :: UTCTime -> UsageWindow
 windowAt resetsAt = UsageWindow "weekly" 100 resetsAt
+
+-- | The same window with the remaining percentage varied too, which is the
+-- other input the count is derived from.
+windowAt' :: Int -> UTCTime -> UsageWindow
+windowAt' percentLeft resetsAt = UsageWindow "weekly" percentLeft resetsAt
+
+-- | Each case the acceptance names, drawn as the whole application and read
+-- back as the sidebar block it produced.
+--
+-- Every reset here is half an hour out, which makes the base row 18 cells in
+-- all of them. That is deliberate: the fixtures then differ only in the
+-- configured estimate and the remaining percentage, so a frame that changed
+-- changed because of the estimate rather than because of a countdown.
+-- Eighteen cells is also the width at which the omission case is genuine —
+-- the shortest reachable base row is 17, and 17 plus a three-digit suffix is
+-- exactly the interior.
+--
+-- A three-digit count is only reachable at a hundred percent remaining, since
+-- the live decoder bounds @pct_left@ at 100 and the smallest legal estimate is
+-- 1. That case's percentage row therefore shows the one-cell overflow the
+-- hundred-percent bar has always had — @5 hour  [..........] 100%@ is 25
+-- cells — which is a property of the row above this one and is neither
+-- introduced nor repaired here.
+data EstimateCase = EstimateCase
+  { estimateCaseName :: Text,
+    estimateCaseEstimate :: Maybe Int,
+    estimateCaseWindows :: [UsageWindow]
+  }
+
+estimateCases :: [EstimateCase]
+estimateCases =
+  [ EstimateCase "fitting one-digit count" (Just 8) [window 63],
+    EstimateCase "fitting two-digit count, filling the interior exactly" (Just 5) [window 63],
+    EstimateCase "three-digit count, omitted whole because the suffix would not fit" (Just 1) [window 100],
+    EstimateCase "zero rounds, rendered rather than hidden" (Just 80) [window 63],
+    EstimateCase "no configured estimate" Nothing [window 63],
+    EstimateCase "configured provider reporting no windows" (Just 8) []
+  ]
+  where
+    window percentLeft = UsageWindow "5 hour" percentLeft (addUTCTime 1800 goldenNow)
+
+renderEstimateCase :: EstimateCase -> IO [Text]
+renderEstimateCase estimateCase = do
+  state <- usageState snapshots (Map.singleton Codex (Fresh goldenNow)) goldenNow
+  let configured =
+        state
+          { appConfig =
+              state.appConfig
+                { resolvedUsage =
+                    defaultUsageConfig {usageCodexEstimatedPercentPerSolveRound = estimateCase.estimateCaseEstimate}
+                }
+          }
+  pure (("== " <> estimateCase.estimateCaseName <> " ==") : providerBlock Codex (sidebarInterior (sidebarFrame configured)))
+  where
+    snapshots = Map.singleton Codex (UsageSnapshot estimateCase.estimateCaseWindows goldenNow)
 
 snapshotFetchedAt :: UTCTime -> UsageSnapshot
 snapshotFetchedAt fetchedAt =
