@@ -23,7 +23,7 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Resolve Kanban's managed installs, records, and logs per platform
+- [x] EPIC. Resolve Kanban's managed installs, records, and logs per platform — [#347]
 - [ ] PATH-1. Make one platform-aware resolver own the issue-review paths
 - [ ] PATH-2. Route the drainer's install, record, runtime, and log paths
 - [ ] PATH-3. Resolve the Haskell consumers' managed paths per platform

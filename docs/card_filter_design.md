@@ -18,10 +18,6 @@ to `exploring`; `Q-10` through `Q-14` were resolved by D-19 through D-23,
 the user signed the design ready again on 2026-08-14. The three linked slices
 are unaffected by those decisions.
 
-Tracker note for the next processing run: epic #298's child checklist still
-lists four children and predates `FILT-5`, so it needs one reconciling edit
-before `FILT-1` is drafted.
-
 Status legend: `[ ]` unprocessed · `[#N]` linked to issue N · `[no-issue]`
 reviewed and deliberately not tracked separately · `[deferred]` blocked on a
 concrete precondition
@@ -33,7 +29,7 @@ concrete precondition
 - [x] FILT-3. Make the open board complete, live-only, and atomically refreshable — [#305]
 - [x] FILT-1. Load and cache complete issue/PR history in the background — [#316]
 - [x] FILT-5. Render completed history read-only behind default-hidden criteria — [#319]
-- [ ] FILT-2. Add the live filter panel and compose it with column search
+- [x] FILT-2. Add the live filter panel and compose it with column search — [#348]
 
 `FILT-3`, then `FILT-4`, then `FILT-5` were added after the first two stable
 slice IDs had been recorded. Their numbers are intentionally out of sequence
