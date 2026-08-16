@@ -131,6 +131,8 @@ library
     Kanban.UI.Types
     Kanban.UI.Util
     Kanban.UI.Worker
+    Kanban.Usage
+    Kanban.Usage.Render
     Kanban.UsageCommand
     Kanban.Worker
     Kanban.Workflow
@@ -211,6 +213,7 @@ test-suite kanban-test
     Spec.Agent.Supervision
     Spec.Agent.Transcript
     Spec.Agent.Usage
+    Spec.Agent.UsageMode
     Spec.Board.Tracker
     Spec.Board.Workflow
     Spec.Config.Consumers
@@ -262,6 +265,7 @@ test-suite kanban-test
     filepath,
     hspec                 >= 2.11 && < 2.12,
     kanban,
+    optparse-applicative,
     process,
     text,
     time,

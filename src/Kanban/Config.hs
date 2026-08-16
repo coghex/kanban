@@ -22,7 +22,9 @@ module Kanban.Config
     defaultConfigPath,
     decodeConfigText,
     loadRawConfig,
+    cacheEnabled,
     resolveConfig,
+    resolveGlobalConfig,
     repositoryIdentity,
     resolveConfigPathOption,
   )
@@ -40,6 +42,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
+import Kanban.CLI (Options (..))
 import Kanban.Domain
   ( ApprovalMode (..),
     BlockingSeverity (..),
@@ -249,6 +252,28 @@ asciiLowercase = Text.map lowerAscii
     lowerAscii character
       | isAsciiUpper character = toLower character
       | otherwise = character
+
+-- | Whether snapshot caching is on for this run: @--no-cache@ or a global
+-- @cache = false@ each turn it off, and the flag always wins.  Every reader
+-- and writer of a snapshot answers from here so a run cannot have caching off
+-- for one cache and on for another.
+cacheEnabled :: Options -> ResolvedConfig -> Bool
+cacheEnabled options config = not options.optionNoCache && config.resolvedCache
+
+-- | Resolution with no repository in play, for the run-and-exit modes that
+-- never resolve one.  Every group keeps its global value: usage commands are
+-- global already, and with no @owner/name@ there is nothing for a repository
+-- override to be keyed by.
+resolveGlobalConfig :: RawConfig -> ResolvedConfig
+resolveGlobalConfig raw =
+  ResolvedConfig
+    { resolvedCache = raw.rawCache,
+      resolvedRemoteName = raw.rawRemoteName,
+      resolvedWorkflow = raw.rawWorkflow,
+      resolvedLimits = raw.rawLimits,
+      resolvedTimeouts = raw.rawTimeouts,
+      resolvedUsage = raw.rawUsage
+    }
 
 resolveConfig :: Text -> RawConfig -> ResolvedConfig
 resolveConfig ownerName raw =

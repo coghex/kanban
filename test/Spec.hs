@@ -13,6 +13,7 @@ import qualified Spec.Agent.Solve as Solve
 import qualified Spec.Agent.Supervision as Supervision
 import qualified Spec.Agent.Transcript as Transcript
 import qualified Spec.Agent.Usage as Usage
+import qualified Spec.Agent.UsageMode as UsageMode
 import qualified Spec.Board.Tracker as Tracker
 import qualified Spec.Board.Workflow as Workflow
 import qualified Spec.Config.Consumers as ConfigConsumers
@@ -74,6 +75,7 @@ suite = do
   Capture.spec
   SolveChooser.spec
   Usage.spec
+  UsageMode.spec
   IssueReviewer.spec
   Drainer.spec
   RepositoryState.spec

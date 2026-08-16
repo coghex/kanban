@@ -2,8 +2,6 @@ module Kanban.UI.Refresh
   ( BoardRefreshDispatch (..),
     boardRefreshDispatch,
     boardRefreshRunner,
-    claudeRefreshTimeoutMicros,
-    codexRefreshTimeoutMicros,
     historyPausedNotice,
     markBoardRefreshRunning,
     newBoardRefreshCoordinator,
@@ -53,7 +51,7 @@ import Kanban.GitHub
     runCompletedHistoryPage
     )
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
-import Kanban.UsageCommand (runUsageCommand)
+import Kanban.Usage (claudeRefreshTimeoutMicros, codexRefreshTimeoutMicros, runUsageProvider)
 import System.Timeout (timeout)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -221,14 +219,6 @@ markBoardRefreshRunning generation =
           }
     )
 
--- | The configured Codex and Claude provider timeouts, converted from whole
--- seconds to the microseconds 'System.Timeout.timeout' takes. GitHub's has no
--- equivalent here: it bounds one page from inside the fetch (§13) rather than
--- a call made from this module.
-codexRefreshTimeoutMicros, claudeRefreshTimeoutMicros :: ResolvedConfig -> Int
-codexRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsCodexSeconds * 1000000
-claudeRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsClaudeSeconds * 1000000
-
 -- | The repository's one coordinator, wired to the board: outcomes reach the
 -- event channel exactly as a lone refresh thread's did, and what the
 -- scheduler has to say for itself reaches the same notice line.
@@ -390,9 +380,3 @@ runClaudeRefresh :: Int -> Maybe UsageCommandConfig -> BChan AppEvent -> IO ()
 runClaudeRefresh timeoutMicros command eventChannel =
   runUsageProvider timeoutMicros command fetchClaudeUsage >>= writeBChan eventChannel . ClaudeRefreshFinished
 
--- | Routes a usage refresh to the configured external command when one is
--- set, or to the built-in provider otherwise (§14: "the external command is
--- the provider").
-runUsageProvider :: Int -> Maybe UsageCommandConfig -> (Int -> IO (Either ProviderError UsageSnapshot)) -> IO (Either ProviderError UsageSnapshot)
-runUsageProvider timeoutMicros Nothing builtIn = builtIn timeoutMicros
-runUsageProvider timeoutMicros (Just command) _ = runUsageCommand timeoutMicros command.usageCommandArgv
