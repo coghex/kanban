@@ -303,6 +303,25 @@ spec = do
           pingGroup `shouldBe` pingPid
           pingGroup `shouldSatisfy` (/= fromIntegral kanbanGroup)
 
+    -- The escalation re-checks the group between TERM and KILL, and those
+    -- reads are as capable of hanging as the census that preceded them. A
+    -- deadline that covered only the first read would let a `ps` which
+    -- answered once and then stopped answering hold the whole cleanup open.
+    -- Driving the sweep directly is what makes which read hangs deterministic:
+    -- the census is the first, so hanging from the second onward is exactly
+    -- "answered the census, hung on a re-check".
+    it "clears the group when the census answers but a re-check hangs" $
+      withPingRoot $ \root -> do
+        withProcessSnapshotHangingAfter root 1 $ do
+          (handle, helper) <- spawnGroupLeaderWithHelper root
+          startedAt <- getMonotonicTimeNSec
+          sweepOwnedGroup handle
+          elapsed <- elapsedSeconds startedAt
+          processAlive helper `shouldReturn` False
+          elapsed `shouldSatisfy` (< 30)
+          _ <- waitForProcess handle
+          pure ()
+
     it "takes the whole group and nothing outside it" $
       ownedGroupMembers 500 mixedSnapshot
         `shouldBe` [ leader 500 "Thu Aug 15 10:00:00 2026",
@@ -701,6 +720,38 @@ withFailingProcessSnapshot root action = do
   let binaryRoot = root </> "bin"
   _ <- writeExecutableScript (binaryRoot </> "ps") ["echo 'ps is unavailable' >&2", "exit 1"]
   action
+
+-- | Puts a @ps@ ahead of the real one that answers normally for the first
+-- @answers@ calls and then stops answering, so a fixture can choose which
+-- read in a sequence is the one that hangs.
+withProcessSnapshotHangingAfter :: FilePath -> Int -> IO result -> IO result
+withProcessSnapshotHangingAfter root answers action = do
+  let counter = root </> "ps-calls"
+  _ <-
+    writeExecutableScript
+      (root </> "bin" </> "ps")
+      [ ByteString.pack ("calls=$(cat \"" <> counter <> "\" 2>/dev/null || echo 0)"),
+        "calls=$((calls + 1))",
+        ByteString.pack ("printf '%s' \"$calls\" > \"" <> counter <> "\""),
+        ByteString.pack ("if [ \"$calls\" -gt " <> show answers <> " ]; then sleep 120; fi"),
+        "exec /bin/ps \"$@\""
+      ]
+  action
+
+-- | A live, unreaped group leader with a helper running in its group, which is
+-- the state a sweep is asked to clear.
+spawnGroupLeaderWithHelper :: FilePath -> IO (ProcessHandle, ProcessID)
+spawnGroupLeaderWithHelper root = do
+  script <-
+    writeExecutableScript
+      (root </> "group-leader.sh")
+      [ ByteString.pack ("sh -c 'exec sleep 30' & printf '%s' \"$!\" > \"" <> helperPidFile root <> "\""),
+        "sleep 30"
+      ]
+  (_, _, _, handle) <-
+    createProcess (proc script []) {std_in = NoStream, std_out = NoStream, std_err = NoStream, new_session = True}
+  helper <- helperPid root
+  pure (handle, helper)
 
 -- | A process group whose leader has been waited on, leaving a helper running
 -- and the group id no longer provably Kanban's.

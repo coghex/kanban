@@ -20,6 +20,18 @@ import System.IO (hPutStrLn, stderr)
 main :: IO ()
 main = do
   parsedOptions <- execParser optionsParserInfo
+  -- Ahead of mode selection, because a malformed --ping must exit non-zero
+  -- whatever else the invocation names: an earlier run-and-exit mode would
+  -- otherwise run, succeed, and leave the unknown or repeated brand
+  -- unreported. Only refusal is hoisted — a well-formed ping still yields to
+  -- every observational mode below (§5).
+  pingBrand <- case parsedOptions.optionPing of
+    [] -> pure Nothing
+    occurrences -> case resolvePingBrand occurrences of
+      Left message -> do
+        hPutStrLn stderr ("kanban: " <> Text.unpack message)
+        exitFailure
+      Right brand -> pure (Just brand)
   case parsedOptions.optionWorkerSpec of
     Just workerSpec -> do
       result <- runWorker workerSpec
@@ -63,37 +75,32 @@ main = do
     -- Last of the run-and-exit modes, and deliberately so: it is the only one
     -- that spends the user's quota (§14), so every observational mode above
     -- wins over it and an invocation naming one of them pings nothing.
-    Nothing | not (null parsedOptions.optionPing) ->
-      case resolvePingBrand parsedOptions.optionPing of
+    Nothing | Just brand <- pingBrand -> do
+      absoluteConfigPath <- resolveConfigPathOption parsedOptions.optionConfig
+      configResult <- loadRawConfig absoluteConfigPath
+      case configResult of
         Left message -> do
           hPutStrLn stderr ("kanban: " <> Text.unpack message)
           exitFailure
-        Right brand -> do
-          absoluteConfigPath <- resolveConfigPathOption parsedOptions.optionConfig
-          configResult <- loadRawConfig absoluteConfigPath
-          case configResult of
+        Right (rawConfig, warnings) -> do
+          mapM_ (\warning -> hPutStrLn stderr ("kanban: warning: " <> Text.unpack warning)) warnings
+          -- An explicit --repo names a repository without needing a checkout;
+          -- without one the invoking directory is asked, and that failing is
+          -- not an error, because a ping requires neither.
+          identityResult <- pingRepositoryIdentity rawConfig.rawRemoteName parsedOptions.optionPath parsedOptions.optionRepo
+          case identityResult of
             Left message -> do
               hPutStrLn stderr ("kanban: " <> Text.unpack message)
               exitFailure
-            Right (rawConfig, warnings) -> do
-              mapM_ (\warning -> hPutStrLn stderr ("kanban: warning: " <> Text.unpack warning)) warnings
-              -- An explicit --repo names a repository without needing a
-              -- checkout; without one the invoking directory is asked, and
-              -- that failing is not an error, because a ping requires neither.
-              identityResult <- pingRepositoryIdentity rawConfig.rawRemoteName parsedOptions.optionPath parsedOptions.optionRepo
-              case identityResult of
-                Left message -> do
-                  hPutStrLn stderr ("kanban: " <> Text.unpack message)
-                  exitFailure
-                Right identity -> do
-                  let resolvedConfig = pingResolvedConfig rawConfig identity
-                      mode =
-                        PingMode
-                          { pingModeBrand = brand,
-                            pingModeCache = cacheEnabled parsedOptions resolvedConfig
-                          }
-                  succeeded <- runPingMode mode resolvedConfig
-                  unless succeeded exitFailure
+            Right identity -> do
+              let resolvedConfig = pingResolvedConfig rawConfig identity
+                  mode =
+                    PingMode
+                      { pingModeBrand = brand,
+                        pingModeCache = cacheEnabled parsedOptions resolvedConfig
+                      }
+              succeeded <- runPingMode mode resolvedConfig
+              unless succeeded exitFailure
     Nothing -> do
       -- An explicit --config is resolved against kanban's own launch
       -- directory here, then threaded onward (canonical issue-review and

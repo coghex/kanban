@@ -255,6 +255,10 @@ Initial options:
 `--ping` takes a required brand argument. Omitting it, naming an unknown
 brand, and supplying `--ping` more than once — including twice with the same
 brand — are all errors that exit non-zero without launching any provider.
+That refusal happens before any mode is selected, so it holds however else the
+invocation is spelled: `kanban --doctor --ping nope` reports the unknown brand
+and exits non-zero rather than running the doctor and succeeding. Only refusal
+comes first; a well-formed `--ping` still yields to the modes below.
 
 Startup sequence:
 
@@ -1777,6 +1781,13 @@ The deadline is measured against a monotonic clock, and every snapshot is
 bounded by what remains of it. `ps` has no deadline of its own, and a hung one
 would otherwise stop the countdown and hold the ping open past its configured
 bound — the opposite of what the timeout exists to do.
+
+The cleanup that follows carries a deadline of the same kind, covering every
+read it makes: the census, and each of the escalation's own re-checks between
+TERM and KILL. Bounding only the first would leave a `ps` that answered once
+and then stopped answering able to hold the escalation open, and with it the
+group it was clearing. A re-check that never answers leaves the escalation
+unable to say the group is gone, so the cleanup finishes without one.
 
 A machine whose process snapshots fail or hang loses the ability to see the
 ping finish, never the cleanup. Such a snapshot is treated as a poll that

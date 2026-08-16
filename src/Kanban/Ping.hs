@@ -41,10 +41,12 @@ where
 import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, finally, try)
 import Control.Monad (unless, void)
+import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
+import Data.Word (Word64)
 import Data.Time (TimeZone, UTCTime, getCurrentTime, getCurrentTimeZone)
 import GHC.Clock (getMonotonicTimeNSec)
 import Kanban.Cache (UsageCacheLoad (..), loadUsageCache, writeUsageCache)
@@ -59,7 +61,7 @@ import Kanban.Config
   )
 import Kanban.Domain (Repository (..), UsageProvider (..))
 import Kanban.Paths (createPrivateDirectory)
-import Kanban.Process (ProcessIdentity (..), defaultProcessSnapshot, killVerifiedGroup)
+import Kanban.Process (ProcessIdentity (..), defaultProcessSnapshot, killVerifiedGroupWith)
 import Kanban.Provider (ProviderError (..))
 import Kanban.Repository (parseRepositoryName, resolveRepository)
 import Kanban.Usage
@@ -433,11 +435,16 @@ boundedProcessSnapshot budgetMicros
 ignoreIOException :: IO () -> IO ()
 ignoreIOException action = void (try @IOException action)
 
-minimumPollMicros, maximumPollMicros, maximumSnapshotMicros, blindTerminationGraceMicros :: Int
+minimumPollMicros, maximumPollMicros, maximumSnapshotMicros, blindTerminationGraceMicros, cleanupBudgetMicros :: Int
 minimumPollMicros = 100 * 1000
 maximumPollMicros = 2 * 1000 * 1000
 maximumSnapshotMicros = 5 * 1000 * 1000
 blindTerminationGraceMicros = 750 * 1000
+
+-- | The whole cleanup's budget: three bounded snapshots and the escalation's
+-- two grace windows, with room to spare. It bounds cleanup alone, not the
+-- ping, whose own deadline has already passed by the time this starts.
+cleanupBudgetMicros = 12 * 1000 * 1000
 
 -- | Everything a snapshot currently shows in the ping's process group.
 --
@@ -484,12 +491,36 @@ sweepOwnedGroup processHandle = do
     Nothing -> pure ()
     Just pid -> do
       let groupPid = fromIntegral pid
-      snapshotResult <- boundedProcessSnapshot maximumSnapshotMicros
+      -- One deadline for the whole cleanup, and every process-table read
+      -- inside it — this census and each of the escalation's own re-checks —
+      -- bounded by what is left of it. Bounding only the first read would
+      -- leave a `ps` that answered once and then hung able to hold the
+      -- escalation open, and with it the group it was clearing.
+      deadlineAt <- cleanupDeadline
+      snapshotResult <- deadlineSnapshot deadlineAt
       case snapshotResult of
-        Just (Right snapshot) -> do
+        Left _ -> terminateOwnedGroupBlind groupPid
+        Right snapshot -> do
           let members = ownedGroupMembers groupPid snapshot
-          unless (null members) (void (killVerifiedGroup groupPid members))
-        _ -> terminateOwnedGroupBlind groupPid
+          unless (null members) $ do
+            escalated <- killVerifiedGroupWith (deadlineSnapshot deadlineAt) groupPid members
+            -- Unverified is not the same as clear: a re-check that never
+            -- answered leaves the escalation unable to say the group is gone,
+            -- so it finishes the job without one.
+            either (const (terminateOwnedGroupBlind groupPid)) pure escalated
+
+cleanupDeadline :: IO Word64
+cleanupDeadline = (+ (fromIntegral cleanupBudgetMicros * 1000)) <$> getMonotonicTimeNSec
+
+-- | A process snapshot bounded by what remains of the cleanup deadline,
+-- reported as an ordinary snapshot failure when it runs out — which is what
+-- every caller, 'killVerifiedGroupWith' included, already fails closed on.
+deadlineSnapshot :: Word64 -> IO (Either Text [ProcessIdentity])
+deadlineSnapshot deadlineAt = do
+  now <- getMonotonicTimeNSec
+  let remaining = if deadlineAt <= now then 0 else fromIntegral ((deadlineAt - now) `div` 1000)
+  answered <- boundedProcessSnapshot remaining
+  pure (fromMaybe (Left "process snapshot did not answer within the ping cleanup deadline") answered)
 
 -- | Clears the group without a census, for when no process snapshot can be
 -- taken at all.
