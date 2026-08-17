@@ -1397,6 +1397,44 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertEqual(install_dir["files"], ["tools/kanban_config.py"])
         self.assertTrue(entry["token"].startswith(install_dir["token"] + "/"))
 
+    def test_every_managed_issue_review_location_is_declared_for_both_platforms(self):
+        # Issue #357: two managed locations, each with a macOS spelling and an
+        # XDG one, and a row's token is one exact literal — so a location with
+        # two spellings needs two rows, and a pair with only one row leaves the
+        # other platform's spelling undeclared. Pinned as pairs rather than as
+        # four independent rows for exactly that reason; the generic grounding
+        # test above then proves each token still appears in the module that
+        # spells it.
+        by_id = {row["id"]: row for row in self.manifest}
+        for macos_id, xdg_id, macos_token, xdg_token in (
+            (
+                "approve-issues-backend",
+                "approve-issues-backend-xdg",
+                "/Library/Application Support/kanban/issue-review",
+                "/.local/share/kanban/issue-review",
+            ),
+            (
+                "issue-review-log-dir",
+                "issue-review-log-dir-xdg",
+                "/Library/Logs/kanban/issue-review",
+                "/.local/state/kanban/issue-review",
+            ),
+        ):
+            for row_id, token in ((macos_id, macos_token), (xdg_id, xdg_token)):
+                with self.subTest(row=row_id):
+                    self.assertIn(row_id, by_id)
+                    entry = by_id[row_id]
+                    self.assertEqual(entry["kind"], "personal-path")
+                    self.assertEqual(entry["token"], token)
+                    self.assertEqual(entry["owner"], "kanban")
+                    self.assertEqual(entry["status"], "supported")
+                    self.assertEqual(entry["mandatory"], "no")
+                    # One declared file each: the resolver is the only place
+                    # any of these is spelled, which is what
+                    # tools/test_install_issue_review.py's
+                    # SingleSourceInstallPathTests holds the tree to.
+                    self.assertEqual(entry["files"], ["tools/kanban_config.py"])
+
 
 if __name__ == "__main__":
     unittest.main()

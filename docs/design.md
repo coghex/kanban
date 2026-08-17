@@ -712,7 +712,13 @@ Kanban-reviewed issues. Kanban does not reconstruct where that backend was
 installed: it reads the absolute path out of the record the installer writes
 at `~/Library/Application Support/kanban/issue-review/config.json`, whose own
 location `--install-dir` cannot move, so an installation made anywhere is
-found by a dashboard launched with no special environment. A non-empty
+found by a dashboard launched with no special environment. That record's
+directory is macOS's; the Python installer and backend also default to
+`$XDG_DATA_HOME/kanban/issue-review` (`~/.local/share` when unset) on other
+platforms, and resolve an installation made under either convention on either
+platform, while this Haskell reader still names the macOS location alone.
+Closing that is the remaining work of the portability arc, not a licence to
+spell the location a second time here. A non-empty
 `KANBAN_ISSUE_REVIEW_INSTALL_DIR` still wins, and a record carrying no
 recorded path — an installation predating the record — falls back to the
 directory holding it. Each way that lookup can fail — an override or recorded

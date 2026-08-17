@@ -12,12 +12,45 @@ from pathlib import Path
 from unittest import mock
 
 import install_issue_review
+import kanban_config
 
 
 def managed_asset_text(name: str, note: str = "") -> str:
     """Content that identifies a file as this repository's tracked asset,
     exactly as the real tools/ files do."""
     return f"# {install_issue_review.managed_asset_marker(name)}\n{note}"
+
+
+def redirect_macos_account(case: unittest.TestCase, home: Path) -> Path:
+    """Point every managed location at `home`, on a simulated macOS host, and
+    answer with the discovery record's resulting path.
+
+    The record's location is fixed under the account's own roots by design, so
+    a test that installs must redirect them or it writes into the developer's
+    own installation; kanban_config resolves them per call precisely so this
+    works. Both XDG base directories are redirected as well as `$HOME`,
+    because since issue #357 the resolver reads them too and an ambient one
+    would otherwise reach these cases. The platform is simulated rather than
+    read for the same reason: this module's expectations are macOS's, which
+    must hold unchanged and must hold on the Linux CI runner as well.
+    """
+    home.mkdir(parents=True, exist_ok=True)
+    environment = mock.patch.dict(
+        os.environ,
+        {
+            "HOME": str(home),
+            "XDG_DATA_HOME": str(home / ".local" / "share"),
+            "XDG_STATE_HOME": str(home / ".local" / "state"),
+        },
+    )
+    environment.start()
+    case.addCleanup(environment.stop)
+    platform = mock.patch.object(kanban_config.sys, "platform", "darwin")
+    platform.start()
+    case.addCleanup(platform.stop)
+    return (
+        home / "Library" / "Application Support" / "kanban" / "issue-review" / "config.json"
+    )
 
 
 class InstallSymlinkTests(unittest.TestCase):
@@ -302,18 +335,8 @@ class InstallerPolicyTests(unittest.TestCase):
         )
         self.install_dir = self.root / "installed"
         self.legacy_path = self.root / "legacy" / "approve-issues.py"
-        # The discovery record's location is fixed under $HOME by design, so
-        # a test that installs must redirect $HOME or it writes into the
-        # developer's own installation. kanban_config resolves it per call
-        # precisely so this works.
         self.home = self.root / "home"
-        self.home.mkdir()
-        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.record_path = (
-            self.home / "Library" / "Application Support" / "kanban" / "issue-review" / "config.json"
-        )
+        self.record_path = redirect_macos_account(self, self.home)
 
     def test_dry_run_makes_no_files(self):
         result = install_issue_review.install(
@@ -472,18 +495,8 @@ class CLIOutputTests(unittest.TestCase):
         )
         self.install_dir = self.root / "installed"
         self.legacy_path = self.root / "legacy" / "approve-issues.py"
-        # The discovery record's location is fixed under $HOME by design, so
-        # a test that installs must redirect $HOME or it writes into the
-        # developer's own installation. kanban_config resolves it per call
-        # precisely so this works.
         self.home = self.root / "home"
-        self.home.mkdir()
-        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.record_path = (
-            self.home / "Library" / "Application Support" / "kanban" / "issue-review" / "config.json"
-        )
+        self.record_path = redirect_macos_account(self, self.home)
 
     def run_cli(self, *extra_args):
         argv = [
@@ -540,13 +553,7 @@ class DiscoveryRecordTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.home = self.root / "home"
-        self.home.mkdir()
-        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.record_path = (
-            self.home / "Library" / "Application Support" / "kanban" / "issue-review" / "config.json"
-        )
+        self.record_path = redirect_macos_account(self, self.home)
         self.repo = self.root / "repo"
         tools = self.repo / "tools"
         tools.mkdir(parents=True)
@@ -691,36 +698,56 @@ class SingleSourceInstallPathTests(unittest.TestCase):
     agent-workflow contract's manifest checks are: by grepping the tracked
     executables rather than by trusting a comment."""
 
-    DEFAULT_PATH = "Library/Application Support/kanban/issue-review"
+    # Every managed issue-review location, in every platform's spelling.
+    # Issue #357 made tools/kanban_config.py answer all four, so #155's
+    # single-source requirement now covers the whole set rather than the
+    # macOS install directory alone: a second spelling of the log directory
+    # is the same drift as a second spelling of the install directory, and
+    # a second spelling of one platform's answer is how a resolver stops
+    # being platform-aware.
+    MANAGED_PATHS = (
+        "Library/Application Support/kanban/issue-review",
+        ".local/share/kanban/issue-review",
+        "Library/Logs/kanban/issue-review",
+        ".local/state/kanban/issue-review",
+    )
+    DEFAULT_PATH = MANAGED_PATHS[0]
+    CONSUMERS = (
+        "tools/approve_issues.py",
+        "tools/install_issue_review.py",
+        "tools/setup_workflows.py",
+        "tools/approve_issues_service.py",
+        "src/Kanban/Review/Canonical.hs",
+        "src/Kanban/Preflight.hs",
+    )
     TOOLS = Path(__file__).resolve().parent
     REPO_ROOT = TOOLS.parent
 
-    def test_only_kanban_config_spells_the_default_install_directory(self):
+    def test_only_kanban_config_spells_a_managed_issue_review_path(self):
         offenders = []
-        for relative_path in (
-            "tools/approve_issues.py",
-            "tools/install_issue_review.py",
-            "tools/setup_workflows.py",
-            "src/Kanban/Review/Canonical.hs",
-            "src/Kanban/Preflight.hs",
-        ):
+        for relative_path in self.CONSUMERS:
             content = (self.REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            # The record path contains the directory as a prefix; it is the
-            # fixed rendezvous each side is allowed to name, not a
+            # The record path contains the install directory as a prefix; it
+            # is the fixed rendezvous each side is allowed to name, not a
             # reconstruction of the installer's default.
             without_record = content.replace(self.DEFAULT_PATH + "/config.json", "")
-            if self.DEFAULT_PATH in without_record:
-                offenders.append(relative_path)
+            offenders.extend(
+                f"{relative_path}: {token}"
+                for token in self.MANAGED_PATHS
+                if token in without_record
+            )
         self.assertEqual(
             offenders,
             [],
-            "these rebuild the default install directory instead of importing it "
+            "these rebuild a managed issue-review path instead of importing it "
             "from tools/kanban_config.py, or reading it out of the discovery record",
         )
 
-    def test_kanban_config_is_where_it_is_spelled(self):
+    def test_kanban_config_is_where_every_managed_path_is_spelled(self):
         content = (self.REPO_ROOT / "tools" / "kanban_config.py").read_text(encoding="utf-8")
-        self.assertIn(self.DEFAULT_PATH, content)
+        for token in self.MANAGED_PATHS:
+            with self.subTest(token=token):
+                self.assertIn(token, content)
 
 
 if __name__ == "__main__":

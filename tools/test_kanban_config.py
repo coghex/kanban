@@ -701,5 +701,238 @@ class GithubRepositoryParsingTests(unittest.TestCase):
         self.assertEqual(kc.parse_github_repository("CogHex/Kanban"), "CogHex/Kanban")
 
 
+class IssueReviewPathTests(unittest.TestCase):
+    """Issue #357: one platform-aware resolver owns every managed
+    issue-review path.
+
+    Table-driven over platform x path kind x environment override x which
+    location already holds an install, because those four are exactly what
+    the answer depends on and no single case pins the shape. The platform is
+    simulated rather than read, and `$HOME` and both XDG base directories are
+    redirected into a temporary tree with `clear=True`, so the whole matrix
+    runs identically on the Linux CI runner and on a macOS developer machine
+    and neither host's own installation can reach a case.
+    """
+
+    MACOS_INSTALL = "Library/Application Support/kanban/issue-review"
+    MACOS_LOG = "Library/Logs/kanban/issue-review"
+    XDG_INSTALL_FALLBACK = ".local/share/kanban/issue-review"
+    XDG_LOG_FALLBACK = ".local/state/kanban/issue-review"
+    # The install-directory answer each platform gives when nothing is
+    # installed anywhere: its own convention, and only its own.
+    WRITE_DEFAULTS = (
+        ("darwin", MACOS_INSTALL, MACOS_LOG),
+        ("linux", XDG_INSTALL_FALLBACK, XDG_LOG_FALLBACK),
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        # clear=True rather than an override: an ambient XDG_DATA_HOME,
+        # XDG_STATE_HOME or KANBAN_ISSUE_REVIEW_INSTALL_DIR on the developer's
+        # own machine would otherwise reach a case that never set one.
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)}, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def home_holding(self, *installed):
+        """A fresh home whose named locations each hold a discovery record."""
+        home = self.root / ("home-" + ("-".join(installed) or "empty"))
+        home.mkdir()
+        for location in installed:
+            directory = home / self.location_suffix(location)
+            directory.mkdir(parents=True)
+            (directory / "config.json").write_text("{}", encoding="utf-8")
+        return home
+
+    def location_suffix(self, location):
+        return self.XDG_INSTALL_FALLBACK if location == "xdg" else self.MACOS_INSTALL
+
+    def test_a_fresh_installs_write_default_is_the_platforms_own_convention(self):
+        for platform, install, log in self.WRITE_DEFAULTS:
+            with self.subTest(platform=platform):
+                with mock.patch.object(kc.sys, "platform", platform):
+                    self.assertEqual(
+                        kc.default_issue_review_install_dir(), self.home / install
+                    )
+                    self.assertEqual(
+                        kc.default_issue_review_log_dir(), self.home / log
+                    )
+
+    def test_the_macos_answers_are_byte_identical_to_the_pre_split_ones(self):
+        # The spellings this resolver replaced, restated here rather than
+        # derived, so a refactor that "simplifies" one of them fails.
+        with mock.patch.object(kc.sys, "platform", "darwin"):
+            self.assertEqual(
+                str(kc.default_issue_review_install_dir()),
+                f"{self.home}/Library/Application Support/kanban/issue-review",
+            )
+            self.assertEqual(
+                str(kc.default_issue_review_log_dir()),
+                f"{self.home}/Library/Logs/kanban/issue-review",
+            )
+            self.assertEqual(
+                str(kc.issue_review_record_path()),
+                f"{self.home}/Library/Application Support/kanban/issue-review/config.json",
+            )
+
+    def test_the_xdg_variables_are_honored_for_the_linux_write_defaults(self):
+        data, state = self.root / "data", self.root / "state"
+        with mock.patch.dict(
+            os.environ, {"XDG_DATA_HOME": str(data), "XDG_STATE_HOME": str(state)}
+        ):
+            with mock.patch.object(kc.sys, "platform", "linux"):
+                self.assertEqual(
+                    kc.default_issue_review_install_dir(),
+                    data / "kanban" / "issue-review",
+                )
+                self.assertEqual(
+                    kc.default_issue_review_log_dir(), state / "kanban" / "issue-review"
+                )
+            # macOS keeps its own convention for both write defaults even when
+            # the variables are set: the platform decides where a fresh
+            # install goes, and only the probe below reads XDG on both.
+            with mock.patch.object(kc.sys, "platform", "darwin"):
+                self.assertEqual(
+                    kc.default_issue_review_install_dir(), self.home / self.MACOS_INSTALL
+                )
+                self.assertEqual(
+                    kc.default_issue_review_log_dir(), self.home / self.MACOS_LOG
+                )
+
+    def test_discovery_probes_xdg_first_and_library_second_on_both_platforms(self):
+        for installed, macos, linux in (
+            ((), self.MACOS_INSTALL, self.XDG_INSTALL_FALLBACK),
+            (("xdg",), self.XDG_INSTALL_FALLBACK, self.XDG_INSTALL_FALLBACK),
+            (("library",), self.MACOS_INSTALL, self.MACOS_INSTALL),
+            (("xdg", "library"), self.XDG_INSTALL_FALLBACK, self.XDG_INSTALL_FALLBACK),
+        ):
+            with self.subTest(installed=installed):
+                home = self.home_holding(*installed)
+                with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                    for platform, expected in (("darwin", macos), ("linux", linux)):
+                        with self.subTest(platform=platform):
+                            with mock.patch.object(kc.sys, "platform", platform):
+                                self.assertEqual(
+                                    kc.installed_issue_review_dir(), home / expected
+                                )
+                                self.assertEqual(
+                                    kc.issue_review_record_path(),
+                                    home / expected / "config.json",
+                                )
+                                self.assertEqual(
+                                    kc.issue_review_install_dir(), home / expected
+                                )
+
+    def test_an_occupied_but_invalid_record_still_selects_its_own_location(self):
+        # The fail-closed half of the probe. A dangling symlink or a directory
+        # where the record belongs is an installation with something wrong
+        # with it, and reading it as absent would silently resolve the
+        # lower-precedence one instead -- exactly what the record's own
+        # readers refuse to do with its contents.
+        for name, occupy in (
+            ("dangling-symlink", lambda path: path.symlink_to(self.root / "gone")),
+            ("directory", lambda path: path.mkdir()),
+        ):
+            with self.subTest(record=name):
+                home = self.root / f"home-{name}"
+                xdg = home / self.XDG_INSTALL_FALLBACK
+                xdg.mkdir(parents=True)
+                occupy(xdg / "config.json")
+                library = home / self.MACOS_INSTALL
+                library.mkdir(parents=True)
+                (library / "config.json").write_text("{}", encoding="utf-8")
+                with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                    for platform in ("darwin", "linux"):
+                        with mock.patch.object(kc.sys, "platform", platform):
+                            self.assertEqual(kc.installed_issue_review_dir(), xdg)
+
+    def test_a_library_installation_keeps_resolving_itself_on_a_linux_host(self):
+        # Requirement 4 and 10 together: nothing migrates, so a backend that
+        # lives under ~/Library still resolves its own install directory --
+        # and therefore its own install-dir-relative runtime state -- on a
+        # host whose fresh-install default is XDG.
+        home = self.home_holding("library")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            with mock.patch.object(kc.sys, "platform", "linux"):
+                self.assertEqual(
+                    kc.issue_review_install_dir(), home / self.MACOS_INSTALL
+                )
+
+    def test_the_environment_override_relocates_the_install_directory_alone(self):
+        elsewhere = self.root / "opt" / "kanban-review"
+        for platform, install, log in self.WRITE_DEFAULTS:
+            with self.subTest(platform=platform):
+                with mock.patch.object(kc.sys, "platform", platform), mock.patch.dict(
+                    os.environ, {kc.ISSUE_REVIEW_INSTALL_DIR_ENV: str(elsewhere)}
+                ):
+                    self.assertEqual(kc.issue_review_install_dir(), elsewhere)
+                    # Neither the discovery record nor the log directory moves
+                    # with it: a dashboard that inherited no environment still
+                    # has to find the record, and logs are not part of the
+                    # installation this variable relocates.
+                    self.assertEqual(
+                        kc.issue_review_record_path(),
+                        self.home / install / "config.json",
+                    )
+                    self.assertEqual(
+                        kc.default_issue_review_log_dir(), self.home / log
+                    )
+
+    def test_a_blank_override_is_no_override_and_a_tilde_is_expanded(self):
+        for platform, install, _log in self.WRITE_DEFAULTS:
+            with self.subTest(platform=platform):
+                with mock.patch.object(kc.sys, "platform", platform):
+                    for blank in ("", "   "):
+                        with mock.patch.dict(
+                            os.environ, {kc.ISSUE_REVIEW_INSTALL_DIR_ENV: blank}
+                        ):
+                            self.assertEqual(
+                                kc.issue_review_install_dir(), self.home / install
+                            )
+                    with mock.patch.dict(
+                        os.environ, {kc.ISSUE_REVIEW_INSTALL_DIR_ENV: "~/elsewhere"}
+                    ):
+                        self.assertEqual(
+                            kc.issue_review_install_dir(), self.home / "elsewhere"
+                        )
+
+    def test_every_resolver_answers_per_call_rather_than_at_import(self):
+        first, second = self.root / "first", self.root / "second"
+        resolvers = (
+            kc.default_issue_review_install_dir,
+            kc.default_issue_review_log_dir,
+            kc.installed_issue_review_dir,
+            kc.issue_review_record_path,
+            kc.issue_review_install_dir,
+        )
+        for platform, _install, _log in self.WRITE_DEFAULTS:
+            for resolver in resolvers:
+                with self.subTest(platform=platform, resolver=resolver.__name__):
+                    with mock.patch.object(kc.sys, "platform", platform):
+                        with mock.patch.dict(os.environ, {"HOME": str(first)}):
+                            before = resolver()
+                        with mock.patch.dict(os.environ, {"HOME": str(second)}):
+                            after = resolver()
+                    self.assertTrue(before.is_relative_to(first), before)
+                    self.assertTrue(after.is_relative_to(second), after)
+        # And the same for the XDG base directories the Linux answers read.
+        for variable, resolver in (
+            ("XDG_DATA_HOME", kc.default_issue_review_install_dir),
+            ("XDG_STATE_HOME", kc.default_issue_review_log_dir),
+        ):
+            with self.subTest(variable=variable):
+                with mock.patch.object(kc.sys, "platform", "linux"):
+                    with mock.patch.dict(os.environ, {variable: str(first)}):
+                        before = resolver()
+                    with mock.patch.dict(os.environ, {variable: str(second)}):
+                        after = resolver()
+                self.assertTrue(before.is_relative_to(first), before)
+                self.assertTrue(after.is_relative_to(second), after)
+
+
 if __name__ == "__main__":
     unittest.main()

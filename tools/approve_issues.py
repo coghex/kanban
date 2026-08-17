@@ -63,13 +63,15 @@ REVIEW_TIMEOUT_SECONDS = 60 * 60
 # integration is unconfigured (a documented non-fatal no-op) unless the user
 # opts in explicitly. Nothing here may require ~/work or
 # ~/.codex/skills/approve-issues, which a fresh checkout does not have.
-HOME = Path.home()
 # Imported rather than rebuilt: kanban_config is the only tracked module
-# installed beside this backend, so it is where the install location is
-# written down once (see issue_review_record_path there). A second spelling
-# here is exactly the drift issue #155 removed.
+# installed beside this backend, so it is where every managed location is
+# written down once, per platform (see default_issue_review_install_dir
+# there). A second spelling here is exactly the drift issue #155 removed, and
+# a macOS-only one is the drift issue #357 removed. Frozen at import like the
+# rest of this module's constants, so a process that redirects $HOME or an
+# XDG base directory must do so before importing this backend.
 INSTALL_DIR = kanban_config.issue_review_install_dir()
-DEFAULT_LOG_DIR = HOME / "Library" / "Logs" / "kanban" / "issue-review"
+DEFAULT_LOG_DIR = kanban_config.default_issue_review_log_dir()
 RUNTIME_DIR = INSTALL_DIR / "runtime"
 DEFAULT_INCIDENT_DIR = RUNTIME_DIR / "incidents"
 INSTALLED_CONFIG_REFERENCE_PATH = INSTALL_DIR / "config.json"

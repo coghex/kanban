@@ -8,17 +8,21 @@ invalid-value errors, unknown-key warnings, global-only keys, canonical
 lowercase repository keys and the ASCII-folded lookup that selects them,
 repository override merge/array-replacement rules).
 
-This module is also the one place the issue-review backend's own install
-location is written down. It is the only tracked module installed alongside
-`approve_issues.py`, so it is the only one that both the installer and the
-installed backend can import -- which is what keeps that location from being
-restated once per component. See issue_review_record_path() below.
+This module is also the one place the issue-review backend's own managed
+locations -- its install directory, its discovery record, and its log
+directory -- are written down, for every platform each one has a convention
+on. It is the only tracked module installed alongside `approve_issues.py`, so
+it is the only one that both the installer and the installed backend can
+import -- which is what keeps those locations from being restated once per
+component, or answered for one platform only. See
+default_issue_review_install_dir() and the resolvers below it.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -41,13 +45,104 @@ class KanbanConfigError(Exception):
 # default without moving every component's.
 ISSUE_REVIEW_INSTALL_DIR_ENV = "KANBAN_ISSUE_REVIEW_INSTALL_DIR"
 
+# Every managed issue-review location, on every supported platform, spelled
+# whole exactly once and only here. Each literal is a `personal-path` token in
+# docs/agent-workflow-contract.md §4 declaring this file, so a spelling that
+# drifts from the manifest fails tools/test_agent_workflow_contract.py rather
+# than shipping. The XDG fallbacks are written as one string rather than
+# joined component by component for that reason too: the manifest reconciles a
+# literal, not an expression.
+_MACOS_INSTALL_DIR = "/Library/Application Support/kanban/issue-review"
+_MACOS_LOG_DIR = "/Library/Logs/kanban/issue-review"
+_XDG_INSTALL_DIR_FALLBACK = "/.local/share/kanban/issue-review"
+_XDG_LOG_DIR_FALLBACK = "/.local/state/kanban/issue-review"
+_ISSUE_REVIEW_RECORD_NAME = "config.json"
+
+
+def _is_macos() -> bool:
+    """The one platform question these resolvers ask, spelled the way
+    tools/service_manager.py's own branch point spells it."""
+    return sys.platform == "darwin"
+
+
+def _home_relative(suffix: str) -> Path:
+    return Path(f"{Path.home()}{suffix}")
+
+
+def _xdg_issue_review_dir(env_name: str, home_relative_fallback: str) -> Path:
+    """This namespace under an XDG base directory, resolved exactly as
+    default_config_path() below resolves $XDG_CONFIG_HOME: the variable when
+    it is set, the conventional home-relative directory when it is not."""
+    base = os.environ.get(env_name)
+    if base:
+        return Path(base) / "kanban" / "issue-review"
+    return _home_relative(home_relative_fallback)
+
+
+def _macos_issue_review_install_dir() -> Path:
+    return _home_relative(_MACOS_INSTALL_DIR)
+
+
+def _xdg_issue_review_install_dir() -> Path:
+    return _xdg_issue_review_dir("XDG_DATA_HOME", _XDG_INSTALL_DIR_FALLBACK)
+
 
 def default_issue_review_install_dir() -> Path:
-    # Resolved per call rather than frozen at import, exactly as
-    # default_config_path() below is: freezing it would bind whatever $HOME
-    # held when the module first loaded, which a test that redirects $HOME --
-    # or any process that changes it -- would then silently escape.
-    return Path(f"{Path.home()}/Library/Application Support/kanban/issue-review")
+    """Where a *fresh* issue-review install goes on this host: this platform's
+    own convention and only that -- macOS keeps `~/Library/Application
+    Support`, every other platform takes the XDG data directory. Where an
+    install that already exists *is* is the different question
+    installed_issue_review_dir() answers by probing both.
+
+    Resolved per call rather than frozen at import, exactly as
+    default_config_path() below is: freezing it would bind whatever $HOME and
+    $XDG_DATA_HOME held when the module first loaded, which a test that
+    redirects them -- or any process that changes them -- would then silently
+    escape.
+    """
+    if _is_macos():
+        return _macos_issue_review_install_dir()
+    return _xdg_issue_review_install_dir()
+
+
+def default_issue_review_log_dir() -> Path:
+    """Where the installed backend writes its daily logs: the second managed
+    location this module owns, and the default `approve_issues.py --log-dir`
+    carries. `--log-dir` moves it; ISSUE_REVIEW_INSTALL_DIR_ENV deliberately
+    does not, because logs are not part of the installation that variable
+    relocates. Per call for the same reason as above."""
+    if _is_macos():
+        return _home_relative(_MACOS_LOG_DIR)
+    return _xdg_issue_review_dir("XDG_STATE_HOME", _XDG_LOG_DIR_FALLBACK)
+
+
+def installed_issue_review_dir() -> Path:
+    """Where an issue-review installation *already is*.
+
+    The XDG location first and the `~/Library` location second, on both
+    platforms, so that nothing an operator already installed has to move: a
+    macOS host that installed under XDG keeps that install, and a Linux host
+    that inherited a `~/Library` install keeps that one. Only when neither is
+    occupied is the answer this platform's write path above, which is what a
+    fresh install gets.
+
+    Occupancy is the discovery record's, tested with os.path.lexists rather
+    than is_file, so a higher-precedence candidate that is *occupied but
+    invalid* -- a dangling symlink, a directory where the record belongs --
+    still selects that installation. Silently reading such a candidate as
+    absent and resolving the lower-precedence one is the fail-closed hole
+    tools/approve_issues_service.py's resolve_backend and
+    src/Kanban/Review/Canonical.hs avoid on the record's contents; this probe
+    avoids it on the record's location, and leaves them to report what is
+    wrong with the record they then read.
+    """
+    for candidate in (
+        _xdg_issue_review_install_dir(),
+        _macos_issue_review_install_dir(),
+    ):
+        if os.path.lexists(candidate / _ISSUE_REVIEW_RECORD_NAME):
+            return candidate
+    return default_issue_review_install_dir()
 
 
 def issue_review_record_path() -> Path:
@@ -55,21 +150,24 @@ def issue_review_record_path() -> Path:
     Kanban discovers an `--install-dir` installation it never saw the option
     for. Fixed rather than install-dir-relative on purpose: a dashboard that
     inherits no environment still has to find it, so the record's own path is
-    the one thing that cannot move. Read by src/Kanban/Review/Canonical.hs and
-    by both packaged PR coordinators; written only by
-    tools/install_issue_review.py."""
-    return default_issue_review_install_dir() / "config.json"
+    the one thing that cannot move -- neither `--install-dir` nor
+    ISSUE_REVIEW_INSTALL_DIR_ENV relocates it. Read by
+    src/Kanban/Review/Canonical.hs and by both packaged PR coordinators;
+    written only by tools/install_issue_review.py."""
+    return installed_issue_review_dir() / _ISSUE_REVIEW_RECORD_NAME
 
 
 def issue_review_install_dir() -> Path:
     """The install directory an issue-review component should treat as its
     own. The environment override wins, exactly as it does for every consumer
     that resolves the backend; the default is the directory the discovery
-    record lives in."""
+    record lives in, which is why a backend installed under `~/Library` keeps
+    resolving itself -- and keeps its install-dir-relative runtime and
+    incident state -- on a host whose fresh-install default is XDG."""
     override = os.environ.get(ISSUE_REVIEW_INSTALL_DIR_ENV)
     if override and override.strip():
         return Path(override).expanduser()
-    return default_issue_review_install_dir()
+    return installed_issue_review_dir()
 
 
 APPROVAL_MODES = {"label", "review", "either"}

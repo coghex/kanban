@@ -10,10 +10,12 @@ reviewer routing, ...) is already covered by `approve_issues.py --self-test`.
 
 import argparse
 import contextlib
+import importlib.util
 import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -21,6 +23,7 @@ from pathlib import Path
 from unittest import mock
 
 import approve_issues
+import kanban_config
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -65,15 +68,86 @@ class ReviewArgumentTests(unittest.TestCase):
 
 
 class PortableDefaultPathTests(unittest.TestCase):
+    """The managed locations this backend freezes into module constants.
+
+    Each case loads the tracked backend again under a simulated platform and
+    a redirected account, rather than reading the module the suite imported.
+    Those constants are resolved once at import by design -- requirement 4 of
+    issue #357 and docs/agent-workflow-contract.md §5 -- so a platform's
+    answer can only be observed by importing the backend under that platform,
+    and the host running the suite must not be able to change it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+
+    @contextlib.contextmanager
+    def host(self, platform):
+        # clear=True: an ambient XDG_DATA_HOME, XDG_STATE_HOME or
+        # KANBAN_ISSUE_REVIEW_INSTALL_DIR would otherwise decide the answer.
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}, clear=True):
+            with mock.patch.object(kanban_config.sys, "platform", platform):
+                yield
+
+    def backend_for(self, platform):
+        with self.host(platform):
+            spec = importlib.util.spec_from_file_location(
+                f"approve_issues_on_{platform}",
+                REPO_ROOT / "tools" / "approve_issues.py",
+            )
+            module = importlib.util.module_from_spec(spec)
+            # Registered for the duration of the execution and no longer: the
+            # backend's @dataclass declarations resolve their own module out
+            # of sys.modules while it runs, and nothing afterwards should be
+            # able to import this copy by name.
+            sys.modules[spec.name] = module
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                sys.modules.pop(spec.name, None)
+        return module
+
     def test_default_paths_are_kanban_namespaced(self):
-        self.assertEqual(approve_issues.INSTALL_DIR.parts[-2:], ("kanban", "issue-review"))
+        backend = self.backend_for("darwin")
+        self.assertEqual(backend.INSTALL_DIR.parts[-2:], ("kanban", "issue-review"))
         self.assertEqual(
-            approve_issues.DEFAULT_LOG_DIR.parts[-3:], ("Logs", "kanban", "issue-review")
+            backend.DEFAULT_LOG_DIR.parts[-3:], ("Logs", "kanban", "issue-review")
         )
         self.assertEqual(
-            approve_issues.DEFAULT_INCIDENT_DIR,
-            approve_issues.INSTALL_DIR / "runtime" / "incidents",
+            backend.DEFAULT_INCIDENT_DIR,
+            backend.INSTALL_DIR / "runtime" / "incidents",
         )
+
+    def test_default_paths_are_kanban_namespaced_on_an_xdg_host_too(self):
+        backend = self.backend_for("linux")
+        self.assertEqual(backend.INSTALL_DIR.parts[-2:], ("kanban", "issue-review"))
+        self.assertEqual(
+            backend.DEFAULT_LOG_DIR.parts[-3:], ("state", "kanban", "issue-review")
+        )
+        # Runtime and incident state stay install-dir-relative on every
+        # platform, so --install-dir and KANBAN_ISSUE_REVIEW_INSTALL_DIR keep
+        # moving them with the scripts.
+        self.assertEqual(
+            backend.DEFAULT_INCIDENT_DIR,
+            backend.INSTALL_DIR / "runtime" / "incidents",
+        )
+
+    def test_the_defaults_are_the_shared_resolvers_answers_rather_than_a_second_spelling(self):
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform):
+                backend = self.backend_for(platform)
+                with self.host(platform):
+                    self.assertEqual(
+                        backend.DEFAULT_LOG_DIR,
+                        kanban_config.default_issue_review_log_dir(),
+                    )
+                    self.assertEqual(
+                        backend.INSTALL_DIR,
+                        kanban_config.issue_review_install_dir(),
+                    )
 
     def test_ntfy_url_is_unconfigured_by_default(self):
         # Reflects the module import; explicit configuration is exercised in

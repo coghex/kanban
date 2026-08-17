@@ -319,6 +319,11 @@ class ApprovalFixture(unittest.TestCase):
             "PYTHONUNBUFFERED": "1",
         }
         self.env.pop("XDG_CONFIG_HOME", None)
+        # Redirected rather than dropped: kanban_config reads both when it
+        # resolves the issue-review locations, so an ambient one would let the
+        # developer's own installation decide what resolve_backend finds.
+        self.env["XDG_DATA_HOME"] = str(self.home / ".local" / "share")
+        self.env["XDG_STATE_HOME"] = str(self.home / ".local" / "state")
         patched = mock.patch.dict(os.environ, self.env, clear=True)
         patched.start()
         self.addCleanup(patched.stop)
@@ -858,6 +863,42 @@ class BackendResolutionTests(ApprovalFixture):
         path = self.home / "Library" / "Application Support" / "kanban" / "issue-review" / "config.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
+
+    def xdg_record_path(self):
+        path = self.home / ".local" / "share" / "kanban" / "issue-review" / "config.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def test_an_xdg_record_wins_over_a_library_one_on_either_platform(self):
+        # Issue #357: this controller shares one resolver with the installer,
+        # so it discovers an installation made under either convention, XDG
+        # first, whichever host it runs on. The losing record deliberately
+        # names a backend that does not exist, so a probe that picked it would
+        # fail loudly rather than coincidentally agree.
+        service.atomic_write_json(
+            self.record_path(), {"backend_path": str(self.root / "gone.py")}
+        )
+        service.atomic_write_json(
+            self.xdg_record_path(), {"backend_path": str(self.backend)}
+        )
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform):
+                with mock.patch.dict(os.environ, {kanban_env(): ""}):
+                    with mock.patch.object(
+                        service.kanban_config.sys, "platform", platform
+                    ):
+                        self.assertEqual(service.resolve_backend(), self.backend)
+
+    def test_a_library_record_is_still_resolved_on_an_xdg_host(self):
+        # The other direction of requirement 10: nothing migrates, so an
+        # inherited ~/Library installation keeps being found by a controller
+        # whose own fresh-install default is XDG.
+        service.atomic_write_json(
+            self.record_path(), {"backend_path": str(self.backend)}
+        )
+        with mock.patch.dict(os.environ, {kanban_env(): ""}):
+            with mock.patch.object(service.kanban_config.sys, "platform", "linux"):
+                self.assertEqual(service.resolve_backend(), self.backend)
 
     def test_the_environment_override_wins(self):
         record = self.record_path()
