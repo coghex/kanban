@@ -11,6 +11,7 @@ module Spec.ApprovalService (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -34,7 +35,7 @@ import Kanban.UI.Approval
     approvalTogglePress,
   )
 import Kanban.UI.PullRequest (drainerTogglePress)
-import Kanban.UI.Review (approvalServiceRefusal)
+import Kanban.UI.Review (approvalServiceRefusal, canonicalLaunchOutcome)
 import Kanban.UI.Types (AppState (..))
 import Spec.Support.App (testAppState)
 import Spec.Support.Env (withTemporaryCacheRoot)
@@ -822,6 +823,74 @@ spec = do
         broken <- fakeApprovalController temporaryRoot ["echo 'the job is not loaded' >&2", "exit 1"]
         liveApprovalContention boardIdentity (Right broken) `shouldReturn` Nothing
 
+    it "asks the service again after the preflight, not only before it" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- The preflight runs several probes, and the service can take the
+        -- backend's lock while they do. A check taken before it would still
+        -- have seen an idle service and spawned a competing child; the one
+        -- taken directly before the spawn sees what the preflight's own
+        -- duration let happen.
+        let marker = temporaryRoot </> "service-took-the-lock"
+        controller <- switchingApprovalController temporaryRoot marker
+        spawned <- newIORef False
+        outcome <-
+          canonicalLaunchOutcome
+            InitialReview
+            boardIdentity
+            (Right controller)
+            (writeFile marker "" >> pure Nothing)
+            (writeIORef spawned True >> pure (Right ()))
+        outcome `shouldSatisfy` either (Text.isInfixOf "canonical review in flight") (const False)
+        readIORef spawned `shouldReturn` False
+
+    it "spawns when the service is still idle by the time the preflight ends" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let marker = temporaryRoot </> "service-took-the-lock"
+        controller <- switchingApprovalController temporaryRoot marker
+        spawned <- newIORef False
+        outcome <-
+          canonicalLaunchOutcome
+            InitialReview
+            boardIdentity
+            (Right controller)
+            (pure Nothing)
+            (writeIORef spawned True >> pure (Right ()))
+        outcome `shouldBe` Right ()
+        readIORef spawned `shouldReturn` True
+
+    it "never reaches the service, or the spawn, when the preflight blocks" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let marker = temporaryRoot </> "service-took-the-lock"
+        controller <- switchingApprovalController temporaryRoot marker
+        spawned <- newIORef False
+        outcome <-
+          canonicalLaunchOutcome
+            InitialReview
+            boardIdentity
+            (Right controller)
+            (pure (Just "Install the canonical review backend first"))
+            (writeIORef spawned True >> pure (Right ()))
+        outcome `shouldBe` Left "Install the canonical review backend first"
+        readIORef spawned `shouldReturn` False
+
+    it "launches a revision without asking the service at all" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- A revision performs no canonical backend review, so a service that
+        -- is reviewing right now does not hold it up.
+        let marker = temporaryRoot </> "service-took-the-lock"
+        controller <- switchingApprovalController temporaryRoot marker
+        writeFile marker ""
+        spawned <- newIORef False
+        outcome <-
+          canonicalLaunchOutcome
+            IssueRevision
+            boardIdentity
+            (Right controller)
+            (pure Nothing)
+            (writeIORef spawned True >> pure (Right ()))
+        outcome `shouldBe` Right ()
+        readIORef spawned `shouldReturn` True
+
     it "reads that live check against this repository, never another's" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         -- A foreign document decodes to unknown, which is not a live pass, so
@@ -838,13 +907,42 @@ spec = do
         liveApprovalContention boardIdentity (Right foreignController) `shouldReturn` Nothing
 
   describe "board refresh after a service result" $ do
-    it "asks for no refresh on the first observation it ever sees" $ do
-      -- The first observation is a baseline: nothing before it was refreshed
-      -- for, and the dashboard's own startup refresh covers whatever the
-      -- service did while it was not running.
+    it "refreshes for a first observation that already reports a mutation" $ do
+      -- The startup fetch and the first poll are started concurrently, so a
+      -- review the service published after that fetch read GitHub and before
+      -- the first poll answered falls between them. Treating the first
+      -- observation as a silent baseline would lose it permanently: every
+      -- document after it is unchanged, and an unchanged document reports
+      -- nothing new.
       state <- dashboardShowing stoppedStatus
-      snd (approvalObservationApplied (observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeAdvanced) True "t1")) state)
-        `shouldBe` False
+      state.appApprovalResult `shouldBe` Nothing
+      let firstSeen observation = snd (approvalObservationApplied observation state)
+      firstSeen (observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeAdvanced) True "t1"))
+        `shouldBe` True
+      firstSeen (observationWith barrierStatus (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) False "t1"))
+        `shouldBe` True
+      let failedStatus = ApprovalStatus ApprovalError "stopped · a backend pass failed" ApprovalServiceChildFailure Nothing Nothing
+      firstSeen (observationWith failedStatus (resultIdentity ApprovalServiceChildFailure (Just ApprovalOutcomeIdle) False "t1"))
+        `shouldBe` True
+
+    it "asks for nothing on a first observation that reports no mutation" $ do
+      -- And it stays cheap: a service that is simply off, or running an idle
+      -- queue, has changed nothing for the startup refresh to have missed.
+      state <- dashboardShowing stoppedStatus
+      let firstSeen observation = snd (approvalObservationApplied observation state)
+      firstSeen (observationWith stoppedStatus (resultIdentity ApprovalServiceStopped Nothing False "t1")) `shouldBe` False
+      firstSeen (observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) True "t1")) `shouldBe` False
+      firstSeen (observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeBusy) True "t1")) `shouldBe` False
+
+    it "does not repeat that first refresh for the documents that follow it" $ do
+      state <- dashboardShowing stoppedStatus
+      let barriered stamp = observationWith barrierStatus (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) False stamp)
+          (afterFirst, firstRefresh) = approvalObservationApplied (barriered "t1") state
+          (afterSame, sameRefresh) = approvalObservationApplied (barriered "t1") afterFirst
+          (_, recheckRefresh) = approvalObservationApplied (barriered "t2") afterSame
+      firstRefresh `shouldBe` True
+      sameRefresh `shouldBe` False
+      recheckRefresh `shouldBe` False
 
     it "refreshes once per advancing pass and never twice for the same document" $ do
       -- The mutating outcome is read off the document written when the *next*
@@ -933,6 +1031,20 @@ spec = do
       pressed.appApprovalBusy `shouldBe` True
       pressed.appDrainerStatus `shouldBe` installed.appDrainerStatus
       pressed.appDrainerBusy `shouldBe` False
+
+-- | A controller that reports a live canonical pass once @marker@ exists, and
+-- an idle service before that. Standing in for the service taking the
+-- backend's approval lock partway through a launch.
+switchingApprovalController :: FilePath -> FilePath -> IO ApprovalController
+switchingApprovalController temporaryRoot marker =
+  fakeApprovalController
+    temporaryRoot
+    [ ByteString.pack ("if [ -e " <> marker <> " ]; then"),
+      ByteString.pack ("  printf '%s' '" <> LazyByteString.unpack (addressed "running" ["\"backend_pid\":424242"]) <> "'"),
+      "else",
+      ByteString.pack ("  printf '%s' '" <> LazyByteString.unpack (addressed "running" []) <> "'"),
+      "fi"
+    ]
 
 -- | Whether a press handed controller work off, and which way. The handoff
 -- has no 'Eq' instance and deliberately never gets one: what a test cares

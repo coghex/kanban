@@ -2560,21 +2560,28 @@ above are unchanged, and persistence the user switched off is not a failure.
   performs no canonical backend review.
 - That refusal is asked three times, and the third is the one that matters. The
   press and the spawn decision both read the board's newest observation, which
-  is up to a whole poll interval old; the launch itself then asks the controller
-  directly, from the thread that would start the competing child, because that
-  is the only reading current at the moment one would be spawned. All three fail
-  open on a service that cannot be read or is not installed, since none of them
-  is what makes concurrent work safe: the backend's own approval lock remains
-  the cross-process authority, and these exist so an operator is told to wait
-  rather than watching a review queue behind one they cannot see.
+  is up to a whole poll interval old. The launch then asks the controller
+  directly, from the thread that would start the competing child — and it asks
+  *after* that launch's preflight rather than before it, because the preflight
+  runs several probes and the service can take the backend's lock while they do.
+  Directly before the spawn is the only position a reading of live state cannot
+  go stale before the thing it guards. All three fail open on a service that
+  cannot be read or is not installed, since none of them is what makes
+  concurrent work safe: the backend's own approval lock remains the
+  cross-process authority, and these exist so an operator is told to wait rather
+  than watching a review queue behind one they cannot see.
 - A service result that may have changed GitHub requires a board refresh, queued
   behind a fetch already in flight rather than dropped. The result is identified
   by the controller's own status stamp together with the state and outcome that
   document carries, so one advancing pass, one barrier, and one failed run each
   require exactly one refresh, and the repeated documents a barriered or idle
-  controller writes require none. The refresh never disturbs the service's own
-  status: the durable warning or error it reported is what still stands after
-  it.
+  controller writes require none. The dashboard's very first observation is
+  judged by those same rules rather than taken as a silent baseline: the startup
+  fetch and the first poll are started concurrently, so a review published after
+  that fetch read GitHub and before the first poll answered falls between them,
+  and no later observation repairs it once the documents stop changing. The
+  refresh never disturbs the service's own status: the durable warning or error
+  it reported is what still stands after it.
 - Worker results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, resize, provider result, active review
   event/spinner tick, or explicit terminal repaint.

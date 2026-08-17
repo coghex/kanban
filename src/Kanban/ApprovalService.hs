@@ -1064,9 +1064,6 @@ approvalResultOf status backendPid outcome updatedAt =
 -- The clauses below are what that identity has to be read through, because the
 -- controller rewrites its status several times per pass:
 --
--- * The first observation is a baseline. Nothing before it was refreshed for,
---   and the dashboard's own startup refresh already covers whatever happened
---   while it was not running.
 -- * A document this dashboard has already seen — same @updated_at@ — reports
 --   nothing new, which is what makes an idle poll every ten seconds free.
 -- * Entering the barrier state is how a @changes_requested@ pass is durably
@@ -1082,9 +1079,20 @@ approvalResultOf status backendPid outcome updatedAt =
 --   the in-flight one stands for the whole of the following pass.
 -- * A stop landing right after a mutating pass is the one case with no
 --   following spawn, so the settled document is refreshed for there.
+--
+-- The /first/ observation is judged by those same clauses rather than taken as
+-- a silent baseline. It is tempting to treat it as one, on the grounds that the
+-- dashboard's own startup refresh covers whatever the service did while
+-- nothing was watching — but that refresh and the first poll are started
+-- concurrently, so a review the service published after the startup fetch read
+-- GitHub and before the first poll answered would fall in the gap between
+-- them, and no later observation repairs it: the documents that follow are
+-- unchanged, and an unchanged document reports nothing new by the first clause
+-- above. Asking the clauses instead costs at most one queued follow-up refresh
+-- at launch, and only when the service is actually reporting a barrier, a
+-- failure, or a mutating pass.
 approvalRefreshRequired :: Maybe ApprovalResult -> ApprovalResult -> Bool
-approvalRefreshRequired Nothing _ = False
-approvalRefreshRequired (Just previous) current
+approvalRefreshRequired previous current
   | sameDocument = False
   | enteredBarrier = True
   | enteredFailure = True
@@ -1092,24 +1100,32 @@ approvalRefreshRequired (Just previous) current
   | stoppedAfterMutation = True
   | otherwise = False
   where
-    sameDocument =
-      isJust current.approvalResultUpdatedAt
-        && previous.approvalResultUpdatedAt == current.approvalResultUpdatedAt
+    sameDocument = case previous of
+      Nothing -> False
+      Just seen ->
+        isJust current.approvalResultUpdatedAt
+          && seen.approvalResultUpdatedAt == current.approvalResultUpdatedAt
+
+    -- "Already in that state" rather than "in some previous state": with no
+    -- previous observation at all, every transition below is one this
+    -- dashboard is seeing for the first time and has therefore not refreshed
+    -- for.
+    wasAlready activity = maybe False ((== activity) . (.approvalResultActivity)) previous
 
     enteredBarrier =
       current.approvalResultActivity == ApprovalServiceBarrier
-        && previous.approvalResultActivity /= ApprovalServiceBarrier
+        && not (wasAlready ApprovalServiceBarrier)
 
     enteredFailure =
       current.approvalResultActivity
         `elem` [ApprovalServiceChildFailure, ApprovalServiceControllerFailure]
-        && previous.approvalResultActivity /= current.approvalResultActivity
+        && not (wasAlready current.approvalResultActivity)
 
     mutatingPassSpawned = current.approvalResultPassRunning && mutating current.approvalResultOutcome
 
     stoppedAfterMutation =
       current.approvalResultActivity == ApprovalServiceStopped
-        && previous.approvalResultActivity /= ApprovalServiceStopped
+        && not (wasAlready ApprovalServiceStopped)
         && mutating current.approvalResultOutcome
 
     -- `changes_requested` is deliberately absent: it is reported by the

@@ -10,6 +10,7 @@ module Kanban.UI.Review
     armReviewTick,
     armVisibleReviewTicks,
     cancelReviewSession,
+    canonicalLaunchOutcome,
     canonicalReviewActivity,
     canonicalReviewCompletionSuperseded,
     canonicalReviewNotice,
@@ -38,7 +39,9 @@ import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.ApprovalService
-  ( approvalContentionNotice,
+  ( ApprovalController,
+    ApprovalUnavailable,
+    approvalContentionNotice,
     approvalOwnsCanonicalReview,
     liveApprovalContention,
   )
@@ -523,19 +526,50 @@ approvalServiceRefusal state stage
   | approvalOwnsCanonicalReview state.appApprovalResult = Just approvalContentionNotice
   | otherwise = Nothing
 
+-- | One canonical launch's sequence: the preflight, then the approval-service
+-- interlock, then the spawn.
+--
+-- The interlock sits /between/ the two rather than ahead of both. The preflight
+-- runs several probes — executables, authentication, installed bundles — and
+-- the service can take the backend's approval lock while they do, so a check
+-- taken before it can be stale by the time the spawn happens. This position is
+-- the last instant before a competing canonical child would be started, which
+-- is the only place a reading of live state cannot go stale before the thing it
+-- guards.
+--
+-- It is asked of the controller rather than of the board's newest observation,
+-- because that observation is up to a whole poll interval old.
+--
+-- Both dependencies are parameters so that window is exercisable: a test
+-- supplies a preflight that changes what the controller reports and establishes
+-- that the spawn never ran.
+canonicalLaunchOutcome ::
+  ReviewStage ->
+  Text ->
+  Either ApprovalUnavailable ApprovalController ->
+  IO (Maybe Text) ->
+  IO (Either Text result) ->
+  IO (Either Text result)
+canonicalLaunchOutcome stage identity controller preflight spawn = do
+  blocked <- preflight
+  case blocked of
+    Just message -> pure (Left message)
+    Nothing -> do
+      -- A revision performs no canonical backend review, so it contends for
+      -- nothing and is never asked about.
+      contended <-
+        if stage == IssueRevision
+          then pure Nothing
+          else liveApprovalContention identity controller
+      case contended of
+        Just notice -> pure (Left notice)
+        Nothing -> spawn
+
 -- | The asynchronous launch itself.
 --
--- The approval-service interlock is asked a third time here, from inside the
--- forked action and against the controller rather than against the last poll.
--- Neither earlier check covers this: the poll behind them is up to ten seconds
--- old, and the service can spawn a canonical child in the window between the
--- press, the spawn decision, and this thread actually getting to run. Asking
--- the controller is the only reading of it that is current at the moment a
--- competing child would be started.
---
--- A refusal is reported the way a preflight blocker is — as this invocation's
--- own failed result — so the session settles with the reason on it rather than
--- waiting on a process that was never started.
+-- A service refusal is reported the way a preflight blocker is — as this
+-- invocation's own failed result — so the session settles with the reason on it
+-- rather than waiting on a process that was never started.
 launchLiveCanonicalIssueReview :: Issue -> ReviewStage -> EventM Name AppState ()
 launchLiveCanonicalIssueReview issue stage = do
   state <- get
@@ -543,17 +577,13 @@ launchLiveCanonicalIssueReview issue stage = do
       issueNumber = issue.issueNumber
       identity = normalizedRepositoryIdentity state.appRepository
   void . liftIO . forkIO $ do
-    contended <-
-      if stage == IssueRevision
-        then pure Nothing
-        else liveApprovalContention identity state.appApprovalController
-    result <- case contended of
-      Just notice -> pure (Left notice)
-      Nothing -> do
-        blocked <- preflightBlocker state.appRepository (ActionIssueReview (issueOriginFromBody issue.issueBody))
-        case blocked of
-          Just message -> pure (Left message)
-          Nothing -> runCanonicalIssueReview state.appOptions.optionConfig state.appRepository issueNumber stage (writeBChan channel . CanonicalIssueReviewProcessStarted issueNumber)
+    result <-
+      canonicalLaunchOutcome
+        stage
+        identity
+        state.appApprovalController
+        (preflightBlocker state.appRepository (ActionIssueReview (issueOriginFromBody issue.issueBody)))
+        (runCanonicalIssueReview state.appOptions.optionConfig state.appRepository issueNumber stage (writeBChan channel . CanonicalIssueReviewProcessStarted issueNumber))
     writeBChan channel (CanonicalIssueReviewFinished issueNumber stage result)
 
 -- | Whether a just-arrived 'CanonicalIssueReviewFinished' must be discarded
