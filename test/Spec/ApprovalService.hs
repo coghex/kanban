@@ -40,8 +40,12 @@ import Spec.Support.App (testAppState)
 import Spec.Support.Env (withTemporaryCacheRoot)
 import Spec.Support.Expect (requireLeft, requireRight, shouldMention, shouldNotMention)
 import Spec.Support.Process (fakeApprovalController, readRecordedPid)
+import Spec.Support.Env (withEnvironmentValue)
+import System.Directory (createDirectory)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
+import System.Posix.Files (setFileMode)
 import Test.Hspec
 
 -- * Crafted runtime documents
@@ -117,6 +121,30 @@ withApproval status state =
 
 dashboardShowing :: ApprovalStatus -> IO AppState
 dashboardShowing status = withApproval status <$> testAppState (Board Map.empty)
+
+-- | The dashboard, having observed this status with or without a live backend
+-- pass under it. The interlock reads that pass rather than the status alone, so
+-- a fixture about it has to say which.
+observing :: ApprovalStatus -> Bool -> IO AppState
+observing status passRunning = do
+  state <- dashboardShowing status
+  pure
+    state
+      { appApprovalResult =
+          Just (ApprovalResult status.approvalActivity (Just ApprovalOutcomeIdle) passRunning (Just "t1"))
+      }
+
+-- | Runs @action@ with a fake @systemctl@ first on @PATH@.
+withFakeSystemctl :: [ByteString.ByteString] -> IO result -> IO result
+withFakeSystemctl scriptLines action =
+  withTemporaryCacheRoot $ \temporaryRoot -> do
+    let binaryRoot = temporaryRoot </> "bin"
+        fake = binaryRoot </> "systemctl"
+    createDirectory binaryRoot
+    ByteString.writeFile fake (ByteString.unlines ("#!/bin/sh" : scriptLines))
+    setFileMode fake 0o700
+    originalPath <- maybe "" id <$> lookupEnv "PATH"
+    withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) action
 
 runningStatus :: ApprovalStatus
 runningStatus = ApprovalStatus ApprovalOn "on" ApprovalServiceRunning Nothing Nothing
@@ -228,40 +256,62 @@ spec = do
         (approvalRecordFromBytes "Example/Project" (recordDocument [("example/project", launchdEntry "installed" "/mine.plist")]))
         `shouldBe` Right (Just "installed")
 
-    it "maps each supported host to the manager that could have installed there" $ do
-      approvalHostBackend "darwin" `shouldBe` Just ApprovalLaunchd
-      approvalHostBackend "linux" `shouldBe` Just ApprovalSystemd
-      approvalHostBackend "mingw32" `shouldBe` Nothing
+    it "decides a systemd host on whether its user manager actually answers" $ do
+      -- The platform's name is not the question. A `systemctl` with no session
+      -- bus behind it manages nothing, so the probe reads the manager's own
+      -- version exactly as `tools/service_manager.py` does and believes only a
+      -- clean exit. Driven through a fake `systemctl` so both answers are
+      -- reachable on any host.
+      withFakeSystemctl ["exit 0"] systemdUserManagerIsLive `shouldReturn` True
+      withFakeSystemctl ["echo 'Failed to connect to bus' >&2", "exit 1"] systemdUserManagerIsLive
+        `shouldReturn` False
 
-    it "reports an unsupported host as its own condition rather than as a lookup failure" $
+    it "reports a host with no reachable manager as its own condition" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
-        -- Requirement 10: an unsupported host is a distinct answer, so nothing
+        -- Requirement 10, and the shape a Linux host without a user session
+        -- arrives in: the probe found no manager, which is the same 'Nothing'
+        -- an unsupported platform produces. It is a distinct answer, so nothing
         -- downstream can present it as an ordinary missing installation the
-        -- operator could install their way out of.
-        resolved <- resolveApprovalDefinition "mingw32" boardIdentity (temporaryRoot </> "config.json")
+        -- operator could install their way out of — and the message names the
+        -- session requirement rather than the installer.
+        resolved <- resolveApprovalDefinition Nothing boardIdentity (temporaryRoot </> "config.json")
         case resolved of
           Left (ApprovalHostUnsupported message) -> do
             message `shouldMention` "not supported on this host"
+            message `shouldMention` "systemctl --user"
             message `shouldNotMention` "install_issue_approval.py"
           other -> expectationFailure ("expected an unsupported host, got " <> show other)
+
+    it "offers no control at all for a host with no reachable manager" $ do
+      -- And the whole of "offers no control": the seam refuses and hands off
+      -- nothing, so no controller process can be spawned there.
+      resolved <- resolveApprovalDefinition Nothing boardIdentity "/nonexistent/config.json"
+      unavailable <- either pure (const (fail "expected an unsupported host")) resolved
+      state <-
+        (\base -> base {appApprovalController = Left unavailable, appApprovalStatus = approvalUnavailableStatus unavailable})
+          <$> dashboardShowing stoppedStatus
+      state.appApprovalStatus.approvalActivity `shouldBe` ApprovalServiceUnsupported
+      let (pressed, handoff) = approvalTogglePress state
+      handoffStart handoff `shouldBe` Nothing
+      pressed.appNotice `shouldMentionJust` "not supported on this host"
 
     it "names the remediation for every way an installed lookup can fail" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let recordPath = temporaryRoot </> "config.json"
             failureFor = fmap (either approvalUnavailableMessage (const "unexpectedly resolved"))
-        absent <- failureFor (resolveApprovalDefinition "darwin" boardIdentity recordPath)
+        absent <- failureFor (resolveApprovalDefinition (Just ApprovalLaunchd) boardIdentity recordPath)
         absent `shouldMention` "not installed for example/project"
         absent `shouldMention` "install_issue_approval.py"
 
         ByteString.writeFile recordPath (ByteString.pack "{ not json")
-        unreadable <- failureFor (resolveApprovalDefinition "darwin" boardIdentity recordPath)
+        unreadable <- failureFor (resolveApprovalDefinition (Just ApprovalLaunchd) boardIdentity recordPath)
         unreadable `shouldMention` "is unreadable"
 
         ByteString.writeFile recordPath (recordDocument [("example/project", launchdEntry "installed" (temporaryRoot </> "gone.plist"))])
-        stale <- failureFor (resolveApprovalDefinition "darwin" boardIdentity recordPath)
+        stale <- failureFor (resolveApprovalDefinition (Just ApprovalLaunchd) boardIdentity recordPath)
         stale `shouldMention` "LaunchAgent is missing at"
 
-        foreign' <- failureFor (resolveApprovalDefinition "linux" boardIdentity recordPath)
+        foreign' <- failureFor (resolveApprovalDefinition (Just ApprovalSystemd) boardIdentity recordPath)
         foreign' `shouldMention` "describes a launchd job, which this systemd host cannot run"
 
     it "resolves the definition the record names, wherever the installer put it" $
@@ -270,7 +320,7 @@ spec = do
             plist = temporaryRoot </> "installed.plist"
         ByteString.writeFile plist (ByteString.pack "<plist/>")
         ByteString.writeFile recordPath (recordDocument [("example/project", launchdEntry "installed" plist)])
-        resolveApprovalDefinition "darwin" boardIdentity recordPath
+        resolveApprovalDefinition (Just ApprovalLaunchd) boardIdentity recordPath
           `shouldReturn` Right (ApprovalLaunchd, plist)
 
     it "rebinds the installed command to this checkout and drops what it supplies itself" $
@@ -644,6 +694,33 @@ spec = do
       -- starting" forever.
       approvalToggle failed.appApprovalBusy failed.appApprovalStatus `shouldBe` StartApprovalService
 
+    it "discards a completion a poll has already superseded" $ do
+      -- The completion belongs to this very transition, so its generation
+      -- matches. It is still late: the poll that cleared busy carried a read
+      -- taken after it, and applying the completion would put the older answer
+      -- back — here, replacing a newly observed barrier with the running state
+      -- the start itself returned.
+      state <- dashboardShowing stoppedStatus
+      let (pressed, handoff) = approvalTogglePress state
+          transition = maybe 0 (.approvalHandoffTransition) handoff
+          barriered =
+            ApprovalObservation
+              barrierStatus
+              (Just [])
+              (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) False "t2")
+          (polled, _) = approvalStatusApplied (Right barriered) pressed
+          stale =
+            ApprovalObservation
+              runningStatus
+              (Just [])
+              (resultIdentity ApprovalServiceRunning Nothing False "t1")
+          (settled, refresh) = approvalToggleApplied transition (Right stale) polled
+      polled.appApprovalStatus `shouldBe` barrierStatus
+      settled.appApprovalStatus `shouldBe` barrierStatus
+      settled.appApprovalResult `shouldBe` polled.appApprovalResult
+      settled.appApprovalBusy `shouldBe` False
+      refresh `shouldBe` False
+
     it "leaves a newer observation alone when its own transition then fails" $ do
       state <- dashboardShowing stoppedStatus
       let (pressed, handoff) = approvalTogglePress state
@@ -652,40 +729,113 @@ spec = do
           (failed, _) = approvalToggleApplied transition (Left "the transition timed out") polled
       failed.appApprovalStatus `shouldBe` runningStatus
       failed.appApprovalBusy `shouldBe` False
+      -- Nothing was owed to that completion: the busy flag it would have
+      -- cleared was already clear, so control is not refused either.
+      approvalToggle failed.appApprovalBusy failed.appApprovalStatus `shouldBe` StopApprovalService
 
   describe "competing canonical work while the service is live" $ do
-    it "refuses a canonical stage while the service owns a review" $ do
-      -- Requirement 8, and the review's own addition: the same issue is
-      -- refused too, because the service reviews in numeric order and cannot
-      -- be asked to skip to this one.
-      state <- dashboardShowing runningStatus
-      approvalServiceRefusal state InitialReview `shouldMentionJust` "wait for it to finish or stop the service"
-      approvalServiceRefusal state IssueRereview `shouldMentionJust` "canonical review in flight"
+    it "refuses a canonical stage only while a backend pass is actually running" $ do
+      -- Requirement 8 is about a review in flight, not about the service being
+      -- switched on. The controller sleeps between passes with no child at
+      -- all, so a running service with no live pass must let a card review
+      -- through; only the pass itself contends for the backend's lock.
+      reviewing <- observing runningStatus True
+      approvalServiceRefusal reviewing InitialReview `shouldMentionJust` "wait for it to finish or stop the service"
+      approvalServiceRefusal reviewing IssueRereview `shouldMentionJust` "canonical review in flight"
 
-    it "keeps the selected-card workflow available at a barrier" $ do
-      -- A barriered controller performs no model work and only rechecks one
-      -- read-only gate, so the repair of the barriered issue and the rereview
-      -- after it can both take the backend's lock (D-10).
-      state <- dashboardShowing barrierStatus
-      approvalServiceRefusal state InitialReview `shouldBe` Nothing
-      approvalServiceRefusal state IssueRereview `shouldBe` Nothing
-      approvalServiceRefusal state IssueRevision `shouldBe` Nothing
+      idle <- observing runningStatus False
+      approvalServiceRefusal idle InitialReview `shouldBe` Nothing
+      approvalServiceRefusal idle IssueRereview `shouldBe` Nothing
+
+    it "refuses the same issue too, not only another one" $ do
+      -- The service reviews in numeric order and cannot be asked to skip to
+      -- the card's issue, so a second canonical child for it is the same
+      -- contention as for any other.
+      reviewing <- observing runningStatus True
+      approvalServiceRefusal reviewing InitialReview `shouldBe` approvalServiceRefusal reviewing IssueRereview
+
+    it "keeps the selected-card workflow available at a barrier, pass or no pass" $ do
+      -- A barriered controller's child is the read-only gate check: no model
+      -- work, and the lock released between checks, so the repair of the
+      -- barriered issue and the rereview after it both stay launchable (D-10).
+      checking <- observing barrierStatus True
+      approvalServiceRefusal checking InitialReview `shouldBe` Nothing
+      approvalServiceRefusal checking IssueRereview `shouldBe` Nothing
+      approvalServiceRefusal checking IssueRevision `shouldBe` Nothing
+
+      waiting <- observing barrierStatus False
+      approvalServiceRefusal waiting IssueRereview `shouldBe` Nothing
 
     it "never refuses a revision, whatever the service is doing" $ do
       -- A revision runs the interactive coordinator and performs no canonical
       -- backend review, so it contends for nothing.
-      running <- dashboardShowing runningStatus
-      approvalServiceRefusal running IssueRevision `shouldBe` Nothing
+      reviewing <- observing runningStatus True
+      approvalServiceRefusal reviewing IssueRevision `shouldBe` Nothing
 
     it "permits canonical work against every settled or unknowable state" $ do
-      stopped <- dashboardShowing stoppedStatus
+      stopped <- observing stoppedStatus False
       approvalServiceRefusal stopped InitialReview `shouldBe` Nothing
-      unsupported <- dashboardShowing (approvalUnavailableStatus (ApprovalHostUnsupported "unsupported"))
+      unsupported <- observing (approvalUnavailableStatus (ApprovalHostUnsupported "unsupported")) False
       approvalServiceRefusal unsupported InitialReview `shouldBe` Nothing
-      unknown <- dashboardShowing (ApprovalStatus ApprovalError "no answer" ApprovalServiceUnknown Nothing Nothing)
+      unknown <- observing (ApprovalStatus ApprovalError "no answer" ApprovalServiceUnknown Nothing Nothing) False
       approvalServiceRefusal unknown InitialReview `shouldBe` Nothing
-      failed <- dashboardShowing (ApprovalStatus ApprovalError "stopped · a backend pass failed" ApprovalServiceChildFailure Nothing Nothing)
+      failed <- observing (ApprovalStatus ApprovalError "stopped · a backend pass failed" ApprovalServiceChildFailure Nothing Nothing) False
       approvalServiceRefusal failed InitialReview `shouldBe` Nothing
+
+    it "permits canonical work before any observation has been applied" $ do
+      -- No evidence of a review is not evidence of one, and the backend's own
+      -- approval lock is what actually decides contention.
+      unobserved <- dashboardShowing stoppedStatus
+      unobserved.appApprovalResult `shouldBe` Nothing
+      approvalServiceRefusal unobserved InitialReview `shouldBe` Nothing
+
+    it "asks the controller again at the asynchronous launch boundary" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- The board's own observation is up to ten seconds old, and the
+        -- service can spawn a canonical child inside that window. The check
+        -- taken at the launch itself therefore reads the controller rather
+        -- than the last poll: a service that was idle when the key was pressed
+        -- and is reviewing by the time the launch runs is still refused.
+        reviewing <-
+          fakeApprovalController
+            temporaryRoot
+            [ByteString.pack ("printf '%s' '" <> LazyByteString.unpack (addressed "running" ["\"backend_pid\":424242"]) <> "'")]
+        contention <- liveApprovalContention boardIdentity (Right reviewing)
+        contention `shouldMentionJust` "canonical review in flight"
+
+    it "lets the launch through when that live read finds no pass" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        idle <-
+          fakeApprovalController
+            temporaryRoot
+            [ByteString.pack ("printf '%s' '" <> LazyByteString.unpack (addressed "running" []) <> "'")]
+        liveApprovalContention boardIdentity (Right idle) `shouldReturn` Nothing
+
+    it "lets the launch through when there is no controller or none can be read" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- Fails open in both directions on purpose. A repository with no
+        -- installed service contends with nothing, and a controller that
+        -- cannot be read has said nothing — refusing on it would let one
+        -- broken service block every card review indefinitely. The backend's
+        -- approval lock is what makes that safe.
+        liveApprovalContention boardIdentity (Left (ApprovalUndiscoverable "not installed")) `shouldReturn` Nothing
+        broken <- fakeApprovalController temporaryRoot ["echo 'the job is not loaded' >&2", "exit 1"]
+        liveApprovalContention boardIdentity (Right broken) `shouldReturn` Nothing
+
+    it "reads that live check against this repository, never another's" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- A foreign document decodes to unknown, which is not a live pass, so
+        -- the launch is never refused on another repository's service.
+        foreignController <-
+          fakeApprovalController
+            temporaryRoot
+            [ ByteString.pack
+                ( "printf '%s' '"
+                    <> "{\"schema\":\"kanban-issue-approval-status\",\"version\":1"
+                    <> ",\"repository\":\"other/repo\",\"state\":\"running\",\"backend_pid\":424242}'"
+                )
+            ]
+        liveApprovalContention boardIdentity (Right foreignController) `shouldReturn` Nothing
 
   describe "board refresh after a service result" $ do
     it "asks for no refresh on the first observation it ever sees" $ do

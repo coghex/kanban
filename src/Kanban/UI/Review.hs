@@ -37,10 +37,15 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Kanban.ApprovalService (approvalOwnsCanonicalReview)
+import Kanban.ApprovalService
+  ( approvalContentionNotice,
+    approvalOwnsCanonicalReview,
+    liveApprovalContention,
+  )
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
+import Kanban.Drainer (normalizedRepositoryIdentity)
 import Kanban.Preflight
   ( PreflightAction (..),
     issueOriginFromBody,
@@ -508,25 +513,47 @@ launchCanonicalIssueReview issue stage = do
 -- including for the issue the card names: the service reviews issues in
 -- numeric order and cannot be asked to skip to this one, so a second canonical
 -- child for the same issue is the same contention as for any other.
+-- Neither this nor the live recheck below is what makes concurrent canonical
+-- work safe: the backend's own approval lock is the cross-process authority.
+-- Both exist so an operator is told to wait instead of watching a review queue
+-- behind one it cannot see.
 approvalServiceRefusal :: AppState -> ReviewStage -> Maybe Text
 approvalServiceRefusal state stage
   | stage == IssueRevision = Nothing
-  | approvalOwnsCanonicalReview state.appApprovalStatus =
-      Just
-        "The issue approval service has a canonical review in flight; wait for it \
-        \to finish or stop the service before starting another"
+  | approvalOwnsCanonicalReview state.appApprovalResult = Just approvalContentionNotice
   | otherwise = Nothing
 
+-- | The asynchronous launch itself.
+--
+-- The approval-service interlock is asked a third time here, from inside the
+-- forked action and against the controller rather than against the last poll.
+-- Neither earlier check covers this: the poll behind them is up to ten seconds
+-- old, and the service can spawn a canonical child in the window between the
+-- press, the spawn decision, and this thread actually getting to run. Asking
+-- the controller is the only reading of it that is current at the moment a
+-- competing child would be started.
+--
+-- A refusal is reported the way a preflight blocker is — as this invocation's
+-- own failed result — so the session settles with the reason on it rather than
+-- waiting on a process that was never started.
 launchLiveCanonicalIssueReview :: Issue -> ReviewStage -> EventM Name AppState ()
 launchLiveCanonicalIssueReview issue stage = do
   state <- get
   let channel = state.appEventChannel
       issueNumber = issue.issueNumber
+      identity = normalizedRepositoryIdentity state.appRepository
   void . liftIO . forkIO $ do
-    blocked <- preflightBlocker state.appRepository (ActionIssueReview (issueOriginFromBody issue.issueBody))
-    result <- case blocked of
-      Just message -> pure (Left message)
-      Nothing -> runCanonicalIssueReview state.appOptions.optionConfig state.appRepository issueNumber stage (writeBChan channel . CanonicalIssueReviewProcessStarted issueNumber)
+    contended <-
+      if stage == IssueRevision
+        then pure Nothing
+        else liveApprovalContention identity state.appApprovalController
+    result <- case contended of
+      Just notice -> pure (Left notice)
+      Nothing -> do
+        blocked <- preflightBlocker state.appRepository (ActionIssueReview (issueOriginFromBody issue.issueBody))
+        case blocked of
+          Just message -> pure (Left message)
+          Nothing -> runCanonicalIssueReview state.appOptions.optionConfig state.appRepository issueNumber stage (writeBChan channel . CanonicalIssueReviewProcessStarted issueNumber)
     writeBChan channel (CanonicalIssueReviewFinished issueNumber stage result)
 
 -- | Whether a just-arrived 'CanonicalIssueReviewFinished' must be discarded

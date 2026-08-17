@@ -2504,10 +2504,14 @@ above are unchanged, and persistence the user switched off is not a failure.
   definition itself — `ProgramArguments` from a plist, `ExecStart` from a unit
   file — dropping the definition's own `run` subcommand and any `--path` or
   `--repo` it carries, then rebinding both to this dashboard's checkout and
-  identity. A host with no supported service manager is reported as its own
-  condition, unsupported and offering no control, rather than as a missing
-  installation or as a stopped service; every other failure names
-  `tools/install_issue_approval.py` as the repair.
+  identity. Which hosts have a service at all is decided by probing capability
+  rather than by reading a platform name — macOS with `launchctl`, otherwise a
+  `systemctl` whose `--user` manager answers a version read — the same question
+  the installer's own backend selection asks, so a Linux container or a
+  logged-out session with no reachable user manager is refused by both. Such a
+  host is reported as its own condition, unsupported and offering no control,
+  rather than as a missing installation or as a stopped service; every other
+  failure names `tools/install_issue_approval.py` as the repair.
 - The controller's status document is decoded against a pinned schema and
   version and against the board's own repository identity. Each state it
   publishes — checking/starting, healthy running, ordered barrier, intentional
@@ -2534,20 +2538,35 @@ above are unchanged, and persistence the user switched off is not a failure.
   the leader of its own process group, which is terminated and confirmed empty
   when that timeout expires. An authoritative poll or completion clears the busy
   flag and supersedes the optimistic state; a failed poll during a transition
-  changes nothing; a completion belonging to a superseded transition is
-  discarded rather than restoring its optimistic state over a newer observation;
-  and a failed transition clears the busy flag either way, so control can never
-  stay permanently refused.
+  changes nothing; and a failed transition clears the busy flag, so control can
+  never stay permanently refused. A completion applies only while the optimistic
+  transition it belongs to still stands: another press supersedes it by starting
+  a newer transition, and an authoritative poll supersedes it by settling the
+  one it belongs to. Either way it is discarded rather than partly applied,
+  because the busy flag it would have cleared is already clear and the status it
+  would have written is older than the one it would replace — which is how a
+  newly polled barrier would otherwise be overwritten by the answer the
+  transition itself returned.
 - While the service owns a live canonical review, a competing canonical stage
   started from a card is refused with a notice to wait for it or stop the
   service — including for the same issue, since the service reviews in numeric
-  order and cannot be asked to skip to one. The refusal is asked at the press
-  and again at the asynchronous spawn boundary, because the service can take the
-  backend's approval lock between the two. A barriered service refuses nothing:
-  it performs no model work and only rechecks one issue's read-only gate, so the
+  order and cannot be asked to skip to one. "Owns a live review" is the live
+  backend child, not the service being switched on: the controller sleeps
+  between passes with no child at all, so an enabled but idle service refuses
+  nothing. A barriered service refuses nothing either, even while it does have a
+  child, because at a barrier that child is the read-only gate check, so the
   selected card's revision and the rereview after it stay available. A revision
   is never refused at all, since it runs the interactive coordinator and
   performs no canonical backend review.
+- That refusal is asked three times, and the third is the one that matters. The
+  press and the spawn decision both read the board's newest observation, which
+  is up to a whole poll interval old; the launch itself then asks the controller
+  directly, from the thread that would start the competing child, because that
+  is the only reading current at the moment one would be spawned. All three fail
+  open on a service that cannot be read or is not installed, since none of them
+  is what makes concurrent work safe: the backend's own approval lock remains
+  the cross-process authority, and these exist so an operator is told to wait
+  rather than watching a review queue behind one they cannot see.
 - A service result that may have changed GitHub requires a board refresh, queued
   behind a fetch already in flight rather than dropped. The result is identified
   by the controller's own status stamp together with the state and outcome that

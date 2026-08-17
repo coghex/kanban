@@ -194,16 +194,29 @@ approvalStatusApplied result state = case result of
 
 -- | What one start or stop's completion does.
 --
--- A completion belonging to a superseded transition is discarded outright: it
--- must neither restore the optimistic state a newer press replaced nor
--- overwrite an observation newer than itself. A completion that /is/ current
--- clears the busy flag however it ended, so a failed control operation can
--- never leave the toggle permanently refused; and it replaces the status only
--- while this transition's own optimistic state is still what stands, since a
--- poll that has already superseded it holds the newer answer.
+-- It applies only while the optimistic transition it belongs to is still what
+-- stands. Two things end that, and both mean something newer is already on
+-- screen:
+--
+-- * another press, which bumps 'appApprovalTransition' — so a slow start's
+--   completion can never restore its own optimistic state over the stop that
+--   replaced it; and
+-- * an authoritative poll, which clears 'appApprovalBusy' — so a completion
+--   carrying a read taken /before/ that poll cannot put it back, which is how a
+--   newly observed barrier would otherwise be overwritten by the running or
+--   stopped answer the transition itself returned.
+--
+-- Either way the completion is discarded outright rather than partly applied.
+-- Nothing is owed to it: the busy flag it would have cleared is already clear,
+-- so control is not refused, and the status it would have written is older
+-- than the one it would replace.
+--
+-- A completion that /is/ current clears the busy flag however it ended, so a
+-- failed control operation can never leave the toggle permanently refused.
 approvalToggleApplied :: Int -> Either Text ApprovalObservation -> AppState -> (AppState, Bool)
 approvalToggleApplied transition result state
   | transition /= state.appApprovalTransition = (state, False)
+  | not state.appApprovalBusy = (state, False)
   | otherwise = case result of
       Right observation ->
         let (applied, refresh) = approvalObservationApplied observation state
@@ -217,15 +230,10 @@ approvalToggleApplied transition result state
               refresh
             )
       Left message ->
-        ( ( if state.appApprovalBusy
-              then
-                state
-                  { appApprovalStatus = approvalErrorStatus message,
-                    appApprovalIncidents = Nothing
-                  }
-              else state
-          )
+        ( state
             { appApprovalBusy = False,
+              appApprovalStatus = approvalErrorStatus message,
+              appApprovalIncidents = Nothing,
               appNotice = Just ("Issue approval service control failed: " <> sanitizeText message)
             },
           False

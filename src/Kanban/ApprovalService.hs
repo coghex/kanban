@@ -23,7 +23,8 @@ module Kanban.ApprovalService
     ApprovalRecord (..),
     ApprovalUnavailable (..),
     approvalDefinitionNoun,
-    approvalHostBackend,
+    detectApprovalHostBackend,
+    systemdUserManagerIsLive,
     approvalManagerName,
     approvalRecordFromBytes,
     approvalRecordPath,
@@ -48,8 +49,10 @@ module Kanban.ApprovalService
 
     -- * Control
     ApprovalToggle (..),
+    approvalContentionNotice,
     approvalOwnsCanonicalReview,
     approvalServiceIsRunning,
+    liveApprovalContention,
     approvalToggle,
     queryApprovalStatus,
     runApprovalCommand,
@@ -85,7 +88,7 @@ import Kanban.ServiceProcess
     serviceTransitionCommand,
   )
 import Kanban.Text (sanitizeText, withoutJsonPath)
-import System.Directory (doesFileExist, getHomeDirectory)
+import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, (</>))
 import System.Info (os)
@@ -279,36 +282,77 @@ approvalRecordFromBytes identity bytes = do
               )
         | otherwise -> Right record
 
--- | The service manager a given host could have installed an approval job
+-- | The service manager this host could have installed an approval job
 -- through, or nothing at all.
 --
--- The one platform question this side asks, and it is about capability rather
--- than about a name — the same question @tools\/service_manager.py@'s
--- @select_backend@ answers for the installer, so the two agree on which hosts
--- have a service at all. Which manager an installed job actually uses stays
--- the record's answer.
-approvalHostBackend :: String -> Maybe ApprovalBackend
-approvalHostBackend "darwin" = Just ApprovalLaunchd
-approvalHostBackend "linux" = Just ApprovalSystemd
-approvalHostBackend _ = Nothing
+-- Probed rather than read off @System.Info.os@, because availability is what
+-- decides it and the platform's name is not availability: a Linux container
+-- with no session bus behind its @systemctl@ manages nothing, and a job
+-- installed against it would be a unit no manager ever loads. This mirrors
+-- @tools\/service_manager.py@'s @_probe_service_manager@ exactly — macOS with
+-- @launchctl@, otherwise a @systemctl@ whose @--user@ manager answers a
+-- version read, otherwise neither — so the installer and this reader agree
+-- about which hosts have a service at all.
+--
+-- Ordered rather than exclusive, and falling through the same way: a macOS
+-- host without @launchctl@ gets the systemd question asked of it too, which is
+-- what keeps the two implementations from disagreeing on an odd host.
+--
+-- Which manager an installed job actually uses stays the record's answer, not
+-- this one.
+detectApprovalHostBackend :: IO (Maybe ApprovalBackend)
+detectApprovalHostBackend = do
+  launchctl <- if os == "darwin" then findExecutable "launchctl" else pure Nothing
+  case launchctl of
+    Just _ -> pure (Just ApprovalLaunchd)
+    Nothing -> do
+      systemctl <- findExecutable "systemctl"
+      case systemctl of
+        Nothing -> pure Nothing
+        Just _ -> do
+          live <- systemdUserManagerIsLive
+          pure (if live then Just ApprovalSystemd else Nothing)
+
+-- | Whether @systemctl --user@ reaches this account's own systemd manager.
+--
+-- A read of the manager's own version, which needs the session bus and nothing
+-- else, exactly as the installer's probe does. @systemctl@ exits nonzero when
+-- it cannot connect — no @XDG_RUNTIME_DIR@, no user manager, a container
+-- without one — and that is precisely the host that has to be reported as
+-- unsupported rather than as an uninstalled service.
+systemdUserManagerIsLive :: IO Bool
+systemdUserManagerIsLive = do
+  probed <-
+    runGroupedProcess
+      "the systemd user-manager probe"
+      (Just approvalProbeTimeoutSeconds)
+      "systemctl"
+      ["--user", "show", "--property", "Version", "--value"]
+  pure $ case probed of
+    Right (ExitSuccess, _, _) -> True
+    _ -> False
 
 approvalReinstallHint :: Text
 approvalReinstallHint = "run `python3 tools/install_issue_approval.py` from the Kanban checkout"
 
 -- | Resolves this repository's installed service definition, naming the
--- remediation for every way the lookup can fail. Parameterised by the host
--- operating system, the repository identity, and the document path so each
--- branch is exercisable off any one host.
+-- remediation for every way the lookup can fail.
+--
+-- Parameterised by the /detected/ host backend rather than by a platform name,
+-- so every branch — including a Linux host whose user manager is not reachable,
+-- which arrives here as 'Nothing' exactly as an unsupported platform does — is
+-- exercisable off any one host.
 resolveApprovalDefinition ::
-  String -> Text -> FilePath -> IO (Either ApprovalUnavailable (ApprovalBackend, FilePath))
-resolveApprovalDefinition hostOperatingSystem identity recordPath =
-  case approvalHostBackend hostOperatingSystem of
+  Maybe ApprovalBackend -> Text -> FilePath -> IO (Either ApprovalUnavailable (ApprovalBackend, FilePath))
+resolveApprovalDefinition detected identity recordPath =
+  case detected of
     Nothing ->
       pure
         ( Left
             ( ApprovalHostUnsupported
                 "the issue approval service is not supported on this host; it \
-                \needs macOS launchd or a systemd user session"
+                \needs macOS launchd or a systemd user session reachable \
+                \through `systemctl --user`"
             )
         )
     Just hostBackend -> do
@@ -762,24 +806,70 @@ approvalServiceIsRunning status = case status.approvalActivity of
 -- stage started from a card would contend with it for the backend's approval
 -- lock (requirement 8).
 --
--- A barrier is deliberately /not/ ownership: a barriered controller performs no
--- model work and only rechecks that one issue's read-only gate, releasing the
--- lock between checks, so the selected-card workflow that repairs the barrier
--- stays reachable (D-10).
-approvalOwnsCanonicalReview :: ApprovalStatus -> Bool
-approvalOwnsCanonicalReview status = case status.approvalActivity of
-  ApprovalServiceRunning -> True
-  -- A start this dashboard has issued, or one the controller has recorded but
-  -- not yet completed a pass for, is about to take the lock. Refusing during
-  -- it is what keeps a press landing in that window from racing the service.
-  ApprovalServiceStarting -> True
-  ApprovalServiceBarrier -> False
-  ApprovalServiceStopping -> False
-  ApprovalServiceStopped -> False
-  ApprovalServiceChildFailure -> False
-  ApprovalServiceControllerFailure -> False
-  ApprovalServiceUnsupported -> False
-  ApprovalServiceUnknown -> False
+-- Read off the live backend child, not off the service being up. The
+-- controller sleeps between passes with no child at all — a whole poll
+-- interval of @running@ can contain no review — and a running service is not
+-- the same claim as a review in flight. Taking one for the other would refuse
+-- every card review for as long as the service was merely enabled.
+--
+-- A barrier is deliberately not ownership even while it /does/ have a child: at
+-- a barrier that child is the read-only gate check, which performs no model
+-- work and releases the lock between checks, so the selected-card workflow
+-- that repairs the barrier stays reachable (D-10).
+--
+-- 'Nothing' — no observation has been applied yet — is not ownership either. A
+-- dashboard that has heard nothing from the service has no evidence of a
+-- review, and the backend's approval lock remains the cross-process authority
+-- that actually decides contention.
+approvalOwnsCanonicalReview :: Maybe ApprovalResult -> Bool
+approvalOwnsCanonicalReview Nothing = False
+approvalOwnsCanonicalReview (Just observed) =
+  observed.approvalResultPassRunning && case observed.approvalResultActivity of
+    ApprovalServiceRunning -> True
+    ApprovalServiceBarrier -> False
+    ApprovalServiceStarting -> False
+    ApprovalServiceStopping -> False
+    ApprovalServiceStopped -> False
+    ApprovalServiceChildFailure -> False
+    ApprovalServiceControllerFailure -> False
+    ApprovalServiceUnsupported -> False
+    ApprovalServiceUnknown -> False
+
+-- | What the operator is told when the service holds the review they asked
+-- for. Spelled once, because the press, the spawn boundary, and the live
+-- recheck all report the same condition and a second wording would read as a
+-- second cause.
+approvalContentionNotice :: Text
+approvalContentionNotice =
+  "The issue approval service has a canonical review in flight; wait for it to \
+  \finish or stop the service before starting another"
+
+-- | Whether the service owns a canonical review /now/, asked of the controller
+-- rather than of the last poll.
+--
+-- The poll is ten seconds apart, and a canonical child is spawned and finished
+-- inside that window all the time, so a check taken at an asynchronous launch
+-- boundary has to read live state rather than the newest observation the board
+-- happens to hold.
+--
+-- Fails open on purpose, in both directions. A repository with no installed
+-- service contends with nothing; and a controller that cannot be read has told
+-- this side nothing, so refusing on it would make an unreadable service block
+-- every card review indefinitely. Neither is a correctness risk: the backend's
+-- own approval lock is the cross-process authority between the service, the
+-- selected card, and every other caller, so the worst a fail-open costs is one
+-- backend pass reporting contention and backing off.
+liveApprovalContention ::
+  Text -> Either ApprovalUnavailable ApprovalController -> IO (Maybe Text)
+liveApprovalContention _ (Left _) = pure Nothing
+liveApprovalContention identity (Right controller) = do
+  observed <- queryApprovalStatus identity controller
+  pure $ case observed of
+    Left _ -> Nothing
+    Right observation
+      | approvalOwnsCanonicalReview (Just observation.observedApprovalResult) ->
+          Just approvalContentionNotice
+      | otherwise -> Nothing
 
 -- | A start is only ever issued from a settled state this dashboard is not
 -- already transitioning. @busy@ is a transition it started; a reported
@@ -843,6 +933,12 @@ approvalStatusFromControllerExit identity exitCode output errors =
 approvalDiscoveryTimeoutSeconds :: Int
 approvalDiscoveryTimeoutSeconds = 3
 
+-- | The host probe's budget. Short: it is a local version read, and a
+-- @systemctl@ that cannot answer it promptly is exactly the unreachable
+-- manager the probe exists to refuse.
+approvalProbeTimeoutSeconds :: Int
+approvalProbeTimeoutSeconds = 3
+
 approvalStatusTimeoutSeconds :: Int
 approvalStatusTimeoutSeconds = 4
 
@@ -855,7 +951,8 @@ approvalTransitionTimeoutSeconds = 30
 discoverApprovalController :: Repository -> IO (Either ApprovalUnavailable ApprovalController)
 discoverApprovalController repository = do
   recordPath <- approvalRecordPath
-  resolved <- resolveApprovalDefinition os (normalizedRepositoryIdentity repository) recordPath
+  detected <- detectApprovalHostBackend
+  resolved <- resolveApprovalDefinition detected (normalizedRepositoryIdentity repository) recordPath
   case resolved of
     Left unavailable -> pure (Left unavailable)
     Right (ApprovalLaunchd, plist) -> do
