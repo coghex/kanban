@@ -625,6 +625,7 @@ data RawApprovalStatus = RawApprovalStatus
     rawApprovalBackendPid :: Maybe Int,
     rawApprovalLastOutcome :: Maybe Text,
     rawApprovalMutations :: Maybe Int,
+    rawApprovalRunId :: Maybe Text,
     rawApprovalStartedAt :: Maybe Text,
     rawApprovalUpdatedAt :: Maybe Text,
     rawApprovalIncident :: Maybe ApprovalIncident,
@@ -645,6 +646,7 @@ instance FromJSON RawApprovalStatus where
       <*> value .:? "backend_pid"
       <*> value .:? "last_outcome"
       <*> value .:? "mutations"
+      <*> value .:? "run_id"
       <*> value .:? "started_at"
       <*> value .:? "updated_at"
       <*> value .:? "open_incident"
@@ -683,6 +685,7 @@ observationFrom identity raw =
         outcome
         raw.rawApprovalUpdatedAt
         raw.rawApprovalMutations
+        raw.rawApprovalRunId
         raw.rawApprovalStartedAt
     )
   where
@@ -1118,6 +1121,14 @@ data ApprovalResult = ApprovalResult
     -- transient-field reading below alive as a fallback rather than a
     -- permanent second opinion.
     approvalResultMutations :: Maybe Int,
+    -- | Which run counted them: the controller's own per-run identity, and its
+    -- start stamp only from a controller that publishes no such identity.
+    --
+    -- The stamp is not sufficient on its own. It is second-granular, so a
+    -- controller that died and restarted inside one second publishes the same
+    -- value, and two runs that each mutated once would then be indistinguishable
+    -- from one run that mutated once — losing the second run's mutation
+    -- precisely because the counts agree.
     approvalResultRun :: Maybe Text
   }
   deriving stock (Eq, Show)
@@ -1133,9 +1144,17 @@ approvalResultOf ::
   Maybe Text ->
   Maybe Int ->
   Maybe Text ->
+  Maybe Text ->
   ApprovalResult
-approvalResultOf status backendPid outcome updatedAt mutations startedAt =
-  ApprovalResult status.approvalActivity outcome backendPid updatedAt mutations startedAt
+approvalResultOf status backendPid outcome updatedAt mutations runId startedAt =
+  ApprovalResult status.approvalActivity outcome backendPid updatedAt mutations run
+  where
+    -- The run's own identity when it has one; the start stamp is the fallback
+    -- for a controller that publishes none, and is weaker for the reason the
+    -- field's own note gives.
+    run = case runId of
+      Just identity | not (Text.null (Text.strip identity)) -> Just identity
+      _ -> startedAt
 
 -- | Whether a newly observed result reports something that may have changed
 -- GitHub and has not already been refreshed for.

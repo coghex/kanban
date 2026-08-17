@@ -2595,7 +2595,11 @@ above are unchanged, and persistence the user switched off is not a failure.
 - A service result that may have changed GitHub requires a board refresh, queued
   behind a fetch already in flight rather than dropped. The result is identified
   by the controller's own count of the passes that may have changed GitHub,
-  published in the status document beside the run that counted them. That count
+  published in the status document beside the identity of the run that counted
+  them — the run's own identity, not its start stamp, because that stamp is
+  second-granular and a controller that died and restarted inside one second
+  would publish the same one, making two runs that each mutated once look like
+  a single run that mutated once. That count
   is the only trace of a mutation a poller can rely on. Every other one is
   transient: the last outcome is overwritten by the pass after it, the child PID
   is cleared when that child exits, and the stamp resolves only to a second — so

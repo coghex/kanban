@@ -177,7 +177,7 @@ resultIdentity activity outcome backendPid stamp =
   ApprovalResult activity outcome backendPid (Just stamp) Nothing Nothing
 
 -- | A result identity from a counting controller: the same fields, plus how
--- many passes of run @\"run-1\"@ may have changed GitHub.
+-- many passes of run @run-1@ may have changed GitHub.
 countedIdentity :: ApprovalActivity -> Maybe ApprovalOutcome -> Maybe Int -> Text -> Int -> ApprovalResult
 countedIdentity activity outcome backendPid stamp mutations =
   ApprovalResult activity outcome backendPid (Just stamp) (Just mutations) (Just "run-1")
@@ -1127,6 +1127,28 @@ spec = do
           restarted = (countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t2" 0) {approvalResultRun = Just "run-2"}
           seen = state {appApprovalResult = Just firstRun}
       snd (approvalObservationApplied (observationWith runningStatus restarted) seen) `shouldBe` True
+
+    it "refreshes for a same-second restart that reached the same count" $ do
+      -- The run identity is the controller's own, not its start stamp: that
+      -- stamp is second-granular, so a controller that died and restarted
+      -- inside one second would carry the same one. Two runs that each hid a
+      -- mutation behind a following idle pass then agree in every field the
+      -- count branch reads, and the second run's mutation would be lost.
+      state <- dashboardShowing runningStatus
+      let firstRun = countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t1" 1
+          sameSecondRestart = firstRun {approvalResultRun = Just "run-2", approvalResultUpdatedAt = Just "t2"}
+          seen = state {appApprovalResult = Just firstRun}
+      -- Everything the count branch compares agrees except the run itself.
+      sameSecondRestart.approvalResultMutations `shouldBe` firstRun.approvalResultMutations
+      snd (approvalObservationApplied (observationWith runningStatus sameSecondRestart) seen) `shouldBe` True
+
+    it "prefers the controller's run identity over its start stamp" $ do
+      -- And that is what the identity is built from: given both, the run id
+      -- decides, so two runs sharing a start stamp are still two runs.
+      let withBoth runId = approvalResultOf runningStatus Nothing (Just ApprovalOutcomeIdle) (Just "t1") (Just 1) runId (Just "12:00:00")
+      (withBoth (Just "run-a")).approvalResultRun `shouldBe` Just "run-a"
+      (withBoth (Just "  ")).approvalResultRun `shouldBe` Just "12:00:00"
+      (withBoth Nothing).approvalResultRun `shouldBe` Just "12:00:00"
 
     it "asks for nothing while a counting controller reports no new mutation" $ do
       -- And it stays cheap: an idle queue rewrites its document every pass

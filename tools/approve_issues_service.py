@@ -58,6 +58,7 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -1451,6 +1452,9 @@ def status_snapshot(job: ApprovalJob) -> dict[str, Any]:
         # this field existed says nothing about the count, and a reader must be
         # able to tell that apart from a run that has mutated nothing.
         "mutations": stored.get("mutations"),
+        # Which run counted them. Read straight through, including its absence,
+        # for the same reason the count is.
+        "run_id": stored.get("run_id"),
         "updated_at": stored.get("updated_at"),
         "message": stored.get("message"),
         "last_outcome": stored.get("last_outcome"),
@@ -1635,6 +1639,14 @@ class Controller:
         self.interval = interval
         self.legacy_policy = legacy_policy
         self.started_at = utc_stamp()
+        # What makes this run distinguishable from the one before it. Not
+        # `started_at`: that is second-granular, so a controller that died and
+        # was restarted inside one second would publish the same value, and a
+        # reader comparing the (run, count) pair would then take two runs that
+        # each mutated once for a single run that mutated once. Random rather
+        # than a sequence, because a sequence would need durable state of its
+        # own and this only has to differ, never to be ordered.
+        self.run_id = uuid.uuid4().hex
         self._child: subprocess.Popen[str] | None = None
         self._stop_requested = False
         self._signals = 0
@@ -1647,9 +1659,9 @@ class Controller:
         # by an idle one leaves no trace a poller can observe. A count that only
         # ever goes up does, whatever a poller happens to sample.
         #
-        # Per-run rather than persisted: `started_at` is published beside it, so
-        # the pair identifies a mutation across a restart without this having to
-        # own a durable file of its own.
+        # Per-run rather than persisted: the run identity below is published
+        # beside it, so the pair identifies a mutation across a restart without
+        # this having to own a durable file of its own.
         self._mutations = 0
 
     # -- lifecycle ---------------------------------------------------------
@@ -1852,6 +1864,7 @@ class Controller:
                 "message": message,
                 "last_outcome": self._last_outcome,
                 "mutations": self._mutations,
+                "run_id": self.run_id,
                 "started_at": self.started_at,
                 "updated_at": utc_stamp(),
                 "backend": str(self.backend),
