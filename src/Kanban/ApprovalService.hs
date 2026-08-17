@@ -624,6 +624,8 @@ data RawApprovalStatus = RawApprovalStatus
     rawApprovalBarrierUnreadable :: Maybe Text,
     rawApprovalBackendPid :: Maybe Int,
     rawApprovalLastOutcome :: Maybe Text,
+    rawApprovalMutations :: Maybe Int,
+    rawApprovalStartedAt :: Maybe Text,
     rawApprovalUpdatedAt :: Maybe Text,
     rawApprovalIncident :: Maybe ApprovalIncident,
     rawApprovalIncidents :: Maybe [ApprovalIncident]
@@ -642,6 +644,8 @@ instance FromJSON RawApprovalStatus where
       <*> value .:? "barrier_unreadable"
       <*> value .:? "backend_pid"
       <*> value .:? "last_outcome"
+      <*> value .:? "mutations"
+      <*> value .:? "started_at"
       <*> value .:? "updated_at"
       <*> value .:? "open_incident"
       <*> value .:? "open_incidents"
@@ -670,7 +674,17 @@ decodeApprovalStatus identity bytes = case eitherDecode bytes of
 
 observationFrom :: Text -> RawApprovalStatus -> ApprovalObservation
 observationFrom identity raw =
-  ApprovalObservation status incidents (approvalResultOf status raw.rawApprovalBackendPid outcome raw.rawApprovalUpdatedAt)
+  ApprovalObservation
+    status
+    incidents
+    ( approvalResultOf
+        status
+        raw.rawApprovalBackendPid
+        outcome
+        raw.rawApprovalUpdatedAt
+        raw.rawApprovalMutations
+        raw.rawApprovalStartedAt
+    )
   where
     outcome = fmap approvalOutcomeFrom raw.rawApprovalLastOutcome
     -- Only ever reported for a document this reader accepted. A rejected one
@@ -1088,7 +1102,23 @@ data ApprovalResult = ApprovalResult
     -- project to exactly the same identity and the second one's refresh would
     -- be suppressed as a repeat of the first.
     approvalResultBackendPid :: Maybe Int,
-    approvalResultUpdatedAt :: Maybe Text
+    approvalResultUpdatedAt :: Maybe Text,
+    -- | How many passes of the observed run may have changed GitHub, and which
+    -- run counted them.
+    --
+    -- This is the only field a poller can trust to still be there. Everything
+    -- else about a mutation is transient: @last_outcome@ is overwritten by the
+    -- next pass, the child PID is cleared when it exits, and the stamp resolves
+    -- to a second — so an advancing pass followed promptly by an idle one
+    -- leaves nothing for a ten-second poll to see. A count that only goes up
+    -- is observable however coarsely it is sampled, and the run it belongs to
+    -- is carried beside it because a restart starts a fresh count.
+    --
+    -- 'Nothing' from a controller predating the field, which is what keeps the
+    -- transient-field reading below alive as a fallback rather than a
+    -- permanent second opinion.
+    approvalResultMutations :: Maybe Int,
+    approvalResultRun :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -1096,61 +1126,53 @@ data ApprovalResult = ApprovalResult
 approvalResultPassRunning :: ApprovalResult -> Bool
 approvalResultPassRunning = isJust . (.approvalResultBackendPid)
 
-approvalResultOf :: ApprovalStatus -> Maybe Int -> Maybe ApprovalOutcome -> Maybe Text -> ApprovalResult
-approvalResultOf status backendPid outcome updatedAt =
-  ApprovalResult status.approvalActivity outcome backendPid updatedAt
+approvalResultOf ::
+  ApprovalStatus ->
+  Maybe Int ->
+  Maybe ApprovalOutcome ->
+  Maybe Text ->
+  Maybe Int ->
+  Maybe Text ->
+  ApprovalResult
+approvalResultOf status backendPid outcome updatedAt mutations startedAt =
+  ApprovalResult status.approvalActivity outcome backendPid updatedAt mutations startedAt
 
 -- | Whether a newly observed result reports something that may have changed
 -- GitHub and has not already been refreshed for.
 --
--- The controller publishes no per-result identity, so this uses one: the
--- document's own @updated_at@ together with the state and outcome it carries.
--- The clauses below are what that identity has to be read through, because the
--- controller rewrites its status several times per pass:
+-- Three sources, in order, because they fail in different ways.
 --
--- * A document this dashboard has already seen — same @updated_at@ — reports
---   nothing new, which is what makes an idle poll every ten seconds free.
--- * Entering the barrier state is how a @changes_requested@ pass is durably
---   reported. The barrier persists, so a poll cannot miss it, and the state is
---   only entered once, so the repeated writes a barriered controller makes
---   while rechecking its gate do not refresh again.
--- * Entering a failure state is outcome-indeterminate: a pass that died
---   mid-publication may have posted a review, so it is refreshed for once.
--- * A mutating outcome is read off the document written when the /next/ pass
---   spawns, not off the momentary one written between passes. An @advanced@
---   pass is followed immediately by the next spawn, so the settled document
---   exists for microseconds and a ten-second poll would never see it, while
---   the in-flight one stands for the whole of the following pass.
--- * A stop landing right after a mutating pass is the one case with no
---   following spawn, so the settled document is refreshed for there.
+-- An identical document reports nothing new, which is what keeps a ten-second
+-- poll of a quiet service free.
 --
--- The /first/ observation is judged by those same clauses rather than taken as
--- a silent baseline. It is tempting to treat it as one, on the grounds that the
--- dashboard's own startup refresh covers whatever the service did while
--- nothing was watching — but that refresh and the first poll are started
--- concurrently, so a review the service published after the startup fetch read
--- GitHub and before the first poll answered would fall in the gap between
--- them, and no later observation repairs it: the documents that follow are
--- unchanged, and an unchanged document reports nothing new by the first clause
--- above. Asking the clauses instead costs at most one queued follow-up refresh
--- at launch, and only when the service is actually reporting a barrier, a
--- failure, or a mutating pass.
+-- The durable states come next. A barrier and a failed run both persist until
+-- something resolves them, so a poll cannot miss one however coarsely it
+-- samples, and each is entered exactly once.
+--
+-- Everything else is the controller's count of passes that may have changed
+-- GitHub. That count is the only trace of a mutation a poller can rely on:
+-- @last_outcome@ is overwritten by the next pass, the child PID is cleared
+-- when it exits, and the stamp resolves only to a second, so an advancing pass
+-- followed promptly by an idle one leaves a document that says nothing
+-- happened. A count that only goes up survives any sampling rate, and any
+-- difference in it is exactly the mutations still owed a refresh.
+--
+-- A controller predating that count falls back to reading the transient
+-- fields, which is the best a reader can do alone and is what this did
+-- everywhere before the count existed.
 approvalRefreshRequired :: Maybe ApprovalResult -> ApprovalResult -> Bool
 approvalRefreshRequired previous current
   | sameDocument = False
   | enteredBarrier = True
   | enteredFailure = True
-  | mutatingPassSpawned = True
-  | stoppedAfterMutation = True
-  | otherwise = False
+  | otherwise = mutationsRequireRefresh
   where
     -- The whole identity, not the stamp alone. @utc_stamp@ is second-granular
-    -- and the controller writes several states inside one pass, so an idle
-    -- result and the @advanced@ running pass that follows it in the same
-    -- second carry the same stamp — and comparing stamps would suppress the
-    -- refresh that second document is the only report of. The pass's PID is
-    -- part of that identity for the same reason one step further out: two
-    -- consecutive advancing passes differ in nothing else.
+    -- and the controller writes several states inside one pass, so two
+    -- documents that differ in what they report can share a stamp. Any
+    -- observable difference makes it a different document; an identical one
+    -- reports nothing new, which is what makes an idle poll every ten seconds
+    -- free.
     sameDocument = previous == Just current
 
     -- "Already in that state" rather than "in some previous state": with no
@@ -1159,6 +1181,11 @@ approvalRefreshRequired previous current
     -- for.
     wasAlready activity = maybe False ((== activity) . (.approvalResultActivity)) previous
 
+    -- The barrier and the failure states are durable, so a poll cannot miss
+    -- one however coarsely it samples, and each is entered once. They are
+    -- asked ahead of the count because a controller predating the count still
+    -- reports both, and because a failed run's outcome is indeterminate in a
+    -- way no count claims to summarise.
     enteredBarrier =
       current.approvalResultActivity == ApprovalServiceBarrier
         && not (wasAlready ApprovalServiceBarrier)
@@ -1168,8 +1195,41 @@ approvalRefreshRequired previous current
         `elem` [ApprovalServiceChildFailure, ApprovalServiceControllerFailure]
         && not (wasAlready current.approvalResultActivity)
 
+    -- What the controller counted, when it counts. A difference is exactly the
+    -- passes that may have changed GitHub and have not been refreshed for --
+    -- however many completed between two polls, and whether or not any of
+    -- their documents was ever observed. That is the whole reason the count
+    -- exists: every other trace of a mutating pass is overwritten by the pass
+    -- after it, so a reader watching only those can be shown a quiet document
+    -- and conclude nothing happened.
+    mutationsRequireRefresh = case (current.approvalResultMutations, previous) of
+      (Just counted, Just seen) -> case seen.approvalResultMutations of
+        Just seenCount ->
+          counted /= seenCount || current.approvalResultRun /= seen.approvalResultRun
+        -- The previous observation came from a controller that did not count,
+        -- so there is no baseline to compare against and the transient
+        -- reading is all this one has.
+        Nothing -> transientReading
+      -- The first observation of a counting run. Its own count is the
+      -- baseline, and a run that has already mutated may have done so in the
+      -- window between the startup fetch reading GitHub and this poll
+      -- answering.
+      (Just counted, Nothing) -> counted > 0
+      -- A controller predating the count. Reading the transient fields is the
+      -- best a reader can do alone: it catches a mutating pass while the pass
+      -- after it is still running, and a stop that landed on top of one.
+      (Nothing, _) -> transientReading
+
+    transientReading = mutatingPassSpawned || stoppedAfterMutation
+
+    -- Read off the document written when the /next/ pass spawns, not off the
+    -- momentary one written between passes: an @advanced@ pass is followed
+    -- immediately by the next spawn, so the settled document exists for
+    -- microseconds while the in-flight one stands for the whole of the
+    -- following pass.
     mutatingPassSpawned = approvalResultPassRunning current && mutating current.approvalResultOutcome
 
+    -- The one case with no following spawn to read the outcome off.
     stoppedAfterMutation =
       current.approvalResultActivity == ApprovalServiceStopped
         && not (wasAlready ApprovalServiceStopped)

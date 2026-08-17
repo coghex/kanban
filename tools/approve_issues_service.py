@@ -1446,6 +1446,11 @@ def status_snapshot(job: ApprovalJob) -> dict[str, Any]:
             else None
         ),
         "started_at": stored.get("started_at"),
+        # How many passes of the recorded run may have changed GitHub. Read
+        # straight through, including its absence: a document written before
+        # this field existed says nothing about the count, and a reader must be
+        # able to tell that apart from a run that has mutated nothing.
+        "mutations": stored.get("mutations"),
         "updated_at": stored.get("updated_at"),
         "message": stored.get("message"),
         "last_outcome": stored.get("last_outcome"),
@@ -1635,6 +1640,17 @@ class Controller:
         self._signals = 0
         self._backoff_steps = 0
         self._last_outcome: str | None = None
+        # How many passes of this run may have changed GitHub. Published in the
+        # status document because no reader can derive it: `last_outcome` is
+        # overwritten by the next pass, `ADVANCE_DELAY_SECONDS` is zero, and
+        # `utc_stamp` is second-granular, so a mutating pass followed promptly
+        # by an idle one leaves no trace a poller can observe. A count that only
+        # ever goes up does, whatever a poller happens to sample.
+        #
+        # Per-run rather than persisted: `started_at` is published beside it, so
+        # the pair identifies a mutation across a restart without this having to
+        # own a durable file of its own.
+        self._mutations = 0
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -1753,6 +1769,12 @@ class Controller:
         return 0
 
     def record_failure(self, state: str, summary: str, detail: str | None) -> int:
+        # A backend pass that died is outcome-indeterminate: it may have posted
+        # a verdict and moved a label before it went. A controller failure is
+        # not -- that is this process failing around a pass, not a pass doing
+        # something -- so only the first counts.
+        if state == STATE_CHILD_FAILURE:
+            self._mutations += 1
         self.log(f"The issue approval controller stopped: {summary}")
         try:
             incident = record_error_incident(
@@ -1829,6 +1851,7 @@ class Controller:
                 "barrier_issue": barrier_issue,
                 "message": message,
                 "last_outcome": self._last_outcome,
+                "mutations": self._mutations,
                 "started_at": self.started_at,
                 "updated_at": utc_stamp(),
                 "backend": str(self.backend),
@@ -2091,10 +2114,19 @@ class Controller:
             raise BackendFailure(failure.summary, tail(command.stderr)) from failure
         self.dispatch(result)
 
+    # The outcomes a pass may have changed GitHub through. `advanced` and
+    # `changes_requested` both publish a review; `retry` is a pass whose
+    # specification moved under it, which cannot report `advanced` but may
+    # already have published before it noticed. `idle` and `busy` selected no
+    # issue and made no model call, so neither touched anything.
+    MUTATING_OUTCOMES = frozenset({"advanced", "changes_requested", "retry"})
+
     def dispatch(self, result: dict[str, Any]) -> None:
         outcome = result["outcome"]
         message = result["message"]
         self._last_outcome = outcome
+        if outcome in self.MUTATING_OUTCOMES:
+            self._mutations += 1
         self.log(f"Backend pass returned {outcome}: {message}")
         if outcome == "changes_requested":
             self.open_barrier(result["issue"], message)

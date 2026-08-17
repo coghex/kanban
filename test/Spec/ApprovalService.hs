@@ -132,7 +132,7 @@ observing status passRunning = do
   pure
     state
       { appApprovalResult =
-          Just (ApprovalResult status.approvalActivity (Just ApprovalOutcomeIdle) (if passRunning then Just 4242 else Nothing) (Just "t1"))
+          Just (ApprovalResult status.approvalActivity (Just ApprovalOutcomeIdle) (if passRunning then Just 4242 else Nothing) (Just "t1") Nothing Nothing)
       }
 
 -- | Runs @action@ with a fake @systemctl@ first on @PATH@.
@@ -170,8 +170,17 @@ observationWith status identity = ApprovalObservation status (Just []) identity
 -- | One result identity, as the controller's own document would carry it: the
 -- state, what the last pass decided, whether a pass is running under it, and
 -- the document's stamp.
+-- | A result identity from a controller that predates the mutation count, so
+-- the transient-field fallback is what reads it.
 resultIdentity :: ApprovalActivity -> Maybe ApprovalOutcome -> Maybe Int -> Text -> ApprovalResult
-resultIdentity activity outcome backendPid stamp = ApprovalResult activity outcome backendPid (Just stamp)
+resultIdentity activity outcome backendPid stamp =
+  ApprovalResult activity outcome backendPid (Just stamp) Nothing Nothing
+
+-- | A result identity from a counting controller: the same fields, plus how
+-- many passes of run @\"run-1\"@ may have changed GitHub.
+countedIdentity :: ApprovalActivity -> Maybe ApprovalOutcome -> Maybe Int -> Text -> Int -> ApprovalResult
+countedIdentity activity outcome backendPid stamp mutations =
+  ApprovalResult activity outcome backendPid (Just stamp) (Just mutations) (Just "run-1")
 
 spec :: Spec
 spec = do
@@ -1086,6 +1095,56 @@ spec = do
       firstRefresh `shouldBe` True
       secondRefresh `shouldBe` True
       repeatRefresh `shouldBe` False
+
+    it "refreshes for a mutation a fast follow-up pass hid from the poll" $ do
+      -- The window this whole count exists for. The controller advances,
+      -- immediately starts the next pass, and that pass returns idle before the
+      -- ten-second poll comes round — overwriting `last_outcome` and clearing
+      -- the child PID. Every transient trace of the mutation is gone by the
+      -- time anything looks, and only the count still says it happened.
+      state <- dashboardShowing runningStatus
+      let quiet = countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t1" 0
+          hidden = countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t2" 1
+          seenQuiet = state {appApprovalResult = Just quiet}
+          (afterHidden, hiddenRefresh) = approvalObservationApplied (observationWith runningStatus hidden) seenQuiet
+          (_, repeatRefresh) = approvalObservationApplied (observationWith runningStatus hidden) afterHidden
+      hiddenRefresh `shouldBe` True
+      repeatRefresh `shouldBe` False
+
+    it "collapses several hidden mutations into one refresh" $ do
+      -- The count says how many passes mutated, not how many refreshes are
+      -- owed: one fetch observes all of them.
+      state <- dashboardShowing runningStatus
+      let seen = state {appApprovalResult = Just (countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t1" 2)}
+          later = countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t2" 5
+      snd (approvalObservationApplied (observationWith runningStatus later) seen) `shouldBe` True
+
+    it "refreshes once when a counting controller restarts" $ do
+      -- A fresh run starts its count again, so equal counts under different
+      -- runs are not the same observation.
+      state <- dashboardShowing runningStatus
+      let firstRun = countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t1" 0
+          restarted = (countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t2" 0) {approvalResultRun = Just "run-2"}
+          seen = state {appApprovalResult = Just firstRun}
+      snd (approvalObservationApplied (observationWith runningStatus restarted) seen) `shouldBe` True
+
+    it "asks for nothing while a counting controller reports no new mutation" $ do
+      -- And it stays cheap: an idle queue rewrites its document every pass
+      -- without the count moving, and none of those rewrites is a refresh.
+      state <- dashboardShowing runningStatus
+      let seen = state {appApprovalResult = Just (countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t1" 3)}
+          spawned = countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) (Just 4242) "t2" 3
+          settled = countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t3" 3
+      snd (approvalObservationApplied (observationWith runningStatus spawned) seen) `shouldBe` False
+      snd (approvalObservationApplied (observationWith runningStatus settled) seen) `shouldBe` False
+
+    it "refreshes on the first observation of a run that has already mutated" $ do
+      state <- dashboardShowing runningStatus
+      state.appApprovalResult `shouldBe` Nothing
+      let mutated = countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t1" 2
+          untouched = countedIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t1" 0
+      snd (approvalObservationApplied (observationWith runningStatus mutated) state) `shouldBe` True
+      snd (approvalObservationApplied (observationWith runningStatus untouched) state) `shouldBe` False
 
     it "asks for nothing on an idle or contended queue" $ do
       state <- dashboardShowing runningStatus

@@ -2594,17 +2594,26 @@ above are unchanged, and persistence the user switched off is not a failure.
   than watching a review queue behind one they cannot see.
 - A service result that may have changed GitHub requires a board refresh, queued
   behind a fetch already in flight rather than dropped. The result is identified
-  by the whole of what the controller reported — its state, the outcome of the
-  last pass, the PID of any pass running under it, and the document's own stamp
-  — so one advancing pass, one barrier, and one failed run each require exactly
-  one refresh, and the repeated documents a barriered or idle controller writes
-  require none. The stamp alone is not that identity: it is second-granular and
-  the controller writes several states inside one pass, so two documents that
-  differ only in what they report would otherwise be taken for one. Nor is the
-  mere presence of a pass enough: the controller starts the next pass the
-  instant one advances, so two consecutive advancing passes differ in nothing
-  but which child is running, and the PID is what keeps the second one's refresh
-  from being suppressed as a repeat of the first. The dashboard's very first observation is
+  by the controller's own count of the passes that may have changed GitHub,
+  published in the status document beside the run that counted them. That count
+  is the only trace of a mutation a poller can rely on. Every other one is
+  transient: the last outcome is overwritten by the pass after it, the child PID
+  is cleared when that child exits, and the stamp resolves only to a second — so
+  an advancing pass followed promptly by an idle one leaves a document saying
+  nothing happened, however often the dashboard looks. A count that only rises
+  survives any sampling rate, any difference in it is exactly the mutations
+  still owed a refresh, and several mutations observed at once collapse into the
+  one fetch that sees all of them. A fresh run starts the count again, which is
+  why the run is carried beside it.
+- Two states are read ahead of that count rather than through it, because both
+  are durable and neither is something a count summarises: entering the ordered
+  barrier, and entering a failure. A poll cannot miss either however coarsely it
+  samples, and each is entered once.
+- A controller that publishes no count — one predating it — falls back to
+  reading those transient fields, which is the best a reader can do alone: it
+  catches a mutating pass while the pass after it is still running, and a stop
+  that landed on top of one. That fallback is why the count is additive rather
+  than required. The dashboard's very first observation is
   judged by those same rules rather than taken as a silent baseline: the startup
   fetch and the first poll are started concurrently, so a review published after
   that fetch read GitHub and before the first poll answered falls between them,
