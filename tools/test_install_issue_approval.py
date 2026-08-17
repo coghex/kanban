@@ -1174,7 +1174,9 @@ class ConvergenceTests(InstallerFixture):
 class CanonicalBackendTests(InstallerFixture):
     def test_the_installer_installs_no_backend_of_its_own(self):
         result = self.install()
-        self.assertEqual(result["backend_path"], str(self.canonical_backend))
+        self.assertEqual(
+            Path(result["backend_path"]), self.canonical_backend.resolve()
+        )
         # The one global reviewer installation is resolved, never copied,
         # linked, or shadowed by one of this installer's own.
         self.assertNotIn(
@@ -1265,6 +1267,88 @@ class CanonicalBackendTests(InstallerFixture):
         # have performed from its own working directory.
         self.assertNotEqual(
             Path(recorded), (Path(definition["working_directory"]) / "canonical")
+        )
+
+    def definition_override(self):
+        definition = json.loads(
+            self.manager.definition_path(self.label()).read_text(encoding="utf-8")
+        )
+        return definition["environment"].get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")
+
+    def test_a_refresh_from_an_empty_environment_keeps_the_selected_reviewer(self):
+        # The definition is rewritten on every start, and a start issued by
+        # Kanban or by a service manager carries no environment. Deriving the
+        # override from that environment alone would silently rewrite the job
+        # to resolve some other reviewer than the one its install verified.
+        self.install()
+        self.assertEqual(
+            self.definition_override(), str(self.backend_dir.resolve())
+        )
+
+        os.environ.pop("KANBAN_ISSUE_REVIEW_INSTALL_DIR", None)
+        refreshed = service.resolve_job(self.repo)
+        service.install_job(refreshed, self.install_dir)
+        self.assertEqual(
+            self.definition_override(), str(self.backend_dir.resolve())
+        )
+        self.assertEqual(
+            self.record()["repositories"]["acme/widgets"]["backend_install_dir"],
+            str(self.backend_dir.resolve()),
+        )
+
+    def test_a_start_from_an_empty_environment_keeps_it_too(self):
+        self.install()
+        os.environ.pop("KANBAN_ISSUE_REVIEW_INSTALL_DIR", None)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(self.wrapper),
+                str(self.install_dir),
+                str(self.account),
+                "controller",
+                "--json",
+                "--path",
+                str(self.repo),
+                "start",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={
+                "PATH": os.defpath,
+                "FIXTURE_SERVICE_MANAGER": str(self.manager.root),
+                "FIXTURE_TOOLS": str(TOOLS_DIR),
+            },
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(json.loads(proc.stdout)["started"])
+        self.assertEqual(
+            self.definition_override(), str(self.backend_dir.resolve())
+        )
+
+    def test_a_reinstall_from_an_empty_environment_verifies_that_reviewer(self):
+        # And the installer checks the backend the definition will name rather
+        # than the one its own shell points at, so a missing recorded reviewer
+        # is refused instead of quietly replaced by the default.
+        self.install()
+        os.environ.pop("KANBAN_ISSUE_REVIEW_INSTALL_DIR", None)
+        self.canonical_backend.unlink()
+        with self.assertRaises(installer.InstallError) as raised:
+            self.install()
+        self.assertIn(str(self.canonical_backend.resolve()), str(raised.exception))
+        self.assertIn("install_issue_review.py", str(raised.exception))
+
+    def test_an_install_with_no_selection_records_none(self):
+        # The ordinary case: no override anywhere, so the job resolves through
+        # the fixed issue-review record and needs no environment at all.
+        os.environ.pop("KANBAN_ISSUE_REVIEW_INSTALL_DIR", None)
+        review_root = self.home / "Library" / "Application Support" / "kanban" / "issue-review"
+        review_root.mkdir(parents=True)
+        (review_root / "approve_issues.py").write_text("backend\n", encoding="utf-8")
+        self.install()
+        self.assertIsNone(self.definition_override())
+        self.assertNotIn(
+            "backend_install_dir", self.record()["repositories"]["acme/widgets"]
         )
 
     def test_the_installed_job_runs_the_backend_the_installer_verified(self):

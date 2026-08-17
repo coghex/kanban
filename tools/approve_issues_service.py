@@ -602,7 +602,7 @@ def read_json(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def resolve_backend() -> Path:
+def resolve_backend(install_dir: str | Path | None = None) -> Path:
     """The installed canonical issue-review backend this controller invokes.
 
     The one resolution contract, in the one order
@@ -613,6 +613,13 @@ def resolve_backend() -> Path:
     exactly how an installation predating the record reads -- the directory
     holding the record.
 
+    `install_dir`, when given, is an installation the caller has already
+    selected -- the one a job's definition will name -- and stands in for
+    reading the environment, so an installer can verify the very backend its
+    job will run rather than the one its own shell happens to point at.
+    Without it the environment decides, which is what a managed run launched
+    from a definition carrying that variable does.
+
     Every failure is closed. A selected override or recorded backend that is
     missing fails here rather than falling through to a lower-precedence
     location, because reviewing with an installation the operator did not
@@ -622,7 +629,11 @@ def resolve_backend() -> Path:
     anything, so a misresolved backend costs no model work.
     """
     record = kanban_config.issue_review_record_path()
-    override = os.environ.get(kanban_config.ISSUE_REVIEW_INSTALL_DIR_ENV)
+    override = (
+        str(install_dir)
+        if install_dir
+        else os.environ.get(kanban_config.ISSUE_REVIEW_INSTALL_DIR_ENV)
+    )
     if override and override.strip():
         resolved = Path(override).expanduser() / BACKEND_NAME
     else:
@@ -2294,6 +2305,34 @@ def job_install_dir(job: ApprovalJob) -> Path:
     return default_install_dir()
 
 
+def installed_backend_install_dir(identity: str) -> str | None:
+    """The canonical reviewer installation this repository's job was installed
+    against, if the install selected one."""
+    return _recorded_string(identity, "backend_install_dir")
+
+
+def selected_backend_install_dir(job: ApprovalJob) -> str | None:
+    """Which canonical reviewer installation this job's definition selects.
+
+    The environment first, because a process pointed at one is choosing it.
+    Then the one recorded for this repository, which is what makes the choice
+    durable: a definition is rewritten on every start, and a start issued from
+    an empty environment -- Kanban's, or a service manager's -- would otherwise
+    silently rewrite the job to resolve some other reviewer than the one its
+    install verified. None means the job resolves through the fixed
+    issue-review record, which needs no environment at all and is the ordinary
+    case.
+
+    Always absolute, because a relative directory names a different place to
+    every process that reads it, and the job reads it with the checkout as its
+    working directory rather than with the installer's.
+    """
+    override = os.environ.get(kanban_config.ISSUE_REVIEW_INSTALL_DIR_ENV)
+    if override and override.strip():
+        return str(Path(override).expanduser().resolve())
+    return installed_backend_install_dir(job.identity)
+
+
 def installed_config_path(identity: str) -> str | None:
     """The kanban `config.toml` this repository's service was installed with.
 
@@ -2376,22 +2415,16 @@ def service_definition(
         "PYTHONUNBUFFERED": "1",
         INSTALL_DIR_ENV: str(install_dir),
     }
-    # Carried across only when this install actually selected one. The
+    # Carried across only when this installation actually selected one. The
     # installer verifies the canonical backend it resolved, and a job that
     # resolved a different one would run a reviewer nobody checked; a job
-    # installed with no override resolves through the fixed issue-review
+    # installed with no selection resolves through the fixed issue-review
     # record, which is the durable answer and needs no environment at all.
-    #
-    # Absolute, because a relative override names a different directory to
-    # every process that reads it. `resolve_backend` read it against *this*
-    # process's working directory, while the job runs with the checkout as
-    # its own -- so the raw value would install a definition pointing at a
-    # backend nobody verified, or at none at all.
-    override = os.environ.get(kanban_config.ISSUE_REVIEW_INSTALL_DIR_ENV)
-    if override and override.strip():
-        environment[kanban_config.ISSUE_REVIEW_INSTALL_DIR_ENV] = str(
-            Path(override).expanduser().resolve()
-        )
+    # `selected_backend_install_dir` is what keeps that selection across a
+    # refresh performed by a process holding no environment.
+    selected = selected_backend_install_dir(job)
+    if selected:
+        environment[kanban_config.ISSUE_REVIEW_INSTALL_DIR_ENV] = selected
     arguments = [
         python,
         str(controller_path(install_dir)),
@@ -2537,6 +2570,7 @@ def install_plan(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
         "install_dir": str(install_dir),
         "controller": str(controller_path(install_dir)),
         "config_path": job.config_path,
+        "backend_install_dir": selected_backend_install_dir(job),
         "runtime_dir": str(job.runtime_dir),
         "log_dir": str(job.log_dir),
         # Installation loads a stopped job and nothing else. The definition
@@ -2566,6 +2600,12 @@ def write_discovery_record(
     }
     if job.config_path:
         updates["config_path"] = job.config_path
+    # Recorded from the same resolution the definition was written with, so the
+    # next refresh restores exactly the reviewer installation this one ran
+    # against rather than whatever its own environment happens to say.
+    selected = selected_backend_install_dir(job)
+    if selected:
+        updates["backend_install_dir"] = selected
     return merge_repository_record(
         job.identity,
         updates,

@@ -154,10 +154,15 @@ BACKEND_REMEDIATION = (
 )
 
 
-def canonical_backend() -> Path:
-    """The installed canonical issue-review backend this service will run.
+def canonical_backend(job: approve_issues_service.ApprovalJob) -> Path:
+    """The installed canonical issue-review backend this job will run.
 
-    Resolved, never installed. The order is the controller's, which is the one
+    Resolved, never installed, and resolved for *this job's* selection rather
+    than for this shell's: a reinstall from an empty environment must verify
+    the reviewer installation the definition it is about to write will name,
+    which is the one the previous install recorded.
+
+    The order is the controller's, which is the one
     `docs/agent-workflow-contract.md` sections 2.3 and 3 fix and
     `Kanban.Review.resolveCanonicalIssueReviewer` implements: a non-empty
     `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the absolute `backend_path` the
@@ -171,7 +176,9 @@ def canonical_backend() -> Path:
     reviewer the operator did not choose is worse than an install refused.
     """
     try:
-        resolved = approve_issues_service.resolve_backend()
+        resolved = approve_issues_service.resolve_backend(
+            approve_issues_service.selected_backend_install_dir(job)
+        )
         # Absolute in what this installer reports, for the same reason the
         # definition records an absolute override: a relative answer names a
         # different file to every process that reads it, and the one a job
@@ -453,7 +460,7 @@ def install(
     )
     job = repository_job(repo, resolved_config_path)
     require_matching_controller(repo)
-    canonical = canonical_backend()
+    canonical = canonical_backend(job)
     plan = controller_operation("install_plan", job, install_dir)
     sources = link_sources(repo, install_dir)
     resolved_sources = {
