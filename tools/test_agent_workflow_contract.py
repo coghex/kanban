@@ -1341,11 +1341,15 @@ class AgentWorkflowContractTests(unittest.TestCase):
         )
 
     def test_drainer_discovery_record_grounds_its_writer_and_its_reader(self):
-        # The record is the whole cross-language coupling: the controller
+        # The record is the whole cross-language coupling: the Python side
         # writes it, Kanban reads it, and neither can see the other's
         # constants. So the manifest has to name both sides, and the path has
         # to appear literally in each rather than only in whichever one a
-        # single-file row happened to declare.
+        # single-file row happened to declare. The writer is
+        # `tools/kanban_config.py` rather than the controller: that is the one
+        # module installed beside the controller, so it is the only one both
+        # the installer and the installed copy can import, and therefore the
+        # only place the location is written down.
         by_id = {row["id"]: row for row in self.manifest}
         self.assertIn("drainer-discovery-record", by_id)
         entry = by_id["drainer-discovery-record"]
@@ -1353,11 +1357,36 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertEqual(entry["owner"], "kanban")
         self.assertEqual(entry["status"], "supported")
         self.assertEqual(
-            entry["files"], ["tools/drain_prs_service.py", "src/Kanban/Drainer.hs"]
+            entry["files"], ["tools/kanban_config.py", "src/Kanban/Drainer.hs"]
         )
         for relative_path in entry["files"]:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             self.assertIn(entry["token"], content, relative_path)
+
+    def test_every_managed_drainer_location_declares_both_platforms(self):
+        # Issue #358: three locations times two platform conventions. A
+        # location whose macOS row exists without its XDG sibling — or the
+        # reverse — leaves one platform's literal undeclared and therefore
+        # unpoliced, which is the hole the pairing rule exists to close. The
+        # log root is included because it had no row at all before this.
+        by_id = {row["id"]: row for row in self.manifest}
+        for macos_id, xdg_id in (
+            ("drainer-install-dir", "drainer-install-dir-xdg"),
+            ("drainer-discovery-record", "drainer-discovery-record-xdg"),
+            ("drainer-log-dir", "drainer-log-dir-xdg"),
+        ):
+            for row_id in (macos_id, xdg_id):
+                with self.subTest(row=row_id):
+                    self.assertIn(row_id, by_id)
+                    row = by_id[row_id]
+                    self.assertEqual(row["kind"], "personal-path")
+                    self.assertEqual(row["owner"], "kanban")
+                    self.assertEqual(row["status"], "supported")
+                    # Every one of the six is grounded in the module that
+                    # writes it down, whichever other readers it also has.
+                    self.assertIn("tools/kanban_config.py", row["files"])
+            self.assertTrue(by_id[macos_id]["token"].startswith("/Library/"))
+            self.assertTrue(by_id[xdg_id]["token"].startswith("/.local/"))
 
 
     def test_issue_review_discovery_record_grounds_every_reader(self):

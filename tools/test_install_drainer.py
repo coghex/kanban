@@ -1,14 +1,18 @@
-"""Safety tests for the macOS PR drainer installer."""
+"""Safety tests for the PR drainer installer."""
 
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import drain_prs_service
 import install_drainer
+import kanban_config
+import service_manager
 
 
 class InstallSymlinkTests(unittest.TestCase):
@@ -563,6 +567,383 @@ class InstallerFailureVocabularyTests(unittest.TestCase):
         ):
             with self.assertRaises(install_drainer.InstallError):
                 install_drainer.service_backend().kick("com.example.job")
+
+
+class LegacyMigrationFixture(unittest.TestCase):
+    """A simulated host with a `~/Library`-spelled drainer installation.
+
+    Hermetic on both counts that matter: `$HOME` and both XDG base directories
+    are redirected into a temporary tree and the platform is simulated, so the
+    developer's own installation is unreachable and the same cases answer
+    identically on a macOS laptop and the Linux CI runner; and the service
+    manager is a real `SystemdBackend` driven by a stub runner, so unit files
+    are rendered and record entries are shaped for real while no `systemctl`
+    is ever spawned.
+
+    The legacy installation is not hand-assembled. It is produced by the
+    controller's own writers with the module's managed paths bound under a
+    simulated macOS, which is exactly the resolution a pre-XDG Linux install
+    ran with — so what these cases migrate is the state that mechanism really
+    leaves behind.
+    """
+
+    def setUp(self):
+        # Registered before every patch below, so it runs after all of them
+        # have unwound and the module describes the real host again for
+        # whatever runs next in this process.
+        self.addCleanup(drain_prs_service.bind_managed_paths)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.start(mock.patch.dict(os.environ, {"HOME": str(self.home)}))
+        for variable in (
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CONFIG_HOME",
+            kanban_config.DRAINER_INSTALL_DIR_ENV,
+        ):
+            os.environ.pop(variable, None)
+        self.start(mock.patch.object(kanban_config.sys, "platform", "linux"))
+        self.legacy_install = (
+            self.home / "Library" / "Application Support" / "kanban" / "pr-drainer"
+        )
+        self.legacy_logs = self.home / "Library" / "Logs" / "kanban" / "pr-drainer"
+        self.xdg_install = self.home / ".local" / "share" / "kanban" / "pr-drainer"
+        self.xdg_logs = self.home / ".local" / "state" / "kanban" / "pr-drainer"
+        self.units = self.home / ".config" / "systemd" / "user"
+        self.start(mock.patch.object(service_manager, "SYSTEMD_USER_DIR", self.units))
+        # A definition renders $HOME into its environment and PATH, so the
+        # controller's own frozen copy is redirected too.
+        self.start(mock.patch.object(drain_prs_service, "HOME", self.home))
+        # Only the remote that decides the *identity* is pinned, so these cases
+        # do not depend on the developer's own shared configuration.
+        self.start(
+            mock.patch.object(
+                drain_prs_service, "discovery_remote_name", return_value="origin"
+            )
+        )
+        self.commands = []
+        self.controller_calls = []
+        self.active = set()
+        self.real_run = install_drainer.run
+        self.backend = service_manager.SystemdBackend(
+            self.fake_run, service_manager.DRAINER_NAMESPACE
+        )
+        for module in (install_drainer, drain_prs_service):
+            self.start(
+                mock.patch.object(module, "service_backend", return_value=self.backend)
+            )
+        self.start(mock.patch.object(install_drainer, "run", self.fake_run))
+        drain_prs_service.bind_managed_paths()
+
+    # -- fixture plumbing -------------------------------------------------
+
+    def start(self, patcher):
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return patcher
+
+    def fake_run(self, args, *, check=True, env=None):
+        """Every command the installer or the backend spawns.
+
+        `systemctl` and the installed controller are answered rather than run;
+        `git` reaches the real binary against the real temporary checkouts,
+        because a repository's identity is what the whole partitioning hangs
+        off and faking it would prove nothing.
+        """
+        self.commands.append(list(args))
+        if args and args[0] == "systemctl":
+            return subprocess.CompletedProcess(args, 0, self.systemctl_output(args), "")
+        if args and args[0] == sys.executable:
+            self.controller_calls.append(list(args))
+            return subprocess.CompletedProcess(
+                args, 0, json.dumps({"installed": True}), ""
+            )
+        return self.real_run(args, check=check, env=env)
+
+    def systemctl_output(self, args):
+        if args[2:3] != ["show"]:
+            return ""
+        identifier, name = args[3], args[5]
+        if name == "ActiveState":
+            return "active\n" if identifier in self.active else "inactive\n"
+        if name == "LoadState":
+            path = self.backend.definition_path(identifier)
+            return "loaded\n" if path.is_file() else "not-found\n"
+        return "0\n"
+
+    def make_checkout(self, name, remote_url):
+        repo = self.root / name
+        tools = repo / "tools"
+        tools.mkdir(parents=True)
+        for module in (
+            "drain_prs.py",
+            "drain_prs_service.py",
+            "kanban_config.py",
+            "service_manager.py",
+        ):
+            (tools / module).write_text(f"# {module}\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin", remote_url], check=True
+        )
+        return repo
+
+    def seed_legacy_install(self, *checkouts):
+        """The installation a pre-XDG host really has, written by the real
+        writers under the resolution that host ran with."""
+        patched = mock.patch.object(kanban_config.sys, "platform", "darwin")
+        patched.start()
+        try:
+            drain_prs_service.bind_managed_paths()
+            for checkout in checkouts:
+                job = drain_prs_service.resolve_job(checkout)
+                drain_prs_service.ensure_dirs(job)
+                self.backend.write_definition(drain_prs_service.service_definition(job))
+                drain_prs_service.write_discovery_record(job)
+                # Durable state the relocation must carry across rather than
+                # recreate: an open incident, and a log the operator can still
+                # read afterwards.
+                (job.incident_dir / "incident.json").write_text(
+                    json.dumps({"id": job.slug, "kind": "merge-conflict"}),
+                    encoding="utf-8",
+                )
+                job.service_log_path.write_text(f"log for {job.identity}\n", encoding="utf-8")
+            for module in (
+                "drain_prs.py",
+                "drain_prs_service.py",
+                "kanban_config.py",
+                "service_manager.py",
+            ):
+                install_drainer.install_symlink(
+                    checkouts[0] / "tools" / module, self.legacy_install / module
+                )
+        finally:
+            patched.stop()
+        # As a fresh process on that host would resolve it: the probe finds the
+        # `~/Library` record and nothing under XDG.
+        drain_prs_service.bind_managed_paths()
+
+    def record(self, path):
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def install(self, repo, install_dir=None, **options):
+        return install_drainer.install(
+            repo,
+            install_dir if install_dir is not None else Path(
+                install_drainer.default_install_destination()
+            ),
+            ntfy_url=options.pop("ntfy_url", None),
+            dry_run=options.pop("dry_run", False),
+            **options,
+        )
+
+
+class LegacyMigrationTests(LegacyMigrationFixture):
+    def setUp(self):
+        super().setUp()
+        self.widgets = self.make_checkout("widgets", "git@github.com:acme/widgets.git")
+        self.gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
+
+    def test_a_default_linux_install_relocates_every_recorded_repository(self):
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        result = self.install(self.widgets)
+
+        migration = result["legacy_migration"]
+        self.assertTrue(migration["migrated"])
+        self.assertEqual(migration["repositories"], ["acme/gadgets", "acme/widgets"])
+
+        # Both records survive, in the one document at the new location.
+        document = self.record(self.xdg_install / "config.json")
+        self.assertEqual(
+            sorted(document["repositories"]), ["acme/gadgets", "acme/widgets"]
+        )
+        # Both definitions were rewritten against the destination and reloaded.
+        for identity in ("acme/widgets", "acme/gadgets"):
+            slug = drain_prs_service.repository_slug(identity)
+            unit = self.backend.definition_path(
+                self.backend.service_identifier(slug)
+            ).read_text(encoding="utf-8")
+            self.assertIn(str(self.xdg_install), unit)
+            self.assertIn(str(self.xdg_logs / slug), unit)
+            self.assertNotIn(str(self.legacy_install), unit)
+            # And the durable state came with them, incidents included.
+            self.assertTrue(
+                (self.xdg_install / "runtime" / slug / "incidents" / "incident.json").is_file()
+            )
+            self.assertEqual(
+                (self.xdg_logs / slug / "service.log").read_text(encoding="utf-8"),
+                f"log for {identity}\n",
+            )
+        self.assertIn(["systemctl", "--user", "daemon-reload"], self.commands)
+
+        # Only then is the legacy installation gone — both of its trees.
+        self.assertFalse(self.legacy_install.exists())
+        self.assertFalse(self.legacy_logs.exists())
+
+    def test_the_merge_keeps_every_repository_and_installer_key_with_xdg_winning(self):
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        legacy = self.record(self.legacy_install / "config.json")
+        legacy["ntfy_url"] = "https://legacy.example.test/topic"
+        legacy["only_legacy"] = "kept"
+        (self.legacy_install / "config.json").write_text(
+            json.dumps(legacy), encoding="utf-8"
+        )
+        # A record already at the destination, holding one repository the
+        # legacy document also names and one it does not.
+        self.xdg_install.mkdir(parents=True)
+        (self.xdg_install / "config.json").write_text(
+            json.dumps(
+                {
+                    "ntfy_url": "https://current.example.test/topic",
+                    "repositories": {
+                        "acme/widgets": dict(
+                            legacy["repositories"]["acme/widgets"],
+                            config_path="/current/config.toml",
+                        )
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        drain_prs_service.bind_managed_paths()
+
+        self.install(self.widgets)
+
+        document = self.record(self.xdg_install / "config.json")
+        # No repository dropped, and no installer key silently deleted with the
+        # directory the only copy of it lived in.
+        self.assertEqual(
+            sorted(document["repositories"]), ["acme/gadgets", "acme/widgets"]
+        )
+        self.assertEqual(document["only_legacy"], "kept")
+        # The destination document wins per key, at both levels.
+        self.assertEqual(document["ntfy_url"], "https://current.example.test/topic")
+        self.assertEqual(
+            document["repositories"]["acme/widgets"]["config_path"],
+            "/current/config.toml",
+        )
+
+    def test_a_custom_destination_installs_there_and_relocates_nothing(self):
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        elsewhere = self.root / "custom-install"
+        result = self.install(self.widgets, elsewhere)
+
+        self.assertFalse(result["legacy_migration"]["migrated"])
+        self.assertIn("left exactly as it is", result["legacy_migration"]["reason"])
+        self.assertTrue((elsewhere / "drain_prs_service.py").is_symlink())
+        # Nothing about the legacy installation moved or was removed.
+        self.assertTrue((self.legacy_install / "config.json").is_file())
+        self.assertTrue((self.legacy_install / "runtime").is_dir())
+        self.assertTrue(self.legacy_logs.is_dir())
+
+    def test_a_macos_host_migrates_nothing_and_removes_nothing(self):
+        # Requirement 6 is Linux-only, and this is the invariant it rests on:
+        # on macOS the two locations are one directory, so a live install can
+        # never be relocated out from under itself.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        with mock.patch.object(kanban_config.sys, "platform", "darwin"):
+            drain_prs_service.bind_managed_paths()
+            self.assertIsNone(install_drainer.legacy_install_dir())
+            result = self.install(self.widgets, self.legacy_install)
+        self.assertIsNone(result["legacy_migration"])
+        self.assertTrue((self.legacy_install / "config.json").is_file())
+        self.assertTrue((self.legacy_install / "runtime").is_dir())
+        self.assertTrue(self.legacy_logs.is_dir())
+        self.assertFalse(self.xdg_install.exists())
+
+    # -- refusals, none of which may mutate anything ----------------------
+
+    def assert_nothing_changed(self, message, *, repo=None):
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.install(repo if repo is not None else self.widgets)
+        self.assertIn(message, str(raised.exception))
+        # Neither the relocation nor a fresh install at the destination: a new
+        # installation standing beside a retained legacy one is the split state
+        # the refusal exists to prevent, and the XDG-first probe would then
+        # hide the legacy siblings.
+        self.assertFalse(self.xdg_install.exists())
+        self.assertFalse(self.xdg_logs.exists())
+        self.assertTrue((self.legacy_install / "config.json").is_file())
+        self.assertTrue((self.legacy_install / "runtime").is_dir())
+        self.assertTrue(self.legacy_logs.is_dir())
+
+    def test_it_refuses_while_any_recorded_repository_has_a_live_job(self):
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        # A sibling's job, not this run's own: the shared installation is every
+        # recorded repository's, so the guard is broadened to all of them.
+        self.active.add(
+            self.backend.service_identifier(
+                drain_prs_service.repository_slug("acme/gadgets")
+            )
+        )
+        self.assert_nothing_changed("acme/gadgets")
+
+    def test_it_refuses_while_a_sibling_checkout_holds_the_run_lock(self):
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        git_dir = Path(
+            self.real_run(
+                ["git", "-C", str(self.gadgets), "rev-parse", "--absolute-git-dir"]
+            ).stdout.strip()
+        )
+        (git_dir / "drain_prs.lock").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        self.assert_nothing_changed("acme/gadgets")
+
+    def test_it_refuses_when_a_destination_durable_tree_already_exists(self):
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        (self.xdg_logs / "acme.widgets").mkdir(parents=True)
+        (self.xdg_logs / "acme.widgets" / "service.log").write_text(
+            "someone else's\n", encoding="utf-8"
+        )
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.install(self.widgets)
+        self.assertIn("already exists", str(raised.exception))
+        # The refusal names the conflicting paths, and preserves both sides.
+        self.assertIn(str(self.legacy_logs), str(raised.exception))
+        self.assertEqual(
+            (self.xdg_logs / "acme.widgets" / "service.log").read_text(encoding="utf-8"),
+            "someone else's\n",
+        )
+        self.assertTrue((self.legacy_logs / "acme.widgets" / "service.log").is_file())
+
+    def test_it_refuses_when_the_legacy_install_holds_an_unexpected_file(self):
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        (self.legacy_install / "notes.txt").write_text("mine\n", encoding="utf-8")
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.install(self.widgets)
+        self.assertIn("did not put there", str(raised.exception))
+        self.assertEqual(
+            (self.legacy_install / "notes.txt").read_text(encoding="utf-8"), "mine\n"
+        )
+        self.assertFalse(self.xdg_install.exists())
+
+    def test_it_refuses_when_a_recorded_sibling_cannot_be_inspected(self):
+        # Rewriting a sibling's definition depends on recovering its checkout
+        # and its identity exactly. An entry that names neither describes a job
+        # this run would leave pointing at a directory it is about to remove.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        document = self.record(self.legacy_install / "config.json")
+        del document["repositories"]["acme/gadgets"]["repository"]
+        (self.legacy_install / "config.json").write_text(
+            json.dumps(document), encoding="utf-8"
+        )
+        self.assert_nothing_changed("no absolute checkout path")
+
+    def test_it_refuses_a_sibling_installed_under_the_other_service_manager(self):
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        document = self.record(self.legacy_install / "config.json")
+        document["repositories"]["acme/gadgets"] = {
+            "backend": "launchd",
+            "launchd_label": "com.coghex.drain-prs.acme.gadgets",
+            "plist_path": "/somewhere/com.coghex.drain-prs.acme.gadgets.plist",
+            "repository": str(self.gadgets),
+        }
+        (self.legacy_install / "config.json").write_text(
+            json.dumps(document), encoding="utf-8"
+        )
+        self.assert_nothing_changed("not the systemd service manager")
 
 
 if __name__ == "__main__":

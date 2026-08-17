@@ -397,9 +397,8 @@ arithmetic, which §2.3 owns.
   host-prerequisite entry. That surface is executable-only. The home-relative
   paths these modules build are neither asserted nor scanned from here: some
   have `personal-path` rows (the drainer's install directory, its discovery
-  record, its LaunchAgent label), others deliberately have none yet
-  (`~/Library/LaunchAgents`, `~/.config/systemd/user`, the drainer's log root,
-  the legacy
+  record, its log root, its LaunchAgent label), others deliberately have none
+  yet (`~/Library/LaunchAgents`, `~/.config/systemd/user`, the legacy
   `~/work/approve-issues.py` launcher), and reconciling them is #146's work,
   not this surface's. Their behavior stays covered by
   `tools/test_pure_logic.py`, `tools/test_drain_prs_service.py`,
@@ -516,11 +515,10 @@ arithmetic, which §2.3 owns.
   `~/.config/systemd/user`, named for the identifier
   `tools/service_manager.py` derives from that repository's normalized
   identity; a runtime directory holding the status file and incidents at
-  `~/Library/Application Support/kanban/pr-drainer/runtime/<slug>`; and a log
+  `<install-dir>/runtime/<slug>`; and a log
   directory holding the service and dated logs at
-  `~/Library/Logs/kanban/pr-drainer/<slug>`. Shared across repositories — the
-  discovery record at
-  `~/Library/Application Support/kanban/pr-drainer/config.json`, whose
+  `<log-root>/<slug>`. Shared across repositories — the
+  discovery record at `<install-dir>/config.json`, whose
   `repositories` table carries one entry per installed repository naming the
   backend that wrote it, that job's identifier, the definition's absolute path,
   the checkout it was installed for,
@@ -531,8 +529,23 @@ arithmetic, which §2.3 owns.
   an exclusive `flock` on a sibling lock file, because installs and starts for
   different repositories run concurrently and an unserialized merge would drop
   the entry a running repository is discovered through; the global `ntfy_url`
-  beside it; and the installer-managed script directory at
-  `~/Library/Application Support/kanban/pr-drainer`. Per checkout — a
+  beside it; and the installer-managed script directory `<install-dir>` those
+  three sit in.
+
+  `<install-dir>` and `<log-root>` are this platform's own conventions,
+  resolved for every component by `tools/kanban_config.py` and declared as
+  `personal-path` rows in §4: on macOS
+  `~/Library/Application Support/kanban/pr-drainer` and
+  `~/Library/Logs/kanban/pr-drainer`, and on Linux `$XDG_DATA_HOME` and
+  `$XDG_STATE_HOME`'s `kanban/pr-drainer` — `~/.local/share` and
+  `~/.local/state` when the variable is unset, empty, or not absolute.
+  Discovery probes the XDG location first and the `~/Library` location second
+  on both platforms and takes the first whose record exists, so an installation
+  that already exists never has to move; only when neither is occupied is the
+  answer this platform's write path. `--install-dir` and
+  `KANBAN_DRAINER_INSTALL_DIR` relocate the script directory and the runtime
+  root beneath it, and neither moves the discovery record or the log root.
+  Per checkout — a
   versioned drain-state JSON file, which records both the approved head each
   queued pull request was cleared at and the post-merge obligations a merged
   pull request still owes, and which migrates forward from the shapes earlier
@@ -887,8 +900,12 @@ issue-review-log-dir | personal-path | /Library/Logs/kanban/issue-review | tools
 issue-review-log-dir-xdg | personal-path | /.local/state/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/Review/Canonical.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/service_manager.py | kanban | supported | no
-drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
-drainer-install-dir | personal-path | /Library/Application Support/kanban/pr-drainer | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
+drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/Drainer.hs | kanban | supported | no
+drainer-discovery-record-xdg | personal-path | /.local/share/kanban/pr-drainer/config.json | tools/kanban_config.py | kanban | supported | no
+drainer-install-dir | personal-path | /Library/Application Support/kanban/pr-drainer | tools/kanban_config.py;src/Kanban/Drainer.hs | kanban | supported | no
+drainer-install-dir-xdg | personal-path | /.local/share/kanban/pr-drainer | tools/kanban_config.py | kanban | supported | no
+drainer-log-dir | personal-path | /Library/Logs/kanban/pr-drainer | tools/kanban_config.py | kanban | supported | no
+drainer-log-dir-xdg | personal-path | /.local/state/kanban/pr-drainer | tools/kanban_config.py | kanban | supported | no
 find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md | kanban | supported | no
 head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md | kanban | supported | no
 codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md | external | supported | no
@@ -912,13 +929,32 @@ only with `approve_issues.py --log-dir`, never with `--install-dir` or
 `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, so it needs no relocation rule of the kind
 `drainer-install-dir` documents below.
 
+The six drainer `personal-path` rows are three locations times two platform
+conventions, on exactly the terms the issue-review rows above follow.
 `drainer-install-dir` is the directory the installer links the drainer, the
 controller and the configuration parser into, and the default Kanban resolves
-`drain_prs.py` inside for the board's `m` key. It is listed separately from
-`drainer-discovery-record` because the two move independently: `--install-dir`
-relocates this directory, while the record's own path is fixed precisely so a
-dashboard that inherited no environment can still find an install that moved.
-Both sides therefore spell the default, and neither derives it from the other.
+`drain_prs.py` inside for the board's `m` key; `drainer-install-dir-xdg` is the
+same directory as the XDG data directory spells it.
+`drainer-discovery-record` and `drainer-discovery-record-xdg` are the record
+inside each. The install directory is listed separately from the record because
+the two move independently: `--install-dir` relocates this directory, while the
+record's own path is fixed precisely so a dashboard that inherited no
+environment can still find an install that moved. `drainer-log-dir` and
+`drainer-log-dir-xdg` are the log root as macOS and the XDG *state* directory
+spell it; it moves with neither `--install-dir` nor
+`KANBAN_DRAINER_INSTALL_DIR`, so like the issue-review log directory it needs no
+relocation rule.
+
+Every one of the six declares `tools/kanban_config.py`, because that module is
+where each is written down, once, for both platforms — the controller, the
+installer and the drainer all resolve through it rather than spelling a path of
+their own. §5 describes which of them is a fresh install's write default on a
+given host, which existing installation the probe prefers, and the one
+relocation that ever moves an installation between them. The two `~/Library`
+rows also declare `src/Kanban/Drainer.hs`, which still spells that location
+itself: the dashboard's own resolver joins this arc separately, so until it does
+a Linux host discovers an XDG-installed drainer from the Python side and not yet
+from the board.
 
 `drainer-launchagent-label`'s token is the shared prefix, which is all a single
 token can be: an installed job's identifier appends the repository's own slug
@@ -975,8 +1011,9 @@ search step and nothing else, which is what `mandatory: no` records.
 
 - **Project-scoped assets are preferred.** Where Kanban must write outside
   the repository at all, it prefers a small, clearly namespaced footprint:
-  the drainer installer's default install directory is
-  `~/Library/Application Support/kanban/pr-drainer`, and its job identifiers
+  the drainer installer's default install directory is this platform's own
+  `kanban/pr-drainer` — `~/Library/Application Support` on macOS, the XDG data
+  directory elsewhere — and its job identifiers
   and definition paths — LaunchAgent labels and plists under
   `~/Library/LaunchAgents`, unit names and files under
   `~/.config/systemd/user` — are a Kanban-owned convention rather than a
@@ -994,8 +1031,8 @@ search step and nothing else, which is what `mandatory: no` records.
   The controller partitions the runtime and log paths by that identity and —
   from those same values — records the backend that wrote the entry, the job's
   identifier, the definition's absolute path,
-  and the checkout it was installed for under that repository's entry in
-  `~/Library/Application Support/kanban/pr-drainer/config.json`. The
+  and the checkout it was installed for under that repository's entry in the
+  discovery record inside that install directory. The
   derivation is total, produces a valid nonempty label for every supported
   `owner/name`, and is injective across distinct normalized identities, so no
   two repositories can name one job. `tools/install_drainer.py` resolves a job
@@ -1019,6 +1056,45 @@ search step and nothing else, which is what `mandatory: no` records.
   pre-per-repository installer wrote is deliberately not read as a fallback,
   because doing so would let a later installation silently change the
   configuration an earlier repository's drainer restarts with.
+  The drainer's own three managed locations are spelled once in
+  `tools/kanban_config.py`, the only tracked module installed beside the
+  controller and therefore the only one both the installer and the installed
+  controller can import. Its install directory — the discovery record and the
+  runtime root with it — defaults to
+  `~/Library/Application Support/kanban/pr-drainer` on macOS and to
+  `$XDG_DATA_HOME/kanban/pr-drainer` elsewhere; its log root defaults to
+  `~/Library/Logs/kanban/pr-drainer` and `$XDG_STATE_HOME/kanban/pr-drainer` on
+  the same terms. Either XDG variable is honoured only when it names an
+  absolute directory, which is systemd's own rule for `$XDG_CONFIG_HOME`, so
+  the drainer's managed paths and the unit that runs it read the environment
+  identically; unset, empty, and relative all fall back to `~/.local/share` and
+  `~/.local/state`. Those are *write* defaults, and resolving an installation
+  that already exists probes the XDG location first and the `~/Library`
+  location second on both platforms, exactly as the issue-review probe below
+  does and with the same occupied-but-invalid rule.
+  One installation does move, and only one: on a platform whose own convention
+  is not `~/Library`, an installer run whose destination is that platform's
+  default relocates a `~/Library` installation it finds there, in that run.
+  Nothing about it is silent or partial. It refuses before changing anything
+  when any repository the shared record names has a live job or checkout
+  drainer, when any recorded entry cannot be recovered exactly — its canonical
+  identity, its checkout, and the identifier and definition path this host
+  would derive for it — when a destination runtime or log tree already exists,
+  or when the legacy install directory holds a file the installer did not put
+  there; and a refusal fails the run outright rather than installing at the
+  destination, because a fresh installation standing beside a retained legacy
+  one is the split state the relocation exists to close. When it proceeds, the
+  two discovery documents are merged with the XDG document winning per key at
+  both levels — no installed repository and no installer key is dropped — and
+  that merged document is written durably at the destination *before* any
+  legacy path is removed, so an interrupted run leaves one complete record
+  rather than none. The runtime and log trees, open incidents included, are
+  moved rather than recreated, every recorded repository's definition is
+  rewritten and reloaded against the destination, and only then is the legacy
+  directory removed. A custom `--install-dir` or `KANBAN_DRAINER_INSTALL_DIR`
+  installs where it says and relocates nothing, reporting that the migration
+  was skipped. macOS is never migrated: there the two locations are the same
+  directory.
   `tools/install_issue_review.py` follows the same convention for the
   canonical issue-review backend, and resolves the same way. Its install
   directory defaults to `~/Library/Application Support/kanban/issue-review`

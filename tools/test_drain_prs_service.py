@@ -11,6 +11,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -20,6 +21,7 @@ from unittest import mock
 
 import drain_prs
 import drain_prs_service
+import kanban_config
 import service_manager
 
 
@@ -452,24 +454,81 @@ class PerRepositoryPathTests(RedirectedControllerTestCase):
 
 
 class ModuleDefaultTests(unittest.TestCase):
-    """The unredirected module constants, which every other fixture replaces."""
+    """The unredirected module constants, which every other fixture replaces.
+
+    Two separable claims, because since issue #358 the constants' *values*
+    depend on the host: what they are wired to is asserted here against the
+    resolver that owns each location, and what that resolver answers per
+    platform is `tools/test_kanban_config.py`'s table. Asserting a `~/Library`
+    literal here instead would pass on a macOS laptop and fail the same
+    acceptance command on the Linux CI runner.
+    """
+
+    def test_every_managed_path_is_the_shared_resolvers_answer(self):
+        # Nothing here spells a location of its own: one module writes each of
+        # them down for every platform, and the controller, its installer and
+        # the drainer all resolve through it.
+        self.assertEqual(
+            drain_prs_service.DISCOVERY_RECORD_PATH,
+            kanban_config.drainer_record_path(),
+        )
+        self.assertEqual(
+            drain_prs_service.INSTALL_DIR, kanban_config.drainer_install_dir()
+        )
+        self.assertEqual(
+            drain_prs_service.LOG_ROOT, kanban_config.default_drainer_log_dir()
+        )
+        self.assertEqual(
+            drain_prs_service.RUNTIME_ROOT,
+            drain_prs_service.INSTALL_DIR / "runtime",
+        )
 
     def test_the_record_stays_at_a_fixed_path_an_install_dir_cannot_move(self):
         # Kanban never inherits KANBAN_DRAINER_INSTALL_DIR, so an install made
         # with --install-dir has to remain discoverable: the record is the one
         # thing whose location the option must not relocate.
         self.assertEqual(
-            drain_prs_service.DISCOVERY_RECORD_PATH,
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "kanban"
-            / "pr-drainer"
-            / "config.json",
-        )
-        self.assertEqual(
             drain_prs_service.DEFAULT_INSTALL_DIR,
             drain_prs_service.DISCOVERY_RECORD_PATH.parent,
+        )
+        elsewhere = Path("/tmp/kanban-install-dir-that-does-not-move-the-record")
+        with mock.patch.dict(
+            os.environ, {kanban_config.DRAINER_INSTALL_DIR_ENV: str(elsewhere)}
+        ):
+            self.assertEqual(kanban_config.drainer_install_dir(), elsewhere)
+            self.assertFalse(
+                kanban_config.drainer_record_path().is_relative_to(elsewhere)
+            )
+            self.assertFalse(
+                kanban_config.default_drainer_log_dir().is_relative_to(elsewhere)
+            )
+
+    def test_rebinding_re_resolves_every_managed_path_from_one_rule(self):
+        # The migration is the only caller, and this is what it depends on: a
+        # process whose installation has just moved must stop writing to where
+        # it used to be, and every one of these constants has to move together
+        # or a single run would split its state across two installations.
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, True)
+        try:
+            with mock.patch.dict(
+                os.environ, {"HOME": str(home)}, clear=True
+            ), mock.patch.object(kanban_config.sys, "platform", "linux"):
+                drain_prs_service.bind_managed_paths()
+                for path in (
+                    drain_prs_service.DISCOVERY_RECORD_PATH,
+                    drain_prs_service.INSTALL_DIR,
+                    drain_prs_service.CONTROLLER_PATH,
+                    drain_prs_service.DRAINER_PATH,
+                    drain_prs_service.LOG_ROOT,
+                    drain_prs_service.RUNTIME_ROOT,
+                ):
+                    self.assertTrue(path.is_relative_to(home), path)
+        finally:
+            drain_prs_service.bind_managed_paths()
+        self.assertEqual(
+            drain_prs_service.DISCOVERY_RECORD_PATH,
+            kanban_config.drainer_record_path(),
         )
 
     def test_the_singleton_label_survives_only_as_the_job_to_retire(self):

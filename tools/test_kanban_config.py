@@ -934,5 +934,219 @@ class IssueReviewPathTests(unittest.TestCase):
                 self.assertTrue(after.is_relative_to(second), after)
 
 
+class DrainerPathTests(unittest.TestCase):
+    """Issue #358: the same resolver owns every managed PR-drainer path.
+
+    Table-driven over the same four axes `IssueReviewPathTests` covers —
+    platform, path kind, environment override, and which location already
+    holds an install — for the same reason, and under the same simulated
+    platform and redirected home, so the whole matrix answers identically on a
+    macOS developer machine and on the Linux CI runner.
+    """
+
+    MACOS_INSTALL = "Library/Application Support/kanban/pr-drainer"
+    MACOS_LOG = "Library/Logs/kanban/pr-drainer"
+    XDG_INSTALL_FALLBACK = ".local/share/kanban/pr-drainer"
+    XDG_LOG_FALLBACK = ".local/state/kanban/pr-drainer"
+    WRITE_DEFAULTS = (
+        ("darwin", MACOS_INSTALL, MACOS_LOG),
+        ("linux", XDG_INSTALL_FALLBACK, XDG_LOG_FALLBACK),
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)}, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def home_holding(self, *installed):
+        home = self.root / ("home-" + ("-".join(installed) or "empty"))
+        home.mkdir()
+        for location in installed:
+            suffix = (
+                self.XDG_INSTALL_FALLBACK
+                if location == "xdg"
+                else self.MACOS_INSTALL
+            )
+            directory = home / suffix
+            directory.mkdir(parents=True)
+            (directory / "config.json").write_text("{}", encoding="utf-8")
+        return home
+
+    def test_a_fresh_installs_write_default_is_the_platforms_own_convention(self):
+        for platform, install, log in self.WRITE_DEFAULTS:
+            with self.subTest(platform=platform):
+                with mock.patch.object(kc.sys, "platform", platform):
+                    self.assertEqual(
+                        kc.default_drainer_install_dir(), self.home / install
+                    )
+                    self.assertEqual(kc.default_drainer_log_dir(), self.home / log)
+
+    def test_the_macos_answers_are_unchanged_literals(self):
+        # The byte-identity half of the requirement: whatever else moves, a
+        # macOS host's own write paths and its record are exactly the strings
+        # every existing install already uses.
+        with mock.patch.object(kc.sys, "platform", "darwin"):
+            self.assertEqual(
+                str(kc.default_drainer_install_dir()),
+                f"{self.home}/Library/Application Support/kanban/pr-drainer",
+            )
+            self.assertEqual(
+                str(kc.drainer_record_path()),
+                f"{self.home}/Library/Application Support/kanban/pr-drainer/config.json",
+            )
+            self.assertEqual(
+                str(kc.default_drainer_log_dir()),
+                f"{self.home}/Library/Logs/kanban/pr-drainer",
+            )
+
+    def test_the_xdg_base_directories_override_the_linux_defaults(self):
+        data, state = self.root / "data", self.root / "state"
+        with mock.patch.dict(
+            os.environ, {"XDG_DATA_HOME": str(data), "XDG_STATE_HOME": str(state)}
+        ):
+            with mock.patch.object(kc.sys, "platform", "linux"):
+                self.assertEqual(
+                    kc.default_drainer_install_dir(), data / "kanban" / "pr-drainer"
+                )
+                self.assertEqual(
+                    kc.default_drainer_log_dir(), state / "kanban" / "pr-drainer"
+                )
+            # macOS ignores both, which is what keeps its answers literal even
+            # on a developer machine that exports them.
+            with mock.patch.object(kc.sys, "platform", "darwin"):
+                self.assertEqual(
+                    kc.default_drainer_install_dir(), self.home / self.MACOS_INSTALL
+                )
+                self.assertEqual(
+                    kc.default_drainer_log_dir(), self.home / self.MACOS_LOG
+                )
+
+    def test_an_unset_empty_or_relative_xdg_value_falls_back(self):
+        # Absolute-only, exactly as tools/service_manager.py reads
+        # $XDG_CONFIG_HOME for the unit directory: a relative value is not a
+        # base directory the drainer and the unit that runs it could agree on,
+        # so it is no more usable than an unset one. The set-but-relative case
+        # is the one an "is it set?" test would pass and this one catches.
+        for value in (None, "", "relative/data", "./data"):
+            with self.subTest(value=value):
+                environment = {} if value is None else {
+                    "XDG_DATA_HOME": value,
+                    "XDG_STATE_HOME": value,
+                }
+                with mock.patch.dict(os.environ, environment):
+                    if value is None:
+                        os.environ.pop("XDG_DATA_HOME", None)
+                        os.environ.pop("XDG_STATE_HOME", None)
+                    with mock.patch.object(kc.sys, "platform", "linux"):
+                        self.assertEqual(
+                            kc.default_drainer_install_dir(),
+                            self.home / self.XDG_INSTALL_FALLBACK,
+                        )
+                        self.assertEqual(
+                            kc.default_drainer_log_dir(),
+                            self.home / self.XDG_LOG_FALLBACK,
+                        )
+
+    def test_discovery_probes_xdg_first_and_library_second_on_both_platforms(self):
+        for installed, macos, linux in (
+            ((), self.MACOS_INSTALL, self.XDG_INSTALL_FALLBACK),
+            (("xdg",), self.XDG_INSTALL_FALLBACK, self.XDG_INSTALL_FALLBACK),
+            (("library",), self.MACOS_INSTALL, self.MACOS_INSTALL),
+            (("xdg", "library"), self.XDG_INSTALL_FALLBACK, self.XDG_INSTALL_FALLBACK),
+        ):
+            with self.subTest(installed=installed):
+                home = self.home_holding(*installed)
+                with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                    for platform, expected in (("darwin", macos), ("linux", linux)):
+                        with self.subTest(platform=platform):
+                            with mock.patch.object(kc.sys, "platform", platform):
+                                self.assertEqual(
+                                    kc.installed_drainer_dir(), home / expected
+                                )
+                                self.assertEqual(
+                                    kc.drainer_record_path(),
+                                    home / expected / "config.json",
+                                )
+                                self.assertEqual(
+                                    kc.drainer_install_dir(), home / expected
+                                )
+
+    def test_an_occupied_but_invalid_candidate_still_selects_its_install(self):
+        # lexists rather than is_file, on the same rule the issue-review probe
+        # follows: a dangling record symlink is an installation with something
+        # wrong with it, not an absent one, and resolving past it would silently
+        # answer with the lower-precedence location.
+        home = self.root / "home-dangling"
+        xdg = home / self.XDG_INSTALL_FALLBACK
+        xdg.mkdir(parents=True)
+        (xdg / "config.json").symlink_to(home / "missing.json")
+        library = home / self.MACOS_INSTALL
+        library.mkdir(parents=True)
+        (library / "config.json").write_text("{}", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for platform in ("darwin", "linux"):
+                with self.subTest(platform=platform):
+                    with mock.patch.object(kc.sys, "platform", platform):
+                        self.assertEqual(kc.installed_drainer_dir(), xdg)
+
+    def test_the_environment_override_moves_the_install_dir_and_nothing_else(self):
+        elsewhere = self.root / "elsewhere"
+        for platform, _install, log in self.WRITE_DEFAULTS:
+            with self.subTest(platform=platform):
+                with mock.patch.object(kc.sys, "platform", platform), mock.patch.dict(
+                    os.environ, {kc.DRAINER_INSTALL_DIR_ENV: str(elsewhere)}
+                ):
+                    self.assertEqual(kc.drainer_install_dir(), elsewhere)
+                    self.assertEqual(kc.drainer_install_dir_override(), elsewhere)
+                    # Neither the record nor the log root follows it: a
+                    # dashboard that inherits no environment still has to find
+                    # the record, and logs are not part of the installation
+                    # this variable relocates.
+                    self.assertFalse(
+                        kc.drainer_record_path().is_relative_to(elsewhere)
+                    )
+                    self.assertEqual(kc.default_drainer_log_dir(), self.home / log)
+
+    def test_an_absent_or_blank_override_is_no_override(self):
+        for value in ("", "   "):
+            with self.subTest(value=repr(value)):
+                with mock.patch.dict(
+                    os.environ, {kc.DRAINER_INSTALL_DIR_ENV: value}
+                ):
+                    self.assertIsNone(kc.drainer_install_dir_override())
+                    with mock.patch.object(kc.sys, "platform", "linux"):
+                        self.assertEqual(
+                            kc.drainer_install_dir(),
+                            self.home / self.XDG_INSTALL_FALLBACK,
+                        )
+
+    def test_every_resolver_answers_per_call_rather_than_at_import(self):
+        first, second = self.root / "first", self.root / "second"
+        resolvers = (
+            kc.default_drainer_install_dir,
+            kc.default_drainer_log_dir,
+            kc.macos_drainer_install_dir,
+            kc.macos_drainer_log_dir,
+            kc.installed_drainer_dir,
+            kc.drainer_record_path,
+            kc.drainer_install_dir,
+        )
+        for platform, _install, _log in self.WRITE_DEFAULTS:
+            for resolver in resolvers:
+                with self.subTest(platform=platform, resolver=resolver.__name__):
+                    with mock.patch.object(kc.sys, "platform", platform):
+                        with mock.patch.dict(os.environ, {"HOME": str(first)}):
+                            before = resolver()
+                        with mock.patch.dict(os.environ, {"HOME": str(second)}):
+                            after = resolver()
+                    self.assertTrue(before.is_relative_to(first), before)
+                    self.assertTrue(after.is_relative_to(second), after)
+
+
 if __name__ == "__main__":
     unittest.main()

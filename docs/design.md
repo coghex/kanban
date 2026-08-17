@@ -2261,8 +2261,12 @@ above are unchanged, and persistence the user switched off is not a failure.
   drainer runs with, including the remote its default-branch check and merges
   use.
 - The PR drainer controller discovers the installed job through the
-  record its installer writes at
-  `~/Library/Application Support/kanban/pr-drainer/config.json`, whose
+  record its installer writes as `config.json` inside the drainer's install
+  directory — `~/Library/Application Support/kanban/pr-drainer` on macOS and
+  `$XDG_DATA_HOME/kanban/pr-drainer` (`~/.local/share` when that variable is
+  unset, empty, or not absolute) on every other platform, resolved for every
+  component by one module and probed XDG-first so an installation made under
+  either spelling is found where it already is. Its
   `repositories` table holds one entry per installed repository naming the
   backend that wrote it, that job's identifier, the definition's absolute path,
   and the installed checkout.
@@ -2466,11 +2470,24 @@ above are unchanged, and persistence the user switched off is not a failure.
   reporting — also ends the result behind it, and a dismissed merge report can
   never be recreated by the refresh it required.
 - The canonical drainer, controller, and safety-first installer are versioned
-  with Kanban under `tools/`. The installer creates stable per-user links under
-  `~/Library/Application Support/kanban/pr-drainer/`; rerunning it refreshes
+  with Kanban under `tools/`. The installer creates stable per-user links in
+  that same platform-resolved install directory, with the per-repository log
+  directories under `~/Library/Logs/kanban/pr-drainer` on macOS and
+  `$XDG_STATE_HOME/kanban/pr-drainer` (`~/.local/state` on the same terms)
+  elsewhere; rerunning it refreshes
   those links after repository relocation, and repairs a missing or stale
   discovery record in place without an uninstall and without changing the
-  job's identity. Installing a second repository adds its entry beside
+  job's identity. On a platform whose own convention is not `~/Library`, a
+  default-destination run also relocates a `~/Library` installation it finds:
+  it merges both discovery documents with the current-convention one winning
+  per key, moves the runtime and log trees with their open incidents, rewrites
+  and reloads every installed repository's definition against the new location,
+  and only then removes the old directory — and refuses the whole install
+  without changing anything when any installed repository's drainer is running,
+  when a recorded entry cannot be recovered exactly, when a destination tree
+  already exists, or when the old directory holds a file the installer did not
+  put there. A custom install directory installs there and relocates nothing.
+  Installing a second repository adds its entry beside
   the first rather than replacing it. Before enabling a repository's derived
   job, the installer retires the machine-wide `com.coghex.drain-prs` singleton
   that predates per-repository jobs when that singleton served the same

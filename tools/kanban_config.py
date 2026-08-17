@@ -8,14 +8,15 @@ invalid-value errors, unknown-key warnings, global-only keys, canonical
 lowercase repository keys and the ASCII-folded lookup that selects them,
 repository override merge/array-replacement rules).
 
-This module is also the one place the issue-review backend's own managed
-locations -- its install directory, its discovery record, and its log
-directory -- are written down, for every platform each one has a convention
-on. It is the only tracked module installed alongside `approve_issues.py`, so
-it is the only one that both the installer and the installed backend can
-import -- which is what keeps those locations from being restated once per
-component, or answered for one platform only. See
-default_issue_review_install_dir() and the resolvers below it.
+This module is also the one place two Kanban services' own managed locations
+-- their install directories, their discovery records, and their log
+directories -- are written down, for every platform each one has a convention
+on. It is the only tracked module installed alongside both `approve_issues.py`
+and `drain_prs_service.py`, so it is the only one that each service's
+installer and installed copy can both import -- which is what keeps those
+locations from being restated once per component, or answered for one platform
+only. See default_issue_review_install_dir(), default_drainer_install_dir(),
+and the resolvers below each.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import re
 import sys
 import tomllib
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 # Identity marker for this tracked asset; see the same constant in
@@ -168,6 +169,159 @@ def issue_review_install_dir() -> Path:
     if override and override.strip():
         return Path(override).expanduser()
     return installed_issue_review_dir()
+
+
+# The PR drainer's own managed locations (docs/agent-workflow-contract.md §4),
+# the second service this module owns the paths of. Everything above about the
+# issue-review backend applies here for the same reasons: `drain_prs_service.py`,
+# `install_drainer.py` and `drain_prs.py` all resolve through these rather than
+# rebuilding them, so `--install-dir` cannot move one component's idea of the
+# default without moving every component's.
+DRAINER_INSTALL_DIR_ENV = "KANBAN_DRAINER_INSTALL_DIR"
+
+# Every managed drainer location, on every supported platform, spelled whole
+# exactly once and only here -- the rule the issue-review literals above
+# follow, and for the same reason: each is a `personal-path` token in
+# docs/agent-workflow-contract.md §4 declaring this file, so a spelling that
+# drifts from the manifest fails tools/test_agent_workflow_contract.py rather
+# than shipping.
+#
+# The install directory is deliberately *not* spelled a second time: it is the
+# directory its own discovery record lives in, which is the relationship
+# `DEFAULT_INSTALL_DIR` has always had to `DISCOVERY_RECORD_PATH` in
+# tools/drain_prs_service.py. That keeps each manifest row's token a substring
+# of one literal here rather than a pair of literals that can drift apart.
+_MACOS_DRAINER_RECORD = "/Library/Application Support/kanban/pr-drainer/config.json"
+_XDG_DRAINER_RECORD_FALLBACK = "/.local/share/kanban/pr-drainer/config.json"
+_MACOS_DRAINER_LOG_DIR = "/Library/Logs/kanban/pr-drainer"
+_XDG_DRAINER_LOG_DIR_FALLBACK = "/.local/state/kanban/pr-drainer"
+# The same two directories as home-relative suffixes, taken from the record
+# literals above rather than restated.
+_MACOS_DRAINER_INSTALL_DIR = str(PurePosixPath(_MACOS_DRAINER_RECORD).parent)
+_XDG_DRAINER_INSTALL_DIR_FALLBACK = str(
+    PurePosixPath(_XDG_DRAINER_RECORD_FALLBACK).parent
+)
+# The namespace the two XDG fallbacks spell home-relatively, for the branch
+# where $XDG_DATA_HOME or $XDG_STATE_HOME names the base directory itself.
+_DRAINER_NAMESPACE = ("kanban", "pr-drainer")
+_DRAINER_RECORD_NAME = PurePosixPath(_MACOS_DRAINER_RECORD).name
+
+
+def _xdg_drainer_dir(env_name: str, home_relative_fallback: str) -> Path:
+    """This namespace under an XDG base directory, by the rule
+    tools/service_manager.py's `_systemd_user_dir` already applies to
+    $XDG_CONFIG_HOME: the variable when it names an *absolute* directory, the
+    conventional home-relative directory when it is unset, empty, or relative.
+
+    Absolute-only rather than merely non-empty, so the drainer's managed paths
+    and the systemd unit that runs it interpret the environment identically. A
+    relative value would otherwise resolve against whatever working directory
+    each of them happened to have, which is not a base directory the two could
+    ever agree on. `_xdg_issue_review_dir` above keeps its own rule; that
+    resolver is PATH-1's and is not this one's to change.
+    """
+    base = os.environ.get(env_name, "")
+    if base and os.path.isabs(base):
+        return Path(base).joinpath(*_DRAINER_NAMESPACE)
+    return _home_relative(home_relative_fallback)
+
+
+def macos_drainer_install_dir() -> Path:
+    """The `~/Library`-spelled install directory, named on every platform.
+
+    macOS's own write path, and on any other platform the location a drainer
+    installed before this arc is at -- which is what makes it the directory
+    tools/install_drainer.py migrates away from there, and never on macOS,
+    where it equals default_drainer_install_dir() below.
+    """
+    return _home_relative(_MACOS_DRAINER_INSTALL_DIR)
+
+
+def macos_drainer_log_dir() -> Path:
+    """The `~/Library`-spelled log root, on the same terms."""
+    return _home_relative(_MACOS_DRAINER_LOG_DIR)
+
+
+def _xdg_drainer_install_dir() -> Path:
+    return _xdg_drainer_dir("XDG_DATA_HOME", _XDG_DRAINER_INSTALL_DIR_FALLBACK)
+
+
+def default_drainer_install_dir() -> Path:
+    """Where a *fresh* drainer install goes on this host: this platform's own
+    convention and only that. Where an install that already exists *is* is the
+    different question installed_drainer_dir() answers by probing both.
+
+    Resolved per call rather than frozen here, exactly as the issue-review
+    resolvers above are, so a test that redirects $HOME or the XDG base
+    directories -- or a migration that changes which install exists -- is not
+    escaped by a value bound when this module first loaded. The consumers that
+    want one answer per process bind it themselves; see
+    tools/drain_prs_service.py's module constants.
+    """
+    if _is_macos():
+        return macos_drainer_install_dir()
+    return _xdg_drainer_install_dir()
+
+
+def default_drainer_log_dir() -> Path:
+    """Where every repository's per-slug log directory hangs off.
+
+    Single-valued per platform rather than probed: DRAINER_INSTALL_DIR_ENV
+    relocates the script links and the runtime root beneath them, never the
+    logs, so there is no second location for a probe to prefer. A Linux
+    migration moves an existing `~/Library` log tree here rather than leaving
+    the host with two.
+    """
+    if _is_macos():
+        return macos_drainer_log_dir()
+    return _xdg_drainer_dir("XDG_STATE_HOME", _XDG_DRAINER_LOG_DIR_FALLBACK)
+
+
+def installed_drainer_dir() -> Path:
+    """Where a drainer installation *already is*.
+
+    The XDG location first and the `~/Library` location second, on both
+    platforms, on exactly the terms installed_issue_review_dir() above
+    explains: nothing an operator already installed has to move, occupancy is
+    the discovery record's and is tested with os.path.lexists so an occupied
+    but invalid candidate still selects its installation, and only when
+    neither is occupied is the answer this platform's write path.
+    """
+    for candidate in (_xdg_drainer_install_dir(), macos_drainer_install_dir()):
+        if os.path.lexists(candidate / _DRAINER_RECORD_NAME):
+            return candidate
+    return default_drainer_install_dir()
+
+
+def drainer_record_path() -> Path:
+    """Where the installer records which jobs it actually installed, so Kanban
+    discovers an `--install-dir` installation it never saw the option for.
+    Fixed rather than install-dir-relative on purpose: a dashboard that
+    inherits no environment still has to find it, so neither `--install-dir`
+    nor DRAINER_INSTALL_DIR_ENV relocates it. Read by src/Kanban/Drainer.hs;
+    written by tools/install_drainer.py and tools/drain_prs_service.py."""
+    return installed_drainer_dir() / _DRAINER_RECORD_NAME
+
+
+def drainer_install_dir_override() -> Path | None:
+    """The install directory DRAINER_INSTALL_DIR_ENV names, or None when it
+    names none. The one place that variable is read, so the controller's own
+    install directory and the installer's default destination cannot disagree
+    about whether it was set."""
+    override = os.environ.get(DRAINER_INSTALL_DIR_ENV)
+    if override and override.strip():
+        return Path(override).expanduser()
+    return None
+
+
+def drainer_install_dir() -> Path:
+    """The install directory a drainer component should treat as its own: the
+    environment override when there is one, and otherwise the directory the
+    discovery record lives in -- which is why an install under `~/Library`
+    keeps resolving itself, and keeps its install-dir-relative runtime and
+    incident state, on a host whose fresh-install default is XDG."""
+    override = drainer_install_dir_override()
+    return override if override is not None else installed_drainer_dir()
 
 
 APPROVAL_MODES = {"label", "review", "either"}
