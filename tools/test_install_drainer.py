@@ -1092,6 +1092,11 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertIn("Every change it had made was undone", str(raised.exception))
         self.assertNotIn("could not be undone", str(raised.exception))
 
+        # The destination is untouched *whole*, script links included: a
+        # refusal that reported nothing was installed while leaving an
+        # installation behind would be the split state this all exists to
+        # prevent.
+        self.assertFalse(self.xdg_install.exists())
         # Every definition is byte-identical to what it was, including the one
         # that had already been rewritten before the failure.
         for identity, before in units.items():
@@ -1139,6 +1144,37 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         # The rest of the undo still ran: the destination record it wrote is
         # gone, so a rollback that cannot finish does not also give up.
         self.assertFalse((self.xdg_install / "config.json").exists())
+
+    def test_it_migrates_an_install_directory_holding_a_bytecode_cache(self):
+        # A real install directory has one: running the installed modules out
+        # of it leaves `__pycache__` there. Refusing it would refuse the
+        # ordinary migration, which is the whole default path on Linux.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        cache = self.legacy_install / "__pycache__"
+        cache.mkdir()
+        (cache / "drain_prs_service.cpython-314.pyc").write_bytes(b"\x00bytecode")
+        (cache / "kanban_config.cpython-314.pyc").write_bytes(b"\x00bytecode")
+
+        result = self.install(self.widgets)
+
+        self.assertTrue(result["legacy_migration"]["migrated"])
+        # Regenerable interpreter output rather than a record of anything, so
+        # it goes with the directory rather than being carried across.
+        self.assertFalse(self.legacy_install.exists())
+        self.assertFalse((self.xdg_install / "__pycache__").exists())
+
+    def test_it_refuses_a_pycache_holding_anything_but_bytecode(self):
+        # Verified, not trusted: the name alone must not admit a directory
+        # whose contents the removal would then discard.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        cache = self.legacy_install / "__pycache__"
+        cache.mkdir()
+        (cache / "notes.txt").write_text("mine\n", encoding="utf-8")
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.install(self.widgets)
+        self.assertIn("did not put there", str(raised.exception))
+        self.assertEqual((cache / "notes.txt").read_text(encoding="utf-8"), "mine\n")
+        self.assertFalse(self.xdg_install.exists())
 
     def test_it_refuses_a_sibling_installed_under_the_other_service_manager(self):
         self.seed_legacy_install(self.widgets, self.gadgets)

@@ -60,6 +60,26 @@ def _is_unmanaged(_path: Path) -> bool:
     return False
 
 
+def _is_bytecode_cache(path: Path) -> bool:
+    """The interpreter's own cache of the modules installed beside it.
+
+    Not written by anything here, but produced by running them: importing the
+    controller or its siblings out of the install directory leaves a
+    `__pycache__` there, and a real installation has one. Refusing it would
+    refuse the ordinary migration this exists to perform.
+
+    Verified rather than trusted, on the same rule as every other entry: a
+    plain directory holding nothing but plain `.pyc` files is a bytecode
+    cache, and anything else wearing the name is not. What that admits is
+    regenerable interpreter output rather than a record of anything — which is
+    what makes it safe for the removal below to take with the directory, and
+    is exactly the distinction a name-only check cannot draw.
+    """
+    return _is_plain_directory(path) and all(
+        _is_plain_file(entry) and entry.suffix == ".pyc" for entry in path.iterdir()
+    )
+
+
 # What a legacy install directory may contain and still be relocated whole:
 # each name this installer or the controller creates there, *and what that name
 # has to be* for this to have created it. A name alone is not ownership.
@@ -78,6 +98,7 @@ MANAGED_INSTALL_ENTRIES = {
     "config.json": _is_plain_file,
     "config.json.lock": _is_plain_file,
     "runtime": _is_plain_directory,
+    "__pycache__": _is_bytecode_cache,
 }
 
 # Which keys name a recorded job's identifier and definition, per backend. The
@@ -690,6 +711,49 @@ def preflight_legacy_migration(
     return jobs
 
 
+class Rollback:
+    """The undo for everything one install changes at its destination.
+
+    A refusal has to leave the host as the preflight found it, and the
+    preflight cannot rule out a step that *fails* rather than a state it can
+    see. So every mutation registers how to undo itself before it runs, and a
+    failure runs them in reverse.
+
+    `commit` marks the point of no return: once every repository is usable
+    through the destination there is nothing left to strand, and undoing what
+    got it there would be the destructive act rather than the safe one.
+    """
+
+    def __init__(self) -> None:
+        self._actions: list[Callable[[], None]] = []
+        self.committed = False
+
+    def add(self, action: Callable[[], None]) -> None:
+        self._actions.append(action)
+
+    def commit(self) -> None:
+        self._actions.clear()
+        self.committed = True
+
+    def undo(self) -> list[str]:
+        """Run every action in reverse, returning what could not be undone.
+
+        Total: one action that fails does not abandon the rest, because each
+        undoes a different mutation and the ones that can still be undone
+        should be. What is left is reported rather than raised — nothing here
+        can repair a host whose filesystem stopped cooperating mid-rollback,
+        and the operator has to be told exactly what was left where.
+        """
+        unrepaired = []
+        for action in reversed(self._actions):
+            try:
+                action()
+            except (OSError, service_manager.ServiceManagerError) as exc:
+                unrepaired.append(str(exc))
+        self._actions.clear()
+        return unrepaired
+
+
 def _restore_file(path: Path) -> Callable[[], None]:
     """An undo that puts `path` back exactly as it is right now — including
     putting nothing there, when there is nothing there now."""
@@ -705,6 +769,52 @@ def _restore_file(path: Path) -> Callable[[], None]:
     return restore
 
 
+def _restore_document(path: Path) -> Callable[[], None]:
+    """An undo for a JSON document *and* the lock file writing it creates.
+
+    `document_lock` puts a `<name>.lock` beside the document, so a destination
+    that held neither must end up holding neither — otherwise a refused
+    install leaves a file behind in a directory it reports as untouched.
+    """
+    restore_document = _restore_file(path)
+    lock = path.with_name(path.name + ".lock")
+    lock_existed = os.path.lexists(lock)
+
+    def restore() -> None:
+        restore_document()
+        if not lock_existed and os.path.lexists(lock):
+            lock.unlink()
+
+    return restore
+
+
+def _restore_link(destination: Path) -> Callable[[], None]:
+    """An undo for one installed script link: the target it pointed at before,
+    or nothing at all when it did not exist."""
+    before = os.readlink(destination) if destination.is_symlink() else None
+
+    def restore() -> None:
+        if os.path.lexists(destination):
+            destination.unlink()
+        if before is not None:
+            destination.symlink_to(before)
+
+    return restore
+
+
+def _restore_directory(path: Path) -> Callable[[], None]:
+    """An undo for a directory this run may have created: removed again if it
+    was not there before and nothing is left in it once every other undo has
+    run. A directory that already held something is never touched."""
+    existed = path.exists()
+
+    def restore() -> None:
+        if not existed and path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+
+    return restore
+
+
 def _restore_move(move: TreeMove) -> Callable[[], None]:
     def restore() -> None:
         move.source.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -714,10 +824,12 @@ def _restore_move(move: TreeMove) -> Callable[[], None]:
 
 
 def perform_legacy_migration(
-    migration: LegacyMigration, jobs: list[RecordedJob], backend
+    migration: LegacyMigration,
+    jobs: list[RecordedJob],
+    backend,
+    rollback: Rollback,
 ) -> dict[str, Any]:
-    """Relocate the shared installation, undoing every step of it if any step
-    fails.
+    """Relocate the shared installation, registering the undo for every step.
 
     The order is the one that is safe to be *interrupted* in: the merged record
     is written durably at the destination first, so a run killed outright
@@ -732,43 +844,36 @@ def perform_legacy_migration(
     the preflight cannot rule out: a sibling whose definition cannot be
     rewritten or reloaded would otherwise be left naming trees that had already
     moved, while the newly merged record won discovery — a half-migrated
-    installation rather than the refusal this owes its caller. So every step
-    registers its own undo before it runs, and a failure runs them in reverse:
-    definitions restored byte for byte and reloaded, trees moved back, the
-    destination record returned to whatever it held. The host is then what the
-    preflight found, and the caller raises rather than installs.
-
-    Undo failures are reported alongside the original one instead of replacing
-    it. Nothing here can repair a host whose filesystem stopped cooperating
-    mid-rollback, and the operator has to be told exactly what was left where.
+    installation rather than the refusal this owes its caller. `rollback` is
+    the caller's, and already carries the script links installed before this
+    ran, so undoing covers the whole destination rather than this function's
+    own share of it.
     """
     moves = planned_tree_moves(migration, jobs)
-    undo: list[Callable[[], None]] = [_restore_file(migration.destination_record)]
-    try:
-        drain_prs_service.update_json_document(
-            migration.destination_record,
-            lambda current: merged_record_document(
-                read_config_document(migration.source_record), current
-            ),
-        )
-        # The legacy install directory's own tree first, so a per-repository
-        # tree from elsewhere lands beside what it carried rather than under it.
-        for move in moves:
-            move.destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            shutil.move(str(move.source), str(move.destination))
-            undo.append(_restore_move(move))
-        # From here on every path this process resolves is the destination's.
-        drain_prs_service.bind_managed_paths()
-        for job in jobs:
-            undo.append(_restore_definition(job, backend))
-            _reinstall_recorded_job(job, backend)
-        for job in jobs:
-            backend.load_definition(job.identifier)
-    except Exception as exc:
-        raise InstallError(_rolled_back(undo, exc)) from exc
+    rollback.add(_restore_document(migration.destination_record))
+    drain_prs_service.update_json_document(
+        migration.destination_record,
+        lambda current: merged_record_document(
+            read_config_document(migration.source_record), current
+        ),
+    )
+    # The legacy install directory's own tree first, so a per-repository
+    # tree from elsewhere lands beside what it carried rather than under it.
+    for move in moves:
+        move.destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.move(str(move.source), str(move.destination))
+        rollback.add(_restore_move(move))
+    # From here on every path this process resolves is the destination's.
+    drain_prs_service.bind_managed_paths()
+    for job in jobs:
+        rollback.add(_restore_definition(job, backend))
+        _reinstall_recorded_job(job, backend)
+    for job in jobs:
+        backend.load_definition(job.identifier)
     # Past the point of return: every repository is usable through the
     # destination, so what is left behind is debris rather than an
     # installation, and nothing that follows can strand a sibling.
+    rollback.commit()
     shutil.rmtree(migration.source)
     return {
         "migrated": True,
@@ -798,21 +903,25 @@ def _restore_definition(job: RecordedJob, backend) -> Callable[[], None]:
     return restore
 
 
-def _rolled_back(undo: list[Callable[[], None]], failure: Exception) -> str:
-    """Run every registered undo in reverse and describe what happened."""
-    unrepaired = []
-    for action in reversed(undo):
-        try:
-            action()
-        except OSError as exc:
-            unrepaired.append(str(exc))
-        except service_manager.ServiceManagerError as exc:
-            unrepaired.append(str(exc))
+def _rolled_back(rollback: Rollback, failure: Exception, source: Path | None) -> str:
+    """Undo whatever this install had changed, and describe what happened.
+
+    Past `commit` there is nothing to undo and nothing that could strand a
+    repository, so a failure there is reported as the completed relocation it
+    is, with the one piece of cleanup the operator has to finish by hand.
+    """
+    unrepaired = rollback.undo()
     # After the destination record is back to what it was, so this resolves the
     # installation the host actually has again.
     drain_prs_service.bind_managed_paths()
+    if rollback.committed:
+        return (
+            f"The PR drainer installation was relocated, but {source} could not "
+            f"then be removed: {failure} Every repository is installed and usable "
+            "at the new location; remove that directory by hand."
+        )
     message = (
-        f"The PR drainer installation could not be relocated: {failure} "
+        f"The PR drainer installation could not be completed: {failure} "
         "Every change it had made was undone, and nothing was installed."
     )
     if unrepaired:
@@ -963,19 +1072,32 @@ def install(
             "started": False,
         }
 
-    link_results = {
-        key: install_symlink(sources[key], destination)
-        for key, destination in destinations.items()
-    }
-    # After the links, because every definition it rewrites names the
-    # controller inside the destination directory, and before the record and
-    # option writes below, because those go to whichever document this process
-    # resolves once the relocation has rebound its managed paths.
+    # One undo scope over everything this run changes at the destination. The
+    # links belong inside it as much as the relocation does: a refusal that
+    # left them behind would report that nothing was installed while having
+    # created the destination installation.
+    rollback = Rollback()
     migration_report = skipped_legacy_migration(install_dir)
-    if migration is not None:
-        migration_report = perform_legacy_migration(
-            migration, migration_jobs, backend
-        )
+    try:
+        rollback.add(_restore_directory(install_dir))
+        link_results = {}
+        for key, destination in destinations.items():
+            rollback.add(_restore_link(destination))
+            link_results[key] = install_symlink(sources[key], destination)
+        # After the links, because every definition it rewrites names the
+        # controller inside the destination directory, and before the record
+        # and option writes below, because those go to whichever document this
+        # process resolves once the relocation has rebound its managed paths.
+        if migration is not None:
+            migration_report = perform_legacy_migration(
+                migration, migration_jobs, backend, rollback
+            )
+    except Exception as exc:
+        raise InstallError(
+            _rolled_back(
+                rollback, exc, migration.source if migration is not None else None
+            )
+        ) from exc
     # Ahead of this run's own options, so an explicit --ntfy-url or --config
     # still wins over whatever the migrated copy carried.
     migrated_keys = migrate_legacy_installed_config(install_dir)
