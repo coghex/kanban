@@ -2547,13 +2547,22 @@ above are unchanged, and persistence the user switched off is not a failure.
   would have written is older than the one it would replace — which is how a
   newly polled barrier would otherwise be overwritten by the answer the
   transition itself returned.
-- Ordering between the two is established rather than assumed. Each poll carries
-  the transition count read immediately before its controller query was issued,
-  and a poll stamped with an older count is discarded: its query began before a
-  press, so it describes the service as it was beforehand, and letting it settle
-  that press would clear the busy flag on a pre-press reading and then make the
-  real completion look late — leaving the board reporting off while the service
-  runs.
+- Ordering between the two is established rather than assumed, in two steps,
+  because neither alone is enough. Each poll carries the transition count read
+  immediately before its controller query was issued, and a poll stamped with an
+  older count is discarded: its query began before a press, so it describes the
+  service as it was beforehand. That establishes only that a poll began after
+  the press, though, not that it began after the *command* the press handed off
+  — which runs in its own thread and takes time to have any effect. So the
+  content decides the rest: while a transition is in flight, a start is settled
+  only by an observation of a service that is up and a stop only by one of a
+  service that is down. Anything else leaves the optimistic state standing.
+  Without both, a poll issued in the gap between the press and the service
+  moving would clear the busy flag on a reading of the state the press is about
+  to change, and the real completion would then be discarded as late — leaving
+  the board reporting off while the service runs. The completion arrives whether
+  the command succeeded or failed, so nothing here can leave control refused
+  forever.
 - An observation this dashboard cannot vouch for is forgotten rather than kept.
   A failed poll outside a transition, and a failed transition, both drop the
   cached observation along with the status, because the canonical-review
@@ -2586,12 +2595,16 @@ above are unchanged, and persistence the user switched off is not a failure.
 - A service result that may have changed GitHub requires a board refresh, queued
   behind a fetch already in flight rather than dropped. The result is identified
   by the whole of what the controller reported — its state, the outcome of the
-  last pass, whether a pass is running under it, and the document's own stamp —
-  so one advancing pass, one barrier, and one failed run each require exactly one
-  refresh, and the repeated documents a barriered or idle controller writes
+  last pass, the PID of any pass running under it, and the document's own stamp
+  — so one advancing pass, one barrier, and one failed run each require exactly
+  one refresh, and the repeated documents a barriered or idle controller writes
   require none. The stamp alone is not that identity: it is second-granular and
   the controller writes several states inside one pass, so two documents that
-  differ only in what they report would otherwise be taken for one. The dashboard's very first observation is
+  differ only in what they report would otherwise be taken for one. Nor is the
+  mere presence of a pass enough: the controller starts the next pass the
+  instant one advances, so two consecutive advancing passes differ in nothing
+  but which child is running, and the PID is what keeps the second one's refresh
+  from being suppressed as a repeat of the first. The dashboard's very first observation is
   judged by those same rules rather than taken as a silent baseline: the startup
   fetch and the first poll are started concurrently, so a review published after
   that fetch read GitHub and before the first poll answered falls between them,

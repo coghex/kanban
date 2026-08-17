@@ -50,6 +50,7 @@ module Kanban.ApprovalService
     -- * Control
     ApprovalToggle (..),
     approvalContentionNotice,
+    approvalObservationSettles,
     approvalOwnsCanonicalReview,
     approvalServiceIsRunning,
     liveApprovalContention,
@@ -61,6 +62,7 @@ module Kanban.ApprovalService
     -- * Board refresh
     ApprovalResult (..),
     approvalRefreshRequired,
+    approvalResultPassRunning,
     approvalResultOf,
   )
 where
@@ -824,7 +826,7 @@ approvalServiceIsRunning status = case status.approvalActivity of
 approvalOwnsCanonicalReview :: Maybe ApprovalResult -> Bool
 approvalOwnsCanonicalReview Nothing = False
 approvalOwnsCanonicalReview (Just observed) =
-  observed.approvalResultPassRunning && case observed.approvalResultActivity of
+  approvalResultPassRunning observed && case observed.approvalResultActivity of
     ApprovalServiceRunning -> True
     ApprovalServiceBarrier -> False
     ApprovalServiceStarting -> False
@@ -834,6 +836,37 @@ approvalOwnsCanonicalReview (Just observed) =
     ApprovalServiceControllerFailure -> False
     ApprovalServiceUnsupported -> False
     ApprovalServiceUnknown -> False
+
+-- | Whether an observation is evidence that the transition now in flight has
+-- actually happened.
+--
+-- Stamping a poll with the transition it was issued under establishes that its
+-- query began after the press. It does not establish that the query began after
+-- the /command/ that press handed off: the start or stop runs in its own
+-- thread, and a poll issued in the window between the press and the service
+-- actually moving is stamped with the current transition and still reports the
+-- state the press is about to change.
+--
+-- So the content decides it. A start is settled only by an observation of a
+-- service that is up, a stop only by one of a service that is down, and
+-- anything else — including an unknown — leaves the optimistic state standing
+-- for the completion to settle. That completion always arrives, whether the
+-- command succeeded or failed, so nothing here can leave the busy flag set
+-- forever.
+approvalObservationSettles :: ApprovalActivity -> ApprovalActivity -> Bool
+approvalObservationSettles inFlight observed = case inFlight of
+  ApprovalServiceStarting -> observed `elem` up
+  ApprovalServiceStopping -> observed `elem` down
+  -- Not a transition this dashboard started, so there is nothing to be
+  -- premature about.
+  _ -> True
+  where
+    up = [ApprovalServiceRunning, ApprovalServiceBarrier, ApprovalServiceStarting]
+    down =
+      [ ApprovalServiceStopped,
+        ApprovalServiceChildFailure,
+        ApprovalServiceControllerFailure
+      ]
 
 -- | What the operator is told when the service holds the review they asked
 -- for. Spelled once, because the press, the spawn boundary, and the live
@@ -1044,17 +1077,28 @@ unitWords = go . Text.unpack
 data ApprovalResult = ApprovalResult
   { approvalResultActivity :: ApprovalActivity,
     approvalResultOutcome :: Maybe ApprovalOutcome,
-    -- | Whether a backend pass is running under this document. The controller
-    -- nulls the PID unless the child is really alive, so this is a live fact
-    -- rather than a leftover.
-    approvalResultPassRunning :: Bool,
+    -- | The backend pass running under this document, by PID, or 'Nothing'
+    -- when none is. The controller nulls the PID unless the child is really
+    -- alive, so this is a live fact rather than a leftover.
+    --
+    -- The PID itself rather than a flag, because it is the only thing that
+    -- distinguishes two /passes/. @ADVANCE_DELAY_SECONDS@ is zero, so the
+    -- controller starts the next pass the instant one advances, and its stamps
+    -- are second-granular: two consecutive advancing passes can otherwise
+    -- project to exactly the same identity and the second one's refresh would
+    -- be suppressed as a repeat of the first.
+    approvalResultBackendPid :: Maybe Int,
     approvalResultUpdatedAt :: Maybe Text
   }
   deriving stock (Eq, Show)
 
+-- | Whether a backend pass is running under this result.
+approvalResultPassRunning :: ApprovalResult -> Bool
+approvalResultPassRunning = isJust . (.approvalResultBackendPid)
+
 approvalResultOf :: ApprovalStatus -> Maybe Int -> Maybe ApprovalOutcome -> Maybe Text -> ApprovalResult
 approvalResultOf status backendPid outcome updatedAt =
-  ApprovalResult status.approvalActivity outcome (isJust backendPid) updatedAt
+  ApprovalResult status.approvalActivity outcome backendPid updatedAt
 
 -- | Whether a newly observed result reports something that may have changed
 -- GitHub and has not already been refreshed for.
@@ -1104,8 +1148,9 @@ approvalRefreshRequired previous current
     -- and the controller writes several states inside one pass, so an idle
     -- result and the @advanced@ running pass that follows it in the same
     -- second carry the same stamp — and comparing stamps would suppress the
-    -- refresh that second document is the only report of. Any observable
-    -- difference makes it a different document.
+    -- refresh that second document is the only report of. The pass's PID is
+    -- part of that identity for the same reason one step further out: two
+    -- consecutive advancing passes differ in nothing else.
     sameDocument = previous == Just current
 
     -- "Already in that state" rather than "in some previous state": with no
@@ -1123,7 +1168,7 @@ approvalRefreshRequired previous current
         `elem` [ApprovalServiceChildFailure, ApprovalServiceControllerFailure]
         && not (wasAlready current.approvalResultActivity)
 
-    mutatingPassSpawned = current.approvalResultPassRunning && mutating current.approvalResultOutcome
+    mutatingPassSpawned = approvalResultPassRunning current && mutating current.approvalResultOutcome
 
     stoppedAfterMutation =
       current.approvalResultActivity == ApprovalServiceStopped

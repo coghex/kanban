@@ -132,7 +132,7 @@ observing status passRunning = do
   pure
     state
       { appApprovalResult =
-          Just (ApprovalResult status.approvalActivity (Just ApprovalOutcomeIdle) passRunning (Just "t1"))
+          Just (ApprovalResult status.approvalActivity (Just ApprovalOutcomeIdle) (if passRunning then Just 4242 else Nothing) (Just "t1"))
       }
 
 -- | Runs @action@ with a fake @systemctl@ first on @PATH@.
@@ -170,8 +170,8 @@ observationWith status identity = ApprovalObservation status (Just []) identity
 -- | One result identity, as the controller's own document would carry it: the
 -- state, what the last pass decided, whether a pass is running under it, and
 -- the document's stamp.
-resultIdentity :: ApprovalActivity -> Maybe ApprovalOutcome -> Bool -> Text -> ApprovalResult
-resultIdentity activity outcome passRunning stamp = ApprovalResult activity outcome passRunning (Just stamp)
+resultIdentity :: ApprovalActivity -> Maybe ApprovalOutcome -> Maybe Int -> Text -> ApprovalResult
+resultIdentity activity outcome backendPid stamp = ApprovalResult activity outcome backendPid (Just stamp)
 
 spec :: Spec
 spec = do
@@ -642,7 +642,7 @@ spec = do
       state <- dashboardShowing stoppedStatus
       let (pressed, handoff) = approvalTogglePress state
           transition = maybe 0 (.approvalHandoffTransition) handoff
-          authoritative = ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing False "t1")
+          authoritative = ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing Nothing "t1")
           (settled, _) = approvalToggleApplied transition (Right authoritative) pressed
       settled.appApprovalStatus `shouldBe` runningStatus
       settled.appApprovalBusy `shouldBe` False
@@ -651,7 +651,7 @@ spec = do
     it "lets an authoritative poll supersede the optimistic transition and free the control" $ do
       state <- dashboardShowing stoppedStatus
       let (pressed, _) = approvalTogglePress state
-          observation = ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing False "t1")
+          observation = ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing Nothing "t1")
           (polled, _) = polledAfter pressed (Right observation)
       polled.appApprovalStatus `shouldBe` runningStatus
       polled.appApprovalBusy `shouldBe` False
@@ -668,9 +668,9 @@ spec = do
       state <- dashboardShowing stoppedStatus
       let (started, _) = approvalTogglePress state
           -- The start is given up on by a poll, and the user presses again.
-          (settled, _) = polledAfter started (Right (ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing False "t1")))
+          (settled, _) = polledAfter started (Right (ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing Nothing "t1")))
           (stopping, secondHandoff) = approvalTogglePress settled
-          stale = ApprovalObservation stoppedStatus (Just []) (resultIdentity ApprovalServiceStopped Nothing False "t0")
+          stale = ApprovalObservation stoppedStatus (Just []) (resultIdentity ApprovalServiceStopped Nothing Nothing "t0")
           (applied, _) = approvalToggleApplied 1 (Right stale) stopping
       fmap (.approvalHandoffTransition) secondHandoff `shouldBe` Just 2
       -- The stale start's completion restores neither its optimistic state nor
@@ -708,7 +708,7 @@ spec = do
             ApprovalObservation
               stoppedStatus
               (Just [])
-              (resultIdentity ApprovalServiceStopped Nothing False "t0")
+              (resultIdentity ApprovalServiceStopped Nothing Nothing "t0")
           (afterStalePoll, _) = approvalStatusApplied 0 (Right prePress) pressed
       transition `shouldBe` 1
       afterStalePoll.appApprovalStatus.approvalActivity `shouldBe` ApprovalServiceStarting
@@ -719,9 +719,61 @@ spec = do
             ApprovalObservation
               runningStatus
               (Just [])
-              (resultIdentity ApprovalServiceRunning Nothing False "t2")
+              (resultIdentity ApprovalServiceRunning Nothing Nothing "t2")
           (settled, _) = approvalToggleApplied transition (Right running) afterStalePoll
       settled.appApprovalStatus `shouldBe` runningStatus
+      settled.appApprovalBusy `shouldBe` False
+
+    it "will not let a poll taken before the command settle the transition" $ do
+      -- The poll is stamped with the current transition, so the epoch check
+      -- passes: its query began after the press. But the start runs in its own
+      -- thread, and this query began before that command had any effect, so it
+      -- reports the very state the press is about to change. Settling on it
+      -- would clear the busy flag, make the real completion look late, and
+      -- leave the board off while the service starts.
+      state <- dashboardShowing stoppedStatus
+      let (pressed, handoff) = approvalTogglePress state
+          transition = maybe 0 (.approvalHandoffTransition) handoff
+          preCommand =
+            ApprovalObservation
+              stoppedStatus
+              (Just [])
+              (resultIdentity ApprovalServiceStopped Nothing Nothing "t1")
+          (afterPoll, _) = approvalStatusApplied transition (Right preCommand) pressed
+      afterPoll.appApprovalStatus.approvalActivity `shouldBe` ApprovalServiceStarting
+      afterPoll.appApprovalBusy `shouldBe` True
+      let running =
+            ApprovalObservation
+              runningStatus
+              (Just [])
+              (resultIdentity ApprovalServiceRunning Nothing Nothing "t2")
+          (settled, _) = approvalToggleApplied transition (Right running) afterPoll
+      settled.appApprovalStatus `shouldBe` runningStatus
+      settled.appApprovalBusy `shouldBe` False
+
+    it "settles a transition on the first poll that agrees the service moved" $ do
+      -- And it is not merely waiting for the completion: a poll that does
+      -- report the service up settles the start immediately, which is what
+      -- keeps control from staying refused when a completion is slow.
+      state <- dashboardShowing stoppedStatus
+      let (pressed, handoff) = approvalTogglePress state
+          transition = maybe 0 (.approvalHandoffTransition) handoff
+          up = ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing Nothing "t1")
+          (settled, _) = approvalStatusApplied transition (Right up) pressed
+      settled.appApprovalStatus `shouldBe` runningStatus
+      settled.appApprovalBusy `shouldBe` False
+
+    it "applies the same rule in reverse to a stop" $ do
+      running <- dashboardShowing runningStatus
+      let (pressed, handoff) = approvalTogglePress running
+          transition = maybe 0 (.approvalHandoffTransition) handoff
+          stillUp = ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing Nothing "t1")
+          (afterPoll, _) = approvalStatusApplied transition (Right stillUp) pressed
+          down = ApprovalObservation stoppedStatus (Just []) (resultIdentity ApprovalServiceStopped Nothing Nothing "t2")
+          (settled, _) = approvalStatusApplied transition (Right down) afterPoll
+      afterPoll.appApprovalStatus.approvalActivity `shouldBe` ApprovalServiceStopping
+      afterPoll.appApprovalBusy `shouldBe` True
+      settled.appApprovalStatus `shouldBe` stoppedStatus
       settled.appApprovalBusy `shouldBe` False
 
     it "discards a completion a poll has already superseded" $ do
@@ -737,13 +789,13 @@ spec = do
             ApprovalObservation
               barrierStatus
               (Just [])
-              (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) False "t2")
+              (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) Nothing "t2")
           (polled, _) = polledAfter pressed (Right barriered)
           stale =
             ApprovalObservation
               runningStatus
               (Just [])
-              (resultIdentity ApprovalServiceRunning Nothing False "t1")
+              (resultIdentity ApprovalServiceRunning Nothing Nothing "t1")
           (settled, refresh) = approvalToggleApplied transition (Right stale) polled
       polled.appApprovalStatus `shouldBe` barrierStatus
       settled.appApprovalStatus `shouldBe` barrierStatus
@@ -755,7 +807,7 @@ spec = do
       state <- dashboardShowing stoppedStatus
       let (pressed, handoff) = approvalTogglePress state
           transition = maybe 0 (.approvalHandoffTransition) handoff
-          (polled, _) = polledAfter pressed (Right (ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing False "t1")))
+          (polled, _) = polledAfter pressed (Right (ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing Nothing "t1")))
           (failed, _) = approvalToggleApplied transition (Left "the transition timed out") polled
       failed.appApprovalStatus `shouldBe` runningStatus
       failed.appApprovalBusy `shouldBe` False
@@ -966,12 +1018,12 @@ spec = do
       state <- dashboardShowing stoppedStatus
       state.appApprovalResult `shouldBe` Nothing
       let firstSeen observation = snd (approvalObservationApplied observation state)
-      firstSeen (observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeAdvanced) True "t1"))
+      firstSeen (observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeAdvanced) (Just 4242) "t1"))
         `shouldBe` True
-      firstSeen (observationWith barrierStatus (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) False "t1"))
+      firstSeen (observationWith barrierStatus (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) Nothing "t1"))
         `shouldBe` True
       let failedStatus = ApprovalStatus ApprovalError "stopped · a backend pass failed" ApprovalServiceChildFailure Nothing Nothing
-      firstSeen (observationWith failedStatus (resultIdentity ApprovalServiceChildFailure (Just ApprovalOutcomeIdle) False "t1"))
+      firstSeen (observationWith failedStatus (resultIdentity ApprovalServiceChildFailure (Just ApprovalOutcomeIdle) Nothing "t1"))
         `shouldBe` True
 
     it "asks for nothing on a first observation that reports no mutation" $ do
@@ -979,13 +1031,13 @@ spec = do
       -- queue, has changed nothing for the startup refresh to have missed.
       state <- dashboardShowing stoppedStatus
       let firstSeen observation = snd (approvalObservationApplied observation state)
-      firstSeen (observationWith stoppedStatus (resultIdentity ApprovalServiceStopped Nothing False "t1")) `shouldBe` False
-      firstSeen (observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) True "t1")) `shouldBe` False
-      firstSeen (observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeBusy) True "t1")) `shouldBe` False
+      firstSeen (observationWith stoppedStatus (resultIdentity ApprovalServiceStopped Nothing Nothing "t1")) `shouldBe` False
+      firstSeen (observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) (Just 4242) "t1")) `shouldBe` False
+      firstSeen (observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeBusy) (Just 4242) "t1")) `shouldBe` False
 
     it "does not repeat that first refresh for the documents that follow it" $ do
       state <- dashboardShowing stoppedStatus
-      let barriered stamp = observationWith barrierStatus (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) False stamp)
+      let barriered stamp = observationWith barrierStatus (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) Nothing stamp)
           (afterFirst, firstRefresh) = approvalObservationApplied (barriered "t1") state
           (afterSame, sameRefresh) = approvalObservationApplied (barriered "t1") afterFirst
           (_, recheckRefresh) = approvalObservationApplied (barriered "t2") afterSame
@@ -999,8 +1051,8 @@ spec = do
       -- the settled document between them exists for microseconds and a
       -- ten-second poll would never see it.
       state <- dashboardShowing runningStatus
-      let advanced stamp = observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeAdvanced) True stamp)
-          (afterFirst, firstRefresh) = approvalObservationApplied (advanced "t1") state {appApprovalResult = Just (resultIdentity ApprovalServiceRunning Nothing True "t0")}
+      let advanced stamp = observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeAdvanced) (Just 4242) stamp)
+          (afterFirst, firstRefresh) = approvalObservationApplied (advanced "t1") state {appApprovalResult = Just (resultIdentity ApprovalServiceRunning Nothing (Just 4242) "t0")}
           (afterRepeat, repeatRefresh) = approvalObservationApplied (advanced "t1") afterFirst
           (_, secondRefresh) = approvalObservationApplied (advanced "t2") afterRepeat
       firstRefresh `shouldBe` True
@@ -1013,25 +1065,40 @@ spec = do
       -- share a stamp. Comparing stamps alone would suppress the refresh that
       -- second document is the only report of.
       state <- dashboardShowing runningStatus
-      let idle = resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) False "t1"
-          advanced = resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeAdvanced) True "t1"
+      let idle = resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t1"
+          advanced = resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeAdvanced) (Just 4242) "t1"
           seenIdle = state {appApprovalResult = Just idle}
       snd (approvalObservationApplied (observationWith runningStatus advanced) seenIdle) `shouldBe` True
       -- The genuinely repeated document still reports nothing new.
       snd (approvalObservationApplied (observationWith runningStatus idle) seenIdle) `shouldBe` False
 
+    it "tells two same-second consecutive advancing passes apart by their PID" $ do
+      -- `ADVANCE_DELAY_SECONDS` is zero, so the controller starts the next pass
+      -- the instant one advances. With second-granular stamps, two distinct
+      -- advancing passes otherwise project to exactly the same identity and the
+      -- second one's refresh is suppressed as a repeat — leaving the board
+      -- stale if the first fetch read GitHub before that later mutation.
+      state <- dashboardShowing runningStatus
+      let pass pid = observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeAdvanced) (Just pid) "t1")
+          (afterFirst, firstRefresh) = approvalObservationApplied (pass 4242) state
+          (afterSecond, secondRefresh) = approvalObservationApplied (pass 4243) afterFirst
+          (_, repeatRefresh) = approvalObservationApplied (pass 4243) afterSecond
+      firstRefresh `shouldBe` True
+      secondRefresh `shouldBe` True
+      repeatRefresh `shouldBe` False
+
     it "asks for nothing on an idle or contended queue" $ do
       state <- dashboardShowing runningStatus
-      let baseline = state {appApprovalResult = Just (resultIdentity ApprovalServiceRunning Nothing True "t0")}
-          quiet outcome stamp = observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just outcome) True stamp)
+      let baseline = state {appApprovalResult = Just (resultIdentity ApprovalServiceRunning Nothing (Just 4242) "t0")}
+          quiet outcome stamp = observationWith runningStatus (resultIdentity ApprovalServiceRunning (Just outcome) (Just 4242) stamp)
       snd (approvalObservationApplied (quiet ApprovalOutcomeIdle "t1") baseline) `shouldBe` False
       snd (approvalObservationApplied (quiet ApprovalOutcomeBusy "t1") baseline) `shouldBe` False
 
     it "refreshes once when the queue enters a barrier and not for its rechecks" $ do
       state <- dashboardShowing runningStatus
-      let baseline = state {appApprovalResult = Just (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) False "t0")}
+      let baseline = state {appApprovalResult = Just (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t0")}
           barriered stamp inFlight =
-            observationWith barrierStatus (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) inFlight stamp)
+            observationWith barrierStatus (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) (if inFlight then Just 4242 else Nothing) stamp)
           (afterOpen, openRefresh) = approvalObservationApplied (barriered "t1" False) baseline
           (afterCheck, checkRefresh) = approvalObservationApplied (barriered "t2" True) afterOpen
           (_, recheckRefresh) = approvalObservationApplied (barriered "t3" False) afterCheck
@@ -1041,9 +1108,9 @@ spec = do
 
     it "refreshes once when a run ends in a way whose outcome is unknown" $ do
       state <- dashboardShowing runningStatus
-      let baseline = state {appApprovalResult = Just (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) True "t0")}
+      let baseline = state {appApprovalResult = Just (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) (Just 4242) "t0")}
           failedStatus = ApprovalStatus ApprovalError "stopped · a backend pass failed" ApprovalServiceChildFailure Nothing Nothing
-          failed stamp = observationWith failedStatus (resultIdentity ApprovalServiceChildFailure (Just ApprovalOutcomeIdle) False stamp)
+          failed stamp = observationWith failedStatus (resultIdentity ApprovalServiceChildFailure (Just ApprovalOutcomeIdle) Nothing stamp)
           (afterFailure, failureRefresh) = approvalObservationApplied (failed "t1") baseline
           (_, repeatRefresh) = approvalObservationApplied (failed "t2") afterFailure
       failureRefresh `shouldBe` True
@@ -1052,8 +1119,8 @@ spec = do
     it "refreshes for a mutating pass that a stop landed on top of" $ do
       -- The one case with no following spawn to read the outcome off.
       state <- dashboardShowing runningStatus
-      let baseline = state {appApprovalResult = Just (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) True "t0")}
-          stopped = observationWith stoppedStatus (resultIdentity ApprovalServiceStopped (Just ApprovalOutcomeAdvanced) False "t1")
+      let baseline = state {appApprovalResult = Just (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) (Just 4242) "t0")}
+          stopped = observationWith stoppedStatus (resultIdentity ApprovalServiceStopped (Just ApprovalOutcomeAdvanced) Nothing "t1")
       snd (approvalObservationApplied stopped baseline) `shouldBe` True
 
     it "keeps the service's durable warning through the refresh it required" $ do
@@ -1061,8 +1128,8 @@ spec = do
       -- returns, not something it writes over its own status with, so the
       -- barrier the observation reported is still what stands afterwards.
       state <- dashboardShowing runningStatus
-      let baseline = state {appApprovalResult = Just (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) False "t0")}
-          barriered = observationWith barrierStatus (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) False "t1")
+      let baseline = state {appApprovalResult = Just (resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) Nothing "t0")}
+          barriered = observationWith barrierStatus (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) Nothing "t1")
           (applied, refresh) = approvalObservationApplied barriered baseline
       refresh `shouldBe` True
       applied.appApprovalStatus `shouldBe` barrierStatus
@@ -1071,7 +1138,7 @@ spec = do
   describe "the two services stay each other's business" $ do
     it "leaves every drainer field alone when an approval observation arrives" $ do
       state <- dashboardShowing stoppedStatus
-      let (applied, _) = approvalObservationApplied (observationWith runningStatus (resultIdentity ApprovalServiceRunning Nothing False "t1")) state
+      let (applied, _) = approvalObservationApplied (observationWith runningStatus (resultIdentity ApprovalServiceRunning Nothing Nothing "t1")) state
       applied.appDrainerController `shouldSatisfy` either (const True) (const False)
       applied.appDrainerStatus `shouldBe` state.appDrainerStatus
       applied.appDrainerIncidents `shouldBe` state.appDrainerIncidents

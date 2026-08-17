@@ -44,6 +44,7 @@ import Kanban.ApprovalService
     ApprovalState (..),
     ApprovalStatus (..),
     ApprovalToggle (..),
+    approvalObservationSettles,
     approvalRefreshRequired,
     approvalToggle,
     approvalUnavailableMessage,
@@ -207,7 +208,22 @@ approvalStatusApplied issuedUnder result state
       Left message
         | state.appApprovalBusy -> (state, False)
         | otherwise -> (forgetObservation (approvalErrorStatus message) state, False)
-      Right observation -> approvalObservationApplied observation state
+      Right observation
+        -- A poll may be stamped with the current transition and still have
+        -- been issued before the command that transition handed off had any
+        -- effect, because that command runs in its own thread. Such a poll
+        -- reports the state the press is about to change, so it is not
+        -- evidence the press happened and must not settle it -- otherwise it
+        -- clears the busy flag, the real completion is then discarded as late,
+        -- and the board reports the service off while it is starting.
+        | state.appApprovalBusy,
+          not
+            ( approvalObservationSettles
+                state.appApprovalStatus.approvalActivity
+                observation.observedApprovalStatus.approvalActivity
+            ) ->
+            (state, False)
+        | otherwise -> approvalObservationApplied observation state
 
 -- | Drop everything the last good observation established, keeping only the
 -- reason it could not be refreshed.
