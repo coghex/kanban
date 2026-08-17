@@ -1283,8 +1283,11 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         # whether it made them or found them. A refusal must therefore put back
         # the permissions of one that was already there, not only remove the
         # ones it created.
+        # The install directory itself, not a per-repository tree: durable
+        # state waiting at a destination is refused outright now, so the
+        # directory that legitimately already exists is the one to check.
         self.seed_legacy_install(self.widgets, durable=False)
-        existing = self.xdg_logs / self.slug("acme/widgets")
+        existing = self.xdg_install
         existing.mkdir(parents=True)
         existing.chmod(0o755)
         real = install_drainer._reinstall_recorded_job
@@ -1441,6 +1444,63 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertIn("did not put there", str(raised.exception))
         self.assertEqual((cache / "notes.txt").read_text(encoding="utf-8"), "mine\n")
         self.assertFalse(self.xdg_install.exists())
+
+    def test_it_refuses_a_legacy_record_it_cannot_read_as_a_document(self):
+        # Answering "no repositories" for a record that does not say would
+        # take the preflight through with nothing to check and nothing to
+        # rewrite, and then remove the directory every existing definition
+        # still names. Absent is an answer; unreadable is a refusal.
+        #
+        # One fixture serves every case: each of them refuses without changing
+        # anything, which is the property under test, so the installation is
+        # still there for the next one.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        record = self.legacy_install / "config.json"
+        for description, contents in (
+            ("truncated json", b'{"repositories": {'),
+            ("a json array", b"[]"),
+            ("a repositories list", b'{"repositories": []}'),
+            ("not utf-8", b"\xff\xfe not utf-8"),
+        ):
+            with self.subTest(record=description):
+                record.write_bytes(contents)
+                with self.assertRaises(install_drainer.InstallError) as raised:
+                    self.install(self.widgets)
+                self.assertIn(
+                    "which repositories it describes cannot be established",
+                    str(raised.exception),
+                )
+                # Nothing removed, and no destination installation made.
+                self.assertTrue((self.legacy_install / "runtime").is_dir())
+                self.assertTrue(self.legacy_logs.is_dir())
+                self.assertFalse(
+                    os.path.lexists(self.xdg_install / "drain_prs_service.py")
+                )
+
+    def test_it_refuses_a_destination_tree_no_legacy_tree_would_move_into(self):
+        # A job that has never run has nothing to move, so nothing checks where
+        # its tree would go — and `ensure_dirs` would then adopt and chmod
+        # whatever is already there.
+        self.seed_legacy_install(self.widgets, durable=False)
+        slug = self.slug("acme/widgets")
+        for description, path in (
+            ("runtime", self.xdg_install / "runtime" / slug),
+            ("logs", self.xdg_logs / slug),
+        ):
+            with self.subTest(destination=description):
+                path.mkdir(parents=True)
+                (path / "status.json").write_text('{"kept": true}', encoding="utf-8")
+                with self.assertRaises(install_drainer.InstallError) as raised:
+                    self.install(self.widgets)
+                self.assertIn("already holds durable state", str(raised.exception))
+                self.assertIn(str(path), str(raised.exception))
+                self.assertEqual(
+                    (path / "status.json").read_text(encoding="utf-8"),
+                    '{"kept": true}',
+                )
+                self.assertTrue((self.legacy_install / "config.json").is_file())
+                # Cleared so the next case is the only occupied destination.
+                shutil.rmtree(path)
 
     def test_it_refuses_a_sibling_installed_under_the_other_service_manager(self):
         self.seed_legacy_install(self.widgets, self.gadgets)

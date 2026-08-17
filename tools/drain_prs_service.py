@@ -165,9 +165,14 @@ RECORD_REPOSITORIES_KEY = "repositories"
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
+    # UnicodeDecodeError alongside the rest, for the reason `read_json` below
+    # spells out: it is a ValueError rather than an OSError, so bytes that are
+    # not UTF-8 would otherwise escape a reader every caller expects to answer
+    # "nothing readable here" — and a record that is not UTF-8 is exactly a
+    # record nothing can read.
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except (FileNotFoundError, UnicodeDecodeError, OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
 

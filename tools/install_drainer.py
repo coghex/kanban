@@ -465,6 +465,56 @@ def skipped_legacy_migration(install_dir: Path) -> dict[str, Any] | None:
     }
 
 
+def strict_record_document(path: Path) -> dict[str, Any]:
+    """The discovery document at `path`, or an InstallError naming why what is
+    there is not one.
+
+    `read_config_document` answers `{}` for anything it cannot read, which is
+    the right answer for a caller merging optional keys and exactly the wrong
+    one for a caller about to delete an installation. "No repositories are
+    recorded" and "this file does not say" would become the same answer, and
+    the second one would sail through the preflight with nothing to check,
+    rewrite no definitions, and then remove the directory every definition
+    still names. Absent is a real answer; unreadable is a refusal.
+    """
+    if not os.path.lexists(path):
+        return {}
+    detail = None
+    document: Any = None
+    if not _is_plain_file(path):
+        # Ahead of reading it, because reading follows a symlink while
+        # `os.replace` writing it would not: this is where the merged document
+        # goes, and writing through would destroy whatever it points at.
+        raise InstallError(
+            f"Refusing to migrate the shared PR drainer installation: {path} is "
+            "where this would write, and is not a regular file. Nothing was "
+            "changed."
+        )
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        detail = f"could not be read ({exc})"
+    except json.JSONDecodeError as exc:
+        detail = f"is not valid JSON ({exc})"
+    if detail is None and not isinstance(document, dict):
+        detail = "does not hold a JSON object"
+    if detail is None:
+        records = document.get(drain_prs_service.RECORD_REPOSITORIES_KEY)
+        if records is not None and not isinstance(records, dict):
+            detail = (
+                f"has a {drain_prs_service.RECORD_REPOSITORIES_KEY!r} value that is "
+                "not a table of repositories"
+            )
+    if detail is not None:
+        raise InstallError(
+            f"Refusing to migrate the shared PR drainer installation: {path} "
+            f"{detail}, so which repositories it describes cannot be established. "
+            "Nothing was changed. Repair or remove that file, then re-run this "
+            "installer."
+        )
+    return document
+
+
 def merged_record_document(
     legacy: dict[str, Any], current: dict[str, Any]
 ) -> dict[str, Any]:
@@ -677,8 +727,8 @@ def preflight_legacy_migration(
     """
     jobs = recorded_jobs(
         merged_record_document(
-            read_config_document(migration.source_record),
-            read_config_document(migration.destination_record),
+            strict_record_document(migration.source_record),
+            strict_record_document(migration.destination_record),
         ),
         backend,
     )
@@ -692,7 +742,24 @@ def preflight_legacy_migration(
             "Refusing to migrate the shared PR drainer installation while a drainer "
             "is running for " + ", ".join(live) + ". Stop it first; nothing was changed."
         )
-    conflicts = _move_conflicts(migration, planned_tree_moves(migration, jobs))
+    moves = planned_tree_moves(migration, jobs)
+    conflicts = _move_conflicts(migration, moves)
+    # Independently of whether anything is being moved into them. A job that
+    # has never run has no tree to move, so nothing above looks at where its
+    # tree is *going* -- and `ensure_dirs` would then adopt, and chmod,
+    # whatever it found waiting there. Durable state already at a destination
+    # is someone's record of what a drainer did, and this refuses rather than
+    # absorbing it.
+    arriving = {move.destination for move in moves}
+    conflicts.extend(
+        f"{path} already holds durable state for {job.identity}"
+        for job in jobs
+        for path in (
+            migration.destination / "runtime" / job.slug,
+            migration.destination_logs / job.slug,
+        )
+        if path not in arriving and os.path.lexists(path)
+    )
     # Every path this migration writes *through*, as opposed to the trees it
     # moves into place. `update_json_document` refuses one that is not a plain
     # file, and `write_definition_file`'s `os.replace` would silently replace
@@ -701,10 +768,7 @@ def preflight_legacy_migration(
     # neither loses it nor writes over it.
     conflicts.extend(
         f"{path} is where this would write, and is not a regular file"
-        for path in [
-            migration.destination_record,
-            *(job.definition_path for job in jobs),
-        ]
+        for path in (job.definition_path for job in jobs)
         if os.path.lexists(path) and not _is_plain_file(path)
     )
     unexpected = sorted(
@@ -920,7 +984,7 @@ def perform_legacy_migration(
     drain_prs_service.update_json_document(
         migration.destination_record,
         lambda current: merged_record_document(
-            read_config_document(migration.source_record), current
+            strict_record_document(migration.source_record), current
         ),
     )
     # The legacy install directory's own tree first, so a per-repository
