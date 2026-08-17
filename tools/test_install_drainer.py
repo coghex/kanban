@@ -691,11 +691,24 @@ class LegacyMigrationFixture(unittest.TestCase):
         )
         return repo
 
-    def seed_legacy_install(self, *checkouts):
+    def seed_legacy_install(self, *checkouts, install_dir=None):
         """The installation a pre-XDG host really has, written by the real
-        writers under the resolution that host ran with."""
+        writers under the resolution that host ran with.
+
+        `install_dir` is the `--install-dir` such a host may have been
+        installed with: it moves the script links and the runtime root exactly
+        as the option really does, and leaves the discovery record and the log
+        root where they are, which is the split the option really produces.
+        """
+        environment = (
+            {kanban_config.DRAINER_INSTALL_DIR_ENV: str(install_dir)}
+            if install_dir is not None
+            else {}
+        )
         patched = mock.patch.object(kanban_config.sys, "platform", "darwin")
         patched.start()
+        overridden = mock.patch.dict(os.environ, environment)
+        overridden.start()
         try:
             drain_prs_service.bind_managed_paths()
             for checkout in checkouts:
@@ -718,9 +731,11 @@ class LegacyMigrationFixture(unittest.TestCase):
                 "service_manager.py",
             ):
                 install_drainer.install_symlink(
-                    checkouts[0] / "tools" / module, self.legacy_install / module
+                    checkouts[0] / "tools" / module,
+                    (install_dir or self.legacy_install) / module,
                 )
         finally:
+            overridden.stop()
             patched.stop()
         # As a fresh process on that host would resolve it: the probe finds the
         # `~/Library` record and nothing under XDG.
@@ -746,6 +761,15 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         super().setUp()
         self.widgets = self.make_checkout("widgets", "git@github.com:acme/widgets.git")
         self.gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
+        self.custom = self.root / "custom-install"
+
+    def slug(self, identity):
+        return drain_prs_service.repository_slug(identity)
+
+    def unit_text(self, identity):
+        return self.backend.definition_path(
+            self.backend.service_identifier(self.slug(identity))
+        ).read_text(encoding="utf-8")
 
     def test_a_default_linux_install_relocates_every_recorded_repository(self):
         self.seed_legacy_install(self.widgets, self.gadgets)
@@ -854,6 +878,55 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertTrue(self.legacy_logs.is_dir())
         self.assertFalse(self.xdg_install.exists())
 
+    def test_it_carries_the_runtime_state_of_a_custom_install_dir_repository(self):
+        # `--install-dir` moves a job's script links and its runtime root while
+        # leaving the discovery record under `~/Library`, so its status file
+        # and open incidents are not in the legacy tree at all. Repointing its
+        # definition at the XDG runtime root without bringing them would make
+        # them unreachable, which is exactly the state they exist to survive.
+        self.seed_legacy_install(self.widgets, self.gadgets, install_dir=self.custom)
+        self.assertTrue(
+            (self.custom / "runtime" / self.slug("acme/widgets") / "incidents").is_dir()
+        )
+        self.assertFalse((self.legacy_install / "runtime").exists())
+
+        result = self.install(self.widgets)
+        self.assertTrue(result["legacy_migration"]["migrated"])
+
+        for identity in ("acme/widgets", "acme/gadgets"):
+            slug = self.slug(identity)
+            self.assertTrue(
+                (self.xdg_install / "runtime" / slug / "incidents" / "incident.json").is_file(),
+                identity,
+            )
+            self.assertFalse((self.custom / "runtime" / slug).exists(), identity)
+            self.assertIn(str(self.xdg_install), self.unit_text(identity))
+        # The operator's own directory is theirs: its script links are left
+        # exactly where they were, because nothing here installed them.
+        self.assertTrue((self.custom / "drain_prs_service.py").is_symlink())
+
+    def test_it_carries_both_a_legacy_and_a_custom_repositorys_runtime_state(self):
+        # The mixed installation, which is the one a single whole-tree move
+        # would half-migrate: one repository's state under the legacy install
+        # directory and another's under a custom one.
+        self.seed_legacy_install(self.widgets)
+        self.seed_legacy_install(self.gadgets, install_dir=self.custom)
+        self.assertTrue(
+            (self.legacy_install / "runtime" / self.slug("acme/widgets")).is_dir()
+        )
+        self.assertTrue((self.custom / "runtime" / self.slug("acme/gadgets")).is_dir())
+
+        self.install(self.widgets)
+
+        for identity in ("acme/widgets", "acme/gadgets"):
+            slug = self.slug(identity)
+            self.assertTrue(
+                (self.xdg_install / "runtime" / slug / "incidents" / "incident.json").is_file(),
+                identity,
+            )
+        self.assertFalse(self.legacy_install.exists())
+        self.assertFalse((self.custom / "runtime" / self.slug("acme/gadgets")).exists())
+
     # -- refusals, none of which may mutate anything ----------------------
 
     def assert_nothing_changed(self, message, *, repo=None):
@@ -930,6 +1003,49 @@ class LegacyMigrationTests(LegacyMigrationFixture):
             json.dumps(document), encoding="utf-8"
         )
         self.assert_nothing_changed("no absolute checkout path")
+
+    def test_it_refuses_when_a_definition_names_no_install_directory(self):
+        # Without it the runtime state that definition owns cannot be located,
+        # so the rewrite would silently orphan it. Recovering it or refusing
+        # are the only two answers; this is the refusal.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        unit = self.backend.definition_path(
+            self.backend.service_identifier(self.slug("acme/gadgets"))
+        )
+        unit.write_text(
+            "\n".join(
+                line
+                for line in unit.read_text(encoding="utf-8").splitlines()
+                if kanban_config.DRAINER_INSTALL_DIR_ENV not in line
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.assert_nothing_changed(kanban_config.DRAINER_INSTALL_DIR_ENV)
+
+    def test_it_refuses_when_a_definition_cannot_be_read_at_all(self):
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        self.backend.definition_path(
+            self.backend.service_identifier(self.slug("acme/gadgets"))
+        ).unlink()
+        self.assert_nothing_changed("cannot read an environment out of")
+
+    def test_it_refuses_when_a_custom_runtime_tree_collides_with_the_legacy_one(self):
+        # A slug present under both install directories has two candidate
+        # trees for one destination. Choosing either would discard the other,
+        # so neither is chosen.
+        self.seed_legacy_install(self.widgets, install_dir=self.custom)
+        stale = self.legacy_install / "runtime" / self.slug("acme/widgets")
+        stale.mkdir(parents=True)
+        (stale / "status.json").write_text("{}", encoding="utf-8")
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.install(self.widgets)
+        self.assertIn("already exists", str(raised.exception))
+        self.assertTrue((stale / "status.json").is_file())
+        self.assertTrue(
+            (self.custom / "runtime" / self.slug("acme/widgets") / "incidents").is_dir()
+        )
+        self.assertFalse(self.xdg_install.exists())
 
     def test_it_refuses_a_sibling_installed_under_the_other_service_manager(self):
         self.seed_legacy_install(self.widgets, self.gadgets)

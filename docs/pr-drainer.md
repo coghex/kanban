@@ -952,7 +952,10 @@ run: the two discovery documents are merged with the XDG one winning per key so
 no repository and no setting is dropped, the runtime and log trees move with
 their open incidents intact, every installed repository's service definition is
 rewritten and reloaded against the new location, and only then is the old
-directory removed. It refuses before changing anything — and fails the install
+directory removed. A repository installed with `--install-dir` keeps its runtime
+state under that directory rather than the old one, so its tree is found through
+its own service definition and moved along with the rest; the custom directory
+itself is left alone. It refuses before changing anything — and fails the install
 rather than proceeding — if any installed repository's drainer is running, if an
 entry in the shared record cannot be recovered exactly, if a destination runtime
 or log tree already exists, or if the old install directory holds a file the

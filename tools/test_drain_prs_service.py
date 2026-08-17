@@ -158,6 +158,12 @@ class RecordingBackend(service_manager.ServiceManagerBackend):
     def request_stop(self, identifier):
         self._record("request_stop", identifier)
 
+    def definition_environment(self, identifier):
+        for definition in self.written:
+            if definition.identifier == identifier:
+                return dict(definition.environment)
+        return None
+
     def legacy_definition_exists(self):
         return self.legacy_installed
 

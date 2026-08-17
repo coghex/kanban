@@ -1078,8 +1078,9 @@ search step and nothing else, which is what `mandatory: no` records.
   Nothing about it is silent or partial. It refuses before changing anything
   when any repository the shared record names has a live job or checkout
   drainer, when any recorded entry cannot be recovered exactly — its canonical
-  identity, its checkout, and the identifier and definition path this host
-  would derive for it — when a destination runtime or log tree already exists,
+  identity, its checkout, the identifier and definition path this host would
+  derive for it, and the install directory its own definition names — when a
+  destination runtime or log tree already exists,
   or when the legacy install directory holds a file the installer did not put
   there; and a refusal fails the run outright rather than installing at the
   destination, because a fresh installation standing beside a retained legacy
@@ -1091,7 +1092,14 @@ search step and nothing else, which is what `mandatory: no` records.
   rather than none. The runtime and log trees, open incidents included, are
   moved rather than recreated, every recorded repository's definition is
   rewritten and reloaded against the destination, and only then is the legacy
-  directory removed. A custom `--install-dir` or `KANBAN_DRAINER_INSTALL_DIR`
+  directory removed. Which runtime tree belongs to a repository is read back
+  out of its own definition rather than assumed: `--install-dir` and
+  `KANBAN_DRAINER_INSTALL_DIR` move a job's script links and its runtime root
+  without moving the shared record that names it, so a repository installed
+  that way keeps its status file and its open incidents under its own
+  directory, and those come across too — while that directory itself, whose
+  contents the installer did not place, is left exactly as it is. A custom
+  `--install-dir` or `KANBAN_DRAINER_INSTALL_DIR`
   installs where it says and relocates nothing, reporting that the migration
   was skipped. macOS is never migrated: there the two locations are the same
   directory.

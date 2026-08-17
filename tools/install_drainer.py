@@ -338,16 +338,45 @@ class RecordedJob:
     """One repository the shared record describes, recovered whole.
 
     A migration must rewrite every one of these, so each is either recovered
-    exactly — identity, checkout, identifier and definition path — or the whole
+    exactly — identity, checkout, identifier, definition path, and the install
+    directory that definition actually points its controller at — or the whole
     migration refuses. There is no partial reading: an entry this cannot
     reconstruct is an entry whose definition would be left pointing at an
     install directory that is about to be removed.
+
+    `install_dir` is read back out of the definition rather than assumed to be
+    the legacy one, because `--install-dir` and DRAINER_INSTALL_DIR_ENV move a
+    job's script links and its runtime root without moving the shared record
+    that names it. A repository installed that way keeps its status file and
+    its open incidents under its own directory, and a migration that moved
+    only the legacy tree would repoint its definition at an empty runtime root
+    and leave them unreachable.
     """
 
     identity: str
+    slug: str
     checkout: Path
     identifier: str
     definition_path: Path
+    install_dir: Path
+
+    @property
+    def runtime_dir(self) -> Path:
+        return self.install_dir / "runtime" / self.slug
+
+
+@dataclass(frozen=True)
+class TreeMove:
+    """One durable tree the migration relocates whole, and what it holds.
+
+    Moved rather than copied-and-deleted, and only into a destination the
+    preflight proved is empty, so nothing here can overwrite, merge into, or
+    discard a record of what a drainer did.
+    """
+
+    what: str
+    source: Path
+    destination: Path
 
 
 def plan_legacy_migration(install_dir: Path) -> LegacyMigration | None:
@@ -449,15 +478,26 @@ def recorded_jobs(document: dict[str, Any], backend) -> list[RecordedJob]:
                 "changed. Repair or remove that entry, then re-run this installer."
             )
         keys = _RECORD_KEYS_BY_BACKEND[backend.backend_name()]
+        slug = drain_prs_service.repository_slug(identity)
+        identifier = entry[keys[0]]
         jobs.append(
             RecordedJob(
                 identity=identity,
+                slug=slug,
                 checkout=Path(entry["repository"]),
-                identifier=entry[keys[0]],
+                identifier=identifier,
                 definition_path=Path(entry[keys[1]]),
+                install_dir=_recorded_install_dir(identifier, backend),
             )
         )
     return jobs
+
+
+def _recorded_install_dir(identifier: str, backend) -> Path:
+    """The install directory that job's own definition points its controller
+    at, which is where its runtime state and open incidents are."""
+    environment = backend.definition_environment(identifier) or {}
+    return Path(environment[kanban_config.DRAINER_INSTALL_DIR_ENV])
 
 
 def _unrecoverable_reason(identity: Any, entry: Any, backend) -> str | None:
@@ -486,6 +526,19 @@ def _unrecoverable_reason(identity: Any, entry: Any, backend) -> str | None:
         return f"records an identifier other than the {expected!r} this host derives"
     if entry.get(definition_key) != str(backend.definition_path(expected)):
         return "records a definition path other than the one this host derives"
+    # The record names the job; only the definition names the directory that
+    # job's runtime state and incidents actually live under, and moving them is
+    # what the rewrite below owes it.
+    environment = backend.definition_environment(expected)
+    if environment is None:
+        return "has a definition this host cannot read an environment out of"
+    configured = environment.get(kanban_config.DRAINER_INSTALL_DIR_ENV)
+    if not isinstance(configured, str) or not Path(configured).is_absolute():
+        return (
+            "has a definition naming no absolute "
+            f"{kanban_config.DRAINER_INSTALL_DIR_ENV}, so the runtime state and "
+            "incidents it would carry cannot be located"
+        )
     return None
 
 
@@ -510,6 +563,64 @@ def sibling_drainer_running(checkout: Path) -> bool:
             f"recorded as an installed repository but could not be inspected ({exc}). "
             "Nothing was changed."
         ) from exc
+
+
+def planned_tree_moves(
+    migration: LegacyMigration, jobs: list[RecordedJob]
+) -> list[TreeMove]:
+    """Every durable tree this migration has to carry across.
+
+    Three kinds, because `--install-dir` and DRAINER_INSTALL_DIR_ENV split
+    them apart: the legacy install directory's own `runtime/` tree, which holds
+    every job installed there and whatever unpartitioned state the machine-wide
+    singleton left; each recorded job whose definition points somewhere else,
+    whose per-repository runtime tree is under *that* directory instead; and
+    the log root, which no option ever relocates and which therefore holds
+    every job's logs wherever its scripts are.
+
+    A job installed at a custom directory keeps that directory — its script
+    links are the operator's own and are never removed — but its runtime state
+    comes along, because the definition being rewritten here is what will look
+    for it at the new install directory afterwards.
+    """
+    moves = [
+        TreeMove("runtime", migration.source / "runtime", migration.destination / "runtime")
+    ]
+    moves.extend(
+        TreeMove(
+            f"runtime for {job.identity}",
+            job.runtime_dir,
+            migration.destination / "runtime" / job.slug,
+        )
+        for job in jobs
+        if job.install_dir != migration.source
+    )
+    moves.append(TreeMove("logs", migration.source_logs, migration.destination_logs))
+    return [move for move in moves if os.path.lexists(move.source)]
+
+
+def _move_conflicts(migration: LegacyMigration, moves: list[TreeMove]) -> list[str]:
+    """Every destination a move would land on top of.
+
+    Whole trees rather than file by file: refusing an occupied destination
+    outright is what makes a same-relative-path collision impossible, and it is
+    the only policy that cannot silently overwrite, discard, or delete a
+    durable record — an open incident above all. A per-repository runtime tree
+    is checked against the legacy tree's own copy of that slug as well, because
+    the whole-tree move above will have put one there by the time it runs.
+    """
+    legacy_runtime = migration.source / "runtime"
+    conflicts = []
+    for move in moves:
+        occupied = os.path.lexists(move.destination)
+        if not occupied and move.destination.parent == migration.destination / "runtime":
+            occupied = os.path.lexists(legacy_runtime / move.destination.name)
+        if occupied:
+            conflicts.append(
+                f"the {move.what} tree at {move.source} cannot be moved to "
+                f"{move.destination}, which already exists"
+            )
+    return conflicts
 
 
 def preflight_legacy_migration(
@@ -544,18 +655,7 @@ def preflight_legacy_migration(
             "Refusing to migrate the shared PR drainer installation while a drainer "
             "is running for " + ", ".join(live) + ". Stop it first; nothing was changed."
         )
-    conflicts = [
-        f"{source} cannot be moved to {destination}, which already exists"
-        for source, destination in (
-            (migration.source / "runtime", migration.destination / "runtime"),
-            (migration.source_logs, migration.destination_logs),
-        )
-        if os.path.lexists(source) and os.path.lexists(destination)
-    ]
-    # Whole trees rather than file by file: refusing an occupied destination
-    # outright is what makes a same-relative-path collision impossible, and it
-    # is the only policy that cannot silently overwrite, discard, or delete a
-    # durable record — an open incident above all.
+    conflicts = _move_conflicts(migration, planned_tree_moves(migration, jobs))
     unexpected = sorted(
         str(entry)
         for entry in migration.source.iterdir()
@@ -595,15 +695,12 @@ def perform_legacy_migration(
             read_config_document(migration.source_record), current
         ),
     )
-    moved = {}
-    for name, source, destination in (
-        ("runtime", migration.source / "runtime", migration.destination / "runtime"),
-        ("logs", migration.source_logs, migration.destination_logs),
-    ):
-        moved[name] = os.path.lexists(source)
-        if moved[name]:
-            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            shutil.move(str(source), str(destination))
+    # The legacy install directory's own tree first, so a per-repository tree
+    # from elsewhere lands beside what it carried rather than under it.
+    moves = planned_tree_moves(migration, jobs)
+    for move in moves:
+        move.destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.move(str(move.source), str(move.destination))
     # From here on every path this process resolves is the destination's.
     drain_prs_service.bind_managed_paths()
     for job in jobs:
@@ -619,7 +716,10 @@ def perform_legacy_migration(
         "destination_logs": str(migration.destination_logs),
         "record": str(migration.destination_record),
         "repositories": [job.identity for job in jobs],
-        "moved": moved,
+        "moved": [
+            {"what": move.what, "from": str(move.source), "to": str(move.destination)}
+            for move in moves
+        ],
     }
 
 

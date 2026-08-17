@@ -2480,9 +2480,11 @@ above are unchanged, and persistence the user switched off is not a failure.
   job's identity. On a platform whose own convention is not `~/Library`, a
   default-destination run also relocates a `~/Library` installation it finds:
   it merges both discovery documents with the current-convention one winning
-  per key, moves the runtime and log trees with their open incidents, rewrites
-  and reloads every installed repository's definition against the new location,
-  and only then removes the old directory — and refuses the whole install
+  per key, moves the runtime and log trees with their open incidents — each
+  repository's own tree found through the install directory its definition
+  names, since that option moves runtime state without moving the record —
+  rewrites and reloads every installed repository's definition against the new
+  location, and only then removes the old directory — and refuses the whole install
   without changing anything when any installed repository's drainer is running,
   when a recorded entry cannot be recovered exactly, when a destination tree
   already exists, or when the old directory holds a file the installer did not

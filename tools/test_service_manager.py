@@ -922,6 +922,69 @@ class NamespaceTests(unittest.TestCase):
         self.assertNotIn("PR drainer", unit)
 
 
+class DefinitionEnvironmentTests(unittest.TestCase):
+    """Reading back the environment a definition on disk sets.
+
+    Both backends, against definitions each one really wrote, because this is
+    the inverse of `render_definition` and the two only stay agreed if they are
+    exercised as a pair.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.runner = ScriptedRunner(RunnerError)
+
+    def test_a_definitions_environment_reads_back_exactly_what_was_written(self):
+        # Issue #358: a job that is already installed names its install
+        # directory nowhere but its own definition, and a migration that has to
+        # move that directory's runtime state must be able to recover it. This
+        # is the read-back half of `render_definition`, so it is pinned against
+        # what each backend really writes rather than against a hand-built
+        # file — including the values each backend has to escape, which is
+        # where a reader and a writer most easily stop agreeing.
+        environment = {
+            "HOME": "/home/user",
+            "KANBAN_DRAINER_INSTALL_DIR": '/opt/dir with space/100% "quoted"\\raw',
+            "PYTHONUNBUFFERED": "1",
+        }
+        launch_agents = self.root / "LaunchAgents"
+        launch_agents.mkdir(exist_ok=True)
+        units = self.root / "units"
+        units.mkdir(exist_ok=True)
+        with (
+            mock.patch.object(service_manager, "LAUNCH_AGENTS_DIR", launch_agents),
+            mock.patch.object(service_manager, "SYSTEMD_USER_DIR", units),
+        ):
+            for backend in (
+                service_manager.LaunchdBackend(self.runner),
+                service_manager.SystemdBackend(self.runner),
+            ):
+                with self.subTest(backend=backend.backend_name()):
+                    identifier = backend.service_identifier("acme.widgets")
+                    backend.write_definition(
+                        service_manager.ServiceDefinition(
+                            identifier=identifier,
+                            program_arguments=["/usr/bin/python3", "/c.py", "run"],
+                            working_directory="/checkout",
+                            environment=environment,
+                            stdout_path="/logs/service.out",
+                            stderr_path="/logs/service.err",
+                        )
+                    )
+                    self.assertEqual(
+                        backend.definition_environment(identifier), environment
+                    )
+                    # Absent rather than empty for a job that has none, so a
+                    # caller can fail closed on "no answer" deliberately.
+                    self.assertIsNone(
+                        backend.definition_environment(
+                            backend.service_identifier("acme.missing")
+                        )
+                    )
+
+
 class BackendSelectionTests(unittest.TestCase):
     """Which backend a host gets, decided by probing rather than by naming it.
 
