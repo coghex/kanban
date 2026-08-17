@@ -1047,6 +1047,99 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         )
         self.assertFalse(self.xdg_install.exists())
 
+    def test_it_refuses_an_ordinary_file_wearing_a_managed_name(self):
+        # A successful migration deletes the legacy directory whole, so what
+        # may be in it is decided by what each entry *is*, not by what it is
+        # called. `install_symlink` only ever creates symlinks there; an
+        # ordinary file with the same name is a user's, and treating the name
+        # as ownership would hand it to `shutil.rmtree`.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        impostor = self.legacy_install / "drain_prs.py"
+        impostor.unlink()
+        impostor.write_text("my own notes, not a link\n", encoding="utf-8")
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.install(self.widgets)
+        self.assertIn("did not put there", str(raised.exception))
+        self.assertIn(str(impostor), str(raised.exception))
+        self.assertEqual(
+            impostor.read_text(encoding="utf-8"), "my own notes, not a link\n"
+        )
+        self.assertFalse(self.xdg_install.exists())
+
+    def test_a_failed_sibling_rewrite_is_rolled_back_whole(self):
+        # The one failure the preflight cannot rule out. Without an undo it
+        # would leave the trees moved, the merged record winning discovery, and
+        # some definitions still naming paths that are gone — a half-migrated
+        # installation rather than a refusal.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        legacy_record = self.record(self.legacy_install / "config.json")
+        units = {
+            identity: self.unit_text(identity)
+            for identity in ("acme/widgets", "acme/gadgets")
+        }
+        real = install_drainer._reinstall_recorded_job
+        attempted = []
+
+        def failing(job, backend):
+            attempted.append(job.identity)
+            if len(attempted) > 1:
+                raise install_drainer.InstallError("the second rewrite failed")
+            return real(job, backend)
+
+        with mock.patch.object(install_drainer, "_reinstall_recorded_job", failing):
+            with self.assertRaises(install_drainer.InstallError) as raised:
+                self.install(self.widgets)
+        self.assertIn("Every change it had made was undone", str(raised.exception))
+        self.assertNotIn("could not be undone", str(raised.exception))
+
+        # Every definition is byte-identical to what it was, including the one
+        # that had already been rewritten before the failure.
+        for identity, before in units.items():
+            self.assertEqual(self.unit_text(identity), before, identity)
+        # The durable trees are back where they were, with their incidents.
+        for identity in ("acme/widgets", "acme/gadgets"):
+            slug = self.slug(identity)
+            self.assertTrue(
+                (self.legacy_install / "runtime" / slug / "incidents" / "incident.json").is_file()
+            )
+            self.assertTrue((self.legacy_logs / slug / "service.log").is_file())
+        self.assertFalse((self.xdg_install / "runtime").exists())
+        self.assertFalse(self.xdg_logs.exists())
+        # And the record the host resolves is the legacy one again, unchanged.
+        self.assertFalse((self.xdg_install / "config.json").exists())
+        self.assertEqual(self.record(self.legacy_install / "config.json"), legacy_record)
+        self.assertEqual(
+            drain_prs_service.DISCOVERY_RECORD_PATH,
+            self.legacy_install / "config.json",
+        )
+
+    def test_a_rollback_that_cannot_finish_is_reported_beside_the_failure(self):
+        # Nothing here can repair a host whose filesystem stopped cooperating
+        # mid-undo, so the operator is told what was left where rather than
+        # given a refusal that reads as if nothing happened.
+        self.seed_legacy_install(self.widgets)
+
+        def failing(job, backend):
+            raise install_drainer.InstallError("the rewrite failed")
+
+        def unmovable(move):
+            def restore():
+                raise OSError(f"{move.destination} could not be moved back")
+
+            return restore
+
+        with (
+            mock.patch.object(install_drainer, "_reinstall_recorded_job", failing),
+            mock.patch.object(install_drainer, "_restore_move", unmovable),
+        ):
+            with self.assertRaises(install_drainer.InstallError) as raised:
+                self.install(self.widgets)
+        self.assertIn("could not be undone", str(raised.exception))
+        self.assertIn("could not be moved back", str(raised.exception))
+        # The rest of the undo still ran: the destination record it wrote is
+        # gone, so a rollback that cannot finish does not also give up.
+        self.assertFalse((self.xdg_install / "config.json").exists())
+
     def test_it_refuses_a_sibling_installed_under_the_other_service_manager(self):
         self.seed_legacy_install(self.widgets, self.gadgets)
         document = self.record(self.legacy_install / "config.json")

@@ -30,6 +30,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -47,23 +48,37 @@ import service_manager
 # answer, for the same reason: one module writes each location down, for every
 # platform it has a convention on.
 #
-# What a legacy install directory may contain and still be relocated whole.
-# Everything here is this installer's or the controller's own: the four script
-# links, the shared document and the lock that serializes writes to it, and the
-# runtime tree beneath them. Anything else is a file nobody here put there, and
-# a migration that moved or deleted it would be discarding a user's file --
-# which is why finding one refuses the migration instead.
-MANAGED_INSTALL_NAMES = frozenset(
-    {
-        "drain_prs.py",
-        "drain_prs_service.py",
-        "kanban_config.py",
-        "service_manager.py",
-        "config.json",
-        "config.json.lock",
-        "runtime",
-    }
-)
+def _is_plain_file(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink()
+
+
+def _is_plain_directory(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink()
+
+
+def _is_unmanaged(_path: Path) -> bool:
+    return False
+
+
+# What a legacy install directory may contain and still be relocated whole:
+# each name this installer or the controller creates there, *and what that name
+# has to be* for this to have created it. A name alone is not ownership.
+# `install_symlink` only ever creates symlinks and refuses to overwrite
+# anything else; `update_json_document` and `document_lock` refuse a path that
+# is not a plain file. So an ordinary file named `drain_prs.py`, or a symlink
+# where `config.json` belongs, is someone else's -- and since a successful
+# migration deletes this directory whole, checking the name alone would be a
+# spelling that hands a user's own file to `shutil.rmtree`. Anything that fails
+# its check refuses the migration instead.
+MANAGED_INSTALL_ENTRIES = {
+    "drain_prs.py": Path.is_symlink,
+    "drain_prs_service.py": Path.is_symlink,
+    "kanban_config.py": Path.is_symlink,
+    "service_manager.py": Path.is_symlink,
+    "config.json": _is_plain_file,
+    "config.json.lock": _is_plain_file,
+    "runtime": _is_plain_directory,
+}
 
 # Which keys name a recorded job's identifier and definition, per backend. The
 # record is a discriminated union (`tools/service_manager.py`), so an entry is
@@ -659,7 +674,7 @@ def preflight_legacy_migration(
     unexpected = sorted(
         str(entry)
         for entry in migration.source.iterdir()
-        if entry.name not in MANAGED_INSTALL_NAMES
+        if not MANAGED_INSTALL_ENTRIES.get(entry.name, _is_unmanaged)(entry)
     )
     if unexpected:
         conflicts.append(
@@ -675,38 +690,85 @@ def preflight_legacy_migration(
     return jobs
 
 
+def _restore_file(path: Path) -> Callable[[], None]:
+    """An undo that puts `path` back exactly as it is right now — including
+    putting nothing there, when there is nothing there now."""
+    before = path.read_bytes() if _is_plain_file(path) else None
+
+    def restore() -> None:
+        if before is None:
+            if os.path.lexists(path):
+                path.unlink()
+        else:
+            path.write_bytes(before)
+
+    return restore
+
+
+def _restore_move(move: TreeMove) -> Callable[[], None]:
+    def restore() -> None:
+        move.source.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.move(str(move.destination), str(move.source))
+
+    return restore
+
+
 def perform_legacy_migration(
     migration: LegacyMigration, jobs: list[RecordedJob], backend
 ) -> dict[str, Any]:
-    """Relocate the shared installation, in the one order that is safe to be
-    interrupted in.
+    """Relocate the shared installation, undoing every step of it if any step
+    fails.
 
-    The merged record is written durably at the destination first, so a run cut
-    short leaves one complete document rather than none. The durable trees move
-    next, into destinations the preflight proved are empty. Only then are the
-    module's own managed paths rebound and every recorded definition rewritten
-    and reloaded against them — and only once all of that has happened is the
-    legacy directory removed, because a definition still naming it is a
-    repository that would stop working the moment it went.
+    The order is the one that is safe to be *interrupted* in: the merged record
+    is written durably at the destination first, so a run killed outright
+    leaves one complete document rather than none; the durable trees move next,
+    into destinations the preflight proved are empty; only then are the module's
+    own managed paths rebound and every recorded definition rewritten and
+    reloaded against them; and only once all of that has happened is the legacy
+    directory removed, because a definition still naming it is a repository
+    that would stop working the moment it went.
+
+    That order alone is not enough for a step that *fails*, which is the case
+    the preflight cannot rule out: a sibling whose definition cannot be
+    rewritten or reloaded would otherwise be left naming trees that had already
+    moved, while the newly merged record won discovery — a half-migrated
+    installation rather than the refusal this owes its caller. So every step
+    registers its own undo before it runs, and a failure runs them in reverse:
+    definitions restored byte for byte and reloaded, trees moved back, the
+    destination record returned to whatever it held. The host is then what the
+    preflight found, and the caller raises rather than installs.
+
+    Undo failures are reported alongside the original one instead of replacing
+    it. Nothing here can repair a host whose filesystem stopped cooperating
+    mid-rollback, and the operator has to be told exactly what was left where.
     """
-    drain_prs_service.update_json_document(
-        migration.destination_record,
-        lambda current: merged_record_document(
-            read_config_document(migration.source_record), current
-        ),
-    )
-    # The legacy install directory's own tree first, so a per-repository tree
-    # from elsewhere lands beside what it carried rather than under it.
     moves = planned_tree_moves(migration, jobs)
-    for move in moves:
-        move.destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        shutil.move(str(move.source), str(move.destination))
-    # From here on every path this process resolves is the destination's.
-    drain_prs_service.bind_managed_paths()
-    for job in jobs:
-        _reinstall_recorded_job(job, backend)
-    for job in jobs:
-        backend.load_definition(job.identifier)
+    undo: list[Callable[[], None]] = [_restore_file(migration.destination_record)]
+    try:
+        drain_prs_service.update_json_document(
+            migration.destination_record,
+            lambda current: merged_record_document(
+                read_config_document(migration.source_record), current
+            ),
+        )
+        # The legacy install directory's own tree first, so a per-repository
+        # tree from elsewhere lands beside what it carried rather than under it.
+        for move in moves:
+            move.destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.move(str(move.source), str(move.destination))
+            undo.append(_restore_move(move))
+        # From here on every path this process resolves is the destination's.
+        drain_prs_service.bind_managed_paths()
+        for job in jobs:
+            undo.append(_restore_definition(job, backend))
+            _reinstall_recorded_job(job, backend)
+        for job in jobs:
+            backend.load_definition(job.identifier)
+    except Exception as exc:
+        raise InstallError(_rolled_back(undo, exc)) from exc
+    # Past the point of return: every repository is usable through the
+    # destination, so what is left behind is debris rather than an
+    # installation, and nothing that follows can strand a sibling.
     shutil.rmtree(migration.source)
     return {
         "migrated": True,
@@ -721,6 +783,41 @@ def perform_legacy_migration(
             for move in moves
         ],
     }
+
+
+def _restore_definition(job: RecordedJob, backend) -> Callable[[], None]:
+    """An undo that puts one repository's definition back and hands the
+    restored bytes to the service manager, so the manager is holding what the
+    file says rather than the version this run replaced."""
+    restore_file = _restore_file(job.definition_path)
+
+    def restore() -> None:
+        restore_file()
+        backend.load_definition(job.identifier)
+
+    return restore
+
+
+def _rolled_back(undo: list[Callable[[], None]], failure: Exception) -> str:
+    """Run every registered undo in reverse and describe what happened."""
+    unrepaired = []
+    for action in reversed(undo):
+        try:
+            action()
+        except OSError as exc:
+            unrepaired.append(str(exc))
+        except service_manager.ServiceManagerError as exc:
+            unrepaired.append(str(exc))
+    # After the destination record is back to what it was, so this resolves the
+    # installation the host actually has again.
+    drain_prs_service.bind_managed_paths()
+    message = (
+        f"The PR drainer installation could not be relocated: {failure} "
+        "Every change it had made was undone, and nothing was installed."
+    )
+    if unrepaired:
+        message += " Some of that could not be undone: " + "; ".join(unrepaired)
+    return message
 
 
 def _reinstall_recorded_job(job: RecordedJob, backend) -> None:
