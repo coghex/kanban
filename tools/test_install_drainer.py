@@ -966,6 +966,25 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         # exactly where they were, because nothing here installed them.
         self.assertTrue((self.custom / "drain_prs_service.py").is_symlink())
 
+    def test_it_migrates_a_custom_install_already_at_the_future_default(self):
+        # `--install-dir` naming what is *now* this platform's default is a
+        # supported pre-XDG install: its record is still under `~/Library`, so
+        # it migrates, while its runtime tree is already exactly where the
+        # migration would put it. Planning that as a move would be a move onto
+        # itself, and the occupied-destination rule would then refuse the very
+        # installation it exists to protect.
+        self.seed_legacy_install(self.widgets, install_dir=self.xdg_install)
+        runtime = self.xdg_install / "runtime" / self.slug("acme/widgets")
+        self.assertTrue((runtime / "incidents" / "incident.json").is_file())
+
+        result = self.install(self.widgets)
+
+        self.assertTrue(result["legacy_migration"]["migrated"])
+        # Preserved in place rather than moved, and still there afterwards.
+        self.assertTrue((runtime / "incidents" / "incident.json").is_file())
+        self.assertIn(str(self.xdg_install), self.unit_text("acme/widgets"))
+        self.assertFalse(self.legacy_install.exists())
+
     def test_it_carries_both_a_legacy_and_a_custom_repositorys_runtime_state(self):
         # The mixed installation, which is the one a single whole-tree move
         # would half-migrate: one repository's state under the legacy install
@@ -1081,28 +1100,81 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertFalse(os.path.lexists(legacy_record))
         self.assertFalse(result["legacy_migration"]["legacy_record_reappeared"])
 
-    def test_a_legacy_record_written_after_the_removal_is_reported(self):
-        # A writer arriving after the removal creates the directory afresh and
-        # opens a lock inode this transition never held, so it is contending
-        # with nothing and cannot be serialized. What it records is invisible
-        # to the XDG-first probe, so the run says so rather than reporting a
-        # clean relocation over a repository nobody will find.
-        self.seed_legacy_install(self.widgets, self.gadgets)
+    def late_legacy_write(self, checkout, *, passes=1):
+        """A writer that installs into the legacy location after it is removed.
+
+        Driven through the controller's own writers with the module constants
+        a process that resolved *before* the relocation still holds — which is
+        exactly what makes such a writer possible: its paths are frozen at the
+        old installation, so it recreates the directory and opens a lock inode
+        this transition never held. Installed as a `shutil.rmtree` wrapper so
+        it commits after the removal, and after any check that follows it.
+        """
         legacy_record = self.legacy_install / "config.json"
         real_rmtree = install_drainer.shutil.rmtree
+        remaining = [passes]
 
         def late_writer(path, *args, **kwargs):
             real_rmtree(path, *args, **kwargs)
-            drain_prs_service.update_json_document(
-                legacy_record, lambda document: {**document, "late": True}
-            )
+            if not remaining[0]:
+                return
+            remaining[0] -= 1
+            with (
+                mock.patch.object(
+                    drain_prs_service, "DISCOVERY_RECORD_PATH", legacy_record
+                ),
+                mock.patch.object(drain_prs_service, "CONFIG_PATH", legacy_record),
+                mock.patch.object(
+                    drain_prs_service, "INSTALL_DIR", self.legacy_install
+                ),
+                mock.patch.object(
+                    drain_prs_service, "RUNTIME_ROOT", self.legacy_install / "runtime"
+                ),
+                mock.patch.object(drain_prs_service, "LOG_ROOT", self.legacy_logs),
+            ):
+                job = drain_prs_service.resolve_job(checkout)
+                drain_prs_service.ensure_dirs(job)
+                self.backend.write_definition(
+                    drain_prs_service.service_definition(job)
+                )
+                drain_prs_service.write_discovery_record(job)
+            self.assertTrue(legacy_record.is_file())
 
-        with mock.patch.object(install_drainer.shutil, "rmtree", late_writer):
+        return mock.patch.object(install_drainer.shutil, "rmtree", late_writer)
+
+    def test_a_repository_recorded_after_the_removal_is_carried_across_too(self):
+        # Not merely noticed: the pass that finds it does what the next run of
+        # this installer would, so a repository installed into the location
+        # this run had just retired ends up installed where things look for it.
+        self.seed_legacy_install(self.widgets)
+        with self.late_legacy_write(self.gadgets):
             result = self.install(self.widgets)
 
         self.assertTrue(result["legacy_migration"]["migrated"])
+        self.assertFalse(result["legacy_migration"]["legacy_record_reappeared"])
+        # Both are installed at the destination, and the latecomer's definition
+        # names it rather than the directory that is gone.
+        self.assertEqual(
+            sorted(self.record(self.xdg_install / "config.json")["repositories"]),
+            ["acme/gadgets", "acme/widgets"],
+        )
+        self.assertIn(str(self.xdg_install), self.unit_text("acme/gadgets"))
+        self.assertNotIn(str(self.legacy_install), self.unit_text("acme/gadgets"))
+        self.assertFalse(self.legacy_install.exists())
+
+    def test_a_writer_that_keeps_winning_the_race_is_reported_rather_than_looped_on(
+        self,
+    ):
+        # A bound rather than a loop: a writer recreating the location every
+        # time must not hold the installer open forever, so past the bound the
+        # run says what is still there.
+        self.seed_legacy_install(self.widgets)
+        with self.late_legacy_write(
+            self.gadgets, passes=install_drainer.LATE_WRITER_PASSES + 1
+        ):
+            result = self.install(self.widgets)
         self.assertTrue(result["legacy_migration"]["legacy_record_reappeared"])
-        # And re-running is the repair, because what came back is a legacy
+        # And re-running is still the repair, because what is there is a legacy
         # installation and that is what this migrates.
         self.assertIsNotNone(install_drainer.plan_legacy_migration(self.xdg_install))
 

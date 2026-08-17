@@ -652,6 +652,13 @@ def sibling_drainer_running(checkout: Path) -> bool:
         ) from exc
 
 
+def _destination_runtime(migration: LegacyMigration, job: RecordedJob) -> Path:
+    """Where this repository's runtime tree belongs once the installation has
+    moved. Equal to `job.runtime_dir` already for a job whose `--install-dir`
+    named what is now this platform's own default."""
+    return migration.destination / "runtime" / job.slug
+
+
 def planned_tree_moves(
     migration: LegacyMigration, jobs: list[RecordedJob]
 ) -> list[TreeMove]:
@@ -677,10 +684,15 @@ def planned_tree_moves(
         TreeMove(
             f"runtime for {job.identity}",
             job.runtime_dir,
-            migration.destination / "runtime" / job.slug,
+            _destination_runtime(migration, job),
         )
         for job in jobs
         if job.install_dir != migration.source
+        # A job installed with `--install-dir` naming what is *now* this
+        # platform's default is already where this would put it. Planning that
+        # as a move would be a move onto itself, and the occupied-destination
+        # rule would then refuse the very installation it is there to protect.
+        and job.runtime_dir != _destination_runtime(migration, job)
     )
     moves.append(TreeMove("logs", migration.source_logs, migration.destination_logs))
     return [move for move in moves if os.path.lexists(move.source)]
@@ -751,15 +763,20 @@ def preflight_legacy_migration(
     # is someone's record of what a drainer did, and this refuses rather than
     # absorbing it.
     arriving = {move.destination for move in moves}
-    conflicts.extend(
-        f"{path} already holds durable state for {job.identity}"
-        for job in jobs
-        for path in (
-            migration.destination / "runtime" / job.slug,
-            migration.destination_logs / job.slug,
-        )
-        if path not in arriving and os.path.lexists(path)
-    )
+    for job in jobs:
+        runtime = _destination_runtime(migration, job)
+        # `job.runtime_dir` is excluded because a tree already at its
+        # destination is this repository's own, preserved in place rather than
+        # someone else's state being adopted.
+        if (
+            runtime not in arriving
+            and runtime != job.runtime_dir
+            and os.path.lexists(runtime)
+        ):
+            conflicts.append(f"{runtime} already holds durable state for {job.identity}")
+        logs = migration.destination_logs / job.slug
+        if logs not in arriving and os.path.lexists(logs):
+            conflicts.append(f"{logs} already holds durable state for {job.identity}")
     # Every path this migration writes *through*, as opposed to the trees it
     # moves into place. `update_json_document` refuses one that is not a plain
     # file, and `write_definition_file`'s `os.replace` would silently replace
@@ -1006,16 +1023,7 @@ def perform_legacy_migration(
     # installation, and nothing that follows can strand a sibling.
     rollback.commit()
     shutil.rmtree(migration.source)
-    # The lock above serializes every writer that queues on the legacy
-    # record's lock file. It cannot serialize one that arrives *after* this
-    # removal: that writer creates the directory afresh, opens a new lock
-    # inode, and is contending with nothing. It would then record a repository
-    # in a document the XDG-first probe no longer prefers -- installed, and
-    # invisible. Nothing here can hold a lock on a file it has just deleted,
-    # so this reports the condition rather than claiming to prevent it. The
-    # repair is another run of this installer: a legacy record that is back is
-    # a legacy installation to migrate, which is exactly what it will do.
-    stranded = os.path.lexists(migration.source_record)
+    stranded = _absorb_late_legacy_writes(migration, backend)
     return {
         "migrated": True,
         "source": str(migration.source),
@@ -1030,6 +1038,56 @@ def perform_legacy_migration(
             for move in moves
         ],
     }
+
+
+# How many times a reappeared legacy record is absorbed before the run stops
+# trying and reports it. Each pass carries whatever came back and removes the
+# location again, so a writer has to win the same race repeatedly to survive
+# them all; a bound rather than a loop because a pathological writer recreating
+# it continuously must not hold an installer open forever.
+LATE_WRITER_PASSES = 3
+
+
+def _absorb_late_legacy_writes(migration: LegacyMigration, backend) -> bool:
+    """Carry across anything written back to the legacy location after it was
+    removed, and report whether anything is still there.
+
+    The lock this transition holds serializes every writer that queues on the
+    legacy record's lock file; one that queues resumes into a directory the
+    removal took away and fails without recording anything. It cannot reach a
+    writer that arrives *afterwards*: that one creates the directory afresh and
+    opens a lock inode this transition never held, so it contends with nothing.
+    No lock closes that, because there is no file left to hold one on.
+
+    So what comes back is migrated rather than merely noticed. Each pass is the
+    same work the next run of this installer would do -- merge the record it
+    finds, rewrite and reload the definitions it names against this
+    installation, remove the location again -- which is what turns "installed
+    where nothing looks" back into an installed repository. A pass that finds
+    nothing is the end of it.
+    """
+    for _ in range(LATE_WRITER_PASSES):
+        if not os.path.lexists(migration.source_record):
+            return False
+        try:
+            late = strict_record_document(migration.source_record)
+        except InstallError:
+            # Unreadable is still "something is there", and the caller reports
+            # it. Nothing here can merge a document it cannot parse.
+            return True
+        drain_prs_service.update_json_document(
+            migration.destination_record,
+            lambda current, late=late: merged_record_document(late, current),
+        )
+        for job in recorded_jobs(late, backend):
+            destination = _destination_runtime(migration, job)
+            if job.runtime_dir != destination and not os.path.lexists(destination):
+                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                shutil.move(str(job.runtime_dir), str(destination))
+            _reinstall_recorded_job(job, backend, Rollback())
+            backend.load_definition(job.identifier)
+        shutil.rmtree(migration.source, ignore_errors=True)
+    return os.path.lexists(migration.source_record)
 
 
 def _restore_definition(job: RecordedJob, backend) -> Callable[[], None]:

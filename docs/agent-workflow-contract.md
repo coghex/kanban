@@ -1115,11 +1115,17 @@ search step and nothing else, which is what `mandatory: no` records.
   exactly one, so there is no cycle to deadlock against.
   A writer that arrives *after* the removal is the one case no lock reaches:
   it creates the directory afresh and opens a lock file this transition never
-  held, so it contends with nothing. The install therefore checks whether the
-  legacy record is back before it reports, and says so — the repository that
-  writer recorded is installed where the XDG-first probe no longer looks, and
-  the repair is another run of the installer, for which a legacy record that
-  has reappeared is simply a legacy installation to migrate.
+  held, so it contends with nothing. What it wrote is carried across rather
+  than merely noticed — a bounded number of further passes each do what the
+  next run of the installer would, merging the record found there, rewriting
+  and reloading the definitions it names against this installation, and
+  removing the location again. Past that bound the run reports what is still
+  there instead of looping, and another run of the installer remains the
+  repair, since a legacy record that has reappeared is simply a legacy
+  installation to migrate.
+  A repository whose runtime tree is already at its destination — a pre-XDG
+  `--install-dir` install that named what is now this platform's default — is
+  preserved in place rather than moved onto itself.
   The installed definition carries `$XDG_DATA_HOME` and `$XDG_STATE_HOME`
   alongside `KANBAN_DRAINER_INSTALL_DIR` whenever they are absolute, because
   that option pins the install directory and the runtime root beneath it but

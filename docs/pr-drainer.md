@@ -965,8 +965,9 @@ or log tree already exists, or if the old install directory holds a file the
 installer did not put there. The whole relocation holds the old record's lock,
 so an install or start for another repository that runs at the same time waits
 for it rather than being left behind by it — and one that starts after the old
-directory is gone cannot be caught by any lock, so the run checks whether that
-record came back and tells you to run it again if it did. Stop every installed
+directory is gone cannot be caught by any lock at all, so whatever it installed
+there is carried across by a further pass, and only a writer that keeps winning
+that race is reported for you to re-run against. Stop every installed
 repository's drainer first,
 and re-run the installer once for any repository; one run carries all of them.
 Passing `--install-dir`, or setting `KANBAN_DRAINER_INSTALL_DIR`, installs at
