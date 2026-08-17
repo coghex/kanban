@@ -491,6 +491,12 @@ class InstallerFixture(unittest.TestCase):
             "GIT_CONFIG_GLOBAL": str(self.git_config),
             "GIT_CONFIG_NOSYSTEM": "1",
             "PYTHONUNBUFFERED": "1",
+            # Redirected rather than dropped: since issue #357 `kanban_config`
+            # resolves the issue-review locations from both the XDG roots and
+            # `~/Library`, so an ambient one would let the developer's own
+            # installation decide what this fixture's installs resolve.
+            "XDG_DATA_HOME": str(self.home / ".local" / "share"),
+            "XDG_STATE_HOME": str(self.home / ".local" / "state"),
         }
         self.environment.pop("XDG_CONFIG_HOME", None)
         self.environment.pop(service.INSTALL_DIR_ENV, None)
@@ -1640,10 +1646,13 @@ class CanonicalBackendTests(InstallerFixture):
             self.install()
         self.assertIn("install_issue_review.py", str(raised.exception))
         self.assertFalse(self.install_dir.exists())
+        # And no reviewer installation was made anywhere this platform would
+        # look for one, which is the half of requirement 6 the refusal alone
+        # does not establish.
         self.assertFalse(
-            (self.home / "Library" / "Application Support" / "kanban" / "issue-review")
-            .exists()
+            service.kanban_config.default_issue_review_install_dir().exists()
         )
+        self.assertFalse(service.kanban_config.installed_issue_review_dir().exists())
 
     def test_a_selected_but_missing_backend_never_falls_through(self):
         # The override is what the operator chose. Falling back to the recorded
@@ -1789,8 +1798,11 @@ class CanonicalBackendTests(InstallerFixture):
         # The ordinary case: no override anywhere, so the job resolves through
         # the fixed issue-review record and needs no environment at all.
         os.environ.pop("KANBAN_ISSUE_REVIEW_INSTALL_DIR", None)
-        review_root = self.home / "Library" / "Application Support" / "kanban" / "issue-review"
-        review_root.mkdir(parents=True)
+        # Asked of the resolver rather than spelled here: since issue #357 the
+        # location is this platform's own, so a hardcoded one would install
+        # somewhere the resolver never looks on every host but the author's.
+        review_root = service.kanban_config.default_issue_review_install_dir()
+        review_root.mkdir(parents=True, exist_ok=True)
         (review_root / "approve_issues.py").write_text("backend\n", encoding="utf-8")
         self.install()
         self.assertIsNone(self.definition_override())
