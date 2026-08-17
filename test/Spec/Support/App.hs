@@ -21,6 +21,12 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Time (utc)
 import Kanban.Domain
+import Kanban.ApprovalService
+  ( ApprovalActivity (..),
+    ApprovalState (..),
+    ApprovalStatus (..),
+    ApprovalUnavailable (..),
+  )
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Filter (defaultFilterCriteria)
 import Kanban.GitHub (newHistoryTraversal)
@@ -94,6 +100,12 @@ testAppState board = do
         appDrainerStatus = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing,
         appDrainerIncidents = Just [],
         appDrainerBusy = False,
+        appApprovalController = Left (ApprovalUndiscoverable "no issue approval service in tests"),
+        appApprovalStatus = ApprovalStatus ApprovalOff "off" ApprovalServiceStopped Nothing Nothing,
+        appApprovalIncidents = Just [],
+        appApprovalBusy = False,
+        appApprovalTransition = 0,
+        appApprovalResult = Nothing,
         appDirectMergePending = Nothing,
         appDirectMergeResult = Nothing,
         appBoardRefreshQueued = False,

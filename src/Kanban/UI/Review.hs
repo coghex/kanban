@@ -6,6 +6,7 @@ module Kanban.UI.Review
     applyReviewBackendStarted,
     applyReviewEvent,
     applyUndeliveredSteer,
+    approvalServiceRefusal,
     armReviewTick,
     armVisibleReviewTicks,
     cancelReviewSession,
@@ -36,6 +37,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Kanban.ApprovalService (approvalOwnsCanonicalReview)
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
@@ -418,6 +420,12 @@ startIssueReview issue = do
           modify (\current -> current {appOverlay = Just (ReviewOverlay issue.issueNumber), appNotice = Nothing})
           presentTranscriptTail
           armVisibleReviewTicks
+    -- The service interlock is asked before a session is created, so a press
+    -- made while the approval service owns a canonical review reports the wait
+    -- rather than opening a session that could only fail. It is asked again at
+    -- the spawn boundary below, because the service can take the backend's
+    -- approval lock between the press and the launch.
+    _ | Just notice <- approvalServiceRefusal state requestedStage -> setNotice notice
     _ -> do
       let priorGeneration = priorTickGeneration issue.issueNumber state.appReviewSessions
           session = newReviewSession issue requestedStage priorGeneration
@@ -476,7 +484,38 @@ launchCanonicalIssueReview issue stage = do
   state <- get
   case readOnlyHistoryRefusal state (IssueItem issue) of
     Just notice -> refuseStartedReview issue.issueNumber notice
-    Nothing -> launchLiveCanonicalIssueReview issue stage
+    Nothing -> case approvalServiceRefusal state stage of
+      Just notice -> refuseStartedReview issue.issueNumber notice
+      Nothing -> launchLiveCanonicalIssueReview issue stage
+
+-- | Why a canonical stage started from a card has to wait for the persistent
+-- issue approval service, if it does (requirement 8).
+--
+-- Three facts decide it, and each is why one of the arms is here.
+--
+-- A revision is never refused: 'reviewStageForLabels' maps a
+-- changes-requested issue to 'IssueRevision', which runs the interactive
+-- coordinator and performs no canonical backend review at all, so it contends
+-- for nothing. That is what keeps the repair of a barriered issue reachable
+-- while the service is on.
+--
+-- A barriered service is never refusing either. It performs no model work and
+-- only rechecks one issue's read-only gate, releasing the backend's approval
+-- lock between checks, so the rereview that follows a repair can take it
+-- (D-10).
+--
+-- Everything else the service could be doing with a live run /is/ a refusal,
+-- including for the issue the card names: the service reviews issues in
+-- numeric order and cannot be asked to skip to this one, so a second canonical
+-- child for the same issue is the same contention as for any other.
+approvalServiceRefusal :: AppState -> ReviewStage -> Maybe Text
+approvalServiceRefusal state stage
+  | stage == IssueRevision = Nothing
+  | approvalOwnsCanonicalReview state.appApprovalStatus =
+      Just
+        "The issue approval service has a canonical review in flight; wait for it \
+        \to finish or stop the service before starting another"
+  | otherwise = Nothing
 
 launchLiveCanonicalIssueReview :: Issue -> ReviewStage -> EventM Name AppState ()
 launchLiveCanonicalIssueReview issue stage = do

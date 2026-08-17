@@ -81,6 +81,7 @@ library
   import: warnings
   hs-source-dirs: src
   exposed-modules:
+    Kanban.ApprovalService
     Kanban.CLI
     Kanban.Cache
     Kanban.Card
@@ -110,6 +111,7 @@ library
     Kanban.Transcript
     Kanban.Tracker
     Kanban.UI
+    Kanban.UI.Approval
     Kanban.UI.AutoSolve
     Kanban.UI.Board
     Kanban.UI.Details
@@ -149,6 +151,7 @@ library
     Kanban.GitHub.Rate
     Kanban.GitHub.Run
     Kanban.GitHub.Warnings
+    Kanban.ServiceProcess
     Kanban.Preflight.Environment
     Kanban.Preflight.Readiness
     Kanban.Review.Canonical
@@ -203,6 +206,7 @@ test-suite kanban-test
   hs-source-dirs: test
   main-is: Spec.hs
   other-modules:
+    Spec.ApprovalService
     Spec.Agent.Capture
     Spec.Agent.IssueReviewer
     Spec.Agent.ManagedProcess

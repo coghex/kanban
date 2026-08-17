@@ -33,6 +33,12 @@ import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime, utc)
 import qualified Graphics.Vty.Attributes as Vty
+import Kanban.ApprovalService
+  ( ApprovalActivity (..),
+    ApprovalState (..),
+    ApprovalStatus (..),
+    ApprovalUnavailable (..),
+  )
 import Kanban.CLI (BorderPolicy (..), Options (..))
 import Kanban.Card (displayWidth)
 import Kanban.Domain
@@ -844,6 +850,12 @@ restingState channel refreshCoordinator historyTraversal =
       -- a failed discovery leaves behind.
       appDrainerIncidents = Nothing,
       appDrainerBusy = False,
+      appApprovalController = Left (ApprovalUndiscoverable "no issue approval service in tests"),
+      appApprovalStatus = ApprovalStatus ApprovalOff "off" ApprovalServiceStopped Nothing Nothing,
+      appApprovalIncidents = Just [],
+      appApprovalBusy = False,
+      appApprovalTransition = 0,
+      appApprovalResult = Nothing,
       appDirectMergePending = Nothing,
       appDirectMergeResult = Nothing,
       appBoardRefreshQueued = False,

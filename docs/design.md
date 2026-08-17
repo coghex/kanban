@@ -70,7 +70,11 @@ tracker progress, and the on-demand Codex and Claude usage providers are also
 implemented. Malformed tracker diagnostics now fail visibly while preserving
 valid membership and standalone fallbacks. The sidebar also controls and
 monitors the local service-managed PR drainer, which runs as a launchd job on
-macOS and a systemd user unit on Linux. Native GitHub sub-issue membership,
+macOS and a systemd user unit on Linux. The persistent per-repository issue
+approval service now has the same dashboard lifecycle — discovery, status and
+incident decoding, the durable ordered barrier, the start/stop seam, the
+canonical-review interlock, and the board refresh a result requires — while the
+sidebar control that reaches that seam is not yet built. Native GitHub sub-issue membership,
 canonical v2 issue-review sessions, embedded revision questions, and
 the first resumable issue-solve flow are implemented. The external
 usage-command escape hatch is also implemented. Broader provider-version
@@ -2482,11 +2486,82 @@ above are unchanged, and persistence the user switched off is not a failure.
   its definition deleted, and its one entry dropped from the discovery record,
   leaving every other repository's install, the shared links, and this
   repository's own runtime state, logs and incidents untouched.
+- Kanban also discovers, monitors, and controls the persistent per-repository
+  issue approval service. It is a separate job from the PR drainer, with its own
+  installer, its own `issue-approval` namespace, its own discovery record at
+  `~/Library/Application Support/kanban/issue-approval/config.json`, its own
+  locks, and its own status and incident types. The two share no state: each
+  service's last observation, incident set, and in-flight transition are held
+  separately, so neither can overwrite the other's, and neither controller owns
+  the other's process. What they do share is the bounded, process-grouped
+  invocation both drive their controllers through.
+- That record's `repositories` table is a discriminated union on `backend` in
+  the shape the drainer's is, but an entry naming no backend is refused rather
+  than read as launchd: this service's installer has written the discriminator
+  since its first release, so an entry without one was not written by it. Kanban
+  selects the entry by its own case-folded repository identity, reads the
+  definition's path from it, and reads the controller command from the
+  definition itself — `ProgramArguments` from a plist, `ExecStart` from a unit
+  file — dropping the definition's own `run` subcommand and any `--path` or
+  `--repo` it carries, then rebinding both to this dashboard's checkout and
+  identity. A host with no supported service manager is reported as its own
+  condition, unsupported and offering no control, rather than as a missing
+  installation or as a stopped service; every other failure names
+  `tools/install_issue_approval.py` as the repair.
+- The controller's status document is decoded against a pinned schema and
+  version and against the board's own repository identity. Each state it
+  publishes — checking/starting, healthy running, ordered barrier, intentional
+  stop, child failure, and controller failure — decodes to its own distinct
+  value, and an absent, unreadable, wrongly versioned, foreign, or unrecognized
+  document decodes to an explicit unknown naming what was wrong. Unknown is
+  never "off": nothing that may act only against a settled stop acts on it.
+- The ordered barrier is read from the controller's durable barrier record
+  rather than from its live state, so it survives an intentional stop and a
+  restart, and a `running` document that still names one is reported as
+  barriered. It is warning severity naming its issue —
+  `on · unresolved incident · Issue #N requests changes` while the service is
+  on, and the drainer's red `stopped · unresolved incident · <summary>`
+  composition once it is stopped — rather than a process failure. The stopped
+  activity and the open warning are both kept; neither is flattened into the
+  other, and a barrier whose warning was acknowledged is still reported from
+  the record.
+- The approval service is polled on the same ten-second cadence as the drainer,
+  which doubles the idle controller-poll cost recorded above on a machine where
+  both are installed. Start and stop are controller operations run
+  asynchronously, with an optimistic `starting…`/`stopping…` state held only
+  until an authoritative observation returns and a busy flag that refuses a
+  second concurrent toggle. Every invocation is bounded by a timeout and runs as
+  the leader of its own process group, which is terminated and confirmed empty
+  when that timeout expires. An authoritative poll or completion clears the busy
+  flag and supersedes the optimistic state; a failed poll during a transition
+  changes nothing; a completion belonging to a superseded transition is
+  discarded rather than restoring its optimistic state over a newer observation;
+  and a failed transition clears the busy flag either way, so control can never
+  stay permanently refused.
+- While the service owns a live canonical review, a competing canonical stage
+  started from a card is refused with a notice to wait for it or stop the
+  service — including for the same issue, since the service reviews in numeric
+  order and cannot be asked to skip to one. The refusal is asked at the press
+  and again at the asynchronous spawn boundary, because the service can take the
+  backend's approval lock between the two. A barriered service refuses nothing:
+  it performs no model work and only rechecks one issue's read-only gate, so the
+  selected card's revision and the rereview after it stay available. A revision
+  is never refused at all, since it runs the interactive coordinator and
+  performs no canonical backend review.
+- A service result that may have changed GitHub requires a board refresh, queued
+  behind a fetch already in flight rather than dropped. The result is identified
+  by the controller's own status stamp together with the state and outcome that
+  document carries, so one advancing pass, one barrier, and one failed run each
+  require exactly one refresh, and the repeated documents a barriered or idle
+  controller writes require none. The refresh never disturbs the service's own
+  status: the durable warning or error it reported is what still stands after
+  it.
 - Worker results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, resize, provider result, active review
   event/spinner tick, or explicit terminal repaint.
-- There are no periodic network or Git polls. The sole timer is the ten-second
-  local PR drainer status check.
+- There are no periodic network or Git polls. The only timers are the two
+  ten-second local service status checks: the PR drainer's and the issue
+  approval service's.
 - Board and usage refresh independently.
 - Codex and Claude failures are independent of one another.
 - A refresh records its completion time and whether displayed data is fresh,
