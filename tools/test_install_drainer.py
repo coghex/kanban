@@ -985,6 +985,33 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertIn(str(self.xdg_install), self.unit_text("acme/widgets"))
         self.assertFalse(self.legacy_install.exists())
 
+    def test_it_migrates_when_the_log_root_is_already_its_own_destination(self):
+        # `$XDG_STATE_HOME` naming `~/Library/Logs` is an absolute value this
+        # host is entitled to set, and it makes the log root its own
+        # destination. Planning that as a move made it a self-move, which the
+        # occupied-destination rule then refused — so the migration this host
+        # is owed could never run.
+        self.seed_legacy_install(self.widgets)
+        with mock.patch.dict(
+            os.environ, {"XDG_STATE_HOME": str(self.home / "Library" / "Logs")}
+        ):
+            drain_prs_service.bind_managed_paths()
+            self.assertEqual(
+                kanban_config.default_drainer_log_dir(),
+                kanban_config.macos_drainer_log_dir(),
+            )
+            result = self.install(self.widgets)
+
+        self.assertTrue(result["legacy_migration"]["migrated"])
+        # Preserved in place: the logs were already where they belong.
+        self.assertEqual(
+            (self.legacy_logs / self.slug("acme/widgets") / "service.log").read_text(
+                encoding="utf-8"
+            ),
+            "log for acme/widgets\n",
+        )
+        self.assertFalse(self.legacy_install.exists())
+
     def test_it_carries_both_a_legacy_and_a_custom_repositorys_runtime_state(self):
         # The mixed installation, which is the one a single whole-tree move
         # would half-migrate: one repository's state under the legacy install
@@ -1210,6 +1237,26 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertTrue((self.legacy_install / "config.json").is_file())
         self.assertTrue((self.legacy_install / "runtime").is_dir())
         self.assertTrue(self.legacy_logs.is_dir())
+
+    def test_a_refusal_leaves_behind_no_lock_file_and_no_changed_mode(self):
+        # Taking the lock is itself a mutation: it creates `config.json.lock`
+        # and chmods the directory holding it. Both happen before the preflight
+        # has decided anything, so a refusal would otherwise report that
+        # nothing was changed over a file that was not there and a mode that
+        # was not that.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        lock = self.legacy_install / "config.json.lock"
+        lock.unlink(missing_ok=True)
+        self.legacy_install.chmod(0o755)
+        self.active.add(
+            self.backend.service_identifier(self.slug("acme/gadgets"))
+        )
+
+        with self.assertRaises(install_drainer.InstallError):
+            self.install(self.widgets)
+
+        self.assertFalse(os.path.lexists(lock))
+        self.assertEqual(self.legacy_install.stat().st_mode & 0o777, 0o755)
 
     def test_it_refuses_while_any_recorded_repository_has_a_live_job(self):
         self.seed_legacy_install(self.widgets, self.gadgets)

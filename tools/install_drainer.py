@@ -31,7 +31,7 @@ import secrets
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -652,6 +652,42 @@ def sibling_drainer_running(checkout: Path) -> bool:
         ) from exc
 
 
+@contextlib.contextmanager
+def _locked_legacy_record(migration: LegacyMigration) -> Iterator[None]:
+    """The legacy record's lock, with the marks taking it leaves undone if the
+    run does not go through.
+
+    Locking is itself a mutation. `document_lock` creates a `config.json.lock`
+    beside the document and chmods the directory holding it to 0700, and both
+    happen before the preflight has decided anything -- so a refusal for a live
+    sibling, an unreadable record, or an occupied destination would report that
+    nothing was changed while leaving behind a file that was not there and a
+    mode that was not that. Both are recorded before the lock is taken and put
+    back if anything raises through it.
+
+    Nothing is restored on the way out of a *successful* migration: the
+    directory holding them is gone by then, which is the point.
+    """
+    lock_path = migration.source_record.with_name(
+        migration.source_record.name + ".lock"
+    )
+    lock_existed = os.path.lexists(lock_path)
+    mode = (
+        migration.source.stat().st_mode & 0o7777
+        if _is_plain_directory(migration.source)
+        else None
+    )
+    try:
+        with drain_prs_service.document_lock(migration.source_record):
+            yield
+    except BaseException:
+        if not lock_existed and os.path.lexists(lock_path):
+            lock_path.unlink()
+        if mode is not None and _is_plain_directory(migration.source):
+            migration.source.chmod(mode)
+        raise
+
+
 def _destination_runtime(migration: LegacyMigration, job: RecordedJob) -> Path:
     """Where this repository's runtime tree belongs once the installation has
     moved. Equal to `job.runtime_dir` already for a job whose `--install-dir`
@@ -695,7 +731,17 @@ def planned_tree_moves(
         and job.runtime_dir != _destination_runtime(migration, job)
     )
     moves.append(TreeMove("logs", migration.source_logs, migration.destination_logs))
-    return [move for move in moves if os.path.lexists(move.source)]
+    # A tree already at its destination is preserved in place rather than moved
+    # onto itself — which the occupied-destination rule would then refuse,
+    # failing the whole migration. That is not only the per-repository runtime
+    # case above: an absolute `$XDG_STATE_HOME` naming `~/Library/Logs` makes
+    # the log root its own destination too, and either self-move would refuse
+    # a migration this host is entitled to.
+    return [
+        move
+        for move in moves
+        if os.path.lexists(move.source) and move.source != move.destination
+    ]
 
 
 def _move_conflicts(migration: LegacyMigration, moves: list[TreeMove]) -> list[str]:
@@ -775,7 +821,13 @@ def preflight_legacy_migration(
         ):
             conflicts.append(f"{runtime} already holds durable state for {job.identity}")
         logs = migration.destination_logs / job.slug
-        if logs not in arriving and os.path.lexists(logs):
+        # Excluded on the same terms as the runtime tree above: a log tree that
+        # is already at its destination is this repository's own.
+        if (
+            logs not in arriving
+            and logs != migration.source_logs / job.slug
+            and os.path.lexists(logs)
+        ):
             conflicts.append(f"{logs} already holds durable state for {job.identity}")
     # Every path this migration writes *through*, as opposed to the trees it
     # moves into place. `update_json_document` refuses one that is not a plain
@@ -1249,9 +1301,7 @@ def install(
             # destination's inside, through `update_json_document` — so no
             # cycle exists for anything else to deadlock against; every other
             # writer in this repository holds exactly one.
-            scope.enter_context(
-                drain_prs_service.document_lock(migration.source_record)
-            )
+            scope.enter_context(_locked_legacy_record(migration))
         return _install_within(
             repo,
             install_dir,
