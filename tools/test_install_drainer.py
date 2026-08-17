@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -691,7 +692,7 @@ class LegacyMigrationFixture(unittest.TestCase):
         )
         return repo
 
-    def seed_legacy_install(self, *checkouts, install_dir=None):
+    def seed_legacy_install(self, *checkouts, install_dir=None, durable=True):
         """The installation a pre-XDG host really has, written by the real
         writers under the resolution that host ran with.
 
@@ -737,6 +738,13 @@ class LegacyMigrationFixture(unittest.TestCase):
         finally:
             overridden.stop()
             patched.stop()
+        if not durable:
+            # A recorded installation whose jobs have never run: the record and
+            # the definitions exist, and no runtime or log tree does. That is
+            # the shape in which a migration creates every destination
+            # directory rather than moving one into place.
+            for tree in ((install_dir or self.legacy_install) / "runtime", self.legacy_logs):
+                shutil.rmtree(tree, ignore_errors=True)
         # As a fresh process on that host would resolve it: the probe finds the
         # `~/Library` record and nothing under XDG.
         drain_prs_service.bind_managed_paths()
@@ -1080,11 +1088,11 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         real = install_drainer._reinstall_recorded_job
         attempted = []
 
-        def failing(job, backend):
+        def failing(job, backend, rollback):
             attempted.append(job.identity)
             if len(attempted) > 1:
                 raise install_drainer.InstallError("the second rewrite failed")
-            return real(job, backend)
+            return real(job, backend, rollback)
 
         with mock.patch.object(install_drainer, "_reinstall_recorded_job", failing):
             with self.assertRaises(install_drainer.InstallError) as raised:
@@ -1118,13 +1126,70 @@ class LegacyMigrationTests(LegacyMigrationFixture):
             self.legacy_install / "config.json",
         )
 
+    def test_a_rollback_removes_directories_no_tree_was_moved_into(self):
+        # The migration that moves nothing still *creates* everything: a
+        # legacy install whose jobs have never run has no runtime or log tree,
+        # so every destination directory is made rather than moved into place.
+        # Those are mutations too, and a refusal that left them behind would
+        # report that nothing was installed while having installed exactly
+        # that.
+        self.seed_legacy_install(self.widgets, self.gadgets, durable=False)
+        self.assertFalse((self.legacy_install / "runtime").exists())
+        self.assertFalse(self.legacy_logs.exists())
+
+        real = install_drainer._reinstall_recorded_job
+        attempted = []
+
+        def failing(job, backend, rollback):
+            attempted.append(job.identity)
+            if len(attempted) > 1:
+                raise install_drainer.InstallError("the second rewrite failed")
+            return real(job, backend, rollback)
+
+        with mock.patch.object(install_drainer, "_reinstall_recorded_job", failing):
+            with self.assertRaises(install_drainer.InstallError) as raised:
+                self.install(self.widgets)
+        self.assertIn("Every change it had made was undone", str(raised.exception))
+        self.assertNotIn("could not be undone", str(raised.exception))
+        # Nothing at either destination root, including the directories the
+        # first job's rewrite created before the second one failed.
+        self.assertFalse(self.xdg_install.exists())
+        self.assertFalse(self.xdg_logs.exists())
+        self.assertTrue((self.legacy_install / "config.json").is_file())
+
+    def test_a_rollback_puts_back_a_mode_it_changed_on_an_existing_directory(self):
+        # `ensure_dirs` chmods each of this repository's directories to 0700,
+        # whether it made them or found them. A refusal must therefore put back
+        # the permissions of one that was already there, not only remove the
+        # ones it created.
+        self.seed_legacy_install(self.widgets, durable=False)
+        existing = self.xdg_logs / self.slug("acme/widgets")
+        existing.mkdir(parents=True)
+        existing.chmod(0o755)
+        real = install_drainer._reinstall_recorded_job
+        calls = []
+
+        def failing(job, backend, rollback):
+            # Let the real rewrite run first, so the chmod actually happens,
+            # and fail afterwards.
+            calls.append(job.identity)
+            real(job, backend, rollback)
+            raise install_drainer.InstallError("the rewrite failed after chmod")
+
+        with mock.patch.object(install_drainer, "_reinstall_recorded_job", failing):
+            with self.assertRaises(install_drainer.InstallError):
+                self.install(self.widgets)
+        self.assertEqual(calls, ["acme/widgets"])
+        self.assertTrue(existing.is_dir())
+        self.assertEqual(existing.stat().st_mode & 0o777, 0o755)
+
     def test_a_rollback_that_cannot_finish_is_reported_beside_the_failure(self):
         # Nothing here can repair a host whose filesystem stopped cooperating
         # mid-undo, so the operator is told what was left where rather than
         # given a refusal that reads as if nothing happened.
         self.seed_legacy_install(self.widgets)
 
-        def failing(job, backend):
+        def failing(job, backend, rollback):
             raise install_drainer.InstallError("the rewrite failed")
 
         def unmovable(move):

@@ -803,14 +803,32 @@ def _restore_link(destination: Path) -> Callable[[], None]:
 
 
 def _restore_directory(path: Path) -> Callable[[], None]:
-    """An undo for a directory this run may have created: removed again if it
-    was not there before and nothing is left in it once every other undo has
-    run. A directory that already held something is never touched."""
-    existed = path.exists()
+    """An undo for `mkdir(parents=True)` and the `chmod` that may follow it.
+
+    Both halves, because a directory tree is created in two ways that have to
+    be undone differently. Every ancestor that does not exist yet is recorded,
+    so the undo removes exactly the ones this run created — deepest first, and
+    only while they are still empty, so a directory something else put back
+    into is left alone. And the mode of one that *did* already exist is
+    recorded too, since `ensure_dirs` chmods what it finds as well as what it
+    makes, and a refusal that reported nothing had changed must not leave a
+    directory's permissions altered.
+    """
+    created = []
+    probe = path
+    while not probe.exists():
+        created.append(probe)
+        if probe.parent == probe:
+            break
+        probe = probe.parent
+    mode = path.stat().st_mode & 0o7777 if path.is_dir() else None
 
     def restore() -> None:
-        if not existed and path.is_dir() and not any(path.iterdir()):
-            path.rmdir()
+        if mode is not None and path.is_dir():
+            path.chmod(mode)
+        for directory in created:
+            if directory.is_dir() and not any(directory.iterdir()):
+                directory.rmdir()
 
     return restore
 
@@ -860,6 +878,7 @@ def perform_legacy_migration(
     # The legacy install directory's own tree first, so a per-repository
     # tree from elsewhere lands beside what it carried rather than under it.
     for move in moves:
+        rollback.add(_restore_directory(move.destination.parent))
         move.destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         shutil.move(str(move.source), str(move.destination))
         rollback.add(_restore_move(move))
@@ -867,7 +886,7 @@ def perform_legacy_migration(
     drain_prs_service.bind_managed_paths()
     for job in jobs:
         rollback.add(_restore_definition(job, backend))
-        _reinstall_recorded_job(job, backend)
+        _reinstall_recorded_job(job, backend, rollback)
     for job in jobs:
         backend.load_definition(job.identifier)
     # Past the point of return: every repository is usable through the
@@ -929,7 +948,7 @@ def _rolled_back(rollback: Rollback, failure: Exception, source: Path | None) ->
     return message
 
 
-def _reinstall_recorded_job(job: RecordedJob, backend) -> None:
+def _reinstall_recorded_job(job: RecordedJob, backend, rollback: Rollback) -> None:
     """Point one recorded repository's definition at the relocated
     installation, keeping everything else about it.
 
@@ -951,6 +970,21 @@ def _reinstall_recorded_job(job: RecordedJob, backend) -> None:
             config_path=config_path,
             remote_name=drain_prs_service.configured_remote_name(config_path),
         )
+        # `ensure_dirs` makes this repository's runtime, incident and log
+        # directories -- and chmods whichever of them it finds already there.
+        # A legacy job that has never run has none of them, so without this a
+        # rolled-back migration would leave a destination installation behind
+        # while reporting that every change was undone. Registered before the
+        # call, in the order it creates them, so the undo removes them from the
+        # deepest first.
+        for directory in (
+            drain_prs_service.INSTALL_DIR,
+            rebuilt.runtime_dir,
+            rebuilt.incident_dir,
+            rebuilt.log_dir,
+            rebuilt.definition_path.parent,
+        ):
+            rollback.add(_restore_directory(directory))
         drain_prs_service.ensure_dirs(rebuilt)
         backend.write_definition(drain_prs_service.service_definition(rebuilt))
         drain_prs_service.write_discovery_record(rebuilt)
