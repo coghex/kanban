@@ -233,17 +233,19 @@ def resolved_link_target(link: Path, target: Path) -> Path:
 def is_replaceable_link(current_target: Path, source: Path) -> bool:
     """Whether an existing symlink may be re-pointed at `source`.
 
-    Two cases qualify, and refusal protects content in both. A link already
-    resolving to Kanban's own tracked module of this name is an installation
-    this installer owns. A link whose target no longer exists at all is what a
-    moved or deleted checkout leaves behind: broken, holding nothing to
-    preserve, and exactly the state a re-run has to converge. A link resolving
-    to any other real file is someone else's, and is preserved and refused.
+    One case qualifies: a link whose target is provably one of Kanban's own
+    tracked modules of this name, recognized by the marker that file carries.
+
+    A link resolving to any other real file is someone else's installation. A
+    link resolving to nothing at all is not a weaker version of ours — it is
+    *unknowable*: a missing target carries no marker, and the name of a link
+    proves nothing about who made it, so a user's own broken
+    `service_manager.py` looks exactly like one this installer left behind.
+    Both are preserved and refused, and the refusal says how to clear a link
+    this installer can no longer account for.
     """
     if current_target.name != source.name:
         return False
-    if not os.path.exists(current_target):
-        return True
     return is_managed_asset(current_target, source.name)
 
 
@@ -271,8 +273,15 @@ def symlink_refusal_reason(destination: Path) -> str:
             f"{destination} already exists and is not a symlink. It is left untouched; "
             "move or remove it yourself, then re-run."
         )
+    target = os.readlink(destination)
+    if not os.path.exists(resolved_link_target(destination, Path(target))):
+        return (
+            f"{destination} is a symlink to {target}, which does not exist — so "
+            "there is nothing to show whether it is one of Kanban's own. It is "
+            "left untouched; remove it yourself, then re-run."
+        )
     return (
-        f"{destination} is a symlink to {os.readlink(destination)}, which does not "
+        f"{destination} is a symlink to {target}, which does not "
         "resolve to one of Kanban's own tracked modules. It is left untouched; "
         "remove it yourself, then re-run."
     )
@@ -328,10 +337,12 @@ def plan_link_removal(destination: Path, name: str) -> str:
         return "kept"
     target = resolved_link_target(destination, Path(os.readlink(destination)))
     if not os.path.exists(target):
-        # A broken link this installer's own name and shape: it points nowhere,
-        # so nothing is lost with it, and leaving it behind would leave the
-        # next install to converge a link no installation stands behind.
-        return "removed" if target.name == name else "kept"
+        # Unknowable, so kept. A missing target carries no marker, and the name
+        # of a link proves nothing about who made it: deleting one on the
+        # strength of its name is exactly the guess this check exists to
+        # refuse, and an uninstall must not take away what it cannot show is
+        # its own.
+        return "kept"
     return "removed" if is_managed_asset(target, name) else "kept"
 
 

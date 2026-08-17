@@ -750,14 +750,31 @@ class LinkSafetyTests(unittest.TestCase):
             installer.install_symlink(self.source, self.destination)
         self.assertEqual(self.destination.resolve(), foreign.resolve())
 
-    def test_replaces_a_broken_link_without_following_it(self):
+    def test_a_broken_link_is_preserved_because_nothing_can_recognize_it(self):
+        # A missing target carries no marker, and the name of a link proves
+        # nothing about who made it: a user's own broken `service_manager.py`
+        # looks exactly like one this installer left behind, so neither is
+        # replaced on the strength of its name.
         self.destination.parent.mkdir()
         self.destination.symlink_to(self.root / "gone" / "service_manager.py")
         self.assertTrue(os.path.lexists(self.destination))
         self.assertEqual(
-            installer.install_symlink(self.source, self.destination), "updated"
+            installer.plan_symlink(self.source, self.destination), "refused"
         )
-        self.assertEqual(self.destination.resolve(), self.source.resolve())
+        with self.assertRaises(installer.InstallError) as raised:
+            installer.install_symlink(self.source, self.destination)
+        self.assertIn("does not exist", str(raised.exception))
+        self.assertEqual(
+            os.readlink(self.destination), str(self.root / "gone" / "service_manager.py")
+        )
+
+    def test_a_broken_link_is_never_removed_either(self):
+        self.destination.parent.mkdir()
+        self.destination.symlink_to(self.root / "gone" / "service_manager.py")
+        self.assertEqual(
+            installer.remove_symlink(self.destination, "service_manager.py"), "kept"
+        )
+        self.assertTrue(os.path.lexists(self.destination))
 
     def test_removal_keeps_an_ordinary_file_and_a_foreign_link(self):
         foreign = self.root / "theirs" / "service_manager.py"
@@ -1556,6 +1573,32 @@ class ConvergenceTests(InstallerFixture):
                     (self.install_dir / name).resolve(),
                     (moved / "tools" / name).resolve(),
                 )
+
+    def test_a_users_broken_link_at_a_managed_path_stops_the_install(self):
+        # End to end, because this is where it matters: an install that
+        # replaced it would destroy a link only its owner can account for.
+        self.install_dir.mkdir(parents=True)
+        guarded = self.install_dir / "service_manager.py"
+        guarded.symlink_to(self.root / "their-checkout" / "service_manager.py")
+        with self.assertRaises(installer.InstallError) as raised:
+            self.install()
+        self.assertIn("does not exist", str(raised.exception))
+        self.assertEqual(
+            os.readlink(guarded), str(self.root / "their-checkout" / "service_manager.py")
+        )
+        self.assertEqual(self.manager.call_names(), [])
+        self.assertEqual(self.record(), {})
+
+    def test_an_uninstall_leaves_a_broken_link_it_cannot_account_for(self):
+        self.install()
+        link = self.install_dir / "service_manager.py"
+        link.unlink()
+        link.symlink_to(self.root / "gone" / "service_manager.py")
+        result = self.uninstall()
+        self.assertEqual(result["links"]["service_manager.py"]["result"], "kept")
+        self.assertTrue(os.path.lexists(link))
+        # The links it can account for still go.
+        self.assertFalse(os.path.lexists(self.install_dir / "kanban_config.py"))
 
     def test_an_ordinary_user_file_at_a_link_path_is_preserved(self):
         self.install_dir.mkdir(parents=True)
