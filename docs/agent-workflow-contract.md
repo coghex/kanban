@@ -1103,6 +1103,14 @@ search step and nothing else, which is what `mandatory: no` records.
   installs where it says and relocates nothing, reporting that the migration
   was skipped. macOS is never migrated: there the two locations are the same
   directory.
+  The whole transition — the read that decides which repositories exist through
+  the removal that takes away the controller all of them name — happens under
+  the legacy record's own lock, so a normal install or start for another
+  repository, still bound to that controller, is serialized against it rather
+  than adding an entry the migration never saw and would then strand. This is
+  the one place two of these documents are held at once, and the order is
+  always the legacy record before the destination's; every other writer holds
+  exactly one, so there is no cycle to deadlock against.
   `tools/install_issue_review.py` follows the same convention for the
   canonical issue-review backend, and resolves the same way. Its install
   directory defaults to `~/Library/Application Support/kanban/issue-review`

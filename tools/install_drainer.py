@@ -24,6 +24,7 @@ also repairs a missing or stale discovery record in place.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import secrets
@@ -1097,12 +1098,58 @@ def install(
         str(Path(config_path).expanduser().resolve()) if config_path else None
     )
 
+    migration = plan_legacy_migration(install_dir)
+    with contextlib.ExitStack() as scope:
+        if migration is not None:
+            # Held from before the preflight reads the legacy record until
+            # after the legacy installation is gone, because those two are the
+            # ends of one transition: the record says which repositories exist,
+            # and the removal takes away the controller every one of them still
+            # names. A writer that slipped in between — a normal install or a
+            # start for another repository, still bound to the legacy
+            # controller — would add an entry this run never saw, and that
+            # repository would keep a definition pointing into a directory this
+            # run then deleted.
+            #
+            # This is the only place two of these documents are held at once.
+            # The order is always source then destination — `perform` takes the
+            # destination's inside, through `update_json_document` — so no
+            # cycle exists for anything else to deadlock against; every other
+            # writer in this repository holds exactly one.
+            scope.enter_context(
+                drain_prs_service.document_lock(migration.source_record)
+            )
+        return _install_within(
+            repo,
+            install_dir,
+            job=job,
+            backend=backend,
+            migration=migration,
+            ntfy_url=ntfy_url,
+            resolved_config_path=resolved_config_path,
+            dry_run=dry_run,
+        )
+
+
+def _install_within(
+    repo: Path,
+    install_dir: Path,
+    *,
+    job: drain_prs_service.DrainerJob,
+    backend,
+    migration: LegacyMigration | None,
+    ntfy_url: str | None,
+    resolved_config_path: str | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """The install itself, with the legacy record's lock already held when one
+    is being relocated. Split out only so that lock spans exactly this."""
     # Ahead of every write below, including the script links: a migration this
     # host cannot perform safely must leave it exactly as it was found, and
     # installing at the destination anyway is the one fallback that is never
     # available — a fresh installation standing beside a retained legacy one is
-    # the split state the whole relocation exists to close.
-    migration = plan_legacy_migration(install_dir)
+    # the split state the whole relocation exists to close. Read under the lock
+    # above, so the repositories it finds are the repositories there are.
     migration_jobs = (
         preflight_legacy_migration(migration, backend) if migration is not None else []
     )

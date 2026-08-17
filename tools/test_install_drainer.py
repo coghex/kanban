@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -985,6 +986,75 @@ class LegacyMigrationTests(LegacyMigrationFixture):
             )
         self.assertFalse(self.legacy_install.exists())
         self.assertFalse((self.custom / "runtime" / self.slug("acme/gadgets")).exists())
+
+    def test_the_legacy_record_stays_locked_from_preflight_until_removal(self):
+        # The read that decides which repositories exist and the removal that
+        # takes away the controller all of them name are the two ends of one
+        # transition. A legacy-bound writer slipping in between would add an
+        # entry this run never saw, and that repository would keep a definition
+        # pointing into a directory this run then deleted.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        legacy_record = self.legacy_install / "config.json"
+        contended = threading.Event()
+
+        def contender():
+            with drain_prs_service.document_lock(legacy_record):
+                contended.set()
+
+        observed = []
+        real_preflight = install_drainer.preflight_legacy_migration
+        real_perform = install_drainer.perform_legacy_migration
+        thread = threading.Thread(target=contender, daemon=True)
+
+        def watched_preflight(*args, **kwargs):
+            # Started once the lock is already held, so what it reports is
+            # whether this transition excludes it rather than whether it
+            # happened to run first.
+            thread.start()
+            observed.append(("before preflight", contended.wait(0.4)))
+            return real_preflight(*args, **kwargs)
+
+        def watched_perform(*args, **kwargs):
+            observed.append(("before perform", contended.wait(0.1)))
+            result = real_perform(*args, **kwargs)
+            observed.append(("after removal", contended.wait(0.1)))
+            return result
+
+        with (
+            mock.patch.object(
+                install_drainer, "preflight_legacy_migration", watched_preflight
+            ),
+            mock.patch.object(
+                install_drainer, "perform_legacy_migration", watched_perform
+            ),
+        ):
+            self.install(self.widgets)
+        thread.join(5)
+
+        self.assertEqual(
+            observed,
+            [("before preflight", False), ("before perform", False), ("after removal", False)],
+        )
+        # And it is released once the run is done, so a waiting writer is
+        # serialized behind the transition rather than shut out of it.
+        self.assertTrue(contended.wait(5))
+
+    def test_a_sibling_recorded_before_the_lock_is_taken_is_carried_across(self):
+        # The other half of the same guarantee: whatever the record holds when
+        # the lock is taken is what gets migrated, so a repository another
+        # process committed first is never dropped.
+        self.seed_legacy_install(self.widgets)
+        self.seed_legacy_install(self.gadgets)
+        result = self.install(self.widgets)
+        self.assertEqual(
+            result["legacy_migration"]["repositories"], ["acme/gadgets", "acme/widgets"]
+        )
+        for identity in ("acme/widgets", "acme/gadgets"):
+            self.assertIn(str(self.xdg_install), self.unit_text(identity))
+        self.assertEqual(
+            sorted(self.record(self.xdg_install / "config.json")["repositories"]),
+            ["acme/gadgets", "acme/widgets"],
+        )
 
     # -- refusals, none of which may mutate anything ----------------------
 
