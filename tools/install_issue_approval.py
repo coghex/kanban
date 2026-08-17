@@ -413,6 +413,60 @@ def require_matching_controller(repo: Path) -> None:
     )
 
 
+def same_directory(left: str | Path, right: str | Path) -> bool:
+    """Whether two spellings name one installation. Compared after resolution,
+    because one directory has many names and a reinstall that read them as two
+    would relocate a job that never moved."""
+    return os.path.realpath(left) == os.path.realpath(right)
+
+
+def installation_lock(install_dir: Path) -> Any:
+    return approve_issues_service.installation_lock(install_dir)
+
+
+def plan_released_links(
+    repo: Path, install_dir: Path, identity: str
+) -> dict[str, dict[str, str]]:
+    """What `release_links` would do to the directory this repository is
+    leaving, without writing anything."""
+    if dependent_repositories(identity, install_dir):
+        return {
+            name: {"destination": str(destination), "result": "kept"}
+            for name, (_source, destination) in link_sources(repo, install_dir).items()
+        }
+    return {
+        name: {
+            "destination": str(destination),
+            "result": plan_link_removal(destination, name),
+        }
+        for name, (_source, destination) in link_sources(repo, install_dir).items()
+    }
+
+
+def release_links(
+    repo: Path, install_dir: Path, identity: str
+) -> dict[str, dict[str, str]]:
+    """Take back the links of an installation this repository has left.
+
+    A reinstall pointed at another directory moves the job's definition and its
+    record entry there, and the directory it came from is then running nothing
+    — so leaving its links behind would strand Kanban-managed files no later
+    uninstall would ever look for. Removed on exactly the uninstall rule: only
+    when no remaining job depends on that directory, and only for a link
+    positively recognized as Kanban's own.
+    """
+    with installation_lock(install_dir):
+        if dependent_repositories(identity, install_dir):
+            return plan_released_links(repo, install_dir, identity)
+        return {
+            name: {
+                "destination": str(destination),
+                "result": remove_symlink(destination, name),
+            }
+            for name, (_source, destination) in link_sources(repo, install_dir).items()
+        }
+
+
 def controller_operation(
     operation: str, job: approve_issues_service.ApprovalJob, *arguments: Any
 ) -> dict[str, Any]:
@@ -461,6 +515,11 @@ def install(
     job = repository_job(repo, resolved_config_path)
     require_matching_controller(repo)
     canonical = canonical_backend(job)
+    # Read before the record is updated, because the update is what forgets it:
+    # an install that moves this repository to another directory has to leave
+    # the one it came from without the links it is no longer run from.
+    previous = approve_issues_service.installed_install_dir(job.identity)
+    relocating = previous is not None and not same_directory(previous, install_dir)
     plan = controller_operation("install_plan", job, install_dir)
     sources = link_sources(repo, install_dir)
     resolved_sources = {
@@ -494,19 +553,41 @@ def install(
             for name, (source, destination) in sources.items()
         },
         "job": plan,
+        "relocated_from": str(previous) if relocating else None,
+        "released_links": (
+            plan_released_links(repo, Path(previous), job.identity)
+            if relocating
+            else {}
+        ),
     }
     if dry_run:
         return {**document, "installed": False, "dry_run": True}
 
-    results = {
-        name: install_symlink(source, destination)
-        for name, (source, destination) in sources.items()
-    }
-    for name, result in results.items():
-        document["links"][name]["result"] = result
-    # After the links, so the job's definition can only ever name a controller
-    # that is really there, and so a refused link leaves no job behind.
-    document["job"] = controller_operation("install_job", job, install_dir)
+    # Under this installation's lock, so the record entry that says this
+    # repository depends on these links is written in the same breath as the
+    # links themselves. An uninstall for another repository reading the
+    # dependants in between would otherwise decide they were unneeded and
+    # delete what this install had just created.
+    with installation_lock(install_dir):
+        results = {
+            name: install_symlink(source, destination)
+            for name, (source, destination) in sources.items()
+        }
+        for name, result in results.items():
+            document["links"][name]["result"] = result
+        # After the links, so the job's definition can only ever name a
+        # controller that is really there, and so a refused link leaves no job
+        # behind.
+        document["job"] = controller_operation("install_job", job, install_dir)
+
+    if relocating:
+        # Sequentially, never nested: two installation locks held at once
+        # could be taken in two orders by two relocations and deadlock. By
+        # here the record already names the new directory, so this repository
+        # is no longer among the old one's dependants.
+        document["released_links"] = release_links(
+            repo, Path(previous), job.identity
+        )
     return {**document, "installed": True, "dry_run": False}
 
 
@@ -544,13 +625,23 @@ def uninstall(repo: Path, install_dir: Path, *, dry_run: bool) -> dict[str, Any]
     if dry_run:
         return {**document, "uninstalled": False, "dry_run": True}
 
-    # The job first: the links are what it runs from, so removing them while it
-    # was still loaded would leave a job the manager could start and nothing
-    # could satisfy.
-    document["job"] = controller_operation("uninstall_job", job)
-    if not dependants:
-        for name, (_source, destination) in sources.items():
-            document["links"][name]["result"] = remove_symlink(destination, name)
+    # Under this installation's lock, and recomputing the dependants inside it:
+    # the set read for the plan above is a snapshot, and an install for another
+    # repository landing between that read and the removal below would leave
+    # its job pointing at links this uninstall had just deleted.
+    with installation_lock(install_dir):
+        # The job first: the links are what it runs from, so removing them
+        # while it was still loaded would leave a job the manager could start
+        # and nothing could satisfy.
+        document["job"] = controller_operation("uninstall_job", job)
+        dependants = dependent_repositories(job.identity, install_dir)
+        document["dependent_repositories"] = dependants
+        if not dependants:
+            for name, (_source, destination) in sources.items():
+                document["links"][name]["result"] = remove_symlink(destination, name)
+        else:
+            for name in sources:
+                document["links"][name]["result"] = "kept"
     return {**document, "uninstalled": True, "dry_run": False}
 
 

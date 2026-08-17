@@ -1111,6 +1111,234 @@ class ManagerLivenessTests(InstallerFixture):
         self.assertFalse(pid_alive(pid))
 
 
+class TransitionSerializationTests(InstallerFixture):
+    """Two transitions of one job never interleave.
+
+    Each of install, start, stop, and uninstall reads what the manager and the
+    runtime currently say and then acts on it, so two running at once can each
+    act on a state the other has already left. The worst of those is a start
+    kicking a job between an uninstall's liveness check and its removal:
+    removing a systemd unit and reloading the manager does not stop an active
+    process, so the job would keep running with its definition and its record
+    entry already gone.
+    """
+
+    def timeline_manager(self, hold):
+        """This fixture's manager, with removal made slow and every call
+        stamped, so an overlap would be visible rather than merely likely."""
+        events = []
+        guard = threading.Lock()
+        manager = self.manager
+
+        def stamp(name):
+            with guard:
+                events.append((name, time.monotonic()))
+
+        original_uninstall = manager.uninstall_definition
+        original_kick = manager.kick
+
+        def slow_uninstall(identifier):
+            stamp("removal-start")
+            time.sleep(hold)
+            outcome = original_uninstall(identifier)
+            stamp("removal-end")
+            return outcome
+
+        def stamped_kick(identifier):
+            stamp("kick")
+            return original_kick(identifier)
+
+        manager.uninstall_definition = slow_uninstall
+        manager.kick = stamped_kick
+        self.addCleanup(setattr, manager, "uninstall_definition", original_uninstall)
+        self.addCleanup(setattr, manager, "kick", original_kick)
+        return events
+
+    def test_a_start_cannot_kick_a_job_that_is_being_removed(self):
+        # A second repository shares the installation, so the uninstall leaves
+        # the links behind and the racing start is a start that can really
+        # succeed rather than one refused for want of a controller.
+        self.install(self.checkout("gadgets", "git@github.com:acme/gadgets.git"))
+        self.install()
+        events = self.timeline_manager(hold=0.4)
+        failures = []
+
+        def start_later():
+            # Long enough to be inside the removal's window if nothing
+            # serialized the two, and far short of how long it holds.
+            time.sleep(0.1)
+            try:
+                service.start_service(self.job(), self.install_dir)
+            except Exception as error:  # pragma: no cover - reported below
+                failures.append(error)
+
+        starter = threading.Thread(target=start_later)
+        starter.start()
+        try:
+            self.uninstall()
+        finally:
+            starter.join(timeout=60)
+
+        self.assertEqual(failures, [])
+        stamps = dict(events)
+        self.assertIn("removal-start", stamps)
+        self.assertIn("kick", stamps)
+        # The whole point: no kick landed inside the removal's window.
+        self.assertFalse(
+            stamps["removal-start"] <= stamps["kick"] <= stamps["removal-end"],
+            f"a start kicked the job while it was being removed: {events}",
+        )
+        self.assertGreater(stamps["kick"], stamps["removal-end"])
+
+    def test_a_start_racing_an_uninstall_leaves_a_job_that_matches_its_record(self):
+        # Whichever order the two settle in, the end state has to be coherent:
+        # a job the manager is running is a job the record can find.
+        self.install(self.checkout("gadgets", "git@github.com:acme/gadgets.git"))
+        self.install()
+        self.timeline_manager(hold=0.3)
+
+        def uninstall_later():
+            time.sleep(0.05)
+            with contextlib.suppress(installer.InstallError):
+                self.uninstall()
+
+        remover = threading.Thread(target=uninstall_later)
+        remover.start()
+        try:
+            with contextlib.suppress(service.ServiceError):
+                service.start_service(self.job(), self.install_dir)
+        finally:
+            remover.join(timeout=60)
+
+        recorded = "acme/widgets" in self.record().get("repositories", {})
+        running = self.manager.is_running(self.label())
+        self.assertEqual(
+            recorded,
+            running,
+            "a running job must be discoverable and a removed one must be gone",
+        )
+
+
+class InstallationSerializationTests(InstallerFixture):
+    """An install and an uninstall sharing one directory never interleave.
+
+    The links are shared, so an uninstall decides whether they may go by
+    reading which other repositories still depend on them. An install landing
+    between that read and the removal would leave its own job pointing at links
+    that were then deleted.
+    """
+
+    def test_an_install_racing_an_uninstall_never_loses_its_links(self):
+        gadgets = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
+        self.install()
+        failures = []
+
+        original = installer.remove_symlink
+
+        def slow_remove(destination, name):
+            time.sleep(0.3)
+            return original(destination, name)
+
+        patched = mock.patch.object(installer, "remove_symlink", slow_remove)
+        patched.start()
+        self.addCleanup(patched.stop)
+
+        def install_later():
+            time.sleep(0.05)
+            try:
+                self.install(gadgets)
+            except Exception as error:  # pragma: no cover - reported below
+                failures.append(error)
+
+        second = threading.Thread(target=install_later)
+        second.start()
+        try:
+            self.uninstall()
+        finally:
+            second.join(timeout=60)
+
+        self.assertEqual(failures, [])
+        # The invariant, whichever order they settled in: a repository with a
+        # record entry has the links its job runs from.
+        if "acme/gadgets" in self.record().get("repositories", {}):
+            for name in installer.LINKED_MODULES:
+                with self.subTest(module=name):
+                    self.assertTrue(
+                        (self.install_dir / name).is_symlink(),
+                        f"{name} was removed under an installed job",
+                    )
+                    self.assertTrue((self.install_dir / name).resolve().is_file())
+
+
+class RelocationTests(InstallerFixture):
+    """A job moved to another install directory leaves the old one empty."""
+
+    def test_reinstalling_elsewhere_takes_back_the_links_it_leaves(self):
+        self.install()
+        moved = self.root / "moved-installation"
+        result = installer.install(
+            self.repo, moved, config_path=None, dry_run=False
+        )
+        self.assertEqual(
+            Path(result["relocated_from"]).resolve(), self.install_dir.resolve()
+        )
+        self.assertEqual(
+            [link["result"] for link in result["released_links"].values()],
+            ["removed"] * len(installer.LINKED_MODULES),
+        )
+        for name in installer.LINKED_MODULES:
+            with self.subTest(module=name):
+                self.assertFalse(os.path.lexists(self.install_dir / name))
+                self.assertTrue((moved / name).is_symlink())
+        entry = self.record()["repositories"]["acme/widgets"]
+        self.assertEqual(Path(entry["install_dir"]).resolve(), moved.resolve())
+        # And the job the manager now holds runs from the new directory.
+        definition = json.loads(
+            self.manager.definition_path(self.label()).read_text(encoding="utf-8")
+        )
+        self.assertEqual(Path(definition["program_arguments"][1]).parent, moved)
+
+    def test_a_relocation_keeps_links_another_job_still_runs_from(self):
+        gadgets = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
+        self.install()
+        self.install(gadgets)
+        moved = self.root / "moved-installation"
+        result = installer.install(
+            self.repo, moved, config_path=None, dry_run=False
+        )
+        self.assertEqual(
+            [link["result"] for link in result["released_links"].values()],
+            ["kept"] * len(installer.LINKED_MODULES),
+        )
+        for name in installer.LINKED_MODULES:
+            with self.subTest(module=name):
+                self.assertTrue((self.install_dir / name).is_symlink())
+
+    def test_reinstalling_in_place_relocates_nothing(self):
+        self.install()
+        result = self.install()
+        self.assertIsNone(result["relocated_from"])
+        self.assertEqual(result["released_links"], {})
+
+    def test_the_relocation_plan_is_what_the_relocation_performs(self):
+        self.install()
+        moved = self.root / "moved-installation"
+        plan = installer.install(self.repo, moved, config_path=None, dry_run=True)
+        self.assertEqual(
+            Path(plan["relocated_from"]).resolve(), self.install_dir.resolve()
+        )
+        self.assertEqual(
+            [link["result"] for link in plan["released_links"].values()],
+            ["removed"] * len(installer.LINKED_MODULES),
+        )
+        # And it wrote nothing: the old links are still there.
+        for name in installer.LINKED_MODULES:
+            self.assertTrue((self.install_dir / name).is_symlink())
+
+        performed = installer.install(self.repo, moved, config_path=None, dry_run=False)
+        self.assertEqual(plan["released_links"], performed["released_links"])
+
+
 class ConvergenceTests(InstallerFixture):
     def test_reinstalling_converges(self):
         first = self.install()
@@ -1928,6 +2156,28 @@ class IdentityTests(InstallerFixture):
             Path(service.__file__).resolve(),
         )
         self.assertTrue(self.install()["installed"])
+
+    def test_a_job_is_never_written_without_an_installed_controller(self):
+        # The definition names the installed link, so writing one before that
+        # link exists would install a job that fails at launch with nothing for
+        # anyone to read.
+        job = service.resolve_job(self.repo)
+        with self.assertRaises(service.ServiceError) as raised:
+            service.install_job(job, self.install_dir)
+        self.assertIn("install_issue_approval.py", str(raised.exception))
+        self.assertEqual(self.manager.call_names(), [])
+
+    def test_a_dangling_controller_link_is_refused_like_an_absent_one(self):
+        self.install()
+        link = self.install_dir / service.CONTROLLER_NAME
+        target = link.resolve()
+        link.unlink()
+        link.symlink_to(self.root / "gone" / service.CONTROLLER_NAME)
+        self.assertTrue(os.path.lexists(link))
+        with self.assertRaises(service.ServiceError) as raised:
+            service.install_job(service.resolve_job(self.repo), self.install_dir)
+        self.assertIn("install_issue_approval.py", str(raised.exception))
+        self.assertTrue(target.is_file())
 
     def test_a_checkout_missing_a_linked_module_is_not_installable(self):
         (self.repo / "tools" / "service_manager.py").unlink()

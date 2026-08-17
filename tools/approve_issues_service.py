@@ -346,6 +346,45 @@ def run_lock_path(slug: str) -> Path:
     return service_root() / "locks" / f"{slug}.lock"
 
 
+def transition_lock_path(slug: str) -> Path:
+    """The lock every transition of one identity's job is performed under.
+
+    Distinct from `run_lock_path` and held for a different span. That one is
+    held by a run for its whole life, so a transition could never take it; this
+    one is held only while a job is being installed, started, stopped, or
+    removed, which is exactly the window in which two transitions could
+    otherwise interleave -- a start kicking a unit between an uninstall's
+    liveness check and its removal, leaving a controller running that nothing
+    can discover or stop.
+
+    Anchored to the account's service root and named by the identity, on the
+    same reasoning as the run lock: two clones of one repository, and two
+    installations of it, must contend here however differently they were
+    started.
+    """
+    return service_root() / "locks" / f"{slug}.transition.lock"
+
+
+def installation_lock_path(install_dir: Path) -> Path:
+    """The lock every transition touching one installation's shared links is
+    performed under.
+
+    Per install directory rather than per identity, because the links are what
+    several repositories share: one repository's uninstall decides whether they
+    may go by reading which others still depend on them, and an install for a
+    different repository writing them in between would leave a job pointing at
+    links that were then deleted.
+
+    Named by the install directory's resolved path and kept in the account's
+    service root rather than inside the installation, so it exists before the
+    directory does and is not itself something an uninstall has to clean up.
+    """
+    digest = hashlib.sha256(
+        os.path.realpath(install_dir).encode("utf-8")
+    ).hexdigest()[:32]
+    return service_root() / "locks" / f"install-{digest}.lock"
+
+
 def log_root() -> Path:
     return account_home() / "Library" / "Logs" / "kanban" / "issue-approval"
 
@@ -2135,6 +2174,54 @@ class Controller:
 
 
 @contextlib.contextmanager
+def held_blocking(path: Path) -> Iterator[None]:
+    """Hold one exclusive lock, waiting for whoever already has it.
+
+    Blocking rather than refusing, unlike the run locks: these are held only
+    for the length of one transition, so a caller that finds one taken has not
+    lost a race to a service that is already running -- it has arrived while
+    the previous transition is still finishing, and waiting is what makes the
+    two orderly instead of interleaved. The kernel releases the lock if its
+    holder dies, so a wedged transition cannot strand the next one forever.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise ServiceError(f"Refusing unsafe lock path: {path}") from exc
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def transition_lock(job: ApprovalJob) -> Any:
+    """Serialize this identity's install, start, stop, and uninstall.
+
+    Every one of those reads what the manager and the runtime currently say and
+    then acts on the answer, so two running concurrently can each act on a
+    state the other has already left. Taken by the public operations only; the
+    `_locked` bodies below assume it and never take it again, which is what
+    keeps a start's own refresh from waiting on itself.
+    """
+    return held_blocking(transition_lock_path(job.slug))
+
+
+def installation_lock(install_dir: Path) -> Any:
+    """Serialize whatever touches one installation's shared links.
+
+    Taken by the installer around installing or removing links together with
+    the record entry that says who depends on them, so the set of dependants an
+    uninstall reads cannot grow between reading it and acting on it.
+
+    Always taken *before* `transition_lock`, never after, so the two can never
+    deadlock: every caller that holds both acquires them in that one order.
+    """
+    return held_blocking(installation_lock_path(install_dir))
+
+
+@contextlib.contextmanager
 def document_lock(path: Path) -> Iterator[None]:
     """Serialize read-modify-write on the shared discovery document.
 
@@ -2625,7 +2712,37 @@ def install_job(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
     backend writes is non-resident by construction, so only an explicit `start`
     ever produces a run (D-9).
     """
+    with transition_lock(job):
+        return _install_locked(job, install_dir)
+
+
+def require_installed_controller(install_dir: Path) -> None:
+    """Refuse to write a definition naming a controller that is not there.
+
+    The definition names the installed link, and a manager asked to run a path
+    that does not exist fails at launch with nothing for anyone to read.
+    Absent and present-but-broken are one answer here -- a dangling link
+    resolves to nothing either way -- and both are repaired by the installer
+    that creates the link rather than by anything this controller can do.
+    """
+    controller = controller_path(install_dir)
+    if not controller.is_file():
+        raise ServiceError(
+            f"There is no installed controller at {controller}, so a job written "
+            "now could never be started. Run `python3 "
+            "tools/install_issue_approval.py` from the checkout first."
+        )
+
+
+def _install_locked(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
+    """`install_job`'s body, with this identity's transition lock already held.
+
+    Separate so a start can refresh the definition inside the one lock it took
+    for the whole start, rather than taking it a second time and waiting on
+    itself.
+    """
     plan = install_plan(job, install_dir)
+    require_installed_controller(install_dir)
     backend = service_backend()
     ensure_dirs(job)
     label = plan["label"]
@@ -2713,7 +2830,17 @@ def uninstall_job(job: ApprovalJob) -> dict[str, Any]:
     job, and the shared script links every installed job runs from, are
     untouched. Removing those links is the installer's decision, and only once
     no installed job is left to depend on them.
+
+    The liveness check and the removal happen under one transition lock, so a
+    start cannot kick the job between them: on systemd in particular, removing
+    a unit file and reloading the manager does not stop an already-active
+    process, and the check that follows could then only report the wreck.
     """
+    with transition_lock(job):
+        return _uninstall_locked(job)
+
+
+def _uninstall_locked(job: ApprovalJob) -> dict[str, Any]:
     plan = uninstall_plan(job)
     backend = service_backend()
     label = plan["label"]
@@ -2745,7 +2872,16 @@ def start_service(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
     moment a stale definition or a missing record would matter, and repairing
     both costs one write nobody notices. What the manager then starts outlives
     this process by construction -- it is the manager's child, not this one's.
+
+    Held under this identity's transition lock from the first check to the
+    confirmed start, so a start and a removal can never interleave in either
+    direction.
     """
+    with transition_lock(job):
+        return _start_locked(job, install_dir)
+
+
+def _start_locked(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
     snapshot = status_snapshot(job)
     conflict = another_checkout_running(job, snapshot)
     if conflict is not None:
@@ -2759,7 +2895,7 @@ def start_service(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
     # that has not yet written its first status is still a run.
     if snapshot["state"] in LIVE_STATES or job_is_running(job):
         return {"started": False, "message": "Already running.", **snapshot}
-    installed = install_job(job, install_dir)
+    installed = _install_locked(job, install_dir)
     label = installed["label"]
     previous_incidents = {
         path.name for path, _document in incident_documents(job, open_only=True)
@@ -2794,7 +2930,16 @@ def stop_service(job: ApprovalJob) -> dict[str, Any]:
     recording that it stopped on purpose. The job stays installed and loaded:
     stopping is not uninstalling, and a stopped job is exactly what the next
     start needs to find.
+
+    Under the same transition lock as the rest, held until the exit is
+    confirmed, so an uninstall that follows a stop cannot begin while the run
+    is still on its way out.
     """
+    with transition_lock(job):
+        return _stop_locked(job)
+
+
+def _stop_locked(job: ApprovalJob) -> dict[str, Any]:
     snapshot = status_snapshot(job)
     # Both answers again, and for the same reason: a run whose status is
     # missing or damaged is still a run, and reporting it as already stopped
