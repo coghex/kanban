@@ -1107,10 +1107,25 @@ search step and nothing else, which is what `mandatory: no` records.
   the removal that takes away the controller all of them name — happens under
   the legacy record's own lock, so a normal install or start for another
   repository, still bound to that controller, is serialized against it rather
-  than adding an entry the migration never saw and would then strand. This is
+  than adding an entry the migration never saw and would then strand. One that
+  queued on that lock resumes into a directory the removal took away and fails
+  outright rather than recording anything. This is
   the one place two of these documents are held at once, and the order is
   always the legacy record before the destination's; every other writer holds
   exactly one, so there is no cycle to deadlock against.
+  A writer that arrives *after* the removal is the one case no lock reaches:
+  it creates the directory afresh and opens a lock file this transition never
+  held, so it contends with nothing. The install therefore checks whether the
+  legacy record is back before it reports, and says so — the repository that
+  writer recorded is installed where the XDG-first probe no longer looks, and
+  the repair is another run of the installer, for which a legacy record that
+  has reappeared is simply a legacy installation to migrate.
+  The installed definition carries `$XDG_DATA_HOME` and `$XDG_STATE_HOME`
+  alongside `KANBAN_DRAINER_INSTALL_DIR` whenever they are absolute, because
+  that option pins the install directory and the runtime root beneath it but
+  not the record or the log root, and a user manager need not export what the
+  operator installed under; a job started without them would resolve
+  `~/.local` and write a second record nothing reads.
   `tools/install_issue_review.py` follows the same convention for the
   canonical issue-review backend, and resolves the same way. Its install
   directory defaults to `~/Library/Application Support/kanban/issue-review`

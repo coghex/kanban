@@ -459,6 +459,63 @@ class PerRepositoryPathTests(RedirectedControllerTestCase):
         )
 
 
+class DefinitionEnvironmentTests(unittest.TestCase):
+    """What a job is started with, beyond the interpreter and the argv.
+
+    `KANBAN_DRAINER_INSTALL_DIR` pins the install directory and the runtime
+    root beneath it, but the discovery record and the log root follow the XDG
+    base directories — and a systemd user manager does not necessarily export
+    the ones the operator installed under. A job started without them would
+    resolve `~/.local` instead, writing a second discovery record nothing reads
+    and dated logs somewhere its own unit does not point.
+    """
+
+    def job(self):
+        return drain_prs_service.job_for_identity(Path("/checkout"), "acme/widgets")
+
+    def environment(self):
+        return dict(drain_prs_service.service_definition(self.job()).environment)
+
+    def test_it_carries_the_xdg_directories_this_installation_resolved_under(self):
+        with mock.patch.dict(
+            os.environ,
+            {"XDG_DATA_HOME": "/srv/data", "XDG_STATE_HOME": "/srv/state"},
+        ):
+            environment = self.environment()
+        self.assertEqual(environment["XDG_DATA_HOME"], "/srv/data")
+        self.assertEqual(environment["XDG_STATE_HOME"], "/srv/state")
+
+    def test_it_carries_no_value_it_would_not_have_honoured_itself(self):
+        # The same absolute-only rule the resolvers apply. Pinning a value they
+        # would ignore would make the job resolve differently from the install
+        # that wrote it, which is the divergence this exists to prevent.
+        for description, value in (
+            ("relative", "relative/data"),
+            ("empty", ""),
+        ):
+            with self.subTest(value=description):
+                with mock.patch.dict(
+                    os.environ,
+                    {"XDG_DATA_HOME": value, "XDG_STATE_HOME": value},
+                ):
+                    environment = self.environment()
+                for name in kanban_config.DRAINER_PATH_VARIABLES:
+                    self.assertNotIn(name, environment)
+        with mock.patch.dict(os.environ, {}):
+            for name in kanban_config.DRAINER_PATH_VARIABLES:
+                os.environ.pop(name, None)
+            environment = self.environment()
+        for name in kanban_config.DRAINER_PATH_VARIABLES:
+            self.assertNotIn(name, environment)
+
+    def test_the_variables_it_carries_are_the_ones_the_resolvers_read(self):
+        # Named once, in the module that owns the paths, so this set cannot
+        # fall behind the resolvers it exists to reproduce.
+        self.assertEqual(
+            kanban_config.DRAINER_PATH_VARIABLES, ("XDG_DATA_HOME", "XDG_STATE_HOME")
+        )
+
+
 class ModuleDefaultTests(unittest.TestCase):
     """The unredirected module constants, which every other fixture replaces.
 
@@ -621,6 +678,15 @@ class PinnedServiceDefinitionTests(unittest.TestCase):
     ).encode("utf-8")
 
     def setUp(self):
+        # The definition carries whichever XDG base directories this
+        # installation resolved under, so the host's own have to be out of the
+        # way for these bytes to be the same everywhere. Which ones it carries,
+        # and when, is asserted separately below.
+        environment = mock.patch.dict(os.environ, {})
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in kanban_config.DRAINER_PATH_VARIABLES:
+            os.environ.pop(name, None)
         for module, name, value in (
             (drain_prs_service, "HOME", self.HOME),
             (drain_prs_service, "INSTALL_DIR", self.INSTALL_DIR),

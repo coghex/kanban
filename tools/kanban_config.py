@@ -204,6 +204,12 @@ _XDG_DRAINER_INSTALL_DIR_FALLBACK = str(
 # The namespace the two XDG fallbacks spell home-relatively, for the branch
 # where $XDG_DATA_HOME or $XDG_STATE_HOME names the base directory itself.
 _DRAINER_NAMESPACE = ("kanban", "pr-drainer")
+# Every environment variable the resolvers below read, named once so a
+# component that has to carry this installation's context somewhere else --
+# `drain_prs_service.service_definition`, into the job a service manager
+# starts -- carries exactly the set that decides the answers, rather than a
+# list of its own that can fall behind this one.
+DRAINER_PATH_VARIABLES = ("XDG_DATA_HOME", "XDG_STATE_HOME")
 _DRAINER_RECORD_NAME = PurePosixPath(_MACOS_DRAINER_RECORD).name
 
 

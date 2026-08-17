@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1038,6 +1039,72 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         # And it is released once the run is done, so a waiting writer is
         # serialized behind the transition rather than shut out of it.
         self.assertTrue(contended.wait(5))
+
+    def test_a_writer_queued_on_the_legacy_lock_fails_rather_than_committing(self):
+        # The contender does not merely take the lock; it tries to *write*
+        # after acquiring it. Having queued inside `document_lock`, it holds
+        # the lock file's original inode and resumes into a directory the
+        # removal took away — so it fails outright rather than recording a
+        # repository in a document nothing reads any more.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        legacy_record = self.legacy_install / "config.json"
+        outcome = {}
+        blocked = threading.Event()
+
+        def contender():
+            blocked.set()
+            try:
+                drain_prs_service.update_json_document(
+                    legacy_record, lambda document: {**document, "late": True}
+                )
+                outcome["wrote"] = True
+            except Exception as exc:  # noqa: BLE001 - recorded, not handled
+                outcome["failed"] = f"{type(exc).__name__}"
+
+        thread = threading.Thread(target=contender, daemon=True)
+        real_perform = install_drainer.perform_legacy_migration
+
+        def watched(*args, **kwargs):
+            thread.start()
+            # Long enough to be inside `document_lock`, waiting on the flock
+            # this transition holds.
+            blocked.wait(2)
+            time.sleep(0.3)
+            return real_perform(*args, **kwargs)
+
+        with mock.patch.object(install_drainer, "perform_legacy_migration", watched):
+            result = self.install(self.widgets)
+        thread.join(5)
+
+        self.assertNotIn("wrote", outcome)
+        self.assertEqual(outcome.get("failed"), "FileNotFoundError")
+        self.assertFalse(os.path.lexists(legacy_record))
+        self.assertFalse(result["legacy_migration"]["legacy_record_reappeared"])
+
+    def test_a_legacy_record_written_after_the_removal_is_reported(self):
+        # A writer arriving after the removal creates the directory afresh and
+        # opens a lock inode this transition never held, so it is contending
+        # with nothing and cannot be serialized. What it records is invisible
+        # to the XDG-first probe, so the run says so rather than reporting a
+        # clean relocation over a repository nobody will find.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        legacy_record = self.legacy_install / "config.json"
+        real_rmtree = install_drainer.shutil.rmtree
+
+        def late_writer(path, *args, **kwargs):
+            real_rmtree(path, *args, **kwargs)
+            drain_prs_service.update_json_document(
+                legacy_record, lambda document: {**document, "late": True}
+            )
+
+        with mock.patch.object(install_drainer.shutil, "rmtree", late_writer):
+            result = self.install(self.widgets)
+
+        self.assertTrue(result["legacy_migration"]["migrated"])
+        self.assertTrue(result["legacy_migration"]["legacy_record_reappeared"])
+        # And re-running is the repair, because what came back is a legacy
+        # installation and that is what this migrates.
+        self.assertIsNotNone(install_drainer.plan_legacy_migration(self.xdg_install))
 
     def test_a_sibling_recorded_before_the_lock_is_taken_is_carried_across(self):
         # The other half of the same guarantee: whatever the record holds when

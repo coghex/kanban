@@ -1513,6 +1513,23 @@ def service_definition(job: DrainerJob) -> service_manager.ServiceDefinition:
         "PYTHONUNBUFFERED": "1",
         "KANBAN_DRAINER_INSTALL_DIR": str(INSTALL_DIR),
     }
+    # The rest of the context this installation's managed paths were resolved
+    # under. KANBAN_DRAINER_INSTALL_DIR alone pins the install directory and
+    # the runtime root beneath it, but not the discovery record or the log
+    # root: those follow the XDG base directories, and a systemd user manager
+    # does not necessarily export the ones the operator installed under. A job
+    # started without them would resolve `~/.local` instead — writing a second
+    # discovery record nothing reads, and dated logs somewhere its own unit
+    # does not point. Carried only when absolute, which is the same rule the
+    # resolvers themselves apply, so an unusable value is left to fall back on
+    # both sides rather than pinned on one.
+    environment.update(
+        {
+            name: os.environ[name]
+            for name in kanban_config.DRAINER_PATH_VARIABLES
+            if os.path.isabs(os.environ.get(name, ""))
+        }
+    )
     return service_manager.ServiceDefinition(
         identifier=job.label,
         program_arguments=[

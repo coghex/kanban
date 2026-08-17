@@ -964,7 +964,10 @@ entry in the shared record cannot be recovered exactly, if a destination runtime
 or log tree already exists, or if the old install directory holds a file the
 installer did not put there. The whole relocation holds the old record's lock,
 so an install or start for another repository that runs at the same time waits
-for it rather than being left behind by it. Stop every installed repository's drainer first,
+for it rather than being left behind by it — and one that starts after the old
+directory is gone cannot be caught by any lock, so the run checks whether that
+record came back and tells you to run it again if it did. Stop every installed
+repository's drainer first,
 and re-run the installer once for any repository; one run carries all of them.
 Passing `--install-dir`, or setting `KANBAN_DRAINER_INSTALL_DIR`, installs at
 that location and relocates nothing, reporting that it skipped the migration.

@@ -1006,6 +1006,16 @@ def perform_legacy_migration(
     # installation, and nothing that follows can strand a sibling.
     rollback.commit()
     shutil.rmtree(migration.source)
+    # The lock above serializes every writer that queues on the legacy
+    # record's lock file. It cannot serialize one that arrives *after* this
+    # removal: that writer creates the directory afresh, opens a new lock
+    # inode, and is contending with nothing. It would then record a repository
+    # in a document the XDG-first probe no longer prefers -- installed, and
+    # invisible. Nothing here can hold a lock on a file it has just deleted,
+    # so this reports the condition rather than claiming to prevent it. The
+    # repair is another run of this installer: a legacy record that is back is
+    # a legacy installation to migrate, which is exactly what it will do.
+    stranded = os.path.lexists(migration.source_record)
     return {
         "migrated": True,
         "source": str(migration.source),
@@ -1014,6 +1024,7 @@ def perform_legacy_migration(
         "destination_logs": str(migration.destination_logs),
         "record": str(migration.destination_record),
         "repositories": [job.identity for job in jobs],
+        "legacy_record_reappeared": stranded,
         "moved": [
             {"what": move.what, "from": str(move.source), "to": str(move.destination)}
             for move in moves
@@ -1398,6 +1409,14 @@ def main() -> int:
                     f"Relocated the shared installation from {migration['source']}, "
                     f"carrying {len(migration['repositories'])} repositories."
                 )
+                if migration["legacy_record_reappeared"]:
+                    print(
+                        f"WARNING: {migration['source']} was written again after the "
+                        "relocation, so another install or start was running at the "
+                        "same time. The repository it recorded is installed where "
+                        "nothing now looks for it. Re-run this installer to carry "
+                        "it across."
+                    )
             elif migration:
                 print(f"Left the installation at {migration['source']}: {migration['reason']}.")
             print(f"Service: {result['label']}")
