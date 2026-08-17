@@ -354,8 +354,8 @@ def link_sources(repo: Path, install_dir: Path) -> dict[str, tuple[Path, Path]]:
     }
 
 
-def dependent_repositories(identity: str, install_dir: Path) -> list[str]:
-    """Every other repository whose job runs from *these* links.
+def dependent_repositories(install_dir: Path, *, excluding: str | None = None) -> list[str]:
+    """Every repository whose job runs from *these* links.
 
     The links are shared, so this is what decides whether any of them may go —
     but they are shared only within one install directory. A repository
@@ -367,14 +367,17 @@ def dependent_repositories(identity: str, install_dir: Path) -> list[str]:
     keeping a link nothing needs is recoverable while removing one a live job
     runs from is not.
 
-    Computed from the record before the uninstall rather than after it, so the
-    plan a dry run reports and the decision the uninstall makes are one
-    computation over one document.
+    `excluding` is for the one caller that is asking about a state it has not
+    reached yet: a *plan* describes an uninstall that has not happened, so the
+    repository it is about is not yet gone and has to be discounted by hand.
+    Everywhere else the question is asked of the record as it actually stands —
+    including immediately before links are removed, where a repository that has
+    reappeared since the plan is a dependant like any other, whoever it is.
     """
     here = os.path.realpath(install_dir)
     dependants = []
     for other, record in approve_issues_service.installed_repository_records().items():
-        if other == identity:
+        if other == excluding:
             continue
         recorded = record.get("install_dir")
         if not isinstance(recorded, str) or not recorded:
@@ -428,8 +431,13 @@ def plan_released_links(
     repo: Path, install_dir: Path, identity: str
 ) -> dict[str, dict[str, str]]:
     """What `release_links` would do to the directory this repository is
-    leaving, without writing anything."""
-    if dependent_repositories(identity, install_dir):
+    leaving, without writing anything.
+
+    Asked with this repository discounted, because the plan describes a
+    relocation that has not happened yet: it is still recorded in the directory
+    it is about to leave.
+    """
+    if dependent_repositories(install_dir, excluding=identity):
         return {
             name: {"destination": str(destination), "result": "kept"}
             for name, (_source, destination) in link_sources(repo, install_dir).items()
@@ -456,7 +464,11 @@ def release_links(
     positively recognized as Kanban's own.
     """
     with installation_lock(install_dir):
-        if dependent_repositories(identity, install_dir):
+        # Without the exclusion, and inside the lock: by here the record already
+        # names the directory this repository moved to, so it can only appear
+        # among these dependants by having been reinstalled here since — which
+        # makes it a dependant like any other rather than the one to discount.
+        if dependent_repositories(install_dir):
             return plan_released_links(repo, install_dir, identity)
         return {
             name: {
@@ -602,7 +614,10 @@ def uninstall(repo: Path, install_dir: Path, *, dry_run: bool) -> dict[str, Any]
     backend = service_backend()
     job = repository_job(repo, None)
     plan = controller_operation("uninstall_plan", job)
-    dependants = dependent_repositories(job.identity, install_dir)
+    # Discounted here because the plan describes an uninstall that has not
+    # happened: this repository is still recorded, and still running from these
+    # links, until it is removed below.
+    dependants = dependent_repositories(install_dir, excluding=job.identity)
     sources = link_sources(repo, install_dir)
     if dependants:
         link_plans = {name: "kept" for name in sources}
@@ -632,9 +647,14 @@ def uninstall(repo: Path, install_dir: Path, *, dry_run: bool) -> dict[str, Any]
     with installation_lock(install_dir):
         # The job first: the links are what it runs from, so removing them
         # while it was still loaded would leave a job the manager could start
-        # and nothing could satisfy.
-        document["job"] = controller_operation("uninstall_job", job)
-        dependants = dependent_repositories(job.identity, install_dir)
+        # and nothing could satisfy. Handed this directory explicitly so the
+        # lock it takes with the transition is the one already held here.
+        document["job"] = controller_operation("uninstall_job", job, install_dir)
+        # Recomputed inside the lock and with nothing discounted. This
+        # repository's entry is gone by now, so it can only appear by having
+        # been reinstalled — which no longer happens, because a start takes
+        # this same lock, and which would still be honoured if it did.
+        dependants = dependent_repositories(install_dir)
         document["dependent_repositories"] = dependants
         if not dependants:
             for name, (_source, destination) in sources.items():

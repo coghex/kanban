@@ -55,6 +55,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from collections.abc import Callable, Iterator
@@ -2173,6 +2174,22 @@ class Controller:
 # ---------------------------------------------------------------------------
 
 
+# Which transition locks this *thread* already holds, and how deeply. Held
+# per thread rather than per process on purpose: a nested acquire by one
+# thread is the same transition reached through a public entry point that must
+# also work when reached directly, while two threads are two transitions and
+# have to contend exactly as two processes do.
+_HELD_LOCKS = threading.local()
+
+
+def _held_depths() -> dict[str, int]:
+    depths = getattr(_HELD_LOCKS, "depths", None)
+    if depths is None:
+        depths = {}
+        _HELD_LOCKS.depths = depths
+    return depths
+
+
 @contextlib.contextmanager
 def held_blocking(path: Path) -> Iterator[None]:
     """Hold one exclusive lock, waiting for whoever already has it.
@@ -2183,16 +2200,33 @@ def held_blocking(path: Path) -> Iterator[None]:
     the previous transition is still finishing, and waiting is what makes the
     two orderly instead of interleaved. The kernel releases the lock if its
     holder dies, so a wedged transition cannot strand the next one forever.
+
+    Re-entrant within one thread, because every operation here is both a step
+    of a larger one and an entry point of its own: an installer holding an
+    installation's lock calls the controller operation that takes the same
+    lock, and a start refreshes an install inside the lock it already took.
+    Without re-entrancy each of those would wait on itself.
     """
+    key = str(path)
+    depths = _held_depths()
+    if depths.get(key):
+        depths[key] += 1
+        try:
+            yield
+        finally:
+            depths[key] -= 1
+        return
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     except OSError as exc:
         raise ServiceError(f"Refusing unsafe lock path: {path}") from exc
+    depths[key] = 1
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
     finally:
+        depths.pop(key, None)
         os.close(descriptor)
 
 
@@ -2201,9 +2235,7 @@ def transition_lock(job: ApprovalJob) -> Any:
 
     Every one of those reads what the manager and the runtime currently say and
     then acts on the answer, so two running concurrently can each act on a
-    state the other has already left. Taken by the public operations only; the
-    `_locked` bodies below assume it and never take it again, which is what
-    keeps a start's own refresh from waiting on itself.
+    state the other has already left.
     """
     return held_blocking(transition_lock_path(job.slug))
 
@@ -2211,14 +2243,28 @@ def transition_lock(job: ApprovalJob) -> Any:
 def installation_lock(install_dir: Path) -> Any:
     """Serialize whatever touches one installation's shared links.
 
-    Taken by the installer around installing or removing links together with
-    the record entry that says who depends on them, so the set of dependants an
-    uninstall reads cannot grow between reading it and acting on it.
+    Held by the installer around installing or removing links together with the
+    record entry that says who depends on them, and by every job transition
+    that writes such an entry, so the set of repositories running from a
+    directory cannot change between an uninstall reading it and acting on it.
+    A start is one of those: it rewrites the definition and the record entry,
+    and a start that skipped this lock could reinstate an entry after an
+    uninstall had read the dependants and before it removed the links that
+    entry's job runs from.
 
     Always taken *before* `transition_lock`, never after, so the two can never
     deadlock: every caller that holds both acquires them in that one order.
     """
     return held_blocking(installation_lock_path(install_dir))
+
+
+@contextlib.contextmanager
+def job_transition(job: ApprovalJob, install_dir: Path) -> Iterator[None]:
+    """Both locks a transition that writes a record entry must hold, in the one
+    order every caller takes them."""
+    with installation_lock(install_dir):
+        with transition_lock(job):
+            yield
 
 
 @contextlib.contextmanager
@@ -2712,7 +2758,7 @@ def install_job(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
     backend writes is non-resident by construction, so only an explicit `start`
     ever produces a run (D-9).
     """
-    with transition_lock(job):
+    with job_transition(job, install_dir):
         return _install_locked(job, install_dir)
 
 
@@ -2821,7 +2867,7 @@ def require_stopped_for_uninstall(job: ApprovalJob) -> None:
         )
 
 
-def uninstall_job(job: ApprovalJob) -> dict[str, Any]:
+def uninstall_job(job: ApprovalJob, install_dir: Path | None = None) -> dict[str, Any]:
     """Remove this repository's job: its definition, the manager's hold on it,
     and its entry in the discovery record.
 
@@ -2835,8 +2881,13 @@ def uninstall_job(job: ApprovalJob) -> dict[str, Any]:
     start cannot kick the job between them: on systemd in particular, removing
     a unit file and reloading the manager does not stop an already-active
     process, and the check that follows could then only report the wreck.
+
+    `install_dir` names the installation whose lock is held with it. The
+    caller's own, when the installer is removing links in the same breath, so
+    the two never take two different locks for one directory; this
+    repository's recorded one otherwise.
     """
-    with transition_lock(job):
+    with job_transition(job, install_dir or job_install_dir(job)):
         return _uninstall_locked(job)
 
 
@@ -2873,11 +2924,12 @@ def start_service(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
     both costs one write nobody notices. What the manager then starts outlives
     this process by construction -- it is the manager's child, not this one's.
 
-    Held under this identity's transition lock from the first check to the
-    confirmed start, so a start and a removal can never interleave in either
-    direction.
+    Held under both locks from the first check to the confirmed start, so a
+    start and a removal can never interleave in either direction -- neither in
+    the job the manager holds, nor in the record entry and shared links an
+    uninstall reads to decide what it may take away.
     """
-    with transition_lock(job):
+    with job_transition(job, install_dir):
         return _start_locked(job, install_dir)
 
 

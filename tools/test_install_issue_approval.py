@@ -1270,6 +1270,136 @@ class InstallationSerializationTests(InstallerFixture):
                     self.assertTrue((self.install_dir / name).resolve().is_file())
 
 
+class LinkRemovalRaceTests(InstallerFixture):
+    """A start can never leave a recorded job pointing at deleted links.
+
+    The uninstall removes the job and its record entry, then removes the links
+    the job ran from. A start landing in between would reinstate the entry and
+    kick the job, and the removal that followed would take away the very files
+    that job runs -- reporting success over a live, recorded, unrunnable
+    service. There is no second repository here to keep the links alive, which
+    is the case where the window is widest.
+    """
+
+    def slow_link_removal(self, hold=0.3):
+        original = installer.remove_symlink
+
+        def slow_remove(destination, name):
+            time.sleep(hold)
+            return original(destination, name)
+
+        patched = mock.patch.object(installer, "remove_symlink", slow_remove)
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def assert_coherent(self):
+        """A recorded job has the links it runs from, and a job the manager is
+        running is one the record can find."""
+        recorded = "acme/widgets" in self.record().get("repositories", {})
+        if recorded:
+            for name in installer.LINKED_MODULES:
+                with self.subTest(module=name):
+                    self.assertTrue(
+                        (self.install_dir / name).is_file(),
+                        f"{name} was removed under a recorded job",
+                    )
+        self.assertEqual(recorded, self.manager.is_running(self.label()))
+
+    def test_a_start_racing_an_uninstall_with_no_sibling_stays_coherent(self):
+        self.install()
+        self.slow_link_removal()
+        failures = []
+
+        def start_later():
+            time.sleep(0.05)
+            try:
+                service.start_service(self.job(), self.install_dir)
+            except service.ServiceError:
+                # A start that arrives after the installation was taken away
+                # is refused for want of a controller, which is a coherent
+                # outcome and the one this ordering produces.
+                pass
+            except Exception as error:  # pragma: no cover - reported below
+                failures.append(error)
+
+        starter = threading.Thread(target=start_later)
+        starter.start()
+        try:
+            self.uninstall()
+        finally:
+            starter.join(timeout=60)
+
+        self.assertEqual(failures, [])
+        self.assert_coherent()
+
+    def test_an_uninstall_racing_a_start_with_no_sibling_stays_coherent(self):
+        # The other ordering: the start commits first, so the uninstall waits
+        # and then removes a job it can see is there.
+        self.install()
+        self.slow_link_removal()
+        failures = []
+
+        def uninstall_later():
+            time.sleep(0.05)
+            try:
+                self.uninstall()
+            except installer.InstallError:
+                # Refused because the start it lost to left a live job, which
+                # is exactly the refusal that keeps this coherent.
+                pass
+            except Exception as error:  # pragma: no cover - reported below
+                failures.append(error)
+
+        remover = threading.Thread(target=uninstall_later)
+        remover.start()
+        try:
+            with contextlib.suppress(service.ServiceError):
+                service.start_service(self.job(), self.install_dir)
+        finally:
+            remover.join(timeout=60)
+
+        self.assertEqual(failures, [])
+        self.assert_coherent()
+
+    def test_a_start_racing_a_relocation_never_loses_the_links_it_needs(self):
+        # The relocation's cleanup of the directory it left is the same window
+        # one step over: a repository still installed there must keep its
+        # links, whichever order the two settle in.
+        gadgets = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
+        self.install()
+        self.install(gadgets)
+        self.slow_link_removal()
+        moved = self.root / "moved-installation"
+        failures = []
+
+        def start_gadgets():
+            time.sleep(0.05)
+            try:
+                service.start_service(
+                    service.resolve_job(gadgets), self.install_dir
+                )
+            except Exception as error:  # pragma: no cover - reported below
+                failures.append(error)
+
+        starter = threading.Thread(target=start_gadgets)
+        starter.start()
+        try:
+            installer.install(self.repo, moved, config_path=None, dry_run=False)
+        finally:
+            starter.join(timeout=60)
+
+        self.assertEqual(failures, [])
+        # gadgets never moved, so its links are still there and its job runs.
+        entry = self.record()["repositories"]["acme/gadgets"]
+        self.assertEqual(
+            Path(entry["install_dir"]).resolve(), self.install_dir.resolve()
+        )
+        for name in installer.LINKED_MODULES:
+            with self.subTest(module=name):
+                self.assertTrue((self.install_dir / name).is_file())
+        self.assertTrue(self.manager.is_running(self.label("acme/gadgets")))
+
+
 class RelocationTests(InstallerFixture):
     """A job moved to another install directory leaves the old one empty."""
 
