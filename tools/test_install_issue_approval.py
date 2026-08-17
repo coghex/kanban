@@ -1444,6 +1444,52 @@ class RelocationTests(InstallerFixture):
             with self.subTest(module=name):
                 self.assertTrue((self.install_dir / name).is_symlink())
 
+    def test_two_installs_of_one_repository_into_two_directories_leave_one(self):
+        # Both would find "no previous installation" if either looked before it
+        # wrote, and the one that wrote second would leave the other's links
+        # behind with nothing able to find them. The location a record write
+        # replaced is read by that write itself, so exactly one directory
+        # survives and it is the one the record names.
+        first = self.root / "installation-a"
+        second = self.root / "installation-b"
+        failures = []
+        ready = threading.Barrier(2)
+
+        def install_into(directory):
+            try:
+                ready.wait(timeout=30)
+                installer.install(
+                    self.repo, directory, config_path=None, dry_run=False
+                )
+            except Exception as error:  # pragma: no cover - reported below
+                failures.append(error)
+
+        threads = [
+            threading.Thread(target=install_into, args=(directory,))
+            for directory in (first, second)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        self.assertEqual(failures, [])
+        recorded = Path(
+            self.record()["repositories"]["acme/widgets"]["install_dir"]
+        ).resolve()
+        self.assertIn(recorded, {first.resolve(), second.resolve()})
+        abandoned = second if recorded == first.resolve() else first
+        for name in installer.LINKED_MODULES:
+            with self.subTest(module=name):
+                self.assertTrue(
+                    (Path(recorded) / name).is_file(),
+                    "the recorded installation lost its links",
+                )
+                self.assertFalse(
+                    os.path.lexists(abandoned / name),
+                    f"{abandoned} kept links no record can find",
+                )
+
     def test_reinstalling_in_place_relocates_nothing(self):
         self.install()
         result = self.install()
@@ -1818,6 +1864,42 @@ class UninstallTests(InstallerFixture):
         for name in installer.LINKED_MODULES:
             with self.subTest(module=name):
                 self.assertTrue((self.install_dir / name).is_symlink())
+
+    def test_an_uninstall_pointed_at_the_wrong_directory_is_refused(self):
+        # The job and its record entry are named by identity alone, so an
+        # uninstall that removed them and then deleted links in a directory the
+        # job never ran from would strand the links it actually did.
+        elsewhere = self.root / "elsewhere"
+        self.install()
+        with self.assertRaises(installer.InstallError) as raised:
+            installer.uninstall(self.repo, elsewhere, dry_run=False)
+        self.assertIn(str(self.install_dir), str(raised.exception))
+        self.assertIn(str(elsewhere), str(raised.exception))
+        # Nothing was removed anywhere.
+        self.assertIn("acme/widgets", self.record()["repositories"])
+        self.assertTrue(self.manager.is_loaded(self.label()))
+        for name in installer.LINKED_MODULES:
+            self.assertTrue((self.install_dir / name).is_symlink())
+
+    def test_the_wrong_directory_is_refused_by_the_dry_run_too(self):
+        self.install()
+        with self.assertRaises(installer.InstallError):
+            installer.uninstall(self.repo, self.root / "elsewhere", dry_run=True)
+
+    def test_uninstalling_with_no_directory_finds_the_recorded_one(self):
+        # Which is why the refusal above costs nothing: the default resolves
+        # the installation the job is actually in.
+        moved = self.root / "moved-installation"
+        self.install()
+        installer.install(self.repo, moved, config_path=None, dry_run=False)
+        self.assertEqual(installer.selected_install_dir(self.repo, None), moved)
+        result = installer.uninstall(
+            self.repo, installer.selected_install_dir(self.repo, None), dry_run=False
+        )
+        self.assertTrue(result["uninstalled"])
+        for name in installer.LINKED_MODULES:
+            with self.subTest(module=name):
+                self.assertFalse(os.path.lexists(moved / name))
 
     def test_uninstall_never_removes_a_link_it_does_not_recognize(self):
         self.install()

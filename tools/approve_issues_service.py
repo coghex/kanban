@@ -2328,6 +2328,7 @@ def merge_repository_record(
     updates: dict[str, Any],
     *,
     discard: frozenset[str] | tuple[str, ...] = (),
+    observed: Callable[[dict[str, Any]], None] | None = None,
 ) -> Path:
     """Merge `updates` into one repository's entry, leaving every sibling entry
     and every top-level key untouched.
@@ -2350,6 +2351,12 @@ def merge_repository_record(
     The read that computes the merge happens inside `update_json_document`'s
     lock, so a repository installed between another writer's read and its write
     cannot be dropped.
+
+    `observed`, when given, is handed the entry exactly as this merge found it,
+    inside that same lock. It is how a writer learns what it replaced without a
+    separate read another writer could slip between -- which is what tells an
+    install whether it has just moved this repository out of some other
+    installation, and is therefore answerable for the links it left there.
     """
 
     def merged(document: dict[str, Any]) -> dict[str, Any]:
@@ -2357,6 +2364,8 @@ def merge_repository_record(
         records = dict(records) if isinstance(records, dict) else {}
         existing = records.get(identity)
         entry = dict(existing) if isinstance(existing, dict) else {}
+        if observed is not None:
+            observed(dict(entry))
         entry = {key: value for key, value in entry.items() if key not in discard}
         entry.update(updates)
         records[identity] = entry
@@ -2715,7 +2724,7 @@ def install_plan(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
 
 def write_discovery_record(
     job: ApprovalJob, label: str, definition_path: Path, install_dir: Path
-) -> Path:
+) -> tuple[Path, str | None]:
     """Record where the definition just written for this job actually lives, so
     Kanban resolves it by reading rather than by deriving the label a second
     time.
@@ -2724,7 +2733,20 @@ def write_discovery_record(
     discriminated union exactly as the drainer's is. `install_dir` rides along
     because a custom installation is otherwise discoverable only through an
     environment variable a dashboard never inherits.
+
+    Reports the install directory this entry named before, read in the same
+    locked read-modify-write that replaced it. That is the only reading of it
+    nothing can race: two installs of one repository into two directories both
+    find "no previous installation" if they look before they write, and the
+    one that writes second would then leave the other's links behind forever.
     """
+    replaced: str | None = None
+
+    def observe(entry: dict[str, Any]) -> None:
+        nonlocal replaced
+        recorded = entry.get("install_dir")
+        replaced = recorded if isinstance(recorded, str) and recorded else None
+
     backend = service_backend()
     updates: dict[str, Any] = {
         **backend.record_entry(label, definition_path),
@@ -2739,9 +2761,10 @@ def write_discovery_record(
     selected = selected_backend_install_dir(job)
     if selected:
         updates["backend_install_dir"] = selected
-    return merge_repository_record(
+    record = merge_repository_record(
         job.identity,
         updates,
+        observed=observe,
         # Every service-manager key, not just this backend's: reinstalling a
         # repository under the other manager must leave the entry naming one
         # backend rather than carrying both, and the merge that keeps
@@ -2749,6 +2772,7 @@ def write_discovery_record(
         # superseded manager's keys alive with them.
         discard=service_manager.RECORD_KEYS,
     )
+    return record, replaced
 
 
 def install_job(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
@@ -2797,9 +2821,19 @@ def _install_locked(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
     # load it: the record describes where the job is, so it has to be true from
     # the moment the job exists. Every install path reaches here, including the
     # refresh `start_service` performs, so no route can leave it stale.
-    record = write_discovery_record(job, label, definition_path, install_dir)
+    record, previous_install_dir = write_discovery_record(
+        job, label, definition_path, install_dir
+    )
     backend.load_definition(label)
-    return {**plan, "installed": True, "record": str(record)}
+    return {
+        **plan,
+        "installed": True,
+        "record": str(record),
+        # Where this repository's job was installed *before* this write, as the
+        # write itself found it. Null unless it has moved, and the installer's
+        # authority for taking back the links it left behind.
+        "previous_install_dir": previous_install_dir,
+    }
 
 
 def uninstall_plan(job: ApprovalJob) -> dict[str, Any]:

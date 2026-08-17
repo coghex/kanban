@@ -479,6 +479,28 @@ def release_links(
         }
 
 
+def require_recorded_installation(
+    job: approve_issues_service.ApprovalJob, install_dir: Path
+) -> None:
+    """Refuse to remove a job from a directory it is not installed in.
+
+    The job, its definition, and its record entry are named by identity alone,
+    so an uninstall pointed at the wrong directory would remove all three and
+    then delete links in a directory the job never ran from -- stranding the
+    links it actually did, with nothing left to find them by. The recorded
+    location is the job's own answer, and `--install-dir` is the only way to
+    disagree with it, so disagreeing is refused rather than resolved.
+    """
+    recorded = approve_issues_service.installed_install_dir(job.identity)
+    if recorded is None or same_directory(recorded, install_dir):
+        return
+    raise InstallError(
+        f"The issue approval service for {job.identity} is installed in "
+        f"{recorded}, not {install_dir}. Re-run without --install-dir, which "
+        "resolves the recorded installation, or name that one."
+    )
+
+
 def controller_operation(
     operation: str, job: approve_issues_service.ApprovalJob, *arguments: Any
 ) -> dict[str, Any]:
@@ -527,11 +549,11 @@ def install(
     job = repository_job(repo, resolved_config_path)
     require_matching_controller(repo)
     canonical = canonical_backend(job)
-    # Read before the record is updated, because the update is what forgets it:
-    # an install that moves this repository to another directory has to leave
-    # the one it came from without the links it is no longer run from.
-    previous = approve_issues_service.installed_install_dir(job.identity)
-    relocating = previous is not None and not same_directory(previous, install_dir)
+    # A snapshot, and used for nothing but the plan below. What the install
+    # actually acts on is the location the record write itself replaced, which
+    # is the only reading of it no concurrent install can invalidate.
+    snapshot = approve_issues_service.installed_install_dir(job.identity)
+    moving = snapshot is not None and not same_directory(snapshot, install_dir)
     plan = controller_operation("install_plan", job, install_dir)
     sources = link_sources(repo, install_dir)
     resolved_sources = {
@@ -565,22 +587,21 @@ def install(
             for name, (source, destination) in sources.items()
         },
         "job": plan,
-        "relocated_from": str(previous) if relocating else None,
+        "relocated_from": str(snapshot) if moving else None,
         "released_links": (
-            plan_released_links(repo, Path(previous), job.identity)
-            if relocating
-            else {}
+            plan_released_links(repo, Path(snapshot), job.identity) if moving else {}
         ),
     }
     if dry_run:
         return {**document, "installed": False, "dry_run": True}
 
-    # Under this installation's lock, so the record entry that says this
+    # Under both of this transition's locks, so the record entry that says this
     # repository depends on these links is written in the same breath as the
-    # links themselves. An uninstall for another repository reading the
-    # dependants in between would otherwise decide they were unneeded and
-    # delete what this install had just created.
-    with installation_lock(install_dir):
+    # links themselves, and so no other transition of this identity can be
+    # deciding where it lives at the same time. An uninstall for another
+    # repository reading the dependants in between would otherwise decide they
+    # were unneeded and delete what this install had just created.
+    with approve_issues_service.job_transition(job, install_dir):
         results = {
             name: install_symlink(source, destination)
             for name, (source, destination) in sources.items()
@@ -592,14 +613,18 @@ def install(
         # behind.
         document["job"] = controller_operation("install_job", job, install_dir)
 
+    previous = document["job"].get("previous_install_dir")
+    relocating = previous is not None and not same_directory(previous, install_dir)
+    document["relocated_from"] = str(previous) if relocating else None
     if relocating:
-        # Sequentially, never nested: two installation locks held at once
-        # could be taken in two orders by two relocations and deadlock. By
-        # here the record already names the new directory, so this repository
-        # is no longer among the old one's dependants.
-        document["released_links"] = release_links(
-            repo, Path(previous), job.identity
-        )
+        # Sequentially, never nested: two installation locks held at once could
+        # be taken in two orders by two relocations and deadlock. By here the
+        # record already names the new directory, so this repository is no
+        # longer among the old one's dependants -- and if it is again, it was
+        # reinstalled there and its links stay.
+        document["released_links"] = release_links(repo, Path(previous), job.identity)
+    else:
+        document["released_links"] = {}
     return {**document, "installed": True, "dry_run": False}
 
 
@@ -613,6 +638,7 @@ def uninstall(repo: Path, install_dir: Path, *, dry_run: bool) -> dict[str, Any]
     """
     backend = service_backend()
     job = repository_job(repo, None)
+    require_recorded_installation(job, install_dir)
     plan = controller_operation("uninstall_plan", job)
     # Discounted here because the plan describes an uninstall that has not
     # happened: this repository is still recorded, and still running from these
@@ -644,7 +670,11 @@ def uninstall(repo: Path, install_dir: Path, *, dry_run: bool) -> dict[str, Any]
     # the set read for the plan above is a snapshot, and an install for another
     # repository landing between that read and the removal below would leave
     # its job pointing at links this uninstall had just deleted.
-    with installation_lock(install_dir):
+    with approve_issues_service.job_transition(job, install_dir):
+        # Re-checked inside the locks: an install could have moved this
+        # repository elsewhere since the plan, and removing links here would
+        # then strand the ones its job actually runs from.
+        require_recorded_installation(job, install_dir)
         # The job first: the links are what it runs from, so removing them
         # while it was still loaded would leave a job the manager could start
         # and nothing could satisfy. Handed this directory explicitly so the
