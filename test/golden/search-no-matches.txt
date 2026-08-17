@@ -10,9 +10,9 @@
 ║┃ in 2h 30m · Thu 17:30    ┃┃                                          ┃     │ reader                          │ ┃  │ updated 3h ago                     │ ┃  │ updated 3h ago                     │ ┃║
 ║┃ week    [██░░░░░░░░] 22% ┃┃                                          ┃     │  code-health                    │ ┃  │ Moves per-domain dispatch into     │ ┃  │ Updates the branch after the       │ ┃║
 ║┃ in 1d 18h · Sat 09:10    ┃┃                                          ┃     │ @codex-agent · updated 4h ago   │ ┃  │ small modules while preserving the │ ┃  │ persistence registry changed on    │ ┃║
-║┃                          ┃┃                                          ┃     │ Read through the envelope and   │ ┃  │ public facade.                     │ ┃  │ master.                            │ ┃║
-║┃                          ┃┃                                          ┃     │ reject a payload whose recorded │ ┃  │ ◐ CI 12/14 · behind                │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃                          ┃┃                                          ┃     │ length disagrees with the file. │ ┃  ╰────────────────────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃ ┏━━━┓                    ┃┃                                          ┃     │ Read through the envelope and   │ ┃  │ public facade.                     │ ┃  │ master.                            │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃                                          ┃     │ reject a payload whose recorded │ ┃  │ ◐ CI 12/14 · behind                │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃ ┗━━━┛                    ┃┃                                          ┃     │ length disagrees with the file. │ ┃  ╰────────────────────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃║
 ║┃                          ┃┃                                          ┃     ╰─────────────────────────────────╯ ┃                                         ┃                                         ┃║
 ║┃                          ┃┃                                          ┃                                         ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃                                          ┃  STANDALONE                             ┃  │ DRAFT #847 Prototype native        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
