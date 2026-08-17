@@ -1063,7 +1063,8 @@ class LifecycleTests(InstallerFixture):
         service.start_service(self.job(), self.install_dir)
         with self.assertRaises(installer.InstallError) as raised:
             self.uninstall()
-        self.assertIn("Stop it first", str(raised.exception))
+        self.assertIn("already running", str(raised.exception))
+        self.assertIn(str(self.repo), str(raised.exception))
         # Refused without taking anything away, so the running controller is
         # still discoverable and still controllable.
         self.assertTrue(self.manager.is_loaded(self.label()))
@@ -1536,6 +1537,114 @@ class RelocationTests(InstallerFixture):
 
         performed = installer.install(self.repo, moved, config_path=None, dry_run=False)
         self.assertEqual(plan["released_links"], performed["released_links"])
+
+
+class ForegroundRunTests(InstallerFixture):
+    """A `run` nobody's service manager started is still a run.
+
+    It takes its run lock before it writes a status document and before it
+    invokes the backend, so between those two moments the manager knows nothing
+    about it and the runtime says nothing about it. A destructive transition
+    that consulted only those two would remove the job, the record entry, and
+    the links out from under a controller that keeps reviewing issues.
+    """
+
+    def foreground_run(self):
+        """A real `run` of this repository, started as a plain process.
+
+        Held at its first backend pass by a canonical backend that blocks, so
+        the run is genuinely established -- lock taken -- for as long as the
+        test needs, without the test having to guess at timing.
+        """
+        gate = self.root / "release-backend"
+        self.canonical_backend.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys, time\n"
+            f"gate = {str(gate)!r}\n"
+            "while not os.path.exists(gate):\n"
+            "    time.sleep(0.02)\n"
+            "sys.stdout.write('{\"schema\": \"approve-issues-review-queue\", "
+            '"version": 1, "outcome": "idle", "issue": null, '
+            "\"model_called\": false, \"message\": \"idle\"}')\n",
+            encoding="utf-8",
+        )
+        self.canonical_backend.chmod(0o700)
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(self.wrapper),
+                str(TOOLS_DIR),
+                str(self.account),
+                "controller",
+                "--path",
+                str(self.repo),
+                "run",
+                "--interval",
+                "0.05",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ},
+        )
+        self.addCleanup(proc.stderr.close)
+        self.addCleanup(proc.stdout.close)
+        self.addCleanup(proc.wait)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        self.addCleanup(gate.touch)
+        wait_until(
+            lambda: service.run_lock_owner(self.job()) is not None,
+            message="the foreground run to take its lock",
+        )
+        return proc
+
+    def test_a_foreground_run_is_seen_before_it_writes_any_status(self):
+        # The window the manager and the status document both miss.
+        self.install()
+        self.foreground_run()
+        owner = service.run_lock_owner(self.job())
+        self.assertEqual(owner["repository"], self.identity)
+        self.assertEqual(Path(owner["repo"]).resolve(), self.repo.resolve())
+        self.assertFalse(self.manager.is_running(self.label()))
+
+    def test_uninstall_refuses_a_foreground_run(self):
+        self.install()
+        self.foreground_run()
+        with self.assertRaises(installer.InstallError) as raised:
+            self.uninstall()
+        self.assertIn("already running", str(raised.exception))
+        # Nothing was taken away from under it.
+        self.assertTrue(self.manager.is_loaded(self.label()))
+        self.assertIn("acme/widgets", self.record()["repositories"])
+        for name in installer.LINKED_MODULES:
+            with self.subTest(module=name):
+                self.assertTrue((self.install_dir / name).is_file())
+
+    def test_install_refuses_a_foreground_run(self):
+        self.install()
+        self.foreground_run()
+        with self.assertRaises(installer.InstallError) as raised:
+            self.install()
+        self.assertIn("already running", str(raised.exception))
+
+    def test_starting_beside_a_foreground_run_is_a_no_op(self):
+        # Not a refusal: a start of something already running is nothing to do,
+        # and it must not rewrite the definition under it either.
+        self.install()
+        self.foreground_run()
+        before = self.manager.call_names()
+        result = service.start_service(self.job(), self.install_dir)
+        self.assertFalse(result["started"])
+        self.assertEqual(self.manager.call_names(), before)
+
+    def test_the_lock_probe_neither_creates_nor_takes_anything(self):
+        # A check must leave the account exactly as it found it, and must never
+        # become a hold that the next run would then contend with.
+        job = self.job()
+        self.assertIsNone(service.run_lock_owner(job))
+        self.assertFalse(os.path.lexists(service.run_lock_path(job.slug)))
+        self.install()
+        self.assertIsNone(service.run_lock_owner(job))
 
 
 class ConvergenceTests(InstallerFixture):

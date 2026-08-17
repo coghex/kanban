@@ -2639,13 +2639,71 @@ def job_is_running(job: ApprovalJob) -> bool:
     damaged or removed all read as stopped while the process they describe
     keeps reviewing issues. The document says what a run is *doing*; only the
     manager says whether there is one.
-
-    Both questions are asked before every transition that would replace or
-    remove a job, because either answer alone can miss a live controller: the
-    manager cannot see a run started outside it, and the document cannot see a
-    run that has not written.
     """
     return service_backend().is_running(service_label(job))
+
+
+def run_lock_owner(job: ApprovalJob) -> dict[str, Any] | None:
+    """Whoever is inside a `run` for this identity, or None when nobody is.
+
+    Read by trying the same non-blocking exclusive lock a run takes and
+    dropping it immediately on success, so a check never becomes a hold; the
+    losing path never truncates, so it cannot erase the owner's own metadata.
+
+    This is the *earliest* signal that a run exists. `run_lock` is taken before
+    the first status document is written and before any backend pass, so a run
+    that has only just begun -- or one whose announcement failed -- is visible
+    here and nowhere else. It is also the only signal that sees a foreground
+    run, which no service manager started and therefore no manager can report.
+    A destructive transition consulting only the manager and the status
+    document would step straight through the window between a run taking this
+    lock and saying so.
+
+    Answers None for a lock file that has never existed, without creating one:
+    a check must leave the account exactly as it found it.
+    """
+    path = run_lock_path(job.slug)
+    if not os.path.lexists(path):
+        return None
+    try:
+        handle = open(path, "a+", encoding="utf-8")
+    except OSError as exc:
+        raise ServiceError(f"Could not inspect the run lock at {path}: {exc}") from exc
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return _read_lock_owner(handle)
+        except OSError as exc:
+            raise ServiceError(
+                f"Could not inspect the run lock at {path}: {exc}"
+            ) from exc
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return None
+    finally:
+        handle.close()
+
+
+def require_no_live_run(job: ApprovalJob, action: str) -> None:
+    """Refuse `action` while any run of this identity exists.
+
+    Three questions, because no one of them sees every run: the manager cannot
+    see a foreground run it never started, the status document cannot see a run
+    that has not written one yet, and the run lock cannot see a process that
+    took no lock. A transition that would replace or remove a job asks all
+    three, and the earliest of them first.
+    """
+    owner = run_lock_owner(job)
+    if owner is not None:
+        raise ServiceError(
+            f"An issue approval controller for {job.identity} is already "
+            f"running{describe_run_owner(owner)}. Stop it before {action}."
+        )
+    if job_is_running(job):
+        raise ServiceError(
+            f"The {service_backend().backend_name()} manager still holds a live "
+            f"process for {service_label(job)}. Stop it before {action}."
+        )
 
 
 def require_installable(job: ApprovalJob) -> None:
@@ -2661,12 +2719,7 @@ def require_installable(job: ApprovalJob) -> None:
     controller nothing can see or stop.
     """
     require_no_legacy_daemon(job.repo_path)
-    if job_is_running(job):
-        raise ServiceError(
-            "Stop the running issue approval controller before installing its "
-            f"{service_backend().backend_name()} job: the manager still holds a "
-            f"live process for {service_label(job)}."
-        )
+    require_no_live_run(job, "installing this repository's job")
     snapshot = status_snapshot(job)
     conflict = another_checkout_running(job, snapshot)
     if conflict is not None:
@@ -2878,13 +2931,11 @@ def require_stopped_for_uninstall(job: ApprovalJob) -> None:
     gone before the live process was ever noticed -- leaving a controller
     running that nothing can discover, address, or stop.
     """
-    if job_is_running(job):
-        raise ServiceError(
-            f"The issue approval controller for {job.identity} is running: the "
-            f"{service_backend().backend_name()} manager still holds a live "
-            f"process for {service_label(job)}. Stop it first; uninstalling a "
-            "live job would leave a controller nothing can see or stop."
-        )
+    require_no_live_run(
+        job,
+        "uninstalling this job; removing it under a live controller would leave "
+        "one running that nothing can see or stop",
+    )
     snapshot = status_snapshot(job)
     conflict = another_checkout_running(job, snapshot)
     if conflict is not None:
@@ -2976,10 +3027,16 @@ def _start_locked(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
             f"from {conflict}, which is another checkout of the same repository as "
             f"{job.repo_path}. One repository runs one controller at a time."
         )
-    # The manager's answer counts here too, and as a no-op rather than a
-    # refusal: starting something already started is nothing to do, and a run
-    # that has not yet written its first status is still a run.
-    if snapshot["state"] in LIVE_STATES or job_is_running(job):
+    # A no-op rather than a refusal, unlike the destructive transitions:
+    # starting something already started is nothing to do. All three signals
+    # count, so a run that has taken its lock but not yet written a status --
+    # or a foreground run no manager knows about -- is not started a second
+    # time.
+    if (
+        snapshot["state"] in LIVE_STATES
+        or job_is_running(job)
+        or run_lock_owner(job) is not None
+    ):
         return {"started": False, "message": "Already running.", **snapshot}
     installed = _install_locked(job, install_dir)
     label = installed["label"]
