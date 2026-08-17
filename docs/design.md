@@ -166,8 +166,8 @@ other explicit mutations.
 - Render a polished Unicode interface with truecolor when available and a
   usable 256-color fallback.
 - Remain fully keyboard-operable; mouse support is limited to card selection,
-  live-session opening, details dismissal, panel/column scrolling, and the PR
-  drainer button.
+  live-session opening, details dismissal, panel/column scrolling, and the
+  sidebar's update and PR drainer buttons.
 - Perform one asynchronous unified board-and-usage update at startup, then block
   on terminal events while idle and redraw only after input, resize, provider
   completion, or an active review event.
@@ -330,6 +330,9 @@ scrollable four-column board.
 ║ in 2h 30m · Thu 17:30    ║              ║              ║              ║              ║
 ║ week    [██░░░░░░░░] 22% ║              ║              ║              ║              ║
 ║ in 1d 18h · Sat 09:10    ║              ║              ║              ║              ║
+║ ┏━━━┓                    ║              ║              ║              ║              ║
+║ ┃ ↻ ┃                    ║              ║              ║              ║              ║
+║ ┗━━━┛                    ║              ║              ║              ║              ║
 ║                          ║              ║              ║              ║              ║
 ║ ┏━━━━━━━━━━━━━━┓         ║              ║              ║              ║              ║
 ║ ┃ drain_prs.py ┃         ║              ║              ║              ║              ║
@@ -402,7 +405,7 @@ Initial bindings:
 | `A` | Choose Codex or Claude and start/reopen the full autosolve review loop |
 | `p` | Open the process/session inspector; Enter opens a session and `x` kills its live process tree |
 | `i` | Open the incidents panel listing everything needing attention; Enter goes to that work |
-| `u` | Update GitHub board data and both usage providers |
+| `u` or click | Update GitHub board data and both usage providers |
 | `d` or click | Start or stop the service-managed PR drainer |
 | `m` | Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path |
 | `c` | Collapse or expand the usage sidebar |
@@ -432,6 +435,8 @@ Mouse interaction is intentionally complete but narrow:
 - The mouse wheel scrolls the board column under the pointer by three rows per
   wheel event.
 - The PR drainer button remains directly clickable.
+- Left-clicking the sidebar's `↻` update button starts the same update `u`
+  does, and is inert when the sidebar is collapsed because no control is drawn.
 
 Cards, columns, and overlays do not otherwise acquire hover, drag, context-menu,
 or pointer-only behavior.
@@ -707,7 +712,13 @@ Kanban-reviewed issues. Kanban does not reconstruct where that backend was
 installed: it reads the absolute path out of the record the installer writes
 at `~/Library/Application Support/kanban/issue-review/config.json`, whose own
 location `--install-dir` cannot move, so an installation made anywhere is
-found by a dashboard launched with no special environment. A non-empty
+found by a dashboard launched with no special environment. That record's
+directory is macOS's; the Python installer and backend also default to
+`$XDG_DATA_HOME/kanban/issue-review` (`~/.local/share` when unset) on other
+platforms, and resolve an installation made under either convention on either
+platform, while this Haskell reader still names the macOS location alone.
+Closing that is the remaining work of the portability arc, not a licence to
+spell the location a second time here. A non-empty
 `KANBAN_ISSUE_REVIEW_INSTALL_DIR` still wins, and a record carrying no
 recorded path — an installation predating the record — falls back to the
 directory holding it. Each way that lookup can fail — an override or recorded
@@ -954,11 +965,11 @@ amber `UNLINKED` warning.
   drawing continuously.
 - Cards: rounded, `╭─╮│╰─╯`.
 - Tracker headers: heavy accent, for example `┏━┓┃┗━┛` or a compact `◆` row.
-- A nested sidebar control such as the drainer button draws with its panel's
-  inner-border style: heavy Unicode (`┏━┓┃┗━┛`) in the default and open-border
-  renderers, ASCII (`+-|`) under `--ascii`. Such a control draws its own box
-  rather than wrapping its label in a border widget, so every glyph keeps the
-  control's status color.
+- A nested sidebar control — the update button, the drainer button — draws with
+  its panel's inner-border style: heavy Unicode (`┏━┓┃┗━┛`) in the default and
+  open-border renderers, ASCII (`+-|`) under `--ascii`. Such a control draws its
+  own box rather than wrapping its label in a border widget, so every glyph
+  keeps the control's status color.
 - Avoid emoji and ambiguous-width decorative characters. Prefer stable
   single-cell symbols such as `✓`, `×`, `!`, `●`, `◐`, and `◆`.
 

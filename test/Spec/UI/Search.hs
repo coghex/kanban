@@ -839,6 +839,53 @@ mouseSpec = describe "mouse precedence" $ do
       | button <- [Vty.BLeft, Vty.BRight, Vty.BMiddle, Vty.BScrollUp, Vty.BScrollDown]
       ]
 
+  -- The sidebar's update control, held to the same rule the drainer button
+  -- is: it is not a column target, so a live search never sees the press and
+  -- the control keeps the update it dispatches.
+  --
+  -- What the click resolves to is the whole of what there is to take. The
+  -- update is not a state transition of its own — 'startAllRefreshes' is what
+  -- the key reaches too, and it is where the loading marks and the in-flight
+  -- coalescing are decided — so the pure press is deliberately identity, and
+  -- that is asserted rather than assumed.
+  it "still takes the update button's refresh while a search is live" $ do
+    searching <- transferring
+    plain <- searchState
+    let press state = boardMousePress <$> boardMouseAction state UpdateButton Vty.BLeft [] <*> pure state
+    boardMouseAction searching UpdateButton Vty.BLeft [] `shouldBe` Just RefreshAllFromClick
+    boardMouseAction plain UpdateButton Vty.BLeft [] `shouldBe` Just RefreshAllFromClick
+    -- The search is exactly where it was, still on its query, and the press
+    -- moved neither the column nor the selection nor an overlay.
+    ((.appSearch) <$> press searching) `shouldBe` Just searching.appSearch
+    ((.appSelectedColumn) <$> press searching) `shouldBe` Just searching.appSelectedColumn
+    ((.appOverlay) <$> press searching) `shouldBe` Just Nothing
+    (flip selectedRow Issues <$> press searching) `shouldBe` Just (selectedRow searching Issues)
+    -- The same press with nothing searching resolves to the same update.
+    ((.appSearch) <$> press plain) `shouldBe` Just plain.appSearch
+    -- Nothing about that press is a transfer, on any button.
+    sequence_
+      [ searchMouseTransfer searching UpdateButton button `shouldBe` Nothing
+      | button <- [Vty.BLeft, Vty.BRight, Vty.BMiddle, Vty.BScrollUp, Vty.BScrollDown]
+      ]
+
+  -- Requirement 5, and the modifier the issue puts out of scope: only a plain
+  -- left press means anything over the update control. Every other button and
+  -- every modified left press falls through to the column arms, which name no
+  -- sidebar control, so the board claims nothing at all for it — no update, no
+  -- scroll, no transfer.
+  it "claims nothing for any other press on either sidebar control" $ do
+    searching <- transferring
+    plain <- searchState
+    sequence_
+      [ (label, name, button, modifiers, boardMouseAction state name button modifiers)
+          `shouldBe` (label, name, button, modifiers, Nothing)
+      | (label, state) <- [("searching" :: Text, searching), ("plain", plain)],
+        name <- [UpdateButton, DrainerButton],
+        (button, modifiers) <-
+          [(button', []) | button' <- [Vty.BMiddle, Vty.BRight, Vty.BScrollUp, Vty.BScrollDown]]
+            <> [(Vty.BLeft, [modifier]) | modifier <- [Vty.MCtrl, Vty.MShift, Vty.MMeta, Vty.MAlt]]
+      ]
+
   -- The other presses, taken the same way: what dispatch decides, run.
   it "takes a transferring press as the transfer and a searched-column press as its ordinary action" $ do
     searching <- transferring

@@ -212,7 +212,7 @@ binding action = case action of
     KeyBinding action [key 'i'] [BoardScope] Nothing "attention" "everything needing attention; Enter goes to its work"
       "Open the incidents panel listing everything needing attention; Enter goes to that work"
   RefreshAll ->
-    KeyBinding action [key 'u'] [BoardScope] Nothing "update" "update board and both usage providers"
+    KeyBinding action [key 'u'] [BoardScope] (Just "click") "update" "update board and both usage providers"
       "Update GitHub board data and both usage providers"
   ToggleDrainer ->
     KeyBinding action [key 'd'] [BoardScope] (Just "click") "drainer" "start or stop PR drainer"

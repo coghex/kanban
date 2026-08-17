@@ -10,9 +10,9 @@
 ║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope                         │ ┃     │ reader                          │ ┃                                         ┃                                         ┃║
 ║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature                         │ ┃     │  code-health                    │ ┃                                         ┃                                         ┃║
 ║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · updated 4h ago      │ ┃     │ @codex-agent · updated 4h ago   │ ┃                                         ┃                                         ┃║
-║┃                          ┃┃     │ Write the envelope header ahead  │ ┃     │ Read through the envelope and   │ ┃                                         ┃                                         ┃║
-║┃                          ┃┃     │ of the payload so a partial      │ ┃     │ reject a payload whose recorded │ ┃                                         ┃                                         ┃║
-║┃                          ┃┃     │ write is detectable on load.     │ ┃     │ length disagrees with the file. │ ┃                                         ┃                                         ┃║
+║┃ ┏━━━┓                    ┃┃     │ Write the envelope header ahead  │ ┃     │ Read through the envelope and   │ ┃                                         ┃                                         ┃║
+║┃ ┃ ↻ ┃                    ┃┃     │ of the payload so a partial      │ ┃     │ reject a payload whose recorded │ ┃                                         ┃                                         ┃║
+║┃ ┗━━━┛                    ┃┃     │ write is detectable on load.     │ ┃     │ length disagrees with the file. │ ┃                                         ┃                                         ┃║
 ║┃                          ┃┃     ╰──────────────────────────────────╯ ┃     ╰─────────────────────────────────╯ ┃                                         ┃                                         ┃║
 ║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃                          ┃┃                                          ┃  STANDALONE                             ┃                                         ┃                                         ┃║

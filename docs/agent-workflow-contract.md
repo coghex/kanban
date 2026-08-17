@@ -763,16 +763,22 @@ commands need.
   checkout can run its `--self-test`, `--check`, `--review`, `--rereview`, and
   `--review-queue`
   paths directly, with no file beneath `~/work` or
-  `~/.codex/skills/approve-issues/`. Its portable runtime locations —
-  `~/Library/Application Support/kanban/issue-review/` (install links),
-  `~/Library/Logs/kanban/issue-review/` (daily logs), and the incident
-  circuit breaker beneath that install directory's `runtime/incidents/` — are
-  a namespaced Kanban footprint, not personal state, and its optional
-  crash/incident notification (`KANBAN_ISSUE_REVIEW_NTFY_URL`) is a
-  documented non-fatal no-op when unset, matching §5.
+  `~/.codex/skills/approve-issues/`. Its portable runtime locations — the
+  install links under `~/Library/Application Support/kanban/issue-review/` on
+  macOS and `$XDG_DATA_HOME/kanban/issue-review/`
+  (`~/.local/share/kanban/issue-review/` when that variable is unset)
+  elsewhere, the daily logs under `~/Library/Logs/kanban/issue-review/` on
+  macOS and `$XDG_STATE_HOME/kanban/issue-review/`
+  (`~/.local/state/kanban/issue-review/` when unset) elsewhere, and the
+  incident circuit breaker beneath that install directory's
+  `runtime/incidents/` — are a namespaced Kanban footprint, not personal
+  state, and its optional crash/incident notification
+  (`KANBAN_ISSUE_REVIEW_NTFY_URL`) is a documented non-fatal no-op when
+  unset, matching §5.
 - **`tools/install_issue_review.py`** installs a stable Kanban-managed link
   to that tracked backend under its install directory (default
-  `~/Library/Application Support/kanban/issue-review`, selectable with
+  `~/Library/Application Support/kanban/issue-review` on macOS and
+  `$XDG_DATA_HOME/kanban/issue-review` elsewhere, selectable with
   `--install-dir` or `KANBAN_ISSUE_REVIEW_INSTALL_DIR`), records that link's
   absolute path in the discovery record described in §5, in the same
   dry-run-capable, idempotent, never-overwrite-an-ordinary-file manner as
@@ -876,6 +882,9 @@ plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | sup
 launchctl-cli | executable | launchctl | tools/service_manager.py | kanban | supported | no
 systemctl-cli | executable | systemctl | tools/service_manager.py | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
+approve-issues-backend-xdg | personal-path | /.local/share/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
+issue-review-log-dir | personal-path | /Library/Logs/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
+issue-review-log-dir-xdg | personal-path | /.local/state/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/Review/Canonical.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/service_manager.py | kanban | supported | no
 drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
@@ -886,6 +895,22 @@ codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/
 awk-cli | executable | awk | codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md | kanban | supported | no
 rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/note-problem.md | kanban | supported | no
 ```
+
+The four issue-review `personal-path` rows are two locations times two
+platform conventions, not four locations. `approve-issues-backend` and
+`approve-issues-backend-xdg` are the install directory as macOS and the XDG
+data directory spell it; `issue-review-log-dir` and
+`issue-review-log-dir-xdg` are the log directory as macOS and the XDG state
+directory spell it. A row's `token` is one exact literal, which is the shape
+both reconciliations here rely on, so a location with two spellings needs two
+rows rather than one row naming a choice — and adding a managed path with only
+one platform's row leaves the other's spelling undeclared. All four declare
+`tools/kanban_config.py` because that module is where each is written down,
+once: §5 describes which of them is a fresh install's write default on a given
+host, and which existing installation a probe prefers. The log directory moves
+only with `approve_issues.py --log-dir`, never with `--install-dir` or
+`KANBAN_ISSUE_REVIEW_INSTALL_DIR`, so it needs no relocation rule of the kind
+`drainer-install-dir` documents below.
 
 `drainer-install-dir` is the directory the installer links the drainer, the
 controller and the configuration parser into, and the default Kanban resolves
@@ -996,18 +1021,39 @@ search step and nothing else, which is what `mandatory: no` records.
   configuration an earlier repository's drainer restarts with.
   `tools/install_issue_review.py` follows the same convention for the
   canonical issue-review backend, and resolves the same way. Its install
-  directory defaults to `~/Library/Application Support/kanban/issue-review`,
-  spelled once in `tools/kanban_config.py` — the only tracked module
-  installed beside the backend, so the only one both the installer and the
-  installed backend can import. Every successful install, from either
-  `tools/install_issue_review.py` or `tools/setup_workflows.py --component
-  issue-review --apply`, writes the linked backend's absolute path as
-  `backend_path` into
-  `~/Library/Application Support/kanban/issue-review/config.json`, after the
-  links it names have been created and never during a dry run. That
-  document's location is fixed even when `--install-dir` moves the
-  installation, and it is merged rather than overwritten so the `config_path`
-  reference the installer has always persisted there survives beside it.
+  directory defaults to `~/Library/Application Support/kanban/issue-review`
+  on macOS and to `$XDG_DATA_HOME/kanban/issue-review` — `~/.local/share`
+  when that variable is unset — on every other platform; its log directory
+  defaults to `~/Library/Logs/kanban/issue-review` and
+  `$XDG_STATE_HOME/kanban/issue-review` (`~/.local/state` when unset) on the
+  same terms. All four are spelled once in `tools/kanban_config.py` — the
+  only tracked module installed beside the backend, so the only one both the
+  installer and the installed backend can import, and therefore the only
+  place a platform's answer can be given. Those are *write* defaults, which
+  decide where a fresh install goes and nothing else: resolving an
+  installation that already exists probes the XDG location first and the
+  `~/Library` location second on both platforms and takes whichever holds a
+  discovery record, so no install made under either convention has to move
+  and none is migrated. A higher-precedence candidate that is occupied but
+  invalid — a dangling symlink, a directory where the record belongs —
+  selects that installation rather than being read as absent, leaving the
+  record's own contract below to report what is wrong with it. Every
+  successful install, from either `tools/install_issue_review.py` or
+  `tools/setup_workflows.py --component issue-review --apply`, writes the
+  linked backend's absolute path as `backend_path` into that resolved
+  directory's `config.json`, after the links it names have been created and
+  never during a dry run. That document's location is fixed even when
+  `--install-dir` moves the installation — `--install-dir` and
+  `KANBAN_ISSUE_REVIEW_INSTALL_DIR` relocate the installation alone, never
+  the record and never the log directory — and it is merged rather than
+  overwritten so the `config_path` reference the installer has always
+  persisted there survives beside it. Runtime and incident state stay
+  relative to the install directory the backend resolves *for itself* on
+  every platform, so `KANBAN_ISSUE_REVIEW_INSTALL_DIR` moves them along with
+  the scripts. A bare `--install-dir` install moves the links alone: the
+  backend it placed there resolves its own directory through the record and
+  the environment, never through the option it was installed with, and that
+  is unchanged by the per-platform defaults.
   Resolution precedence, identical in `src/Kanban/Review/Canonical.hs`,
   `src/Kanban/Preflight.hs`, both packaged `review_pr.py` coordinators, and
   the packaged Codex/Claude `issue-review` and `solve` workflows: a non-empty
@@ -1018,7 +1064,16 @@ search step and nothing else, which is what `mandatory: no` records.
   falling through to a lower-precedence location, since reviewing with an
   installation the user did not choose is worse than not reviewing; a record
   that will not parse, or whose `backend_path` is wrong-typed or relative,
-  is its own failure naming that document.
+  is its own failure naming that document. The per-platform defaults above
+  are so far the Python side's alone: `tools/kanban_config.py` and every
+  component that imports it — `tools/approve_issues.py`,
+  `tools/install_issue_review.py`, `tools/setup_workflows.py`, and
+  `tools/approve_issues_service.py` — resolve both conventions, while the
+  Haskell resolution point and the vendored plugin assets listed above still
+  name the `~/Library` record location only and therefore do not yet discover
+  an XDG-defaulted install on a non-macOS host. Closing that is the remaining
+  work of the portability arc (#347), not a licence for a second spelling in
+  the meantime.
 - **User-scoped installation is explicit and opt-in.** Nothing in Kanban's
   build (`cabal build all`) or normal startup path installs the drainer's job
   or the issue-review backend's stable link; the installed definition is

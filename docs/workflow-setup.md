@@ -52,7 +52,7 @@ four with `--all`.
 
 | Component | What it installs | Needed for |
 | --- | --- | --- |
-| `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend (and its `kanban_config.py` companion) under `~/Library/Application Support/kanban/issue-review/`, plus the discovery record naming that link | Every AI action except issue revision: canonical issue review/rereview (`r`), the readiness gate a solve session checks before claiming an issue, and the gate the PR coordinator checks before publishing a verdict |
+| `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend (and its `kanban_config.py` companion) under `~/Library/Application Support/kanban/issue-review/` on macOS or `$XDG_DATA_HOME/kanban/issue-review/` — `~/.local/share/kanban/issue-review/` when that variable is unset — on Linux, plus the discovery record naming that link | Every AI action except issue revision: canonical issue review/rereview (`r`), the readiness gate a solve session checks before claiming an issue, and the gate the PR coordinator checks before publishing a verdict |
 | `codex-plugin` | `kanban@kanban` from `codex-plugin/`, through `codex plugin marketplace add` and `codex plugin add` | `$solve`, `$pr-review`, `$pr-rereview`, `$pr-revise`, `$repair` |
 | `claude-plugin` | `kanban@kanban` from `claude-plugin/`, through `claude plugin marketplace add` and `claude plugin install` | `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/repair` |
 | `legacy-launcher` | A symlink at `~/work/approve-issues.py` pointing at the installed backend | Nothing in Kanban. Purely a compatibility shim for pre-migration automation that still invokes that path directly — see [agent-workflow-contract §3](agent-workflow-contract.md#3-migration-boundary) |
@@ -69,8 +69,12 @@ never-replace-an-ordinary-file policy as the PR-drainer installer.
 
 Nothing that consults the backend reconstructs that location. Installing
 writes the linked backend's absolute path into
-`~/Library/Application Support/kanban/issue-review/config.json` — a document
-whose own path `--install-dir` cannot move — and
+`~/Library/Application Support/kanban/issue-review/config.json` on macOS, or
+`$XDG_DATA_HOME/kanban/issue-review/config.json` —
+`~/.local/share/kanban/issue-review/config.json` when that variable is unset —
+on Linux; an installation that already exists under either convention keeps
+its own record rather than moving. That document's own path `--install-dir`
+cannot move, and
 `src/Kanban/Review/Canonical.hs`, `src/Kanban/Preflight.hs`, both packaged
 `review_pr.py` coordinators, and the packaged `issue-review` and `solve`
 workflows all read it, with the same precedence: a non-empty
@@ -279,10 +283,17 @@ codex plugin remove kanban@kanban
 codex plugin marketplace remove kanban
 claude plugin uninstall kanban@kanban
 claude plugin marketplace remove kanban
-rm -rf ~/Library/Application\ Support/kanban/issue-review
+rm -rf ~/Library/Application\ Support/kanban/issue-review   # macOS
+rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}"/kanban/issue-review   # Linux
 rm ~/work/approve-issues.py                       # only if it is a symlink
 mv ~/work/approve-issues.py.pre-kanban-backup ~/work/approve-issues.py
 ```
+
+Delete the backend's log directory the same way if you want it gone too:
+`~/Library/Logs/kanban/issue-review` on macOS,
+`"${XDG_STATE_HOME:-$HOME/.local/state}"/kanban/issue-review` on Linux.
+Removing an installation never deletes the other platform's location, and
+nothing migrates one to the other.
 
 Removing the PR drainer is separate and unchanged; see
 [the PR drainer guide](pr-drainer.md).

@@ -10,9 +10,9 @@
 ║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope                         │ ┃  1/2 complete                           ┃  │ updated 3h ago                     │ ┃  │ updated 3h ago                     │ ┃║
 ║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature                         │ ┃ ▌└─ ╭─────────────────────────────────╮ ┃  │ Moves per-domain dispatch into     │ ┃  │ Updates the branch after the       │ ┃║
 ║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · updated 4h ago      │ ┃     │ A2 · tracker #700               │ ┃  │ small modules while preserving the │ ┃  │ persistence registry changed on    │ ┃║
-║┃                          ┃┃     │ Write the envelope header ahead  │ ┃     │ #712 Migrate the terrain cache  │ ┃  │ public facade.                     │ ┃  │ master.                            │ ┃║
-║┃                          ┃┃     │ of the payload so a partial      │ ┃     │ reader                          │ ┃  │ ◐ CI 12/14 · behind                │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃                          ┃┃     │ write is detectable on load.     │ ┃     │  code-health                    │ ┃  ╰────────────────────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃ ┏━━━┓                    ┃┃     │ Write the envelope header ahead  │ ┃     │ #712 Migrate the terrain cache  │ ┃  │ public facade.                     │ ┃  │ master.                            │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃     │ of the payload so a partial      │ ┃     │ reader                          │ ┃  │ ◐ CI 12/14 · behind                │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃ ┗━━━┛                    ┃┃     │ write is detectable on load.     │ ┃     │  code-health                    │ ┃  ╰────────────────────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃║
 ║┃                          ┃┃     ╰──────────────────────────────────╯ ┃     │ @codex-agent · updated 4h ago   │ ┃                                         ┃                                         ┃║
 ║┃                          ┃┃                                          ┃     │ Read through the envelope and   │ ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃                                          ┃     │ reject a payload whose recorded │ ┃  │ DRAFT #847 Prototype native        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
