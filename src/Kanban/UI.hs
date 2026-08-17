@@ -26,6 +26,7 @@ import Brick.BChan (BChan, newBChan, writeBChan)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (forever, void, when)
 import Control.Monad.IO.Class (liftIO)
+import Data.IORef (newIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -89,6 +90,7 @@ runDashboard options config repository = do
   (usageCacheLoad, completedCacheLoad) <- loadStartupCaches options config repository
   drainerController <- discoverDrainerController repository
   approvalController <- discoverApprovalController repository
+  approvalEpoch <- newIORef 0
   (initialSettings, settingsNotice) <- loadSettings
   logRoot <- transcriptRoot repository
   eventChannel <- newBChan 256
@@ -191,6 +193,7 @@ runDashboard options config repository = do
             appApprovalIncidents = Nothing,
             appApprovalBusy = False,
             appApprovalTransition = 0,
+            appApprovalEpoch = approvalEpoch,
             appApprovalResult = Nothing,
             appDirectMergePending = Nothing,
             appDirectMergeResult = Nothing,
@@ -318,6 +321,7 @@ startApplication = do
           state.appRepository
           controller
           serviceStatusIntervalMicros
+          state.appApprovalEpoch
           state.appEventChannel
 
 -- | Mouse reporting is an optional affordance on a dashboard that must stay

@@ -652,14 +652,14 @@ spec = do
       state <- dashboardShowing stoppedStatus
       let (pressed, _) = approvalTogglePress state
           observation = ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing False "t1")
-          (polled, _) = approvalStatusApplied (Right observation) pressed
+          (polled, _) = polledAfter pressed (Right observation)
       polled.appApprovalStatus `shouldBe` runningStatus
       polled.appApprovalBusy `shouldBe` False
 
     it "ignores a failed poll while a transition it cannot see is still in flight" $ do
       state <- dashboardShowing stoppedStatus
       let (pressed, _) = approvalTogglePress state
-          (polled, refresh) = approvalStatusApplied (Left "issue approval status timed out after 4 seconds") pressed
+          (polled, refresh) = polledAfter pressed (Left "issue approval status timed out after 4 seconds")
       polled.appApprovalStatus `shouldBe` pressed.appApprovalStatus
       polled.appApprovalBusy `shouldBe` True
       refresh `shouldBe` False
@@ -668,7 +668,7 @@ spec = do
       state <- dashboardShowing stoppedStatus
       let (started, _) = approvalTogglePress state
           -- The start is given up on by a poll, and the user presses again.
-          (settled, _) = approvalStatusApplied (Right (ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing False "t1"))) started
+          (settled, _) = polledAfter started (Right (ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing False "t1")))
           (stopping, secondHandoff) = approvalTogglePress settled
           stale = ApprovalObservation stoppedStatus (Just []) (resultIdentity ApprovalServiceStopped Nothing False "t0")
           (applied, _) = approvalToggleApplied 1 (Right stale) stopping
@@ -695,6 +695,35 @@ spec = do
       -- starting" forever.
       approvalToggle failed.appApprovalBusy failed.appApprovalStatus `shouldBe` StartApprovalService
 
+    it "discards a poll whose query began before the press it landed after" $ do
+      -- The controller query was issued while the service was still stopped;
+      -- the press happened while it was in flight. Letting that pre-press read
+      -- through would clear the busy flag on a view of the service from before
+      -- the toggle, which then makes the real start's completion look late —
+      -- leaving the board reporting off while the service runs.
+      state <- dashboardShowing stoppedStatus
+      let (pressed, handoff) = approvalTogglePress state
+          transition = maybe 0 (.approvalHandoffTransition) handoff
+          prePress =
+            ApprovalObservation
+              stoppedStatus
+              (Just [])
+              (resultIdentity ApprovalServiceStopped Nothing False "t0")
+          (afterStalePoll, _) = approvalStatusApplied 0 (Right prePress) pressed
+      transition `shouldBe` 1
+      afterStalePoll.appApprovalStatus.approvalActivity `shouldBe` ApprovalServiceStarting
+      afterStalePoll.appApprovalBusy `shouldBe` True
+      -- And because it changed nothing, the start's own completion is still
+      -- the current transition's and still lands.
+      let running =
+            ApprovalObservation
+              runningStatus
+              (Just [])
+              (resultIdentity ApprovalServiceRunning Nothing False "t2")
+          (settled, _) = approvalToggleApplied transition (Right running) afterStalePoll
+      settled.appApprovalStatus `shouldBe` runningStatus
+      settled.appApprovalBusy `shouldBe` False
+
     it "discards a completion a poll has already superseded" $ do
       -- The completion belongs to this very transition, so its generation
       -- matches. It is still late: the poll that cleared busy carried a read
@@ -709,7 +738,7 @@ spec = do
               barrierStatus
               (Just [])
               (resultIdentity ApprovalServiceBarrier (Just ApprovalOutcomeChangesRequested) False "t2")
-          (polled, _) = approvalStatusApplied (Right barriered) pressed
+          (polled, _) = polledAfter pressed (Right barriered)
           stale =
             ApprovalObservation
               runningStatus
@@ -726,7 +755,7 @@ spec = do
       state <- dashboardShowing stoppedStatus
       let (pressed, handoff) = approvalTogglePress state
           transition = maybe 0 (.approvalHandoffTransition) handoff
-          (polled, _) = approvalStatusApplied (Right (ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing False "t1"))) pressed
+          (polled, _) = polledAfter pressed (Right (ApprovalObservation runningStatus (Just []) (resultIdentity ApprovalServiceRunning Nothing False "t1")))
           (failed, _) = approvalToggleApplied transition (Left "the transition timed out") polled
       failed.appApprovalStatus `shouldBe` runningStatus
       failed.appApprovalBusy `shouldBe` False
@@ -906,6 +935,26 @@ spec = do
             ]
         liveApprovalContention boardIdentity (Right foreignController) `shouldReturn` Nothing
 
+    it "stops refusing card reviews once the service can no longer be read" $ do
+      -- The last good observation had a live backend pass, so the interlock was
+      -- refusing. A failed poll says this end cannot vouch for that any more,
+      -- and a reading it has disowned must not go on blocking explicit work —
+      -- the live check at the launch boundary fails open for the same reason.
+      reviewing <- observing runningStatus True
+      approvalServiceRefusal reviewing InitialReview `shouldMentionJust` "canonical review in flight"
+      let (lost, _) = polledAfter reviewing (Left "issue approval status timed out after 4 seconds")
+      lost.appApprovalStatus.approvalActivity `shouldBe` ApprovalServiceUnknown
+      lost.appApprovalResult `shouldBe` Nothing
+      approvalServiceRefusal lost InitialReview `shouldBe` Nothing
+
+    it "stops refusing card reviews when a transition fails instead" $ do
+      reviewing <- observing runningStatus True
+      let (pressed, handoff) = approvalTogglePress reviewing
+          transition = maybe 0 (.approvalHandoffTransition) handoff
+          (failed, _) = approvalToggleApplied transition (Left "the job is not loaded") pressed
+      failed.appApprovalResult `shouldBe` Nothing
+      approvalServiceRefusal failed InitialReview `shouldBe` Nothing
+
   describe "board refresh after a service result" $ do
     it "refreshes for a first observation that already reports a mutation" $ do
       -- The startup fetch and the first poll are started concurrently, so a
@@ -957,6 +1006,19 @@ spec = do
       firstRefresh `shouldBe` True
       repeatRefresh `shouldBe` False
       secondRefresh `shouldBe` True
+
+    it "tells two same-second documents apart by more than their stamp" $ do
+      -- `utc_stamp` is second-granular and the controller writes several states
+      -- per pass, so an idle result and the advancing pass that follows it can
+      -- share a stamp. Comparing stamps alone would suppress the refresh that
+      -- second document is the only report of.
+      state <- dashboardShowing runningStatus
+      let idle = resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeIdle) False "t1"
+          advanced = resultIdentity ApprovalServiceRunning (Just ApprovalOutcomeAdvanced) True "t1"
+          seenIdle = state {appApprovalResult = Just idle}
+      snd (approvalObservationApplied (observationWith runningStatus advanced) seenIdle) `shouldBe` True
+      -- The genuinely repeated document still reports nothing new.
+      snd (approvalObservationApplied (observationWith runningStatus idle) seenIdle) `shouldBe` False
 
     it "asks for nothing on an idle or contended queue" $ do
       state <- dashboardShowing runningStatus
@@ -1031,6 +1093,12 @@ spec = do
       pressed.appApprovalBusy `shouldBe` True
       pressed.appDrainerStatus `shouldBe` installed.appDrainerStatus
       pressed.appDrainerBusy `shouldBe` False
+
+-- | One poll issued under the state's current transition — that is, after
+-- whatever press it lands beside. The epoch is what separates that from a poll
+-- issued before the press, which is a different test.
+polledAfter :: AppState -> Either Text ApprovalObservation -> (AppState, Bool)
+polledAfter state result = approvalStatusApplied state.appApprovalTransition result state
 
 -- | A controller that reports a live canonical pass once @marker@ exists, and
 -- an idle service before that. Standing in for the service taking the

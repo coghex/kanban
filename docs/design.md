@@ -2547,6 +2547,19 @@ above are unchanged, and persistence the user switched off is not a failure.
   would have written is older than the one it would replace — which is how a
   newly polled barrier would otherwise be overwritten by the answer the
   transition itself returned.
+- Ordering between the two is established rather than assumed. Each poll carries
+  the transition count read immediately before its controller query was issued,
+  and a poll stamped with an older count is discarded: its query began before a
+  press, so it describes the service as it was beforehand, and letting it settle
+  that press would clear the busy flag on a pre-press reading and then make the
+  real completion look late — leaving the board reporting off while the service
+  runs.
+- An observation this dashboard cannot vouch for is forgotten rather than kept.
+  A failed poll outside a transition, and a failed transition, both drop the
+  cached observation along with the status, because the canonical-review
+  interlock reads that observation: a last reading that happened to carry a live
+  backend pass would otherwise go on refusing card reviews indefinitely on the
+  strength of something this side has just disowned.
 - While the service owns a live canonical review, a competing canonical stage
   started from a card is refused with a notice to wait for it or stop the
   service — including for the same issue, since the service reviews in numeric
@@ -2572,10 +2585,13 @@ above are unchanged, and persistence the user switched off is not a failure.
   than watching a review queue behind one they cannot see.
 - A service result that may have changed GitHub requires a board refresh, queued
   behind a fetch already in flight rather than dropped. The result is identified
-  by the controller's own status stamp together with the state and outcome that
-  document carries, so one advancing pass, one barrier, and one failed run each
-  require exactly one refresh, and the repeated documents a barriered or idle
-  controller writes require none. The dashboard's very first observation is
+  by the whole of what the controller reported — its state, the outcome of the
+  last pass, whether a pass is running under it, and the document's own stamp —
+  so one advancing pass, one barrier, and one failed run each require exactly one
+  refresh, and the repeated documents a barriered or idle controller writes
+  require none. The stamp alone is not that identity: it is second-granular and
+  the controller writes several states inside one pass, so two documents that
+  differ only in what they report would otherwise be taken for one. The dashboard's very first observation is
   judged by those same rules rather than taken as a silent baseline: the startup
   fetch and the first poll are started concurrently, so a review published after
   that fetch read GitHub and before the first poll answered falls between them,

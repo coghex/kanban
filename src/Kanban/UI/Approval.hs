@@ -35,6 +35,7 @@ import Brick.BChan (BChan, writeBChan)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (forever, void, when)
 import Control.Monad.IO.Class (liftIO)
+import Data.IORef (readIORef, writeIORef)
 import Data.Text (Text)
 import Kanban.ApprovalService
   ( ApprovalActivity (..),
@@ -49,6 +50,7 @@ import Kanban.ApprovalService
     queryApprovalStatus,
     setApprovalServiceRunning,
   )
+import Data.IORef (IORef)
 import Kanban.Domain (Repository)
 import Kanban.Drainer (normalizedRepositoryIdentity)
 import Kanban.Text (sanitizeText)
@@ -68,9 +70,17 @@ data ApprovalHandoff = ApprovalHandoff
 -- names, posting each observation to the event channel. The identity is what
 -- every decode is validated against, so an observation recorded for another
 -- repository is refused rather than shown (requirement 2).
-monitorApprovalService :: Repository -> ApprovalController -> Int -> BChan AppEvent -> IO ()
-monitorApprovalService repository controller intervalMicros eventChannel = forever $ do
-  queryApprovalStatus identity controller >>= writeBChan eventChannel . ApprovalStatusRefreshed
+--
+-- Each poll carries the transition count read immediately /before/ its query
+-- was issued, not after. That is the whole point of stamping it: a query that
+-- began before a toggle press returns a read of the service as it was before
+-- that press, and a dashboard which let such a read settle the press would
+-- show the state the toggle just changed.
+monitorApprovalService :: Repository -> ApprovalController -> Int -> IORef Int -> BChan AppEvent -> IO ()
+monitorApprovalService repository controller intervalMicros epoch eventChannel = forever $ do
+  issuedUnder <- readIORef epoch
+  observed <- queryApprovalStatus identity controller
+  writeBChan eventChannel (ApprovalStatusRefreshed issuedUnder observed)
   threadDelay intervalMicros
   where
     identity = normalizedRepositoryIdentity repository
@@ -143,7 +153,11 @@ toggleApprovalService = do
 runApprovalToggleHandoff :: AppState -> EventM Name AppState ()
 runApprovalToggleHandoff state = case snd (approvalTogglePress state) of
   Nothing -> pure ()
-  Just handoff ->
+  Just handoff -> do
+    -- Published before the controller work starts, and synchronously on the
+    -- event thread, so every poll issued from here on is stamped with the new
+    -- transition and every poll already in flight keeps the old one.
+    liftIO (writeIORef state.appApprovalEpoch handoff.approvalHandoffTransition)
     void
       . liftIO
       . forkIO
@@ -172,25 +186,46 @@ approvalObservationApplied observation state =
     approvalRefreshRequired state.appApprovalResult observation.observedApprovalResult
   )
 
--- | What one poll's answer does.
+-- | What one poll's answer does, given the transition it was issued under.
 --
--- A failed poll is not an authoritative observation: it says only that this
--- end could not read the service. While a transition this dashboard started is
--- still in flight it therefore changes nothing, so a status query that times
--- out beside a running @start@ cannot replace the optimistic state that
--- transition's own completion is about to settle.
-approvalStatusApplied :: Either Text ApprovalObservation -> AppState -> (AppState, Bool)
-approvalStatusApplied result state = case result of
-  Left message
-    | state.appApprovalBusy -> (state, False)
-    | otherwise ->
-        ( state
-            { appApprovalStatus = approvalErrorStatus message,
-              appApprovalIncidents = Nothing
-            },
-          False
-        )
-  Right observation -> approvalObservationApplied observation state
+-- A poll stamped with an older transition began before a press this dashboard
+-- has since made. Whatever it says describes the service as it was before that
+-- press, so it is discarded outright: letting it through would settle the
+-- transition it never saw — clearing the busy flag on a pre-press @stopped@
+-- read, which then makes the real start's completion look late and leaves the
+-- board reporting off while the service runs.
+--
+-- A failed poll is not an authoritative observation either: it says only that
+-- this end could not read the service. While a transition is still in flight it
+-- therefore changes nothing, so a status query that times out beside a running
+-- @start@ cannot replace the optimistic state that transition's own completion
+-- is about to settle.
+approvalStatusApplied :: Int -> Either Text ApprovalObservation -> AppState -> (AppState, Bool)
+approvalStatusApplied issuedUnder result state
+  | issuedUnder /= state.appApprovalTransition = (state, False)
+  | otherwise = case result of
+      Left message
+        | state.appApprovalBusy -> (state, False)
+        | otherwise -> (forgetObservation (approvalErrorStatus message) state, False)
+      Right observation -> approvalObservationApplied observation state
+
+-- | Drop everything the last good observation established, keeping only the
+-- reason it could not be refreshed.
+--
+-- The cached result goes with the status, because the canonical-review
+-- interlock reads it: a last observation that happened to carry a live backend
+-- PID would otherwise go on refusing card reviews indefinitely, on the strength
+-- of a reading this dashboard has just said it cannot vouch for. Failing open
+-- there is the same choice the live check at the launch boundary makes, and for
+-- the same reason — the backend's approval lock is the authority, so an
+-- unreadable service must not become one that blocks all explicit work.
+forgetObservation :: ApprovalStatus -> AppState -> AppState
+forgetObservation status state =
+  state
+    { appApprovalStatus = status,
+      appApprovalIncidents = Nothing,
+      appApprovalResult = Nothing
+    }
 
 -- | What one start or stop's completion does.
 --
@@ -230,17 +265,15 @@ approvalToggleApplied transition result state
               refresh
             )
       Left message ->
-        ( state
+        ( (forgetObservation (approvalErrorStatus message) state)
             { appApprovalBusy = False,
-              appApprovalStatus = approvalErrorStatus message,
-              appApprovalIncidents = Nothing,
               appNotice = Just ("Issue approval service control failed: " <> sanitizeText message)
             },
           False
         )
 
-applyApprovalStatus :: Either Text ApprovalObservation -> EventM Name AppState ()
-applyApprovalStatus = withRequiredRefresh . approvalStatusApplied
+applyApprovalStatus :: Int -> Either Text ApprovalObservation -> EventM Name AppState ()
+applyApprovalStatus issuedUnder = withRequiredRefresh . approvalStatusApplied issuedUnder
 
 applyApprovalToggle :: Int -> Either Text ApprovalObservation -> EventM Name AppState ()
 applyApprovalToggle transition = withRequiredRefresh . approvalToggleApplied transition

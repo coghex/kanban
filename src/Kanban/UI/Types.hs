@@ -42,6 +42,7 @@ where
 
 
 import Brick.BChan (BChan )
+import Data.IORef (IORef)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
@@ -532,7 +533,11 @@ data AppEvent
   | ClaudeRefreshFinished (Either ProviderError UsageSnapshot)
   | DrainerStatusRefreshed (Either Text DrainerObservation)
   | DrainerToggleFinished (Either Text DrainerObservation)
-  | ApprovalStatusRefreshed (Either Text ApprovalObservation)
+  | -- | The transition generation current when this poll's controller query
+    -- was /issued/, then its result. A poll that began before a toggle press
+    -- carries a read taken before it, so it is discarded rather than allowed
+    -- to settle a transition it never saw.
+    ApprovalStatusRefreshed Int (Either Text ApprovalObservation)
   | -- | The transition generation the completed toggle belongs to, then its
     -- result. A completion whose generation another press has superseded is
     -- discarded rather than applied, so a slow start cannot restore its
@@ -668,6 +673,15 @@ data AppState = AppState
     -- on. Bumped by every press, and carried by the handoff, so a completion
     -- can say which transition it belongs to.
     appApprovalTransition :: Int,
+    -- | The same count, in a cell the status monitor can read.
+    --
+    -- The monitor is a plain 'IO' loop with no view of this record, and the
+    -- press that bumps 'appApprovalTransition' is a pure transition that
+    -- cannot write to one. This is the seam between them: the press's handoff
+    -- publishes the new count here, and the monitor stamps each poll with
+    -- whatever it reads immediately before issuing that poll's query. That is
+    -- what lets a poll say which transition it predates.
+    appApprovalEpoch :: IORef Int,
     -- | The result identity the last applied observation carried, which is what
     -- keeps one service result from requiring a board refresh twice. 'Nothing'
     -- until the first observation establishes a baseline.

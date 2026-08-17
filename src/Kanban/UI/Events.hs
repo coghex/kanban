@@ -110,7 +110,7 @@ handleEvent event = do
     (_, AppEvent (ClaudeRefreshFinished result)) -> applyClaudeRefresh result
     (_, AppEvent (DrainerStatusRefreshed result)) -> applyDrainerStatus result
     (_, AppEvent (DrainerToggleFinished result)) -> applyDrainerToggle result
-    (_, AppEvent (ApprovalStatusRefreshed result)) -> applyApprovalStatus result
+    (_, AppEvent (ApprovalStatusRefreshed issuedUnder result)) -> applyApprovalStatus issuedUnder result
     (_, AppEvent (ApprovalToggleFinished transition result)) -> applyApprovalToggle transition result
     (_, AppEvent (DirectMergeFinished number result)) -> applyDirectMerge number result
     (_, AppEvent (ReviewBackendStarted result)) -> applyReviewBackendStarted result

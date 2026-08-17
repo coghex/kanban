@@ -1100,11 +1100,13 @@ approvalRefreshRequired previous current
   | stoppedAfterMutation = True
   | otherwise = False
   where
-    sameDocument = case previous of
-      Nothing -> False
-      Just seen ->
-        isJust current.approvalResultUpdatedAt
-          && seen.approvalResultUpdatedAt == current.approvalResultUpdatedAt
+    -- The whole identity, not the stamp alone. @utc_stamp@ is second-granular
+    -- and the controller writes several states inside one pass, so an idle
+    -- result and the @advanced@ running pass that follows it in the same
+    -- second carry the same stamp — and comparing stamps would suppress the
+    -- refresh that second document is the only report of. Any observable
+    -- difference makes it a different document.
+    sameDocument = previous == Just current
 
     -- "Already in that state" rather than "in some previous state": with no
     -- previous observation at all, every transition below is one this
