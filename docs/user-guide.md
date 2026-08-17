@@ -94,7 +94,7 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `Enter` | Open details |
 | `Esc` | Close the current window |
 | `e` | Expand or collapse an epic |
-| `u` | Refresh GitHub, Codex usage, and Claude usage |
+| `u` | Refresh GitHub, Codex usage, and Claude usage — the sidebar's `↻` button does the same thing |
 | `c` | Hide or show the sidebar |
 | `o` | Change how much agent output is shown |
 | `p` | Open the jobs and processes list |
@@ -238,6 +238,7 @@ by itself once a merge lands.
 - Click an epic title to expand or collapse it.
 - Right-click a card to open its active job.
 - Click outside an open details window to close it.
+- Click the `↻` button in the sidebar to refresh, the same as `u`.
 
 Every mouse action has a keyboard equivalent.
 
@@ -282,7 +283,7 @@ If the PR drainer has not answered yet, or could not be asked, the list says so 
 
 ## Usage sidebar
 
-The sidebar shows the available Codex and Claude usage windows. Press `u` to refresh them. A failure from one service does not prevent the other service or the GitHub board from updating.
+The sidebar shows the available Codex and Claude usage windows. Press `u`, or click the `↻` button below the Claude block, to refresh them. A failure from one service does not prevent the other service or the GitHub board from updating.
 
 Each window takes two rows. The first is its label, a bar, and the percentage left. The second says how long until that window resets and the wall-clock time it resets at, in your own timezone:
 

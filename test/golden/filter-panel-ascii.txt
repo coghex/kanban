@@ -10,9 +10,9 @@
 || in 2h 30m · Thu 17:30    ||                                 |                                |                                |                                ||
 || week    [##........] 22% ||                                 |                                |  STANDALONE                    |  STANDALONE                    ||
 || in 1d 18h · Sat 09:10    ||  v #700  Persistence contract   |  v #700  Persistence contract  |  +---------------------------+ |  +---------------------------+ ||
-||                          ||  rollout  1/2 complete          |  rollout  1/2 complete         |  | PR #841 Split the input   | |  | PR #851 Resolve save      | ||
-||                          ||  `- +-------------------------+ |  `- +------------------------+ |  | dispatch facade           | |  | envelope conflict         | ||
-||                          ||     | A1 · tracker #700       | |     | A2 · tracker #700      | |  |  refactor                 | |  |  reviewed:approve         | ||
+|| +---+                    ||  rollout  1/2 complete          |  rollout  1/2 complete         |  | PR #841 Split the input   | |  | PR #851 Resolve save      | ||
+|| | ↻ |                    ||  `- +-------------------------+ |  `- +------------------------+ |  | dispatch facade           | |  | envelope conflict         | ||
+|| +---+                    ||     | A1 · tracker #700       | |     | A2 · tracker #700      | |  |  refactor                 | |  |  reviewed:approve         | ||
 ||                          ||     | #711 Adopt the          | |     | #712 Migrate the       | |  | #833 · agent-name →       | |  | UNLINKED · agent-name →   | ||
 ||                          ||     | versioned save envelope | |     | terrain cache reader   | |  | master · updated 3h ago   | |  | master · updated 3h ago   | ||
 ||                          ||     |  feature                | |     |  code-health           | |  | Moves per-domain dispatch | |  | Updates the branch after  | ||

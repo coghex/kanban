@@ -149,39 +149,67 @@ drawUsage state
     usageContents =
       vBox
         [ vBox [drawProvider state Codex, txt "", drawProvider state Claude],
+          drawUpdateButton state,
           padTop Max (drawDrainerButton state)
         ]
 
--- | The drainer control draws its own box out of 'innerBorderStyle' rather
--- than wrapping the label in Brick's 'Brick.Widgets.Border.border'. That keeps
--- one border policy for the sidebar in all three modes, and it keeps every
--- glyph under 'drainerStatusAttr': Brick's border widgets draw their runs
--- under @borderAttr@, which the theme does not name, so a bordered label would
--- lose the status color on its edges.
+-- | One nested sidebar control, drawn under §10's convention: its own box out
+-- of 'innerBorderStyle' rather than the label wrapped in Brick's
+-- 'Brick.Widgets.Border.border'. That keeps one border policy for the sidebar
+-- in all three modes, and it keeps every glyph under @attribute@: Brick's
+-- border widgets draw their runs under @borderAttr@, which the theme does not
+-- name, so a bordered label would lose the control's color on its edges.
+--
+-- The box is measured in terminal cells rather than code points, because that
+-- is what the drawn label occupies and what the sidebar's width is counted in.
+sidebarControl :: AppState -> Name -> AttrName -> Text -> Widget Name
+sidebarControl state name attribute label =
+  clickable name
+    . withAttr attribute
+    . vBox
+    $ [ txt (edge boxStyle.bsCornerTL boxStyle.bsCornerTR),
+        txt (Text.singleton boxStyle.bsVertical <> label <> Text.singleton boxStyle.bsVertical),
+        txt (edge boxStyle.bsCornerBL boxStyle.bsCornerBR)
+      ]
+  where
+    boxStyle = innerBorderStyle state
+    edge leftCorner rightCorner =
+      Text.singleton leftCorner
+        <> Text.replicate (displayWidth label) (Text.singleton boxStyle.bsHorizontal)
+        <> Text.singleton rightCorner
+
 drawDrainerButton :: AppState -> Widget Name
 drawDrainerButton state =
   vBox
-    [ clickable DrainerButton
-        . withAttr (drainerStatusAttr status)
-        . vBox
-        $ [ txt (edge boxStyle.bsCornerTL boxStyle.bsCornerTR),
-            txt (Text.singleton boxStyle.bsVertical <> drainerLabel <> Text.singleton boxStyle.bsVertical),
-            txt (edge boxStyle.bsCornerBL boxStyle.bsCornerBR)
-          ],
+    [ sidebarControl state DrainerButton (drainerStatusAttr status) drainerLabel,
       withAttr (drainerStatusAttr status) (txtWrap status.drainerDetail)
     ]
   where
     status = state.appDrainerStatus
-    boxStyle = innerBorderStyle state
-    edge leftCorner rightCorner =
-      Text.singleton leftCorner
-        <> Text.replicate (Text.length drainerLabel) (Text.singleton boxStyle.bsHorizontal)
-        <> Text.singleton rightCorner
 
 -- | The drainer control's interior row, padded so the control keeps its
 -- sixteen-column footprint.
 drainerLabel :: Text
 drainerLabel = " drain_prs.py "
+
+-- | The update control: the board-and-usage update @u@ performs, made
+-- clickable. It carries no status or detail line of its own, because the
+-- update it starts already reports itself through the provider blocks above
+-- it and the notice line below the board, so it draws in the neutral color a
+-- control with nothing of its own to say takes.
+drawUpdateButton :: AppState -> Widget Name
+drawUpdateButton state = sidebarControl state UpdateButton neutralAttr updateLabel
+
+-- | The update control's interior row: the single glyph §6 fixes, with the
+-- one-space padding the drainer control's label carries.
+--
+-- @↻@ (U+21BB) is not a matter of taste. It is one terminal cell wide and is
+-- carried by the DejaVu Sans Mono build @tools/render_board_screenshot.py@
+-- pins and verifies every frame glyph against; the similar @⟳@ (U+27F3),
+-- @⟲@ (U+27F2), and @⭮@ (U+2B6E) are absent from that font in both faces and
+-- would leave the tracked screenshot unrenderable.
+updateLabel :: Text
+updateLabel = " ↻ "
 
 -- | One provider's block: its name, then either the status standing in for
 -- windows it has none of, or its windows and whatever status still qualifies

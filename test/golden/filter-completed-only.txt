@@ -10,9 +10,9 @@
 ║┃ in 2h 30m · Thu 17:30    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃ week    [██░░░░░░░░] 22% ┃┃  STANDALONE                              ┃                                         ┃                                         ┃  STANDALONE                             ┃║
 ║┃ in 1d 18h · Sat 09:10    ┃┃ ▌╭─────────────────────────────────────╮ ┃ No filter matches                       ┃ No filter matches                       ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃  │ #655 Retire the legacy snapshot     │ ┃                                         ┃                                         ┃  │ PR #705 Retire the legacy snapshot │ ┃║
-║┃                          ┃┃  │ writer                              │ ┃                                         ┃                                         ┃  │ writer                             │ ┃║
-║┃                          ┃┃  │  code-health                        │ ┃                                         ┃                                         ┃  │  code-health                       │ ┃║
+║┃ ┏━━━┓                    ┃┃  │ #655 Retire the legacy snapshot     │ ┃                                         ┃                                         ┃  │ PR #705 Retire the legacy snapshot │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃  │ writer                              │ ┃                                         ┃                                         ┃  │ writer                             │ ┃║
+║┃ ┗━━━┛                    ┃┃  │  code-health                        │ ┃                                         ┃                                         ┃  │  code-health                       │ ┃║
 ║┃                          ┃┃  │ CLOSED · unassigned · updated 4h    │ ┃                                         ┃                                         ┃  │ MERGED · #655 · agent-name →       │ ┃║
 ║┃                          ┃┃  │ ago                                 │ ┃                                         ┃                                         ┃  │ master · updated 3h ago            │ ┃║
 ║┃                          ┃┃  │ The pre-envelope writer is          │ ┃                                         ┃                                         ┃  │ Removes the writer and the two     │ ┃║

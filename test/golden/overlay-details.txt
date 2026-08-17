@@ -10,9 +10,9 @@
 ║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope           ┃                                                                                      ┃          │ ┃  │ updated 3h ago                     │ ┃║
 ║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature           ┃ PR #823  Fix modal scroll routing                                                    ┃ into     │ ┃  │ Updates the branch after the       │ ┃║
 ║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · update┃  reviewed:approve   input   ui                                                       ┃rving the │ ┃  │ persistence registry changed on    │ ┃║
-║┃                          ┃┃     │ Write the envelope ┃ Metadata                                                                             ┃          │ ┃  │ master.                            │ ┃║
-║┃                          ┃┃     │ of the payload so a┃ #812 · agent-name → master · updated 3h ago                                          ┃          │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃                          ┃┃     │ write is detectable┃ Author                                                                               ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃ ┏━━━┓                    ┃┃     │ Write the envelope ┃ Metadata                                                                             ┃          │ ┃  │ master.                            │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃     │ of the payload so a┃ #812 · agent-name → master · updated 3h ago                                          ┃          │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃ ┗━━━┛                    ┃┃     │ write is detectable┃ Author                                                                               ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║
 ║┃                          ┃┃     ╰────────────────────┃ @agent-name                                                                          ┃            ┃                                         ┃║
 ║┃                          ┃┃                          ┃ Branches                                                                             ┃──────────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃                          ┃ work/issue-823 → master                                                              ┃ve        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║

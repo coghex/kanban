@@ -10,9 +10,9 @@
 ║┃ in 2h 30m · Thu 17:30    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃ week    [██░░░░░░░░] 22% ┃┃ ┌─────────────── SEARCH ───────────────┐ ┃                                         ┃  STANDALONE                             ┃  STANDALONE                             ┃║
 ║┃ in 1d 18h · Sat 09:10    ┃┃ │ envelope                             │ ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃ └──────────────────────────────────────┘ ┃  1/2 complete                           ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
-║┃                          ┃┃                                          ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
-║┃                          ┃┃                                          ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
+║┃ ┏━━━┓                    ┃┃ └──────────────────────────────────────┘ ┃  1/2 complete                           ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃                                          ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
+║┃ ┗━━━┛                    ┃┃                                          ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
 ║┃                          ┃┃  ▾ #700  Persistence contract rollout    ┃     │ #712 Migrate the terrain cache  │ ┃  │ #833 · agent-name → master ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
 ║┃                          ┃┃  1/2 complete                            ┃     │ reader                          │ ┃  │ updated 3h ago                     │ ┃  │ updated 3h ago                     │ ┃║
 ║┃                          ┃┃ ▌└─ ╭──────────────────────────────────╮ ┃     │  code-health                    │ ┃  │ Moves per-domain dispatch into     │ ┃  │ Updates the branch after the       │ ┃║
