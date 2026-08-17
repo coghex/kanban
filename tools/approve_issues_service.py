@@ -988,22 +988,40 @@ def require_no_legacy_daemon(repo_path: Path) -> None:
 
 
 def describe_run_owner(owner: dict[str, Any]) -> str:
-    """Where and what the controller already holding a run lock is."""
+    """Where and what is already holding a run lock.
+
+    A transition names itself, because it is not a run: install and uninstall
+    take this same lock precisely so that no run can begin while they are
+    deciding what to remove, and a contender told "a controller is already
+    running" would go looking for one that does not exist.
+    """
     pid = owner.get("pid")
     where = owner.get("repo")
     detail = f" (PID {pid})" if is_plain_integer(pid) else ""
     from_where = f" from {where}" if isinstance(where, str) and where else ""
+    if owner.get("mode") == "transition":
+        return f"{from_where}{detail}, which is installing or removing this job"
     return f"{from_where}{detail}"
 
 
 @contextlib.contextmanager
 def held_exclusively(
-    path: Path, job: ApprovalJob, refusal: Callable[[str], str]
+    path: Path,
+    job: ApprovalJob,
+    refusal: Callable[[str], str],
+    *,
+    mode: str = "run",
 ) -> Iterator[None]:
     """Hold one non-blocking exclusive lock, or refuse with `refusal`.
 
     `refusal` is called with a description of the owner rather than
     interpolated into, so no repository path can be read as a format field.
+
+    `mode` is what the holder is doing, recorded so a contender can say which
+    it lost to. A `run` and a transition that must exclude one take the very
+    same lock -- that is how they are made mutually exclusive -- and "a
+    controller is already running" would be the wrong sentence for half of
+    those encounters.
 
     The losing contender closes without truncating, so it cannot erase the
     owner's own diagnostic metadata -- the discipline
@@ -1032,6 +1050,7 @@ def held_exclusively(
                     "pid": os.getpid(),
                     "repo": str(job.repo_path),
                     "repository": job.identity,
+                    "mode": mode,
                     "started_at": utc_stamp(),
                 },
                 sort_keys=True,
@@ -2660,9 +2679,14 @@ def run_lock_owner(job: ApprovalJob) -> dict[str, Any] | None:
     lock and saying so.
 
     Answers None for a lock file that has never existed, without creating one:
-    a check must leave the account exactly as it found it.
+    a check must leave the account exactly as it found it, and None for one
+    this thread is itself holding through `exclusive_of_runs`, since a
+    transition asking whether a run exists must not be answered with its own
+    exclusion of one.
     """
     path = run_lock_path(job.slug)
+    if _held_depths().get(str(path)):
+        return None
     if not os.path.lexists(path):
         return None
     try:
@@ -2685,13 +2709,18 @@ def run_lock_owner(job: ApprovalJob) -> dict[str, Any] | None:
 
 
 def require_no_live_run(job: ApprovalJob, action: str) -> None:
-    """Refuse `action` while any run of this identity exists.
+    """Refuse `action` while a run of this identity is visible.
 
     Three questions, because no one of them sees every run: the manager cannot
     see a foreground run it never started, the status document cannot see a run
     that has not written one yet, and the run lock cannot see a process that
-    took no lock. A transition that would replace or remove a job asks all
-    three, and the earliest of them first.
+    took no lock.
+
+    Advisory rather than authoritative. A run can still begin the instant after
+    every one of these answers "no", which is why the transitions that act on
+    them go on to *take* the run lock -- see `exclusive_of_runs`. This is what
+    a plan reports and what a dry run refuses on, so neither describes work
+    that would then be refused.
     """
     owner = run_lock_owner(job)
     if owner is not None:
@@ -2704,6 +2733,50 @@ def require_no_live_run(job: ApprovalJob, action: str) -> None:
             f"The {service_backend().backend_name()} manager still holds a live "
             f"process for {service_label(job)}. Stop it before {action}."
         )
+
+
+@contextlib.contextmanager
+def exclusive_of_runs(job: ApprovalJob, action: str) -> Iterator[None]:
+    """Hold this identity's run lock for the length of a destructive step.
+
+    The check-then-act window no ordering of read-only checks can close: a
+    foreground `run` takes this lock as the very first thing it does, so a
+    transition that only *asked* about it could always be overtaken between the
+    asking and the acting, and would then remove a job, its record entry, and
+    its links out from under a controller that had just come into existence.
+
+    Taking the same lock makes the two mutually exclusive rather than merely
+    ordered. Whoever gets it wins: a run beginning inside an uninstall is
+    refused with the uninstall named, and an uninstall beginning inside a run
+    is refused with the run named.
+
+    Non-blocking, unlike the transition locks, because a run is not a step that
+    finishes on its own -- waiting for one would be waiting for an operator.
+
+    Deliberately not held across a `start`'s kick and wait: the run being
+    started needs this very lock to establish itself, so a start that held it
+    would be waiting for something it was itself preventing.
+    """
+    path = run_lock_path(job.slug)
+    depths = _held_depths()
+    key = str(path)
+    with held_exclusively(
+        path,
+        job,
+        lambda owner: (
+            f"An issue approval controller for {job.identity} is running{owner}. "
+            f"Stop it before {action}."
+        ),
+        mode="transition",
+    ):
+        # Recorded so this thread's own advisory probes do not report the lock
+        # back to it: `require_no_live_run` runs inside these sections too, and
+        # a check that saw its own hold would refuse every transition.
+        depths[key] = depths.get(key, 0) + 1
+        try:
+            yield
+        finally:
+            depths[key] -= 1
 
 
 def require_installable(job: ApprovalJob) -> None:
@@ -2865,6 +2938,14 @@ def _install_locked(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
     itself.
     """
     plan = install_plan(job, install_dir)
+    with exclusive_of_runs(job, "installing this repository's job"):
+        return _install_write(job, install_dir, plan)
+
+
+def _install_write(
+    job: ApprovalJob, install_dir: Path, plan: dict[str, Any]
+) -> dict[str, Any]:
+    """The writes themselves, with every lock this install needs held."""
     require_installed_controller(install_dir)
     backend = service_backend()
     ensure_dirs(job)
@@ -2978,6 +3059,19 @@ def uninstall_job(job: ApprovalJob, install_dir: Path | None = None) -> dict[str
 
 def _uninstall_locked(job: ApprovalJob) -> dict[str, Any]:
     plan = uninstall_plan(job)
+    with exclusive_of_runs(
+        job,
+        "uninstalling this job; removing it under a live controller would leave "
+        "one running that nothing can see or stop",
+    ):
+        # Re-asked with the lock held, so the manager's answer is one no run
+        # can invalidate while the removal below acts on it.
+        require_stopped_for_uninstall(job)
+        return _uninstall_write(job, plan)
+
+
+def _uninstall_write(job: ApprovalJob, plan: dict[str, Any]) -> dict[str, Any]:
+    """The removal itself, with every lock this uninstall needs held."""
     backend = service_backend()
     label = plan["label"]
     outcome = backend.uninstall_definition(label)

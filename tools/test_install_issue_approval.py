@@ -1637,6 +1637,120 @@ class ForegroundRunTests(InstallerFixture):
         self.assertFalse(result["started"])
         self.assertEqual(self.manager.call_names(), before)
 
+    def launch_run(self):
+        """Start a `run` without waiting for it to establish.
+
+        The companion to `foreground_run` for the case where it is *expected*
+        to refuse: waiting for a lock it will never get would hang.
+        """
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(self.wrapper),
+                str(TOOLS_DIR),
+                str(self.account),
+                "controller",
+                "--path",
+                str(self.repo),
+                "run",
+                "--interval",
+                "0.05",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ},
+        )
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        return proc
+
+    def test_a_run_establishing_inside_the_uninstalls_window_wins_or_is_refused(self):
+        # The window a read-only check can never close: the uninstall has
+        # already decided nothing is running, and the run begins before it
+        # acts. Whichever reaches the lock first must win outright — what must
+        # never happen is both succeeding, which is how a controller ends up
+        # running with its job, record entry, and links removed.
+        self.install()
+        decided = threading.Event()
+        original = service.uninstall_plan
+
+        def slow_plan(job):
+            plan = original(job)
+            decided.set()
+            # Wide enough that the run below lands squarely inside the window.
+            time.sleep(0.6)
+            return plan
+
+        patched = mock.patch.object(service, "uninstall_plan", slow_plan)
+        patched.start()
+        self.addCleanup(patched.stop)
+
+        outcome = {}
+
+        def uninstall_in_thread():
+            try:
+                outcome["result"] = self.uninstall()
+            except installer.InstallError as error:
+                outcome["error"] = error
+
+        remover = threading.Thread(target=uninstall_in_thread)
+        remover.start()
+        try:
+            decided.wait(timeout=30)
+            proc = self.foreground_run()
+        finally:
+            remover.join(timeout=60)
+
+        # The run got the lock first, so the uninstall was refused rather than
+        # removing anything out from under it.
+        self.assertIn("error", outcome, "the uninstall removed a job under a live run")
+        self.assertIn("already running", str(outcome["error"]))
+        self.assertIsNone(proc.poll(), "the run was left running")
+        self.assertTrue(self.manager.is_loaded(self.label()))
+        self.assertIn("acme/widgets", self.record()["repositories"])
+        for name in installer.LINKED_MODULES:
+            with self.subTest(module=name):
+                self.assertTrue((self.install_dir / name).is_file())
+
+    def test_a_run_beginning_inside_an_uninstall_that_holds_the_lock_refuses(self):
+        # The other direction, and why the uninstall may take the lock at all:
+        # once it holds it, a run cannot come into existence beneath it, and
+        # the run is told what it lost to rather than that a controller it will
+        # never find is running.
+        self.install()
+        removing = threading.Event()
+        original = self.manager.uninstall_definition
+
+        def slow_uninstall(identifier):
+            removing.set()
+            time.sleep(0.6)
+            return original(identifier)
+
+        self.manager.uninstall_definition = slow_uninstall
+        self.addCleanup(setattr, self.manager, "uninstall_definition", original)
+
+        outcome = {}
+
+        def uninstall_in_thread():
+            try:
+                outcome["result"] = self.uninstall()
+            except installer.InstallError as error:  # pragma: no cover
+                outcome["error"] = error
+
+        remover = threading.Thread(target=uninstall_in_thread)
+        remover.start()
+        try:
+            removing.wait(timeout=30)
+            proc = self.launch_run()
+            stderr = proc.communicate(timeout=60)[1]
+        finally:
+            remover.join(timeout=60)
+
+        self.assertNotEqual(proc.returncode, 0, "a run began inside the removal")
+        self.assertIn("installing or removing this job", stderr)
+        self.assertNotIn("error", outcome)
+        self.assertTrue(outcome["result"]["uninstalled"])
+
     def test_the_lock_probe_neither_creates_nor_takes_anything(self):
         # A check must leave the account exactly as it found it, and must never
         # become a hold that the next run would then contend with.
