@@ -238,7 +238,10 @@ Two documented paths drain it without opening Kanban:
 - Start the polling service for the whole queue through the installed
   controller, which performs the same guarded start the `d` key does. The
   install directory is spelled for macOS here; on Linux it is
-  `${XDG_DATA_HOME:-$HOME/.local/share}/kanban/pr-drainer`:
+  `kanban/pr-drainer` under `$XDG_DATA_HOME` when that variable names an
+  absolute directory and under `~/.local/share` when it does not — a relative
+  value is not honoured, so `${XDG_DATA_HOME:-$HOME/.local/share}` is not the
+  substitution to make:
 
   ```console
   CONTROL="$HOME/Library/Application Support/kanban/pr-drainer/drain_prs_service.py"
@@ -970,8 +973,9 @@ The controller records unexpected exits as incidents, and the drainer records a 
 ## Manual status
 
 Normal control should happen through Kanban. For diagnosis, run — again with
-the macOS install directory, which on Linux is
-`${XDG_DATA_HOME:-$HOME/.local/share}/kanban/pr-drainer`:
+the macOS install directory, which on Linux is `kanban/pr-drainer` under
+`$XDG_DATA_HOME` when that variable names an absolute directory and under
+`~/.local/share` when it does not:
 
 ```console
 CONTROL="$HOME/Library/Application Support/kanban/pr-drainer/drain_prs_service.py"

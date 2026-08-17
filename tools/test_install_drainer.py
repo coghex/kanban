@@ -570,6 +570,57 @@ class InstallerFailureVocabularyTests(unittest.TestCase):
                 install_drainer.service_backend().kick("com.example.job")
 
 
+class FileSnapshotTests(unittest.TestCase):
+    """`_restore_file`, which has to put back what a path *is* as well as what
+    it holds — a snapshot that only understood bytes would delete anything
+    else it found."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_it_restores_a_symlink_rather_than_deleting_it(self):
+        target = self.root / "target"
+        target.write_text("keep me\n", encoding="utf-8")
+        path = self.root / "document"
+        path.symlink_to(target)
+        restore = install_drainer._restore_file(path)
+        # What a write through `os.replace` does to it: the link is gone and a
+        # regular file stands where it was.
+        path.unlink()
+        path.write_text("replaced\n", encoding="utf-8")
+        restore()
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(os.readlink(path), str(target))
+        self.assertEqual(target.read_text(encoding="utf-8"), "keep me\n")
+
+    def test_it_restores_bytes_and_absence(self):
+        path = self.root / "document"
+        path.write_text("before\n", encoding="utf-8")
+        restore = install_drainer._restore_file(path)
+        path.write_text("after\n", encoding="utf-8")
+        restore()
+        self.assertEqual(path.read_text(encoding="utf-8"), "before\n")
+
+        missing = self.root / "never-there"
+        restore = install_drainer._restore_file(missing)
+        missing.write_text("created\n", encoding="utf-8")
+        restore()
+        self.assertFalse(os.path.lexists(missing))
+
+    def test_it_leaves_alone_a_shape_it_could_not_recreate(self):
+        # A directory where a document belongs is not something this put
+        # there, so removing it would be the destructive act rather than the
+        # safe one.
+        path = self.root / "occupied"
+        path.mkdir()
+        (path / "inside").write_text("mine\n", encoding="utf-8")
+        install_drainer._restore_file(path)()
+        self.assertTrue(path.is_dir())
+        self.assertEqual((path / "inside").read_text(encoding="utf-8"), "mine\n")
+
+
 class LegacyMigrationFixture(unittest.TestCase):
     """A simulated host with a `~/Library`-spelled drainer installation.
 
@@ -1182,6 +1233,86 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertEqual(calls, ["acme/widgets"])
         self.assertTrue(existing.is_dir())
         self.assertEqual(existing.stat().st_mode & 0o777, 0o755)
+
+    def test_a_rollback_continues_past_an_undo_that_cannot_reload(self):
+        # Restoring a definition hands it back to the service manager, and that
+        # reload reaches this module's own `run` — which raises `InstallError`,
+        # not `OSError`. An undo loop enumerating the errors it expected would
+        # abandon every remaining action at that one, leaving the moved trees
+        # and the merged record in place while reporting a clean refusal.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        legacy_record = self.record(self.legacy_install / "config.json")
+
+        real_load = self.backend.load_definition
+        failed = []
+
+        def load(identifier):
+            # Only while undoing: the forward pass must get far enough to have
+            # something to roll back.
+            if failed:
+                raise install_drainer.InstallError(f"{identifier} would not reload")
+            return real_load(identifier)
+
+        def failing(job, backend, rollback):
+            failed.append(job.identity)
+            raise install_drainer.InstallError("the rewrite failed")
+
+        with (
+            mock.patch.object(install_drainer, "_reinstall_recorded_job", failing),
+            mock.patch.object(self.backend, "load_definition", load),
+        ):
+            with self.assertRaises(install_drainer.InstallError) as raised:
+                self.install(self.widgets)
+        self.assertIn("could not be undone", str(raised.exception))
+        self.assertIn("would not reload", str(raised.exception))
+        # And the actions after the failing one still ran: the trees are back,
+        # the merged record is gone, and no destination install remains.
+        self.assertTrue((self.legacy_install / "runtime").is_dir())
+        self.assertTrue(self.legacy_logs.is_dir())
+        self.assertFalse((self.xdg_install / "config.json").exists())
+        self.assertFalse(self.xdg_logs.exists())
+        self.assertEqual(self.record(self.legacy_install / "config.json"), legacy_record)
+
+    def assert_refuses_a_symlink_at(self, path, contents="someone else's\n"):
+        """A path the migration writes *through*, occupied by a symlink.
+
+        `os.replace` replaces one rather than following it, so writing through
+        it would destroy it — and a rollback cannot put back what it never
+        created. The refusal has to come before the first write.
+
+        `contents` is what the link points at, and for a definition it has to
+        be a *usable* one: an unreadable definition is refused a step earlier,
+        as un-inspectable, which would leave this check untested.
+        """
+        target = self.root / f"elsewhere-{path.name}"
+        target.write_text(contents, encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if os.path.lexists(path):
+            path.unlink()
+        path.symlink_to(target)
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.install(self.widgets)
+        self.assertIn("not a regular file", str(raised.exception))
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(target.read_text(encoding="utf-8"), contents)
+        # Refused before the first write, so no destination install exists.
+        # Asserted on the links rather than on the directory, which one of
+        # these cases has to create in order to occupy a path inside it.
+        self.assertFalse(os.path.lexists(self.xdg_install / "drain_prs_service.py"))
+        self.assertTrue((self.legacy_install / "config.json").is_file())
+
+    def test_it_refuses_a_symlink_where_the_destination_record_goes(self):
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        self.assert_refuses_a_symlink_at(self.xdg_install / "config.json")
+
+    def test_it_refuses_a_symlink_where_a_recorded_definition_goes(self):
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        definition = self.backend.definition_path(
+            self.backend.service_identifier(self.slug("acme/gadgets"))
+        )
+        self.assert_refuses_a_symlink_at(
+            definition, contents=definition.read_text(encoding="utf-8")
+        )
 
     def test_a_rollback_that_cannot_finish_is_reported_beside_the_failure(self):
         # Nothing here can repair a host whose filesystem stopped cooperating

@@ -692,6 +692,20 @@ def preflight_legacy_migration(
             "is running for " + ", ".join(live) + ". Stop it first; nothing was changed."
         )
     conflicts = _move_conflicts(migration, planned_tree_moves(migration, jobs))
+    # Every path this migration writes *through*, as opposed to the trees it
+    # moves into place. `update_json_document` refuses one that is not a plain
+    # file, and `write_definition_file`'s `os.replace` would silently replace
+    # it; either way nothing here created what is there, so nothing here can
+    # put it back. Refusing before the first write is the only answer that
+    # neither loses it nor writes over it.
+    conflicts.extend(
+        f"{path} is where this would write, and is not a regular file"
+        for path in [
+            migration.destination_record,
+            *(job.definition_path for job in jobs),
+        ]
+        if os.path.lexists(path) and not _is_plain_file(path)
+    )
     unexpected = sorted(
         str(entry)
         for entry in migration.source.iterdir()
@@ -748,23 +762,56 @@ class Rollback:
         for action in reversed(self._actions):
             try:
                 action()
-            except (OSError, service_manager.ServiceManagerError) as exc:
+            except Exception as exc:  # noqa: BLE001 - see below
+                # Every exception, not a list of the ones an undo is expected
+                # to raise. Each action here undoes a different mutation
+                # through a different layer -- the filesystem raises `OSError`,
+                # the service-manager seam raises `ServiceManagerError`, and
+                # reloading a restored definition reaches this module's own
+                # `run`, which raises `InstallError` -- so an enumerated list
+                # is a list that goes stale, and the one that went stale would
+                # abandon every remaining undo at the first surprise. Being
+                # total is the whole contract; what could not be undone is
+                # reported below instead.
                 unrepaired.append(str(exc))
         self._actions.clear()
         return unrepaired
 
 
 def _restore_file(path: Path) -> Callable[[], None]:
-    """An undo that puts `path` back exactly as it is right now — including
-    putting nothing there, when there is nothing there now."""
-    before = path.read_bytes() if _is_plain_file(path) else None
+    """An undo that puts `path` back exactly as it is right now.
+
+    What the path *is*, not only what it holds. A snapshot that recorded
+    "these bytes, or nothing" would read a symlink or a directory sitting
+    there as nothing, and restoring nothing means unlinking it — so the
+    rollback would destroy the very thing it was registered to protect.
+    `os.replace`, which is how both a definition and this document are
+    written, replaces a symlink rather than following it, so that is a path
+    this really can reach.
+
+    A shape this did not create and cannot faithfully recreate — a directory,
+    a socket, a device — is left alone rather than removed. Refusing it before
+    anything is written is the preflight's job; this is the second line.
+    """
+    if path.is_symlink():
+        before: tuple[str, Any] = ("symlink", os.readlink(path))
+    elif _is_plain_file(path):
+        before = ("file", path.read_bytes())
+    elif os.path.lexists(path):
+        before = ("other", None)
+    else:
+        before = ("absent", None)
 
     def restore() -> None:
-        if before is None:
-            if os.path.lexists(path):
-                path.unlink()
-        else:
-            path.write_bytes(before)
+        kind, value = before
+        if kind == "other":
+            return
+        if os.path.lexists(path) and not (path.is_dir() and not path.is_symlink()):
+            path.unlink()
+        if kind == "file":
+            path.write_bytes(value)
+        elif kind == "symlink":
+            path.symlink_to(value)
 
     return restore
 
