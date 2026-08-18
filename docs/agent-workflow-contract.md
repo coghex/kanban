@@ -1130,7 +1130,17 @@ search step and nothing else, which is what `mandatory: no` records.
   itself: unlinking one a writer may be queued on is how two writers end up
   holding different inodes and losing each other's entries, and an empty lock
   file the next write recreates anyway is the smaller thing to leave. A dry run
-  takes no lock at all, so it leaves nothing to put back.
+  takes no lock at all, so it leaves nothing to put back. That lock is
+  re-entrant within a thread, because holding it across a transition is what
+  serializes the transition and every such transition ends in a write that asks
+  for it again.
+  Installing a job is one of those transitions: the definition and the record
+  entry are written under the record's lock together, so a controller still
+  bound to a relocated installation cannot land a definition between the two.
+  Having taken that lock, an install also refuses outright when the installation
+  it resolved at import is no longer the one the host has — writing from paths
+  that have moved would install a job naming a controller that is gone. A fresh
+  process resolves the new location, which is what makes re-running the repair.
   A writer that arrives *after* the removal is the one case no lock reaches:
   it creates the directory afresh and opens a lock file this transition never
   held, so it contends with nothing. What it wrote is carried across rather
