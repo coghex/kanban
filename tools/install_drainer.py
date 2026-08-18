@@ -313,18 +313,18 @@ def migrate_legacy_installed_config(install_dir: Path) -> list[str]:
 
 
 def legacy_install_dir() -> Path | None:
-    """The `~/Library`-spelled install directory this host migrates away from,
-    or None on macOS, where it *is* the platform's own convention and nothing
-    is ever migrated.
+    """The `~/Library`-spelled install directory this host takes over, or None
+    on macOS, where it *is* the platform's own convention.
 
-    Asked as "are these two directories the same?" rather than as
-    `sys.platform`, because that is the condition that actually decides it:
-    macOS's write path and the legacy spelling are one directory, so the
-    comparison is False there by construction and no platform name has to be
-    consulted a second time.
+    Whether the two are the *same* directory is a separate question, and one
+    this deliberately does not answer: an absolute `$XDG_DATA_HOME` naming
+    `~/Library/Application Support` makes them equal on a host that still owes
+    its definitions the rewrite. `LegacyMigration.relocating` draws that
+    distinction where it belongs.
     """
-    legacy = kanban_config.macos_drainer_install_dir()
-    return None if legacy == kanban_config.default_drainer_install_dir() else legacy
+    if not kanban_config.drainer_migrates_macos_installs():
+        return None
+    return kanban_config.macos_drainer_install_dir()
 
 
 def default_install_destination() -> Path:
@@ -368,6 +368,21 @@ class LegacyMigration:
     destination_logs: Path
     source_record: Path
     destination_record: Path
+
+    @property
+    def relocating(self) -> bool:
+        """Whether the installation itself moves.
+
+        False when this host's own convention resolves to the `~/Library`
+        spelling — an absolute `$XDG_DATA_HOME` naming it. The installation is
+        then already where it belongs and nothing may be removed; what is left
+        is the rewrite, because the definitions still carry whatever log paths
+        and environment they were written with. Almost everything below is
+        conditioned on this: there is no record to merge with itself, no
+        directory to delete, and therefore no writer that deleting it could
+        strand.
+        """
+        return self.source != self.destination
 
 
 @dataclass(frozen=True)
@@ -452,7 +467,14 @@ def skipped_legacy_migration(install_dir: Path) -> dict[str, Any] | None:
     than left to infer it from an install that reported success.
     """
     source = legacy_install_dir()
-    if source is None or not os.path.lexists(source / "config.json"):
+    if (
+        source is None
+        # A default-destination run is never "skipped": either it migrated, or
+        # there was nothing there to migrate, and reporting a custom
+        # destination's reason for it would simply be untrue.
+        or install_dir == kanban_config.default_drainer_install_dir()
+        or not os.path.lexists(source / "config.json")
+    ):
         return None
     return {
         "migrated": False,
@@ -688,6 +710,39 @@ def _locked_legacy_record(migration: LegacyMigration) -> Iterator[None]:
         raise
 
 
+def _rebuilt_job(job: RecordedJob) -> drain_prs_service.DrainerJob:
+    """This repository's job as it resolves against the installation the
+    module's managed paths currently name."""
+    config_path = drain_prs_service.configured_config_path(job.identity)
+    return drain_prs_service.job_for_identity(
+        job.checkout,
+        job.identity,
+        config_path=config_path,
+        remote_name=drain_prs_service.configured_remote_name(config_path),
+    )
+
+
+def _definition_is_stale(job: RecordedJob, backend) -> bool:
+    """Whether this repository's installed definition differs from the one
+    this host would write for it now.
+
+    Compared as the bytes the backend renders rather than field by field, so
+    every value a definition carries counts -- the log paths it names and the
+    environment it passes among them. A definition that cannot be read at all
+    is stale by construction: rewriting it is exactly the repair.
+    """
+    try:
+        rendered = backend.render_definition(
+            drain_prs_service.service_definition(_rebuilt_job(job))
+        )
+    except drain_prs_service.ServiceError:
+        return True
+    try:
+        return job.definition_path.read_bytes() != rendered
+    except OSError:
+        return True
+
+
 def _destination_runtime(migration: LegacyMigration, job: RecordedJob) -> Path:
     """Where this repository's runtime tree belongs once the installation has
     moved. Equal to `job.runtime_dir` already for a job whose `--install-dir`
@@ -790,6 +845,16 @@ def preflight_legacy_migration(
         ),
         backend,
     )
+    if not migration.relocating:
+        # Nothing moves and nothing is removed, so the only repositories this
+        # run touches are the ones whose definition is not already what this
+        # host would write. On a settled installation that is none of them, and
+        # this is then not a migration at all -- which matters, because
+        # everything below would otherwise refuse an ordinary install whenever
+        # any *other* repository's drainer happened to be running.
+        jobs = [job for job in jobs if _definition_is_stale(job, backend)]
+        if not jobs:
+            return []
     live = [
         job.identity
         for job in jobs
@@ -840,16 +905,19 @@ def preflight_legacy_migration(
         for path in (job.definition_path for job in jobs)
         if os.path.lexists(path) and not _is_plain_file(path)
     )
-    unexpected = sorted(
-        str(entry)
-        for entry in migration.source.iterdir()
-        if not MANAGED_INSTALL_ENTRIES.get(entry.name, _is_unmanaged)(entry)
-    )
-    if unexpected:
-        conflicts.append(
-            f"{migration.source} contains files this installer did not put there: "
-            + ", ".join(unexpected)
+    if migration.relocating:
+        # Only when the directory is going to be deleted. A run that leaves it
+        # in place has no business refusing over what someone else keeps there.
+        unexpected = sorted(
+            str(entry)
+            for entry in migration.source.iterdir()
+            if not MANAGED_INSTALL_ENTRIES.get(entry.name, _is_unmanaged)(entry)
         )
+        if unexpected:
+            conflicts.append(
+                f"{migration.source} contains files this installer did not put there: "
+                + ", ".join(unexpected)
+            )
     if conflicts:
         raise InstallError(
             "Refusing to migrate the shared PR drainer installation: "
@@ -1049,13 +1117,18 @@ def perform_legacy_migration(
     own share of it.
     """
     moves = planned_tree_moves(migration, jobs)
-    rollback.add(_restore_document(migration.destination_record))
-    drain_prs_service.update_json_document(
-        migration.destination_record,
-        lambda current: merged_record_document(
-            strict_record_document(migration.source_record), current
-        ),
-    )
+    if migration.relocating:
+        rollback.add(_restore_document(migration.destination_record))
+        drain_prs_service.update_json_document(
+            migration.destination_record,
+            lambda current: merged_record_document(
+                strict_record_document(migration.source_record), current
+            ),
+        )
+    # Skipped entirely when the two are one document. There is nothing to
+    # merge with itself, and this run holds that document's lock while
+    # `write_discovery_record` below takes it again — which is why the lock is
+    # only taken when something is being removed. See `_install_within`.
     # The legacy install directory's own tree first, so a per-repository
     # tree from elsewhere lands beside what it carried rather than under it.
     for move in moves:
@@ -1074,10 +1147,13 @@ def perform_legacy_migration(
     # destination, so what is left behind is debris rather than an
     # installation, and nothing that follows can strand a sibling.
     rollback.commit()
-    shutil.rmtree(migration.source)
-    stranded = _absorb_late_legacy_writes(migration, backend)
+    stranded = False
+    if migration.relocating:
+        shutil.rmtree(migration.source)
+        stranded = _absorb_late_legacy_writes(migration, backend)
     return {
         "migrated": True,
+        "relocated": migration.relocating,
         "source": str(migration.source),
         "source_logs": str(migration.source_logs),
         "destination": str(migration.destination),
@@ -1196,13 +1272,7 @@ def _reinstall_recorded_job(job: RecordedJob, backend, rollback: Rollback) -> No
         # Read out of the merged record, in the order `resolve_job` reads it:
         # the identity selects the entry, and the entry supplies the `--config`
         # whose own remote this repository's drainer runs with.
-        config_path = drain_prs_service.configured_config_path(job.identity)
-        rebuilt = drain_prs_service.job_for_identity(
-            job.checkout,
-            job.identity,
-            config_path=config_path,
-            remote_name=drain_prs_service.configured_remote_name(config_path),
-        )
+        rebuilt = _rebuilt_job(job)
         # `ensure_dirs` makes this repository's runtime, incident and log
         # directories -- and chmods whichever of them it finds already there.
         # A legacy job that has never run has none of them, so without this a
@@ -1285,7 +1355,15 @@ def install(
 
     migration = plan_legacy_migration(install_dir)
     with contextlib.ExitStack() as scope:
-        if migration is not None:
+        if migration is not None and migration.relocating:
+            # Only when something is removed, which is the only thing this
+            # lock protects against. A run that leaves the installation in
+            # place strands nobody by definition — a writer that adds a
+            # repository during it simply is not one of the definitions this
+            # rewrites, and its own is already correct. Taking it anyway would
+            # deadlock: with one document rather than two, the lock held here
+            # is the lock `write_discovery_record` goes on to ask for.
+            #
             # Held from before the preflight reads the legacy record until
             # after the legacy installation is gone, because those two are the
             # ends of one transition: the record says which repositories exist,
@@ -1336,6 +1414,10 @@ def _install_within(
     migration_jobs = (
         preflight_legacy_migration(migration, backend) if migration is not None else []
     )
+    if migration is not None and not migration.relocating and not migration_jobs:
+        # An installation already at this platform's own location with nothing
+        # stale left in it is not a migration at all, however it is spelled.
+        migration = None
 
     # Every module the installed controller imports has to be linked beside
     # it: it is executed out of the install directory, so it resolves its

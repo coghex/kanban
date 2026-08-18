@@ -248,6 +248,20 @@ def macos_drainer_log_dir() -> Path:
     return _home_relative(_MACOS_DRAINER_LOG_DIR)
 
 
+def drainer_migrates_macos_installs() -> bool:
+    """Whether this platform's installer takes over a `~/Library`-spelled
+    drainer installation. macOS never does: that spelling is its own.
+
+    The platform question, asked directly, rather than inferred from whether
+    the two directories differ. They can be the same directory on a host that
+    *does* migrate -- an absolute `$XDG_DATA_HOME` naming
+    `~/Library/Application Support` is a value a Linux host may legitimately
+    set -- and reading that as "this is macOS" would skip a host that still
+    owes its definitions a rewrite even though nothing moves.
+    """
+    return not _is_macos()
+
+
 def _xdg_drainer_install_dir() -> Path:
     return _xdg_drainer_dir("XDG_DATA_HOME", _XDG_DRAINER_INSTALL_DIR_FALLBACK)
 

@@ -1072,9 +1072,18 @@ search step and nothing else, which is what `mandatory: no` records.
   that already exists probes the XDG location first and the `~/Library`
   location second on both platforms, exactly as the issue-review probe below
   does and with the same occupied-but-invalid rule.
-  One installation does move, and only one: on a platform whose own convention
-  is not `~/Library`, an installer run whose destination is that platform's
-  default relocates a `~/Library` installation it finds there, in that run.
+  One installation is taken over, and only one: on a platform that is not
+  macOS, an installer run whose destination is that platform's default adopts a
+  `~/Library` installation it finds there, in that run. Whether that *moves*
+  anything is a separate question from whether this platform takes it over, and
+  both are asked: an absolute `$XDG_DATA_HOME` naming
+  `~/Library/Application Support` is a value a Linux host may set, which makes
+  the installation already its own destination. Such a run rewrites and
+  reloads the definitions that are not already what this host would write —
+  they still carry the old log root and none of the XDG context — moves the log
+  tree if that root did change, and removes nothing at all; with nothing stale
+  left it is not a migration and reports none, so an ordinary install is never
+  dragged through one. Everything below describes the run that does relocate.
   Nothing about it is silent or partial. It refuses before changing anything
   when any repository the shared record names has a live job or checkout
   drainer, when any recorded entry cannot be recovered exactly — its canonical

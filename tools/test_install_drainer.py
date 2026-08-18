@@ -985,6 +985,72 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertIn(str(self.xdg_install), self.unit_text("acme/widgets"))
         self.assertFalse(self.legacy_install.exists())
 
+    def in_place_xdg(self):
+        """A Linux host whose own `$XDG_DATA_HOME` names the `~/Library`
+        directory — an absolute value it may legitimately set, which makes the
+        install directory its own destination."""
+        return mock.patch.dict(
+            os.environ,
+            {"XDG_DATA_HOME": str(self.home / "Library" / "Application Support")},
+        )
+
+    def test_it_rewrites_in_place_when_the_install_dir_is_its_own_destination(self):
+        # The migration still owes this host something even though nothing
+        # moves: its definitions were written with the old log root and carry
+        # none of the XDG context. Deciding by whether the two paths differ
+        # would read this as macOS and skip it entirely.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        with self.in_place_xdg():
+            drain_prs_service.bind_managed_paths()
+            self.assertEqual(
+                kanban_config.default_drainer_install_dir(), self.legacy_install
+            )
+            result = self.install(self.widgets)
+
+        migration = result["legacy_migration"]
+        self.assertTrue(migration["migrated"])
+        self.assertFalse(migration["relocated"])
+        self.assertEqual(migration["repositories"], ["acme/gadgets", "acme/widgets"])
+
+        # Nothing removed: the installation is where this host wants it.
+        self.assertTrue((self.legacy_install / "config.json").is_file())
+        self.assertTrue((self.legacy_install / "drain_prs_service.py").is_symlink())
+        for identity in ("acme/widgets", "acme/gadgets"):
+            slug = self.slug(identity)
+            # The runtime tree stays exactly where it is, incidents included.
+            self.assertTrue(
+                (self.legacy_install / "runtime" / slug / "incidents" / "incident.json").is_file()
+            )
+            # What the rewrite is *for*: the log root did move, and the
+            # definition names it and carries the context it resolved under.
+            unit = self.unit_text(identity)
+            self.assertIn(str(self.xdg_logs / slug), unit)
+            self.assertNotIn(str(self.legacy_logs / slug), unit)
+            self.assertIn("XDG_DATA_HOME", unit)
+            self.assertEqual(
+                (self.xdg_logs / slug / "service.log").read_text(encoding="utf-8"),
+                f"log for {identity}\n",
+            )
+
+    def test_a_settled_in_place_installation_is_not_a_migration_at_all(self):
+        # Otherwise every ordinary install on such a host would drag every
+        # recorded repository through a rewrite — and refuse outright whenever
+        # any *other* repository's drainer happened to be running.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        with self.in_place_xdg():
+            drain_prs_service.bind_managed_paths()
+            self.install(self.widgets)
+            # Nothing stale left, so the next run has no migration to report...
+            second = self.install(self.widgets)
+            self.assertIsNone(second["legacy_migration"])
+            # ...and a sibling's live drainer is no longer this install's
+            # business, exactly as on any other host.
+            self.active.add(
+                self.backend.service_identifier(self.slug("acme/gadgets"))
+            )
+            third = self.install(self.widgets)
+        self.assertIsNone(third["legacy_migration"])
+
     def test_it_migrates_when_the_log_root_is_already_its_own_destination(self):
         # `$XDG_STATE_HOME` naming `~/Library/Logs` is an absolute value this
         # host is entitled to set, and it makes the log root its own

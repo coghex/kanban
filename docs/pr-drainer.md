@@ -950,8 +950,18 @@ XDG one first — so nothing you already installed has to move.
 
 A Linux host that installed the drainer before these paths took each platform's
 own convention has its installation at the `~/Library` spellings. The next
-installer run whose destination is the platform default relocates it in that one
-run: the two discovery documents are merged with the XDG one winning per key so
+installer run whose destination is the platform default takes it over in that
+one run.
+
+If you have set `XDG_DATA_HOME` to an absolute path naming
+`~/Library/Application Support`, the installation is already where this host
+wants it. That run rewrites and reloads the service definitions that are not
+already what it would write — they still name the old log root and carry none
+of the XDG context — moves the log tree if your `XDG_STATE_HOME` puts it
+somewhere else, and removes nothing. Once nothing is stale it stops being a
+migration, so ordinary installs are unaffected.
+
+Otherwise it relocates the installation: the two discovery documents are merged with the XDG one winning per key so
 no repository and no setting is dropped, the runtime and log trees move with
 their open incidents intact, every installed repository's service definition is
 rewritten and reloaded against the new location, and only then is the old
