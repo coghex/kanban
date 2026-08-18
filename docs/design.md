@@ -2265,7 +2265,7 @@ above are unchanged, and persistence the user switched off is not a failure.
   drainer runs with, including the remote its default-branch check and merges
   use.
 - The PR drainer controller discovers the installed job through the
-  record its installer writes as `config.json` inside the drainer's install
+  record its installer writes as `config.json` in the drainer's own resolved
   directory — `~/Library/Application Support/kanban/pr-drainer` on macOS and
   `$XDG_DATA_HOME/kanban/pr-drainer` (`~/.local/share` when that variable is
   unset, empty, or not absolute) on every other platform, resolved for every
@@ -2475,7 +2475,9 @@ above are unchanged, and persistence the user switched off is not a failure.
   never be recreated by the refresh it required.
 - The canonical drainer, controller, and safety-first installer are versioned
   with Kanban under `tools/`. The installer creates stable per-user links in
-  that same platform-resolved install directory, with the per-repository log
+  that same resolved directory — unless `--install-dir` or
+  `KANBAN_DRAINER_INSTALL_DIR` moves them and the runtime tree beneath them,
+  neither of which moves the record or the logs — with the per-repository log
   directories under `~/Library/Logs/kanban/pr-drainer` on macOS and
   `$XDG_STATE_HOME/kanban/pr-drainer` (`~/.local/state` on the same terms)
   elsewhere; rerunning it refreshes

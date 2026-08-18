@@ -525,7 +525,7 @@ arithmetic, which §2.3 owns.
   `<install-dir>/runtime/<slug>`; and a log
   directory holding the service and dated logs at
   `<log-root>/<slug>`. Shared across repositories — the
-  discovery record at `<install-dir>/config.json`, whose
+  discovery record at `<record-dir>/config.json`, whose
   `repositories` table carries one entry per installed repository naming the
   backend that wrote it, that job's identifier, the definition's absolute path,
   the checkout it was installed for,
@@ -536,10 +536,10 @@ arithmetic, which §2.3 owns.
   an exclusive `flock` on a sibling lock file, because installs and starts for
   different repositories run concurrently and an unserialized merge would drop
   the entry a running repository is discovered through; the global `ntfy_url`
-  beside it; and the installer-managed script directory `<install-dir>` those
-  three sit in.
+  beside it; and the installer-managed script directory `<install-dir>`, which
+  is `<record-dir>` itself unless an override moved it.
 
-  `<install-dir>` and `<log-root>` are this platform's own conventions,
+  `<record-dir>` and `<log-root>` are this platform's own conventions,
   resolved for every component by `tools/kanban_config.py` and declared as
   `personal-path` rows in §4: on macOS
   `~/Library/Application Support/kanban/pr-drainer` and
@@ -549,9 +549,13 @@ arithmetic, which §2.3 owns.
   Discovery probes the XDG location first and the `~/Library` location second
   on both platforms and takes the first whose record exists, so an installation
   that already exists never has to move; only when neither is occupied is the
-  answer this platform's write path. `--install-dir` and
-  `KANBAN_DRAINER_INSTALL_DIR` relocate the script directory and the runtime
-  root beneath it, and neither moves the discovery record or the log root.
+  answer this platform's write path. `<install-dir>` is a third name only
+  because `--install-dir` and `KANBAN_DRAINER_INSTALL_DIR` exist: they relocate
+  the script directory and the runtime root beneath it, and move neither the
+  discovery record nor the log root. With no override in play `<install-dir>`
+  *is* `<record-dir>`, which is why the record is a fixed location a dashboard
+  that inherits no environment can still find, while the scripts beside it are
+  not.
   Per checkout — a
   versioned drain-state JSON file, which records both the approved head each
   queued pull request was cleared at and the post-merge obligations a merged

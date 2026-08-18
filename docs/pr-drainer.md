@@ -924,7 +924,7 @@ filename — `coghex/kanban` becomes `coghex.kanban`. It is the same slug the
 job identifier ends with, so the log directory, the runtime directory, and the
 service definition of one repository all carry the same name.
 
-`<install-dir>` and `<log-root>` below are this platform's own conventions.
+`<record-dir>` and `<log-root>` below are this platform's own conventions.
 On macOS they are `~/Library/Application Support/kanban/pr-drainer` and
 `~/Library/Logs/kanban/pr-drainer`; on Linux, `$XDG_DATA_HOME/kanban/pr-drainer`
 and `$XDG_STATE_HOME/kanban/pr-drainer`, falling back to `~/.local/share` and
@@ -932,10 +932,16 @@ and `$XDG_STATE_HOME/kanban/pr-drainer`, falling back to `~/.local/share` and
 installer finds an installation that already exists at either spelling — the
 XDG one first — so nothing you already installed has to move.
 
+`<install-dir>` is `<record-dir>` too, unless you passed `--install-dir` or set
+`KANBAN_DRAINER_INSTALL_DIR`. Those move the script links and the runtime tree
+beneath them and nothing else, which is why the record and the logs below name
+`<record-dir>` and `<log-root>` rather than `<install-dir>`: Kanban has to find
+the record without inheriting your environment, so that one cannot move.
+
 - Installed links, shared by every repository: `<install-dir>/`
 - Install record Kanban resolves each job through, and the global
   private configuration (`ntfy_url`) that shares it:
-  `<install-dir>/config.json` — this path is
+  `<record-dir>/config.json` — this path is
   fixed, and `--install-dir` does not move it. Its `repositories` table holds
   one entry per installed repository, carrying the backend that wrote it, that
   job's identifier, the definition's path, the checkout, and `config_path`.
