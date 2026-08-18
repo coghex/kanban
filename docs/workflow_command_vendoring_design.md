@@ -102,9 +102,10 @@ reviewable line in a tracked file rather than an accident nobody can see.
 
 ### Out of scope
 
-- Migrating the fifteen existing bundle commands to the shared source. VEND-0
-  builds the mechanism for the eight vendored here; the existing commands
-  migrate later on their own schedule (D-6).
+- Migrating the fourteen existing two-brand command pairs to the shared source.
+  VEND-0 builds the mechanism for the eight vendored here; those pairs migrate
+  later on their own schedule (D-6). Claude-only `/draft-issues` is excluded
+  outright — it has no second copy to converge.
 - Any behavioral redesign of a command beyond what reconciliation forces.
 - The document-workflow helper resolution gap (#370). None of these eight
   references those helpers, so this arc neither depends on nor fixes it.
@@ -171,11 +172,14 @@ maintained as two hand-edited copies. VEND-0 establishes that mechanism before
 any command is vendored, because vendoring into the two-copy model and
 collapsing later pays the reconciliation cost twice.
 
-The mechanism is built for these eight only. Kanban's fifteen existing commands
-are **not** migrated here: their brand copies are not mechanically convertible —
-`process-report`'s two copies differ by 169 body lines — so migrating them means
-reconciling fifteen pairs or building a templating layer, which is its own arc
-(D-6).
+The mechanism is built for these eight only. Kanban's existing bundle commands
+are **not** migrated here. Fourteen of the fifteen ship as two-brand pairs whose
+copies are not mechanically convertible — `process-report`'s two differ by 169
+body lines — so migrating them means reconciling fourteen pairs or building a
+templating layer, which is its own arc (D-6). The fifteenth, `/draft-issues`,
+has no pair at all: `docs/drafting-workflow-contract.md:60,79` makes it Claude
+only by contract, and `:372` treats losing that boundary as a violation, so it
+is outside any migration this arc could specify.
 
 If VEND-0 finds the mechanism infeasible, its recorded outcome is the two-copy
 model plus a content-parity gate, and the eight slices behind it each produce two
@@ -221,9 +225,10 @@ place. The echo is what catches the case where resolution was wrong.
 
 ### D-6. Do not migrate the existing bundle commands in this arc
 
-Kanban's fifteen shipped commands keep their two hand-maintained brand copies.
-Migrating them to the shared source is a separate arc, justified by the same
-drift evidence but not blocking any slice here.
+The fourteen shipped commands that exist as two-brand pairs keep their two
+hand-maintained copies. Migrating those pairs to the shared source is a separate
+arc, justified by the same drift evidence but not blocking any slice here.
+Claude-only `/draft-issues` is not part of it and never becomes a pair.
 
 ### D-7. Reconciliation picks a winner per command, and says why
 
@@ -282,7 +287,7 @@ Arc-level signals:
   the answer instead.
 - **Scope:** the mechanism and its gate, proved against a **fixture** that is
   authored and rendered but never shipped as an invokable command. No command is
-  vendored by this slice, and none of the fifteen existing bundle commands is
+  vendored by this slice, and none of the existing bundle commands is
   migrated (D-6). Proving the mechanism on a real command would vendor it, which
   this slice explicitly does not do; the first real rendering is VEND-1's.
 - **Phase:** 0
