@@ -685,10 +685,11 @@ def _locked_legacy_record(migration: LegacyMigration) -> Iterator[None]:
     sibling, an unreadable record, or an occupied destination would report that
     nothing was changed while leaving behind a file that was not there and a
     mode that was not that. Both are recorded before the lock is taken and put
-    back if anything raises through it.
+    back on every way out of this but one.
 
-    Nothing is restored on the way out of a *successful* migration: the
-    directory holding them is gone by then, which is the point.
+    That one is a completed relocation, which has nothing to put back because
+    the directory holding them is gone -- which is also what distinguishes it
+    from a dry run, whose whole contract is to leave the host as it found it.
     """
     lock_path = migration.source_record.with_name(
         migration.source_record.name + ".lock"
@@ -702,12 +703,18 @@ def _locked_legacy_record(migration: LegacyMigration) -> Iterator[None]:
     try:
         with drain_prs_service.document_lock(migration.source_record):
             yield
-    except BaseException:
-        if not lock_existed and os.path.lexists(lock_path):
-            lock_path.unlink()
-        if mode is not None and _is_plain_directory(migration.source):
-            migration.source.chmod(mode)
-        raise
+    finally:
+        # Whenever the directory is still there, which is every way out of
+        # this that is not a completed relocation: a refusal, and a dry run,
+        # which must leave the host exactly as it found it and would otherwise
+        # be the one path that reports having changed nothing while having
+        # created a file and altered a mode. A relocation that finished has
+        # nothing to put back, because what held them is gone.
+        if _is_plain_directory(migration.source):
+            if not lock_existed and os.path.lexists(lock_path):
+                lock_path.unlink()
+            if mode is not None:
+                migration.source.chmod(mode)
 
 
 def _rebuilt_job(job: RecordedJob) -> drain_prs_service.DrainerJob:
@@ -1207,13 +1214,28 @@ def _absorb_late_legacy_writes(migration: LegacyMigration, backend) -> bool:
             migration.destination_record,
             lambda current, late=late: merged_record_document(late, current),
         )
+        collided = False
         for job in recorded_jobs(late, backend):
             destination = _destination_runtime(migration, job)
-            if job.runtime_dir != destination and not os.path.lexists(destination):
-                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                shutil.move(str(job.runtime_dir), str(destination))
+            if job.runtime_dir != destination and os.path.lexists(job.runtime_dir):
+                if os.path.lexists(destination):
+                    # One repository with a durable tree at both locations,
+                    # which is what a late *start* for an already-migrated
+                    # repository leaves: it wrote a status file and possibly
+                    # incidents through paths frozen at the old installation.
+                    # Merging them would have to choose which status and whose
+                    # incidents survive, and neither answer is this
+                    # installer's to give -- so the old installation stays
+                    # where it is and the run reports it, rather than the
+                    # removal below quietly taking one of them.
+                    collided = True
+                else:
+                    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    shutil.move(str(job.runtime_dir), str(destination))
             _reinstall_recorded_job(job, backend, Rollback())
             backend.load_definition(job.identifier)
+        if collided:
+            return True
         shutil.rmtree(migration.source, ignore_errors=True)
     return os.path.lexists(migration.source_record)
 

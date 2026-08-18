@@ -1231,6 +1231,9 @@ class LegacyMigrationTests(LegacyMigrationFixture):
                     drain_prs_service.service_definition(job)
                 )
                 drain_prs_service.write_discovery_record(job)
+                # What a start really leaves behind, and what the removal
+                # must not quietly take with it.
+                job.status_path.write_text('{"late": true}', encoding="utf-8")
             self.assertTrue(legacy_record.is_file())
 
         return mock.patch.object(install_drainer.shutil, "rmtree", late_writer)
@@ -1270,6 +1273,60 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         # And re-running is still the repair, because what is there is a legacy
         # installation and that is what this migrates.
         self.assertIsNotNone(install_drainer.plan_legacy_migration(self.xdg_install))
+
+    def test_a_late_write_for_an_already_migrated_repository_is_not_discarded(self):
+        # A late *start* for a repository this run already carried across
+        # writes its status and incidents through paths frozen at the old
+        # installation, so that repository ends up with a durable tree at both
+        # locations. Removing the old one would be choosing which status file
+        # and whose incidents survive, which is not this installer's call.
+        self.seed_legacy_install(self.widgets)
+        legacy_runtime = self.legacy_install / "runtime" / self.slug("acme/widgets")
+
+        with self.late_legacy_write(self.widgets):
+            result = self.install(self.widgets)
+
+        self.assertTrue(result["legacy_migration"]["migrated"])
+        self.assertTrue(result["legacy_migration"]["legacy_record_reappeared"])
+        # Both trees survive: the one this run moved, and the one the late
+        # writer created behind it.
+        self.assertEqual(
+            (legacy_runtime / "status.json").read_text(encoding="utf-8"),
+            '{"late": true}',
+        )
+        self.assertTrue(
+            (
+                self.xdg_install / "runtime" / self.slug("acme/widgets")
+                / "incidents" / "incident.json"
+            ).is_file()
+        )
+
+    def test_a_dry_run_migration_changes_nothing_at_all(self):
+        # Including the marks taking the lock leaves. A dry run is the one
+        # path whose entire contract is to leave the host as it found it, and
+        # it reached the lock before reporting.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        lock = self.legacy_install / "config.json.lock"
+        lock.unlink(missing_ok=True)
+        self.legacy_install.chmod(0o755)
+        before = self.record(self.legacy_install / "config.json")
+        units = {
+            identity: self.unit_text(identity)
+            for identity in ("acme/widgets", "acme/gadgets")
+        }
+
+        result = self.install(self.widgets, dry_run=True)
+
+        self.assertTrue(result["dry_run"])
+        self.assertTrue(result["legacy_migration"]["planned"])
+        self.assertFalse(os.path.lexists(lock))
+        self.assertEqual(self.legacy_install.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(self.record(self.legacy_install / "config.json"), before)
+        self.assertTrue(self.legacy_logs.is_dir())
+        for identity, text in units.items():
+            self.assertEqual(self.unit_text(identity), text)
+        self.assertFalse(os.path.lexists(self.xdg_install / "drain_prs_service.py"))
+        self.assertFalse(self.xdg_logs.exists())
 
     def test_a_sibling_recorded_before_the_lock_is_taken_is_carried_across(self):
         # The other half of the same guarantee: whatever the record holds when
