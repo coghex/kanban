@@ -675,6 +675,32 @@ def sibling_drainer_running(checkout: Path) -> bool:
 
 
 @contextlib.contextmanager
+def _selected_install_dir(install_dir: Path) -> Iterator[None]:
+    """Bind this process's managed paths to the directory this run selected.
+
+    `--install-dir` decides where the links go, and it is what the installed
+    controller is spawned with -- but `bind_managed_paths` reads the ambient
+    environment, where an inherited KANBAN_DRAINER_INSTALL_DIR may name
+    somewhere else entirely. The relocation would then move every tree to the
+    destination it chose while writing definitions that name the inherited
+    directory, leaving each sibling pointed at a runtime root with nothing in
+    it. The two have to be one answer, and this run's own selection is it --
+    set here exactly as it is passed to the controller below, so the parent
+    resolves what the child will.
+    """
+    previous = os.environ.get(kanban_config.DRAINER_INSTALL_DIR_ENV)
+    os.environ[kanban_config.DRAINER_INSTALL_DIR_ENV] = str(install_dir)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(kanban_config.DRAINER_INSTALL_DIR_ENV, None)
+        else:
+            os.environ[kanban_config.DRAINER_INSTALL_DIR_ENV] = previous
+        drain_prs_service.bind_managed_paths()
+
+
+@contextlib.contextmanager
 def _locked_legacy_record(migration: LegacyMigration) -> Iterator[None]:
     """The legacy record's lock, with the marks taking it leaves undone if the
     run does not go through.
@@ -1406,6 +1432,8 @@ def install(
 
     migration = plan_legacy_migration(install_dir)
     with contextlib.ExitStack() as scope:
+        if migration is not None:
+            scope.enter_context(_selected_install_dir(install_dir))
         if migration is not None and migration.relocating:
             # Only when something is removed, which is the only thing this
             # lock protects against. A run that leaves the installation in

@@ -1110,7 +1110,11 @@ search step and nothing else, which is what `mandatory: no` records.
   contents the installer did not place, is left exactly as it is. A custom
   `--install-dir` or `KANBAN_DRAINER_INSTALL_DIR`
   installs where it says and relocates nothing, reporting that the migration
-  was skipped. macOS is never migrated: there the two locations are the same
+  was skipped. When both are given and they disagree, `--install-dir` is the
+  run's selection: it is where the links go and what the installed controller
+  is spawned with, so it is also what the relocation resolves its own managed
+  paths from, and every tree it moves and every definition it writes name that
+  one directory. macOS is never migrated: there the two locations are the same
   directory.
   The whole transition — the read that decides which repositories exist through
   the removal that takes away the controller all of them name — happens under

@@ -1078,6 +1078,35 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         )
         self.assertFalse(self.legacy_install.exists())
 
+    def test_an_explicit_install_dir_beats_an_inherited_override(self):
+        # `--install-dir` decides where this run installs and is what the
+        # controller is spawned with, but the managed paths are resolved from
+        # the environment — so an inherited KANBAN_DRAINER_INSTALL_DIR naming
+        # somewhere else would have every tree moved to the selected
+        # destination while every definition named the inherited directory,
+        # leaving each sibling pointed at an empty runtime root.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        inherited = self.root / "inherited-custom"
+        with mock.patch.dict(
+            os.environ,
+            {kanban_config.DRAINER_INSTALL_DIR_ENV: str(inherited)},
+        ):
+            drain_prs_service.bind_managed_paths()
+            result = self.install(self.widgets, self.xdg_install)
+
+        self.assertTrue(result["legacy_migration"]["migrated"])
+        for identity in ("acme/widgets", "acme/gadgets"):
+            slug = self.slug(identity)
+            unit = self.unit_text(identity)
+            self.assertIn(str(self.xdg_install), unit)
+            self.assertNotIn(str(inherited), unit)
+            # And the tree each definition names is the one that was moved.
+            self.assertTrue(
+                (self.xdg_install / "runtime" / slug / "incidents" / "incident.json").is_file()
+            )
+        # Nothing was created at the inherited location at all.
+        self.assertFalse(inherited.exists())
+
     def test_it_carries_both_a_legacy_and_a_custom_repositorys_runtime_state(self):
         # The mixed installation, which is the one a single whole-tree move
         # would half-migrate: one repository's state under the legacy install
