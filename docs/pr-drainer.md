@@ -976,8 +976,13 @@ installer did not put there. The whole relocation holds the old record's lock,
 so an install or start for another repository that runs at the same time waits
 for it rather than being left behind by it — and one that starts after the old
 directory is gone cannot be caught by any lock at all, so whatever it installed
-there is carried across by a further pass, and only a writer that keeps winning
-that race is reported for you to re-run against. Stop every installed
+there is carried across by a further pass. What a further pass cannot carry is a
+repository that ends up with runtime state in both places, which is what a late
+start for an already-migrated repository leaves: both trees are kept, since
+nothing here can choose which status file and whose incidents survive, and the
+run names that repository. A re-run refuses over exactly those two trees, so the
+repair is to stop that repository's drainer, keep whichever tree you want,
+remove the other, and then re-run. Stop every installed
 repository's drainer first,
 and re-run the installer once for any repository; one run carries all of them.
 Passing `--install-dir`, or setting `KANBAN_DRAINER_INSTALL_DIR`, installs at

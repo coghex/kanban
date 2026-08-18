@@ -1125,7 +1125,12 @@ search step and nothing else, which is what `mandatory: no` records.
   A writer that arrives *after* the removal is the one case no lock reaches:
   it creates the directory afresh and opens a lock file this transition never
   held, so it contends with nothing. What it wrote is carried across rather
-  than merely noticed — a bounded number of further passes each do what the
+  than merely noticed, except where it gives one repository durable state in
+  both places -- a late start for an already-migrated repository writes a
+  status file and incidents through paths frozen at the old installation, and
+  choosing which of the two survives is not the installer's to make. Both are
+  kept, that repository is named, and the run says what the repair is, because
+  a later run refuses over exactly those trees rather than carrying them — a bounded number of further passes each do what the
   next run of the installer would, merging the record found there, rewriting
   and reloading the definitions it names against this installation, and
   removing the location again. Past that bound the run reports what is still

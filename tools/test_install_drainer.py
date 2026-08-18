@@ -1300,6 +1300,30 @@ class LegacyMigrationTests(LegacyMigrationFixture):
                 / "incidents" / "incident.json"
             ).is_file()
         )
+        # And the run names the repository rather than promising a re-run,
+        # because a re-run cannot resolve this: it refuses over exactly the
+        # two trees that were kept.
+        self.assertEqual(
+            result["legacy_migration"]["unresolved_repositories"], ["acme/widgets"]
+        )
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.install(self.widgets)
+        self.assertIn("already exists", str(raised.exception))
+        # Named as the roots it would move, which is where the kept tree is.
+        self.assertIn(str(legacy_runtime.parent), str(raised.exception))
+        self.assertIn(str(self.xdg_install / "runtime"), str(raised.exception))
+        # Both trees are still there afterwards: the refusal changed nothing,
+        # so the operator still has both to choose between.
+        self.assertEqual(
+            (legacy_runtime / "status.json").read_text(encoding="utf-8"),
+            '{"late": true}',
+        )
+        self.assertTrue(
+            (
+                self.xdg_install / "runtime" / self.slug("acme/widgets")
+                / "incidents" / "incident.json"
+            ).is_file()
+        )
 
     def test_a_dry_run_migration_changes_nothing_at_all(self):
         # Including the marks taking the lock leaves. A dry run is the one

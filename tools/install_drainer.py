@@ -1154,10 +1154,11 @@ def perform_legacy_migration(
     # destination, so what is left behind is debris rather than an
     # installation, and nothing that follows can strand a sibling.
     rollback.commit()
-    stranded = False
+    collisions: list[str] = []
     if migration.relocating:
         shutil.rmtree(migration.source)
-        stranded = _absorb_late_legacy_writes(migration, backend)
+        collisions = _absorb_late_legacy_writes(migration, backend)
+    stranded = migration.relocating and os.path.lexists(migration.source_record)
     return {
         "migrated": True,
         "relocated": migration.relocating,
@@ -1168,6 +1169,7 @@ def perform_legacy_migration(
         "record": str(migration.destination_record),
         "repositories": [job.identity for job in jobs],
         "legacy_record_reappeared": stranded,
+        "unresolved_repositories": collisions,
         "moved": [
             {"what": move.what, "from": str(move.source), "to": str(move.destination)}
             for move in moves
@@ -1183,9 +1185,9 @@ def perform_legacy_migration(
 LATE_WRITER_PASSES = 3
 
 
-def _absorb_late_legacy_writes(migration: LegacyMigration, backend) -> bool:
+def _absorb_late_legacy_writes(migration: LegacyMigration, backend) -> list[str]:
     """Carry across anything written back to the legacy location after it was
-    removed, and report whether anything is still there.
+    removed, and name the repositories whose state could not be carried.
 
     The lock this transition holds serializes every writer that queues on the
     legacy record's lock file; one that queues resumes into a directory the
@@ -1200,21 +1202,27 @@ def _absorb_late_legacy_writes(migration: LegacyMigration, backend) -> bool:
     installation, remove the location again -- which is what turns "installed
     where nothing looks" back into an installed repository. A pass that finds
     nothing is the end of it.
+
+    What it cannot carry is a repository that now has durable state in both
+    places. Those are named rather than resolved, because the caller has to
+    say so: a later run of this installer will refuse over exactly those
+    trees, so telling the operator to re-run and leave it at that would be
+    advice that does not work.
     """
+    collisions: list[str] = []
     for _ in range(LATE_WRITER_PASSES):
         if not os.path.lexists(migration.source_record):
-            return False
+            return collisions
         try:
             late = strict_record_document(migration.source_record)
         except InstallError:
             # Unreadable is still "something is there", and the caller reports
             # it. Nothing here can merge a document it cannot parse.
-            return True
+            return collisions
         drain_prs_service.update_json_document(
             migration.destination_record,
             lambda current, late=late: merged_record_document(late, current),
         )
-        collided = False
         for job in recorded_jobs(late, backend):
             destination = _destination_runtime(migration, job)
             if job.runtime_dir != destination and os.path.lexists(job.runtime_dir):
@@ -1228,16 +1236,17 @@ def _absorb_late_legacy_writes(migration: LegacyMigration, backend) -> bool:
                     # installer's to give -- so the old installation stays
                     # where it is and the run reports it, rather than the
                     # removal below quietly taking one of them.
-                    collided = True
+                    if job.identity not in collisions:
+                        collisions.append(job.identity)
                 else:
                     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                     shutil.move(str(job.runtime_dir), str(destination))
             _reinstall_recorded_job(job, backend, Rollback())
             backend.load_definition(job.identifier)
-        if collided:
-            return True
+        if collisions:
+            return collisions
         shutil.rmtree(migration.source, ignore_errors=True)
-    return os.path.lexists(migration.source_record)
+    return collisions
 
 
 def _restore_definition(job: RecordedJob, backend) -> Callable[[], None]:
@@ -1625,10 +1634,25 @@ def main() -> int:
                     print(
                         f"WARNING: {migration['source']} was written again after the "
                         "relocation, so another install or start was running at the "
-                        "same time. The repository it recorded is installed where "
-                        "nothing now looks for it. Re-run this installer to carry "
-                        "it across."
+                        "same time, and what it recorded is where nothing now looks "
+                        "for it."
                     )
+                    unresolved = migration["unresolved_repositories"]
+                    if unresolved:
+                        # Naming the repair rather than "re-run", which would
+                        # be advice that does not work: a later run refuses
+                        # over exactly the trees this could not carry.
+                        print(
+                            "  " + ", ".join(unresolved) + " now has runtime state "
+                            f"under both {migration['source']} and "
+                            f"{migration['destination']}. Nothing here can choose "
+                            "which status file and whose incidents survive, so both "
+                            "were kept and a re-run will refuse over them. Stop that "
+                            "repository's drainer, keep whichever of the two trees "
+                            "you want, remove the other, then re-run this installer."
+                        )
+                    else:
+                        print("  Re-run this installer to carry it across.")
             elif migration:
                 print(f"Left the installation at {migration['source']}: {migration['reason']}.")
             print(f"Service: {result['label']}")
