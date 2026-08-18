@@ -1042,7 +1042,8 @@ search step and nothing else, which is what `mandatory: no` records.
   from those same values — records the backend that wrote the entry, the job's
   identifier, the definition's absolute path,
   and the checkout it was installed for under that repository's entry in the
-  discovery record inside that install directory. The
+  discovery record, which is in the directory this platform resolves rather
+  than in whichever one the script links were installed to. The
   derivation is total, produces a valid nonempty label for every supported
   `owner/name`, and is injective across distinct normalized identities, so no
   two repositories can name one job. `tools/install_drainer.py` resolves a job

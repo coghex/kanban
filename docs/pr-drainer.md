@@ -111,8 +111,10 @@ The installer:
   `~/.config/systemd/user/com.coghex.drain-prs.<owner>.<name>.service` under
   systemd;
 - records the backend that wrote it, that job's identifier, the definition's
-  path, and the checkout under this repository's entry in the `config.json`
-  inside that install directory, which is how Kanban finds it;
+  path, and the checkout under this repository's entry in the discovery
+  record — which sits in the directory this platform resolves rather than in
+  whichever directory the links went to, so Kanban finds it without inheriting
+  your environment;
 - loads the job without starting it.
 
 Run it once per repository, from that repository's own main checkout. Installing
