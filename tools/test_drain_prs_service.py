@@ -11,6 +11,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -20,6 +21,7 @@ from unittest import mock
 
 import drain_prs
 import drain_prs_service
+import kanban_config
 import service_manager
 
 
@@ -156,6 +158,12 @@ class RecordingBackend(service_manager.ServiceManagerBackend):
     def request_stop(self, identifier):
         self._record("request_stop", identifier)
 
+    def definition_environment(self, identifier):
+        for definition in self.written:
+            if definition.identifier == identifier:
+                return dict(definition.environment)
+        return None
+
     def legacy_definition_exists(self):
         return self.legacy_installed
 
@@ -201,7 +209,6 @@ class RedirectedControllerTestCase(unittest.TestCase):
             patched = mock.patch.object(drain_prs_service, name, value)
             patched.start()
             self.addCleanup(patched.stop)
-
         # The launchd artifacts belong to the backend, so they are redirected
         # on the module that owns them rather than on the controller.
         for name, value in (
@@ -451,25 +458,139 @@ class PerRepositoryPathTests(RedirectedControllerTestCase):
         )
 
 
+class DefinitionEnvironmentTests(unittest.TestCase):
+    """What a job is started with, beyond the interpreter and the argv.
+
+    `KANBAN_DRAINER_INSTALL_DIR` pins the install directory and the runtime
+    root beneath it, but the discovery record and the log root follow the XDG
+    base directories — and a systemd user manager does not necessarily export
+    the ones the operator installed under. A job started without them would
+    resolve `~/.local` instead, writing a second discovery record nothing reads
+    and dated logs somewhere its own unit does not point.
+    """
+
+    def job(self):
+        return drain_prs_service.job_for_identity(Path("/checkout"), "acme/widgets")
+
+    def environment(self):
+        return dict(drain_prs_service.service_definition(self.job()).environment)
+
+    def test_it_carries_the_xdg_directories_this_installation_resolved_under(self):
+        with mock.patch.dict(
+            os.environ,
+            {"XDG_DATA_HOME": "/srv/data", "XDG_STATE_HOME": "/srv/state"},
+        ):
+            environment = self.environment()
+        self.assertEqual(environment["XDG_DATA_HOME"], "/srv/data")
+        self.assertEqual(environment["XDG_STATE_HOME"], "/srv/state")
+
+    def test_it_carries_no_value_it_would_not_have_honoured_itself(self):
+        # The same absolute-only rule the resolvers apply. Pinning a value they
+        # would ignore would make the job resolve differently from the install
+        # that wrote it, which is the divergence this exists to prevent.
+        for description, value in (
+            ("relative", "relative/data"),
+            ("empty", ""),
+        ):
+            with self.subTest(value=description):
+                with mock.patch.dict(
+                    os.environ,
+                    {"XDG_DATA_HOME": value, "XDG_STATE_HOME": value},
+                ):
+                    environment = self.environment()
+                for name in kanban_config.DRAINER_PATH_VARIABLES:
+                    self.assertNotIn(name, environment)
+        with mock.patch.dict(os.environ, {}):
+            for name in kanban_config.DRAINER_PATH_VARIABLES:
+                os.environ.pop(name, None)
+            environment = self.environment()
+        for name in kanban_config.DRAINER_PATH_VARIABLES:
+            self.assertNotIn(name, environment)
+
+    def test_the_variables_it_carries_are_the_ones_the_resolvers_read(self):
+        # Named once, in the module that owns the paths, so this set cannot
+        # fall behind the resolvers it exists to reproduce.
+        self.assertEqual(
+            kanban_config.DRAINER_PATH_VARIABLES, ("XDG_DATA_HOME", "XDG_STATE_HOME")
+        )
+
+
 class ModuleDefaultTests(unittest.TestCase):
-    """The unredirected module constants, which every other fixture replaces."""
+    """The unredirected module constants, which every other fixture replaces.
+
+    Two separable claims, because since issue #358 the constants' *values*
+    depend on the host: what they are wired to is asserted here against the
+    resolver that owns each location, and what that resolver answers per
+    platform is `tools/test_kanban_config.py`'s table. Asserting a `~/Library`
+    literal here instead would pass on a macOS laptop and fail the same
+    acceptance command on the Linux CI runner.
+    """
+
+    def test_every_managed_path_is_the_shared_resolvers_answer(self):
+        # Nothing here spells a location of its own: one module writes each of
+        # them down for every platform, and the controller, its installer and
+        # the drainer all resolve through it.
+        self.assertEqual(
+            drain_prs_service.DISCOVERY_RECORD_PATH,
+            kanban_config.drainer_record_path(),
+        )
+        self.assertEqual(
+            drain_prs_service.INSTALL_DIR, kanban_config.drainer_install_dir()
+        )
+        self.assertEqual(
+            drain_prs_service.LOG_ROOT, kanban_config.default_drainer_log_dir()
+        )
+        self.assertEqual(
+            drain_prs_service.RUNTIME_ROOT,
+            drain_prs_service.INSTALL_DIR / "runtime",
+        )
 
     def test_the_record_stays_at_a_fixed_path_an_install_dir_cannot_move(self):
         # Kanban never inherits KANBAN_DRAINER_INSTALL_DIR, so an install made
         # with --install-dir has to remain discoverable: the record is the one
         # thing whose location the option must not relocate.
         self.assertEqual(
-            drain_prs_service.DISCOVERY_RECORD_PATH,
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "kanban"
-            / "pr-drainer"
-            / "config.json",
-        )
-        self.assertEqual(
             drain_prs_service.DEFAULT_INSTALL_DIR,
             drain_prs_service.DISCOVERY_RECORD_PATH.parent,
+        )
+        elsewhere = Path("/tmp/kanban-install-dir-that-does-not-move-the-record")
+        with mock.patch.dict(
+            os.environ, {kanban_config.DRAINER_INSTALL_DIR_ENV: str(elsewhere)}
+        ):
+            self.assertEqual(kanban_config.drainer_install_dir(), elsewhere)
+            self.assertFalse(
+                kanban_config.drainer_record_path().is_relative_to(elsewhere)
+            )
+            self.assertFalse(
+                kanban_config.default_drainer_log_dir().is_relative_to(elsewhere)
+            )
+
+    def test_rebinding_re_resolves_every_managed_path_from_one_rule(self):
+        # The migration is the only caller, and this is what it depends on: a
+        # process whose installation has just moved must stop writing to where
+        # it used to be, and every one of these constants has to move together
+        # or a single run would split its state across two installations.
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, True)
+        try:
+            with mock.patch.dict(
+                os.environ, {"HOME": str(home)}, clear=True
+            ), mock.patch.object(kanban_config.sys, "platform", "linux"):
+                drain_prs_service.bind_managed_paths()
+                for path in (
+                    drain_prs_service.DISCOVERY_RECORD_PATH,
+                    drain_prs_service.INSTALL_DIR,
+                    drain_prs_service.CONTROLLER_PATH,
+                    drain_prs_service.DRAINER_PATH,
+                    drain_prs_service.LOG_ROOT,
+                    drain_prs_service.RUNTIME_ROOT,
+                ):
+                    self.assertTrue(path.is_relative_to(home), path)
+        finally:
+            drain_prs_service.bind_managed_paths()
+        self.assertEqual(
+            drain_prs_service.DISCOVERY_RECORD_PATH,
+            kanban_config.drainer_record_path(),
         )
 
     def test_the_singleton_label_survives_only_as_the_job_to_retire(self):
@@ -556,6 +677,15 @@ class PinnedServiceDefinitionTests(unittest.TestCase):
     ).encode("utf-8")
 
     def setUp(self):
+        # The definition carries whichever XDG base directories this
+        # installation resolved under, so the host's own have to be out of the
+        # way for these bytes to be the same everywhere. Which ones it carries,
+        # and when, is asserted separately below.
+        environment = mock.patch.dict(os.environ, {})
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in kanban_config.DRAINER_PATH_VARIABLES:
+            os.environ.pop(name, None)
         for module, name, value in (
             (drain_prs_service, "HOME", self.HOME),
             (drain_prs_service, "INSTALL_DIR", self.INSTALL_DIR),
@@ -842,6 +972,39 @@ class ControllerConfigurationTests(RedirectedControllerTestCase):
                 drain_prs_service.configured_ntfy_url(),
                 "https://notify.example.test/current",
             )
+
+    def test_a_document_that_is_not_utf8_reads_as_nothing_rather_than_raising(self):
+        # `_read_service_config` merges two documents, and either one may be
+        # bytes nothing can decode. `UnicodeDecodeError` is a `ValueError`
+        # rather than an `OSError`, so without catching it by name it escapes
+        # a reader every caller expects to answer "nothing readable here" —
+        # and both of these are read on the way to resolving a job, so a single
+        # unreadable file would take down `status` and `logs` as well.
+        legacy = self.root / "elsewhere" / "config.json"
+        legacy.parent.mkdir()
+        self.record.parent.mkdir(parents=True)
+        readable = json.dumps({"ntfy_url": "https://notify.example.test/kept"})
+
+        for unreadable, other in (
+            (self.record, legacy),
+            (legacy, self.record),
+        ):
+            with self.subTest(unreadable=unreadable.name):
+                unreadable.write_bytes(b"\xff\xfe not utf-8 at all")
+                other.write_text(readable, encoding="utf-8")
+                with mock.patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop("KANBAN_DRAINER_NTFY_URL", None)
+                    # The readable one still answers, and the unreadable one
+                    # contributes nothing instead of raising.
+                    self.assertEqual(
+                        drain_prs_service.configured_ntfy_url(),
+                        "https://notify.example.test/kept",
+                    )
+                    self.assertEqual(
+                        drain_prs_service.installed_repository_records(), {}
+                    )
+                unreadable.unlink()
+                other.unlink()
 
     def test_notifications_are_disabled_by_default(self):
         self.assertEqual(

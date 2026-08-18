@@ -2265,8 +2265,15 @@ above are unchanged, and persistence the user switched off is not a failure.
   drainer runs with, including the remote its default-branch check and merges
   use.
 - The PR drainer controller discovers the installed job through the
-  record its installer writes at
-  `~/Library/Application Support/kanban/pr-drainer/config.json`, whose
+  record its installer writes as `config.json` in the drainer's own resolved
+  directory — `~/Library/Application Support/kanban/pr-drainer` on macOS and
+  `$XDG_DATA_HOME/kanban/pr-drainer` (`~/.local/share` when that variable is
+  unset, empty, or not absolute) on every other platform, resolved for every
+  Python component by one module and probed XDG-first so an installation made
+  under either spelling is found where it already is. The dashboard is not yet
+  one of them: `src/Kanban/Drainer.hs` still spells the macOS location itself,
+  so on a Linux host an XDG-installed drainer is discovered by the controller
+  and not by the board until that resolver joins the arc. Its
   `repositories` table holds one entry per installed repository naming the
   backend that wrote it, that job's identifier, the definition's absolute path,
   and the installed checkout.
@@ -2470,11 +2477,18 @@ above are unchanged, and persistence the user switched off is not a failure.
   reporting — also ends the result behind it, and a dismissed merge report can
   never be recreated by the refresh it required.
 - The canonical drainer, controller, and safety-first installer are versioned
-  with Kanban under `tools/`. The installer creates stable per-user links under
-  `~/Library/Application Support/kanban/pr-drainer/`; rerunning it refreshes
+  with Kanban under `tools/`. The installer creates stable per-user links in
+  that same resolved directory — unless `--install-dir` or
+  `KANBAN_DRAINER_INSTALL_DIR` moves them and the runtime tree beneath them,
+  neither of which moves the record or the logs — with the per-repository log
+  directories under `~/Library/Logs/kanban/pr-drainer` on macOS and
+  `$XDG_STATE_HOME/kanban/pr-drainer` (`~/.local/state` on the same terms)
+  elsewhere; rerunning it refreshes
   those links after repository relocation, and repairs a missing or stale
   discovery record in place without an uninstall and without changing the
-  job's identity. Installing a second repository adds its entry beside
+  job's identity. An installation that already exists is never moved: the probe
+  finds it at whichever spelling it is on, so a host that inherited one keeps
+  it. Installing a second repository adds its entry beside
   the first rather than replacing it. Before enabling a repository's derived
   job, the installer retires the machine-wide `com.coghex.drain-prs` singleton
   that predates per-repository jobs when that singleton served the same

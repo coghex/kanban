@@ -85,19 +85,69 @@ ISO_STRICT_DATE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z|[+-][0-9]{2}:[0-9]{2})"
 )
 HOME = Path.home()
+# Every managed path below is `tools/kanban_config.py`'s answer, not a spelling
+# of its own: that module is the one place each location is written down, for
+# every platform it has a convention on, and it is installed beside this one so
+# the controller and its installer cannot resolve them differently. macOS keeps
+# `~/Library`; every other platform takes the XDG data and state directories.
+#
+# Bound once here rather than resolved per call, which is what keeps every
+# consumer's `mock.patch.object` seam working and what makes one process
+# describe one installation throughout. `bind_managed_paths` is the only place
+# they are computed, so the migration that relocates an installation can rebind
+# them from the same rule rather than restating it.
+#
 # The record Kanban reads to find those jobs. Its location is fixed rather than
 # INSTALL_DIR-relative on purpose: a dashboard that never inherits
 # KANBAN_DRAINER_INSTALL_DIR still has to discover an install made with
 # --install-dir, so the record's own path is the one thing that cannot move.
-DISCOVERY_RECORD_PATH = Path(
-    f"{HOME}/Library/Application Support/kanban/pr-drainer/config.json"
-)
-DEFAULT_INSTALL_DIR = DISCOVERY_RECORD_PATH.parent
-INSTALL_DIR = Path(
-    os.environ.get("KANBAN_DRAINER_INSTALL_DIR", DEFAULT_INSTALL_DIR)
-).expanduser()
-CONTROLLER_PATH = INSTALL_DIR / "drain_prs_service.py"
-DRAINER_PATH = INSTALL_DIR / "drain_prs.py"
+DISCOVERY_RECORD_PATH: Path
+DEFAULT_INSTALL_DIR: Path
+INSTALL_DIR: Path
+CONTROLLER_PATH: Path
+DRAINER_PATH: Path
+# One document, at that same fixed location, carries both the installer's keys
+# and every repository's discovery record: --install-dir relocates the script
+# links and the runtime state, not the file Kanban and this service both have
+# to resolve without an environment override.
+CONFIG_PATH: Path
+# Where a --install-dir install made before that consolidation left them. The
+# installer migrates this copy on its next run; until then it is still read.
+LEGACY_CONFIG_PATH: Path
+# The roots the per-repository log and runtime directories hang off. The
+# singleton wrote its own state directly into these; a derived job never does.
+LOG_ROOT: Path
+RUNTIME_ROOT: Path
+
+
+def bind_managed_paths() -> None:
+    """Resolve this process's managed drainer paths, once.
+
+    Called at import, and again only by the installer's Linux migration, which
+    relocates the installation these describe: rebinding from this one rule is
+    what stops the run that moved an installation from continuing to write to
+    where it used to be. Nothing else calls it -- a controller's installation
+    does not move underneath it.
+
+    Paths only. `NTFY_URL` below is the running service's own snapshot of a
+    value read once at startup, and the installer neither consumes it nor
+    notifies, so rebinding it here would refresh nothing any caller can see.
+    """
+    global DISCOVERY_RECORD_PATH, DEFAULT_INSTALL_DIR, INSTALL_DIR
+    global CONTROLLER_PATH, DRAINER_PATH, CONFIG_PATH, LEGACY_CONFIG_PATH
+    global LOG_ROOT, RUNTIME_ROOT
+    DISCOVERY_RECORD_PATH = kanban_config.drainer_record_path()
+    DEFAULT_INSTALL_DIR = DISCOVERY_RECORD_PATH.parent
+    INSTALL_DIR = kanban_config.drainer_install_dir()
+    CONTROLLER_PATH = INSTALL_DIR / "drain_prs_service.py"
+    DRAINER_PATH = INSTALL_DIR / "drain_prs.py"
+    CONFIG_PATH = DISCOVERY_RECORD_PATH
+    LEGACY_CONFIG_PATH = INSTALL_DIR / "config.json"
+    LOG_ROOT = kanban_config.default_drainer_log_dir()
+    RUNTIME_ROOT = INSTALL_DIR / "runtime"
+
+
+bind_managed_paths()
 # The third installed link, named by what this process actually imported rather
 # than by INSTALL_DIR: the module already loaded is the one whose bytes ran.
 CONFIG_MODULE_PATH = Path(kanban_config.__file__)
@@ -109,27 +159,20 @@ SERVICE_MANAGER_MODULE_PATH = Path(service_manager.__file__)
 # baseline, read out of the checkout's own local remote-tracking ref — never
 # fetched, because the audit may not touch the network or repository state.
 SOURCE_BASELINE_REF = "refs/remotes/origin/master"
-# One document, at that same fixed location, carries both the installer's keys
-# and every repository's discovery record: --install-dir relocates the script
-# links and the runtime state, not the file Kanban and this service both have
-# to resolve without an environment override.
-CONFIG_PATH = DISCOVERY_RECORD_PATH
-# Where a --install-dir install made before that consolidation left them. The
-# installer migrates this copy on its next run; until then it is still read.
-LEGACY_CONFIG_PATH = INSTALL_DIR / "config.json"
-# The roots the per-repository log and runtime directories hang off. The
-# singleton wrote its own state directly into these; a derived job never does.
-LOG_ROOT = HOME / "Library" / "Logs" / "kanban" / "pr-drainer"
-RUNTIME_ROOT = INSTALL_DIR / "runtime"
 # The key every repository's record, label, and runtime directory is filed
 # under in the shared document.
 RECORD_REPOSITORIES_KEY = "repositories"
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
+    # UnicodeDecodeError alongside the rest, for the reason `read_json` below
+    # spells out: it is a ValueError rather than an OSError, so bytes that are
+    # not UTF-8 would otherwise escape a reader every caller expects to answer
+    # "nothing readable here" — and a record that is not UTF-8 is exactly a
+    # record nothing can read.
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except (FileNotFoundError, UnicodeDecodeError, OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
 
@@ -1470,6 +1513,23 @@ def service_definition(job: DrainerJob) -> service_manager.ServiceDefinition:
         "PYTHONUNBUFFERED": "1",
         "KANBAN_DRAINER_INSTALL_DIR": str(INSTALL_DIR),
     }
+    # The rest of the context this installation's managed paths were resolved
+    # under. KANBAN_DRAINER_INSTALL_DIR alone pins the install directory and
+    # the runtime root beneath it, but not the discovery record or the log
+    # root: those follow the XDG base directories, and a systemd user manager
+    # does not necessarily export the ones the operator installed under. A job
+    # started without them would resolve `~/.local` instead — writing a second
+    # discovery record nothing reads, and dated logs somewhere its own unit
+    # does not point. Carried only when absolute, which is the same rule the
+    # resolvers themselves apply, so an unusable value is left to fall back on
+    # both sides rather than pinned on one.
+    environment.update(
+        {
+            name: os.environ[name]
+            for name in kanban_config.DRAINER_PATH_VARIABLES
+            if os.path.isabs(os.environ.get(name, ""))
+        }
+    )
     return service_manager.ServiceDefinition(
         identifier=job.label,
         program_arguments=[

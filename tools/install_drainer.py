@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import drain_prs_service
+import kanban_config
 import service_manager
 
 
@@ -40,8 +41,11 @@ import service_manager
 # `tools/service_manager.py`, the identifier derived from it, the definition's
 # path, and the manager target; this installer resolves a job through the
 # controller and reaches the service manager through that same backend rather
-# than restating any of them.
-DEFAULT_INSTALL_DIR = drain_prs_service.DEFAULT_INSTALL_DIR
+# than restating any of them. Where the installation *is* is resolved the same
+# way, through `tools/kanban_config.py`: it is the one module that writes each
+# managed location down, for every platform it has a convention on, and the
+# only one both this installer and the installed controller can import.
+DEFAULT_INSTALL_DIR = kanban_config.drainer_install_dir()
 
 
 class InstallError(RuntimeError):

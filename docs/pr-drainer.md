@@ -76,8 +76,15 @@ with no shell between, the same working directory, environment, and output
 routing, no restart, and no `[Install]` section, so nothing enables it and no
 login starts it.
 
-Everything else this document describes is the same on both, including the
-managed paths below, which still use their macOS `~/Library` shapes on Linux.
+Everything else this document describes is the same on both. The managed paths
+below take each platform's own convention: macOS keeps `~/Library`, and Linux
+uses `$XDG_DATA_HOME/kanban/pr-drainer` for the install directory and the
+discovery record and `$XDG_STATE_HOME/kanban/pr-drainer` for logs, falling back
+to `~/.local/share` and `~/.local/state` when the variable is unset, empty, or
+not an absolute path. Where this document spells a `~/Library` path, read the
+XDG one on Linux. An install a Linux host made before that — under the
+`~/Library` shapes — is found and kept there rather than moved; see
+[Files and logs](#files-and-logs).
 
 Preview the changes:
 
@@ -95,17 +102,19 @@ The installer:
 
 - refuses to run while this repository's drainer is active;
 - refuses to overwrite ordinary files;
-- creates stable links under `~/Library/Application Support/kanban/pr-drainer/`,
-  shared by every repository;
+- creates stable links under this platform's `kanban/pr-drainer` install
+  directory, shared by every repository, or wherever an installation
+  already exists;
 - installs the service definition named for this repository's normalized
   identity — `~/Library/LaunchAgents/com.coghex.drain-prs.<owner>.<name>.plist`
   under launchd, or
   `~/.config/systemd/user/com.coghex.drain-prs.<owner>.<name>.service` under
   systemd;
 - records the backend that wrote it, that job's identifier, the definition's
-  path, and the checkout under this repository's entry in
-  `~/Library/Application Support/kanban/pr-drainer/config.json`, which is how
-  Kanban finds it;
+  path, and the checkout under this repository's entry in the discovery
+  record — which sits in the directory this platform resolves rather than in
+  whichever directory the links went to, so Kanban finds it without inheriting
+  your environment;
 - loads the job without starting it.
 
 Run it once per repository, from that repository's own main checkout. Installing
@@ -156,8 +165,8 @@ Two things do not migrate themselves:
   remote the shared Kanban configuration names, which is the remote Kanban
   itself resolves the board's repository through. To drain a fork's upstream
   under that upstream's name, set `remote_name` in the shared configuration.
-- The old job's logs and runtime state under
-  `~/Library/Logs/kanban/pr-drainer/` and the install directory's `runtime/`.
+- The old job's logs and runtime state under the log root and the install
+  directory's `runtime/`.
   New jobs write into per-repository subdirectories beside them; the old files
   can be deleted once you no longer want them.
 
@@ -229,10 +238,26 @@ the attempt; it does not pre-authorize it.
 Two documented paths drain it without opening Kanban:
 
 - Start the polling service for the whole queue through the installed
-  controller, which performs the same guarded start the `d` key does:
+  controller, which performs the same guarded start the `d` key does. This
+  finds the install directory the way the installer does — the environment
+  override first, then the XDG location and the `~/Library` one — and honours
+  `$XDG_DATA_HOME` only when it is absolute, which is why
+  `${XDG_DATA_HOME:-$HOME/.local/share}` is not the substitution to make. If
+  you installed with `--install-dir` and have not exported
+  `KANBAN_DRAINER_INSTALL_DIR`, set `DRAINER` to that directory yourself: the
+  record stays where this platform resolves it, so nothing here can find the
+  links from it.
 
   ```console
-  CONTROL="$HOME/Library/Application Support/kanban/pr-drainer/drain_prs_service.py"
+  DRAINER="$KANBAN_DRAINER_INSTALL_DIR"
+  if [ -z "$DRAINER" ]; then
+    DATA_HOME="$XDG_DATA_HOME"
+    case "$DATA_HOME" in /*) ;; *) DATA_HOME="$HOME/.local/share" ;; esac
+    DRAINER="$DATA_HOME/kanban/pr-drainer"
+    [ -e "$DRAINER/config.json" ] || [ -L "$DRAINER/config.json" ] ||
+      DRAINER="$HOME/Library/Application Support/kanban/pr-drainer"
+  fi
+  CONTROL="$DRAINER/drain_prs_service.py"
   python3 "$CONTROL" --path /path/to/project --json start
   ```
 
@@ -908,18 +933,29 @@ filename — `coghex/kanban` becomes `coghex.kanban`. It is the same slug the
 job identifier ends with, so the log directory, the runtime directory, and the
 service definition of one repository all carry the same name.
 
-These paths keep their macOS shapes on Linux as well; only the service
-definition differs between the two managers.
+`<record-dir>` and `<log-root>` below are this platform's own conventions.
+On macOS they are `~/Library/Application Support/kanban/pr-drainer` and
+`~/Library/Logs/kanban/pr-drainer`; on Linux, `$XDG_DATA_HOME/kanban/pr-drainer`
+and `$XDG_STATE_HOME/kanban/pr-drainer`, falling back to `~/.local/share` and
+`~/.local/state` when the variable is unset, empty, or not absolute. The
+installer finds an installation that already exists at either spelling — the
+XDG one first — so nothing you already installed has to move.
 
-- Installed links, shared by every repository: `~/Library/Application Support/kanban/pr-drainer/`
+`<install-dir>` is `<record-dir>` too, unless you passed `--install-dir` or set
+`KANBAN_DRAINER_INSTALL_DIR`. Those move the script links and the runtime tree
+beneath them and nothing else, which is why the record and the logs below name
+`<record-dir>` and `<log-root>` rather than `<install-dir>`: Kanban has to find
+the record without inheriting your environment, so that one cannot move.
+
+- Installed links, shared by every repository: `<install-dir>/`
 - Install record Kanban resolves each job through, and the global
   private configuration (`ntfy_url`) that shares it:
-  `~/Library/Application Support/kanban/pr-drainer/config.json` — this path is
+  `<record-dir>/config.json` — this path is
   fixed, and `--install-dir` does not move it. Its `repositories` table holds
   one entry per installed repository, carrying the backend that wrote it, that
   job's identifier, the definition's path, the checkout, and `config_path`.
-- Runtime status and incidents: `~/Library/Application Support/kanban/pr-drainer/runtime/<slug>/`
-- Logs: `~/Library/Logs/kanban/pr-drainer/<slug>/`
+- Runtime status and incidents: `<install-dir>/runtime/<slug>/`
+- Logs: `<log-root>/<slug>/`
 - Service definition: `~/Library/LaunchAgents/com.coghex.drain-prs.<slug>.plist`
   under launchd, or `~/.config/systemd/user/com.coghex.drain-prs.<slug>.service`
   under systemd
@@ -931,14 +967,32 @@ definition differs between the two managers.
   excluded from running concurrently by their shared canonical identity, which
   the lock cannot see.
 
+A Linux host that installed the drainer before these paths took each platform's
+own convention has its installation at the `~/Library` spellings, and it stays
+there: the installer finds an installation wherever it already is rather than
+moving it. Relocating one to this platform's own convention is #367, taking
+over one already at that location is #368, and carrying across what a writer
+installs at a relocated location is #369.
+
 The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Incidents are attributed to the canonical repository rather than to the checkout that raised them, so any clone of that repository can list, acknowledge, and clear them. Stopping the drainer intentionally clears that repository's crash incidents, and no other repository's — a stop ends the supervisor, which is exactly what a crash incident is about. It resolves nothing else: a conflict or cleanup incident stays open across the stop, still naming a debt that is still owed, and clears through its own path once that pull request is mergeable or closed or its last obligation succeeds. Starting the drainer is not gated on an open incident of any kind, and an incident already open when it starts is never mistaken for a startup failure.
 
 ## Manual status
 
-Normal control should happen through Kanban. For diagnosis, run:
+Normal control should happen through Kanban. For diagnosis, run — again
+finding the install directory the way the installer does, and again needing
+`DRAINER` set by hand if you installed with `--install-dir` and have not
+exported `KANBAN_DRAINER_INSTALL_DIR`:
 
 ```console
-CONTROL="$HOME/Library/Application Support/kanban/pr-drainer/drain_prs_service.py"
+DRAINER="$KANBAN_DRAINER_INSTALL_DIR"
+if [ -z "$DRAINER" ]; then
+  DATA_HOME="$XDG_DATA_HOME"
+  case "$DATA_HOME" in /*) ;; *) DATA_HOME="$HOME/.local/share" ;; esac
+  DRAINER="$DATA_HOME/kanban/pr-drainer"
+  [ -e "$DRAINER/config.json" ] || [ -L "$DRAINER/config.json" ] ||
+    DRAINER="$HOME/Library/Application Support/kanban/pr-drainer"
+fi
+CONTROL="$DRAINER/drain_prs_service.py"
 python3 "$CONTROL" --path /path/to/project --json status
 python3 "$CONTROL" --path /path/to/project --json logs --lines 120
 python3 "$CONTROL" --path /path/to/project --json ack --note "conflict resolved by hand"
