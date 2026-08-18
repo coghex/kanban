@@ -152,6 +152,33 @@ coordinator, and for the same reason. The trust rule and its deliberate
 divergence from the reviewer gate's association-based arithmetic are recorded in
 [docs/agent-workflow-contract.md §2.1](../docs/agent-workflow-contract.md#21-issue-solve-solve--solve).
 
+The three document workflows that publish — `$process-design-doc`,
+`$note-problem`, and `$process-report` — bundle the mechanism they delegate to,
+at `skills/process-report/scripts/publish_coordination_doc.py`,
+`skills/process-report/scripts/tracker_transaction.py`, and the
+`skills/process-report/scripts/kanban_config.py` the first of those reads a
+repository's declared coordination paths through. Each is a byte-identical copy
+of the `tools/` module of the same name. All three skills locate the installed
+copies by searching under `$CODEX_HOME` — the same lookup, and the same reason,
+as the PR-flow skills' search for the coordinator — and never resolve them from
+the repository being worked, which tracks none of them. That was issue #370: the
+skills shipped and the modules they require did not, so all three failed closed
+in every repository but Kanban's own, which is the opposite of what this plugin
+is for. The three modules travel as a unit because each loads its siblings from
+beside itself, and `tools/test_document_workflow_contract.py` holds the copies
+identical to their sources, holds each skill's lookup to a bundled path, and
+runs that `find` against a simulated install. An edit to a `tools/` module
+therefore has to be copied into both bundles in the same change; the drift
+failure names the exact `cp` that repairs it.
+
+Eligibility does not travel with the mechanism. For `coghex/kanban` it stays
+[agent-workflow-contract.md §7](../docs/agent-workflow-contract.md#7-document-publication-classification)
+as the publication branch itself carries it; for every other repository it is
+that repository's own `workflow.coordination_paths` declaration, and declaring
+none is the ordinary `not-published` outcome — the approved mutation is still
+applied to the document, and the repository lands it through the pull-request
+lane it already has.
+
 `$issue-review` — and `$autoissue`'s immediate review handoff — resolve the
 same canonical backend the same portable way, through the discovery record at
 `~/Library/Application Support/kanban/issue-review/config.json` that

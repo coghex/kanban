@@ -234,10 +234,25 @@ outcome plainly rather than describing the observation as captured.
 
 ## Publish the approved mutation
 
+**Resolve this bundle's own mechanism first.** The helper ships with this
+plugin rather than with the repository being worked, so it is resolved against
+this plugin's install location and never against `$DOC_ROOT`:
+
+```bash
+PUBLISH_DOC="${CLAUDE_PLUGIN_ROOT}/scripts/publish_coordination_doc.py"
+[ -f "$PUBLISH_DOC" ]
+```
+
+Claude Code substitutes `${CLAUDE_PLUGIN_ROOT}` to this plugin's own install
+location regardless of the invoking working directory, which is what lets this
+workflow run in a repository that tracks no copy of it. An unresolvable helper
+stops the run here rather than after the document has been read. The lookup
+rule this follows is stated in full with the publication step below.
+
 **First, before writing anything, check for an outstanding publication.**
 
 ```bash
-PREFLIGHT="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+PREFLIGHT="$(python3 "$PUBLISH_DOC" \
   --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
   --path "$DOC_RELATIVE_PATH" --check-pending)"
 PREFLIGHT_TIP="$(PREFLIGHT="$PREFLIGHT" python3 -c \
@@ -267,10 +282,10 @@ the working tree. Ask the helper for a scratch path, write the rendered
 document there, and hand it back:
 
 ```bash
-APPROVED="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+APPROVED="$(python3 "$PUBLISH_DOC" \
   --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
   --new-content-file)"
-python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+python3 "$PUBLISH_DOC" \
   --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
   --path "$DOC_RELATIVE_PATH" --content "$APPROVED" \
   --expected-tip "$PREFLIGHT_TIP"
@@ -288,16 +303,25 @@ same one; either way a run reads the other's approved content and publishes it
 under its own document's name. The helper mints a path unique to this
 invocation, which is the property no naming convention here can promise.
 
-Resolve the helper from the already-resolved `$DOC_ROOT` — the local checkout of
-the owning repository — and never from the session's own checkout, a personal
-path, or an inline fallback. These plugins install into repositories that do not
-track it, so a helper that cannot be resolved there fails closed: report that
-publication was not attempted and why, and never publish by hand instead.
+Resolve the helper from this plugin's own bundle — the versioned copy installed
+beside these instructions — and never from the session's own checkout,
+a personal path, or an inline fallback. `$DOC_ROOT` stays exactly what it was:
+the validated local checkout of the owning repository, which is where the helper
+writes and never where the helper itself is found. These plugins install into
+repositories that track no copy of it, so resolving the helper from the owning
+repository fails closed in every repository but Kanban's own — which is the
+defect that older wording mandated. A helper that cannot be resolved in the
+bundle still fails closed: report that publication was not attempted and why,
+and never publish by hand instead.
 
-The helper owns the entire mechanism — eligibility against §7 as the publication
-branch itself carries it, the per-document lock, the baseline, isolation, the
-push, verification by reachability, and the resumption of an unfinished earlier
-publication. Do not reimplement, precede, or compensate for any part of it. Act
+The helper owns the entire mechanism — eligibility, the per-document lock, the
+baseline, isolation, the push, verification by reachability, and the resumption
+of an unfinished earlier publication. Eligibility is the one part that is not
+the same question in every repository, and the helper answers it rather than
+you: for `coghex/kanban` it is §7 as the publication branch itself carries it,
+and for every other owner it is that repository's own
+`workflow.coordination_paths` declaration, which is empty until the repository
+sets it. Do not reimplement, precede, or compensate for any part of it. Act
 on the one structured result it returns:
 
 - **`"status": "published"`.** Say so, and quote the commit it reports together
@@ -307,11 +331,12 @@ on the one structured result it returns:
   the summary is what makes the difference visible.
 - **`"status": "not-published"`.** The document is not direct-publication
   eligible — it is `pr-atomic`, matched no §7 row, is not yet tracked, or
-  belongs to a repository with no coordination lane. The approved mutation is
-  not lost: the helper reports `approved_blob`, recoverable with
-  `git cat-file -p`, and `document_written` says whether it also applied it to
-  the document. Say which it did and why publication was declined. This is the
-  ordinary outcome for a `pr-atomic` document, not a failure of this run.
+  belongs to a repository that declares no coordination path for it. The
+  approved mutation is not lost: the helper reports `approved_blob`,
+  recoverable with `git cat-file -p`, and `document_written` says whether it
+  also applied it to the document. Say which it did and why publication was
+  declined. This is the ordinary outcome for a `pr-atomic` document, not a
+  failure of this run.
 - **Any other status.** The document was not published. Report the three states
   the helper returns — whether the edit exists locally and in which worktree and
   path, whether a local publication commit exists and its ID, and whether the

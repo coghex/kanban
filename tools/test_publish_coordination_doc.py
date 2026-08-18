@@ -42,6 +42,25 @@ def _load():
 publisher = _load()
 
 
+# Issue #370 made eligibility for an owner outside §7 a question about the
+# machine's Kanban configuration, so every case below has to answer it from a
+# known one rather than from whatever the developer running the suite happens
+# to have. An empty directory is "no configuration", which is the documented
+# default and the state a consuming repository that declares nothing is in.
+_CONFIG_ISOLATION = None
+
+
+def setUpModule():
+    global _CONFIG_ISOLATION
+    _CONFIG_ISOLATION = tempfile.TemporaryDirectory()
+    os.environ["XDG_CONFIG_HOME"] = _CONFIG_ISOLATION.name
+
+
+def tearDownModule():
+    os.environ.pop("XDG_CONFIG_HOME", None)
+    _CONFIG_ISOLATION.cleanup()
+
+
 CLASSIFICATION = """# Contract
 
 ## 7. Document publication classification
@@ -1600,6 +1619,142 @@ class PublishTests(unittest.TestCase):
             # Its own document still receives the approved mutation.
             self.assertTrue(result["document_written"])
             self.assertIn("- two", (other.docs / "docs" / "ui-bugs.md").read_text())
+
+    # -- a consuming repository's own declared lane (issue #370) -------------
+
+    def write_config(self, body: str) -> Path:
+        """The Kanban configuration this machine resolves, for this test alone."""
+        target = Path(os.environ["XDG_CONFIG_HOME"]) / "kanban" / "config.toml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+        self.addCleanup(target.unlink, missing_ok=True)
+        return target
+
+    def test_a_consuming_repository_publishes_a_path_it_declares(self):
+        # The lane a repository that does not track §7 declares for itself.
+        # Read through kanban_config.resolve_config, so it is the same
+        # declaration the drainer already honours rather than a second one.
+        self.write_config(
+            '[repositories."coghex/synarchy".workflow]\n'
+            'coordination_paths = ["docs/ui-bugs.md"]\n'
+        )
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Fixture(Path(other_dir), origin_name="synarchy")
+            result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertEqual(result["status"], "published")
+            self.assertTrue(result["remote_contains_commit"])
+            self.assertIn("- two", other.remote_content())
+
+    def test_a_consuming_repository_inherits_the_global_declaration(self):
+        # Normal inheritance, not a repository table only: the resolved view is
+        # the global workflow table merged with any override for this slug.
+        self.write_config(
+            "[workflow]\n"
+            'coordination_paths = ["docs/ui-bugs.md"]\n'
+        )
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Fixture(Path(other_dir), origin_name="synarchy")
+            result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertEqual(result["status"], "published")
+            self.assertIn("- two", other.remote_content())
+
+    def test_a_repository_override_replaces_the_global_declaration(self):
+        # Array replacement rather than union, which is the loader's documented
+        # override rule: a repository that names another document declares no
+        # lane for this one, and inheriting the global list would publish a
+        # document its owner did not declare.
+        self.write_config(
+            "[workflow]\n"
+            'coordination_paths = ["docs/ui-bugs.md"]\n\n'
+            '[repositories."coghex/synarchy".workflow]\n'
+            'coordination_paths = ["docs/drainer-bugs.md"]\n'
+        )
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Fixture(Path(other_dir), origin_name="synarchy")
+            result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertEqual(result["status"], "not-published")
+            self.assertIn("no coordination lane", result["reason"])
+            self.assertTrue(result["document_written"])
+
+    def test_a_declared_path_matches_exactly_and_never_by_prefix(self):
+        # `coordination_paths` entries are exact, case-sensitive, relative
+        # paths -- no globs, no directory prefixes. A directory-shaped entry
+        # therefore declares nothing, rather than quietly acquiring §7's
+        # whole-component matching for a repository §7 does not classify.
+        self.write_config(
+            '[repositories."coghex/synarchy".workflow]\n'
+            'coordination_paths = ["docs/"]\n'
+        )
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Fixture(Path(other_dir), origin_name="synarchy")
+            result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertEqual(result["status"], "not-published")
+            self.assertIn("no coordination lane", result["reason"])
+
+    def test_unreadable_configuration_publishes_and_writes_nothing(self):
+        # Present-but-invalid is not absent. An empty lane would apply the
+        # approved mutation locally and report a terminal `not-published`
+        # outcome for a document whose owner may really have declared it.
+        self.write_config('[repositories."coghex/synarchy".workflow\n')
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Fixture(Path(other_dir), origin_name="synarchy")
+            with self.assertRaises(publisher.PublishError) as caught:
+                other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertEqual(caught.exception.status, "coordination-config-unreadable")
+            self.assertEqual(other.remote_content(), "# UI\n\n- one")
+            self.assertEqual(
+                (other.docs / "docs" / "ui-bugs.md").read_text(), "# UI\n\n- one\n"
+            )
+
+    def test_a_missing_configuration_file_is_an_empty_lane_not_a_failure(self):
+        # Requirement 5: the ordinary outcome for a consuming repository that
+        # has declared nothing, and the state the module is in for every other
+        # case in this class.
+        self.assertFalse(
+            (Path(os.environ["XDG_CONFIG_HOME"]) / "kanban" / "config.toml").exists()
+        )
+        self.assertEqual(
+            publisher.declared_coordination_paths("coghex/synarchy"), (frozenset(), [])
+        )
+
+    def test_a_misspelled_key_is_reported_rather_than_read_as_no_lane(self):
+        # An unknown key is a warning, not an error, so the lane really is
+        # empty -- and the outcome is indistinguishable from having declared
+        # nothing unless the warning travels with it.
+        self.write_config(
+            '[repositories."coghex/synarchy".workflow]\n'
+            'coordination_path = ["docs/ui-bugs.md"]\n'
+        )
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Fixture(Path(other_dir), origin_name="synarchy")
+            result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertEqual(result["status"], "not-published")
+            self.assertIn("coordination_path", result["reason"])
+            self.assertIn("unknown configuration key", result["reason"])
+
+    def test_kanban_own_eligibility_never_consults_configuration(self):
+        # Requirement 6. §7 is tracked beside the documents it classifies, so
+        # Kanban's own lane holds whether or not an operator ever copied
+        # config.toml.example -- and a configuration that named nothing must
+        # not close a lane §7 opens.
+        self.write_config(
+            '[repositories."coghex/kanban".workflow]\ncoordination_paths = []\n'
+        )
+        result = self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(result["status"], "published")
+        self.assertIn("- two", self.fx.remote_content())
+
+    def test_configuration_cannot_open_a_lane_section_7_closed(self):
+        # The other direction of the same boundary: for Kanban itself the
+        # classification decides, so a configuration naming a `pr-atomic`
+        # document does not make it publishable.
+        self.write_config(
+            '[repositories."coghex/kanban".workflow]\n'
+            'coordination_paths = ["docs/design.md"]\n'
+        )
+        result = self.fx.publish("# Design\n\nchanged\n", path="docs/design.md")
+        self.assertEqual(result["status"], "not-published")
+        self.assertIn("pr-atomic", result["reason"])
 
     # -- isolation -----------------------------------------------------------
 

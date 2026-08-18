@@ -520,20 +520,44 @@ assets, which write their own file precisely because they publish nothing.
 
 ### 9.2 Eligibility, and the fail-closed default
 
+Eligibility means exactly one thing: the resolved document's
+repository-relative path is declared a coordination path by the authority for
+its owner —
 [agent-workflow-contract.md §7](agent-workflow-contract.md#7-document-publication-classification)
-is the authoritative classification, and eligibility means exactly one thing:
-the resolved document's repository-relative path is classified `coordination`
-there. **A `pr-atomic` path, and a path no row matches, is never published
-directly** — `pr-atomic` is the fail-closed default for an unmatched path, so an
-unrecognized document is left unpublished rather than guessed into the direct
-lane.
+for `coghex/kanban`, and that repository's own `workflow.coordination_paths`
+for every other owner, as the rest of this section sets out. **A path its own
+authority does not declare is never published directly** — `pr-atomic` is the
+fail-closed default for an unmatched path, so an unrecognized document is left
+unpublished rather than guessed into the direct lane.
 
 §8's ownership resolution is a prerequisite, not a parallel check: a document
 whose owning repository or publication branch could not be verified fails closed
-and stays unpublished. §7 is Kanban's own statement about Kanban, so
-`coghex/kanban` is the only repository with a `coordination` lane here; a
-consuming repository that installed these plugins has none, and neither does a
-fork.
+and stays unpublished.
+
+§7 is Kanban's own statement about Kanban, so it authorizes a `coordination`
+lane for `coghex/kanban` and for no other repository — a fork included. Every
+other owner declares its own lane, in the `workflow.coordination_paths` key §7
+already delegates a consuming repository's classification to: exact,
+case-sensitive, repository-relative paths, read through the same resolved
+configuration `tools/drain_prs.py` reads, with the same global-then-repository
+merge and the same array replacement. The two roots never mix in either
+direction. Kanban's own eligibility is decided from §7 as the publication tip
+itself carries it and never from configuration, so it holds whether or not an
+operator ever copied `config.toml.example`; every other repository's is decided
+from its own declaration alone, so nothing here infers a lane from a file
+extension or a directory.
+
+**A repository that declares nothing has no lane, and that is an ordinary
+outcome rather than an error.** The approved mutation is preserved in the object
+database and applied to the document itself whenever the working tree still
+matches the publication tip, and the run reports `"status": "not-published"`
+with `document_written` true — exactly what a `pr-atomic` document of Kanban's
+own reports, and for the same reason. Such a repository lands the document
+through the pull-request lane it already has; nothing is vendored into it, and
+it tracks no copy of the mechanism. Configuration that exists but cannot be read
+or is invalid is not an absent declaration: it fails closed before anything is
+written or published, because a lane silently read as absent would leave a
+document its owner really did declare publishable sitting in one checkout.
 
 ### 9.3 What a publication may contain
 
@@ -568,6 +592,30 @@ approval precedes publication, one artifact per invocation, and what to report
 on each outcome — and hold no part of the sequence. This contract states the
 same division: what follows is the module's contract, not a transcript of its
 steps.
+
+**The mechanism ships with the assets that invoke it.** `tools/` holds the
+source, and a byte-identical copy of it ships inside each tracked plugin bundle,
+so every declared asset resolves the copy in its own bundle:
+`${CLAUDE_PLUGIN_ROOT}/scripts/` for the Claude commands, and the `$CODEX_HOME`
+plugin cache for the Codex skills, which have no such substitution and locate
+their bundle's copy the way the PR-flow skills locate `review_pr.py`. That is
+the level issue #229 stopped one short of and issue #370 closed: these plugins
+exist to operate on other repositories, and an asset that resolved the module
+from the repository it was operating on was inert in every repository but this
+one. `$DOC_ROOT` remains the validated checkout of the owning repository — where
+the module *writes* — and is never where the module is found. What stays
+forbidden is what that rule was always protecting against: the session's own
+checkout, a personal path, and an inline reimplementation. So does shipping part
+of the set, because the publication and transaction modules load each other from
+beside themselves and the publication module loads the configuration reader from
+beside itself — a bundle carrying one carries all three or none.
+`tools/test_document_workflow_contract.py` holds the copies byte-identical to
+their source, holds every asset's lookup to a bundled one, and drives each
+brand's lookup against a simulated install, while
+`tools/test_consuming_repository_documents.py` runs all six assets' own lookups
+and the helpers they return against a repository that tracks neither `tools/`
+nor §7 — which is the only place the defect was ever observable, since the
+mechanism and the assets were each correct on their own.
 
 **The caller renders the approved document; the module writes it.** A processing
 asset composes the complete approved content and hands it over, and never edits

@@ -31,7 +31,11 @@ ui_style_labels = []
 # Paths whose content coordinates the pipeline rather than building it. The PR
 # drainer may merge a candidate whose only distance from the default branch is
 # a change to these, instead of first rebuilding it on a new base that cannot
-# change its result. Each entry is one exact, case-sensitive, repository-
+# change its result; and in a repository docs/agent-workflow-contract.md
+# section 7 does not classify -- which is every repository but Kanban's own --
+# the document workflows publish exactly these paths straight to the default
+# branch, leaving every other document to the ordinary pull-request lane.
+# Each entry is one exact, case-sensitive, repository-
 # relative path: no globs, no directory prefixes, no extension matching, and a
 # rename counts both endpoints, so configure every path you mean. Empty by
 # default, which requests a branch update for every advance as before. Never

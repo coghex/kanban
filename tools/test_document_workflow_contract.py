@@ -44,6 +44,7 @@ tools/test_agent_workflow_contract.py.
 from __future__ import annotations
 
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -257,8 +258,49 @@ CONTRACT_STATEMENTS = {
     "publication-unmatched-fails-closed": (
         "pr-atomic is the fail-closed default for an unmatched path"
     ),
-    "publication-is-kanban-only": (
-        "coghex/kanban is the only repository with a coordination lane here"
+    # Issue #370 split one classification root into two. §7 still authorizes
+    # Kanban's own lane and nothing else — the half requirement 6 protects —
+    # while every other owner's lane is that owner's own declaration, which is
+    # what makes a consuming repository reachable at all.
+    "publication-section-7-authorizes-kanban-only": (
+        "it authorizes a coordination lane for coghex/kanban and for no other "
+        "repository"
+    ),
+    "publication-other-owners-declare-their-own": (
+        "Every other owner declares its own lane, in the "
+        "workflow.coordination_paths key"
+    ),
+    "publication-kanban-never-consults-configuration": (
+        "Kanban's own eligibility is decided from §7 as the publication tip "
+        "itself carries it and never from configuration"
+    ),
+    "publication-no-declaration-is-not-an-error": (
+        "A repository that declares nothing has no lane, and that is an "
+        "ordinary outcome rather than an error"
+    ),
+    "publication-undeclared-still-applies-the-mutation": (
+        'the run reports "status": "not-published" with document_written true'
+    ),
+    "publication-nothing-is-vendored-into-consumers": (
+        "nothing is vendored into it, and it tracks no copy of the mechanism"
+    ),
+    "publication-unreadable-configuration-fails-closed": (
+        "it fails closed before anything is written or published"
+    ),
+    # The packaging half of §9.4, which is the defect itself: the assets
+    # shipped and the module they invoke did not.
+    "publication-mechanism-ships-with-the-assets": (
+        "The mechanism ships with the assets that invoke it"
+    ),
+    "publication-bundle-is-the-lookup-root": (
+        "every declared asset resolves the copy in its own bundle"
+    ),
+    "publication-doc-root-is-not-the-lookup-root": (
+        "$DOC_ROOT remains the validated checkout of the owning repository — "
+        "where the module writes — and is never where the module is found"
+    ),
+    "publication-mechanism-ships-whole": (
+        "a bundle carrying one carries all three or none"
     ),
     "publication-carries-one-mutation": (
         "A publication carries the single approved mutation to the one eligible "
@@ -410,16 +452,31 @@ PUBLICATION_CLAUSES = {
     "helper-is-the-only-writer": (
         "tools/publish_coordination_doc.py is the only writer of the document"
     ),
-    "resolved-from-the-owning-write-root": (
-        "resolve the helper from the already-resolved $doc_root — the local "
-        "checkout of the owning repository"
+    # Issue #370 turned this clause around. It used to name $DOC_ROOT as the
+    # lookup root, which forbade the one resolution that works in a repository
+    # tracking no copy of the helper — the plugin's own versioned code. What
+    # stayed forbidden is what it was ever protecting against: the session's
+    # checkout, a personal path, and an inline reimplementation.
+    "resolved-from-the-plugin-bundle": (
+        "resolve the helper from this plugin's own bundle — the versioned copy "
+        "installed beside these instructions"
     ),
     "never-a-personal-or-session-path": (
         "never from the session's own checkout, a personal path, or an inline "
         "fallback"
     ),
+    "doc-root-is-not-the-lookup-root": (
+        "$doc_root stays exactly what it was: the validated local checkout of "
+        "the owning repository, which is where the helper writes and never "
+        "where the helper itself is found"
+    ),
+    "owning-root-lookup-is-the-defect": (
+        "these plugins install into repositories that track no copy of it, so "
+        "resolving the helper from the owning repository fails closed in every "
+        "repository but kanban's own"
+    ),
     "missing-helper-fails-closed": (
-        "a helper that cannot be resolved there fails closed"
+        "a helper that cannot be resolved in the bundle still fails closed"
     ),
     "does-not-reimplement-the-mechanism": (
         "do not reimplement, precede, or compensate for any part of it"
@@ -454,7 +511,7 @@ PUBLICATION_CLAUSES = {
 
 # The one command the assets carry. Anything more would be mechanism.
 PUBLICATION_INVOCATION = (
-    'python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \\ '
+    'python3 "$PUBLISH_DOC" \\ '
     '--repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \\ '
     '--path "$DOC_RELATIVE_PATH" --content "$APPROVED" \\ '
     '--expected-tip "$PREFLIGHT_TIP"'
@@ -473,7 +530,7 @@ PUBLICATION_TIP_EXTRACTION = (
 )
 
 PUBLICATION_SCRATCH_INVOCATION = (
-    'APPROVED="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \\ '
+    'APPROVED="$(python3 "$PUBLISH_DOC" \\ '
     '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
     '--new-content-file)"'
 )
@@ -683,7 +740,7 @@ TRANSACTION_INVOCATIONS = (
 )
 
 TRANSACTION_MODULE_INVOCATION = (
-    'python3 "$DOC_ROOT/tools/tracker_transaction.py" \\ '
+    'python3 "$TRACKER_TX" \\ '
     '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
 )
 
@@ -996,6 +1053,71 @@ SECTION_2_FENCE_RE = re.compile(
 
 def contract_text() -> str:
     return CONTRACT_PATH.read_text(encoding="utf-8")
+
+
+# Issue #370. The mechanism the publishing assets delegate to now ships with
+# them, so the mechanism's *packaging* is part of this contract: an asset that
+# installs into a repository tracking no copy of the helper is inert there, and
+# that was true of all six for as long as they resolved it from $DOC_ROOT.
+#
+# `tools/` stays the source. Each bundle carries a byte-identical copy, held
+# identical below, and the three-file set is one unit: the two mechanism
+# modules load each other from beside themselves and the publication module
+# loads the configuration reader from beside itself, so a bundle carrying part
+# of the set carries none of it.
+MECHANISM_SOURCE_DIR = REPO_ROOT / "tools"
+BUNDLE_ROOTS = {
+    "claude": REPO_ROOT / "claude-plugin" / "plugins" / "kanban",
+    "codex": REPO_ROOT / "codex-plugin" / "plugins" / "kanban",
+}
+BUNDLED_MECHANISM = {
+    "claude": "scripts",
+    "codex": "skills/process-report/scripts",
+}
+MECHANISM_MODULES = (
+    "publish_coordination_doc.py",
+    "tracker_transaction.py",
+    "kanban_config.py",
+)
+
+# `Path(__file__).resolve().parent / "<name>"` — how each mechanism module
+# names a sibling it loads at run time. Read out of the source rather than
+# listed, so a module that grows a fourth sibling dependency has to ship it in
+# every bundle rather than only in tools/.
+SIBLING_LOAD_RE = re.compile(
+    r'Path\(__file__\)\.resolve\(\)\.parent\s*/\s*"(?P<name>[\w.]+\.py)"'
+)
+
+# What an asset actually runs: `python3 "$SOME_VAR"`. Deliberately not the
+# helper's own basename — the point of this gate is that no asset names a
+# filesystem location for the helper except through a lookup below.
+HELPER_INVOCATION_RE = re.compile(r'python3 "\$([A-Z][A-Z0-9_]*)"')
+
+# The two brands' bundle-local lookups, each capturing the bundle-relative path
+# it resolves. Claude Code substitutes ${CLAUDE_PLUGIN_ROOT} to the plugin's own
+# install location; Codex has no such substitution, so its skills search the
+# $CODEX_HOME cache the way the PR-flow skills already locate review_pr.py.
+BUNDLE_LOOKUP_RES = {
+    "claude": re.compile(
+        r'^(?P<var>[A-Z][A-Z0-9_]*)="\$\{CLAUDE_PLUGIN_ROOT\}/(?P<relative>[^"]+)"$',
+        re.MULTILINE,
+    ),
+    "codex": re.compile(
+        r'^(?P<var>[A-Z][A-Z0-9_]*)="\$\(find "\$\{CODEX_HOME:-\$HOME/\.codex\}'
+        r'/plugins/cache" -path \'\*/kanban/\*/(?P<relative>[^\']+)\' '
+        r'2>/dev/null \| head -n1\)"$',
+        re.MULTILINE,
+    ),
+}
+
+# The lookup root issue #370 removed. Named as forbidden text so the fix cannot
+# be undone one asset at a time.
+FORBIDDEN_OWNING_ROOT_LOOKUP = "$DOC_ROOT/tools/"
+
+
+def bundle_of(relative_path):
+    return "codex" if relative_path.startswith("codex-plugin/") else "claude"
+
 
 
 def normalized(text: str) -> str:
@@ -2103,6 +2225,197 @@ class SharedStatusVocabularyTests(unittest.TestCase):
                         f"{name}: {path} missing shared form {UNCHECKED_FORM!r}"
                     )
         self.assertEqual(differences, [], "\n".join(differences))
+
+
+class BundledMechanismTests(unittest.TestCase):
+    """Issue #370. The publishing assets ship with the mechanism they require.
+
+    Issue #229 made the assets tracked plugin assets so a pull request could
+    change and verify them, and stopped one level short: the assets shipped and
+    the modules they invoke did not, so every one of them failed closed in the
+    only repositories they exist to serve. What is asserted here is the level
+    below — that whatever carries the mechanism travels with the asset, whole,
+    and that no asset can go back to resolving it from the repository it is
+    operating on.
+    """
+
+    def asset_text(self, path):
+        return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+    def bundled_dir(self, bundle):
+        return BUNDLE_ROOTS[bundle] / BUNDLED_MECHANISM[bundle]
+
+    def test_every_bundle_ships_the_whole_mechanism(self):
+        for bundle in sorted(BUNDLE_ROOTS):
+            for name in MECHANISM_MODULES:
+                with self.subTest(bundle=bundle, module=name):
+                    self.assertTrue(
+                        (self.bundled_dir(bundle) / name).is_file(),
+                        f"the {bundle} bundle does not ship {name}, so every "
+                        "asset that invokes it is inert wherever the bundle "
+                        "installs",
+                    )
+
+    def test_every_bundled_copy_is_identical_to_its_tracked_source(self):
+        # Duplicated rather than shared because each bundle is a self-contained
+        # plugin asset (docs/agent-workflow-contract.md §3), exactly as the two
+        # review coordinators are. Byte equality is what keeps three copies one
+        # mechanism; tools/test_coordinator_parity.py bounds the coordinators'
+        # one reviewed divergence, and this pair has none at all.
+        for bundle in sorted(BUNDLE_ROOTS):
+            for name in MECHANISM_MODULES:
+                with self.subTest(bundle=bundle, module=name):
+                    self.assertEqual(
+                        (self.bundled_dir(bundle) / name).read_bytes(),
+                        (MECHANISM_SOURCE_DIR / name).read_bytes(),
+                        f"{bundle}'s {name} has drifted from tools/{name}; the "
+                        "bundled copies are the same mechanism, not a fork. "
+                        f"Repair: cp tools/{name} "
+                        f"{(self.bundled_dir(bundle) / name).relative_to(REPO_ROOT)}",
+                    )
+
+    def sibling_closure(self):
+        """Every module the mechanism reaches by loading a sibling, transitively.
+
+        Transitive rather than one level, because one level is exactly the
+        distance this issue's defect travelled: the assets shipped, the module
+        they load did not. A fourth module added under any of these would
+        otherwise ship only as far as whoever remembered it.
+        """
+        reached, queue, edges = set(MECHANISM_MODULES), list(MECHANISM_MODULES), []
+        while queue:
+            name = queue.pop()
+            source = (MECHANISM_SOURCE_DIR / name).read_text(encoding="utf-8")
+            for sibling in sorted(set(SIBLING_LOAD_RE.findall(source))):
+                edges.append((name, sibling))
+                if sibling not in reached:
+                    reached.add(sibling)
+                    queue.append(sibling)
+        return reached, edges
+
+    def test_every_sibling_a_module_loads_ships_beside_it_everywhere(self):
+        reached, edges = self.sibling_closure()
+        # Not vacuous: the mutual publication/transaction pair and the
+        # configuration reader are three real sibling loads.
+        self.assertGreaterEqual(len(edges), 3, edges)
+        for name, sibling in edges:
+            for bundle in sorted(BUNDLE_ROOTS):
+                with self.subTest(module=name, sibling=sibling, bundle=bundle):
+                    self.assertTrue(
+                        (self.bundled_dir(bundle) / sibling).is_file(),
+                        f"tools/{name} loads {sibling} from beside itself, so "
+                        f"the {bundle} bundle must ship it too",
+                    )
+        # And the set this module holds byte-identical has to be that closure,
+        # so a newly reached module is copied *and* pinned rather than merely
+        # present.
+        self.assertEqual(
+            sorted(reached),
+            sorted(MECHANISM_MODULES),
+            "MECHANISM_MODULES must name every module the bundled mechanism "
+            "reaches, so each one is held identical to its tracked source",
+        )
+
+    def test_every_publishing_asset_resolves_its_helpers_from_its_own_bundle(self):
+        for path in PUBLISHING_ASSETS:
+            with self.subTest(path=path):
+                bundle = bundle_of(path)
+                text = self.asset_text(path)
+                defined = {
+                    match.group("var"): match.group("relative")
+                    for match in BUNDLE_LOOKUP_RES[bundle].finditer(text)
+                }
+                invoked = set(HELPER_INVOCATION_RE.findall(text))
+                self.assertTrue(invoked, f"{path} invokes no resolved helper")
+                self.assertEqual(
+                    sorted(invoked - set(defined)),
+                    [],
+                    f"{path} runs a helper it never resolved from its bundle",
+                )
+                for variable in sorted(invoked):
+                    resolved = BUNDLE_ROOTS[bundle] / defined[variable]
+                    self.assertTrue(
+                        resolved.is_file(),
+                        f"{path} resolves ${variable} to {defined[variable]}, "
+                        f"which the {bundle} bundle does not ship",
+                    )
+
+    def test_no_declared_asset_looks_the_helper_up_under_the_owning_checkout(self):
+        # The regression this issue closes, stated as forbidden text: the
+        # owning repository is where the helper *writes*, and was never a place
+        # it could be found outside Kanban's own tree.
+        for path in sorted(EXPECTED_DECLARED_PATHS):
+            with self.subTest(path=path):
+                self.assertNotIn(
+                    FORBIDDEN_OWNING_ROOT_LOOKUP,
+                    self.asset_text(path),
+                    f"{path} resolves a helper from the repository it is "
+                    "operating on, which tracks no copy of it",
+                )
+
+    def test_reintroducing_the_owning_root_lookup_is_reported(self):
+        # The planted violation, so the check above cannot pass by finding
+        # nothing to look at.
+        for path in PUBLISHING_ASSETS:
+            with self.subTest(path=path):
+                self.assertIn(
+                    FORBIDDEN_OWNING_ROOT_LOOKUP,
+                    self.asset_text(path).replace(
+                        '"$PUBLISH_DOC"',
+                        '"$DOC_ROOT/tools/publish_coordination_doc.py"',
+                    ),
+                )
+
+    def test_each_brands_lookup_resolves_against_a_simulated_install(self):
+        # The lookups are shell that has to work, not text that has to be
+        # present. Both are driven against a fake install tree here, the way
+        # tools/test_codex_plugin.py drives the coordinator's.
+        for path in PUBLISHING_ASSETS:
+            bundle = bundle_of(path)
+            text = self.asset_text(path)
+            for match in BUNDLE_LOOKUP_RES[bundle].finditer(text):
+                relative = match.group("relative")
+                with self.subTest(path=path, relative=relative):
+                    with tempfile.TemporaryDirectory() as temp:
+                        installed = self.plant(Path(temp), bundle, relative)
+                        self.assertEqual(
+                            self.resolve(Path(temp), bundle, relative), [str(installed)]
+                        )
+
+    def plant(self, temp, bundle, relative):
+        """The helper as a provider's own installer lays it down."""
+        if bundle == "claude":
+            installed = temp / "plugins" / "kanban" / relative
+        else:
+            installed = (
+                temp / "plugins" / "cache" / "kanban" / "kanban" / "1.0.0" / relative
+            )
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        installed.write_text("# stand-in for the installed helper\n", encoding="utf-8")
+        return installed
+
+    def resolve(self, temp, bundle, relative):
+        """What the asset's own lookup finds there."""
+        if bundle == "claude":
+            # ${CLAUDE_PLUGIN_ROOT} is a substitution, so resolution is the
+            # join itself; what is under test is that the joined path is the
+            # one the installer laid down.
+            candidate = temp / "plugins" / "kanban" / relative
+            return [str(candidate)] if candidate.is_file() else []
+        proc = subprocess.run(
+            [
+                "find",
+                str(temp / "plugins" / "cache"),
+                "-path",
+                f"*/kanban/*/{relative}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return [line for line in proc.stdout.splitlines() if line]
+
 
 
 if __name__ == "__main__":
