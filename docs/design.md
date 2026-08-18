@@ -70,7 +70,11 @@ tracker progress, and the on-demand Codex and Claude usage providers are also
 implemented. Malformed tracker diagnostics now fail visibly while preserving
 valid membership and standalone fallbacks. The sidebar also controls and
 monitors the local service-managed PR drainer, which runs as a launchd job on
-macOS and a systemd user unit on Linux. Native GitHub sub-issue membership,
+macOS and a systemd user unit on Linux. The persistent per-repository issue
+approval service now has the same dashboard lifecycle — discovery, status and
+incident decoding, the durable ordered barrier, the start/stop seam, the
+canonical-review interlock, and the board refresh a result requires — while the
+sidebar control that reaches that seam is not yet built. Native GitHub sub-issue membership,
 canonical v2 issue-review sessions, embedded revision questions, and
 the first resumable issue-solve flow are implemented. The external
 usage-command escape hatch is also implemented. Broader provider-version
@@ -2482,11 +2486,150 @@ above are unchanged, and persistence the user switched off is not a failure.
   its definition deleted, and its one entry dropped from the discovery record,
   leaving every other repository's install, the shared links, and this
   repository's own runtime state, logs and incidents untouched.
+- Kanban also discovers, monitors, and controls the persistent per-repository
+  issue approval service. It is a separate job from the PR drainer, with its own
+  installer, its own `issue-approval` namespace, its own discovery record at
+  `~/Library/Application Support/kanban/issue-approval/config.json`, its own
+  locks, and its own status and incident types. The two share no state: each
+  service's last observation, incident set, and in-flight transition are held
+  separately, so neither can overwrite the other's, and neither controller owns
+  the other's process. What they do share is the bounded, process-grouped
+  invocation both drive their controllers through.
+- That record's `repositories` table is a discriminated union on `backend` in
+  the shape the drainer's is, but an entry naming no backend is refused rather
+  than read as launchd: this service's installer has written the discriminator
+  since its first release, so an entry without one was not written by it. Kanban
+  selects the entry by its own case-folded repository identity, reads the
+  definition's path from it, and reads the controller command from the
+  definition itself — `ProgramArguments` from a plist, `ExecStart` from a unit
+  file — dropping the definition's own `run` subcommand and any `--path` or
+  `--repo` it carries, then rebinding both to this dashboard's checkout and
+  identity. Which hosts have a service at all is decided by probing capability
+  rather than by reading a platform name — macOS with `launchctl`, otherwise a
+  `systemctl` whose `--user` manager answers a version read — the same question
+  the installer's own backend selection asks, so a Linux container or a
+  logged-out session with no reachable user manager is refused by both. Such a
+  host is reported as its own condition, unsupported and offering no control,
+  rather than as a missing installation or as a stopped service; every other
+  failure names `tools/install_issue_approval.py` as the repair.
+- The controller's status document is decoded against a pinned schema and
+  version and against the board's own repository identity. Each state it
+  publishes — checking/starting, healthy running, ordered barrier, intentional
+  stop, child failure, and controller failure — decodes to its own distinct
+  value, and an absent, unreadable, wrongly versioned, foreign, or unrecognized
+  document decodes to an explicit unknown naming what was wrong. Unknown is
+  never "off": nothing that may act only against a settled stop acts on it.
+- The ordered barrier is read from the controller's durable barrier record
+  rather than from its live state, so it survives an intentional stop and a
+  restart, and a `running` document that still names one is reported as
+  barriered. It is warning severity naming its issue —
+  `on · unresolved incident · Issue #N requests changes` while the service is
+  on, and the drainer's red `stopped · unresolved incident · <summary>`
+  composition once it is stopped — rather than a process failure. The stopped
+  activity and the open warning are both kept; neither is flattened into the
+  other, and a barrier whose warning was acknowledged is still reported from
+  the record.
+- The approval service is polled on the same ten-second cadence as the drainer,
+  which doubles the idle controller-poll cost recorded above on a machine where
+  both are installed. Start and stop are controller operations run
+  asynchronously, with an optimistic `starting…`/`stopping…` state held only
+  until an authoritative observation returns and a busy flag that refuses a
+  second concurrent toggle. Every invocation is bounded by a timeout and runs as
+  the leader of its own process group, which is terminated and confirmed empty
+  when that timeout expires. An authoritative poll or completion clears the busy
+  flag and supersedes the optimistic state; a failed poll during a transition
+  changes nothing; and a failed transition clears the busy flag, so control can
+  never stay permanently refused. A completion applies only while the optimistic
+  transition it belongs to still stands: another press supersedes it by starting
+  a newer transition, and an authoritative poll supersedes it by settling the
+  one it belongs to. Either way it is discarded rather than partly applied,
+  because the busy flag it would have cleared is already clear and the status it
+  would have written is older than the one it would replace — which is how a
+  newly polled barrier would otherwise be overwritten by the answer the
+  transition itself returned.
+- Ordering between the two is established rather than assumed, in two steps,
+  because neither alone is enough. Each poll carries the transition count read
+  immediately before its controller query was issued, and a poll stamped with an
+  older count is discarded: its query began before a press, so it describes the
+  service as it was beforehand. That establishes only that a poll began after
+  the press, though, not that it began after the *command* the press handed off
+  — which runs in its own thread and takes time to have any effect. So the
+  content decides the rest: while a transition is in flight, a start is settled
+  only by an observation of a service that is up and a stop only by one of a
+  service that is down. Anything else leaves the optimistic state standing.
+  Without both, a poll issued in the gap between the press and the service
+  moving would clear the busy flag on a reading of the state the press is about
+  to change, and the real completion would then be discarded as late — leaving
+  the board reporting off while the service runs. The completion arrives whether
+  the command succeeded or failed, so nothing here can leave control refused
+  forever.
+- An observation this dashboard cannot vouch for is forgotten rather than kept.
+  A failed poll outside a transition, and a failed transition, both drop the
+  cached observation along with the status, because the canonical-review
+  interlock reads that observation: a last reading that happened to carry a live
+  backend pass would otherwise go on refusing card reviews indefinitely on the
+  strength of something this side has just disowned.
+- While the service owns a live canonical review, a competing canonical stage
+  started from a card is refused with a notice to wait for it or stop the
+  service — including for the same issue, since the service reviews in numeric
+  order and cannot be asked to skip to one. "Owns a live review" is the live
+  backend child, not the service being switched on: the controller sleeps
+  between passes with no child at all, so an enabled but idle service refuses
+  nothing. A barriered service refuses nothing either, even while it does have a
+  child, because at a barrier that child is the read-only gate check, so the
+  selected card's revision and the rereview after it stay available. A revision
+  is never refused at all, since it runs the interactive coordinator and
+  performs no canonical backend review.
+- That refusal is asked three times, and the third is the one that matters. The
+  press and the spawn decision both read the board's newest observation, which
+  is up to a whole poll interval old. The launch then asks the controller
+  directly, from the thread that would start the competing child — and it asks
+  *after* that launch's preflight rather than before it, because the preflight
+  runs several probes and the service can take the backend's lock while they do.
+  Directly before the spawn is the only position a reading of live state cannot
+  go stale before the thing it guards. All three fail open on a service that
+  cannot be read or is not installed, since none of them is what makes
+  concurrent work safe: the backend's own approval lock remains the
+  cross-process authority, and these exist so an operator is told to wait rather
+  than watching a review queue behind one they cannot see.
+- A service result that may have changed GitHub requires a board refresh, queued
+  behind a fetch already in flight rather than dropped. The result is identified
+  by the controller's own count of the passes that may have changed GitHub,
+  published in the status document beside the identity of the run that counted
+  them — the run's own identity, not its start stamp, because that stamp is
+  second-granular and a controller that died and restarted inside one second
+  would publish the same one, making two runs that each mutated once look like
+  a single run that mutated once. That count
+  is the only trace of a mutation a poller can rely on. Every other one is
+  transient: the last outcome is overwritten by the pass after it, the child PID
+  is cleared when that child exits, and the stamp resolves only to a second — so
+  an advancing pass followed promptly by an idle one leaves a document saying
+  nothing happened, however often the dashboard looks. A count that only rises
+  survives any sampling rate, any difference in it is exactly the mutations
+  still owed a refresh, and several mutations observed at once collapse into the
+  one fetch that sees all of them. A fresh run starts the count again, which is
+  why the run is carried beside it.
+- Two states are read ahead of that count rather than through it, because both
+  are durable and neither is something a count summarises: entering the ordered
+  barrier, and entering a failure. A poll cannot miss either however coarsely it
+  samples, and each is entered once.
+- A controller that publishes no count — one predating it — falls back to
+  reading those transient fields, which is the best a reader can do alone: it
+  catches a mutating pass while the pass after it is still running, and a stop
+  that landed on top of one. That fallback is why the count is additive rather
+  than required. The dashboard's very first observation is
+  judged by those same rules rather than taken as a silent baseline: the startup
+  fetch and the first poll are started concurrently, so a review published after
+  that fetch read GitHub and before the first poll answered falls between them,
+  and no later observation repairs it once the documents stop changing. The
+  refresh never disturbs the service's own status: the durable warning or error
+  it reported is what still stands after it.
 - Worker results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, resize, provider result, active review
   event/spinner tick, or explicit terminal repaint.
-- There are no periodic network or Git polls. The sole timer is the ten-second
-  local PR drainer status check.
+- There are no periodic network or Git polls. The only timers are the two
+  ten-second local service status checks: the PR drainer's and the issue
+  approval service's.
 - Board and usage refresh independently.
 - Codex and Claude failures are independent of one another.
 - A refresh records its completion time and whether displayed data is fresh,

@@ -33,7 +33,14 @@ import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime, utc)
 import qualified Graphics.Vty.Attributes as Vty
+import Kanban.ApprovalService
+  ( ApprovalActivity (..),
+    ApprovalState (..),
+    ApprovalStatus (..),
+    ApprovalUnavailable (..),
+  )
 import Kanban.CLI (BorderPolicy (..), Options (..))
+import Data.IORef (IORef, newIORef)
 import Kanban.Card (displayWidth)
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
@@ -791,7 +798,8 @@ renderCase frameCase = do
   channel <- newBChan 1
   refreshCoordinator <- inertRefreshCoordinator
   historyTraversal <- newHistoryTraversal
-  let state = frameCase.frameCaseState (restingState channel refreshCoordinator historyTraversal)
+  approvalEpoch <- newIORef 0
+  let state = frameCase.frameCaseState (restingState channel refreshCoordinator historyTraversal approvalEpoch)
   pure (renderFrameCells (themeFor state.appOptions) (frameCase.frameCaseWidth, frameCase.frameCaseHeight) (drawApplication state))
 
 withOptions :: (Options -> Options) -> AppState -> AppState
@@ -799,8 +807,8 @@ withOptions change state = state {appOptions = change state.appOptions}
 
 -- | The state every case starts from: the fixture board, the fixture usage
 -- snapshots, and a resting value for everything else that can reach a frame.
-restingState :: BChan AppEvent -> RefreshCoordinator BoardRefreshOutcome -> HistoryTraversal -> AppState
-restingState channel refreshCoordinator historyTraversal =
+restingState :: BChan AppEvent -> RefreshCoordinator BoardRefreshOutcome -> HistoryTraversal -> IORef Int -> AppState
+restingState channel refreshCoordinator historyTraversal approvalEpoch =
   AppState
     { appRepository = Repository "/fixture/kanban" "coghex" "kanban",
       appBoard = fixtureBoard,
@@ -844,6 +852,13 @@ restingState channel refreshCoordinator historyTraversal =
       -- a failed discovery leaves behind.
       appDrainerIncidents = Nothing,
       appDrainerBusy = False,
+      appApprovalController = Left (ApprovalUndiscoverable "no issue approval service in tests"),
+      appApprovalStatus = ApprovalStatus ApprovalOff "off" ApprovalServiceStopped Nothing Nothing,
+      appApprovalIncidents = Just [],
+      appApprovalBusy = False,
+      appApprovalTransition = 0,
+      appApprovalEpoch = approvalEpoch,
+      appApprovalResult = Nothing,
       appDirectMergePending = Nothing,
       appDirectMergeResult = Nothing,
       appBoardRefreshQueued = False,

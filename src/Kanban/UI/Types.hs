@@ -42,6 +42,7 @@ where
 
 
 import Brick.BChan (BChan )
+import Data.IORef (IORef)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
@@ -49,6 +50,14 @@ import Data.Time (TimeZone, UTCTime )
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
+import Kanban.ApprovalService
+  ( ApprovalController,
+    ApprovalIncident (..),
+    ApprovalObservation (..),
+    ApprovalResult,
+    ApprovalStatus (..),
+    ApprovalUnavailable,
+  )
 import Kanban.Drainer
   ( DirectMergeOutcome,
     DrainerController,
@@ -524,6 +533,16 @@ data AppEvent
   | ClaudeRefreshFinished (Either ProviderError UsageSnapshot)
   | DrainerStatusRefreshed (Either Text DrainerObservation)
   | DrainerToggleFinished (Either Text DrainerObservation)
+  | -- | The transition generation current when this poll's controller query
+    -- was /issued/, then its result. A poll that began before a toggle press
+    -- carries a read taken before it, so it is discarded rather than allowed
+    -- to settle a transition it never saw.
+    ApprovalStatusRefreshed Int (Either Text ApprovalObservation)
+  | -- | The transition generation the completed toggle belongs to, then its
+    -- result. A completion whose generation another press has superseded is
+    -- discarded rather than applied, so a slow start cannot restore its
+    -- optimistic state over the stop that replaced it.
+    ApprovalToggleFinished Int (Either Text ApprovalObservation)
   | DirectMergeFinished Int (Either Text DirectMergeOutcome)
   | ReviewBackendStarted (Either Text ReviewClient)
   | ReviewProtocolEvent ReviewEvent
@@ -638,6 +657,35 @@ data AppState = AppState
     -- the controller reported no such set at all. See 'DrainerSourceState'.
     appDrainerIncidents :: Maybe [DrainerIncident],
     appDrainerBusy :: Bool,
+    -- | The issue approval service's controller, or why there is none. An
+    -- unsupported host is kept apart from every other failure so nothing
+    -- downstream can offer control the host cannot honour (requirement 10).
+    appApprovalController :: Either ApprovalUnavailable ApprovalController,
+    -- | The approval service's last observation, held apart from
+    -- 'appDrainerStatus' so neither service's state can overwrite the other's.
+    appApprovalStatus :: ApprovalStatus,
+    -- | The last observed set of the approval service's open incidents, or
+    -- 'Nothing' whenever no successful observation stands, on the same
+    -- reasoning as 'appDrainerIncidents'.
+    appApprovalIncidents :: Maybe [ApprovalIncident],
+    appApprovalBusy :: Bool,
+    -- | Which start or stop of the approval service this dashboard is waiting
+    -- on. Bumped by every press, and carried by the handoff, so a completion
+    -- can say which transition it belongs to.
+    appApprovalTransition :: Int,
+    -- | The same count, in a cell the status monitor can read.
+    --
+    -- The monitor is a plain 'IO' loop with no view of this record, and the
+    -- press that bumps 'appApprovalTransition' is a pure transition that
+    -- cannot write to one. This is the seam between them: the press's handoff
+    -- publishes the new count here, and the monitor stamps each poll with
+    -- whatever it reads immediately before issuing that poll's query. That is
+    -- what lets a poll say which transition it predates.
+    appApprovalEpoch :: IORef Int,
+    -- | The result identity the last applied observation carried, which is what
+    -- keeps one service result from requiring a board refresh twice. 'Nothing'
+    -- until the first observation establishes a baseline.
+    appApprovalResult :: Maybe ApprovalResult,
     -- | The pull request a direct @m@ merge is running for, if one is. Held
     -- apart from 'appDrainerStatus', which reports the launchd service and
     -- has nothing to say about a run this dashboard started instead of it.

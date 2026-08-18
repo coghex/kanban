@@ -44,7 +44,8 @@ module Spec.Support.Process
     withFakeCanonicalReviewer,
     runBoundedCanonicalCommand,
     canonicalSessionLogText,
-    fakeController
+    fakeController,
+    fakeApprovalController
   )
 where
 
@@ -60,6 +61,7 @@ import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (UTCTime (..))
 import Kanban.Domain
+import Kanban.ApprovalService (ApprovalBackend (..), ApprovalController (..))
 import Kanban.Drainer (DrainerBackend (..), DrainerController (..))
 import Kanban.Process
   ( ManagedProcess,
@@ -514,6 +516,16 @@ fakeController temporaryRoot scriptLines = do
   ByteString.writeFile scriptPath (ByteString.unlines ("#!/bin/sh" : scriptLines))
   setFileMode scriptPath 0o700
   pure (DrainerController scriptPath [] DrainerLaunchd)
+
+-- | The same fixture for the issue approval service, written to its own file
+-- so a test may stand one of each up in one temporary directory without either
+-- overwriting the other.
+fakeApprovalController :: FilePath -> [ByteString.ByteString] -> IO ApprovalController
+fakeApprovalController temporaryRoot scriptLines = do
+  let scriptPath = temporaryRoot </> "approve-issues-controller"
+  ByteString.writeFile scriptPath (ByteString.unlines ("#!/bin/sh" : scriptLines))
+  setFileMode scriptPath 0o700
+  pure (ApprovalController scriptPath [] ApprovalLaunchd)
 
 -- | The PID a fixture recorded for itself. Read only after the invocation
 -- under test has returned, by which point the shell has long since written
