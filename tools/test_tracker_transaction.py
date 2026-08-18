@@ -22,6 +22,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -41,6 +42,25 @@ def _load(name, filename):
 
 tracker = _load("_kanban_tracker_transaction_under_test", "tracker_transaction.py")
 publisher = _load("_kanban_publish_helper_for_tracker", "publish_coordination_doc.py")
+
+
+# Issue #370 made eligibility for an owner outside §7 a question about the
+# machine's Kanban configuration, so every case below has to answer it from a
+# known one rather than from whatever the developer running the suite happens
+# to have. An empty directory is "no configuration", which is the documented
+# default and the state a consuming repository that declares nothing is in.
+_CONFIG_ISOLATION = None
+
+
+def setUpModule():
+    global _CONFIG_ISOLATION
+    _CONFIG_ISOLATION = tempfile.TemporaryDirectory()
+    os.environ["XDG_CONFIG_HOME"] = _CONFIG_ISOLATION.name
+
+
+def tearDownModule():
+    os.environ.pop("XDG_CONFIG_HOME", None)
+    _CONFIG_ISOLATION.cleanup()
 
 
 CLASSIFICATION = """# Contract
@@ -1495,6 +1515,51 @@ class TrackerTransactionTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, "resolution-unverified")
         self.assertIn(expected, caught.exception.message)
         self.assertEqual(self.fx.check()["status"], "outstanding")
+
+    def test_an_unreadable_lane_declaration_stops_a_local_resolution(self):
+        # Issue #370: outside §7 a document's lane comes from its owner's own
+        # configuration, which can be present and unreadable. An unknown lane
+        # may not clear a record — resolving against the working tree is
+        # admissible only for a document that provably has none — so the
+        # failure arrives as a named tracker status rather than as a lane read
+        # as absent.
+        config = Path(os.environ["XDG_CONFIG_HOME"]) / "kanban" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            '[repositories."otherorg/product".workflow\n', encoding="utf-8"
+        )
+        self.addCleanup(config.unlink, missing_ok=True)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            tracker.local_resolution_permitted(
+                self.fx.docs,
+                {"repository": "otherorg/product", "document": "docs/ui-bugs.md"},
+                "master",
+            )
+        self.assertEqual(
+            caught.exception.status, "publication-classification-unavailable"
+        )
+        self.assertIn("could not be decided", caught.exception.message)
+
+    def test_a_declared_lane_outside_section_7_refuses_a_local_resolution(self):
+        # The other side of the same branch, so the status above is a real
+        # failure rather than the only outcome this path has: a repository that
+        # does declare the document publishes it to the branch, and a record for
+        # such a document is never resolvable from the working tree.
+        config = Path(os.environ["XDG_CONFIG_HOME"]) / "kanban" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            '[repositories."otherorg/product".workflow]\n'
+            'coordination_paths = ["docs/ui-bugs.md"]\n',
+            encoding="utf-8",
+        )
+        self.addCleanup(config.unlink, missing_ok=True)
+        permitted, why_not = tracker.local_resolution_permitted(
+            self.fx.docs,
+            {"repository": "otherorg/product", "document": "docs/ui-bugs.md"},
+            "master",
+        )
+        self.assertFalse(permitted)
+        self.assertIn("publishes directly to master", why_not)
 
     def test_an_unchecked_entry_carrying_the_link_does_not_resolve(self):
         # The interrupted run's own signature: the issue exists and the number

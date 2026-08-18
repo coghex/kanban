@@ -80,6 +80,9 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
 ]
 
 # The tracked Claude plugin's own packaged workflows (issue #77): the same
@@ -105,6 +108,9 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
+    "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
+    "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
+    "claude-plugin/plugins/kanban/scripts/kanban_config.py",
 ]
 
 # Both bundles' vendored trusted-comment issue-spec helper (issue #238). Each is
@@ -115,6 +121,22 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
 TRUSTED_SPEC_SURFACE_FILES = {
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py": {"gh"},
+}
+
+# Issue #370's vendored document mechanism, covered exactly the way the
+# trusted-comment helper above is. Each bundle carries a byte-identical copy of
+# the three tools/ modules the document workflows invoke, so each copy's own
+# external commands are reconciled against the manifest rather than inheriting
+# the tracked original's row. The configuration reader spawns nothing at all,
+# which is a pin rather than an omission: a future edit that made it shell out
+# would have to declare that here.
+DOCUMENT_MECHANISM_SURFACE_FILES = {
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py": {"git"},
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py": {"git"},
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py": set(),
+    "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py": {"git"},
+    "claude-plugin/plugins/kanban/scripts/tracker_transaction.py": {"git"},
+    "claude-plugin/plugins/kanban/scripts/kanban_config.py": set(),
 }
 
 # The seven drafting and canonical issue-review assets vendored by issue #118,
@@ -197,6 +219,12 @@ DOCUMENT_SURFACE_FILES = [
 # added a third shape: both note-problem variants invoke `python3` without ever
 # reaching tools/tracker_transaction.py, because they publish an appended
 # observation to an existing report while mutating no tracker.
+# Issue #370 added `find` and `head` to all three Codex document skills. Their
+# helpers ship with the bundle rather than with the repository being worked, and
+# Codex has no ${CLAUDE_PLUGIN_ROOT} substitution, so each skill locates its
+# bundle's installed copy under $CODEX_HOME exactly as the PR-flow skills locate
+# review_pr.py. The Claude commands reach the same copies through the
+# substitution and so still invoke neither.
 DOCUMENT_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/design-epic.md": {"git", "awk", "gh"},
     "claude-plugin/plugins/kanban/commands/process-design-doc.md": {
@@ -211,14 +239,14 @@ DOCUMENT_SURFACE_EXPECTED_COMMANDS = {
     },
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": {"git", "awk", "gh"},
     "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": {
-        "git", "awk", "gh", "python3",
+        "git", "awk", "gh", "python3", "find", "head",
     },
     "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": {"git", "awk", "gh"},
     "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md": {
-        "git", "awk", "gh", "python3",
+        "git", "awk", "gh", "python3", "find", "head",
     },
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": {
-        "git", "awk", "gh", "python3",
+        "git", "awk", "gh", "python3", "find", "head",
     },
 }
 
@@ -737,6 +765,32 @@ class AgentWorkflowContractTests(unittest.TestCase):
             row["token"] for row in self.manifest if row["kind"] == "executable"
         }
         for relative_path, expected in sorted(TRUSTED_SPEC_SURFACE_FILES.items()):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+
+    def test_the_vendored_document_mechanism_is_scanned_and_declared(self):
+        # Issue #370's counterpart of the trusted-spec pin above. Each bundle's
+        # copy of the mechanism is a member of its brand's surface list, so its
+        # commands are already reconciled; what this adds is that dropping one
+        # from a list fails a test rather than silently un-scanning a vendored
+        # asset, and that the extractor really recovers something from the two
+        # modules that spawn anything.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path, expected in sorted(DOCUMENT_MECHANISM_SURFACE_FILES.items()):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,

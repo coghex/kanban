@@ -367,11 +367,28 @@ multiple drafts.
 Use this section for the approved `EPIC` entry and for an approved child
 disposition alike. Both mutate the tracker, so both take every step below.
 
+**Resolve this bundle's own mechanism first.** Both helpers ship with this
+plugin rather than with the repository being worked, and Kanban spawns this
+workflow with the *worked* repository as the working directory, so locate the
+installed copies under `$CODEX_HOME` (default `~/.codex`) rather than against
+`$DOC_ROOT` or a path relative to the current directory:
+
+```bash
+PUBLISH_DOC="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/*/skills/process-report/scripts/publish_coordination_doc.py' 2>/dev/null | head -n1)"
+TRACKER_TX="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/*/skills/process-report/scripts/tracker_transaction.py' 2>/dev/null | head -n1)"
+[ -n "$PUBLISH_DOC" ] && [ -n "$TRACKER_TX" ]
+```
+
+The two resolve as one unit — each loads the other from beside itself — so a
+bundle carrying one without the other carries neither, and an unresolvable
+helper stops the run here rather than after the first mutation. The lookup rule
+this follows is stated in full with the publication step below.
+
 **First, before any tracker mutation, check for an outstanding publication or
 tracker transaction.**
 
 ```bash
-PREFLIGHT="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+PREFLIGHT="$(python3 "$PUBLISH_DOC" \
   --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
   --path "$DOC_RELATIVE_PATH" --check-pending)"
 PREFLIGHT_TIP="$(PREFLIGHT="$PREFLIGHT" python3 -c \
@@ -433,7 +450,7 @@ the first one runs**, because a run that dies afterwards leaves an unchanged
 document, a clear preflight, and issues that already exist:
 
 ```bash
-python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+python3 "$TRACKER_TX" \
   --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
   --acquire --approved --publication-tip "$PREFLIGHT_TIP" --plan - <<'PLAN'
 {"entry_key": "<EPIC or the stable slice ID>",
@@ -451,9 +468,9 @@ preflight cannot both proceed; the loser stops rather than mutating GitHub
 beside the winner. The record is shared across every linked worktree of this
 repository, so a later invocation resolving a different `$DOCS_WT` still sees
 it. `tools/tracker_transaction.py` is the whole mechanism — acquisition, every
-transition, and the resolution check — and it is resolved from the
-already-resolved `$DOC_ROOT` exactly as the publication helper is. Do not
-reimplement any part of it, and never edit a transaction reference by hand. If
+transition, and the resolution check — and it is resolved from this plugin's
+own bundle exactly as the publication helper is. Do not reimplement any part of
+it, and never edit a transaction reference by hand. If
 it cannot be resolved, created, read, or updated, stop before the first
 irreversible action and report that; an unreadable transaction is never read as
 no transaction.
@@ -471,11 +488,11 @@ returned before the next step starts; that gap is the only window in which a
 mutation can be unaccounted for, and closing it is what this record is for.
 
 ```bash
-python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+python3 "$TRACKER_TX" \
   --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
   --begin-step 0 --approved
 # ... run exactly that one approved mutation ...
-python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+python3 "$TRACKER_TX" \
   --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
   --confirm-step 0 --begin-token "$BEGIN_TOKEN" --identity - <<'IDENTITY'
 {"kind": "issue-create", "id": "<number>", "url": "<url>",
@@ -582,7 +599,7 @@ publication before you hand it over, so an interruption inside publication is
 distinguishable from one before it:
 
 ```bash
-python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+python3 "$TRACKER_TX" \
   --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
   --publication-pending
 ```
@@ -595,10 +612,10 @@ the working tree. Ask the helper for a scratch path, write the rendered
 document there, and hand it back:
 
 ```bash
-APPROVED="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+APPROVED="$(python3 "$PUBLISH_DOC" \
   --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
   --new-content-file)"
-python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+python3 "$PUBLISH_DOC" \
   --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
   --path "$DOC_RELATIVE_PATH" --content "$APPROVED" \
   --expected-tip "$PREFLIGHT_TIP"
@@ -615,16 +632,25 @@ same one; either way a run reads the other's approved content and publishes it
 under its own document's name. The helper mints a path unique to this
 invocation, which is the property no naming convention here can promise.
 
-Resolve the helper from the already-resolved `$DOC_ROOT` — the local checkout of
-the owning repository — and never from the session's own checkout, a personal
-path, or an inline fallback. These plugins install into repositories that do not
-track it, so a helper that cannot be resolved there fails closed: report that
-publication was not attempted and why, and never publish by hand instead.
+Resolve the helper from this plugin's own bundle — the versioned copy installed
+beside these instructions — and never from the session's own checkout,
+a personal path, or an inline fallback. `$DOC_ROOT` stays exactly what it was:
+the validated local checkout of the owning repository, which is where the helper
+writes and never where the helper itself is found. These plugins install into
+repositories that track no copy of it, so resolving the helper from the owning
+repository fails closed in every repository but Kanban's own — which is the
+defect that older wording mandated. A helper that cannot be resolved in the
+bundle still fails closed: report that publication was not attempted and why,
+and never publish by hand instead.
 
-The helper owns the entire mechanism — eligibility against §7 as the publication
-branch itself carries it, the per-document lock, the baseline, isolation, the
-push, verification by reachability, and the resumption of an unfinished earlier
-publication. Do not reimplement, precede, or compensate for any part of it. Act
+The helper owns the entire mechanism — eligibility, the per-document lock, the
+baseline, isolation, the push, verification by reachability, and the resumption
+of an unfinished earlier publication. Eligibility is the one part that is not
+the same question in every repository, and the helper answers it rather than
+you: for `coghex/kanban` it is §7 as the publication branch itself carries it,
+and for every other owner it is that repository's own
+`workflow.coordination_paths` declaration, which is empty until the repository
+sets it. Do not reimplement, precede, or compensate for any part of it. Act
 on the one structured result it returns:
 
 - **`"status": "published"`.** Say so, and quote the commit it reports together
@@ -634,11 +660,11 @@ on the one structured result it returns:
   the summary is what makes the difference visible.
 - **`"status": "not-published"`.** The document is not direct-publication
   eligible — it is `pr-atomic`, matched no §7 row, or belongs to a repository
-  with no coordination lane. The approved mutation is not lost: the helper
-  reports `approved_blob`, recoverable with `git cat-file -p`, and
-  `document_written` says whether it also applied it to the document. Say which
-  it did and why publication was declined. This is the ordinary outcome for a
-  `pr-atomic` document, not a failure of this run.
+  that declares no coordination path for it. The approved mutation is not
+  lost: the helper reports `approved_blob`, recoverable with
+  `git cat-file -p`, and `document_written` says whether it also applied it to
+  the document. Say which it did and why publication was declined. This is the
+  ordinary outcome for a `pr-atomic` document, not a failure of this run.
 - **Any other status.** The document was not published. Report the three states
   the helper returns — whether the edit exists locally and in which worktree and
   path, whether a local publication commit exists and its ID, and whether the
@@ -652,7 +678,7 @@ fact that a commit landed. Reachability proves a commit reached the branch; it
 proves nothing about whether that commit carried this disposition:
 
 ```bash
-python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+python3 "$TRACKER_TX" \
   --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
   --resolve --source branch --branch "$DOC_BRANCH"
 ```

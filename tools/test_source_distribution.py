@@ -162,6 +162,21 @@ PROVIDER_MANIFESTS = (
     "codex-plugin/plugins/kanban/.codex-plugin/plugin.json",
 )
 
+# Issue #370's vendored document mechanism, asserted by exact name rather than
+# left to the whole-tree rule above. A workflow that ships without the modules
+# it invokes is inert wherever it installs -- the defect that issue reports --
+# and "the tree ships" is the guarantee that was already true while these files
+# existed only under tools/. Naming them here is what makes an unpacked release
+# prove it carries them.
+BUNDLED_MECHANISM_MODULES = (
+    "claude-plugin/plugins/kanban/scripts/kanban_config.py",
+    "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
+    "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
+)
+
 # What each `tools/setup_workflows.py` component installs from. Keyed to that
 # module's own COMPONENTS tuple, so a new component cannot land without a
 # stated source bundle.
@@ -398,6 +413,15 @@ class SourceDistributionTest(unittest.TestCase):
             f"{alias.ALIAS_NAME} reached {self.archive.name} without resolving "
             f"to {alias.CONTRACT_NAME}'s content, so an unpacked release hands "
             "a Codex session a contract that is not the one it ships.",
+        )
+
+    def test_the_bundled_document_mechanism_ships_with_both_bundles(self):
+        self.assert_present(
+            BUNDLED_MECHANISM_MODULES,
+            "Both provider bundles must carry the publication, tracker "
+            "transaction, and configuration modules their document workflows "
+            "invoke; a bundle that ships the workflows without them installs "
+            "a command that fails closed in every repository.",
         )
 
     def test_provider_bundle_manifests_ship(self):

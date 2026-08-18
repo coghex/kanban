@@ -643,6 +643,17 @@ than any list repeated here. Two of those rows are directories —
 workflow beneath it, so the documents those rows reach are more numerous than
 the rows themselves.
 
+The drainer is not the only reader. In a repository
+[agent-workflow-contract §7](agent-workflow-contract.md#7-document-publication-classification)
+does not classify — which is every repository but Kanban's own — the packaged
+document workflows take this same key as their direct-publication lane, so a
+path listed here is also one those workflows publish straight to the default
+branch (issue #370). That is the same statement about the same documents read
+twice, which is why it is one key: a document whose content cannot change a
+build result is a document a coordination mutation can land on its own. A
+repository that declares nothing keeps both defaults — a branch update for
+every advance, and the ordinary pull-request lane for every document.
+
 The drainer merges past an advance only when all of this holds:
 
 - The candidate's `mergeStateStatus` is `BEHIND`.
