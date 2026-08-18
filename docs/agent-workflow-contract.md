@@ -436,12 +436,19 @@ arithmetic, which §2.3 owns.
   canonical GitHub repository, named for the identifier
   `tools/service_manager.py` derives from that repository's normalized
   identity. Kanban names none of them: it selects this repository's entry in
-  the discovery record `tools/drain_prs_service.py` writes at
-  `~/Library/Application Support/kanban/pr-drainer/config.json`, resolves the
+  the discovery record `tools/drain_prs_service.py` writes — at that module's
+  own resolved location, which is `~/Library/Application Support/kanban/pr-drainer/config.json`
+  on macOS and the XDG one on Linux (§5) — resolves the
   definition's path from that entry, then reads the command out of the
   definition itself — `ProgramArguments` from the plist through
   `/usr/bin/plutil`, `ExecStart` from the unit file read directly — which stays
-  authoritative for what the service manager will actually run. That entry is a
+  authoritative for what the service manager will actually run. Which location
+  that is, is the controller's answer and not yet the dashboard's:
+  `src/Kanban/Drainer.hs` still spells the macOS one itself, so until PATH-3
+  gives it the same resolver a Linux host discovers an XDG-installed drainer
+  from the Python side and not from the board. That window is deliberate and
+  bounded — `docs/managed_paths_design.md` accepts it — rather than a
+  disagreement about where the record is. That entry is a
   discriminated union: it names the `backend` that wrote it, and carries that
   backend's own `launchd_label`/`plist_path` or `systemd_unit`/`unit_path`.
   An entry naming no backend at all is the shape written before that field

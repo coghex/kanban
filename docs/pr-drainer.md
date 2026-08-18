@@ -246,7 +246,8 @@ Two documented paths drain it without opening Kanban:
   DATA_HOME="$XDG_DATA_HOME"
   case "$DATA_HOME" in /*) ;; *) DATA_HOME="$HOME/.local/share" ;; esac
   DRAINER="$DATA_HOME/kanban/pr-drainer"
-  [ -f "$DRAINER/config.json" ] || DRAINER="$HOME/Library/Application Support/kanban/pr-drainer"
+  [ -e "$DRAINER/config.json" ] || [ -L "$DRAINER/config.json" ] ||
+    DRAINER="$HOME/Library/Application Support/kanban/pr-drainer"
   CONTROL="$DRAINER/drain_prs_service.py"
   python3 "$CONTROL" --path /path/to/project --json start
   ```
@@ -969,7 +970,8 @@ finding the install directory the way the installer does:
 DATA_HOME="$XDG_DATA_HOME"
 case "$DATA_HOME" in /*) ;; *) DATA_HOME="$HOME/.local/share" ;; esac
 DRAINER="$DATA_HOME/kanban/pr-drainer"
-[ -f "$DRAINER/config.json" ] || DRAINER="$HOME/Library/Application Support/kanban/pr-drainer"
+[ -e "$DRAINER/config.json" ] || [ -L "$DRAINER/config.json" ] ||
+    DRAINER="$HOME/Library/Application Support/kanban/pr-drainer"
 CONTROL="$DRAINER/drain_prs_service.py"
 python3 "$CONTROL" --path /path/to/project --json status
 python3 "$CONTROL" --path /path/to/project --json logs --lines 120
