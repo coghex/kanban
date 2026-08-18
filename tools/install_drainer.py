@@ -690,6 +690,11 @@ def _selected_install_dir(install_dir: Path) -> Iterator[None]:
     """
     previous = os.environ.get(kanban_config.DRAINER_INSTALL_DIR_ENV)
     os.environ[kanban_config.DRAINER_INSTALL_DIR_ENV] = str(install_dir)
+    # Immediately, not when the relocation gets there: the preflight resolves
+    # jobs through these constants too -- deciding which definitions are stale
+    # by rendering them -- so leaving it until later would judge them against
+    # the very directory this context exists to overrule, and settle nothing.
+    drain_prs_service.bind_managed_paths()
     try:
         yield
     finally:

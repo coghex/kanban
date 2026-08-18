@@ -1051,6 +1051,34 @@ class LegacyMigrationTests(LegacyMigrationFixture):
             third = self.install(self.widgets)
         self.assertIsNone(third["legacy_migration"])
 
+    def test_a_settled_in_place_install_ignores_an_inherited_override(self):
+        # The two rules meeting: an explicit `--install-dir` wins over an
+        # inherited override, and a settled installation is not a migration.
+        # Deciding staleness through constants still bound to the inherited
+        # directory would render every sibling as different, turn a settled
+        # host back into a migration, and then refuse the install outright
+        # because some other repository's drainer happened to be running.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        inherited = self.root / "inherited-custom"
+        with self.in_place_xdg():
+            drain_prs_service.bind_managed_paths()
+            self.install(self.widgets, self.legacy_install)
+            with mock.patch.dict(
+                os.environ,
+                {kanban_config.DRAINER_INSTALL_DIR_ENV: str(inherited)},
+            ):
+                # A process that *started* with the override, which is what
+                # binds the module's constants to the inherited directory —
+                # the state the preflight would otherwise judge staleness by.
+                drain_prs_service.bind_managed_paths()
+                self.assertEqual(drain_prs_service.INSTALL_DIR, inherited)
+                self.active.add(
+                    self.backend.service_identifier(self.slug("acme/gadgets"))
+                )
+                result = self.install(self.widgets, self.legacy_install)
+        self.assertIsNone(result["legacy_migration"])
+        self.assertFalse(inherited.exists())
+
     def test_it_migrates_when_the_log_root_is_already_its_own_destination(self):
         # `$XDG_STATE_HOME` naming `~/Library/Logs` is an absolute value this
         # host is entitled to set, and it makes the log root its own
