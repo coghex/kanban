@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import urllib.error
@@ -591,6 +592,12 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
             os.unlink(tmp_name)
 
 
+# Which documents this thread already holds the lock for, so a transition can
+# hold one across the write that ends it. Per thread rather than per process:
+# two threads contending for one document must still contend.
+_HELD_LOCKS = threading.local()
+
+
 @contextlib.contextmanager
 def document_lock(path: Path) -> Iterator[None]:
     """Serializes read-modify-write on a shared JSON document.
@@ -603,7 +610,23 @@ def document_lock(path: Path) -> Iterator[None]:
     Kanban to find it through. The lock lives beside the document rather than
     on it because the document is replaced atomically, which would drop a lock
     held on the old inode.
+
+    Re-entrant within one thread. Holding it across a wider transition than a
+    single document write is what serializes that transition against another
+    process, and every such transition ends in a write that asks for the lock
+    again -- `flock` on a second descriptor of the same file blocks against
+    itself, so without this the only way to serialize a transition would be to
+    not serialize it. Re-entry is a pass-through: the outermost holder owns the
+    descriptor and releases it, and nothing outside this process sees any
+    difference.
     """
+    resolved = path.absolute()
+    held = getattr(_HELD_LOCKS, "paths", None)
+    if held is None:
+        held = _HELD_LOCKS.paths = set()
+    if resolved in held:
+        yield
+        return
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.parent.chmod(0o700)
     lock_path = path.with_name(path.name + ".lock")
@@ -615,8 +638,10 @@ def document_lock(path: Path) -> Iterator[None]:
         raise ServiceError(f"Refusing unsafe config lock path: {lock_path}") from exc
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
+        held.add(resolved)
         yield
     finally:
+        held.discard(resolved)
         os.close(descriptor)
 
 
@@ -1604,6 +1629,32 @@ def retire_legacy_job(job: DrainerJob) -> dict[str, Any] | None:
     }
 
 
+def require_current_installation() -> None:
+    """Refuse if this process's managed paths no longer name the installation
+    the host has.
+
+    They are resolved once, at import. An installer that relocates the shared
+    installation underneath a running controller leaves this process naming a
+    directory that is gone, and writing a definition from those paths installs
+    a job pointing at a controller that no longer exists -- and then fails at
+    the record it can no longer reach, leaving that definition behind.
+
+    Asked under the record lock, so a relocation has either not started or
+    finished: before it, this is the installation; after it, the answer has
+    moved and there is nothing here worth writing. A fresh process resolves
+    the new location and is unaffected, which is what makes re-running the
+    repair.
+    """
+    current = kanban_config.drainer_record_path()
+    if current != DISCOVERY_RECORD_PATH:
+        raise ServiceError(
+            f"The PR drainer installation this process resolved at "
+            f"{DISCOVERY_RECORD_PATH} has been relocated to {current}. Nothing "
+            "was written. Re-run the command; a new process resolves the "
+            "installation that is there now."
+        )
+
+
 def install_job(job: DrainerJob) -> dict[str, Any]:
     ensure_dirs(job)
     manager = service_backend().backend_name()
@@ -1623,16 +1674,25 @@ def install_job(job: DrainerJob) -> dict[str, Any]:
     retired = retire_legacy_job(job)
 
     backend = service_backend()
-    backend.write_definition(service_definition(job))
+    # The definition and the record are one transition, held under the record's
+    # own lock. Writing the definition outside it is what let an installer
+    # relocating the shared installation and a controller still bound to the
+    # old one interleave: the definition landed unguarded, and only then did
+    # this ask for a lock the relocation was holding. That left a job named in
+    # the record that has moved, by a definition naming a controller that has
+    # been removed.
+    with document_lock(DISCOVERY_RECORD_PATH):
+        require_current_installation()
+        backend.write_definition(service_definition(job))
 
-    # Written from the definition on disk, before the service manager is asked
-    # to load it: the record describes where the job is, so it has to be true
-    # the moment the job exists. Every install path reaches here — `install`,
-    # and the refresh `start_service` performs — so no route can leave the
-    # record stale.
-    record = write_discovery_record(job)
+        # Written from the definition on disk, before the service manager is
+        # asked to load it: the record describes where the job is, so it has to
+        # be true the moment the job exists. Every install path reaches here —
+        # `install`, and the refresh `start_service` performs — so no route can
+        # leave the record stale.
+        record = write_discovery_record(job)
 
-    backend.load_definition(job.label)
+        backend.load_definition(job.label)
     return {
         "installed": True,
         "repository": job.identity,

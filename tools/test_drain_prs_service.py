@@ -209,6 +209,17 @@ class RedirectedControllerTestCase(unittest.TestCase):
             patched = mock.patch.object(drain_prs_service, name, value)
             patched.start()
             self.addCleanup(patched.stop)
+        # And the resolver those constants were bound from, because the module
+        # asks it whether the installation it resolved is still the one the
+        # host has. Redirecting the constants alone would leave every case
+        # here looking like a controller whose installation had moved.
+        patched = mock.patch.object(
+            drain_prs_service.kanban_config,
+            "drainer_record_path",
+            return_value=self.record,
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
 
         # The launchd artifacts belong to the backend, so they are redirected
         # on the module that owns them rather than on the controller.
@@ -794,6 +805,65 @@ class BackendDelegationTests(RedirectedControllerTestCase):
         )
         self.assertEqual(result["target"], "fake-manager/fake-service.acme.widgets")
         self.assertEqual(self.service_manager_commands(), [])
+
+    def test_the_definition_is_written_under_the_records_own_lock(self):
+        # The definition and the record are one transition. Writing the
+        # definition outside the lock is what let an installer relocating the
+        # shared installation and a controller still bound to the old one
+        # interleave — the definition landing unguarded, and only then this
+        # asking for a lock the relocation was holding.
+        written = threading.Event()
+        failed = []
+
+        def install():
+            try:
+                with mock.patch.object(
+                    drain_prs_service,
+                    "status_snapshot",
+                    return_value={"state": "stopped"},
+                ):
+                    drain_prs_service.install_job(self.job)
+            except BaseException as exc:  # noqa: BLE001 - reported, not handled
+                failed.append(str(exc))
+            finally:
+                written.set()
+
+        with drain_prs_service.document_lock(self.record):
+            thread = threading.Thread(target=install, daemon=True)
+            thread.start()
+            # Long enough to have written a definition, were it free to.
+            self.assertFalse(written.wait(0.4))
+            self.assertEqual(self.backend.names(), [])
+        thread.join(5)
+
+        self.assertEqual(failed, [])
+        self.assertEqual(
+            self.backend.names(),
+            ["write_definition", "load_definition"],
+        )
+
+    def test_installing_refuses_once_its_installation_has_been_relocated(self):
+        # A controller resolves its managed paths once, at import. An
+        # installer that relocates the shared installation underneath it
+        # leaves this process naming a directory that is gone, and a
+        # definition written from those paths would name a controller that no
+        # longer exists — then fail at the record it can no longer reach,
+        # leaving that definition behind.
+        with (
+            mock.patch.object(
+                drain_prs_service, "status_snapshot", return_value={"state": "stopped"}
+            ),
+            mock.patch.object(
+                drain_prs_service.kanban_config,
+                "drainer_record_path",
+                return_value=self.root / "somewhere-else" / "config.json",
+            ),
+        ):
+            with self.assertRaises(drain_prs_service.ServiceError) as raised:
+                drain_prs_service.install_job(self.job)
+        self.assertIn("has been relocated", str(raised.exception))
+        # Nothing was written from the paths that had moved.
+        self.assertEqual(self.backend.names(), [])
 
     def test_a_legacy_singleton_is_retired_before_the_replacement_is_written(self):
         self.backend.legacy_installed = True
