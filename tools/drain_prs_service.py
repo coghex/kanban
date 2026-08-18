@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import urllib.error
@@ -591,6 +592,12 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
             os.unlink(tmp_name)
 
 
+# Which documents this thread already holds the lock for. Per thread rather
+# than per process, so two threads contending for one document still contend;
+# what this makes safe is one thread asking for a lock it is already inside.
+_HELD_DOCUMENT_LOCKS = threading.local()
+
+
 @contextlib.contextmanager
 def document_lock(path: Path) -> Iterator[None]:
     """Serializes read-modify-write on a shared JSON document.
@@ -603,7 +610,26 @@ def document_lock(path: Path) -> Iterator[None]:
     Kanban to find it through. The lock lives beside the document rather than
     on it because the document is replaced atomically, which would drop a lock
     held on the old inode.
+
+    Re-entrant within one thread. A transition wider than a single document
+    write -- installing a job writes its definition, its record entry and then
+    asks the manager to load it -- is only serialized against another process
+    by holding this across the whole of it, and the write that ends such a
+    transition asks for the same lock again. `flock` on a second descriptor of
+    one file blocks against itself, so without re-entry the only way to hold
+    the lock across a transition would be to not hold it at all.
+
+    Re-entry is a pass-through: the outermost holder owns the descriptor and is
+    the only one that closes it, so leaving a nested context releases nothing
+    and another process stays blocked until the transition really ends.
     """
+    resolved = path.absolute()
+    held = getattr(_HELD_DOCUMENT_LOCKS, "paths", None)
+    if held is None:
+        held = _HELD_DOCUMENT_LOCKS.paths = set()
+    if resolved in held:
+        yield
+        return
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.parent.chmod(0o700)
     lock_path = path.with_name(path.name + ".lock")
@@ -615,8 +641,10 @@ def document_lock(path: Path) -> Iterator[None]:
         raise ServiceError(f"Refusing unsafe config lock path: {lock_path}") from exc
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
+        held.add(resolved)
         yield
     finally:
+        held.discard(resolved)
         os.close(descriptor)
 
 
@@ -1623,16 +1651,29 @@ def install_job(job: DrainerJob) -> dict[str, Any]:
     retired = retire_legacy_job(job)
 
     backend = service_backend()
-    backend.write_definition(service_definition(job))
+    # One critical section over the three steps that install a job, rather than
+    # one per document write. Writing the definition outside the record's lock
+    # is what let two of these interleave: the definition landed unguarded, and
+    # only then did this ask for a lock another installer or start was holding
+    # -- so a job could be named in the record by one run and described on disk
+    # by another. Mutual exclusion, not a transaction: nothing is rolled back
+    # here, and a step that fails still fails where it stands.
+    #
+    # The span is exactly the contiguous sequence. Retiring the singleton stays
+    # ahead of it, because it is about a job this one replaces rather than
+    # about this record; `start_service`'s kick stays after it, because a job
+    # that has been asked to run is no longer being installed.
+    with document_lock(DISCOVERY_RECORD_PATH):
+        backend.write_definition(service_definition(job))
 
-    # Written from the definition on disk, before the service manager is asked
-    # to load it: the record describes where the job is, so it has to be true
-    # the moment the job exists. Every install path reaches here — `install`,
-    # and the refresh `start_service` performs — so no route can leave the
-    # record stale.
-    record = write_discovery_record(job)
+        # Written from the definition on disk, before the service manager is
+        # asked to load it: the record describes where the job is, so it has to
+        # be true the moment the job exists. Every install path reaches here —
+        # `install`, and the refresh `start_service` performs — so no route can
+        # leave the record stale.
+        record = write_discovery_record(job)
 
-    backend.load_definition(job.label)
+        backend.load_definition(job.label)
     return {
         "installed": True,
         "repository": job.identity,
