@@ -17,7 +17,7 @@ concrete precondition
 ## Processing status
 
 - [x] EPIC. Vendor the personal workflow commands as tracked plugin assets — [#373]
-- [ ] VEND-0. Establish the shared-source mechanism for vendored commands
+- [x] VEND-0. Establish the shared-source mechanism for vendored commands — [#375]
 - [ ] VEND-1. Vendor triage
 - [ ] VEND-2. Vendor retriage
 - [ ] VEND-3. Vendor backlog-review
