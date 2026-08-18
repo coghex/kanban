@@ -1125,7 +1125,12 @@ search step and nothing else, which is what `mandatory: no` records.
   outright rather than recording anything. This is
   the one place two of these documents are held at once, and the order is
   always the legacy record before the destination's; every other writer holds
-  exactly one, so there is no cycle to deadlock against.
+  exactly one, so there is no cycle to deadlock against. A refusal puts back
+  the directory mode taking that lock changed, but never removes the lock file
+  itself: unlinking one a writer may be queued on is how two writers end up
+  holding different inodes and losing each other's entries, and an empty lock
+  file the next write recreates anyway is the smaller thing to leave. A dry run
+  takes no lock at all, so it leaves nothing to put back.
   A writer that arrives *after* the removal is the one case no lock reaches:
   it creates the directory afresh and opens a lock file this transition never
   held, so it contends with nothing. What it wrote is carried across rather

@@ -15,6 +15,7 @@ from unittest import mock
 
 import drain_prs_service
 import install_drainer
+from install_drainer import _is_plain_file as _is_plain_file_path
 import kanban_config
 import service_manager
 
@@ -803,6 +804,22 @@ class LegacyMigrationFixture(unittest.TestCase):
         # `~/Library` record and nothing under XDG.
         drain_prs_service.bind_managed_paths()
 
+    def assert_no_destination_install(self):
+        """No installation at the destination: no links, no record, no trees.
+
+        The `config.json.lock` the document protocol creates may remain, and
+        with it the directory holding it. It is never unlinked — removing a
+        lock a writer may be queued on is how two writers end up locking
+        different inodes and losing each other's entries — so this asserts
+        what an installation is, rather than that the directory is absent.
+        """
+        if self.xdg_install.exists():
+            self.assertEqual(
+                sorted(entry.name for entry in self.xdg_install.iterdir()),
+                ["config.json.lock"],
+            )
+        self.assertFalse(self.xdg_logs.exists())
+
     def record(self, path):
         return json.loads(path.read_text(encoding="utf-8"))
 
@@ -938,7 +955,7 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertTrue((self.legacy_install / "config.json").is_file())
         self.assertTrue((self.legacy_install / "runtime").is_dir())
         self.assertTrue(self.legacy_logs.is_dir())
-        self.assertFalse(self.xdg_install.exists())
+        self.assert_no_destination_install()
 
     def test_it_carries_the_runtime_state_of_a_custom_install_dir_repository(self):
         # `--install-dir` moves a job's script links and its runtime root while
@@ -1494,18 +1511,16 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         # installation standing beside a retained legacy one is the split state
         # the refusal exists to prevent, and the XDG-first probe would then
         # hide the legacy siblings.
-        self.assertFalse(self.xdg_install.exists())
+        self.assert_no_destination_install()
         self.assertFalse(self.xdg_logs.exists())
         self.assertTrue((self.legacy_install / "config.json").is_file())
         self.assertTrue((self.legacy_install / "runtime").is_dir())
         self.assertTrue(self.legacy_logs.is_dir())
 
-    def test_a_refusal_leaves_behind_no_lock_file_and_no_changed_mode(self):
-        # Taking the lock is itself a mutation: it creates `config.json.lock`
-        # and chmods the directory holding it. Both happen before the preflight
-        # has decided anything, so a refusal would otherwise report that
-        # nothing was changed over a file that was not there and a mode that
-        # was not that.
+    def test_a_refusal_puts_back_the_mode_taking_the_lock_changed(self):
+        # Taking the lock chmods the directory holding the document, before the
+        # preflight has decided anything — so a refusal would otherwise report
+        # that nothing was changed over a mode that was not that.
         self.seed_legacy_install(self.widgets, self.gadgets)
         lock = self.legacy_install / "config.json.lock"
         lock.unlink(missing_ok=True)
@@ -1517,8 +1532,49 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         with self.assertRaises(install_drainer.InstallError):
             self.install(self.widgets)
 
-        self.assertFalse(os.path.lexists(lock))
         self.assertEqual(self.legacy_install.stat().st_mode & 0o777, 0o755)
+        # The lock file itself stays. Unlinking it would end the serialization
+        # it exists for, and it is a managed artifact the next write of the
+        # document creates again in any case.
+        self.assertTrue(_is_plain_file_path(lock))
+
+    def test_a_writer_queued_across_a_refusal_still_commits_exactly_once(self):
+        # The serialization has to survive a refusal, not just a migration. A
+        # writer that queued on the legacy record while the preflight ran must
+        # still be the only one writing it, and must find every repository
+        # still there when it does.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        legacy_record = self.legacy_install / "config.json"
+        self.active.add(self.backend.service_identifier(self.slug("acme/gadgets")))
+        started = threading.Event()
+
+        def contender():
+            started.set()
+            drain_prs_service.update_json_document(
+                legacy_record, lambda document: {**document, "queued": True}
+            )
+
+        thread = threading.Thread(target=contender, daemon=True)
+        real_preflight = install_drainer.preflight_legacy_migration
+
+        def watched(*args, **kwargs):
+            thread.start()
+            started.wait(2)
+            time.sleep(0.3)
+            return real_preflight(*args, **kwargs)
+
+        with mock.patch.object(
+            install_drainer, "preflight_legacy_migration", watched
+        ):
+            with self.assertRaises(install_drainer.InstallError):
+                self.install(self.widgets)
+        thread.join(5)
+
+        document = self.record(legacy_record)
+        self.assertTrue(document["queued"])
+        self.assertEqual(
+            sorted(document["repositories"]), ["acme/gadgets", "acme/widgets"]
+        )
 
     def test_it_refuses_while_any_recorded_repository_has_a_live_job(self):
         self.seed_legacy_install(self.widgets, self.gadgets)
@@ -1567,7 +1623,7 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertEqual(
             (self.legacy_install / "notes.txt").read_text(encoding="utf-8"), "mine\n"
         )
-        self.assertFalse(self.xdg_install.exists())
+        self.assert_no_destination_install()
 
     def test_it_refuses_when_a_recorded_sibling_cannot_be_inspected(self):
         # Rewriting a sibling's definition depends on recovering its checkout
@@ -1622,7 +1678,7 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertTrue(
             (self.custom / "runtime" / self.slug("acme/widgets") / "incidents").is_dir()
         )
-        self.assertFalse(self.xdg_install.exists())
+        self.assert_no_destination_install()
 
     def test_it_refuses_an_ordinary_file_wearing_a_managed_name(self):
         # A successful migration deletes the legacy directory whole, so what
@@ -1641,7 +1697,7 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertEqual(
             impostor.read_text(encoding="utf-8"), "my own notes, not a link\n"
         )
-        self.assertFalse(self.xdg_install.exists())
+        self.assert_no_destination_install()
 
     def test_a_failed_sibling_rewrite_is_rolled_back_whole(self):
         # The one failure the preflight cannot rule out. Without an undo it
@@ -1673,7 +1729,7 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         # refusal that reported nothing was installed while leaving an
         # installation behind would be the split state this all exists to
         # prevent.
-        self.assertFalse(self.xdg_install.exists())
+        self.assert_no_destination_install()
         # Every definition is byte-identical to what it was, including the one
         # that had already been rewritten before the failure.
         for identity, before in units.items():
@@ -1722,7 +1778,7 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertNotIn("could not be undone", str(raised.exception))
         # Nothing at either destination root, including the directories the
         # first job's rewrite created before the second one failed.
-        self.assertFalse(self.xdg_install.exists())
+        self.assert_no_destination_install()
         self.assertFalse(self.xdg_logs.exists())
         self.assertTrue((self.legacy_install / "config.json").is_file())
 
@@ -1872,7 +1928,7 @@ class LegacyMigrationTests(LegacyMigrationFixture):
 
         # Nothing partial left at either destination root, and the source
         # trees are untouched.
-        self.assertFalse(self.xdg_install.exists())
+        self.assert_no_destination_install()
         self.assertFalse(self.xdg_logs.exists())
         for identity in ("acme/widgets", "acme/gadgets"):
             slug = self.slug(identity)
@@ -1981,7 +2037,7 @@ class LegacyMigrationTests(LegacyMigrationFixture):
             self.install(self.widgets)
         self.assertIn("did not put there", str(raised.exception))
         self.assertEqual((cache / "notes.txt").read_text(encoding="utf-8"), "mine\n")
-        self.assertFalse(self.xdg_install.exists())
+        self.assert_no_destination_install()
 
     def test_it_refuses_a_legacy_record_it_cannot_read_as_a_document(self):
         # Answering "no repositories" for a record that does not say would

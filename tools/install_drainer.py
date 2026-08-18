@@ -727,22 +727,24 @@ def _locked_legacy_record(migration: LegacyMigration) -> Iterator[None]:
     """The legacy record's lock, with the marks taking it leaves undone if the
     run does not go through.
 
-    Locking is itself a mutation. `document_lock` creates a `config.json.lock`
-    beside the document and chmods the directory holding it to 0700, and both
-    happen before the preflight has decided anything -- so a refusal for a live
-    sibling, an unreadable record, or an occupied destination would report that
-    nothing was changed while leaving behind a file that was not there and a
-    mode that was not that. Both are recorded before the lock is taken and put
-    back on every way out of this but one.
+    Locking is itself a mutation: `document_lock` chmods the directory holding
+    the document to 0700, before the preflight has decided anything. A refusal
+    for a live sibling, an unreadable record, or an occupied destination would
+    otherwise report that nothing was changed over a mode that was not that,
+    so it is recorded before the lock is taken and put back on every way out
+    of this but a completed relocation, which has nothing to put back because
+    the directory holding it is gone.
 
-    That one is a completed relocation, which has nothing to put back because
-    the directory holding them is gone -- which is also what distinguishes it
-    from a dry run, whose whole contract is to leave the host as it found it.
+    The lock file `document_lock` creates is deliberately *not* removed again.
+    Unlinking it would end the serialization it exists for: a writer that
+    queued on it holds that inode, and once the path is free the next writer
+    creates a different one -- leaving two writers locking different files and
+    both updating the shared record, which is the lost entry the lock prevents.
+    It is a managed artifact of the protocol, the next write of the document
+    creates it again anyway, and an empty lock file is a far smaller thing than
+    a dropped repository. A dry run avoids the question rather than answering
+    it, by not taking the lock at all.
     """
-    lock_path = migration.source_record.with_name(
-        migration.source_record.name + ".lock"
-    )
-    lock_existed = os.path.lexists(lock_path)
     mode = (
         migration.source.stat().st_mode & 0o7777
         if _is_plain_directory(migration.source)
@@ -758,11 +760,8 @@ def _locked_legacy_record(migration: LegacyMigration) -> Iterator[None]:
         # be the one path that reports having changed nothing while having
         # created a file and altered a mode. A relocation that finished has
         # nothing to put back, because what held them is gone.
-        if _is_plain_directory(migration.source):
-            if not lock_existed and os.path.lexists(lock_path):
-                lock_path.unlink()
-            if mode is not None:
-                migration.source.chmod(mode)
+        if _is_plain_directory(migration.source) and mode is not None:
+            migration.source.chmod(mode)
 
 
 def _rebuilt_job(job: RecordedJob) -> drain_prs_service.DrainerJob:
@@ -1070,22 +1069,15 @@ def _restore_file(path: Path) -> Callable[[], None]:
 
 
 def _restore_document(path: Path) -> Callable[[], None]:
-    """An undo for a JSON document *and* the lock file writing it creates.
+    """An undo for a JSON document.
 
-    `document_lock` puts a `<name>.lock` beside the document, so a destination
-    that held neither must end up holding neither — otherwise a refused
-    install leaves a file behind in a directory it reports as untouched.
+    The `<name>.lock` `document_lock` puts beside it is deliberately left where
+    it is, for the reason `_locked_legacy_record` gives: removing a lock file
+    is how two writers end up locking different inodes and losing each other's
+    entries, which is a worse thing to leave behind than an empty file the next
+    write would create anyway.
     """
-    restore_document = _restore_file(path)
-    lock = path.with_name(path.name + ".lock")
-    lock_existed = os.path.lexists(lock)
-
-    def restore() -> None:
-        restore_document()
-        if not lock_existed and os.path.lexists(lock):
-            lock.unlink()
-
-    return restore
+    return _restore_file(path)
 
 
 def _restore_link(destination: Path) -> Callable[[], None]:
@@ -1522,7 +1514,7 @@ def install(
     with contextlib.ExitStack() as scope:
         if migration is not None:
             scope.enter_context(_selected_install_dir(install_dir))
-        if migration is not None and migration.relocating:
+        if migration is not None and migration.relocating and not dry_run:
             # Only when something is removed, which is the only thing this
             # lock protects against. A run that leaves the installation in
             # place strands nobody by definition — a writer that adds a
