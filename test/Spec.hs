@@ -4,6 +4,7 @@
 module Main (main) where
 
 import qualified Spec.Agent.Capture as Capture
+import qualified Spec.ApprovalService as ApprovalService
 import qualified Spec.Agent.IssueReviewer as IssueReviewer
 import qualified Spec.Agent.ManagedProcess as ManagedProcess
 import qualified Spec.Agent.Ping as Ping
@@ -81,6 +82,7 @@ suite = do
   UsageMode.spec
   IssueReviewer.spec
   Drainer.spec
+  ApprovalService.spec
   RepositoryState.spec
   PullRequestStatus.spec
   ConfigConsumers.spec

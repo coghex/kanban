@@ -84,6 +84,7 @@ import Kanban.UI.Session
 import Kanban.UI.SessionEvents
 import Kanban.UI.Refresh
 import Kanban.UI.Solve
+import Kanban.UI.Approval
 import Kanban.UI.PullRequest
 import Kanban.UI.Review
 import Kanban.UI.Worker
@@ -109,6 +110,8 @@ handleEvent event = do
     (_, AppEvent (ClaudeRefreshFinished result)) -> applyClaudeRefresh result
     (_, AppEvent (DrainerStatusRefreshed result)) -> applyDrainerStatus result
     (_, AppEvent (DrainerToggleFinished result)) -> applyDrainerToggle result
+    (_, AppEvent (ApprovalStatusRefreshed issuedUnder result)) -> applyApprovalStatus issuedUnder result
+    (_, AppEvent (ApprovalToggleFinished transition result)) -> applyApprovalToggle transition result
     (_, AppEvent (DirectMergeFinished number result)) -> applyDirectMerge number result
     (_, AppEvent (ReviewBackendStarted result)) -> applyReviewBackendStarted result
     (_, AppEvent (ReviewProtocolEvent reviewEvent)) -> applyReviewEvent reviewEvent

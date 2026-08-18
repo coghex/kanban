@@ -17,10 +17,17 @@ module Spec.Support.App
 where
 
 import Brick.BChan (newBChan)
+import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Time (utc)
 import Kanban.Domain
+import Kanban.ApprovalService
+  ( ApprovalActivity (..),
+    ApprovalState (..),
+    ApprovalStatus (..),
+    ApprovalUnavailable (..),
+  )
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Filter (defaultFilterCriteria)
 import Kanban.GitHub (newHistoryTraversal)
@@ -54,6 +61,7 @@ testAppState board = do
   eventChannel <- newBChan 16
   refreshCoordinator <- inertRefreshCoordinator
   historyTraversal <- newHistoryTraversal
+  approvalEpoch <- newIORef 0
   pure
     AppState
       { appRepository = Repository "/tmp/example-project" "example" "project",
@@ -94,6 +102,13 @@ testAppState board = do
         appDrainerStatus = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing,
         appDrainerIncidents = Just [],
         appDrainerBusy = False,
+        appApprovalController = Left (ApprovalUndiscoverable "no issue approval service in tests"),
+        appApprovalStatus = ApprovalStatus ApprovalOff "off" ApprovalServiceStopped Nothing Nothing,
+        appApprovalIncidents = Just [],
+        appApprovalBusy = False,
+        appApprovalTransition = 0,
+        appApprovalEpoch = approvalEpoch,
+        appApprovalResult = Nothing,
         appDirectMergePending = Nothing,
         appDirectMergeResult = Nothing,
         appBoardRefreshQueued = False,

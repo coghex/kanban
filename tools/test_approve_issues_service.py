@@ -1849,6 +1849,16 @@ class OutcomeDispatchTests(ApprovalFixture):
     def dispatch(self, outcome, **kwargs):
         self.controller.dispatch(result_document(outcome, **kwargs))
 
+    def new_controller(self):
+        """A successor run over the same job, as a restart produces."""
+        successor = service.Controller(
+            self.job_, backend=self.backend, interval=30.0, legacy_policy="dual"
+        )
+        patched = mock.patch.object(successor, "sleep", side_effect=self.waits.append)
+        patched.start()
+        self.addCleanup(patched.stop)
+        return successor
+
     def test_idle_waits_the_ordinary_interval(self):
         self.dispatch("idle")
         self.assertEqual(self.waits, [30.0])
@@ -1882,6 +1892,46 @@ class OutcomeDispatchTests(ApprovalFixture):
         self.dispatch("idle")
         self.dispatch("busy")
         self.assertEqual(self.waits, [30.0, 60.0, 30.0, 30.0])
+
+    def test_only_a_pass_that_may_have_mutated_advances_the_count(self):
+        # The count is what a ten-second poller reads instead of `last_outcome`,
+        # which the next pass overwrites. `idle` and `busy` selected no issue
+        # and made no model call, so neither may move it.
+        self.dispatch("idle")
+        self.assertEqual(self.stored_status()["mutations"], 0)
+        self.dispatch("busy")
+        self.assertEqual(self.stored_status()["mutations"], 0)
+        self.dispatch("advanced", issue=3, model_called=True)
+        self.assertEqual(self.stored_status()["mutations"], 1)
+        self.dispatch("retry", issue=4, model_called=True)
+        self.assertEqual(self.stored_status()["mutations"], 2)
+        self.dispatch("changes_requested", issue=5, model_called=True)
+        self.assertEqual(self.stored_status()["mutations"], 3)
+
+    def test_the_count_survives_a_pass_that_reports_nothing_after_it(self):
+        # The window the count exists for: an advancing pass followed promptly
+        # by an idle one, which overwrites `last_outcome` and clears the child
+        # PID. Nothing else in the document still says a mutation happened.
+        self.dispatch("advanced", issue=3, model_called=True)
+        self.dispatch("idle")
+        stored = self.stored_status()
+        self.assertEqual(stored["last_outcome"], "idle")
+        self.assertIsNone(stored["backend_pid"])
+        self.assertEqual(stored["mutations"], 1)
+
+    def test_each_run_publishes_an_identity_its_predecessor_cannot_share(self):
+        # `started_at` is second-granular, so a controller that died and
+        # restarted inside one second would publish the same value. A reader
+        # comparing (run, count) would then take two runs that each mutated
+        # once for one run that mutated once, and miss the second mutation.
+        self.dispatch("advanced", issue=3, model_called=True)
+        first = self.stored_status()
+        successor = self.new_controller()
+        successor.dispatch(result_document("advanced", issue=4, model_called=True))
+        second = self.stored_status()
+        self.assertEqual(first["mutations"], second["mutations"])
+        self.assertNotEqual(first["run_id"], second["run_id"])
+        self.assertTrue(first["run_id"])
 
     def test_changes_requested_opens_the_barrier_without_waiting(self):
         self.dispatch("changes_requested", issue=5, model_called=True)

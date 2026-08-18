@@ -26,12 +26,20 @@ import Brick.BChan (BChan, newBChan, writeBChan)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (forever, void, when)
 import Control.Monad.IO.Class (liftIO)
+import Data.IORef (newIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time (UTCTime, getCurrentTime, getCurrentTimeZone )
 import qualified Graphics.Vty as Vty
+import Kanban.ApprovalService
+  ( ApprovalActivity (..),
+    ApprovalState (..),
+    ApprovalStatus (..),
+    approvalUnavailableStatus,
+    discoverApprovalController,
+  )
 import Kanban.Cache
   ( CompletedCacheLoad (..),
     UsageCacheLoad (..),
@@ -73,6 +81,7 @@ import Kanban.UI.Overlay
 import Kanban.UI.Refresh
 import Kanban.UI.PullRequest
 import Kanban.UI.Events
+import Kanban.UI.Approval (monitorApprovalService)
 
 runDashboard :: Options -> ResolvedConfig -> Repository -> IO ()
 runDashboard options config repository = do
@@ -80,6 +89,8 @@ runDashboard options config repository = do
   timeZone <- getCurrentTimeZone
   (usageCacheLoad, completedCacheLoad) <- loadStartupCaches options config repository
   drainerController <- discoverDrainerController repository
+  approvalController <- discoverApprovalController repository
+  approvalEpoch <- newIORef 0
   (initialSettings, settingsNotice) <- loadSettings
   logRoot <- transcriptRoot repository
   eventChannel <- newBChan 256
@@ -167,6 +178,23 @@ runDashboard options config repository = do
             -- a drainer with no open incidents.
             appDrainerIncidents = Nothing,
             appDrainerBusy = False,
+            appApprovalController = approvalController,
+            appApprovalStatus =
+              case approvalController of
+                -- Not 'ApprovalServiceStopped': nothing has reported a state
+                -- yet, and an interlock that may only permit work against a
+                -- settled service must not read "no answer so far" as one.
+                Right _ ->
+                  ApprovalStatus ApprovalStarting "checking…" ApprovalServiceUnknown Nothing Nothing
+                Left unavailable -> approvalUnavailableStatus unavailable,
+            -- Nothing has been observed yet, and a failed discovery never
+            -- will be: both read as an unanswered source rather than as a
+            -- service with no open incidents.
+            appApprovalIncidents = Nothing,
+            appApprovalBusy = False,
+            appApprovalTransition = 0,
+            appApprovalEpoch = approvalEpoch,
+            appApprovalResult = Nothing,
             appDirectMergePending = Nothing,
             appDirectMergeResult = Nothing,
             appBoardRefreshQueued = False,
@@ -283,6 +311,18 @@ startApplication = do
         . liftIO
         . forkIO
         $ monitorDrainer controller state.appEventChannel
+  case state.appApprovalController of
+    Left _ -> pure ()
+    Right controller ->
+      void
+        . liftIO
+        . forkIO
+        $ monitorApprovalService
+          state.appRepository
+          controller
+          serviceStatusIntervalMicros
+          state.appApprovalEpoch
+          state.appEventChannel
 
 -- | Mouse reporting is an optional affordance on a dashboard that must stay
 -- fully keyboard-operable (docs\/design.md §2), and vty exposes mode support
@@ -297,7 +337,11 @@ enableMouseIfSupported output =
 monitorDrainer :: DrainerController -> BChan AppEvent -> IO ()
 monitorDrainer controller eventChannel = forever $ do
   queryDrainerStatus controller >>= writeBChan eventChannel . DrainerStatusRefreshed
-  threadDelay drainerRefreshIntervalMicros
+  threadDelay serviceStatusIntervalMicros
 
-drainerRefreshIntervalMicros :: Int
-drainerRefreshIntervalMicros = 10 * 1000 * 1000
+-- | How often each managed service's status is read. One constant for both,
+-- because the approval service is polled on the same cadence as the PR drainer
+-- (requirement 4) and two constants would be two cadences the moment one was
+-- edited.
+serviceStatusIntervalMicros :: Int
+serviceStatusIntervalMicros = 10 * 1000 * 1000
