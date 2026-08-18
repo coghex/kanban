@@ -973,6 +973,39 @@ class ControllerConfigurationTests(RedirectedControllerTestCase):
                 "https://notify.example.test/current",
             )
 
+    def test_a_document_that_is_not_utf8_reads_as_nothing_rather_than_raising(self):
+        # `_read_service_config` merges two documents, and either one may be
+        # bytes nothing can decode. `UnicodeDecodeError` is a `ValueError`
+        # rather than an `OSError`, so without catching it by name it escapes
+        # a reader every caller expects to answer "nothing readable here" —
+        # and both of these are read on the way to resolving a job, so a single
+        # unreadable file would take down `status` and `logs` as well.
+        legacy = self.root / "elsewhere" / "config.json"
+        legacy.parent.mkdir()
+        self.record.parent.mkdir(parents=True)
+        readable = json.dumps({"ntfy_url": "https://notify.example.test/kept"})
+
+        for unreadable, other in (
+            (self.record, legacy),
+            (legacy, self.record),
+        ):
+            with self.subTest(unreadable=unreadable.name):
+                unreadable.write_bytes(b"\xff\xfe not utf-8 at all")
+                other.write_text(readable, encoding="utf-8")
+                with mock.patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop("KANBAN_DRAINER_NTFY_URL", None)
+                    # The readable one still answers, and the unreadable one
+                    # contributes nothing instead of raising.
+                    self.assertEqual(
+                        drain_prs_service.configured_ntfy_url(),
+                        "https://notify.example.test/kept",
+                    )
+                    self.assertEqual(
+                        drain_prs_service.installed_repository_records(), {}
+                    )
+                unreadable.unlink()
+                other.unlink()
+
     def test_notifications_are_disabled_by_default(self):
         self.assertEqual(
             drain_prs_service.publish_ntfy("test"),
