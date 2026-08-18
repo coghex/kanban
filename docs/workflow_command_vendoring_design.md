@@ -280,18 +280,23 @@ Arc-level signals:
 - **Outcome:** one authored source per vendored command renders into both bundle
   layouts, or a recorded decision that two copies plus a content-parity gate is
   the answer instead.
-- **Scope:** the mechanism and its gate, exercised on one command as proof. No
-  command is vendored by this slice, and none of the fifteen existing bundle
-  commands is migrated (D-6).
+- **Scope:** the mechanism and its gate, proved against a **fixture** that is
+  authored and rendered but never shipped as an invokable command. No command is
+  vendored by this slice, and none of the fifteen existing bundle commands is
+  migrated (D-6). Proving the mechanism on a real command would vendor it, which
+  this slice explicitly does not do; the first real rendering is VEND-1's.
 - **Phase:** 0
 - **Depends on:** `none`
 - **Ordering:** `critical path` — its outcome decides whether every later slice
   produces one file or two.
 - **Relevant decisions:** D-3, D-6
-- **Acceptance signals:** the proof command is shipped in both bundles from one
-  source; `tools/plugin_bundle_gate.py` lists it as mentioned and shipped for
-  both brands; if the mechanism is rejected, the pull request records why and
-  what the parity gate checks instead.
+- **Acceptance signals:** one authored fixture source renders into both bundle
+  layouts, and the rendered outputs match what each brand's loader expects;
+  re-running the renderer over unchanged input produces no diff; the fixture is
+  absent from both bundles' shipped command sets, so nothing new is invokable;
+  and `tools/plugin_bundle_gate.py` still passes. If the mechanism is rejected
+  instead, the pull request records why and what the content-parity gate checks
+  in its place.
 - **Out of scope:** vendoring any of the eight; migrating existing commands;
   changing any command's behavior.
 - **Open questions:** `None`
