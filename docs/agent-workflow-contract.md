@@ -533,7 +533,19 @@ arithmetic, which §2.3 owns.
   writes a definition refreshes from those same values without disturbing
   another
   repository's entry — every read-modify-write of that document happens under
-  an exclusive `flock` on a sibling lock file, because installs and starts for
+  an exclusive `flock` on a sibling lock file, and installing a job holds that
+  same lock across the whole of it: the definition write, the record write, and
+  the manager load are one critical section rather than three, so two installs
+  cannot interleave into a job the record names from one run and the disk
+  describes from another. Mutual exclusion, not a transaction — nothing is
+  rolled back, and a step that fails fails where it stands. The span is exactly
+  that contiguous sequence: retiring the machine-wide singleton happens before
+  it, and the kick a start performs happens after it. The lock is re-entrant
+  within a thread so that span can contain the record write that would
+  otherwise block against it, and leaving a nested acquisition releases
+  nothing — only the outermost holder does, so another process stays blocked
+  until the transition really ends. It is needed at all because installs and
+  starts for
   different repositories run concurrently and an unserialized merge would drop
   the entry a running repository is discovered through; the global `ntfy_url`
   beside it; and the installer-managed script directory `<install-dir>`, which

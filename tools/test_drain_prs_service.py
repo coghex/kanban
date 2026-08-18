@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -793,6 +794,50 @@ class BackendDelegationTests(RedirectedControllerTestCase):
         )
         self.assertEqual(result["target"], "fake-manager/fake-service.acme.widgets")
         self.assertEqual(self.service_manager_commands(), [])
+
+    def test_installing_holds_the_record_lock_across_the_whole_transition(self):
+        # The definition write used to land outside any lock, and only then did
+        # this ask for one another installer or start could be holding — so a
+        # job could be named in the record by one run and described on disk by
+        # another. Nothing may be written while the record's lock is held
+        # elsewhere.
+        self.record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_path = self.record.with_name(self.record.name + ".lock")
+        held = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, held)
+        fcntl.flock(held, fcntl.LOCK_EX)
+
+        finished = threading.Event()
+        failed = []
+
+        def install():
+            try:
+                with mock.patch.object(
+                    drain_prs_service,
+                    "status_snapshot",
+                    return_value={"state": "stopped"},
+                ):
+                    drain_prs_service.install_job(self.job)
+            except BaseException as exc:  # noqa: BLE001 - reported, not handled
+                failed.append(str(exc))
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=install, daemon=True)
+        worker.start()
+        # Long enough to have written a definition, were it free to.
+        self.assertFalse(finished.wait(0.5))
+        self.assertEqual(self.backend.names(), [])
+        fcntl.flock(held, fcntl.LOCK_UN)
+        self.assertTrue(finished.wait(10))
+        worker.join(10)
+
+        self.assertEqual(failed, [])
+        # And the whole sequence ran once the lock was free, in its own order.
+        self.assertEqual(
+            self.backend.names(),
+            ["write_definition", "load_definition"],
+        )
 
     def test_a_legacy_singleton_is_retired_before_the_replacement_is_written(self):
         self.backend.legacy_installed = True
@@ -1585,6 +1630,80 @@ class SharedRecordConcurrencyTests(RedirectedControllerTestCase):
         self.assertEqual(
             self.read_record()["repositories"]["acme/widgets"]["launchd_label"], "held"
         )
+
+    def test_a_nested_acquisition_does_not_deadlock_and_releases_once(self):
+        # A transition wider than one document write ends in a write that asks
+        # for the same lock again, and `flock` on a second descriptor of one
+        # file blocks against itself — so without re-entry the only way to hold
+        # the lock across a transition would be to not hold it at all.
+        self.record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with drain_prs_service.document_lock(self.record):
+            with drain_prs_service.document_lock(self.record):
+                drain_prs_service.merge_repository_record(
+                    "acme/widgets", {"launchd_label": "nested"}
+                )
+        # And it is genuinely released afterwards, rather than left held by a
+        # descriptor nobody closed.
+        lock_path = self.record.with_name(self.record.name + ".lock")
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        self.assertEqual(
+            self.read_record()["repositories"]["acme/widgets"]["launchd_label"],
+            "nested",
+        )
+
+    def test_leaving_a_nested_acquisition_releases_nothing(self):
+        # The property the whole re-entrancy rests on: only the outermost
+        # holder owns the descriptor. If leaving an inner context released the
+        # kernel lock, a transition would silently stop being serialized
+        # exactly where it writes its record.
+        self.record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        acquired = threading.Event()
+        release_seen_at = []
+
+        def contender():
+            # An independent descriptor, which is what another process has.
+            with drain_prs_service.document_lock(self.record):
+                acquired.set()
+
+        worker = threading.Thread(target=contender, daemon=True)
+        with drain_prs_service.document_lock(self.record):
+            with drain_prs_service.document_lock(self.record):
+                worker.start()
+                self.assertFalse(acquired.wait(0.3))
+            # Inner context left; the lock must still be held out here.
+            release_seen_at.append(acquired.wait(0.3))
+        self.assertTrue(acquired.wait(10))
+        worker.join(10)
+        self.assertEqual(release_seen_at, [False])
+
+    def test_two_threads_contending_for_one_document_still_contend(self):
+        # Re-entrancy is per thread, so it must not make the lock a no-op for
+        # a second thread that happens to want the same document.
+        self.record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        entered = threading.Event()
+        overlapped = []
+        inside = []
+
+        def hold(name):
+            with drain_prs_service.document_lock(self.record):
+                overlapped.append(len(inside) > 0)
+                inside.append(name)
+                entered.set()
+                time.sleep(0.2)
+                inside.remove(name)
+
+        workers = [
+            threading.Thread(target=hold, args=(name,), daemon=True)
+            for name in ("first", "second")
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+        self.assertEqual(overlapped, [False, False])
 
     def test_concurrent_merges_keep_every_repositorys_entry(self):
         # Unserialized, two writers both snapshot the old table and whichever
