@@ -148,4 +148,5 @@ coordination_paths = [
   "docs/ui-bugs.md",
   "docs/usage_awareness_design.md",
   "docs/workflow_audit_findings.md",
+  "docs/workflow_command_vendoring_design.md",
 ]

@@ -149,6 +149,7 @@ EXCLUDED_TRACKED_PATHS = (
     "docs/ui-bugs.md",
     "docs/usage_awareness_design.md",
     "docs/workflow_audit_findings.md",
+    "docs/workflow_command_vendoring_design.md",
 )
 
 # The files each provider's `plugin marketplace add` reads. They are the only

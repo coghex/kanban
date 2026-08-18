@@ -37,8 +37,9 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   `docs/linux_portability_design.md`, `docs/managed_paths_design.md`,
   `docs/multi_repo_boards_design.md`,
   `docs/pipeline-hardening.md`, `docs/public_release_design.md`,
-  `docs/ui-bugs.md`, `docs/usage_awareness_design.md`, and
-  `docs/workflow_audit_findings.md`. Everything else is pr-atomic and
+  `docs/ui-bugs.md`, `docs/usage_awareness_design.md`,
+  `docs/workflow_audit_findings.md`, and
+  `docs/workflow_command_vendoring_design.md`. Everything else is pr-atomic and
   lands with its implementation through a pull request. Anything unclassified is
   pr-atomic too — that default fails closed, so a new document never publishes directly
   until section 7 says it may.
