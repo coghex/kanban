@@ -239,17 +239,24 @@ Two documented paths drain it without opening Kanban:
 
 - Start the polling service for the whole queue through the installed
   controller, which performs the same guarded start the `d` key does. This
-  finds the install directory the way the installer does — the XDG one first
-  and the `~/Library` one second — and honours `$XDG_DATA_HOME` only when it is
-  absolute, which is why `${XDG_DATA_HOME:-$HOME/.local/share}` is not the
-  substitution to make:
+  finds the install directory the way the installer does — the environment
+  override first, then the XDG location and the `~/Library` one — and honours
+  `$XDG_DATA_HOME` only when it is absolute, which is why
+  `${XDG_DATA_HOME:-$HOME/.local/share}` is not the substitution to make. If
+  you installed with `--install-dir` and have not exported
+  `KANBAN_DRAINER_INSTALL_DIR`, set `DRAINER` to that directory yourself: the
+  record stays where this platform resolves it, so nothing here can find the
+  links from it.
 
   ```console
-  DATA_HOME="$XDG_DATA_HOME"
-  case "$DATA_HOME" in /*) ;; *) DATA_HOME="$HOME/.local/share" ;; esac
-  DRAINER="$DATA_HOME/kanban/pr-drainer"
-  [ -e "$DRAINER/config.json" ] || [ -L "$DRAINER/config.json" ] ||
-    DRAINER="$HOME/Library/Application Support/kanban/pr-drainer"
+  DRAINER="$KANBAN_DRAINER_INSTALL_DIR"
+  if [ -z "$DRAINER" ]; then
+    DATA_HOME="$XDG_DATA_HOME"
+    case "$DATA_HOME" in /*) ;; *) DATA_HOME="$HOME/.local/share" ;; esac
+    DRAINER="$DATA_HOME/kanban/pr-drainer"
+    [ -e "$DRAINER/config.json" ] || [ -L "$DRAINER/config.json" ] ||
+      DRAINER="$HOME/Library/Application Support/kanban/pr-drainer"
+  fi
   CONTROL="$DRAINER/drain_prs_service.py"
   python3 "$CONTROL" --path /path/to/project --json start
   ```
@@ -972,14 +979,19 @@ The controller records unexpected exits as incidents, and the drainer records a 
 ## Manual status
 
 Normal control should happen through Kanban. For diagnosis, run — again
-finding the install directory the way the installer does:
+finding the install directory the way the installer does, and again needing
+`DRAINER` set by hand if you installed with `--install-dir` and have not
+exported `KANBAN_DRAINER_INSTALL_DIR`:
 
 ```console
-DATA_HOME="$XDG_DATA_HOME"
-case "$DATA_HOME" in /*) ;; *) DATA_HOME="$HOME/.local/share" ;; esac
-DRAINER="$DATA_HOME/kanban/pr-drainer"
-[ -e "$DRAINER/config.json" ] || [ -L "$DRAINER/config.json" ] ||
+DRAINER="$KANBAN_DRAINER_INSTALL_DIR"
+if [ -z "$DRAINER" ]; then
+  DATA_HOME="$XDG_DATA_HOME"
+  case "$DATA_HOME" in /*) ;; *) DATA_HOME="$HOME/.local/share" ;; esac
+  DRAINER="$DATA_HOME/kanban/pr-drainer"
+  [ -e "$DRAINER/config.json" ] || [ -L "$DRAINER/config.json" ] ||
     DRAINER="$HOME/Library/Application Support/kanban/pr-drainer"
+fi
 CONTROL="$DRAINER/drain_prs_service.py"
 python3 "$CONTROL" --path /path/to/project --json status
 python3 "$CONTROL" --path /path/to/project --json logs --lines 120
