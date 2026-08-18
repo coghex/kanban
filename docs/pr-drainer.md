@@ -236,15 +236,18 @@ the attempt; it does not pre-authorize it.
 Two documented paths drain it without opening Kanban:
 
 - Start the polling service for the whole queue through the installed
-  controller, which performs the same guarded start the `d` key does. The
-  install directory is spelled for macOS here; on Linux it is
-  `kanban/pr-drainer` under `$XDG_DATA_HOME` when that variable names an
-  absolute directory and under `~/.local/share` when it does not — a relative
-  value is not honoured, so `${XDG_DATA_HOME:-$HOME/.local/share}` is not the
+  controller, which performs the same guarded start the `d` key does. This
+  finds the install directory the way the installer does — the XDG one first
+  and the `~/Library` one second — and honours `$XDG_DATA_HOME` only when it is
+  absolute, which is why `${XDG_DATA_HOME:-$HOME/.local/share}` is not the
   substitution to make:
 
   ```console
-  CONTROL="$HOME/Library/Application Support/kanban/pr-drainer/drain_prs_service.py"
+  DATA_HOME="$XDG_DATA_HOME"
+  case "$DATA_HOME" in /*) ;; *) DATA_HOME="$HOME/.local/share" ;; esac
+  DRAINER="$DATA_HOME/kanban/pr-drainer"
+  [ -f "$DRAINER/config.json" ] || DRAINER="$HOME/Library/Application Support/kanban/pr-drainer"
+  CONTROL="$DRAINER/drain_prs_service.py"
   python3 "$CONTROL" --path /path/to/project --json start
   ```
 
@@ -996,13 +999,15 @@ The controller records unexpected exits as incidents, and the drainer records a 
 
 ## Manual status
 
-Normal control should happen through Kanban. For diagnosis, run — again with
-the macOS install directory, which on Linux is `kanban/pr-drainer` under
-`$XDG_DATA_HOME` when that variable names an absolute directory and under
-`~/.local/share` when it does not:
+Normal control should happen through Kanban. For diagnosis, run — again
+finding the install directory the way the installer does:
 
 ```console
-CONTROL="$HOME/Library/Application Support/kanban/pr-drainer/drain_prs_service.py"
+DATA_HOME="$XDG_DATA_HOME"
+case "$DATA_HOME" in /*) ;; *) DATA_HOME="$HOME/.local/share" ;; esac
+DRAINER="$DATA_HOME/kanban/pr-drainer"
+[ -f "$DRAINER/config.json" ] || DRAINER="$HOME/Library/Application Support/kanban/pr-drainer"
+CONTROL="$DRAINER/drain_prs_service.py"
 python3 "$CONTROL" --path /path/to/project --json status
 python3 "$CONTROL" --path /path/to/project --json logs --lines 120
 python3 "$CONTROL" --path /path/to/project --json ack --note "conflict resolved by hand"
