@@ -103,6 +103,22 @@ MANAGED_INSTALL_ENTRIES = {
     "__pycache__": _is_bytecode_cache,
 }
 
+def unmanaged_entries(directory: Path) -> list[str]:
+    """Everything in an install directory this installer did not put there.
+
+    The one place that question is asked, because both paths that remove such
+    a directory have to ask it: the preflight before a relocation, and the
+    absorber before it clears a location a late writer recreated. Judged by
+    what each entry *is*, never by its name alone -- see
+    MANAGED_INSTALL_ENTRIES.
+    """
+    return sorted(
+        str(entry)
+        for entry in directory.iterdir()
+        if not MANAGED_INSTALL_ENTRIES.get(entry.name, _is_unmanaged)(entry)
+    )
+
+
 # Which keys name a recorded job's identifier and definition, per backend. The
 # record is a discriminated union (`tools/service_manager.py`), so an entry is
 # read through the backend it names rather than by trying both shapes.
@@ -947,11 +963,7 @@ def preflight_legacy_migration(
     if migration.relocating:
         # Only when the directory is going to be deleted. A run that leaves it
         # in place has no business refusing over what someone else keeps there.
-        unexpected = sorted(
-            str(entry)
-            for entry in migration.source.iterdir()
-            if not MANAGED_INSTALL_ENTRIES.get(entry.name, _is_unmanaged)(entry)
-        )
+        unexpected = unmanaged_entries(migration.source)
         if unexpected:
             conflicts.append(
                 f"{migration.source} contains files this installer did not put there: "
@@ -1239,10 +1251,10 @@ def perform_legacy_migration(
     # destination, so what is left behind is debris rather than an
     # installation, and nothing that follows can strand a sibling.
     rollback.commit()
-    collisions: list[str] = []
+    late = LateWrites()
     if migration.relocating:
         shutil.rmtree(migration.source)
-        collisions = _absorb_late_legacy_writes(migration, backend)
+        late = _absorb_late_legacy_writes(migration, backend)
     stranded = migration.relocating and os.path.lexists(migration.source_record)
     return {
         "migrated": True,
@@ -1254,7 +1266,8 @@ def perform_legacy_migration(
         "record": str(migration.destination_record),
         "repositories": [job.identity for job in jobs],
         "legacy_record_reappeared": stranded,
-        "unresolved_repositories": collisions,
+        "unresolved_repositories": list(late.unresolved),
+        "unmanaged_paths": list(late.unmanaged),
         "moved": [
             {"what": move.what, "from": str(move.source), "to": str(move.destination)}
             for move in moves
@@ -1270,7 +1283,16 @@ def perform_legacy_migration(
 LATE_WRITER_PASSES = 3
 
 
-def _absorb_late_legacy_writes(migration: LegacyMigration, backend) -> list[str]:
+@dataclass(frozen=True)
+class LateWrites:
+    """What a writer left at the legacy location after it was removed, and
+    what of it could not be carried across."""
+
+    unresolved: tuple[str, ...] = ()
+    unmanaged: tuple[str, ...] = ()
+
+
+def _absorb_late_legacy_writes(migration: LegacyMigration, backend) -> LateWrites:
     """Carry across anything written back to the legacy location after it was
     removed, and name the repositories whose state could not be carried.
 
@@ -1297,13 +1319,13 @@ def _absorb_late_legacy_writes(migration: LegacyMigration, backend) -> list[str]
     collisions: list[str] = []
     for _ in range(LATE_WRITER_PASSES):
         if not os.path.lexists(migration.source_record):
-            return collisions
+            return LateWrites(unresolved=tuple(collisions))
         try:
             late = strict_record_document(migration.source_record)
         except InstallError:
             # Unreadable is still "something is there", and the caller reports
             # it. Nothing here can merge a document it cannot parse.
-            return collisions
+            return LateWrites(unresolved=tuple(collisions))
         drain_prs_service.update_json_document(
             migration.destination_record,
             lambda current, late=late: merged_record_document(late, current),
@@ -1340,13 +1362,20 @@ def _absorb_late_legacy_writes(migration: LegacyMigration, backend) -> list[str]
             _reinstall_recorded_job(job, backend, Rollback())
             backend.load_definition(job.identifier)
         if collisions:
-            return collisions
+            return LateWrites(unresolved=tuple(collisions))
+        # The same question the preflight asks before it removes this
+        # directory, asked again because a writer that recreated it may have
+        # put something there that is not this installer's -- and clearing it
+        # is no more this run's to do the second time than the first.
+        unmanaged = unmanaged_entries(migration.source)
+        if unmanaged:
+            return LateWrites(unmanaged=tuple(unmanaged))
         shutil.rmtree(migration.source, ignore_errors=True)
         # The log root is its own tree rather than one inside the installation,
         # so what a late writer recreated there is removed only once every
         # repository's logs have been carried out of it and nothing is left.
         _remove_if_empty(migration.source_logs)
-    return collisions
+    return LateWrites(unresolved=tuple(collisions))
 
 
 def _remove_if_empty(path: Path) -> None:
@@ -1757,6 +1786,17 @@ def main() -> int:
                             "refuse over them. Stop that repository's drainer, keep "
                             "whichever of each pair you want, remove the other, then "
                             "re-run this installer."
+                        )
+                    elif migration["unmanaged_paths"]:
+                        # A re-run refuses over these rather than carrying
+                        # anything, so saying "re-run" alone would again be
+                        # advice that does not work.
+                        print(
+                            "  It also left files this installer did not put there: "
+                            + ", ".join(migration["unmanaged_paths"])
+                            + ". They were not touched, and nothing there was "
+                            "removed. Move them elsewhere, then re-run this "
+                            "installer."
                         )
                     else:
                         print("  Re-run this installer to carry it across.")

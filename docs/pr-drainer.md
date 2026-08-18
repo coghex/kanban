@@ -981,7 +981,9 @@ alike, since a writer with frozen paths writes to both old roots. What a further
 pass cannot carry is a repository that ends up with state in both places, which
 is what a late start for an already-migrated repository leaves: both are kept,
 since nothing here can choose which status file, whose incidents and which logs
-survive, and the run names that repository. A re-run refuses over exactly those two trees, so the
+survive, and the run names that repository. If that writer also left a file
+the installer did not put there, nothing at that location is removed at all:
+the file is kept and named, and a re-run refuses over it until you move it. A re-run refuses over exactly those two trees, so the
 repair is to stop that repository's drainer, keep whichever tree you want,
 remove the other, and then re-run. Stop every installed
 repository's drainer first,

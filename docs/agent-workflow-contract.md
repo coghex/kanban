@@ -1136,7 +1136,10 @@ search step and nothing else, which is what `mandatory: no` records.
   installation; choosing which of each pair survives is not the installer's to
   make. Both are
   kept, that repository is named, and the run says what the repair is, because
-  a later run refuses over exactly those trees rather than carrying them — a bounded number of further passes each do what the
+  a later run refuses over exactly those trees rather than carrying them; and
+  it clears the location a writer recreated only on the same terms as the
+  first removal, so a file this installer did not put there is kept and named
+  rather than swept up with it — a bounded number of further passes each do what the
   next run of the installer would, merging the record found there, rewriting
   and reloading the definitions it names against this installation, and
   removing the location again. Past that bound the run reports what is still

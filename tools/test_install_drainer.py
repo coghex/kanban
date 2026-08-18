@@ -1251,7 +1251,7 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertFalse(os.path.lexists(legacy_record))
         self.assertFalse(result["legacy_migration"]["legacy_record_reappeared"])
 
-    def late_legacy_write(self, checkout, *, passes=1):
+    def late_legacy_write(self, checkout, *, passes=1, stray=None):
         """A writer that installs into the legacy location after it is removed.
 
         Driven through the controller's own writers with the module constants
@@ -1295,6 +1295,10 @@ class LegacyMigrationTests(LegacyMigrationFixture):
                 job.status_path.write_text('{"late": true}', encoding="utf-8")
                 job.service_log_path.write_text(
                     f"late log for {job.identity}\n", encoding="utf-8"
+                )
+            if stray is not None:
+                (self.legacy_install / stray).write_text(
+                    "not the installer's\n", encoding="utf-8"
                 )
             self.assertTrue(legacy_record.is_file())
 
@@ -1437,6 +1441,31 @@ class LegacyMigrationTests(LegacyMigrationFixture):
             self.assertEqual(self.unit_text(identity), text)
         self.assertFalse(os.path.lexists(self.xdg_install / "drain_prs_service.py"))
         self.assertFalse(self.xdg_logs.exists())
+
+    def test_a_late_writers_directory_is_not_cleared_of_someone_elses_file(self):
+        # The absorber removes the location a late writer recreated, and that
+        # removal is no more entitled to take a file it did not put there than
+        # the first one was. A name is not ownership in either path.
+        self.seed_legacy_install(self.widgets)
+        stray = self.legacy_install / "notes.txt"
+
+        with self.late_legacy_write(self.gadgets, stray="notes.txt"):
+            result = self.install(self.widgets)
+
+        migration = result["legacy_migration"]
+        self.assertTrue(migration["migrated"])
+        # Kept, and named, rather than swept up with the directory.
+        self.assertEqual(
+            stray.read_text(encoding="utf-8"), "not the installer's\n"
+        )
+        self.assertEqual(migration["unmanaged_paths"], [str(stray)])
+        self.assertTrue(migration["legacy_record_reappeared"])
+        # And a re-run refuses over it rather than carrying anything, which is
+        # why the run says to move it rather than to re-run.
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.install(self.widgets)
+        self.assertIn("did not put there", str(raised.exception))
+        self.assertIn(str(stray), str(raised.exception))
 
     def test_a_sibling_recorded_before_the_lock_is_taken_is_carried_across(self):
         # The other half of the same guarantee: whatever the record holds when
