@@ -1224,29 +1224,49 @@ def _absorb_late_legacy_writes(migration: LegacyMigration, backend) -> list[str]
             lambda current, late=late: merged_record_document(late, current),
         )
         for job in recorded_jobs(late, backend):
-            destination = _destination_runtime(migration, job)
-            if job.runtime_dir != destination and os.path.lexists(job.runtime_dir):
+            # Both of this repository's durable trees, on the same terms. A
+            # late writer resolves through paths frozen at the old
+            # installation, so it writes a status file and incidents under the
+            # old runtime root *and* its service and dated logs under the old
+            # log root -- and the log root is not inside the install directory,
+            # so the removal below would not even take it, only orphan it.
+            for source, destination in (
+                (job.runtime_dir, _destination_runtime(migration, job)),
+                (
+                    migration.source_logs / job.slug,
+                    migration.destination_logs / job.slug,
+                ),
+            ):
+                if source == destination or not os.path.lexists(source):
+                    continue
                 if os.path.lexists(destination):
                     # One repository with a durable tree at both locations,
                     # which is what a late *start* for an already-migrated
-                    # repository leaves: it wrote a status file and possibly
-                    # incidents through paths frozen at the old installation.
-                    # Merging them would have to choose which status and whose
-                    # incidents survive, and neither answer is this
-                    # installer's to give -- so the old installation stays
-                    # where it is and the run reports it, rather than the
-                    # removal below quietly taking one of them.
+                    # repository leaves. Merging them would have to choose
+                    # which status, whose incidents and which logs survive, and
+                    # none of those answers is this installer's to give -- so
+                    # both are kept and the run names the repository, rather
+                    # than the removal below quietly taking one side.
                     if job.identity not in collisions:
                         collisions.append(job.identity)
                 else:
                     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    shutil.move(str(job.runtime_dir), str(destination))
+                    shutil.move(str(source), str(destination))
             _reinstall_recorded_job(job, backend, Rollback())
             backend.load_definition(job.identifier)
         if collisions:
             return collisions
         shutil.rmtree(migration.source, ignore_errors=True)
+        # The log root is its own tree rather than one inside the installation,
+        # so what a late writer recreated there is removed only once every
+        # repository's logs have been carried out of it and nothing is left.
+        _remove_if_empty(migration.source_logs)
     return collisions
+
+
+def _remove_if_empty(path: Path) -> None:
+    if _is_plain_directory(path) and not any(path.iterdir()):
+        path.rmdir()
 
 
 def _restore_definition(job: RecordedJob, backend) -> Callable[[], None]:
@@ -1644,12 +1664,12 @@ def main() -> int:
                         # over exactly the trees this could not carry.
                         print(
                             "  " + ", ".join(unresolved) + " now has runtime state "
-                            f"under both {migration['source']} and "
-                            f"{migration['destination']}. Nothing here can choose "
-                            "which status file and whose incidents survive, so both "
-                            "were kept and a re-run will refuse over them. Stop that "
-                            "repository's drainer, keep whichever of the two trees "
-                            "you want, remove the other, then re-run this installer."
+                            "or logs in both the old and the new location. Nothing "
+                            "here can choose which status file, whose incidents and "
+                            "which logs survive, so both were kept and a re-run will "
+                            "refuse over them. Stop that repository's drainer, keep "
+                            "whichever of each pair you want, remove the other, then "
+                            "re-run this installer."
                         )
                     else:
                         print("  Re-run this installer to carry it across.")

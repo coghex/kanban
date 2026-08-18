@@ -1231,9 +1231,13 @@ class LegacyMigrationTests(LegacyMigrationFixture):
                     drain_prs_service.service_definition(job)
                 )
                 drain_prs_service.write_discovery_record(job)
-                # What a start really leaves behind, and what the removal
-                # must not quietly take with it.
+                # What a start really leaves behind, in both of the trees it
+                # resolves through frozen paths: runtime state under the old
+                # install directory, and logs under the old log root.
                 job.status_path.write_text('{"late": true}', encoding="utf-8")
+                job.service_log_path.write_text(
+                    f"late log for {job.identity}\n", encoding="utf-8"
+                )
             self.assertTrue(legacy_record.is_file())
 
         return mock.patch.object(install_drainer.shutil, "rmtree", late_writer)
@@ -1257,6 +1261,19 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         self.assertIn(str(self.xdg_install), self.unit_text("acme/gadgets"))
         self.assertNotIn(str(self.legacy_install), self.unit_text("acme/gadgets"))
         self.assertFalse(self.legacy_install.exists())
+        # Its logs came too. The log root is its own tree rather than one
+        # inside the installation, so removing the install directory would not
+        # have taken them -- it would have left them where the definition this
+        # run rewrote no longer points, invisible to `logs` and to the board.
+        slug = self.slug("acme/gadgets")
+        self.assertEqual(
+            (self.xdg_logs / slug / "service.log").read_text(encoding="utf-8"),
+            "late log for acme/gadgets\n",
+        )
+        self.assertFalse((self.legacy_logs / slug).exists())
+        # And nothing is left standing at the old log root either, so a later
+        # migration is not refused by a directory this one emptied.
+        self.assertFalse(self.legacy_logs.exists())
 
     def test_a_writer_that_keeps_winning_the_race_is_reported_rather_than_looped_on(
         self,
@@ -1299,6 +1316,17 @@ class LegacyMigrationTests(LegacyMigrationFixture):
                 self.xdg_install / "runtime" / self.slug("acme/widgets")
                 / "incidents" / "incident.json"
             ).is_file()
+        )
+        # Its logs collide the same way and are kept the same way, rather than
+        # one side being chosen.
+        slug = self.slug("acme/widgets")
+        self.assertEqual(
+            (self.legacy_logs / slug / "service.log").read_text(encoding="utf-8"),
+            "late log for acme/widgets\n",
+        )
+        self.assertEqual(
+            (self.xdg_logs / slug / "service.log").read_text(encoding="utf-8"),
+            "log for acme/widgets\n",
         )
         # And the run names the repository rather than promising a re-run,
         # because a re-run cannot resolve this: it refuses over exactly the

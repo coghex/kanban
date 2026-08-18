@@ -1127,8 +1127,10 @@ search step and nothing else, which is what `mandatory: no` records.
   held, so it contends with nothing. What it wrote is carried across rather
   than merely noticed, except where it gives one repository durable state in
   both places -- a late start for an already-migrated repository writes a
-  status file and incidents through paths frozen at the old installation, and
-  choosing which of the two survives is not the installer's to make. Both are
+  status file and incidents under the old runtime root, and its service and
+  dated logs under the old log root, through paths frozen at the old
+  installation; choosing which of each pair survives is not the installer's to
+  make. Both are
   kept, that repository is named, and the run says what the repair is, because
   a later run refuses over exactly those trees rather than carrying them — a bounded number of further passes each do what the
   next run of the installer would, merging the record found there, rewriting
