@@ -398,9 +398,6 @@ class FakeServiceManager(service_manager.ServiceManagerBackend):
             unloaded=unloaded, definition_removed=removed
         )
 
-    def definition_environment(self, identifier):
-        return None
-
     def legacy_definition_exists(self):
         return False
 

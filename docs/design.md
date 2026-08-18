@@ -2477,19 +2477,9 @@ above are unchanged, and persistence the user switched off is not a failure.
   elsewhere; rerunning it refreshes
   those links after repository relocation, and repairs a missing or stale
   discovery record in place without an uninstall and without changing the
-  job's identity. On a platform whose own convention is not `~/Library`, a
-  default-destination run also relocates a `~/Library` installation it finds:
-  it merges both discovery documents with the current-convention one winning
-  per key, moves the runtime and log trees with their open incidents — each
-  repository's own tree found through the install directory its definition
-  names, since that option moves runtime state without moving the record —
-  rewrites and reloads every installed repository's definition against the new
-  location, and only then removes the old directory — and refuses the whole install
-  without changing anything when any installed repository's drainer is running,
-  when a recorded entry cannot be recovered exactly, when a destination tree
-  already exists, or when the old directory holds a file the installer did not
-  put there. A custom install directory installs there and relocates nothing.
-  Installing a second repository adds its entry beside
+  job's identity. An installation that already exists is never moved: the probe
+  finds it at whichever spelling it is on, so a host that inherited one keeps
+  it. Installing a second repository adds its entry beside
   the first rather than replacing it. Before enabling a repository's derived
   job, the installer retires the machine-wide `com.coghex.drain-prs` singleton
   that predates per-repository jobs when that singleton served the same

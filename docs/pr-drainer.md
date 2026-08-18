@@ -83,7 +83,7 @@ discovery record and `$XDG_STATE_HOME/kanban/pr-drainer` for logs, falling back
 to `~/.local/share` and `~/.local/state` when the variable is unset, empty, or
 not an absolute path. Where this document spells a `~/Library` path, read the
 XDG one on Linux. An install a Linux host made before that — under the
-`~/Library` shapes — is relocated by the installer's next default run; see
+`~/Library` shapes — is found and kept there rather than moved; see
 [Files and logs](#files-and-logs).
 
 Preview the changes:
@@ -103,8 +103,8 @@ The installer:
 - refuses to run while this repository's drainer is active;
 - refuses to overwrite ordinary files;
 - creates stable links under this platform's `kanban/pr-drainer` install
-  directory, shared by every repository, and relocates a Linux host's
-  pre-XDG installation into it;
+  directory, shared by every repository, or wherever an installation
+  already exists;
 - installs the service definition named for this repository's normalized
   identity — `~/Library/LaunchAgents/com.coghex.drain-prs.<owner>.<name>.plist`
   under launchd, or
@@ -952,48 +952,11 @@ XDG one first — so nothing you already installed has to move.
   the lock cannot see.
 
 A Linux host that installed the drainer before these paths took each platform's
-own convention has its installation at the `~/Library` spellings. The next
-installer run whose destination is the platform default takes it over in that
-one run.
-
-If you have set `XDG_DATA_HOME` to an absolute path naming
-`~/Library/Application Support`, the installation is already where this host
-wants it. That run rewrites and reloads the service definitions that are not
-already what it would write — they still name the old log root and carry none
-of the XDG context — moves the log tree if your `XDG_STATE_HOME` puts it
-somewhere else, and removes nothing. Once nothing is stale it stops being a
-migration, so ordinary installs are unaffected.
-
-Otherwise it relocates the installation: the two discovery documents are merged with the XDG one winning per key so
-no repository and no setting is dropped, the runtime and log trees move with
-their open incidents intact, every installed repository's service definition is
-rewritten and reloaded against the new location, and only then is the old
-directory removed. A repository installed with `--install-dir` keeps its runtime
-state under that directory rather than the old one, so its tree is found through
-its own service definition and moved along with the rest; the custom directory
-itself is left alone. It refuses before changing anything — and fails the install
-rather than proceeding — if any installed repository's drainer is running, if an
-entry in the shared record cannot be recovered exactly, if a destination runtime
-or log tree already exists, or if the old install directory holds a file the
-installer did not put there. The whole relocation holds the old record's lock,
-so an install or start for another repository that runs at the same time waits
-for it rather than being left behind by it — and one that starts after the old
-directory is gone cannot be caught by any lock at all, so whatever it installed
-there is carried across by a further pass — its runtime state and its logs
-alike, since a writer with frozen paths writes to both old roots. What a further
-pass cannot carry is a repository that ends up with state in both places, which
-is what a late start for an already-migrated repository leaves: both are kept,
-since nothing here can choose which status file, whose incidents and which logs
-survive, and the run names that repository. If that writer also left a file
-the installer did not put there, nothing at that location is removed at all:
-the file is kept and named, and a re-run refuses over it until you move it. A re-run refuses over exactly those two trees, so the
-repair is to stop that repository's drainer, keep whichever tree you want,
-remove the other, and then re-run. Stop every installed
-repository's drainer first,
-and re-run the installer once for any repository; one run carries all of them.
-Passing `--install-dir`, or setting `KANBAN_DRAINER_INSTALL_DIR`, installs at
-that location and relocates nothing, reporting that it skipped the migration.
-macOS never migrates: `~/Library` is already its own convention.
+own convention has its installation at the `~/Library` spellings, and it stays
+there: the installer finds an installation wherever it already is rather than
+moving it. Relocating one to this platform's own convention is #367, taking
+over one already at that location is #368, and carrying across what a writer
+installs at a relocated location is #369.
 
 The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Incidents are attributed to the canonical repository rather than to the checkout that raised them, so any clone of that repository can list, acknowledge, and clear them. Stopping the drainer intentionally clears that repository's crash incidents, and no other repository's — a stop ends the supervisor, which is exactly what a crash incident is about. It resolves nothing else: a conflict or cleanup incident stays open across the stop, still naming a debt that is still owed, and clears through its own path once that pull request is mergeable or closed or its last obligation succeeds. Starting the drainer is not gated on an open incident of any kind, and an incident already open when it starts is never mistaken for a startup failure.
 

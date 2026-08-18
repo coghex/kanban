@@ -949,8 +949,7 @@ Every one of the six declares `tools/kanban_config.py`, because that module is
 where each is written down, once, for both platforms — the controller, the
 installer and the drainer all resolve through it rather than spelling a path of
 their own. §5 describes which of them is a fresh install's write default on a
-given host, which existing installation the probe prefers, and the one
-relocation that ever moves an installation between them. The two `~/Library`
+given host and which existing installation the probe prefers. The two `~/Library`
 rows also declare `src/Kanban/Drainer.hs`, which still spells that location
 itself: the dashboard's own resolver joins this arc separately, so until it does
 a Linux host discovers an XDG-installed drainer from the Python side and not yet
@@ -1072,98 +1071,11 @@ search step and nothing else, which is what `mandatory: no` records.
   that already exists probes the XDG location first and the `~/Library`
   location second on both platforms, exactly as the issue-review probe below
   does and with the same occupied-but-invalid rule.
-  One installation is taken over, and only one: on a platform that is not
-  macOS, an installer run whose destination is that platform's default adopts a
-  `~/Library` installation it finds there, in that run. Whether that *moves*
-  anything is a separate question from whether this platform takes it over, and
-  both are asked: an absolute `$XDG_DATA_HOME` naming
-  `~/Library/Application Support` is a value a Linux host may set, which makes
-  the installation already its own destination. Such a run rewrites and
-  reloads the definitions that are not already what this host would write —
-  they still carry the old log root and none of the XDG context — moves the log
-  tree if that root did change, and removes nothing at all; with nothing stale
-  left it is not a migration and reports none, so an ordinary install is never
-  dragged through one. Everything below describes the run that does relocate.
-  Nothing about it is silent or partial. It refuses before changing anything
-  when any repository the shared record names has a live job or checkout
-  drainer, when any recorded entry cannot be recovered exactly — its canonical
-  identity, its checkout, the identifier and definition path this host would
-  derive for it, and the install directory its own definition names — when a
-  destination runtime or log tree already exists,
-  or when the legacy install directory holds a file the installer did not put
-  there; and a refusal fails the run outright rather than installing at the
-  destination, because a fresh installation standing beside a retained legacy
-  one is the split state the relocation exists to close. When it proceeds, the
-  two discovery documents are merged with the XDG document winning per key at
-  both levels — no installed repository and no installer key is dropped — and
-  that merged document is written durably at the destination *before* any
-  legacy path is removed, so an interrupted run leaves one complete record
-  rather than none. The runtime and log trees, open incidents included, are
-  moved rather than recreated, every recorded repository's definition is
-  rewritten and reloaded against the destination, and only then is the legacy
-  directory removed. Which runtime tree belongs to a repository is read back
-  out of its own definition rather than assumed: `--install-dir` and
-  `KANBAN_DRAINER_INSTALL_DIR` move a job's script links and its runtime root
-  without moving the shared record that names it, so a repository installed
-  that way keeps its status file and its open incidents under its own
-  directory, and those come across too — while that directory itself, whose
-  contents the installer did not place, is left exactly as it is. A custom
-  `--install-dir` or `KANBAN_DRAINER_INSTALL_DIR`
-  installs where it says and relocates nothing, reporting that the migration
-  was skipped. When both are given and they disagree, `--install-dir` is the
-  run's selection: it is where the links go and what the installed controller
-  is spawned with, so it is also what the relocation resolves its own managed
-  paths from, and every tree it moves and every definition it writes name that
-  one directory. macOS is never migrated: there the two locations are the same
-  directory.
-  The whole transition — the read that decides which repositories exist through
-  the removal that takes away the controller all of them name — happens under
-  the legacy record's own lock, so a normal install or start for another
-  repository, still bound to that controller, is serialized against it rather
-  than adding an entry the migration never saw and would then strand. One that
-  queued on that lock resumes into a directory the removal took away and fails
-  outright rather than recording anything. This is
-  the one place two of these documents are held at once, and the order is
-  always the legacy record before the destination's; every other writer holds
-  exactly one, so there is no cycle to deadlock against. A refusal puts back
-  the directory mode taking that lock changed, but never removes the lock file
-  itself: unlinking one a writer may be queued on is how two writers end up
-  holding different inodes and losing each other's entries, and an empty lock
-  file the next write recreates anyway is the smaller thing to leave. A dry run
-  takes no lock at all, so it leaves nothing to put back. That lock is
-  re-entrant within a thread, because holding it across a transition is what
-  serializes the transition and every such transition ends in a write that asks
-  for it again.
-  Installing a job is one of those transitions: the definition and the record
-  entry are written under the record's lock together, so a controller still
-  bound to a relocated installation cannot land a definition between the two.
-  Having taken that lock, an install also refuses outright when the installation
-  it resolved at import is no longer the one the host has — writing from paths
-  that have moved would install a job naming a controller that is gone. A fresh
-  process resolves the new location, which is what makes re-running the repair.
-  A writer that arrives *after* the removal is the one case no lock reaches:
-  it creates the directory afresh and opens a lock file this transition never
-  held, so it contends with nothing. What it wrote is carried across rather
-  than merely noticed, except where it gives one repository durable state in
-  both places -- a late start for an already-migrated repository writes a
-  status file and incidents under the old runtime root, and its service and
-  dated logs under the old log root, through paths frozen at the old
-  installation; choosing which of each pair survives is not the installer's to
-  make. Both are
-  kept, that repository is named, and the run says what the repair is, because
-  a later run refuses over exactly those trees rather than carrying them; and
-  it clears the location a writer recreated only on the same terms as the
-  first removal, so a file this installer did not put there is kept and named
-  rather than swept up with it — a bounded number of further passes each do what the
-  next run of the installer would, merging the record found there, rewriting
-  and reloading the definitions it names against this installation, and
-  removing the location again. Past that bound the run reports what is still
-  there instead of looping, and another run of the installer remains the
-  repair, since a legacy record that has reappeared is simply a legacy
-  installation to migrate.
-  A repository whose runtime tree is already at its destination — a pre-XDG
-  `--install-dir` install that named what is now this platform's default — is
-  preserved in place rather than moved onto itself.
+  An installation that already exists is never moved: the probe finds it where
+  it is, on either spelling, and a host that inherited a `~/Library`
+  installation keeps it. Relocating one to this platform's own convention is
+  #367, taking over one already at that location is #368, and carrying across
+  what a writer installs at a relocated location is #369.
   The installed definition carries `$XDG_DATA_HOME` and `$XDG_STATE_HOME`
   alongside `KANBAN_DRAINER_INSTALL_DIR` whenever they are absolute, because
   that option pins the install directory and the runtime root beneath it but

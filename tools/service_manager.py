@@ -396,24 +396,6 @@ class ServiceManagerBackend(ABC):
         """
 
     @abstractmethod
-    def definition_environment(self, identifier: str) -> dict[str, str] | None:
-        """The environment the installed definition for `identifier` sets, or
-        None when there is no definition or it cannot be read as one.
-
-        The read-back counterpart of the `environment` a `ServiceDefinition`
-        carries, and the only way to recover where a job that is *already*
-        installed resolves its install-directory-relative state from: the
-        discovery record names the job and its definition, but the directory
-        the definition points its controller at is written down nowhere else.
-        A caller that must move that state has to be able to find it.
-
-        Total and non-raising, on the same rule `legacy_service_repository`
-        follows: an absent, unparsable, or foreign-shaped definition is None
-        rather than an error, so a caller distinguishes "no answer" from an
-        answer and can fail closed on it deliberately.
-        """
-
-    @abstractmethod
     def legacy_definition_exists(self) -> bool:
         """Whether the singleton's definition is still installed."""
 
@@ -548,23 +530,6 @@ class LaunchdBackend(ServiceManagerBackend):
             unloaded=unloaded,
             definition_removed=remove_definition_file(self.definition_path(identifier)),
         )
-
-    def definition_environment(self, identifier: str) -> dict[str, str] | None:
-        try:
-            with self.definition_path(identifier).open("rb") as handle:
-                document = plistlib.load(handle)
-        except (FileNotFoundError, OSError, plistlib.InvalidFileException, ValueError):
-            return None
-        if not isinstance(document, dict):
-            return None
-        variables = document.get("EnvironmentVariables")
-        if not isinstance(variables, dict):
-            return None
-        return {
-            name: value
-            for name, value in variables.items()
-            if isinstance(name, str) and isinstance(value, str)
-        }
 
     def legacy_definition_exists(self) -> bool:
         # False rather than an error for a namespace with no singleton: this is
@@ -759,22 +724,6 @@ class SystemdBackend(ServiceManagerBackend):
         self._run(["systemctl", "--user", "reset-failed", identifier], check=False)
         return UninstallOutcome(unloaded=unloaded, definition_removed=removed)
 
-    def definition_environment(self, identifier: str) -> dict[str, str] | None:
-        try:
-            text = self.definition_path(identifier).read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError, UnicodeDecodeError):
-            return None
-        environment: dict[str, str] = {}
-        for line in text.splitlines():
-            if not line.startswith("Environment="):
-                continue
-            name, separator, value = _unit_word_value(
-                line[len("Environment=") :]
-            ).partition("=")
-            if separator and name:
-                environment[name] = value
-        return environment
-
     def legacy_definition_exists(self) -> bool:
         # There has never been a systemd install, so there is no systemd
         # singleton predating per-repository units — for either namespace.
@@ -938,35 +887,6 @@ def _unit_word(word: str) -> str:
     """
     escaped = _unit_value(word).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
-
-
-def _unit_word_value(rendered: str) -> str:
-    """`_unit_word` undone: the word a rendered directive value carries.
-
-    Every escape that function applies, reversed in the opposite order — the
-    surrounding quotes, then `\\` and `"`, then the `%%` that protects a
-    literal percent from systemd's specifier expansion. An unquoted value is
-    returned as it is rather than rejected, because this reads definitions
-    this repository may not have written.
-    """
-    word = rendered.strip()
-    if len(word) >= 2 and word.startswith('"') and word.endswith('"'):
-        word = word[1:-1]
-    unescaped: list[str] = []
-    index = 0
-    while index < len(word):
-        character = word[index]
-        following = word[index + 1] if index + 1 < len(word) else ""
-        if character == "\\" and following in ('"', "\\"):
-            unescaped.append(following)
-            index += 2
-        elif character == "%" and following == "%":
-            unescaped.append("%")
-            index += 2
-        else:
-            unescaped.append(character)
-            index += 1
-    return "".join(unescaped)
 
 
 _UNPROBED = object()
