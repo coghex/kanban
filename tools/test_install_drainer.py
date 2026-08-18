@@ -1,5 +1,6 @@
 """Safety tests for the PR drainer installer."""
 
+import errno
 import json
 import os
 import shutil
@@ -1803,6 +1804,96 @@ class LegacyMigrationTests(LegacyMigrationFixture):
         )
         self.assert_refuses_a_symlink_at(
             definition, contents=definition.read_text(encoding="utf-8")
+        )
+
+    def test_a_move_that_fails_partway_across_filesystems_leaves_nothing(self):
+        # A custom XDG root may be on another filesystem, where a move is a
+        # copy and then a delete. A copy that dies halfway leaves a partial
+        # destination, and the directory undo deliberately keeps a non-empty
+        # directory — so without this the run would report having undone
+        # everything over a destination that is now occupied, and the retry
+        # below would refuse over it.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+
+        real_replace = install_drainer.os.replace
+
+        def cross_device(source, destination, *args, **kwargs):
+            # Only the tree moves: `os.replace` is also how a link, a record
+            # and a definition are written, and failing those would abort the
+            # run long before it reached a move — passing this test for a
+            # reason that has nothing to do with it.
+            if Path(source).is_dir():
+                raise OSError(errno.EXDEV, "cross-device link")
+            return real_replace(source, destination, *args, **kwargs)
+
+        def half_a_copy(source, destination, *args, **kwargs):
+            # What `copytree` leaves behind when it fails: some of the tree.
+            Path(destination).mkdir(parents=True, exist_ok=True)
+            (Path(destination) / "partial").write_text("half\n", encoding="utf-8")
+            raise OSError("the copy failed halfway")
+
+        with (
+            mock.patch.object(install_drainer.os, "replace", cross_device),
+            mock.patch.object(install_drainer.shutil, "copytree", half_a_copy),
+        ):
+            with self.assertRaises(install_drainer.InstallError) as raised:
+                self.install(self.widgets)
+        self.assertIn("Every change it had made was undone", str(raised.exception))
+        self.assertNotIn("could not be undone", str(raised.exception))
+
+        # Nothing partial left at either destination root, and the source
+        # trees are untouched.
+        self.assertFalse(self.xdg_install.exists())
+        self.assertFalse(self.xdg_logs.exists())
+        for identity in ("acme/widgets", "acme/gadgets"):
+            slug = self.slug(identity)
+            self.assertTrue(
+                (self.legacy_install / "runtime" / slug / "incidents" / "incident.json").is_file()
+            )
+            self.assertEqual(
+                (self.legacy_logs / slug / "service.log").read_text(encoding="utf-8"),
+                f"log for {identity}\n",
+            )
+        # And the retry the operator would reach for actually works.
+        result = self.install(self.widgets)
+        self.assertTrue(result["legacy_migration"]["migrated"])
+
+    def test_a_move_whose_source_survives_the_copy_reports_both_trees(self):
+        # The other half of a cross-filesystem move: the copy lands and the
+        # removal of the source does not, so one tree exists twice. Neither is
+        # discarded — choosing between two durable trees is what this refuses
+        # to do everywhere else — and the run has to say so, which it can only
+        # do if the undo was registered before the move rather than after it.
+        self.seed_legacy_install(self.widgets, self.gadgets)
+        real_replace = install_drainer.os.replace
+        real_rmtree = install_drainer.shutil.rmtree
+        source_tree = self.legacy_install / "runtime"
+
+        def cross_device(source, destination, *args, **kwargs):
+            if Path(source).is_dir():
+                raise OSError(errno.EXDEV, "cross-device link")
+            return real_replace(source, destination, *args, **kwargs)
+
+        def stubborn(path, *args, **kwargs):
+            if Path(path) == source_tree:
+                raise OSError("the source could not be removed")
+            return real_rmtree(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(install_drainer.os, "replace", cross_device),
+            mock.patch.object(install_drainer.shutil, "rmtree", stubborn),
+        ):
+            with self.assertRaises(install_drainer.InstallError) as raised:
+                self.install(self.widgets)
+        self.assertIn("could not be undone", str(raised.exception))
+        self.assertIn("is at both", str(raised.exception))
+        # Both copies are still there for the operator to choose between.
+        slug = self.slug("acme/widgets")
+        self.assertTrue(
+            (source_tree / slug / "incidents" / "incident.json").is_file()
+        )
+        self.assertTrue(
+            (self.xdg_install / "runtime" / slug / "incidents" / "incident.json").is_file()
         )
 
     def test_a_rollback_that_cannot_finish_is_reported_beside_the_failure(self):

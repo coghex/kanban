@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import json
 import os
 import secrets
@@ -1120,10 +1121,61 @@ def _restore_directory(path: Path) -> Callable[[], None]:
     return restore
 
 
+def _move_tree(source: Path, destination: Path) -> None:
+    """Move one durable tree, leaving no state in between.
+
+    A rename when both ends are on one filesystem. When they are not -- which
+    a custom XDG root may well arrange -- the copy is made first and the source
+    is dropped only once it has succeeded, so there is exactly one moment at
+    which the destination becomes the authoritative copy. A failure before it
+    takes the incomplete destination away and leaves the source untouched; a
+    failure after it keeps the destination, because by then it is the complete
+    one and the source is not.
+
+    `shutil.move` does the same two steps but reports one outcome, which from
+    outside cannot say which half failed -- and therefore cannot say which of
+    the two trees is the one worth keeping.
+    """
+    try:
+        os.replace(source, destination)
+        return
+    except OSError as error:
+        if error.errno != errno.EXDEV:
+            raise
+    try:
+        shutil.copytree(source, destination, symlinks=True)
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    shutil.rmtree(source)
+
+
 def _restore_move(move: TreeMove) -> Callable[[], None]:
+    """An undo for a tree move, registered *before* it runs.
+
+    Registering it afterwards would leave a move that failed partway
+    unaccounted for, and the directory undo deliberately keeps a non-empty
+    directory -- so the run would report having undone everything over a
+    destination that is now occupied, and a retry would refuse over it.
+
+    Which way to undo is read from what is there rather than from how far the
+    move got. A destination with no source is a completed move and goes back.
+    A source with no destination is a move that left nothing. Both at once can
+    only mean the copy completed and the source removal did not, and choosing
+    between two trees that both exist is what this whole path refuses to do
+    anywhere else, so it is reported rather than resolved.
+    """
+
     def restore() -> None:
+        if not os.path.lexists(move.destination):
+            return
+        if os.path.lexists(move.source):
+            raise OSError(
+                f"the {move.what} tree is at both {move.source} and "
+                f"{move.destination}; keep whichever is complete and remove the other"
+            )
         move.source.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        shutil.move(str(move.destination), str(move.source))
+        _move_tree(move.destination, move.source)
 
     return restore
 
@@ -1172,8 +1224,10 @@ def perform_legacy_migration(
     for move in moves:
         rollback.add(_restore_directory(move.destination.parent))
         move.destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        shutil.move(str(move.source), str(move.destination))
+        # Registered before the move, not after it: a move that fails partway
+        # has left something to undo too.
         rollback.add(_restore_move(move))
+        _move_tree(move.source, move.destination)
     # From here on every path this process resolves is the destination's.
     drain_prs_service.bind_managed_paths()
     for job in jobs:
@@ -1282,7 +1336,7 @@ def _absorb_late_legacy_writes(migration: LegacyMigration, backend) -> list[str]
                         collisions.append(job.identity)
                 else:
                     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    shutil.move(str(source), str(destination))
+                    _move_tree(source, destination)
             _reinstall_recorded_job(job, backend, Rollback())
             backend.load_definition(job.identifier)
         if collisions:
