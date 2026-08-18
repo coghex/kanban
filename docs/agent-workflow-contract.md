@@ -540,7 +540,9 @@ arithmetic, which §2.3 owns.
   is `<record-dir>` itself unless an override moved it.
 
   `<record-dir>` and `<log-root>` are this platform's own conventions,
-  resolved for every component by `tools/kanban_config.py` and declared as
+  resolved for every Python component by `tools/kanban_config.py` — the
+  dashboard's own resolver has not joined them yet, which is the bounded
+  window §4's input contract describes above — and declared as
   `personal-path` rows in §4: on macOS
   `~/Library/Application Support/kanban/pr-drainer` and
   `~/Library/Logs/kanban/pr-drainer`, and on Linux `$XDG_DATA_HOME` and

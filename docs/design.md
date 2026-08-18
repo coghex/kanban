@@ -2269,8 +2269,11 @@ above are unchanged, and persistence the user switched off is not a failure.
   directory — `~/Library/Application Support/kanban/pr-drainer` on macOS and
   `$XDG_DATA_HOME/kanban/pr-drainer` (`~/.local/share` when that variable is
   unset, empty, or not absolute) on every other platform, resolved for every
-  component by one module and probed XDG-first so an installation made under
-  either spelling is found where it already is. Its
+  Python component by one module and probed XDG-first so an installation made
+  under either spelling is found where it already is. The dashboard is not yet
+  one of them: `src/Kanban/Drainer.hs` still spells the macOS location itself,
+  so on a Linux host an XDG-installed drainer is discovered by the controller
+  and not by the board until that resolver joins the arc. Its
   `repositories` table holds one entry per installed repository naming the
   backend that wrote it, that job's identifier, the definition's absolute path,
   and the installed checkout.
