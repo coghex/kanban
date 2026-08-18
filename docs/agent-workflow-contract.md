@@ -1311,7 +1311,7 @@ never direct-master eligible: the table below is an allowlist for the
 `coordination` lane alone, so a tracked Markdown file matching no row is a
 check failure rather than a document that publishes directly.
 
-The fifteen `coordination` documents are
+The sixteen `coordination` documents are
 `docs/card_filter_design.md`, `docs/claude_document_workflows_design.md`,
 `docs/code-health-report.md`, `docs/document_workflow_findings.md`,
 `docs/drainer-bugs.md`, `docs/issue_approval_queue_design.md`,
@@ -1319,8 +1319,9 @@ The fifteen `coordination` documents are
 `docs/linux_portability_design.md`, `docs/managed_paths_design.md`,
 `docs/multi_repo_boards_design.md`,
 `docs/pipeline-hardening.md`, `docs/public_release_design.md`,
-`docs/ui-bugs.md`, `docs/usage_awareness_design.md`, and
-`docs/workflow_audit_findings.md`. **Every other tracked
+`docs/ui-bugs.md`, `docs/usage_awareness_design.md`,
+`docs/workflow_audit_findings.md`, and
+`docs/workflow_command_vendoring_design.md`. **Every other tracked
 Markdown file in this repository is `pr-atomic`.** Those two sentences are the
 human-readable answer to "which lane does this document take", and
 `tools/test_document_classification.py` reconciles them against the rows below,
@@ -1396,6 +1397,7 @@ docs/usage_awareness_design.md | coordination | audit-report
 docs/user-guide.md | pr-atomic | release-document
 docs/workflow-setup.md | pr-atomic | release-document
 docs/workflow_audit_findings.md | coordination | audit-report
+docs/workflow_command_vendoring_design.md | coordination | audit-report
 ```
 
 The six `test-parsed` rows name what actually parses them:
