@@ -37,7 +37,7 @@ import Kanban.Process (identityForPid, readProcessSnapshot)
 import qualified Spec.Drainer.DirectMerge as DirectMerge
 import Spec.Support.Env (withTemporaryCacheRoot)
 import Spec.Support.Expect (isLeft, requireLeft, requireRight, shouldMention, shouldNotMention)
-import Spec.Support.Process (fakeController, readRecordedPid)
+import Spec.Support.Process (fakeController, readRecordedPid, shouldNotHaveSwept, withSurvivingGroupLeader)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import Test.Hspec
@@ -542,37 +542,42 @@ spec = do
         runDrainerStatus 5 controller "status" `shouldReturn` Left "launchd job is not loaded"
 
     it "leaves no survivor from a wedged controller's process group, and says the transition's outcome is unknown" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        let leaderFile = temporaryRoot </> "leader-pid"
-            descendantFile = temporaryRoot </> "descendant-pid"
-        -- Both the controller and something it started ignore TERM, and the
-        -- descendant holds the inherited pipes open, so nothing about the
-        -- invocation ending implies either of them stopped. `create_group`
-        -- puts both in the invocation's own group; the escalation has to
-        -- reach the whole group and prove it empty, not just TERM the child.
-        controller <-
-          fakeController
-            temporaryRoot
-            [ "trap '' TERM",
-              "sh -c \"trap '' TERM; while :; do sleep 1; done\" &",
-              ByteString.pack ("echo $! > " <> descendantFile),
-              ByteString.pack ("echo $$ > " <> leaderFile),
-              "while :; do sleep 1; done"
-            ]
-        outcome <- runDrainerStatus 3 controller "start"
-        -- Taken the instant the invocation returns, so this proves the group
-        -- was already empty when the timeout was reported -- not merely that
-        -- it emptied by the time an assertion got around to looking.
-        snapshot <- readProcessSnapshot >>= requireRight "process snapshot after the drainer timeout"
-        leaderPid <- readRecordedPid leaderFile
-        descendantPid <- readRecordedPid descendantFile
-        descendantPid `shouldNotBe` leaderPid
-        identityForPid leaderPid snapshot `shouldBe` Nothing
-        identityForPid descendantPid snapshot `shouldBe` Nothing
-        message <- requireLeft "a wedged controller reported success" outcome
-        message `shouldMention` "drainer start timed out after 3 seconds"
-        message `shouldMention` "the outcome is unknown"
-        message `shouldMention` "the next status poll will reconcile it"
+      -- The bystander runs for the whole escalation and is shaped exactly like
+      -- what the escalation is aimed at, so the snapshot below has to show the
+      -- sweep reached this invocation's group and stopped there.
+      withSurvivingGroupLeader $ \bystanderPid ->
+        withTemporaryCacheRoot $ \temporaryRoot -> do
+          let leaderFile = temporaryRoot </> "leader-pid"
+              descendantFile = temporaryRoot </> "descendant-pid"
+          -- Both the controller and something it started ignore TERM, and the
+          -- descendant holds the inherited pipes open, so nothing about the
+          -- invocation ending implies either of them stopped. `create_group`
+          -- puts both in the invocation's own group; the escalation has to
+          -- reach the whole group and prove it empty, not just TERM the child.
+          controller <-
+            fakeController
+              temporaryRoot
+              [ "trap '' TERM",
+                "sh -c \"trap '' TERM; while :; do sleep 1; done\" &",
+                ByteString.pack ("echo $! > " <> descendantFile),
+                ByteString.pack ("echo $$ > " <> leaderFile),
+                "while :; do sleep 1; done"
+              ]
+          outcome <- runDrainerStatus 3 controller "start"
+          -- Taken the instant the invocation returns, so this proves the group
+          -- was already empty when the timeout was reported -- not merely that
+          -- it emptied by the time an assertion got around to looking.
+          snapshot <- readProcessSnapshot >>= requireRight "process snapshot after the drainer timeout"
+          leaderPid <- readRecordedPid leaderFile
+          descendantPid <- readRecordedPid descendantFile
+          descendantPid `shouldNotBe` leaderPid
+          identityForPid leaderPid snapshot `shouldBe` Nothing
+          identityForPid descendantPid snapshot `shouldBe` Nothing
+          snapshot `shouldNotHaveSwept` bystanderPid
+          message <- requireLeft "a wedged controller reported success" outcome
+          message `shouldMention` "drainer start timed out after 3 seconds"
+          message `shouldMention` "the outcome is unknown"
+          message `shouldMention` "the next status poll will reconcile it"
 
     it "terminates a descendant still holding the pipes after the controller itself exits" $
       withTemporaryCacheRoot $ \temporaryRoot -> do

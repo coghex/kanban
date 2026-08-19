@@ -244,6 +244,7 @@ test-suite kanban-test
     Spec.Support.Fixtures
     Spec.Support.Golden
     Spec.Support.Json
+    Spec.Support.Lanes
     Spec.Support.Locale
     Spec.Support.Preflight
     Spec.Support.Process
@@ -274,6 +275,7 @@ test-suite kanban-test
     directory,
     filepath,
     hspec                 >= 2.11 && < 2.12,
+    hspec-core            >= 2.11 && < 2.12,
     kanban,
     optparse-applicative,
     process,

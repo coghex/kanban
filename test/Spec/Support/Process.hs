@@ -40,6 +40,7 @@ module Spec.Support.Process
     withFakeClaudeCli,
     runBoundedClaudeCall,
     shouldRecordASweptProcess,
+    shouldNotHaveSwept,
     readRecordedPid,
     withFakeCanonicalReviewer,
     runBoundedCanonicalCommand,
@@ -175,6 +176,30 @@ withNonLeaderProcess =
       childPid <- maybe (fail "non-leader fixture reported no PID") (pure . fromIntegral) =<< getPid child
       threadDelay 200000
       pure (childPid :: Int, child)
+
+-- | The bystander half of a sweep assertion.
+--
+-- A census, a group sweep or a "leaves no survivor" check is entitled to take
+-- exactly what it recorded and nothing else, and a snapshot showing its own
+-- fixtures gone says nothing about the second half of that. So the examples
+-- that make one run it beside a 'withSurvivingGroupLeader' process nothing
+-- under test ever recorded — the same TERM-ignoring shape, in a group of its
+-- own — and read this from the very snapshot the emptiness was read from. A
+-- sweep that matched on what a process /looks/ like, or that reached past the
+-- identities it owns, takes the bystander with the rest and fails here.
+--
+-- It is deliberately asked of a snapshot rather than of the live process: a
+-- swept bystander is a zombie until this process reaps it, and a zombie is
+-- absent from a snapshot for exactly the reason a killed process is.
+shouldNotHaveSwept :: [ProcessIdentity] -> Int -> Expectation
+shouldNotHaveSwept snapshot bystander = case identityForPid bystander snapshot of
+  Just _ -> pure ()
+  Nothing ->
+    expectationFailure
+      ( "the sweep also took process "
+          <> show bystander
+          <> ", which nothing under test had recorded"
+      )
 
 withManagedShell :: String -> (ProcessHandle -> IO result) -> IO result
 withManagedShell command = bracket start stop
