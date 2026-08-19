@@ -1245,10 +1245,20 @@ search step and nothing else, which is what `mandatory: no` records.
   The whole transition — from the read that decides which repositories exist
   through the removal that takes the controller they name away — runs under the
   legacy record's own lock, which is taken only when something is removed and
-  never during a dry run. It also holds every recorded checkout's own
-  `drain_prs.py` run lock for that whole span, taken through
-  `drain_prs.acquire_lock`'s dry-run shape so it writes nothing into a checkout
-  the installer has no business modifying. Reading a PID file is a snapshot,
+  never during a dry run. It also holds, for that whole span, both of the
+  locks §2.4 requires a mover to fence on: every recorded checkout's own
+  `drain_prs.py` run lock, taken through `drain_prs.acquire_lock`'s dry-run
+  shape so it writes nothing into a checkout the installer has no business
+  modifying, and every controller lock that already exists at either end of
+  each repository's runtime move. The controller lock is the one neither
+  liveness signal can see — `run_service` takes it inside its own
+  record-locked startup transaction and keeps it for the process's life,
+  before it has spawned any drainer, so such a process is neither a managed
+  running job nor a holder of the checkout's run lock. Only an existing lock
+  file is taken, because creating one would be this run mutating an
+  installation it may yet refuse, and none can appear underneath it: acquiring
+  that lock needs the discovery record's lock, which this transition holds
+  throughout. Reading a PID file is a snapshot,
   and the record locks exclude no drainer at all because a drainer never takes
   them, so without that fence a run starting one instant after the liveness
   check would drain a checkout whose runtime tree was being moved and whose

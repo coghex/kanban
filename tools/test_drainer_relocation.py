@@ -302,6 +302,28 @@ class RelocationFixture(unittest.TestCase):
                     )
         return state
 
+    def lock_is_held(self, record=None):
+        """Whether another opener would block on one record's lock.
+
+        `flock` is per open file description, so a second descriptor in this
+        same process contends exactly as another process's would — which is
+        what makes this an observation of the lock rather than of the code
+        that takes it.
+        """
+        lock_path = Path(str(record or self.legacy_record) + ".lock")
+        if not lock_path.parent.is_dir():
+            return False
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(descriptor)
+
     def outside_the_destination(self, state):
         """`state` without the XDG roots this transition writes under.
 
@@ -321,6 +343,16 @@ class RelocationFixture(unittest.TestCase):
             ["config.json.lock"],
         )
         self.assertFalse(self.destination_logs.exists())
+
+    def assert_relocate_refuses_and_changes_nothing(self, expected_fragment):
+        """For a refusal the transition raises rather than the plan: the
+        fences are taken by `relocate` once the plan is settled, so the plan
+        itself has nothing to say about them."""
+        before = self.host_state()
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            install_drainer.relocate(self.destination, self.sources)
+        self.assertIn(expected_fragment, str(raised.exception))
+        self.assertEqual(self.host_state(), before)
 
     def assert_refuses_and_changes_nothing(self, expected_fragment):
         """Both halves of every refusal: it fails the run, and it fails it
@@ -1140,28 +1172,6 @@ class LockingTests(RelocationFixture):
         super().setUp()
         self.job = self.seed_legacy_installation()[0]
 
-    def lock_is_held(self, record=None):
-        """Whether another opener would block on one record's lock.
-
-        `flock` is per open file description, so a second descriptor in this
-        same process contends exactly as another process's would — which is
-        what makes this an observation of the lock rather than of the code
-        that takes it.
-        """
-        lock_path = Path(str(record or self.legacy_record) + ".lock")
-        if not lock_path.parent.is_dir():
-            return False
-        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        else:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            return False
-        finally:
-            os.close(descriptor)
-
     def test_the_removal_and_the_read_before_it_are_under_one_lock(self):
         observed = []
         real_plan = install_drainer.plan_relocation
@@ -1360,6 +1370,62 @@ class CheckoutFenceTests(RelocationFixture):
         lock = self.a_drainer_starts(mode="polling", pull_request=None)
         self.addCleanup(lock.close)
         self.assert_refuses_and_changes_nothing("a drainer is running in")
+
+    def a_controller_starts(self, runtime_dir=None):
+        """A controller taking the lock `run_service` holds for its life."""
+        runtime = runtime_dir or (self.legacy_dir / "runtime" / self.job.slug)
+        descriptor = drain_prs_service.acquire_controller_lock(runtime)
+        self.addCleanup(lambda: os.close(descriptor))
+        return descriptor
+
+    def test_a_running_controller_refuses_the_relocation(self):
+        # The signal neither liveness check can see: `run_service` takes this
+        # lock inside its record-locked startup transaction and keeps it for
+        # the process's life, before it has spawned any drainer — so it is
+        # neither a managed running job nor a holder of the checkout's run
+        # lock, and its supervision would resume against paths this run
+        # removed.
+        self.a_controller_starts()
+        self.assert_relocate_refuses_and_changes_nothing("controller is running")
+
+    def test_a_controller_at_the_destination_refuses_it_too(self):
+        # Both ends, because both are locations this run writes into. Arranged
+        # so the fence is the only thing that can refuse: with no source tree
+        # nothing would be moved onto the destination, so the collision check
+        # has nothing to say and a live controller there is the whole reason
+        # to stop.
+        shutil.rmtree(self.legacy_dir / "runtime" / self.job.slug)
+        destination = self.destination / "runtime" / self.job.slug
+        destination.mkdir(parents=True)
+        self.a_controller_starts(destination)
+        self.assert_relocate_refuses_and_changes_nothing("controller is running")
+
+    def test_a_controller_starting_mid_transition_blocks_on_the_record_lock(self):
+        # A controller that has not taken its lock yet is not fenced by that
+        # lock -- there is no file to hold. It is fenced by the record's,
+        # because `run_service` acquires the controller lock inside its own
+        # record-locked transaction, and this run holds that record lock for
+        # its whole span.
+        observed = {}
+        real = install_drainer._apply_relocation
+
+        def during(transition, plan, sources):
+            observed["record held"] = self.lock_is_held(self.legacy_record)
+            return real(transition, plan, sources)
+
+        with mock.patch.object(install_drainer, "_apply_relocation", during):
+            self.assertTrue(self.relocate()["relocated"])
+        self.assertTrue(observed["record held"])
+
+    def test_a_runtime_directory_with_no_lock_file_is_not_fenced(self):
+        # A controller creates that file when it takes the lock, so its
+        # absence means none ever has — and creating one to fence it would be
+        # this run mutating an installation it may yet refuse.
+        runtime = self.legacy_dir / "runtime" / self.job.slug
+        lock = drain_prs_service.controller_lock_path(runtime)
+        self.assertFalse(lock.exists())
+        self.assertTrue(self.relocate()["relocated"])
+        self.assertFalse((self.legacy_dir / "runtime").exists())
 
     def test_a_repository_the_fence_does_not_cover_refuses(self):
         # Fail closed on the one thing the preflight-derived fence cannot

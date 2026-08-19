@@ -765,6 +765,53 @@ def _fence_checkout(entry: RelocationRepository) -> Any:
         ) from exc
 
 
+def _fence_controllers(entry: RelocationRepository) -> list[int]:
+    """Hold every controller lock that could exist for this repository.
+
+    A controller that is neither a managed running job nor holding the
+    checkout's run lock is still a writer: `drain_prs_service.run_service`
+    takes its own `controller.lock` inside its record-locked startup
+    transaction and keeps it for the process's life, before it has spawned any
+    drainer. Neither liveness signal sees that, and its `_supervise` would
+    resume against paths this run had removed.
+
+    Both ends, source and destination alike, because that is where this run
+    writes — and once only when they are the same tree, since `flock` is per
+    open file description and a second acquisition of one lock would block
+    against this very process.
+
+    A runtime directory that does not exist, or one holding no lock file at
+    all, holds no lock: the file is what a controller creates when it takes
+    one. None can appear underneath us either, because a controller acquires
+    that lock *while holding the discovery record's lock*, which this
+    transition already holds — so one either had it before this started or
+    cannot get it at all.
+    """
+    held: list[int] = []
+    directories = [entry.source_runtime_dir]
+    if not _same_tree(entry.source_runtime_dir, entry.destination_runtime_dir):
+        directories.append(entry.destination_runtime_dir)
+    for runtime in directories:
+        if not _plain_directory(runtime):
+            continue
+        # Only a lock that already exists is taken. A controller creates that
+        # file when it takes the lock, so its absence means none ever has --
+        # and creating one here would be this run mutating an installation
+        # before it had finished deciding whether it may.
+        if not os.path.lexists(drain_prs_service.controller_lock_path(runtime)):
+            continue
+        try:
+            held.append(drain_prs_service.acquire_controller_lock(runtime))
+        except drain_prs_service.ServiceError as exc:
+            for descriptor in held:
+                os.close(descriptor)
+            raise InstallError(
+                f"Refusing to relocate: a PR drainer controller is running for "
+                f"{entry.identity} and holds {runtime}. Stop it first. ({exc})"
+            ) from exc
+    return held
+
+
 def _require_every_checkout_fenced(
     repositories: tuple[RelocationRepository, ...], fenced: frozenset[Path]
 ) -> None:
@@ -1511,6 +1558,13 @@ def relocate(install_dir: Path, sources: dict[str, Path]) -> dict[str, Any]:
                     fenced.add(entry.checkout)
                 plan = plan_relocation(install_dir)
                 _require_every_checkout_fenced(plan.repositories, frozenset(fenced))
+                # After the plan and before any mutation, on the same terms
+                # the destination record's lock is taken: a refusal must not
+                # leave a lock file behind, and nothing can acquire one in the
+                # meantime because doing so needs the record lock held here.
+                for entry in plan.repositories:
+                    for descriptor in _fence_controllers(entry):
+                        locks.callback(os.close, descriptor)
                 # A destination record that does *not* exist has no such
                 # writer: every writer on this host resolves the legacy record
                 # and is blocked above. Its lock is therefore taken here,
