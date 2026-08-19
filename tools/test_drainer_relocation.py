@@ -2903,7 +2903,21 @@ class PreGateWriterTests(RelocationFixture):
                 "0.4",
                 self.writes,
             ],
-            env={"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
+            env={
+                "HOME": str(self.home),
+                "PATH": os.environ.get("PATH", ""),
+                # The install directory and the discovery record are *probed*,
+                # so this process resolves the `~/Library` ones on any host
+                # simply by importing before the destination record exists. The
+                # log root is not: it is single-valued per platform, so a
+                # subprocess on a Linux host would resolve the XDG one and
+                # write its logs at the destination rather than at the location
+                # a pre-XDG controller wrote them. Pointing `$XDG_STATE_HOME`
+                # at the `~/Library` log root is what makes this process
+                # resolve what such a controller hardcoded, identically on
+                # either platform.
+                "XDG_STATE_HOME": str(self.legacy_logs.parent.parent),
+            },
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -3025,7 +3039,10 @@ class PreGateWriterTests(RelocationFixture):
         # ...and everything it wrote before getting there.
         runtime = self.legacy_dir / "runtime" / self.job.slug
         logs = self.legacy_logs / self.job.slug
+        # Named by the writer itself, so a host that resolved either of them
+        # somewhere else fails here rather than through a missing file.
         self.assertEqual(outcome["runtime"], str(runtime))
+        self.assertEqual(outcome["logs"], str(logs))
         self.assertTrue((runtime / "status.json").is_file())
         self.assertTrue(any((runtime / "incidents").iterdir()))
         self.assertTrue((logs / "service.log").is_file())
