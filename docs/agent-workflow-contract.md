@@ -1398,17 +1398,22 @@ docs/user-guide.md | pr-atomic | release-document
 docs/workflow-setup.md | pr-atomic | release-document
 docs/workflow_audit_findings.md | coordination | audit-report
 docs/workflow_command_vendoring_design.md | coordination | audit-report
+tools/ | pr-atomic | test-parsed;release-document
 ```
 
-The six `test-parsed` rows name what actually parses them:
+The eight `test-parsed` rows name what actually parses them:
 `tools/test_agent_workflow_contract.py` reads §4 of this document (and
 `tools/test_document_classification.py` reads §7),
 `test/Spec/UI/Keys.hs` reads the binding table in `docs/design.md` §7,
 `tools/test_document_workflow_contract.py` and
 `tools/test_drafting_workflow_contract.py` read their own contracts' §2 asset
-tables, and `tools/test_claude_plugin.py` and `tools/test_codex_plugin.py` read
+tables, `tools/test_board_screenshot.py` reconciles the regeneration procedure
+in `docs/media/README.md` against the renderer's own constants,
+`tools/test_claude_plugin.py` and `tools/test_codex_plugin.py` read
 the frontmatter and body of every packaged workflow under `claude-plugin/` and
-`codex-plugin/`.
+`codex-plugin/`, and `tools/test_render_command_sources.py` reads the authored
+command sources under `tools/command_sources/` and byte-compares the Markdown
+rendered from them.
 
 `docs/design.md` and `docs/agent-workflow-contract.md` are the two documents
 that are `test-parsed` and `implementation-coupled` at once: `CLAUDE.md` names

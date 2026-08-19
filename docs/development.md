@@ -109,6 +109,34 @@ working-tree edits and ignoring untracked files. `.github/workflows/ci.yml`
 therefore checks out with `fetch-depth: 0`; without that baseline the check
 fails rather than passing unenforced.
 
+## Rendering a shared command source
+
+Some workflow commands are authored once and rendered into both bundle
+layouts, instead of being maintained as two hand-edited copies that drift.
+`tools/render_command_sources.py` holds the registry and the transformation:
+
+```console
+python3 tools/render_command_sources.py            # write both files
+python3 tools/render_command_sources.py --check    # report stale ones
+```
+
+An authored source lives under `tools/command_sources/` and carries the union
+of both brands' frontmatter. It names a workflow with a `cmd` directive rather
+than a literal `/name` or `$name`, so each brand's file gets its own sigil, and
+it keeps deliberate per-brand body text inside a
+`<!-- brand:claude -->` / `<!-- brand:codex -->` / `<!-- /brand -->` block.
+Rendering refuses a literal sigil written where a directive belongs.
+
+After editing a source, re-render and commit both generated files.
+`tools/test_render_command_sources.py` re-renders every registered source and
+byte-compares it against the tracked output, so a source changed without a
+re-render fails the required `build-test` job.
+
+Only a fixture is registered today (issue #375): it renders under `tools/`,
+outside both bundles, so nothing new becomes invokable while the mechanism is
+proved. A command rendered into `claude-plugin/.../commands/` or
+`codex-plugin/.../skills/` is shipped, and the bundle rules above apply to it.
+
 ## Source layout
 
 - `app/` — executable entry point.
