@@ -2500,9 +2500,13 @@ above are unchanged, and persistence the user switched off is not a failure.
   file, the directory that has to remain to contain it, and a marker naming
   where the installation went. That transition is held under the legacy
   record's lock from the read that decides which repositories exist through the
-  removal, so a writer queued on that lock fails without recording anything. It
-  cannot reach a writer that arrives after the removal, which finds no record
-  and recreates what it needs, so the run then reconciles what came back —
+  removal, so a writer queued on that lock fails without recording anything —
+  a refusal every write to that record's `repositories` table carries itself,
+  rather than one its callers each have to remember. It cannot reach a writer
+  running an older installed copy of the controller, from before that gate,
+  which is what a pre-XDG host is running by definition; one of those arriving
+  after the removal recreates what it needs, so the run then reconciles what
+  came back —
   bounded at three passes rather than looped, each merging the recreated record
   on those same terms, carrying the trees it brought, rewriting the definitions
   it names, and clearing the location again on the removal's own ownership

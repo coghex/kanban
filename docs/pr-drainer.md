@@ -1031,10 +1031,14 @@ of a tree at both locations it keeps both and tells you rather than choosing.
 
 Holding the old record's lock for the whole move is what makes a writer that
 was already queued on it safe: it wakes into a location whose record is gone,
-reads the marker beside that lock, and fails without recording anything. It
-cannot make a writer that turns up *after* the move safe, because there is
-nothing left for that one to queue on — it just recreates the directory and
-records itself where nothing looks any more. So the run goes back and checks,
+reads the marker beside that lock, and fails without recording anything. That
+refusal belongs to the write itself rather than to whatever called it, so it
+holds however such a writer got there. What it cannot cover is a writer running
+an *older* copy of the controller — which is exactly what a host with a
+`~/Library` installation is running, since that is why the installation is
+there — and one of those that turns up after the move just recreates the
+directory and records itself where nothing looks any more. So the run goes back
+and checks,
 up to three times: whatever it finds is merged into the destination record the
 same way the move's own merge works, its runtime and log trees are carried
 over, the definitions it names are rewritten and reloaded against the new

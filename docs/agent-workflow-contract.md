@@ -584,6 +584,17 @@ arithmetic, which §2.3 owns.
   refuses by printing rather than logging, because logging creates the
   directories it logs into.
 
+  Every write to the discovery record's `repositories` table carries that same
+  gate itself, not only the transitions that perform one. Holding the record's
+  lock across a whole transition serializes a queued writer rather than
+  stopping it: such a writer wakes *after* a mover has taken the installation
+  apart, on the far side of any reconciliation that mover could have run, and a
+  refusal that lived only in its caller would be one a caller could be outside
+  of. So the merge and the removal that mutate that table each ask the gate
+  before and inside the record's own lock, which makes the refusal a property
+  of the write. A transition that already holds the lock re-enters it, and asks
+  the gate again for nothing.
+
   The drainer's own writes are deliberately not among them.
   `tools/drain_prs.py` records conflict and cleanup incidents into the
   installation through `record_conflict_incident` and
@@ -1303,8 +1314,13 @@ search step and nothing else, which is what `mandatory: no` records.
   reads that marker under the same lock, and refuses before it writes. They
   cannot reach a writer that arrives *after* the removal, which finds no record,
   creates the directory afresh, and opens a lock inode the transition never
-  held — so the run reconciles whatever came back. Each pass merges the record
-  found there into the destination's on the same destination-wins-per-key terms
+  held. §2.4's write-level gate is what refuses such a writer running *this*
+  code; the reconciliation below is what the gate cannot cover, because the
+  installed controller a pre-XDG host is running is an older copy that predates
+  it — which is the same premise that puts the installation at `~/Library` in
+  the first place. So the run reconciles whatever came back. Each pass merges
+  the record found there into the destination's on the same
+  destination-wins-per-key terms
   at both levels, carries each runtime and log tree it brought, rewrites and
   reloads every definition it names against this installation, and clears the
   location again on exactly the ownership terms the removal asks: an entry this

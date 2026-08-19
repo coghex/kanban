@@ -32,7 +32,9 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -319,11 +321,15 @@ class RelocationFixture(unittest.TestCase):
         real durable content in both its trees: a definition, a record entry, a
         status file, an incident and a log.
 
-        `install_job` is deliberately not among them. It is gated on this
-        process's installation still being the one this host resolves and
-        refuses outright, which is what makes every writer that goes through it
-        safe; these are the writers that are not gated, and they are the hole
-        the reconciliation exists to close.
+        The process that can actually do this is the *installed* controller a
+        pre-XDG host is running, which is an older copy of this module — that
+        is the premise of the whole relocation — and predates the staleness
+        refusal every discovery-record write in this copy now carries. Standing
+        exactly that one refusal down for the writer is what makes this fixture
+        that process rather than this one; every other step is this module's
+        own writer, unmodified, and the runtime, log and definition writers are
+        not gated in either copy. `QueuedRecordWriterTests` below is the other
+        half: a writer running *this* copy, in another process, is refused.
         """
         with self.as_bound(bindings):
             job = drain_prs_service.resolve_job(checkout)
@@ -333,7 +339,10 @@ class RelocationFixture(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 drain_prs_service.ensure_dirs(job)
                 backend.write_definition(drain_prs_service.service_definition(job))
-                drain_prs_service.write_discovery_record(job)
+                with mock.patch.object(
+                    drain_prs_service, "require_current_installation", lambda: None
+                ):
+                    drain_prs_service.write_discovery_record(job)
                 drain_prs_service.atomic_write_json(
                     job.status_path,
                     {"state": "stopped", "repository": job.identity, "stamp": stamp},
@@ -2203,6 +2212,11 @@ class LateWriteMergeTests(RelocationFixture):
     def setUp(self):
         super().setUp()
         self.seed_legacy_installation()
+        # While the legacy record is still the one this host resolves, so this
+        # is the installation's own selection rather than a stale process's.
+        install_drainer.write_installed_config_path(
+            "acme/widgets", "/destination/widgets.toml"
+        )
         self.bindings = self.legacy_bindings
         self.gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
         # An unrelated repository already recorded at the destination, seeded
@@ -2252,16 +2266,16 @@ class LateWriteMergeTests(RelocationFixture):
         )
 
     def test_a_repository_recorded_at_both_keeps_the_destinations_entry(self):
-        with self.as_bound(self.bindings):
-            install_drainer.write_installed_config_path(
-                "acme/widgets", "/destination/widgets.toml"
-            )
-
         def late():
+            # Through the pre-gate installed copy `write_late` above explains:
+            # a writer running *this* copy is refused rather than recorded.
             with self.as_bound(self.bindings):
-                drain_prs_service.merge_repository_record(
-                    "acme/widgets", {"config_path": "/late/widgets.toml"}
-                )
+                with mock.patch.object(
+                    drain_prs_service, "require_current_installation", lambda: None
+                ):
+                    drain_prs_service.merge_repository_record(
+                        "acme/widgets", {"config_path": "/late/widgets.toml"}
+                    )
 
         with self.racing(late):
             result = self.relocate()
@@ -2441,6 +2455,165 @@ class LateWriteReportingTests(RelocationFixture):
             str(self.legacy_dir / "runtime"), report["retained"]
         )
         self.assertIn("A re-run alone is not the repair", report["repair"])
+
+
+# What the queued writer below runs. A real second process, because
+# `document_lock` re-enters within one thread: a writer driven from the
+# relocating thread takes that bypass and never contends at all, so nothing
+# run there can stand in for interprocess contention. It resolves its own
+# managed paths at its own import, exactly as any controller does, and then
+# writes the discovery record the way a start or an install does.
+_QUEUED_WRITER = """
+import json, sys, time
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+ready, go, queued, acquired, result = (
+    Path(argument) for argument in sys.argv[2:7]
+)
+identity, checkout = sys.argv[7], sys.argv[8]
+
+import drain_prs_service
+
+# Bound here, while the legacy record is still the one this host resolves.
+ready.write_text(str(drain_prs_service.DISCOVERY_RECORD_PATH), encoding="utf-8")
+while not go.exists():
+    time.sleep(0.01)
+outcome = {"bound_record": str(drain_prs_service.DISCOVERY_RECORD_PATH)}
+queued.write_text("", encoding="utf-8")
+# The record's own lock, taken the way every transition in the controller
+# takes it and before anything is asked about the installation, so where this
+# process waits is settled rather than raced. `merge_repository_record` below
+# asks for the same lock again, which re-enters within this one thread exactly
+# as it does inside `install_job`.
+with drain_prs_service.document_lock(drain_prs_service.DISCOVERY_RECORD_PATH):
+    acquired.write_text("", encoding="utf-8")
+    try:
+        drain_prs_service.merge_repository_record(identity, {"repository": checkout})
+        outcome["recorded"] = True
+    except drain_prs_service.ServiceError as error:
+        outcome["refused"] = str(error)
+result.write_text(json.dumps(outcome), encoding="utf-8")
+"""
+
+
+class QueuedRecordWriterTests(RelocationFixture):
+    """A writer in another OS process, queued on the legacy record's lock.
+
+    The relocation holds that lock across its whole transition and never
+    unlinks the lock file, so this writer really does block on the same inode
+    and really does wake only after the reconciliation has finished — past
+    anything a bounded sweep could have carried across. What it must not be
+    able to do is record anything, and that is what the refusal every
+    discovery-record write carries is for.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.ready = self.root / "writer.ready"
+        self.go = self.root / "writer.go"
+        self.queued = self.root / "writer.queued"
+        self.acquired = self.root / "writer.acquired"
+        self.result = self.root / "writer.result"
+        self.writer_script = self.root / "queued_writer.py"
+        self.writer_script.write_text(_QUEUED_WRITER, encoding="utf-8")
+
+    def start_writer(self):
+        """Spawn it and wait until it has bound its managed paths, which has to
+        happen before this run writes a record at the destination: from that
+        instant a fresh process resolves the destination instead."""
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(self.writer_script),
+                str(Path(drain_prs_service.__file__).parent),
+                str(self.ready),
+                str(self.go),
+                str(self.queued),
+                str(self.acquired),
+                str(self.result),
+                "acme/widgets",
+                str(self.widgets),
+            ],
+            env={"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(process.kill)
+        self.process = process
+        self.wait_for(self.ready, "the queued writer never bound its paths")
+        return process
+
+    def wait_for(self, path, message):
+        deadline = time.monotonic() + 30
+        while not path.exists() and time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                self.fail(f"{message}: {self.process.communicate()}")
+            time.sleep(0.02)
+        self.assertTrue(path.exists(), message)
+
+    def relocate_with_queued_writer(self):
+        """Release it at the very start of the transition and observe it near
+        the end.
+
+        Released before the destination record is written, because from the
+        instant that file exists the writer's own resolver already answers the
+        destination and it refuses where it stands instead of queuing — a
+        narrower window than the lock alone, and not the one under test here.
+        Observed inside the removal, by which point the lock has been held
+        across the moves and the definition rewrites.
+        """
+        process = self.start_writer()
+        real_apply = install_drainer._apply_relocation
+        real_remove = install_drainer._remove_legacy_installation
+
+        def apply_hook(transition, relocation_plan, sources):
+            self.go.write_text("", encoding="utf-8")
+            self.wait_for(self.queued, "the queued writer never reached the lock")
+            # It is between writing that file and blocking in `flock`; a
+            # moment here is what puts it there rather than racing it.
+            time.sleep(0.25)
+            return real_apply(transition, relocation_plan, sources)
+
+        def remove_hook(transition, relocation_plan):
+            # It cannot have the lock: this run holds it and never unlinks it.
+            # If it does, `flock` did not serialize this writer at all.
+            self.blocked = not self.acquired.exists()
+            return real_remove(transition, relocation_plan)
+
+        with mock.patch.object(install_drainer, "_apply_relocation", apply_hook):
+            with mock.patch.object(
+                install_drainer, "_remove_legacy_installation", remove_hook
+            ):
+                result = self.relocate()
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+        return result, json.loads(self.result.read_text(encoding="utf-8"))
+
+    def test_it_blocks_on_the_lock_and_then_records_nothing(self):
+        before_record = self.legacy_record
+        _, outcome = self.relocate_with_queued_writer()
+        # It really was the stale, legacy-bound process this is about...
+        self.assertEqual(outcome["bound_record"], str(before_record))
+        # ...it really did block, rather than refusing before it queued...
+        self.assertTrue(self.blocked, outcome)
+        # ...and it wrote nothing at the location the relocation emptied.
+        self.assertNotIn("recorded", outcome)
+        self.assertIn("was relocated to", outcome["refused"])
+        self.assertIn(str(self.destination), outcome["refused"])
+        self.assertFalse(self.legacy_record.exists())
+
+    def test_the_run_it_woke_into_needed_no_reconciliation(self):
+        result, _ = self.relocate_with_queued_writer()
+        # Nothing came back, so nothing was carried and nothing is retained:
+        # the refusal is what kept the sweep from having anything to do.
+        self.assertTrue(result["late_writes"]["resolved"])
+        self.assertEqual(result["late_writes"]["passes"], 0)
+        self.assertEqual(
+            sorted(path.name for path in self.legacy_dir.iterdir()),
+            ["config.json.lock", "relocated.json"],
+        )
 
 
 if __name__ == "__main__":

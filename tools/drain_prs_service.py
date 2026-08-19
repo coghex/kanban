@@ -932,6 +932,18 @@ def merge_repository_record(
     The read that computes the merge happens inside `update_json_document`'s
     lock, so a repository installed between another writer's read and its write
     cannot be dropped.
+
+    Gated here, at the write, rather than only at the transitions that call it.
+    A relocation holds this record's lock across its whole transition and never
+    unlinks the lock file, precisely so a writer queued on that inode is
+    serialized rather than lost -- but serialized is not stopped: such a writer
+    wakes *after* the relocation has taken the installation apart and, without
+    this, would recreate the record at a location nothing resolves any more,
+    past any bounded reconciliation that installer already ran. So the refusal
+    lives with the mutation, where no caller can be outside it. The unlocked
+    half of `installation_transaction` costs a queued writer nothing, and the
+    locked half is the authoritative answer, taken where no mover can be
+    running.
     """
 
     def merged(document: dict[str, Any]) -> dict[str, Any]:
@@ -944,7 +956,8 @@ def merge_repository_record(
         records[identity] = entry
         return {**document, RECORD_REPOSITORIES_KEY: records}
 
-    return update_json_document(DISCOVERY_RECORD_PATH, merged)
+    with installation_transaction():
+        return update_json_document(DISCOVERY_RECORD_PATH, merged)
 
 
 def write_discovery_record(job: DrainerJob) -> Path:
@@ -987,7 +1000,10 @@ def remove_discovery_record(identity: str) -> Path:
     other direction: rewriting `repositories` from anything but its own current
     value would delete the repositories this uninstall is not about, and the
     read that computes the removal happens inside `update_json_document`'s lock
-    so an install racing it cannot be dropped.
+    so an install racing it cannot be dropped. It carries that function's
+    staleness gate too, on the other side of the same race: a queued writer
+    that woke after a relocation would otherwise write a fresh record at the
+    location that relocation emptied, which is debris rather than an uninstall.
     """
 
     def without(document: dict[str, Any]) -> dict[str, Any]:
@@ -997,7 +1013,8 @@ def remove_discovery_record(identity: str) -> Path:
         remaining = {key: value for key, value in records.items() if key != identity}
         return {**document, RECORD_REPOSITORIES_KEY: remaining}
 
-    return update_json_document(DISCOVERY_RECORD_PATH, without)
+    with installation_transaction():
+        return update_json_document(DISCOVERY_RECORD_PATH, without)
 
 
 def read_json(path: Path) -> dict[str, Any] | None:

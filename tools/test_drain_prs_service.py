@@ -1003,8 +1003,14 @@ class BackendDelegationTests(RedirectedControllerTestCase):
         # chmods it, and creates the lock file — so a stale controller that
         # locked first would mutate what it is about to refuse.
         self.assertEqual(
-            observed, [("gate", False), ("gate", True), ("ensure_dirs", True)]
+            observed[:3], [("gate", False), ("gate", True), ("ensure_dirs", True)]
         )
+        # Every gate after the first is under the lock, the record writer's own
+        # included: the refusal lives with the mutation as well as with this
+        # transition, so a caller outside one is still inside the other. What
+        # this asserts is that ordering, not how many writers ask.
+        self.assertTrue(all(held for _, held in observed[1:]), observed)
+        self.assertEqual([name for name, _ in observed].count("ensure_dirs"), 1)
 
     def test_an_uninstall_gates_and_removes_under_one_lock(self):
         observed = []
@@ -1023,7 +1029,8 @@ class BackendDelegationTests(RedirectedControllerTestCase):
             ),
         ):
             drain_prs_service.uninstall_job(self.job)
-        self.assertEqual(observed, [("gate", False), ("gate", True)])
+        self.assertEqual(observed[:2], [("gate", False), ("gate", True)])
+        self.assertTrue(all(held for _, held in observed[1:]), observed)
         self.assertIn("uninstall_definition", self.backend.names())
 
     def test_a_relocated_installation_refuses_an_install_and_an_uninstall(self):
