@@ -129,9 +129,20 @@ DOCUMENT_COMMAND_NAMES = {
 }
 CODEX_ONLY_DOCUMENT_WORKFLOWS = ()
 
+# The roadmap workflow vendored by issue #393, slice VEND-1 of
+# docs/workflow_command_vendoring_design.md. Unlike every set above it is not
+# a hand-edited file: it is rendered from tools/command_sources/triage.md by
+# tools/render_command_sources.py, and tools/test_render_command_sources.py
+# byte-compares the tracked output against that source. User-invoked and so
+# excluded from Haskell name parity like the rest.
+ROADMAP_COMMAND_NAMES = {"triage"}
+
 # What a Claude Code installation must actually discover in commands/.
 EXPECTED_COMMAND_NAMES = (
-    HASKELL_PARITY_COMMAND_NAMES | DRAFTING_COMMAND_NAMES | DOCUMENT_COMMAND_NAMES
+    HASKELL_PARITY_COMMAND_NAMES
+    | DRAFTING_COMMAND_NAMES
+    | DOCUMENT_COMMAND_NAMES
+    | ROADMAP_COMMAND_NAMES
 )
 
 # Keys that would let a packaged command's frontmatter or manifest silently
@@ -265,14 +276,16 @@ class CommandDiscoveryTests(unittest.TestCase):
         # The two concepts must stay distinct: discovery covers every packaged
         # workflow, while WorkflowNameParityTests pins only the ones Kanban's
         # Haskell code spawns. Collapsing them back into one constant would
-        # either break parity or silently stop discovering the drafting and
-        # document commands.
+        # either break parity or silently stop discovering the drafting,
+        # document, and roadmap commands.
         self.assertTrue(HASKELL_PARITY_COMMAND_NAMES < EXPECTED_COMMAND_NAMES)
         self.assertEqual(
             EXPECTED_COMMAND_NAMES - HASKELL_PARITY_COMMAND_NAMES,
-            DRAFTING_COMMAND_NAMES | DOCUMENT_COMMAND_NAMES,
+            DRAFTING_COMMAND_NAMES | DOCUMENT_COMMAND_NAMES | ROADMAP_COMMAND_NAMES,
         )
         self.assertEqual(DRAFTING_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
+        self.assertEqual(ROADMAP_COMMAND_NAMES & DRAFTING_COMMAND_NAMES, set())
+        self.assertEqual(ROADMAP_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
 
     def test_the_remaining_codex_only_document_workflow_is_not_packaged_here(self):
         for name in CODEX_ONLY_DOCUMENT_WORKFLOWS:
