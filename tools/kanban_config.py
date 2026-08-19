@@ -68,9 +68,16 @@ _XDG_LOG_DIR_FALLBACK = "/.local/state/kanban/issue-review"
 _ISSUE_REVIEW_RECORD_NAME = "config.json"
 
 
-def _is_macos() -> bool:
+def is_macos() -> bool:
     """The one platform question these resolvers ask, spelled the way
-    tools/service_manager.py's own branch point spells it."""
+    tools/service_manager.py's own branch point spells it.
+
+    Public because it is also the platform question
+    `tools/install_drainer.py` asks before relocating a pre-XDG `~/Library`
+    installation: that decision is "is this platform macOS?", never "do the
+    two directories differ?", and a second spelling of it there could answer
+    differently from the resolvers whose output it relocates.
+    """
     return sys.platform == "darwin"
 
 
@@ -109,7 +116,7 @@ def default_issue_review_install_dir() -> Path:
     redirects them -- or any process that changes them -- would then silently
     escape.
     """
-    if _is_macos():
+    if is_macos():
         return _macos_issue_review_install_dir()
     return _xdg_issue_review_install_dir()
 
@@ -120,7 +127,7 @@ def default_issue_review_log_dir() -> Path:
     carries. `--log-dir` moves it; ISSUE_REVIEW_INSTALL_DIR_ENV deliberately
     does not, because logs are not part of the installation that variable
     relocates. Per call for the same reason as above."""
-    if _is_macos():
+    if is_macos():
         return _home_relative(_MACOS_LOG_DIR)
     return _xdg_issue_review_dir("XDG_STATE_HOME", _XDG_LOG_DIR_FALLBACK)
 
@@ -272,7 +279,7 @@ def default_drainer_install_dir() -> Path:
     want one answer per process bind it themselves; see
     tools/drain_prs_service.py's module constants.
     """
-    if _is_macos():
+    if is_macos():
         return macos_drainer_install_dir()
     return _xdg_drainer_install_dir()
 
@@ -286,7 +293,7 @@ def default_drainer_log_dir() -> Path:
     migration moves an existing `~/Library` log tree here rather than leaving
     the host with two.
     """
-    if _is_macos():
+    if is_macos():
         return macos_drainer_log_dir()
     return _xdg_drainer_dir("XDG_STATE_HOME", _XDG_DRAINER_LOG_DIR_FALLBACK)
 

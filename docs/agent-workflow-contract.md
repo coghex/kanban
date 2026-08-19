@@ -650,12 +650,19 @@ arithmetic, which §2.3 owns.
   `$XDG_STATE_HOME`'s `kanban/pr-drainer` — `~/.local/share` and
   `~/.local/state` when the variable is unset, empty, or not absolute.
   Discovery probes the XDG location first and the `~/Library` location second
-  on both platforms and takes the first whose record exists, so an installation
-  that already exists never has to move; only when neither is occupied is the
-  answer this platform's write path. `<install-dir>` is a third name only
+  on both platforms and takes the first whose record exists; only when neither
+  is occupied is the answer this platform's write path. A macOS installation is
+  therefore never moved, and a `~/Library` installation on any other platform is
+  moved exactly once, by the installer's own relocation described in §5. `<install-dir>` is a third name only
   because `--install-dir` and `KANBAN_DRAINER_INSTALL_DIR` exist: they relocate
   the script directory and the runtime root beneath it, and move neither the
-  discovery record nor the log root. With no override in play `<install-dir>`
+  discovery record nor the log root. The variable is how an installed component
+  resolves the installation it belongs to; it is not how the *installer* picks
+  where to write. `tools/install_drainer.py`'s destination is `--install-dir`
+  alone, defaulting to `<record-dir>` on macOS and to this platform's own
+  convention elsewhere, so a host that merely exports the variable is not
+  thereby installing somewhere custom — which is what would otherwise leave a
+  `~/Library` installation unrelocated forever. With no override in play `<install-dir>`
   *is* `<record-dir>`, which is why the record is a fixed location a dashboard
   that inherits no environment can still find, while the scripts beside it are
   not.
@@ -1067,9 +1074,15 @@ the two move independently: `--install-dir` relocates this directory, while the
 record's own path is fixed precisely so a dashboard that inherited no
 environment can still find an install that moved. `drainer-log-dir` and
 `drainer-log-dir-xdg` are the log root as macOS and the XDG *state* directory
-spell it; it moves with neither `--install-dir` nor
-`KANBAN_DRAINER_INSTALL_DIR`, so like the issue-review log directory it needs no
-relocation rule.
+spell it; no option moves it, so unlike `drainer-install-dir` it has no
+override rule — but it is still carried by the one relocation §5 describes,
+because a host left logging to both roots would have one of them frozen as
+history.
+
+All six rows stay declared on every platform, including the `~/Library` three
+on a host that will never install there again: they are what a non-macOS
+relocation moves *from*, so the spelling has to stay policed for as long as any
+component can still read it.
 
 Every one of the six declares `tools/kanban_config.py`, because that module is
 where each is written down, once, for both platforms — the controller, the
@@ -1203,11 +1216,92 @@ search step and nothing else, which is what `mandatory: no` records.
   that already exists probes the XDG location first and the `~/Library`
   location second on both platforms, exactly as the issue-review probe below
   does and with the same occupied-but-invalid rule.
-  An installation that already exists is never moved: the probe finds it where
-  it is, on either spelling, and a host that inherited a `~/Library`
-  installation keeps it. Relocating one to this platform's own convention is
-  #367, taking over one already at that location is #368, and carrying across
-  what a writer installs at a relocated location is #369.
+  A macOS installation is never moved: its own convention is where it already
+  is. On every other platform a `~/Library` installation is moved exactly once,
+  by `tools/install_drainer.py` on its next default run. The relocation is
+  attempted only when this platform is not macOS — asked as the platform
+  question, never inferred from two directories differing — the run's
+  destination is this platform's own convention, and the `~/Library` location
+  holds a discovery record. `--install-dir` decides that destination and is
+  what the installed controller is spawned with, so the relocation resolves its
+  own managed paths from that same selection; a custom destination installs
+  there and relocates nothing, and an inherited `KANBAN_DRAINER_INSTALL_DIR`
+  never decides it. A platform default that resolves to the `~/Library`
+  directory itself, because an absolute XDG root names it, installs in place
+  and relocates nothing too.
+  What moves is the whole shared installation, because nothing less of it can
+  move on its own: the two discovery records merge with the destination winning
+  per key at both the top level and the `repositories` table and the merged
+  document is written durably at the destination first; the script links are
+  installed there; every recorded repository's runtime tree is carried, found
+  through the install directory its *own* definition names, since
+  `--install-dir` moves runtime state without moving the record; its log tree
+  is carried to the destination log root; and its definition is rewritten from
+  the destination's paths and reloaded, since every definition embeds the
+  controller path, the install-directory environment, the working directory and
+  the log paths, and removing the installation without rewriting them would
+  strand every sibling repository. A tree already at its destination is
+  preserved in place rather than moved onto itself.
+  The whole transition — from the read that decides which repositories exist
+  through the removal that takes the controller they name away — runs under the
+  legacy record's own lock, which is taken only when something is removed and
+  never during a dry run. It also holds, for that whole span, both of the
+  locks §2.4 requires a mover to fence on: every recorded checkout's own
+  `drain_prs.py` run lock, taken through `drain_prs.acquire_lock`'s dry-run
+  shape so it writes nothing into a checkout the installer has no business
+  modifying, and every controller lock that already exists at either end of
+  each repository's runtime move. The controller lock is the one neither
+  liveness signal can see — `run_service` takes it inside its own
+  record-locked startup transaction and keeps it for the process's life,
+  before it has spawned any drainer, so such a process is neither a managed
+  running job nor a holder of the checkout's run lock. Only an existing lock
+  file is taken, because creating one would be this run mutating an
+  installation it may yet refuse, and none can appear underneath it: acquiring
+  that lock needs the discovery record's lock, which this transition holds
+  throughout. Reading a PID file is a snapshot,
+  and the record locks exclude no drainer at all because a drainer never takes
+  them, so without that fence a run starting one instant after the liveness
+  check would drain a checkout whose runtime tree was being moved and whose
+  controller was being removed — and whatever it wrote would not be in a plan
+  computed before it existed. It refuses before mutating anything, and the refusal
+  fails the run rather than installing at the destination, when: any recorded
+  repository's managed job or checkout drainer is live, or its checkout's run
+  lock cannot be taken; a repository appears that the fence does not cover; any recorded entry
+  cannot be recovered exactly — its canonical identity, its checkout, this
+  host's derived identifier and definition path, and the install directory its
+  own definition names; either discovery record is present but unreadable, not
+  an object, or has a non-table `repositories`; a distinct source tree would be
+  moved onto a destination runtime or log tree that already exists; a
+  per-repository runtime or log path is present and is not a directory, at
+  either end, since carrying one would satisfy "the tree arrived" and strand
+  the next controller on it; a path it writes through is not a regular file; or the `~/Library` install directory
+  holds an entry this installer did not put there — decided by what an entry
+  *is*, with the expected relative name selecting each managed slot and its
+  required object type proving ownership, so the four script links must be
+  symlinks, the record and its lock plain files, `runtime/` a plain directory,
+  and `__pycache__` recognized only when it holds nothing but plain `.pyc`
+  files.
+  Every mutation registers its undo before it runs, and any failure runs them
+  in reverse — definitions restored byte for byte and reloaded, trees moved
+  back, the destination record restored, created directories removed while
+  empty, modes put back, and the process's managed paths rebound — totally over
+  exception types, never abandoning the remaining actions, and reporting what
+  it could not undo beside the original failure. A tree move is safe to fail
+  partway: a copy that fails takes its incomplete destination with it and
+  leaves the source untouched, and a copy that lands makes the destination
+  authoritative, so if the source then survives both are kept and reported
+  rather than one being chosen. The lock file is never unlinked, because a
+  writer may be queued on its inode — which is why the `~/Library` directory
+  containing it survives the removal it otherwise completes, and why a marker
+  naming the destination is written into that directory before anything is
+  taken out of it. A controller bound to the old location cannot re-resolve
+  its own managed paths, so that marker is how it learns it is stale; §2.4
+  describes the transitions that refuse on it. Removal happens
+  only once every recorded repository is usable through the destination, and
+  the run then reports whether the legacy record has reappeared and what the
+  repair for that is.
+  Taking over an installation already at this platform's own location is #368,
+  and carrying across what a writer installs at a relocated location is #369.
   The installed definition carries `$XDG_DATA_HOME` and `$XDG_STATE_HOME`
   alongside `KANBAN_DRAINER_INSTALL_DIR` whenever they are absolute, because
   that option pins the install directory and the runtime root beneath it but

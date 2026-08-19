@@ -170,7 +170,7 @@ class ConsumingRepositoryTests(unittest.TestCase):
             plugin_root = target / "plugins" / "kanban"
         else:
             plugin_root = (
-                target / "plugins" / "cache" / "kanban" / "kanban" / "1.4.0"
+                target / "plugins" / "cache" / "kanban" / "kanban" / "1.4.1"
             )
         if not plugin_root.exists():
             shutil.copytree(BUNDLE_SOURCES[brand], plugin_root)

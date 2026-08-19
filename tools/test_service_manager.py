@@ -242,6 +242,55 @@ class LivenessProbeTests(BackendTestCase):
         self.assertEqual(self.probe(_completed(0, stderr="\tstate = running\n"))[1], True)
 
 
+class LaunchdDefinitionEnvironmentTests(BackendTestCase):
+    """Issue #367: the read-back counterpart of the environment a definition
+    carries.
+
+    A relocation has to ask each installed job which installation it names,
+    because `KANBAN_DRAINER_INSTALL_DIR` is what decides where that job's
+    runtime state lives and `--install-dir` moves that state without moving
+    the record it is discovered through. The answer has to be total on the
+    same terms `legacy_service_repository` is: it is asked of jobs a
+    half-finished install may have left in any state.
+    """
+
+    def test_the_environment_written_is_the_environment_read_back(self):
+        definition = self.definition()
+        self.backend.write_definition(definition)
+        self.assertEqual(
+            self.backend.definition_environment(definition.identifier),
+            dict(definition.environment),
+        )
+
+    def test_an_absent_definition_carries_no_variables_rather_than_failing(self):
+        self.assertEqual(
+            self.backend.definition_environment("com.example.never-installed"), {}
+        )
+
+    def test_a_malformed_definition_carries_no_variables_rather_than_failing(self):
+        for payload in (b"not a plist at all", plistlib.dumps(["a", "list"])):
+            with self.subTest(payload=payload[:12]):
+                path = self.backend.definition_path("com.example.job")
+                path.write_bytes(payload)
+                self.assertEqual(
+                    self.backend.definition_environment("com.example.job"), {}
+                )
+
+    def test_a_definition_with_no_environment_block_carries_no_variables(self):
+        path = self.backend.definition_path("com.example.job")
+        path.write_bytes(plistlib.dumps({"Label": "com.example.job"}))
+        self.assertEqual(self.backend.definition_environment("com.example.job"), {})
+
+    def test_non_string_entries_are_dropped_rather_than_returned(self):
+        path = self.backend.definition_path("com.example.job")
+        path.write_bytes(
+            plistlib.dumps({"EnvironmentVariables": {"HOME": "/home", "N": 4}})
+        )
+        self.assertEqual(
+            self.backend.definition_environment("com.example.job"), {"HOME": "/home"}
+        )
+
+
 class LegacySingletonTests(BackendTestCase):
     def write_legacy(self, document):
         service_manager.LEGACY_PLIST_PATH.write_bytes(plistlib.dumps(document))
@@ -661,6 +710,50 @@ class SystemdLivenessProbeTests(SystemdBackendTestCase):
         self.show("MainPID", "", returncode=1)
         self.assertFalse(self.backend.is_loaded(self.unit))
         self.assertFalse(self.backend.is_running(self.unit))
+
+
+class SystemdDefinitionEnvironmentTests(SystemdBackendTestCase):
+    """Issue #367: the same read-back, off a unit file.
+
+    A unit carries its environment as quoted words rather than as a
+    dictionary, so this is the half where the reader has to reverse exactly
+    what the writer did — including a value holding whitespace, a quote, a
+    backslash, or the `%` systemd would otherwise expand as a specifier.
+    """
+
+    def test_the_environment_written_is_the_environment_read_back(self):
+        definition = self.definition(
+            environment={
+                "HOME": "/home",
+                "KANBAN_DRAINER_INSTALL_DIR": "/data/kanban/pr-drainer",
+                "AWKWARD": 'a b "c" \\ 100%',
+            }
+        )
+        self.backend.write_definition(definition)
+        self.assertEqual(
+            self.backend.definition_environment(definition.identifier),
+            dict(definition.environment),
+        )
+
+    def test_an_absent_unit_carries_no_variables_rather_than_failing(self):
+        self.assertEqual(self.backend.definition_environment(self.unit), {})
+
+    def test_a_malformed_unit_carries_no_variables_rather_than_failing(self):
+        for payload in (b"\xff\xfe not utf-8", b"[Service]\nEnvironment=\nRestart=no\n"):
+            with self.subTest(payload=payload[:12]):
+                self.backend.definition_path(self.unit).write_bytes(payload)
+                self.assertEqual(self.backend.definition_environment(self.unit), {})
+
+    def test_a_directory_where_the_unit_belongs_carries_no_variables(self):
+        self.backend.definition_path(self.unit).mkdir()
+        self.assertEqual(self.backend.definition_environment(self.unit), {})
+
+    def test_only_the_environment_directives_are_read(self):
+        self.backend.write_definition(self.definition())
+        self.assertEqual(
+            sorted(self.backend.definition_environment(self.unit)),
+            ["HOME", "PYTHONUNBUFFERED"],
+        )
 
 
 class SystemdUninstallTests(SystemdBackendTestCase):
