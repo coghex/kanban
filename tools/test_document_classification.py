@@ -75,6 +75,10 @@ TEST_PARSED_PATHS = {
     "claude-plugin/",
     # tools/test_codex_plugin.py reads every packaged skill the same way.
     "codex-plugin/",
+    # tools/test_render_command_sources.py reads the authored command sources
+    # under tools/command_sources/ and byte-compares the files rendered from
+    # them, so editing either alone fails build-test (issue #375).
+    "tools/",
 }
 
 # The coordination documents §7 names in prose, so a contributor can place
