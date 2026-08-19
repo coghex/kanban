@@ -19,16 +19,22 @@ The key visual contract:
 
 ## Workflow
 
-1. Resolve the repository once, before any GitHub read, and use that one identity for every `gh` call below.
+1. Set `REPO` once, before any GitHub read, and use that one identity for every `gh` call below. It is set on exactly one of the two paths here, never left unset.
 
-A supplied repository arrives in `$ARGUMENTS`; when it is non-empty, that identity is the target and the resolution below is skipped.
+A supplied repository arrives in `$ARGUMENTS`, which Claude Code substitutes before the session reads this file. When it is non-empty, that identity is the target: take `REPO` from it and skip the resolution below.
+
+```bash
+REPO="$ARGUMENTS"
+```
+
+Otherwise resolve it from the session's own checkout:
 
 ```bash
 REPO_REMOTE="$(git remote get-url origin)"
 REPO="$(gh repo view "$REPO_REMOTE" --json nameWithOwner --jq .nameWithOwner)"
 ```
 
-Pass `-R "$REPO"` on every `gh` invocation below, and name the resolved repository in the answer's first line. Without `-R`, `gh` targets whatever repository the session's working directory happens to be in, so an unnamed call silently triages the wrong tracker; reporting what was resolved is what catches a wrong resolution.
+Either path leaves `$REPO` holding one `owner/name` before the first `gh` call. Pass `-R "$REPO"` on every `gh` invocation below, and name that repository in the answer's first line. Without `-R`, `gh` targets whatever repository the session's working directory happens to be in, so an unnamed call silently triages the wrong tracker; reporting what was resolved is what catches a wrong resolution.
 
 2. Pull fresh open issue data. Prefer `gh` if no GitHub issue-listing connector is available:
 
