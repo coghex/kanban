@@ -54,12 +54,17 @@ tracked file has none:
   links to.
 
 Prerequisites are `cabal` on `PATH` and a Git checkout of this repository.
-Both hold in the required `build-test` CI job. Neither holds inside an
-unpacked release -- which nonetheless carries this file, since `tools/`
-ships whole, and whose own `README.md` advertises the `unittest discover`
-command that collects it. That case skips with a reason rather than
-erroring. Anything else -- `cabal sdist` failing, an unreadable archive --
-is a hard failure.
+Neither holds inside an unpacked release -- which nonetheless carries this
+file, since `tools/` ships whole, and whose own `README.md` advertises the
+`unittest discover` command that collects it. That case skips with a reason
+rather than erroring. Anything else -- `cabal sdist` failing, an unreadable
+archive -- is a hard failure.
+
+A skip is a pass to `unittest`, so where the prerequisites do hold this
+module is not left to whole-suite discovery: `.github/workflows/ci.yml`'s
+`haskell` job runs it by name, after installing the pinned toolchain, and
+fails the step on a skipped or empty result. The toolchain-free `python` job
+runs the rest of the suite and collects this module too, where it skips.
 """
 
 import ast
