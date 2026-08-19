@@ -13,6 +13,22 @@ alongside the container-verified drainer lifecycle. The `tools/` job installs no
 Haskell toolchain: nothing in that suite needs one except the source
 distribution check below, which runs in the Haskell job.
 
+That compiler is restored from a cache rather than installed. ghcup is pointed
+at a `~/.ghcup` the job owns outright, that directory is what the cache covers,
+and the key names the runner, both pinned versions, and the installation
+layout — never a source file, since the compiler does not change when a module
+does. There are deliberately no fallback keys: a prefix match would be a tree
+built for some other pin, and a miss reinstalls, which is slower and still
+correct. The job then executes `ghc` and `cabal` and requires them to report the
+pins before anything builds, so a restore that lost an executable bit or a
+symlink fails there rather than quietly building with something else.
+
+`.github/workflows/release.yml`'s `build-test` job resolves the toolchain the
+same way, and has to: a release built by a different compiler than CI verified
+is invisible in either workflow read on its own.
+`tools/test_toolchain_parity.py` compares the two to each other rather than to a
+literal, so bumping the pin in one of them alone fails.
+
 The required `build-test` check is the aggregate over all of them. It runs no
 build or test step of its own and succeeds only when every other job in the
 workflow succeeded, failing explicitly when one did not — a dependency failure
