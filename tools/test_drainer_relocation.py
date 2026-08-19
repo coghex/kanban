@@ -1,9 +1,13 @@
-"""Issue #367: relocating a pre-XDG `~/Library` drainer installation.
+"""Issues #367 and #369: relocating a pre-XDG `~/Library` drainer installation,
+and carrying across whatever a writer puts back at the location it emptied.
 
 A host that installed before `tools/kanban_config.py` resolved the drainer's
 managed paths per platform has its installation at the macOS-shaped locations,
 and discovery keeps finding it there forever. These are the tests for the one
-thing that moves it.
+thing that moves it, and for the reconciliation that follows the removal: the
+transition's locks serialize every writer queued on them, and a writer that
+arrives afterwards contends with nothing, so what it recorded is carried across
+and what cannot be carried is reported rather than chosen between.
 
 Hermetic throughout. The platform is simulated rather than read, `$HOME` and
 both XDG base directories are redirected into a temporary tree, and no
@@ -28,7 +32,9 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -247,8 +253,111 @@ class RelocationFixture(unittest.TestCase):
             jobs.append(
                 self.seed_repository(self.gadgets, install_dir=custom_install_dir)
             )
+        # Captured while this resolution is still in force, because it is
+        # exactly what a process that resolved before this arc holds: the
+        # `~/Library` spellings, the log root among them. That log root is
+        # single-valued per platform rather than probed, so a process bound
+        # after the platform question changed already writes its logs at the
+        # destination — and a late writer whose logs land at the *legacy* root
+        # is a pre-XDG process, which is the population this whole transition
+        # is about.
+        self.legacy_bindings = self.stale_bindings()
         self.set_platform("linux")
         return jobs
+
+    # -- the writer that arrives after the removal --------------------------
+
+    def stale_bindings(self):
+        """Every managed path this process currently has bound.
+
+        Captured before a relocation, it is exactly what a controller launched
+        before that relocation still holds: a separate process's constants are
+        frozen at its own import, so restoring these *is* that process's state
+        and there is nothing left for a scheduler to decide.
+        """
+        return {
+            name: getattr(drain_prs_service, name)
+            for name in (
+                "INSTALL_DIR",
+                "DISCOVERY_RECORD_PATH",
+                "CONFIG_PATH",
+                "LEGACY_CONFIG_PATH",
+                "CONTROLLER_PATH",
+                "DRAINER_PATH",
+                "RUNTIME_ROOT",
+                "LOG_ROOT",
+            )
+        }
+
+    def as_bound(self, bindings):
+        stack = contextlib.ExitStack()
+        for name, value in bindings.items():
+            stack.enter_context(mock.patch.object(drain_prs_service, name, value))
+        return stack
+
+    def racing(self, write):
+        """Run `write` in the instant after the removal.
+
+        That is the window the reconciliation exists for: every writer queued
+        on the legacy record's lock is still blocked on it, and one arriving
+        here finds the record gone and recreates what it needs. Reproduced by
+        hooking the removal rather than raced, so the interleaving is the one
+        under test rather than one a scheduler happened to produce.
+        """
+        real = install_drainer._remove_legacy_installation
+
+        def hook(transition, relocation_plan):
+            outcome = real(transition, relocation_plan)
+            write()
+            return outcome
+
+        return mock.patch.object(install_drainer, "_remove_legacy_installation", hook)
+
+    def write_late(self, checkout, bindings, *, stamp="late"):
+        """One repository recorded at the legacy location, after the removal.
+
+        Driven through the controller's own writers under the constants a
+        process that resolved before the relocation still holds, and leaving
+        real durable content in both its trees: a definition, a record entry, a
+        status file, an incident and a log.
+
+        The process that can actually do this is the *installed* controller a
+        pre-XDG host is running, which is an older copy of this module — that
+        is the premise of the whole relocation — and predates the staleness
+        refusal every discovery-record write in this copy now carries. Standing
+        exactly that one refusal down for the writer is what makes this fixture
+        that process rather than this one; every other step is this module's
+        own writer, unmodified, and the runtime, log and definition writers are
+        not gated in either copy. `QueuedRecordWriterTests` below is the other
+        half: a writer running *this* copy, in another process, is refused.
+        """
+        with self.as_bound(bindings):
+            job = drain_prs_service.resolve_job(checkout)
+            backend = install_drainer.service_backend()
+            # The controller's own log writer also prints, which is its job and
+            # not this suite's output.
+            with contextlib.redirect_stdout(io.StringIO()):
+                drain_prs_service.ensure_dirs(job)
+                backend.write_definition(drain_prs_service.service_definition(job))
+                with mock.patch.object(
+                    drain_prs_service, "require_current_installation", lambda: None
+                ):
+                    drain_prs_service.write_discovery_record(job)
+                drain_prs_service.atomic_write_json(
+                    job.status_path,
+                    {"state": "stopped", "repository": job.identity, "stamp": stamp},
+                )
+                drain_prs_service.write_incident(
+                    job=job,
+                    exit_code=7,
+                    command=["drain_prs.py", "--path", str(checkout)],
+                )
+                drain_prs_service.service_log(job, f"{stamp} write for {job.identity}")
+                for source in self.sources.values():
+                    install_drainer.install_symlink(
+                        source, drain_prs_service.INSTALL_DIR / source.name
+                    )
+        return job
 
     # -- locations ----------------------------------------------------------
 
@@ -343,6 +452,25 @@ class RelocationFixture(unittest.TestCase):
             ["config.json.lock"],
         )
         self.assertFalse(self.destination_logs.exists())
+
+    def assert_record_path_is_sealed(self):
+        """No document at the legacy record path, and nothing that can put one
+        there.
+
+        Asserted as what the seal is rather than as the path being absent:
+        `Path.exists` follows the symlink to the marker beside it, and the
+        point of leaving a symlink is precisely that the path is occupied by
+        something no writer will replace.
+        """
+        self.assertTrue(install_drainer._is_tombstone(self.legacy_record))
+        self.assertEqual(
+            os.readlink(self.legacy_record),
+            drain_prs_service.RELOCATION_MARKER_NAME,
+        )
+        self.assertNotIn(
+            "repositories",
+            drain_prs_service._read_json_object(self.legacy_record),
+        )
 
     def assert_relocate_refuses_and_changes_nothing(self, expected_fragment):
         """For a refusal the transition raises rather than the plan: the
@@ -576,11 +704,12 @@ class TwoRepositoryRelocationTests(RelocationFixture):
         # hand the next writer a different lock from the one it is waiting on
         # — which is why the directory containing it survives too, and with it
         # the marker that tells a process still bound here that it is stale.
-        self.assertFalse(self.legacy_record.exists())
+        self.assert_record_path_is_sealed()
         self.assertEqual(
             sorted(path.name for path in self.legacy_dir.iterdir()),
-            ["config.json.lock", "relocated.json"],
+            ["config.json", "config.json.lock", "relocated.json"],
         )
+        self.assert_record_path_is_sealed()
         self.assertIn(str(self.legacy_record) + ".lock", self.result["retained"])
         self.assertIn(
             str(self.legacy_dir / "relocated.json"), self.result["retained"]
@@ -668,7 +797,7 @@ class StaleControllerTests(RelocationFixture):
         # The record it would have recreated, the definition it would have
         # rewritten, and the runtime directories `ensure_dirs` would have
         # rebuilt are all still as the relocation left them.
-        self.assertFalse(self.legacy_record.exists())
+        self.assert_record_path_is_sealed()
         self.assertFalse((self.legacy_dir / "runtime").exists())
         self.assertEqual(after, before)
         # And it never asked the service manager for anything.
@@ -697,7 +826,7 @@ class StaleControllerTests(RelocationFixture):
             .definition_path(self.job.label)
             .is_file()
         )
-        self.assertFalse(self.legacy_record.exists())
+        self.assert_record_path_is_sealed()
 
     def test_a_queued_run_refuses_before_it_writes_anything(self):
         # The service-manager `run` path: a runner launched before the
@@ -765,7 +894,7 @@ class StaleCustomInstallControllerTests(RelocationFixture):
             with self.assertRaises(drain_prs_service.ServiceError):
                 drain_prs_service.install_job(self.job)
             self.assertEqual(self.host_state(), before)
-        self.assertFalse(self.legacy_record.exists())
+        self.assert_record_path_is_sealed()
 
 
 class TransientDestinationControllerTests(RelocationFixture):
@@ -823,33 +952,67 @@ class TransientDestinationControllerTests(RelocationFixture):
         self.assertFalse(self.destination_record.exists())
 
 
-class RetainedResidueTests(RelocationFixture):
-    """What the removal deliberately leaves behind, and says it left."""
+class UnaccountedTreeTests(RelocationFixture):
+    """A repository's durable state that no record names.
 
-    def test_a_legacy_log_root_still_holding_something_is_kept_and_reported(self):
-        # Not this run's to delete: it never accounted for whatever is in
-        # there, and taking a log root away with the installation it happened
-        # to sit beside would be discarding durable state.
+    An uninstall deliberately leaves a repository's runtime state, logs and
+    incidents behind, so a repository removed long ago has trees under these
+    roots and an entry nowhere. Neither the removal nor the plan can recover it
+    *as* a repository — there is no entry to read a checkout or a definition out
+    of — but leaving it where it is would orphan it at a location nothing looks
+    at again. It is carried by the one name it has.
+    """
+
+    def test_a_log_tree_no_record_names_is_carried_rather_than_orphaned(self):
         self.seed_legacy_installation()
         stray = self.legacy_logs / "someone.else"
         stray.mkdir(parents=True)
         (stray / "service.log").write_text("kept\n", encoding="utf-8")
         result = self.relocate()
+        # The removal itself keeps it, because it never accounted for it and
+        # deleting durable state is not its to do...
         self.assertIn(str(self.legacy_logs), result["retained"])
-        self.assertEqual((stray / "service.log").read_text(encoding="utf-8"), "kept\n")
+        # ...and the reconciliation then carries it to the root the
+        # installation now uses, whole.
+        carried = self.destination_logs / "someone.else" / "service.log"
+        self.assertEqual(carried.read_text(encoding="utf-8"), "kept\n")
+        self.assertFalse(stray.exists())
+        self.assertTrue(result["late_writes"]["resolved"])
 
-    def test_a_legacy_runtime_directory_still_holding_something_is_kept(self):
+    def test_a_runtime_tree_no_record_names_is_carried_too(self):
         job = self.seed_legacy_installation()[0]
         stray = self.legacy_dir / "runtime" / "someone.else"
         stray.mkdir(parents=True)
         (stray / "status.json").write_text("{}", encoding="utf-8")
         result = self.relocate()
         self.assertIn(str(self.legacy_dir / "runtime"), result["retained"])
-        self.assertTrue((stray / "status.json").is_file())
+        self.assertTrue(
+            (self.destination / "runtime" / "someone.else" / "status.json").is_file()
+        )
+        self.assertFalse(stray.exists())
         # And what the run *did* account for still moved.
         self.assertTrue(
             (self.destination / "runtime" / job.slug / "status.json").is_file()
         )
+        self.assertTrue(result["late_writes"]["resolved"])
+
+    def test_one_already_at_the_destination_is_kept_and_named(self):
+        # The judgement nothing here makes, asked of a tree with no repository
+        # to name it: both copies stay and both are reported.
+        self.seed_legacy_installation()
+        for root in (self.legacy_logs, self.destination_logs):
+            tree = root / "someone.else"
+            tree.mkdir(parents=True)
+            (tree / "service.log").write_text(f"{root.name}\n", encoding="utf-8")
+        result = self.relocate()
+        late = result["late_writes"]
+        self.assertFalse(late["resolved"])
+        self.assertEqual(
+            [(item["repository"], item["kind"]) for item in late["collisions"]],
+            [("someone.else", "log")],
+        )
+        self.assertTrue((self.legacy_logs / "someone.else").is_dir())
+        self.assertTrue((self.destination_logs / "someone.else").is_dir())
 
 
 class DirectoryModeTests(RelocationFixture):
@@ -1202,9 +1365,9 @@ class LockingTests(RelocationFixture):
         real_write = install_drainer._write_destination_record
         real_roll_back = install_drainer._Transition.roll_back
 
-        def write(transition, relocation_plan):
+        def write(transition, record_path, document):
             observed.append(("write", self.lock_is_held(self.destination_record)))
-            return real_write(transition, relocation_plan)
+            return real_write(transition, record_path, document)
 
         def roll_back(transition):
             observed.append(("roll_back", self.lock_is_held(self.destination_record)))
@@ -1281,20 +1444,18 @@ class LockingTests(RelocationFixture):
             [entry.identity for entry in plan.repositories], ["acme/widgets"]
         )
 
-    def test_a_legacy_record_that_reappears_is_reported_with_its_repair(self):
-        real_remove = install_drainer._remove_legacy_installation
-
-        def racing(transition, relocation_plan):
-            outcome = real_remove(transition, relocation_plan)
-            relocation_plan.legacy_record.write_text("{}", encoding="utf-8")
-            return outcome
-
-        with mock.patch.object(
-            install_drainer, "_remove_legacy_installation", racing
-        ):
+    def test_a_legacy_record_that_reappears_is_carried_across_and_cleared(self):
+        # An empty record is the smallest thing a late writer can leave: there
+        # is nothing in it to carry, so the whole repair is taking it away
+        # again, and the run says so rather than advising a re-run that would
+        # have nothing left to do.
+        with self.racing(lambda: self.legacy_record.write_text("{}", encoding="utf-8")):
             result = self.relocate()
         self.assertTrue(result["legacy_record_reappeared"])
-        self.assertIn("re-run this installer", result["repair"])
+        self.assertTrue(result["late_writes"]["resolved"])
+        self.assertEqual(result["late_writes"]["passes"], 1)
+        self.assertIn("cleared again", result["repair"])
+        self.assert_record_path_is_sealed()
 
 
 class CheckoutFenceTests(RelocationFixture):
@@ -1828,6 +1989,1169 @@ class InstallerIntegrationTests(RelocationFixture):
         with self.assertRaises(install_drainer.InstallError):
             self.install(dry_run=False)
         self.assertEqual(self.host_state(), before)
+
+
+class LateWriteCarryTests(RelocationFixture):
+    """Issue #369 requirement 1: whatever a writer put back after the removal
+    is carried across, and the location is taken away again.
+
+    The writer lands in the one instant the transition's locks cannot reach —
+    after the removal, when the record it would have queued on is gone — and it
+    writes through the controller's own ungated writers, which is exactly the
+    hole this closes.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.seeded = self.seed_legacy_installation()[0]
+        self.bindings = self.legacy_bindings
+        self.gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
+        self.slug = drain_prs_service.repository_slug("acme/gadgets")
+
+    def relocate_with_late_write(self):
+        with self.racing(lambda: self.write_late(self.gadgets, self.bindings)):
+            return self.relocate()
+
+    def test_a_repository_recorded_after_the_removal_is_carried_across(self):
+        result = self.relocate_with_late_write()
+        late = result["late_writes"]
+        self.assertTrue(late["resolved"])
+        self.assertEqual(late["passes"], 1)
+        self.assertEqual(late["repositories"], ["acme/gadgets"])
+        document = self.record_document(self.destination_record)
+        self.assertEqual(
+            sorted(document["repositories"]), ["acme/gadgets", "acme/widgets"]
+        )
+        self.assertEqual(
+            document["repositories"]["acme/gadgets"]["repository"], str(self.gadgets)
+        )
+
+    def test_its_runtime_tree_and_its_logs_arrive_whole(self):
+        self.relocate_with_late_write()
+        runtime = self.destination / "runtime" / self.slug
+        self.assertEqual(
+            json.loads(runtime.joinpath("status.json").read_text(encoding="utf-8"))[
+                "stamp"
+            ],
+            "late",
+        )
+        self.assertTrue(any((runtime / "incidents").iterdir()))
+        self.assertIn(
+            "late write for acme/gadgets",
+            (self.destination_logs / self.slug / "service.log").read_text(
+                encoding="utf-8"
+            ),
+        )
+
+    def test_its_definition_names_this_installation_and_is_reloaded(self):
+        self.commands.clear()
+        self.relocate_with_late_write()
+        backend = install_drainer.service_backend()
+        identifier = backend.service_identifier(self.slug)
+        self.assertEqual(
+            backend.definition_environment(identifier)[
+                kanban_config.DRAINER_INSTALL_DIR_ENV
+            ],
+            str(self.destination),
+        )
+        self.assertTrue(
+            any(identifier in " ".join(command) for command in self.commands),
+            self.commands,
+        )
+
+    def test_the_recreated_location_is_taken_away_again(self):
+        result = self.relocate_with_late_write()
+        self.assertEqual(
+            sorted(path.name for path in self.legacy_dir.iterdir()),
+            ["config.json", "config.json.lock", "relocated.json"],
+        )
+        self.assert_record_path_is_sealed()
+        self.assertFalse(self.legacy_logs.exists())
+        self.assertIn(str(self.legacy_record), result["late_writes"]["removed"])
+        self.assertEqual(result["late_writes"]["retained"], [])
+        self.assertTrue(result["late_writes"]["sealed"])
+
+    def test_a_writer_that_keeps_winning_is_reported_rather_than_looped_on(self):
+        # Bounded rather than looped: this writer recreates the record after
+        # every clear, so a run that kept going would never return.
+        real = install_drainer._clear_recreated_location
+
+        def relentless(transition, relocation_plan, outcome):
+            real(transition, relocation_plan, outcome)
+            relocation_plan.legacy_record.write_text("{}", encoding="utf-8")
+
+        with mock.patch.object(
+            install_drainer, "_clear_recreated_location", relentless
+        ):
+            with self.racing(
+                lambda: self.legacy_record.write_text("{}", encoding="utf-8")
+            ):
+                result = self.relocate()
+        late = result["late_writes"]
+        self.assertEqual(late["passes"], install_drainer._LATE_WRITER_PASSES)
+        self.assertFalse(late["resolved"])
+        self.assertEqual(late["collisions"], [])
+        self.assertIn(str(self.legacy_record), late["retained"])
+        self.assertIn("kept recreating", late["repair"])
+        # Nothing is in two places, so a re-run really is the repair here.
+        self.assertIn("re-run this installer", late["repair"])
+
+    def test_a_queued_writer_fails_without_recording_anything(self):
+        # The other half of the same race, and the half a lock does close: a
+        # writer that queued on the legacy record's lock resumes into a
+        # location whose record is gone, reads the marker left beside that
+        # lock, and refuses before it writes.
+        self.relocate()
+        with self.as_bound(self.bindings):
+            before = self.host_state()
+            with self.assertRaises(drain_prs_service.ServiceError):
+                drain_prs_service.install_job(
+                    drain_prs_service.resolve_job(self.widgets)
+                )
+            self.assertEqual(self.host_state(), before)
+        self.assert_record_path_is_sealed()
+
+
+class SealedRecordPathTests(RelocationFixture):
+    """What a finished relocation leaves at the record path it emptied.
+
+    The reconciliation can carry across what a writer put back while the run is
+    still looking, and nothing can carry what one puts back afterwards: `flock`
+    cannot be asked whether anyone is waiting on it, and a process that has
+    returned cannot look again. So the emptied path is left occupied by a
+    symlink to the marker beside it, which every copy of the controller old
+    enough to write a discovery record refuses to write over.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.result = self.relocate()
+
+    def test_the_emptied_record_path_is_sealed(self):
+        self.assertTrue(self.result["late_writes"]["sealed"])
+        self.assert_record_path_is_sealed()
+
+    def test_every_record_writer_refuses_it(self):
+        # The shared mutator each of `write_discovery_record`,
+        # `merge_repository_record` and `remove_discovery_record` goes through,
+        # in this copy and in every copy back to the one that introduced the
+        # record. Asked directly, because what makes the seal work is this
+        # refusal and not anything this arc added.
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            drain_prs_service.update_json_document(
+                self.legacy_record, lambda document: {"repositories": {}}
+            )
+        self.assertIn("Refusing unsafe config path", str(raised.exception))
+        self.assert_record_path_is_sealed()
+
+    def test_it_reads_as_the_relocation_notice_rather_than_as_a_record(self):
+        # Following it finds the marker, which names where the installation
+        # went and has no `repositories` table — so a reader bound here learns
+        # the truth rather than an empty installation.
+        document = drain_prs_service._read_json_object(self.legacy_record)
+        self.assertEqual(
+            document[drain_prs_service.RELOCATION_MARKER_DESTINATION],
+            str(self.destination),
+        )
+        self.assertNotIn("repositories", document)
+
+    def test_a_later_run_relocates_nothing_and_changes_nothing(self):
+        before = self.host_state()
+        again = self.relocate()
+        self.assertFalse(again["relocated"])
+        self.assertIn("emptied and sealed", again["reason"])
+        self.assertEqual(self.host_state(), before)
+
+    def test_the_lock_beside_it_is_still_never_unlinked(self):
+        self.assertTrue((self.legacy_dir / "config.json.lock").is_file())
+        self.assertTrue(
+            (self.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME).is_file()
+        )
+
+
+class UnsealedResidueTests(RelocationFixture):
+    """A location this run could not finish reconciling is left as it stands.
+
+    Sealing one would close the path the operator has to reconcile through, and
+    would claim an answer this run does not have.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.bindings = self.legacy_bindings
+
+    def test_a_collision_leaves_the_record_path_unsealed(self):
+        with self.racing(lambda: self.write_late(self.widgets, self.bindings)):
+            result = self.relocate()
+        self.assertFalse(result["late_writes"]["resolved"])
+        self.assertFalse(result["late_writes"]["sealed"])
+        self.assertFalse(install_drainer._is_tombstone(self.legacy_record))
+        self.assertTrue(_plain_file_at(self.legacy_record))
+
+    def test_a_stray_leaves_it_unsealed_too(self):
+        def late():
+            self.legacy_record.write_text("{}", encoding="utf-8")
+            (self.legacy_dir / "notes.txt").write_text("mine\n", encoding="utf-8")
+
+        with self.racing(late):
+            result = self.relocate()
+        self.assertFalse(result["late_writes"]["sealed"])
+        self.assertFalse(install_drainer._is_tombstone(self.legacy_record))
+
+    def test_a_seal_that_cannot_be_written_is_reported_rather_than_raised(self):
+        # Total on the same terms as the rest of the reconciliation: this runs
+        # after the removal, so a relocation that already succeeded is not
+        # rolled back over a seal that could not be written, and the run says
+        # the one thing an operator can act on — re-run it.
+        patcher = mock.patch.object(
+            install_drainer.Path, "symlink_to", side_effect=OSError("read-only")
+        )
+        self.addCleanup(patcher.stop)
+        # Armed after the links are installed, so what fails is the seal rather
+        # than the installation this run is making.
+        with self.racing(patcher.start):
+            result = self.relocate()
+        patcher.stop()
+        self.assertTrue(result["relocated"])
+        self.assertTrue(result["late_writes"]["resolved"])
+        self.assertFalse(result["late_writes"]["sealed"])
+        self.assertFalse(os.path.lexists(self.legacy_record))
+        self.assertIn("could not be sealed", result["repair"])
+        self.assertIn("re-run this installer", result["repair"])
+        # And the install does not report success over it: a record path left
+        # open to a controller still bound there is the one thing this run
+        # could not finish, whatever else it did.
+        with self.assertRaises(install_drainer.RelocationUnresolved) as raised:
+            install_drainer._require_relocation_resolved(result)
+        self.assertIn("was left open", str(raised.exception))
+        self.assertIn(str(self.legacy_record), str(raised.exception))
+
+    def test_reconciling_and_re_running_then_seals_it(self):
+        # What the remediation tells the operator to do, and what it gets them.
+        with self.racing(lambda: self.write_late(self.widgets, self.bindings)):
+            self.relocate()
+        shutil.rmtree(self.legacy_dir / "runtime" / self.job.slug)
+        shutil.rmtree(self.legacy_logs / self.job.slug)
+        again = self.relocate()
+        self.assertTrue(again["relocated"])
+        self.assertTrue(again["late_writes"]["sealed"])
+        self.assert_record_path_is_sealed()
+
+
+def _plain_file_at(path):
+    return path.is_file() and not path.is_symlink()
+
+
+class LateWriteCollisionTests(RelocationFixture):
+    """Requirements 2 and 3: durable state in both places is kept and named,
+    and the repair is the one that works."""
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.slug = self.job.slug
+        self.bindings = self.legacy_bindings
+
+    def relocate_with_late_write(self, prepare=None):
+        def late():
+            if prepare is not None:
+                prepare()
+            self.write_late(self.widgets, self.bindings)
+
+        with self.racing(late):
+            return self.relocate()
+
+    def test_a_late_write_for_an_already_migrated_repository_keeps_both_trees(self):
+        result = self.relocate_with_late_write()
+        late = result["late_writes"]
+        self.assertFalse(late["resolved"])
+        self.assertEqual(late["repositories"], ["acme/widgets"])
+        self.assertEqual(
+            sorted(
+                (item["kind"], item["source"], item["destination"])
+                for item in late["collisions"]
+            ),
+            sorted(
+                [
+                    (
+                        "log",
+                        str(self.legacy_logs / self.slug),
+                        str(self.destination_logs / self.slug),
+                    ),
+                    (
+                        "runtime",
+                        str(self.legacy_dir / "runtime" / self.slug),
+                        str(self.destination / "runtime" / self.slug),
+                    ),
+                ]
+            ),
+        )
+
+    def test_nothing_chooses_which_status_incidents_or_logs_survive(self):
+        self.relocate_with_late_write()
+        late_runtime = self.legacy_dir / "runtime" / self.slug
+        carried_runtime = self.destination / "runtime" / self.slug
+        self.assertEqual(
+            json.loads(late_runtime.joinpath("status.json").read_text(encoding="utf-8"))[
+                "stamp"
+            ],
+            "late",
+        )
+        self.assertNotIn(
+            "stamp",
+            json.loads(
+                carried_runtime.joinpath("status.json").read_text(encoding="utf-8")
+            ),
+        )
+        self.assertTrue(any((late_runtime / "incidents").iterdir()))
+        self.assertTrue(any((carried_runtime / "incidents").iterdir()))
+        self.assertIn(
+            "late write for acme/widgets",
+            (self.legacy_logs / self.slug / "service.log").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "seeded acme/widgets",
+            (self.destination_logs / self.slug / "service.log").read_text(
+                encoding="utf-8"
+            ),
+        )
+
+    def test_the_unresolved_location_is_preserved_rather_than_cleared(self):
+        result = self.relocate_with_late_write()
+        retained = result["late_writes"]["retained"]
+        self.assertTrue(self.legacy_record.is_file())
+        self.assertIn(str(self.legacy_record), retained)
+        self.assertIn(str(self.legacy_dir / "runtime"), retained)
+        self.assertIn(str(self.legacy_logs / self.slug), retained)
+        self.assertEqual(result["late_writes"]["removed"], [])
+
+    def test_the_repair_is_reconciliation_rather_than_a_re_run(self):
+        repair = self.relocate_with_late_write()["repair"]
+        self.assertIn("Both copies are kept", repair)
+        self.assertIn("A re-run alone is not the repair", repair)
+        self.assertIn(str(self.legacy_logs / self.slug), repair)
+        self.assertIn(str(self.destination_logs / self.slug), repair)
+
+    def test_the_install_fails_rather_than_reporting_success(self):
+        # The relocation itself succeeded and is not rolled back — rolling it
+        # back is the one action that could lose what the late writer recorded
+        # — but an install that returned success would be telling automation
+        # that a host with a repository's state in two places is finished.
+        result = self.relocate_with_late_write()
+        with self.assertRaises(install_drainer.RelocationUnresolved) as raised:
+            install_drainer._require_relocation_resolved(result)
+        self.assertEqual(raised.exception.report, result["late_writes"])
+        self.assertIn("acme/widgets", str(raised.exception))
+
+    def assert_re_run_refuses_naming(self, *roots):
+        """The remediation's own claim, asked of the re-run it names: it
+        refuses, it names both roots of a tree that was kept, and it does that
+        before anything is mutated."""
+        before = self.host_state()
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            install_drainer.plan_relocation(self.destination)
+        message = str(raised.exception)
+        for root in roots:
+            self.assertIn(str(root), message)
+        self.assertEqual(self.host_state(), before)
+
+    def test_a_re_run_then_refuses_naming_both_roots_and_changes_nothing(self):
+        self.relocate_with_late_write()
+        # The runtime pair is what it reaches first, and naming it is what
+        # makes the re-run the repair the report says it is not.
+        self.assert_re_run_refuses_naming(
+            self.legacy_dir / "runtime" / self.slug,
+            self.destination / "runtime" / self.slug,
+        )
+
+    def test_only_the_colliding_runtime_tree_is_kept_and_the_logs_are_carried(self):
+        # Asymmetric: the destination already holds this repository's runtime
+        # tree and no longer holds its logs, so exactly one of the two is in
+        # two places.
+        result = self.relocate_with_late_write(
+            prepare=lambda: shutil.rmtree(self.destination_logs / self.slug)
+        )
+        late = result["late_writes"]
+        self.assertEqual([item["kind"] for item in late["collisions"]], ["runtime"])
+        self.assertIn(
+            "late write for acme/widgets",
+            (self.destination_logs / self.slug / "service.log").read_text(
+                encoding="utf-8"
+            ),
+        )
+        self.assertFalse((self.legacy_logs / self.slug).exists())
+        self.assertTrue((self.legacy_dir / "runtime" / self.slug / "status.json").is_file())
+        self.assertIn(str(self.legacy_dir / "runtime"), late["retained"])
+        # And the re-run the report tells the operator not to rely on refuses
+        # over exactly the tree that was kept — which it can only do because
+        # the legacy location's own runtime tree is a source in its own right,
+        # the definition having been rewritten to the destination.
+        self.assert_re_run_refuses_naming(
+            self.legacy_dir / "runtime" / self.slug,
+            self.destination / "runtime" / self.slug,
+        )
+
+    def test_only_the_colliding_log_tree_is_kept_and_the_runtime_is_carried(self):
+        result = self.relocate_with_late_write(
+            prepare=lambda: shutil.rmtree(self.destination / "runtime" / self.slug)
+        )
+        late = result["late_writes"]
+        self.assertEqual([item["kind"] for item in late["collisions"]], ["log"])
+        self.assertEqual(
+            json.loads(
+                (self.destination / "runtime" / self.slug / "status.json").read_text(
+                    encoding="utf-8"
+                )
+            )["stamp"],
+            "late",
+        )
+        self.assertFalse((self.legacy_dir / "runtime" / self.slug).exists())
+        self.assertIn(str(self.legacy_logs / self.slug), late["retained"])
+        self.assert_re_run_refuses_naming(
+            self.legacy_logs / self.slug, self.destination_logs / self.slug
+        )
+
+
+class LateWriteMergeTests(RelocationFixture):
+    """The late record merges on exactly the relocation's own terms: the
+    destination wins per key at both levels, and what only the recreated record
+    names survives."""
+
+    def setUp(self):
+        super().setUp()
+        self.seed_legacy_installation()
+        # While the legacy record is still the one this host resolves, so this
+        # is the installation's own selection rather than a stale process's.
+        install_drainer.write_installed_config_path(
+            "acme/widgets", "/destination/widgets.toml"
+        )
+        self.bindings = self.legacy_bindings
+        self.gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
+        # An unrelated repository already recorded at the destination, seeded
+        # through the controller's own install so its entry and its definition
+        # are the ones this host really derives.
+        self.gizmos = self.make_checkout("gizmos", "git@github.com:acme/gizmos.git")
+        legacy = self.record_document(self.legacy_record)
+        self.set_platform("darwin")
+        self.seed_repository(self.gizmos)
+        self.set_platform("linux")
+        promoted = self.record_document(self.legacy_record)
+        self.destination.mkdir(parents=True, exist_ok=True)
+        self.destination_record.write_text(
+            json.dumps(
+                {
+                    "ntfy_url": "https://notify.example.test/current",
+                    "repositories": {
+                        "acme/gizmos": promoted["repositories"]["acme/gizmos"]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.legacy_record.write_text(json.dumps(legacy), encoding="utf-8")
+
+    def test_the_destination_wins_and_legacy_only_values_survive(self):
+        def late():
+            self.write_late(self.gadgets, self.bindings)
+            with self.as_bound(self.bindings):
+                drain_prs_service.merge_json_document(
+                    self.legacy_record,
+                    {
+                        "ntfy_url": "https://notify.example.test/late",
+                        "late_only": "kept",
+                    },
+                )
+
+        with self.racing(late):
+            result = self.relocate()
+        self.assertTrue(result["late_writes"]["resolved"])
+        document = self.record_document(self.destination_record)
+        self.assertEqual(document["ntfy_url"], "https://notify.example.test/current")
+        self.assertEqual(document["late_only"], "kept")
+        self.assertEqual(
+            sorted(document["repositories"]),
+            ["acme/gadgets", "acme/gizmos", "acme/widgets"],
+        )
+
+    def test_a_repository_recorded_at_both_keeps_the_destinations_entry(self):
+        def late():
+            # Through the pre-gate installed copy `write_late` above explains:
+            # a writer running *this* copy is refused rather than recorded.
+            with self.as_bound(self.bindings):
+                with mock.patch.object(
+                    drain_prs_service, "require_current_installation", lambda: None
+                ):
+                    drain_prs_service.merge_repository_record(
+                        "acme/widgets", {"config_path": "/late/widgets.toml"}
+                    )
+
+        with self.racing(late):
+            result = self.relocate()
+        self.assertTrue(result["late_writes"]["resolved"])
+        entry = self.record_document(self.destination_record)["repositories"][
+            "acme/widgets"
+        ]
+        self.assertEqual(entry["config_path"], "/destination/widgets.toml")
+
+
+class LateWriteOwnershipTests(RelocationFixture):
+    """Requirement 4: clearing the recreated location asks the same ownership
+    question the relocation's own removal asks."""
+
+    def setUp(self):
+        super().setUp()
+        self.seed_legacy_installation()
+        self.bindings = self.legacy_bindings
+
+    def relocate_with(self, write):
+        with self.racing(write):
+            return self.relocate()
+
+    def test_a_file_this_installer_did_not_create_is_kept_and_named(self):
+        def late():
+            self.legacy_record.write_text("{}", encoding="utf-8")
+            (self.legacy_dir / "notes.txt").write_text("mine\n", encoding="utf-8")
+
+        result = self.relocate_with(late)
+        late_writes = result["late_writes"]
+        self.assertFalse(late_writes["resolved"])
+        self.assertEqual(late_writes["strays"], [str(self.legacy_dir / "notes.txt")])
+        self.assertEqual(
+            (self.legacy_dir / "notes.txt").read_text(encoding="utf-8"), "mine\n"
+        )
+        # And nothing at that location is removed — including the record this
+        # run would otherwise have taken away.
+        self.assertTrue(self.legacy_record.is_file())
+        self.assertEqual(late_writes["removed"], [])
+        self.assertIn("Move it aside", late_writes["repair"])
+        self.assertIn("re-run this installer", late_writes["repair"])
+
+    def test_a_managed_name_holding_the_wrong_kind_of_object_is_one_too(self):
+        # The name selects the slot; the object type is what proves the entry
+        # is this installer's, exactly as the removal decides it.
+        result = self.relocate_with(lambda: (self.legacy_dir / "drain_prs.py").mkdir())
+        late_writes = result["late_writes"]
+        self.assertEqual(
+            late_writes["strays"], [str(self.legacy_dir / "drain_prs.py")]
+        )
+        self.assertTrue((self.legacy_dir / "drain_prs.py").is_dir())
+        self.assertEqual(late_writes["removed"], [])
+
+
+class StaleInstallRefusalTests(RelocationFixture):
+    """Requirement 5: an install refuses outright when the installation it
+    resolved at import is no longer the one this host has, rather than writing
+    a definition naming a controller that is gone."""
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.bindings = self.legacy_bindings
+        self.kanban = self.make_checkout("kanban", "git@github.com:acme/widgets.git")
+        tools = self.kanban / "tools"
+        tools.mkdir()
+        for source in self.sources.values():
+            (tools / source.name).write_text(
+                source.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        self.assertTrue(self.relocate()["relocated"])
+        self.commands.clear()
+
+    def test_the_controllers_install_refuses_and_writes_nothing(self):
+        with self.as_bound(self.bindings):
+            before = self.host_state()
+            with self.assertRaises(drain_prs_service.ServiceError) as raised:
+                drain_prs_service.install_job(self.job)
+            self.assertEqual(self.host_state(), before)
+        self.assertIn("was relocated to", str(raised.exception))
+        self.assertEqual(self.commands, [])
+
+    def test_the_installer_refuses_before_it_links_or_records_anything(self):
+        # Managed links, the shared configuration, the discovery record, the
+        # runtime and log trees and the service definition: every one of them
+        # is downstream of this gate, so the whole host is unchanged.
+        with self.as_bound(self.bindings):
+            before = self.host_state()
+            with self.assertRaises(install_drainer.InstallError) as raised:
+                install_drainer.install(
+                    self.kanban,
+                    self.destination,
+                    ntfy_url="https://notify.example.test/new",
+                    config_path=str(self.kanban / "config.toml"),
+                    dry_run=False,
+                )
+            self.assertEqual(self.host_state(), before)
+        self.assertIn("Refusing to install", str(raised.exception))
+        self.assertIn(str(self.destination), str(raised.exception))
+
+    def test_the_check_is_taken_under_the_discovery_records_lock(self):
+        # So a relocation has either not started or finished by the time it is
+        # answered: the unlocked check refuses cheaply, and the locked one is
+        # the authoritative answer.
+        observed = []
+        real = drain_prs_service.require_current_installation
+
+        def watched():
+            observed.append(self.lock_is_held(self.destination_record))
+            return real()
+
+        with mock.patch.object(
+            drain_prs_service, "require_current_installation", watched
+        ):
+            with self.assertRaises(install_drainer.InstallError):
+                install_drainer.install(
+                    self.kanban, self.destination, ntfy_url=None, dry_run=False
+                )
+        self.assertIn(True, observed)
+
+
+class LateWriteReportingTests(RelocationFixture):
+    """Unresolved retained state says the same actionable thing through both
+    of the installer's command modes."""
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.bindings = self.legacy_bindings
+        self.kanban = self.make_checkout("kanban", "git@github.com:acme/widgets.git")
+        tools = self.kanban / "tools"
+        tools.mkdir()
+        for source in self.sources.values():
+            (tools / source.name).write_text(
+                source.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+
+    def run_main(self, *extra):
+        argv = [
+            "install_drainer.py",
+            "--repo",
+            str(self.kanban),
+            "--install-dir",
+            str(self.destination),
+            *extra,
+        ]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(install_drainer.sys, "argv", argv):
+            with contextlib.redirect_stdout(stdout):
+                with contextlib.redirect_stderr(stderr):
+                    with self.racing(
+                        lambda: self.write_late(self.widgets, self.bindings)
+                    ):
+                        code = install_drainer.main()
+        return code, stderr.getvalue()
+
+    def test_the_default_mode_names_the_repository_the_trees_and_the_repair(self):
+        code, stderr = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("acme/widgets", stderr)
+        self.assertIn(str(self.legacy_logs / self.job.slug), stderr)
+        self.assertIn(str(self.destination_logs / self.job.slug), stderr)
+        self.assertIn("A re-run alone is not the repair", stderr)
+
+    def test_the_json_mode_names_them_as_data(self):
+        code, stderr = self.run_main("--json")
+        self.assertEqual(code, 1)
+        payload = json.loads(stderr)
+        self.assertIn("acme/widgets", payload["error"])
+        report = payload["late_writes"]
+        self.assertFalse(report["resolved"])
+        self.assertEqual(report["repositories"], ["acme/widgets"])
+        self.assertEqual(
+            sorted(item["kind"] for item in report["collisions"]), ["log", "runtime"]
+        )
+        self.assertIn(
+            str(self.legacy_dir / "runtime"), report["retained"]
+        )
+        self.assertIn("A re-run alone is not the repair", report["repair"])
+
+
+# What the queued writer below runs. A real second process, because
+# `document_lock` re-enters within one thread: a writer driven from the
+# relocating thread takes that bypass and never contends at all, so nothing
+# run there can stand in for interprocess contention. It resolves its own
+# managed paths at its own import, exactly as any controller does, and then
+# writes the discovery record the way a start or an install does.
+_QUEUED_WRITER = """
+import contextlib, io, json, os, sys, time
+from pathlib import Path
+
+for entry in reversed(sys.argv[1].split(os.pathsep)):
+    sys.path.insert(0, entry)
+ready, go, queued, acquired, result = (
+    Path(argument) for argument in sys.argv[2:7]
+)
+identity, checkout = sys.argv[7], sys.argv[8]
+
+import drain_prs_service
+
+# Bound here, while the legacy record is still the one this host resolves.
+ready.write_text(str(drain_prs_service.DISCOVERY_RECORD_PATH), encoding="utf-8")
+while not go.exists():
+    time.sleep(0.01)
+outcome = {"bound_record": str(drain_prs_service.DISCOVERY_RECORD_PATH)}
+if sys.argv[10] == "trees":
+    with contextlib.redirect_stdout(io.StringIO()):
+        # Everything a controller puts down before it ever reaches the record, and
+        # every bit of it under no record lock at all: the directories, the status
+        # file, an incident, a log line and the service definition. The backend is
+        # pinned rather than probed because this process cannot count on the host
+        # it runs on having a live user manager, and nothing here asks one for
+        # anything — every one of these is a file write.
+        import service_manager
+
+        service_manager._DETECTED = service_manager.SYSTEMD
+        job = drain_prs_service.resolve_job(Path(checkout))
+        drain_prs_service.ensure_dirs(job)
+        drain_prs_service.atomic_write_json(
+            job.status_path, {"state": "starting", "repository": identity}
+        )
+        drain_prs_service.write_incident(
+            job=job, exit_code=9, command=["drain_prs.py", "--path", checkout]
+        )
+        drain_prs_service.service_log(job, f"pre-gate start for {identity}")
+        drain_prs_service.service_backend().write_definition(
+            drain_prs_service.service_definition(job)
+        )
+        outcome["runtime"] = str(job.runtime_dir)
+        outcome["logs"] = str(job.log_dir)
+queued.write_text("", encoding="utf-8")
+# The record's own lock, taken the way every transition in the controller
+# takes it and before anything is asked about the installation, so where this
+# process waits is settled rather than raced. `merge_repository_record` below
+# asks for the same lock again, which re-enters within this one thread exactly
+# as it does inside `install_job`.
+with drain_prs_service.document_lock(drain_prs_service.DISCOVERY_RECORD_PATH):
+    acquired.write_text("", encoding="utf-8")
+    try:
+        drain_prs_service.merge_repository_record(identity, {"repository": checkout})
+        outcome["recorded"] = True
+    except drain_prs_service.ServiceError as error:
+        outcome["refused"] = str(error)
+    # Held across the write and a moment past it, so a reader that asks for
+    # this lock after the handoff blocks on this process rather than reading a
+    # record it is halfway through replacing.
+    time.sleep(float(sys.argv[9]))
+result.write_text(json.dumps(outcome), encoding="utf-8")
+"""
+
+
+class QueuedRecordWriterTests(RelocationFixture):
+    """A writer in another OS process, queued on the legacy record's lock.
+
+    The relocation holds that lock across its whole transition and never
+    unlinks the lock file, so this writer really does block on the same inode
+    and really does wake only after the reconciliation has finished — past
+    anything a bounded sweep could have carried across. What it must not be
+    able to do is record anything, and that is what the refusal every
+    discovery-record write carries is for.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.ready = self.root / "writer.ready"
+        self.go = self.root / "writer.go"
+        self.queued = self.root / "writer.queued"
+        self.acquired = self.root / "writer.acquired"
+        self.result = self.root / "writer.result"
+        self.writer_script = self.root / "queued_writer.py"
+        self.writer_script.write_text(_QUEUED_WRITER, encoding="utf-8")
+
+    def start_writer(self):
+        """Spawn it and wait until it has bound its managed paths, which has to
+        happen before this run writes a record at the destination: from that
+        instant a fresh process resolves the destination instead."""
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(self.writer_script),
+                str(Path(drain_prs_service.__file__).parent),
+                str(self.ready),
+                str(self.go),
+                str(self.queued),
+                str(self.acquired),
+                str(self.result),
+                "acme/widgets",
+                str(self.widgets),
+                "0",
+                "record-only",
+            ],
+            env={"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(process.kill)
+        self.process = process
+        self.wait_for(self.ready, "the queued writer never bound its paths")
+        return process
+
+    def wait_for(self, path, message):
+        deadline = time.monotonic() + 30
+        while not path.exists() and time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                self.fail(f"{message}: {self.process.communicate()}")
+            time.sleep(0.02)
+        self.assertTrue(path.exists(), message)
+
+    def relocate_with_queued_writer(self):
+        """Release it at the very start of the transition and observe it near
+        the end.
+
+        Released before the destination record is written, because from the
+        instant that file exists the writer's own resolver already answers the
+        destination and it refuses where it stands instead of queuing — a
+        narrower window than the lock alone, and not the one under test here.
+        Observed inside the removal, by which point the lock has been held
+        across the moves and the definition rewrites.
+        """
+        process = self.start_writer()
+        real_apply = install_drainer._apply_relocation
+        real_remove = install_drainer._remove_legacy_installation
+
+        def apply_hook(transition, relocation_plan, sources):
+            self.go.write_text("", encoding="utf-8")
+            self.wait_for(self.queued, "the queued writer never reached the lock")
+            # It is between writing that file and blocking in `flock`; a
+            # moment here is what puts it there rather than racing it.
+            time.sleep(0.25)
+            return real_apply(transition, relocation_plan, sources)
+
+        def remove_hook(transition, relocation_plan):
+            # It cannot have the lock: this run holds it and never unlinks it.
+            # If it does, `flock` did not serialize this writer at all.
+            self.blocked = not self.acquired.exists()
+            return real_remove(transition, relocation_plan)
+
+        with mock.patch.object(install_drainer, "_apply_relocation", apply_hook):
+            with mock.patch.object(
+                install_drainer, "_remove_legacy_installation", remove_hook
+            ):
+                result = self.relocate()
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+        return result, json.loads(self.result.read_text(encoding="utf-8"))
+
+    def test_it_blocks_on_the_lock_and_then_records_nothing(self):
+        before_record = self.legacy_record
+        _, outcome = self.relocate_with_queued_writer()
+        # It really was the stale, legacy-bound process this is about...
+        self.assertEqual(outcome["bound_record"], str(before_record))
+        # ...it really did block, rather than refusing before it queued...
+        self.assertTrue(self.blocked, outcome)
+        # ...and it wrote nothing at the location the relocation emptied.
+        self.assertNotIn("recorded", outcome)
+        self.assertIn("was relocated to", outcome["refused"])
+        self.assertIn(str(self.destination), outcome["refused"])
+        self.assert_record_path_is_sealed()
+
+    def test_the_run_it_woke_into_needed_no_reconciliation(self):
+        result, _ = self.relocate_with_queued_writer()
+        # Nothing came back, so nothing was carried and nothing is retained:
+        # the refusal is what kept the sweep from having anything to do.
+        self.assertTrue(result["late_writes"]["resolved"])
+        self.assertEqual(result["late_writes"]["passes"], 0)
+        self.assertEqual(
+            sorted(path.name for path in self.legacy_dir.iterdir()),
+            ["config.json", "config.json.lock", "relocated.json"],
+        )
+
+
+# What the pre-gate writer below runs. Identical to the queued writer above
+# except for the copy of the controller it imports, so the only thing that
+# differs between the two cases is whether that copy refuses.
+_PRE_GATE_WRITER = _QUEUED_WRITER
+
+
+class PreGateWriterTests(RelocationFixture):
+    """The writer no gate in this copy can refuse: an older installed
+    controller.
+
+    A host with a `~/Library` installation is running the controller it
+    installed, from before this arc — that is the premise of the relocation
+    itself — so no edit to *this* copy makes that process refuse. Such a writer
+    queued on the retained record lock wakes once the transition releases it and
+    records itself at the location the run just emptied. What must happen then
+    is that the reconciliation finds it, which is why the reconciliation is
+    sequenced outside those locks and re-takes them pass by pass.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.ready = self.root / "pre-gate.ready"
+        self.go = self.root / "pre-gate.go"
+        self.queued = self.root / "pre-gate.queued"
+        self.acquired = self.root / "pre-gate.acquired"
+        self.result = self.root / "pre-gate.result"
+        self.writer_script = self.root / "pre_gate_writer.py"
+        self.writer_script.write_text(_PRE_GATE_WRITER, encoding="utf-8")
+        self.pre_gate = self.build_pre_gate_controller()
+        self.writes = "record-only"
+        self.repository = "acme/widgets"
+        self.checkout = self.widgets
+
+    def build_pre_gate_controller(self):
+        """This module's own source with exactly the gate this arc added taken
+        back out, which is what an older installed copy is.
+
+        Built from the current source rather than checked in, and asserted to
+        have really removed something, so a rename or a re-spelling of that
+        gate cannot quietly turn this into a second test of the gated path.
+        """
+        source = Path(drain_prs_service.__file__).read_text(encoding="utf-8")
+        gate = (
+            "    with installation_transaction():\n"
+            "        return update_json_document("
+        )
+        self.assertEqual(
+            source.count(gate), 2, "the discovery record's write-level gate moved"
+        )
+        directory = self.root / "pre-gate-controller"
+        directory.mkdir()
+        (directory / "drain_prs_service.py").write_text(
+            source.replace(gate, "    return update_json_document("), encoding="utf-8"
+        )
+        return directory
+
+    def start_writer(self):
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(self.writer_script),
+                # Its own copy first and the tracked modules behind it, so this
+                # process really is running the older controller while
+                # resolving paths through the same `kanban_config` every other
+                # component does.
+                os.pathsep.join(
+                    [str(self.pre_gate), str(Path(drain_prs_service.__file__).parent)]
+                ),
+                str(self.ready),
+                str(self.go),
+                str(self.queued),
+                str(self.acquired),
+                str(self.result),
+                self.repository,
+                str(self.checkout),
+                # Held past the write, so the reconciliation's first pass
+                # blocks on this process once the handoff gives it the lock.
+                "0.4",
+                self.writes,
+            ],
+            env={
+                "HOME": str(self.home),
+                "PATH": os.environ.get("PATH", ""),
+                # The install directory and the discovery record are *probed*,
+                # so this process resolves the `~/Library` ones on any host
+                # simply by importing before the destination record exists. The
+                # log root is not: it is single-valued per platform, so a
+                # subprocess on a Linux host would resolve the XDG one and
+                # write its logs at the destination rather than at the location
+                # a pre-XDG controller wrote them. Pointing `$XDG_STATE_HOME`
+                # at the `~/Library` log root is what makes this process
+                # resolve what such a controller hardcoded, identically on
+                # either platform.
+                "XDG_STATE_HOME": str(self.legacy_logs.parent.parent),
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(process.kill)
+        self.process = process
+        self.wait_for(self.ready, "the pre-gate writer never bound its paths")
+        return process
+
+    def wait_for(self, path, message):
+        deadline = time.monotonic() + 30
+        while not path.exists() and time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                self.fail(f"{message}: {self.process.communicate()}")
+            time.sleep(0.02)
+        self.assertTrue(path.exists(), message)
+
+    def relocate_with_pre_gate_writer(self):
+        """Nothing here sequences the writer against the reconciliation.
+
+        The only thing this arranges is that the writer is queued on the lock
+        before the transition takes it, which is the interleaving under test;
+        which of the two gets that lock afterwards is left to the handoff the
+        reconciliation performs, exactly as it is on a real host.
+        """
+        process = self.start_writer()
+        real_apply = install_drainer._apply_relocation
+
+        def apply_hook(transition, relocation_plan, sources):
+            self.go.write_text("", encoding="utf-8")
+            self.wait_for(self.queued, "the pre-gate writer never reached the lock")
+            time.sleep(0.25)
+            return real_apply(transition, relocation_plan, sources)
+
+        with mock.patch.object(install_drainer, "_apply_relocation", apply_hook):
+            result = self.relocate()
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+        return result, json.loads(self.result.read_text(encoding="utf-8"))
+
+    def test_it_blocks_on_the_lock_and_then_really_does_record(self):
+        result, outcome = self.relocate_with_pre_gate_writer()
+        self.assertEqual(outcome["bound_record"], str(self.legacy_record))
+        # It blocked on the retained lock rather than refusing where it stood...
+        self.assertTrue(self.acquired.exists())
+        # ...and, being the older copy, it recorded. Nothing in this repository
+        # can stop that; the reconciliation is what answers it.
+        self.assertTrue(outcome["recorded"])
+        self.assertNotIn("refused", outcome)
+        self.assertEqual(result["late_writes"]["passes"], 1)
+
+    def test_what_it_recorded_is_carried_across_and_the_location_cleared(self):
+        result, _ = self.relocate_with_pre_gate_writer()
+        late = result["late_writes"]
+        self.assertTrue(late["resolved"])
+        self.assertEqual(late["repositories"], ["acme/widgets"])
+        self.assertIn(str(self.legacy_record), late["removed"])
+        self.assert_record_path_is_sealed()
+        self.assertEqual(
+            sorted(path.name for path in self.legacy_dir.iterdir()),
+            ["config.json", "config.json.lock", "relocated.json"],
+        )
+        self.assert_record_path_is_sealed()
+        entry = self.record_document(self.destination_record)["repositories"][
+            "acme/widgets"
+        ]
+        self.assertEqual(entry["repository"], str(self.widgets))
+
+    def test_the_install_reports_success_because_nothing_was_left_behind(self):
+        result, _ = self.relocate_with_pre_gate_writer()
+        install_drainer._require_relocation_resolved(result)
+        self.assertIn("cleared again", result["repair"])
+
+    def test_a_writer_that_beats_the_final_look_is_refused_by_the_seal(self):
+        """The case no lock can reach, answered by leaving nothing to write.
+
+        This writer takes the lock only once the run is over — past the final
+        scan, past the pause, past the bound, and past anything a process that
+        has returned could observe. What stops it is not timing: the record
+        path it would write is occupied by the seal, and
+        `update_json_document` has refused a present-but-not-a-regular-file
+        record path since the commit that introduced the record, so every copy
+        of the controller old enough to write one refuses this.
+        """
+        process = self.start_writer()
+        first = self.relocate()
+        self.assertTrue(first["late_writes"]["resolved"])
+        self.assertEqual(first["late_writes"]["passes"], 0)
+        self.assertTrue(first["late_writes"]["sealed"])
+        # Only now, with nothing holding the lock and the run over.
+        self.go.write_text("", encoding="utf-8")
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+        outcome = json.loads(self.result.read_text(encoding="utf-8"))
+        self.assertTrue(self.acquired.exists())
+        self.assertNotIn("recorded", outcome)
+        self.assertIn("Refusing unsafe config path", outcome["refused"])
+        self.assert_record_path_is_sealed()
+
+    def test_the_trees_it_lays_down_first_are_found_by_a_later_run(self):
+        """What the seal does not close, and what does answer it.
+
+        A controller bound to the old location writes its directories, its
+        status file, its incidents, its logs and its definition before it ever
+        reaches the record — every one of them under no record lock at all — so
+        the seal refuses only the last of those. Being sealed is therefore a
+        reason for a later run to do nothing only when there is nothing there;
+        this one finds the trees and refuses over them, naming both places
+        rather than choosing.
+        """
+        self.writes = "trees"
+        process = self.start_writer()
+        first = self.relocate()
+        self.assertTrue(first["late_writes"]["sealed"])
+        self.go.write_text("", encoding="utf-8")
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+        outcome = json.loads(self.result.read_text(encoding="utf-8"))
+        # The record it could not write...
+        self.assertIn("Refusing unsafe config path", outcome["refused"])
+        self.assert_record_path_is_sealed()
+        # ...and everything it wrote before getting there.
+        runtime = self.legacy_dir / "runtime" / self.job.slug
+        logs = self.legacy_logs / self.job.slug
+        # Named by the writer itself, so a host that resolved either of them
+        # somewhere else fails here rather than through a missing file.
+        self.assertEqual(outcome["runtime"], str(runtime))
+        self.assertEqual(outcome["logs"], str(logs))
+        self.assertTrue((runtime / "status.json").is_file())
+        self.assertTrue(any((runtime / "incidents").iterdir()))
+        self.assertTrue((logs / "service.log").is_file())
+        # A later run no longer reads the seal as nothing to do.
+        self.assertIsNone(install_drainer.relocation_disposition(self.destination))
+        before = self.host_state()
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            install_drainer.plan_relocation(self.destination)
+        message = str(raised.exception)
+        self.assertIn(str(runtime), message)
+        self.assertIn(str(self.destination / "runtime" / self.job.slug), message)
+        self.assertEqual(self.host_state(), before)
+
+    def test_a_repository_no_record_names_has_its_trees_carried(self):
+        """The writer whose record the seal refused was installing something.
+
+        It writes its directories, its status file, its incidents, its logs and
+        its definition before it reaches the record, so refusing the record
+        leaves a repository nothing names with durable state at a location
+        nothing looks at again. A later run carries it by the one name it has —
+        the slug its state is filed under — rather than retaining it silently.
+        """
+        self.repository = "acme/gadgets"
+        self.checkout = self.make_checkout(
+            "gadgets", "git@github.com:acme/gadgets.git"
+        )
+        self.writes = "trees"
+        process = self.start_writer()
+        self.assertTrue(self.relocate()["late_writes"]["sealed"])
+        self.go.write_text("", encoding="utf-8")
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+        outcome = json.loads(self.result.read_text(encoding="utf-8"))
+        self.assertIn("Refusing unsafe config path", outcome["refused"])
+        slug = drain_prs_service.repository_slug("acme/gadgets")
+        self.assertTrue((self.legacy_dir / "runtime" / slug).is_dir())
+        # Nothing records it, so the destination record still does not name it
+        # — and its state is nonetheless where the installation now is.
+        again = install_drainer.relocate(self.destination, self.sources)
+        self.assertTrue(again["relocated"])
+        self.assertTrue(again["late_writes"]["resolved"])
+        self.assertNotIn(
+            "acme/gadgets",
+            self.record_document(self.destination_record)["repositories"],
+        )
+        self.assertTrue(
+            (self.destination / "runtime" / slug / "status.json").is_file()
+        )
+        self.assertTrue((self.destination_logs / slug / "service.log").is_file())
+        self.assertFalse((self.legacy_dir / "runtime" / slug).exists())
+        self.assert_record_path_is_sealed()
+
+    def test_a_sealed_location_holding_nothing_is_left_alone(self):
+        self.relocate()
+        self.assertIn(
+            "emptied and sealed",
+            install_drainer.relocation_disposition(self.destination),
+        )
+
+    def test_the_seal_is_what_refuses_it_rather_than_any_gate(self):
+        """Asked of the copy that has no gate at all.
+
+        The writer above runs a controller built from this source with the
+        record-write gate removed, so what it meets at the sealed path is the
+        refusal every copy has carried since the record existed — not anything
+        this arc added.
+        """
+        source = (self.pre_gate / "drain_prs_service.py").read_text(encoding="utf-8")
+        self.assertNotIn(
+            "    with installation_transaction():\n"
+            "        return update_json_document(",
+            source,
+        )
+        self.assertIn("Refusing unsafe config path", source)
 
 
 if __name__ == "__main__":

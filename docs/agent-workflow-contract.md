@@ -584,6 +584,17 @@ arithmetic, which §2.3 owns.
   refuses by printing rather than logging, because logging creates the
   directories it logs into.
 
+  Every write to the discovery record's `repositories` table carries that same
+  gate itself, not only the transitions that perform one. Holding the record's
+  lock across a whole transition serializes a queued writer rather than
+  stopping it: such a writer wakes *after* a mover has taken the installation
+  apart, on the far side of any reconciliation that mover could have run, and a
+  refusal that lived only in its caller would be one a caller could be outside
+  of. So the merge and the removal that mutate that table each ask the gate
+  before and inside the record's own lock, which makes the refusal a property
+  of the write. A transition that already holds the lock re-enters it, and asks
+  the gate again for nothing.
+
   The drainer's own writes are deliberately not among them.
   `tools/drain_prs.py` records conflict and cleanup incidents into the
   installation through `record_conflict_incident` and
@@ -1272,6 +1283,9 @@ search step and nothing else, which is what `mandatory: no` records.
   own definition names; either discovery record is present but unreadable, not
   an object, or has a non-table `repositories`; a distinct source tree would be
   moved onto a destination runtime or log tree that already exists; a
+  repository has a runtime tree at the `~/Library` location *and* at the
+  install directory its own definition names, which is one repository with two
+  runtime trees and one destination; a
   per-repository runtime or log path is present and is not a directory, at
   either end, since carrying one would satisfy "the tree arrived" and strand
   the next controller on it; a path it writes through is not a regular file; or the `~/Library` install directory
@@ -1297,11 +1311,112 @@ search step and nothing else, which is what `mandatory: no` records.
   taken out of it. A controller bound to the old location cannot re-resolve
   its own managed paths, so that marker is how it learns it is stale; §2.4
   describes the transitions that refuse on it. Removal happens
-  only once every recorded repository is usable through the destination, and
-  the run then reports whether the legacy record has reappeared and what the
-  repair for that is.
-  Taking over an installation already at this platform's own location is #368,
-  and carrying across what a writer installs at a relocated location is #369.
+  only once every recorded repository is usable through the destination.
+  Those locks serialize every writer queued on them, so a queued writer fails
+  without recording anything: it resumes into a location whose record is gone,
+  reads that marker under the same lock, and refuses before it writes. They
+  cannot stop one either, only serialize it: a queued writer is guaranteed to
+  wake *after* everything done while those locks are held, so it wakes into a
+  location whose installation is gone and recreates what it needs there.
+  §2.4's write-level gate is what refuses such a writer running *this* code;
+  the reconciliation below is what that gate cannot cover, because the
+  installed controller a pre-XDG host is running is an older copy that predates
+  it — which is the same premise that puts the installation at `~/Library` in
+  the first place.
+  So the reconciliation runs *outside* those locks and re-takes them for each
+  pass, and that sequencing is the point rather than an implementation detail:
+  a sweep inside the transition's own locks could never see a writer queued on
+  them, because releasing is what lets one through. Between passes it holds
+  neither record lock, and it pauses before taking them again — `flock` has no
+  handoff, so releasing only makes a waiter runnable and a run that asked again
+  in the same instant could take the lock back before that waiter ever ran.
+  Once the waiter holds it, the next pass blocks on it and reads what it wrote
+  rather than racing it. That pause is a mitigation and not a proof: whether
+  anyone is waiting on a lock cannot be asked, and a writer that acquires after
+  the run's last look is past any process that terminates at all — and the
+  writer that can still do it is an older installed controller, from before the
+  refusal every discovery-record write now carries, which no gate added here
+  reaches.
+  What answers that one is not timing but leaving it nothing to write. A run
+  whose final scan finds the location clear seals the emptied record path,
+  under that same scan's lock, with a symlink to the relocation marker beside
+  it. `update_json_document` — the one mutator every discovery-record write in
+  every copy of the controller goes through — has refused a record path that is
+  present and not a regular file since the commit that introduced the record,
+  so a writer that acquires the lock afterwards refuses where it stands however
+  old it is. Following the seal finds the marker rather than a document, so a
+  reader bound to that location learns where the installation went instead of
+  finding an empty one. A location this run could not finish
+  reconciling is deliberately left unsealed, because the operator has to see it
+  as it stands and the re-run that follows their reconciliation is what seals
+  it; a record path that could not be sealed at all fails the install on the
+  same terms as unresolved state, since a path left open to a controller still
+  bound there is the one thing that keeps the rest closed.
+  The seal closes the record and only the record. A controller bound to that
+  location writes its directories, its status file, its incidents, its logs and
+  its definition before it ever reaches the record, under no record lock at all,
+  so one starting after a run has finished looking still leaves those behind —
+  its record write is what refuses, and by then the trees exist. Being sealed is
+  therefore a reason for a later run to do nothing only when the location holds
+  nothing but the seal, the lock and the marker: a sealed location that still
+  holds trees is planned and reconciled exactly as an unsealed one is, which is
+  what stops the seal from making such state permanently invisible. Preventing
+  those writes rather than finding them on the next run is #390.
+  A per-repository tree no record names is carried too, by the one name it has
+  — the directory its state is filed under. Two things leave one: a controller
+  whose record write the seal refused, which wrote its trees first, and an
+  uninstall, which deliberately leaves a repository's runtime state, logs and
+  incidents behind. Neither can be recovered *as* a repository, because there
+  is no entry to read a checkout, an identifier or a definition out of, and
+  neither may be left at a location nothing looks at again — so the roots the
+  removal kept are descended into rather than skipped, and what is under them
+  is moved to the roots the installation now uses. One already at its
+  destination is the collision every other tree's is, kept and named rather
+  than chosen between. No fence is taken for such a tree and none is available:
+  a repository no record names is one this installation can neither discover
+  nor control, so nothing is running it.
+  Whoever was waiting takes the lock; it keeps the checkout
+  and controller fences the whole time, so no drainer or controller can start
+  against a tree it is about to move, and it fences any repository it recovers
+  that the transition had not — once per lock, because a second acquisition of
+  one this process holds would block against this very process. Each pass
+  merges the record found there into the destination's on the same
+  destination-wins-per-key terms
+  at both levels, carries each runtime and log tree it brought, rewrites and
+  reloads every definition it names against this installation, and clears the
+  location again on exactly the ownership terms the removal asks: an entry this
+  installer did not create is kept and named, and then nothing at that location
+  is removed at all. The sweep is bounded rather than looped, at three passes,
+  so a writer that keeps taking that lock cannot hold an installer open; one
+  that arrives after the final look is past any installer that terminates at
+  all, which is the write-level gate's half of this rather than the sweep's.
+  A tree a distinct tree already exists at the destination for is the one case
+  nothing here resolves: both copies are kept and both are named, per tree
+  rather than per repository, so a repository whose runtime collided and whose
+  logs did not still has its logs carried and no status file, incident or log
+  is chosen between. A repository's runtime tree at the `~/Library` location is
+  a source in its own right, asked for independently of the install directory
+  its definition names: a run that kept such a tree rewrote that definition to
+  the destination, and a plan that asked only what the definition named would
+  report success over exactly the tree the remediation told the operator to
+  reconcile. Anything left unresolved — a collision, an entry this
+  installer did not create, an entry that cannot be recovered, or a writer still
+  winning at the bound — preserves the location exactly as it stands and fails
+  the install rather than reporting success, naming every affected repository
+  and every retained path in the default and `--json` command modes alike. The
+  remediation distinguishes the two cases it can be in, because a re-run
+  resolves no kept tree — it refuses over exactly the trees it still finds in
+  both places and keeps the rest a second time — while a location that merely
+  came back with nothing in two places is one a re-run does resolve. The
+  installer's own writes — the managed links, the migrated configuration, the
+  notification endpoint, and this repository's
+  `config_path` entry — are made under the discovery record's lock and behind
+  the same staleness refusal §2.4 describes, so a run whose installation moved
+  between its import and its writes refuses outright rather than recording into
+  a location nothing resolves or handing the installed controller a directory
+  that is gone. It ends before the installed controller is spawned, which takes
+  that lock in its own process.
+  Taking over an installation already at this platform's own location is #368.
   The installed definition carries `$XDG_DATA_HOME` and `$XDG_STATE_HOME`
   alongside `KANBAN_DRAINER_INSTALL_DIR` whenever they are absolute, because
   that option pins the install directory and the runtime root beneath it but

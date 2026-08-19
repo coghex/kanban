@@ -78,10 +78,25 @@ class InstallerFixture(unittest.TestCase):
         for name, value in (
             ("DISCOVERY_RECORD_PATH", self.shared_config),
             ("CONFIG_PATH", self.shared_config),
+            ("INSTALL_DIR", self.install_dir),
             ("RUNTIME_ROOT", self.root / "runtime"),
             ("LOG_ROOT", self.root / "logs"),
         ):
             patched = mock.patch.object(controller, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+        # Redirected as *answers* as well as as constants. Every discovery
+        # record write asks whether the installation this process resolved is
+        # still the one this host resolves, and a fixture that pinned only one
+        # side of that question would be refused by its own redirection rather
+        # than by anything under test.
+        for name, value in (
+            ("drainer_record_path", self.shared_config),
+            ("drainer_install_dir", self.install_dir),
+        ):
+            patched = mock.patch.object(
+                install_drainer.kanban_config, name, return_value=value
+            )
             patched.start()
             self.addCleanup(patched.stop)
         # The LaunchAgents directory belongs to the backend, so it is
