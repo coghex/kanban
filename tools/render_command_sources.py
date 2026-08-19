@@ -61,12 +61,14 @@ re-rendering fails `tools/test_render_command_sources.py` in the required
 `build-test` job. A one-time `render && git diff --exit-code` demonstration
 would not: it proves the mechanism ran once, never that it keeps being run.
 
-Today the registry holds exactly one entry, and it is a fixture. Its outputs
-land under `tools/`, deliberately outside `claude-plugin/.../commands/` and
-`codex-plugin/.../skills/`, because `tools/plugin_bundle_gate.py` takes
-shippedness from location: anything rendered into either bundle directory
-becomes invokable and gate-relevant, and this slice vendors no command. The
-first real rendering is VEND-1's.
+The registry holds two kinds of entry, and the difference is the output
+directory alone. VEND-0's fixture renders under `tools/`, deliberately outside
+`claude-plugin/.../commands/` and `codex-plugin/.../skills/`, because
+`tools/plugin_bundle_gate.py` takes shippedness from location: anything
+rendered into either bundle directory becomes invokable and gate-relevant, and
+the fixture vendors no command. `triage` — VEND-1, the first real rendering —
+renders into those two bundle directories and is therefore shipped, named by
+both bundles' manifests and discovered by both providers.
 """
 
 from __future__ import annotations
@@ -176,6 +178,17 @@ COMMAND_SOURCES = (
             "VEND-0's proof fixture. Its outputs mirror each bundle's layout "
             "but land under tools/, so the mechanism is exercised end to end "
             "without adding an invokable command to either bundle."
+        ),
+    ),
+    CommandSource(
+        name="triage",
+        source="tools/command_sources/triage.md",
+        claude_commands_dir=CLAUDE_COMMANDS_DIR,
+        codex_skills_dir=CODEX_SKILLS_DIR,
+        note=(
+            "VEND-1, the first vendored workflow. Unlike the fixture above it "
+            "renders into both bundle directories, so both providers ship it "
+            "and tools/plugin_bundle_gate.py sees it as shipped."
         ),
     ),
 )

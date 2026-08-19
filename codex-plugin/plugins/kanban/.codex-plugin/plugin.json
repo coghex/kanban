@@ -1,7 +1,7 @@
 {
   "name": "kanban",
-  "version": "1.4.1",
-  "description": "Kanban's tracked Codex workflows: the Kanban-invoked $solve, $pr-review, $pr-rereview, $pr-revise, and $repair, plus the user-invoked $issue, $autoissue, $issue-review, $issue-rereview, $design-epic, $process-design-doc, $draft-report, $note-problem, and $process-report drafting, readiness-gate, and document workflows.",
+  "version": "1.5.0",
+  "description": "Kanban's tracked Codex workflows: the Kanban-invoked $solve, $pr-review, $pr-rereview, $pr-revise, and $repair, plus the user-invoked $issue, $autoissue, $issue-review, $issue-rereview, $design-epic, $process-design-doc, $draft-report, $note-problem, $process-report, and $triage drafting, readiness-gate, document, and roadmap workflows.",
   "author": {
     "name": "Terry"
   },
@@ -23,13 +23,14 @@
     "process-design-doc",
     "draft-report",
     "note-problem",
-    "process-report"
+    "process-report",
+    "triage"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Kanban Workflows",
-    "shortDescription": "Kanban's $solve, $pr-review, $pr-rereview, $pr-revise, $repair, $issue, $autoissue, $issue-review, $issue-rereview, $design-epic, $process-design-doc, $draft-report, $note-problem, and $process-report workflows",
-    "longDescription": "Packages the Codex-side workflows the Kanban board invokes by name: $solve claims and implements a GitHub issue through PR creation, $pr-review and $pr-rereview run the canonical opposite-brand pull request review, $pr-revise repairs a changes-requested pull request and hands off to a fresh canonical rereview, and $repair unblocks a pull request that cannot merge and hands off to exactly one rereview. It also packages the drafting, readiness-gate, and document workflows a user or the review daemon invokes directly rather than Kanban's CLI: $issue drafts exactly one verified, deduplicated issue and stops for signoff, $autoissue delegates that drafting and then immediately runs the canonical review of the created issue, $issue-review runs the canonical opposite-agent readiness gate for one numbered issue, $issue-rereview repairs a changes-requested issue with explicit signoff and resubmits it to that gate, $design-epic captures an epic-sized feature arc in a durable Markdown design document before any tracker item exists, $process-design-doc turns one entry of such a document into one approved tracker artifact, $draft-report turns notes or an audit request into an evidence-backed findings report, $note-problem appends one verified observation to an existing report after explicit approval, and $process-report processes one concern of such a report at a time. Each workflow preserves Kanban's existing solver, reviewer, and revision authority boundaries described in docs/agent-workflow-contract.md, docs/drafting-workflow-contract.md, and docs/document-workflow-contract.md.",
+    "shortDescription": "Kanban's $solve, $pr-review, $pr-rereview, $pr-revise, $repair, $issue, $autoissue, $issue-review, $issue-rereview, $design-epic, $process-design-doc, $draft-report, $note-problem, $process-report, and $triage workflows",
+    "longDescription": "Packages the Codex-side workflows the Kanban board invokes by name: $solve claims and implements a GitHub issue through PR creation, $pr-review and $pr-rereview run the canonical opposite-brand pull request review, $pr-revise repairs a changes-requested pull request and hands off to a fresh canonical rereview, and $repair unblocks a pull request that cannot merge and hands off to exactly one rereview. It also packages the drafting, readiness-gate, and document workflows a user or the review daemon invokes directly rather than Kanban's CLI: $issue drafts exactly one verified, deduplicated issue and stops for signoff, $autoissue delegates that drafting and then immediately runs the canonical review of the created issue, $issue-review runs the canonical opposite-agent readiness gate for one numbered issue, $issue-rereview repairs a changes-requested issue with explicit signoff and resubmits it to that gate, $design-epic captures an epic-sized feature arc in a durable Markdown design document before any tracker item exists, $process-design-doc turns one entry of such a document into one approved tracker artifact, $draft-report turns notes or an audit request into an evidence-backed findings report, $note-problem appends one verified observation to an existing report after explicit approval, $process-report processes one concern of such a report at a time, and $triage orders a repository's open issues into a dependency-aware roadmap. Each workflow preserves Kanban's existing solver, reviewer, and revision authority boundaries described in docs/agent-workflow-contract.md, docs/drafting-workflow-contract.md, and docs/document-workflow-contract.md.",
     "developerName": "Terry",
     "category": "Engineering",
     "capabilities": [
@@ -51,7 +52,8 @@
       "Use $process-design-doc to file the next ready slice of that design document as a tracker item.",
       "Use $draft-report to turn my audit notes into an evidence-backed findings report.",
       "Use $note-problem to note and verify one problem into that findings report.",
-      "Use $process-report to process the next open concern in that findings report."
+      "Use $process-report to process the next open concern in that findings report.",
+      "Use $triage to order this repository's open issues into a dependency-aware roadmap."
     ]
   }
 }

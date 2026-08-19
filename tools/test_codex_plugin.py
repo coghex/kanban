@@ -127,9 +127,20 @@ DOCUMENT_SKILL_NAMES = {
     "process-report",
 }
 
+# The roadmap workflow vendored by issue #393, slice VEND-1 of
+# docs/workflow_command_vendoring_design.md. Unlike every set above it is not a
+# hand-edited file: it is rendered from tools/command_sources/triage.md by
+# tools/render_command_sources.py, and tools/test_render_command_sources.py
+# byte-compares the tracked output against that source. User-invoked and so
+# excluded from Haskell name parity like the rest.
+ROADMAP_SKILL_NAMES = {"triage"}
+
 # What a Codex installation must actually discover under skills/.
 EXPECTED_SKILL_NAMES = (
-    HASKELL_PARITY_SKILL_NAMES | DRAFTING_SKILL_NAMES | DOCUMENT_SKILL_NAMES
+    HASKELL_PARITY_SKILL_NAMES
+    | DRAFTING_SKILL_NAMES
+    | DOCUMENT_SKILL_NAMES
+    | ROADMAP_SKILL_NAMES
 )
 
 # Keys that would let a packaged manifest silently override the model,
@@ -316,14 +327,16 @@ class SkillDiscoveryTests(unittest.TestCase):
         # The two concepts must stay distinct: discovery covers every packaged
         # workflow, while WorkflowNameParityTests pins only the ones Kanban's
         # Haskell code spawns. Collapsing them back into one constant would
-        # either break parity or silently stop discovering the drafting and
-        # document skills.
+        # either break parity or silently stop discovering the drafting,
+        # document, and roadmap skills.
         self.assertTrue(HASKELL_PARITY_SKILL_NAMES < EXPECTED_SKILL_NAMES)
         self.assertEqual(
             EXPECTED_SKILL_NAMES - HASKELL_PARITY_SKILL_NAMES,
-            DRAFTING_SKILL_NAMES | DOCUMENT_SKILL_NAMES,
+            DRAFTING_SKILL_NAMES | DOCUMENT_SKILL_NAMES | ROADMAP_SKILL_NAMES,
         )
         self.assertEqual(DRAFTING_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
+        self.assertEqual(ROADMAP_SKILL_NAMES & DRAFTING_SKILL_NAMES, set())
+        self.assertEqual(ROADMAP_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
 
     def test_repair_is_a_spawned_workflow_and_not_a_drafting_one(self):
         # Kanban's `r` spawns $repair for a red Done card (issue #127), so it
