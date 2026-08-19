@@ -2209,9 +2209,16 @@ def _reconcile_late_writes(
         "strays": [],
         "failures": [],
     }
+    remaining: tuple[Path, ...] | None = None
     for _ in range(_LATE_WRITER_PASSES):
         with _record_locks(plan):
             if not _recreated_entries(plan, known):
+                # This is the last look, so the seal goes down here rather
+                # than under a lock taken again for nothing: the handoff has
+                # already happened, and a second pause would hand the lock
+                # over a second time only to find what this look just did.
+                remaining = ()
+                outcome["sealed"] = _seal_record_path(transition, plan)
                 break
             outcome["passes"] += 1
             # The outer guard, so no fault raised by a step this sweep drives
@@ -2231,12 +2238,15 @@ def _reconcile_late_writes(
                 break
         # Outside the lock deliberately: leaving this block is what lets a
         # writer queued on it through, and the next pass is what sees them.
-    with _record_locks(plan):
-        remaining = _recreated_entries(plan, known)
-        # Under the same lock as the look that found it clear, so nothing can
-        # get in between the two, and only then: a location this run could not
-        # finish reconciling is one the operator has to see as it stands.
-        outcome["sealed"] = not remaining and _seal_record_path(transition, plan)
+    if remaining is None:
+        # The sweep stopped on something it could not carry, or at the bound,
+        # so what is there now is not what the pass that stopped saw.
+        with _record_locks(plan):
+            remaining = _recreated_entries(plan, known)
+            # Under the same lock as the look that found it clear, and only
+            # then: a location this run could not finish reconciling is one
+            # the operator has to see as it stands.
+            outcome["sealed"] = not remaining and _seal_record_path(transition, plan)
     outcome["retained"] = sorted(
         set(outcome["retained"]) | {str(path) for path in remaining}
     )
