@@ -76,18 +76,16 @@ module Spec.Support.Lanes
 where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (IOException, bracket, onException, try)
+import Control.Exception (IOException, bracket, mask_, onException, try)
 import Control.Monad (filterM, forM_, unless, when)
 import qualified Data.ByteString.Char8 as ByteString
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.List (find, intercalate, nub, sort)
 import Data.Maybe (isNothing)
-import qualified Data.Text as Text
 import GHC.Clock (getMonotonicTime)
 import Kanban.Process
   ( ProcessIdentity (..),
     descendantProcesses,
-    identityForPid,
     matchingIdentities,
     readProcessSnapshot,
   )
@@ -102,13 +100,13 @@ import System.Posix.Process (getProcessGroupID, getProcessID)
 import System.Posix.Signals (sigINT, sigKILL, signalProcess, signalProcessGroup)
 import System.Process
   ( CreateProcess (..),
+    Pid,
     ProcessHandle,
     StdStream (..),
     createProcess,
     getPid,
     getProcessExitCode,
     proc,
-    waitForProcess,
   )
 import Test.Hspec (Spec)
 import Test.Hspec.Core.Runner
@@ -274,26 +272,29 @@ runEveryLane groups = do
   started <- getMonotonicTime
   outcomes <-
     bracket createTemporaryDirectory removePathForcibly $ \root -> do
-      -- Recorded as they start rather than after the last one, so a lane that
-      -- fails to start leaves no siblings of its own running behind it.
+      -- The list of lanes the runner is still answerable for. Membership is
+      -- exactly the claim "this PID is still ours to signal", and both edges of
+      -- it are taken atomically: see 'reapLane' for why leaving is, and 'start'
+      -- just below for why joining is.
       launched <- newIORef []
-      let start lane = do
+      let start lane = mask_ $ do
+            -- Spawning and joining the list are one uninterruptible step. There
+            -- is nothing interruptible between 'createProcess' returning and the
+            -- write below, so there is no instant in which a lane exists and the
+            -- runner does not know it has to bring it down. Anything that has to
+            -- block belongs after this, when the lane is already accounted for.
             running <- startLane self arguments inherited root lane
             modifyIORef' launched (running :)
             pure running
           -- Reported as each is reaped rather than at the end, which is also
-          -- why the lanes are reaped in their own order: what a run prints
-          -- does not depend on which lane happened to finish first. A reaped
-          -- lane drops off the list at the same moment, so an interrupt after
-          -- it neither reports it twice nor signals a group its PID no longer
-          -- names.
+          -- why the lanes are reaped in their own order: what a run prints does
+          -- not depend on which lane happened to finish first.
           collect running = do
-            outcome <- collectLane running
-            modifyIORef' launched (filter ((/= runningLane running) . runningLane))
+            outcome <- collectLane launched running
             reportLane outcome
             pure outcome
       (mapM start allLanes >>= mapM collect)
-        `onException` (readIORef launched >>= abandonLanes)
+        `onException` (readIORef launched >>= abandonLanes launched)
   elapsed <- subtract started <$> getMonotonicTime
   summarize expected elapsed outcomes
 
@@ -307,16 +308,16 @@ runEveryLane groups = do
 -- delivers to its main thread as an interrupt, which is what runs those
 -- brackets; only what is still standing after that is killed by group. A lane
 -- killed outright would leave every such fixture running on the host.
-abandonLanes :: [RunningLane] -> IO ()
-abandonLanes running = do
+abandonLanes :: IORef [RunningLane] -> [RunningLane] -> IO ()
+abandonLanes launched running = do
   -- Surveyed before anything is asked to stop, and that order is the point: a
   -- lane's fixtures are only reachable as its descendants while the lane is
   -- alive to be walked from. A lane that then unwinds cleanly and still leaves
   -- one behind would otherwise leave it orphaned and unfindable.
-  standing <- mapM surveyLane running
-  mapM_ (interruptLane . standingLane) standing
-  awaitLanes running
-  mapM_ sweepLane standing
+  standing <- mapM (surveyLane launched) running
+  mapM_ (interruptLane launched . standingLane) standing
+  awaitLanes launched running
+  mapM_ (sweepLane launched) standing
   mapM_ dumpLane (reverse running)
 
 -- | A lane and everything it had started at the moment it was asked to stop.
@@ -325,8 +326,13 @@ data StandingLane = StandingLane
     standingTree :: [ProcessIdentity]
   }
 
-surveyLane :: RunningLane -> IO StandingLane
-surveyLane running = StandingLane running . maybe [] snd <$> laneStanding running
+surveyLane :: IORef [RunningLane] -> RunningLane -> IO StandingLane
+surveyLane launched running = do
+  pid <- laneStillOurs launched running
+  snapshot <- readProcessSnapshot
+  let live = either (const []) id snapshot
+  pure . StandingLane running $
+    maybe [] (\identifier -> descendantProcesses [fromIntegral identifier] live) pid
 
 -- | How long the lanes are given, between them, to unwind after being asked
 -- to. Generous next to how long unwinding takes — a bracket kills its fixture
@@ -338,42 +344,32 @@ abandonSeconds = 10
 -- | Asks one lane to unwind. Aimed at the lane itself rather than its group:
 -- what has to run is the lane's own finalizers, and its fixtures are reached
 -- by those and by nothing else.
-interruptLane :: RunningLane -> IO ()
-interruptLane running = do
-  standing <- laneStanding running
-  forM_ standing $ \(identity, _) ->
-    ignoringIOException (signalProcess sigINT (fromIntegral identity.processIdentityPid))
+interruptLane :: IORef [RunningLane] -> RunningLane -> IO ()
+interruptLane launched running = do
+  pid <- laneStillOurs launched running
+  forM_ pid $ \identifier -> ignoringIOException (signalProcess sigINT identifier)
 
 -- | Waits for the lanes to finish unwinding, on one deadline between them
 -- rather than one each, since they were all asked at once.
-awaitLanes :: [RunningLane] -> IO ()
-awaitLanes running = do
+awaitLanes :: IORef [RunningLane] -> [RunningLane] -> IO ()
+awaitLanes launched running = do
   deadline <- (+ abandonSeconds) <$> getMonotonicTime
   let poll = do
-        alive <- filterM stillRunning running
+        alive <- filterM (fmap isNothing . reapLane launched) running
         now <- getMonotonicTime
-        unless (null alive || now >= deadline) (threadDelay 100000 >> poll)
+        unless (null alive || now >= deadline) (threadDelay pollMicroseconds >> poll)
   poll
-
-stillRunning :: RunningLane -> IO Bool
-stillRunning = fmap isNothing . getProcessExitCode . runningHandle
 
 dumpLane :: RunningLane -> IO ()
 dumpLane running = do
   ByteString.putStrLn (ByteString.pack ("== lane " <> laneName (runningLane running) <> ": abandoned"))
   ignoringIOException (ByteString.readFile (runningOutput running) >>= ByteString.putStr)
 
--- | 'runningIdentity' is what the lane was when it started, and it is the only
--- thing a signal is ever aimed through. A PID stops being ours the moment the
--- lane is reaped, and the host is free to hand it — and so the process group it
--- names — to something unrelated; 'Nothing' means the runner could not record
--- one, which is read as "do not signal" rather than as "signal anyway".
 data RunningLane = RunningLane
   { runningLane :: Lane,
     runningHandle :: ProcessHandle,
     runningOutput :: FilePath,
-    runningReport :: FilePath,
-    runningIdentity :: Maybe ProcessIdentity
+    runningReport :: FilePath
   }
 
 data LaneOutcome = LaneOutcome
@@ -417,40 +413,42 @@ startLane self arguments inherited root lane = do
           -- a group signal or find among its own descendants.
           new_session = True
         }
-  RunningLane lane handle outputPath reportPath <$> recordLaneIdentity lane handle
+  pure (RunningLane lane handle outputPath reportPath)
 
--- | The identity of a lane that has just been started, taken while its PID is
--- still unambiguously ours because nothing has reaped it yet.
---
--- 'Nothing' means the lane is already gone — a lane holding nothing a
--- @--match@ selected finishes in under a millisecond — which needs no signal
--- and can take none. A snapshot that could not be taken at all is a different
--- answer: the runner cannot promise to bring this lane down, so it takes the
--- one chance it is sure of and refuses to run.
-recordLaneIdentity :: Lane -> ProcessHandle -> IO (Maybe ProcessIdentity)
-recordLaneIdentity lane handle = do
-  pid <- getPid handle
-  case pid of
-    Nothing -> pure Nothing
-    Just identifier -> do
-      snapshot <- readProcessSnapshot
-      case snapshot of
-        Right live -> pure (identityForPid (fromIntegral identifier) live)
-        Left message -> do
-          ignoringIOException (signalProcessGroup sigKILL identifier)
-          die
-            ( "lane "
-                <> laneName lane
-                <> " could not be identified, so it could not be promised an end: "
-                <> Text.unpack message
-            )
-
-collectLane :: RunningLane -> IO LaneOutcome
-collectLane running = do
-  code <- waitForProcess (runningHandle running)
+collectLane :: IORef [RunningLane] -> RunningLane -> IO LaneOutcome
+collectLane launched running = do
+  code <- waitForLane launched running
   output <- ByteString.readFile (runningOutput running)
   report <- readLaneReport (runningReport running)
   pure (LaneOutcome (runningLane running) code output report)
+
+waitForLane :: IORef [RunningLane] -> RunningLane -> IO ExitCode
+waitForLane launched running =
+  reapLane launched running
+    >>= maybe (threadDelay pollMicroseconds >> waitForLane launched running) pure
+
+-- | Reaps a lane if it has finished, and takes it off the runner's list in the
+-- same breath.
+--
+-- Those two are one uninterruptible step, and the reap is the non-blocking
+-- 'getProcessExitCode' rather than a blocking wait precisely so that it can be:
+-- a blocking wait reaps inside itself and can be interrupted before it says so,
+-- leaving a handle that still names a PID nothing owns any more. A lane's PID
+-- is the runner's to signal only until something reaps it, after which the host
+-- may hand it — and the process group it names — to anything at all. Membership
+-- of the list /is/ that claim, and it stops being true and stops being claimed
+-- at the same instant.
+reapLane :: IORef [RunningLane] -> RunningLane -> IO (Maybe ExitCode)
+reapLane launched running = mask_ $ do
+  code <- getProcessExitCode (runningHandle running)
+  forM_ code (const (modifyIORef' launched (filter ((/= runningLane running) . runningLane))))
+  pure code
+
+-- | How often a lane is asked whether it has finished: nothing next to the tens
+-- of seconds a lane takes, and the price of a reap the runner's list can be
+-- kept honest across.
+pollMicroseconds :: Int
+pollMicroseconds = 50000
 
 -- | What a lane recorded, or 'Nothing' if it never got that far. Read as the
 -- runner's only evidence that a lane ran at all, so an unreadable or
@@ -477,50 +475,34 @@ readLaneReport path = do
 -- to be walked from. After the lane dies its children are reparented and no
 -- walk can find them again, which is why the tree is taken first and signalled
 -- second.
-sweepLane :: StandingLane -> IO ()
-sweepLane standing = do
+sweepLane :: IORef [RunningLane] -> StandingLane -> IO ()
+sweepLane launched standing = do
+  pid <- laneStillOurs launched (standingLane standing)
   snapshot <- readProcessSnapshot
-  case snapshot of
-    Left _ -> pure ()
-    Right live -> do
-      let current = stillItself live (runningIdentity (standingLane standing))
-          descendants = maybe [] (\identity -> descendantProcesses [identity.processIdentityPid] live) current
-          -- Whatever the lane had when it was surveyed and still holds the
-          -- same PID and start time, plus whatever it has started since. The
-          -- first half is what survives the lane itself; the second is what a
-          -- lane that never unwound is still holding.
-          survivors = matchingIdentities live (standingTree standing) <> descendants
-      forM_ survivors $ \survivor ->
-        ignoringIOException (signalProcess sigKILL (fromIntegral survivor.processIdentityPid))
-      forM_ current $ \identity ->
-        ignoringIOException (signalProcessGroup sigKILL (fromIntegral identity.processIdentityGroupPid))
+  let live = either (const []) id snapshot
+      descendants = maybe [] (\identifier -> descendantProcesses [fromIntegral identifier] live) pid
+      -- Whatever the lane had when it was surveyed and still holds the same PID
+      -- and start time, plus whatever it has started since. The first half is
+      -- what outlives the lane itself; the second is what a lane that never
+      -- unwound is still holding.
+      survivors = matchingIdentities live (standingTree standing) <> descendants
+  forM_ survivors $ \survivor ->
+    ignoringIOException (signalProcess sigKILL (fromIntegral survivor.processIdentityPid))
+  forM_ pid $ \identifier ->
+    ignoringIOException (signalProcessGroup sigKILL identifier)
 
--- | The lane as it is right now — and everything it has started — but only if
--- it is still the process the runner started: same PID, same start time.
+-- | The lane's PID, and only while the runner is still answerable for it.
 --
--- Every signal this module sends goes through here, because a lane's PID is
--- the runner's to use only until the lane is reaped, and the reap can happen
--- inside 'waitForProcess' or 'getProcessExitCode' an instant before an
--- interrupt is delivered, leaving a handle that still reports the PID that now
--- belongs to somebody else. Answers 'Nothing' when the lane is already gone,
--- when its identity was never recorded, and when a snapshot cannot be taken at
--- all: not being able to tell is not permission to signal.
-laneStanding :: RunningLane -> IO (Maybe (ProcessIdentity, [ProcessIdentity]))
-laneStanding running = do
-  snapshot <- readProcessSnapshot
-  pure $ case snapshot of
-    Left _ -> Nothing
-    Right live -> do
-      current <- stillItself live (runningIdentity running)
-      Just (current, descendantProcesses [current.processIdentityPid] live)
-
--- | The recorded process as this snapshot has it, and only if the snapshot
--- still shows the same start time against the same PID.
-stillItself :: [ProcessIdentity] -> Maybe ProcessIdentity -> Maybe ProcessIdentity
-stillItself live recorded = do
-  known <- recorded
-  current <- identityForPid known.processIdentityPid live
-  if current.processIdentityStartedAt == known.processIdentityStartedAt then Just current else Nothing
+-- Every signal this module aims at a lane goes through here. A PID names the
+-- lane only until something reaps it, and 'reapLane' is the one thing that
+-- does, taking the lane off the list in the same uninterruptible step; so a
+-- lane still on the list has not been reaped, its PID has not been released,
+-- and neither has the process group its own session named after it. A lane that
+-- has left the list is never signalled, whatever its handle still says.
+laneStillOurs :: IORef [RunningLane] -> RunningLane -> IO (Maybe Pid)
+laneStillOurs launched running = do
+  answerable <- elem (runningLane running) . map runningLane <$> readIORef launched
+  if answerable then getPid (runningHandle running) else pure Nothing
 
 reportLane :: LaneOutcome -> IO ()
 reportLane outcome = do
