@@ -28,6 +28,7 @@ concrete precondition
 - [x] PATH-2. Route the drainer's install, record, runtime, and log paths — [#358]
 - [ ] PATH-3. Resolve the Haskell consumers' managed paths per platform
 - [ ] PATH-4. Repoint the packaged plugin assets at the resolved record
+- [x] PATH-5. Relocate a pre-XDG `~/Library` installation on a non-macOS host — [#367]
 
 ## Epic contract
 
@@ -312,8 +313,11 @@ macOS-spelled location to the XDG one on its next run, following the existing
 `LEGACY_CONFIG_PATH` precedent for a pre-consolidation install. Detect-and-
 report was rejected as leaving a split state; ignoring it was rejected because
 a real Linux host that ran LNX-2 early would stay inconsistent. Consequence:
-PATH-2 carries the migration and its fixtures; macOS installs are still never
-touched, since D-1 keeps their location correct. What that migration actually
+PATH-5 (#367) carries the relocation and its fixtures, with PATH-2 (#358) as
+its prerequisite: PATH-2 supplies the per-platform path routing the relocation
+resolves its source and its destination through, and nothing more, so the
+relocation itself is #367's rather than #358's. macOS installs are still never
+touched, since D-1 keeps their location correct. What that relocation actually
 moves is D-11.
 
 ### D-10. Both managed log directories join the arc and enter the manifest
@@ -331,14 +335,18 @@ PATH-1 and PATH-2 each carry a two-row manifest addition beyond their sibling
 rows, and `tools/approve_issues.py` derives its `--log-dir` default from the
 resolver instead of spelling the path.
 
-### D-11. The Linux migration relinks, merges, moves logs, and removes the old install
+### D-11. The Linux relocation relinks, merges, moves logs, and removes the old installation
 
 User signoff 2026-08-16, during issue processing; completes D-9, which fixed
 that a migration happens without saying what it moves. On Linux an installer
 run that finds a `~/Library`-spelled install relocates it in that same run: the
 script links are installed at the XDG install directory, the discovery record
 is migrated, the `~/Library/Logs/kanban/pr-drainer` tree is moved to the XDG
-log root, and the old install directory is removed. Leaving the old log tree
+log root, and the old installation is removed — its controller, its script
+links, its record, its runtime content and its recognized bytecode cache. The
+old *directory* is not always removed with them: the record's lock file may
+never be unlinked, because a writer may be queued on its inode, so whatever
+directory has to exist to contain that lock remains. Leaving the old log tree
 behind was rejected as leaving a Linux host with two log locations, one of them
 frozen history; migrating the record alone was rejected as leaving debris the
 probe merely tolerates. When both locations hold a record, their `repositories`
@@ -349,7 +357,7 @@ repository installed only under the old record would silently vanish, and
 refusing the install outright was rejected as blocking a host that ran LNX-2
 early until manual cleanup. The running-drainer case needs no new answer —
 `tools/install_drainer.py:293-295` already refuses an install while the job is
-live. Consequence: PATH-2 carries a directory move and a record merge, not only
+live. Consequence: PATH-5 carries a directory move and a record merge, not only
 a path change.
 
 ### D-12. Consumers keep their existing resolution shape
@@ -426,13 +434,14 @@ return the arc here rather than deciding it in a PR.
   environment override × which location exists) so a new managed path cannot
   be added with only one platform's expectation, and the D-7 order is asserted
   for each location alone and for both present at once.
-- The D-9/D-11 migration is proven by seeding a `~/Library`-spelled install on
-  a simulated Linux host, running the installer, and asserting the links land
-  at the XDG install directory, the record is migrated, the log tree moved, the
-  old install directory is gone, and the same run on a simulated macOS host
-  changes nothing. A separate case seeds a record at *both* locations and
-  asserts every repository from both survives the merge with the XDG value
-  winning where an entry appears in both.
+- The D-9/D-11 relocation, PATH-5's, is proven by seeding a `~/Library`-spelled
+  install on a simulated Linux host, running the installer, and asserting the
+  links land at the XDG install directory, the record is migrated, the log tree
+  moved, the old installation gone but for the lock whose directory has to keep
+  containing it, and the same run on a simulated macOS host changes nothing. A
+  separate case seeds a record at *both* locations and asserts every repository
+  from both survives the merge with the XDG value winning where an entry
+  appears in both.
 - The §4 reconciliations stay green throughout and are the mechanism that
   catches an undeclared second spelling; a slice that changes a spelling
   without its row fails the Python suite.
@@ -481,13 +490,13 @@ reconciliation fails closed on a spelling whose row is missing.
 > Processed as #358.
 
 - **Outcome:** `drain_prs_service.py` and `install_drainer.py` derive every
-  managed path from the resolver instead of spelling it, and the installer
-  relocates a `~/Library`-spelled Linux install on its next run; macOS output
-  byte-identical and never migrated.
+  managed path from the resolver instead of spelling it; macOS output
+  byte-identical and never migrated. Relocating a `~/Library`-spelled install
+  is PATH-5's, which this slice is the prerequisite for.
 - **Scope:** the four drainer path constants (kept as module-level constants
   per D-12), their §4 sibling rows, the new macOS/Linux row pair for the
   drainer log root (D-10), the corrected `files` columns on the two existing
-  drainer rows, the D-9/D-11 migration, `docs/pr-drainer.md` and
+  drainer rows, `docs/pr-drainer.md` and
   `docs/agent-workflow-contract.md` prose, and the drainer fixtures.
 - **Phase:** 2
 - **Depends on:** PATH-1
@@ -495,14 +504,12 @@ reconciliation fails closed on a spelling whose row is missing.
 - **Relevant decisions:** D-1, D-2, D-5, D-6, D-7, D-8, D-9, D-10, D-11, D-12
 - **Acceptance signals:** drainer fixtures pass with macOS spellings
   unchanged, including `PinnedServiceDefinitionTests`' golden plist; Linux
-  resolution asserted; the migration relinks, migrates the record, moves the
-  log tree, and removes the old install directory on a seeded `~/Library`
-  Linux install, and is a no-op on macOS; a record at both locations merges
-  with XDG winning per key; §4 reconciliation green with the new rows and the
+  resolution asserted; §4 reconciliation green with the new rows and the
   corrected file lists; the `systemd-drainer-lifecycle` CI job passes.
 - **Out of scope:** `~/Library/LaunchAgents`, plists, and the systemd unit
   location, which belong to LNX-2; adding `src/Kanban/Drainer.hs` to the new
-  Linux sibling rows' file lists, which is PATH-3's.
+  Linux sibling rows' file lists, which is PATH-3's; the D-9/D-11 relocation,
+  which is PATH-5's.
 - **Open questions:** None
 
 ### PATH-3. Resolve the Haskell consumers' managed paths per platform
@@ -523,6 +530,37 @@ reconciliation fails closed on a spelling whose row is missing.
   unchanged; the probe order asserted off-host for each location and for both
   present.
 - **Out of scope:** the darwin service gate, which is LNX-2's.
+- **Open questions:** None
+
+### PATH-5. Relocate a pre-XDG `~/Library` installation on a non-macOS host
+
+> Processed as #367.
+
+- **Outcome:** on a platform that is not macOS, a default installer run moves a
+  whole `~/Library` installation to this platform's own convention — records
+  merged, links installed, every repository's runtime tree, logs and incidents
+  carried, every definition rewritten and reloaded — and then removes the old
+  installation; macOS relocates nothing.
+- **Scope:** the installer's relocation transition, its refusals, its undo and
+  its reporting; the destination selection, which `--install-dir` alone
+  decides; the service-manager definition-environment read-back each
+  repository's own install directory is recovered through;
+  `docs/agent-workflow-contract.md` §4/§5 and `docs/pr-drainer.md` prose; and
+  the hermetic fixtures.
+- **Phase:** 2
+- **Depends on:** PATH-2
+- **Ordering:** not on the critical path
+- **Relevant decisions:** D-1, D-2, D-5, D-7, D-8, D-9, D-11
+- **Acceptance signals:** each refusal leaves the host exactly as found,
+  including a dry run; a two-repository relocation rewrites and reloads both
+  definitions and preserves both records, runtime trees, incidents and logs; a
+  `--install-dir` repository's runtime tree is carried; an already-placed tree
+  is preserved; a macOS host relocates nothing; a rolled-back failure leaves no
+  installation at the destination; both halves of a partial cross-filesystem
+  move; and the `systemd-drainer-lifecycle` CI job passes.
+- **Out of scope:** taking over an installation already at this platform's own
+  location (#368); carrying across what a writer installs at the location after
+  it is removed (#369); `src/Kanban/Drainer.hs`, which is PATH-3's.
 - **Open questions:** None
 
 ### PATH-4. Repoint the packaged plugin assets at the resolved record
