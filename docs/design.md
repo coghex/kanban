@@ -2505,8 +2505,12 @@ above are unchanged, and persistence the user switched off is not a failure.
   rather than one its callers each have to remember. It cannot reach a writer
   running an older installed copy of the controller, from before that gate,
   which is what a pre-XDG host is running by definition; one of those arriving
-  after the removal recreates what it needs, so the run then reconciles what
-  came back —
+  after the removal recreates what it needs. So the run then reconciles what
+  came back, outside those record locks and re-taking them for each pass:
+  releasing is what hands the lock to whoever was queued on it, so a
+  reconciliation inside the transition's own locks could never see them, while
+  the checkout and controller fences are held throughout and extended to any
+  repository it recovers. It is
   bounded at three passes rather than looped, each merging the recreated record
   on those same terms, carrying the trees it brought, rewriting the definitions
   it names, and clearing the location again on the removal's own ownership
