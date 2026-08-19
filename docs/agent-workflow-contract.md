@@ -553,8 +553,8 @@ arithmetic, which §2.3 owns.
   process it is waiting for.
 
   Each of those transitions — install, start, uninstall, run, stop, and
-  incident acknowledgement, which is every one that writes into an
-  installation — asks first whether the installation is still the one this
+  incident acknowledgement, which is every *controller* transition that writes
+  into an installation — asks first whether the installation is still the one this
   process is bound to, and refuses if it is not. It asks twice: once with no
   lock held at all, because taking the lock is itself a write into the
   installation — it creates the record's parent directory, chmods it, and
@@ -580,6 +580,18 @@ arithmetic, which §2.3 owns.
   refuses by printing rather than logging, because logging creates the
   directories it logs into.
 
+  The drainer's own writes are deliberately not among them.
+  `tools/drain_prs.py` records conflict and cleanup incidents into the
+  installation through `record_conflict_incident` and
+  `record_cleanup_incident`, in its standalone `--pr` mode as much as under a
+  controller, and neither is gated here. It does not need to be: a drainer run
+  takes the checkout's own run lock as soon as the git directory is known and
+  before any log line, state read, or GitHub call, and a run that moves or
+  removes an installation fences on exactly that lock for every recorded
+  repository — so a drainer cannot be writing while a mover is running, in
+  either order. Gating those writes as well would add a second answer to a
+  question the fence already settles.
+
   A running controller also holds an exclusive lock on `controller.lock` inside
   its own runtime directory, taken inside that same startup span — while the
   record's lock is held no mover can be running, so the gate's answer is still
@@ -589,8 +601,20 @@ arithmetic, which §2.3 owns.
   the drainer's run lock: `drain_prs.py` takes the checkout's `.git` rendezvous
   non-blockingly and the controller supervises a child that does exactly that,
   so a controller holding the drainer's lock would make every run it supervises
-  fail immediately. Two objects, both held at once. Any run that moves or
-  removes an installation fences on both.
+  fail immediately. Two objects, both held at once.
+
+  What a mover owes in return is symmetrical and is part of this contract
+  rather than each mover's own invention. It fences on *both* lock kinds — the
+  discovery record's and the controller's — at every location it writes into
+  or removes from, source and destination alike, and it keeps holding them
+  across a rollback, because an undo writes to exactly the locations the
+  transition did. And the marker it leaves is a tombstone rather than a
+  notice: a valid one refuses every gated transition unconditionally, with no
+  expiry and no best-effort reading, until the run that makes that location a
+  live installation again removes or invalidates it. A mover that took a
+  location apart and left a marker behind has therefore said something
+  permanent about it, which is what lets a controller bound there refuse
+  without having to reason about how long ago the move happened.
 
   Which lock a transition needs follows from how long it lives. A bounded one
   holds the record's lock across its gate and its writes together, because a
