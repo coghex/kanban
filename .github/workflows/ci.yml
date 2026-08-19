@@ -21,22 +21,114 @@ jobs:
   haskell:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # The one place this workflow names the toolchain. The setup action, both
+    # cache keys, and the verification below all read the pins from here, so a
+    # bump cannot leave one of them behind; tools/test_toolchain_parity.py
+    # holds this block against the identical one in release.yml's build-test
+    # job, so a bump of one workflow alone cannot land either.
+    env:
+      GHC_VERSION: "9.12.2"
+      CABAL_VERSION: "3.16.1.0"
     steps:
       - uses: actions/checkout@v6
 
+      # ghcup installs under `$GHCUP_INSTALL_BASE_PREFIX/.ghcup`, and the
+      # runner image points that at `/usr/local` -- a prefix this job does not
+      # own, whose modes and timestamps a restore running as the runner user
+      # cannot be relied on to reproduce, and which the image's `~/.ghcup`
+      # already redirects into. So the installation is moved somewhere the job
+      # owns outright and `~/.ghcup` is made a real directory of its own,
+      # before anything reads or writes either. That path is also the one
+      # `haskell-actions/setup` probes and puts on PATH, so the compiler the
+      # cache restores is the compiler the build runs.
+      - name: Establish a runner-owned compiler installation prefix
+        run: |
+          set -euo pipefail
+          rm -rf "$HOME/.ghcup"
+          mkdir -p "$HOME/.ghcup"
+          echo "GHCUP_INSTALL_BASE_PREFIX=$HOME" >> "$GITHUB_ENV"
+
+      # The compiler itself, which the package cache further down has never
+      # covered: without this, `ghcup install ghc` unpacks and installs the
+      # bindist from scratch on every run, which is about two minutes of every
+      # one.
+      #
+      # The key partitions by everything the restored tree is only valid for --
+      # runner OS, runner architecture, both pinned versions, and `v1`, the
+      # installation layout established above. That last component is the lever
+      # for invalidating every entry at once without touching a pin: bump it
+      # when the prefix changes, when what is kept under it changes, or if a
+      # restored installation ever stops being valid for the runner image it
+      # was built on. It names no source file: the compiler does not change
+      # when a module is added, and keying it on `kanban.cabal` would miss on
+      # nearly every pull request.
+      #
+      # There are deliberately no `restore-keys`. A prefix match is by
+      # definition a tree built for another pin or another layout, and a
+      # compiler is not a thing to half-restore; a miss reinstalls, which is
+      # slower and still correct. `actions/cache` saves in a post step gated on
+      # `success()`, so a tree that fails the verification below is never
+      # written back for the next run to restore.
+      - name: Restore the pinned compiler
+        uses: actions/cache@v5
+        with:
+          path: ~/.ghcup
+          key: ghcup-home-v1-${{ runner.os }}-${{ runner.arch }}-ghc-${{ env.GHC_VERSION }}-cabal-${{ env.CABAL_VERSION }}
+
       - uses: haskell-actions/setup@v2
         with:
-          ghc-version: "9.12.2"
-          cabal-version: "3.16.1.0"
+          ghc-version: ${{ env.GHC_VERSION }}
+          cabal-version: ${{ env.CABAL_VERSION }}
+
+      # Whether the compiler was restored or installed, what follows has to be
+      # the pinned one. A restore that lost an executable bit or a symlink, and
+      # a prefix redirect that silently did not take, both leave a setup step
+      # reporting success over a build that would run something else -- so the
+      # tools are executed here and made to say what they are, before the first
+      # `cabal` invocation depends on them.
+      - name: Verify the pinned toolchain
+        run: |
+          set -euo pipefail
+          if [ -L "$HOME/.ghcup" ] || [ ! -d "$HOME/.ghcup" ]; then
+            echo "$HOME/.ghcup is not the runner-owned directory this job established" >&2
+            exit 1
+          fi
+          if ! ghc_path="$(command -v ghc)"; then
+            echo "no ghc on PATH after setup" >&2
+            exit 1
+          fi
+          if ! cabal_path="$(command -v cabal)"; then
+            echo "no cabal on PATH after setup" >&2
+            exit 1
+          fi
+          ghc_reported="$(ghc --numeric-version)"
+          cabal_reported="$(cabal --numeric-version)"
+          echo "ghc $ghc_reported at $ghc_path"
+          echo "cabal $cabal_reported at $cabal_path"
+          if [ "$ghc_reported" != "$GHC_VERSION" ]; then
+            echo "ghc reports $ghc_reported, not the pinned $GHC_VERSION" >&2
+            exit 1
+          fi
+          if [ "$cabal_reported" != "$CABAL_VERSION" ]; then
+            echo "cabal reports $cabal_reported, not the pinned $CABAL_VERSION" >&2
+            exit 1
+          fi
+
+      # `tmp` is where ghcup unpacks a bindist and `logs` is what it writes
+      # while installing one. Neither is part of an installation, and on a cold
+      # run the unpacked bindist alone is the size of the compiler, so dropping
+      # them keeps the entry saved above to the installation itself.
+      - name: Drop the installer's scratch directories
+        run: rm -rf "$HOME/.ghcup/tmp" "$HOME/.ghcup/logs"
 
       - uses: actions/cache@v5
         with:
           path: |
             ~/.cabal/store
             dist-newstyle
-          key: cabal-${{ runner.os }}-${{ runner.arch }}-ghc-9.12.2-${{ hashFiles('kanban.cabal', 'cabal.project') }}
+          key: cabal-${{ runner.os }}-${{ runner.arch }}-ghc-${{ env.GHC_VERSION }}-${{ hashFiles('kanban.cabal', 'cabal.project') }}
           restore-keys: |
-            cabal-${{ runner.os }}-${{ runner.arch }}-ghc-9.12.2-
+            cabal-${{ runner.os }}-${{ runner.arch }}-ghc-${{ env.GHC_VERSION }}-
 
       - name: Check package metadata
         run: cabal check
