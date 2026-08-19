@@ -1323,8 +1323,17 @@ search step and nothing else, which is what `mandatory: no` records.
   So the reconciliation runs *outside* those locks and re-takes them for each
   pass, and that sequencing is the point rather than an implementation detail:
   a sweep inside the transition's own locks could never see a writer queued on
-  them, because releasing is what hands the lock over. Between passes it holds
-  neither record lock, so whoever was waiting takes it; it keeps the checkout
+  them, because releasing is what lets one through. Between passes it holds
+  neither record lock, and it pauses before taking them again — `flock` has no
+  handoff, so releasing only makes a waiter runnable and a run that asked again
+  in the same instant could take the lock back before that waiter ever ran.
+  Once the waiter holds it, the next pass blocks on it and reads what it wrote
+  rather than racing it. That pause is a mitigation and not a proof: whether
+  anyone is waiting on a lock cannot be asked, and a writer that acquires after
+  the run's last look is past any process that terminates at all. What answers
+  that one is the next run, which finds a discovery record at the legacy
+  location again and relocates over it, so such state is late rather than lost.
+  Whoever was waiting takes the lock; it keeps the checkout
   and controller fences the whole time, so no drainer or controller can start
   against a tree it is about to move, and it fences any repository it recovers
   that the transition had not — once per lock, because a second acquisition of

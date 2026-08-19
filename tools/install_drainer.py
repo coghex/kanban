@@ -32,6 +32,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -321,6 +322,21 @@ _RUNTIME_DIRECTORY_NAME = "runtime"
 _BYTECODE_CACHE_NAME = "__pycache__"
 _BYTECODE_SUFFIX = ".pyc"
 
+
+# How long one run waits, having released the legacy record's lock, before
+# taking it again. `flock` has no handoff: releasing a lock does not give it to
+# a waiter, it only makes that waiter runnable, and nothing orders a wakeup
+# against this process asking for the lock again. So a run that re-took it
+# immediately could outrun a writer that had been queued on it for the whole
+# transition and report a location that writer is about to write into. This is
+# the pause that makes losing that race a scheduling accident rather than the
+# ordinary case: a process blocked in `flock` is runnable the instant the lock
+# is released, and this is orders of magnitude longer than it takes to be
+# scheduled. It is not a proof, because none is available -- a writer that
+# acquires after this run's last look is past any process that terminates at
+# all, and what carries that one is the next installer run, which relocates
+# again over the record it left.
+_LOCK_HANDOFF_SECONDS = 0.1
 
 # How many times one run carries a recreated legacy location across before it
 # stops and reports what is still there. Bounded rather than looped: a writer
@@ -1866,7 +1882,15 @@ def _record_locks(plan: RelocationPlan) -> Iterator[None]:
     together: this pass reads and clears the legacy location and writes the
     destination record, so a writer at either end has to be excluded while it
     does — and let through the instant it stops.
+
+    Preceded by the handoff pause above, because letting one through is the
+    whole point of having released it: a writer queued on the legacy record's
+    lock becomes runnable when this run lets go, and asking for it again in the
+    same instant is how this run would take it back before that writer ever
+    ran. Once the writer holds it, `document_lock` below blocks on it, so the
+    pass that follows reads what it wrote rather than racing it.
     """
+    time.sleep(_LOCK_HANDOFF_SECONDS)
     with drain_prs_service.document_lock(plan.legacy_record):
         with drain_prs_service.document_lock(plan.destination_record):
             yield

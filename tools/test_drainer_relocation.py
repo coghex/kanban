@@ -2494,6 +2494,10 @@ with drain_prs_service.document_lock(drain_prs_service.DISCOVERY_RECORD_PATH):
         outcome["recorded"] = True
     except drain_prs_service.ServiceError as error:
         outcome["refused"] = str(error)
+    # Held across the write and a moment past it, so a reader that asks for
+    # this lock after the handoff blocks on this process rather than reading a
+    # record it is halfway through replacing.
+    time.sleep(float(sys.argv[9]))
 result.write_text(json.dumps(outcome), encoding="utf-8")
 """
 
@@ -2536,6 +2540,7 @@ class QueuedRecordWriterTests(RelocationFixture):
                 str(self.result),
                 "acme/widgets",
                 str(self.widgets),
+                "0",
             ],
             env={"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
             stdout=subprocess.PIPE,
@@ -2647,7 +2652,6 @@ class PreGateWriterTests(RelocationFixture):
         self.writer_script = self.root / "pre_gate_writer.py"
         self.writer_script.write_text(_PRE_GATE_WRITER, encoding="utf-8")
         self.pre_gate = self.build_pre_gate_controller()
-        self.waited = False
 
     def build_pre_gate_controller(self):
         """This module's own source with exactly the gate this arc added taken
@@ -2691,6 +2695,9 @@ class PreGateWriterTests(RelocationFixture):
                 str(self.result),
                 "acme/widgets",
                 str(self.widgets),
+                # Held past the write, so the reconciliation's first pass
+                # blocks on this process once the handoff gives it the lock.
+                "0.4",
             ],
             env={"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
             stdout=subprocess.PIPE,
@@ -2711,9 +2718,15 @@ class PreGateWriterTests(RelocationFixture):
         self.assertTrue(path.exists(), message)
 
     def relocate_with_pre_gate_writer(self):
+        """Nothing here sequences the writer against the reconciliation.
+
+        The only thing this arranges is that the writer is queued on the lock
+        before the transition takes it, which is the interleaving under test;
+        which of the two gets that lock afterwards is left to the handoff the
+        reconciliation performs, exactly as it is on a real host.
+        """
         process = self.start_writer()
         real_apply = install_drainer._apply_relocation
-        real_locks = install_drainer._record_locks
 
         def apply_hook(transition, relocation_plan, sources):
             self.go.write_text("", encoding="utf-8")
@@ -2721,22 +2734,8 @@ class PreGateWriterTests(RelocationFixture):
             time.sleep(0.25)
             return real_apply(transition, relocation_plan, sources)
 
-        @contextlib.contextmanager
-        def locks_hook(relocation_plan):
-            # Before the first pass takes the lock, never inside it: waiting
-            # for the writer under the lock it is waiting for would be this
-            # test deadlocking itself. What it removes is the scheduler's say
-            # in which of the two gets the lock first, not the release that
-            # makes the writer possible at all.
-            if not self.waited:
-                self.waited = True
-                self.wait_for(self.result, "the pre-gate writer never recorded")
-            with real_locks(relocation_plan):
-                yield
-
         with mock.patch.object(install_drainer, "_apply_relocation", apply_hook):
-            with mock.patch.object(install_drainer, "_record_locks", locks_hook):
-                result = self.relocate()
+            result = self.relocate()
         self.assertEqual(process.wait(timeout=60), 0, process.communicate())
         return result, json.loads(self.result.read_text(encoding="utf-8"))
 
@@ -2771,6 +2770,37 @@ class PreGateWriterTests(RelocationFixture):
         result, _ = self.relocate_with_pre_gate_writer()
         install_drainer._require_relocation_resolved(result)
         self.assertIn("cleared again", result["repair"])
+
+    def test_a_writer_that_beats_the_final_look_is_carried_by_the_next_run(self):
+        """The one case no terminating process can close.
+
+        A writer that takes the lock after this run's last look is past
+        anything this run can observe: `flock` cannot be asked whether someone
+        is waiting, and a process that has returned cannot look again. What
+        answers it is the next run, which finds a discovery record at the
+        legacy location again and relocates over it exactly as this one did —
+        so the state is late rather than lost.
+        """
+        process = self.start_writer()
+        first = self.relocate()
+        self.assertTrue(first["late_writes"]["resolved"])
+        self.assertEqual(first["late_writes"]["passes"], 0)
+        # Only now, with nothing left holding the lock and the run over.
+        self.go.write_text("", encoding="utf-8")
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+        self.assertTrue(
+            json.loads(self.result.read_text(encoding="utf-8"))["recorded"]
+        )
+        self.assertTrue(self.legacy_record.is_file())
+        second = install_drainer.relocate(self.destination, self.sources)
+        self.assertTrue(second["relocated"])
+        self.assertFalse(self.legacy_record.exists())
+        self.assertEqual(
+            self.record_document(self.destination_record)["repositories"][
+                "acme/widgets"
+            ]["repository"],
+            str(self.widgets),
+        )
 
 
 if __name__ == "__main__":

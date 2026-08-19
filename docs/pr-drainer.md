@@ -1042,8 +1042,10 @@ directory and records itself where nothing looks any more.
 So the run goes back and checks — and it does that with the lock *let go*,
 which is the part that makes it work at all: a writer waiting on that lock only
 gets it once the move stops holding it, so a check made while still holding it
-could never see what that writer does. Letting go hands it over; taking it again
-for the next check is what finds what they left. Up to three times, and
+could never see what that writer does. Letting go lets them in; a short pause
+before taking it back is what gives them time to actually get it, since letting
+a lock go does not hand it to anyone in particular; and the next check then
+waits on them and finds what they left. Up to three times, and
 throughout it keeps holding each repository's checkout the way a drainer does,
 so nothing can start draining a tree it is about to move. Whatever it finds is
 merged into the destination record the
@@ -1069,6 +1071,13 @@ in two places is one a re-run does resolve. The installer refuses outright, and
 writes nothing at all, if the installation it worked out at startup is no
 longer the one this host resolves — checked while it holds the record's lock,
 so a move has either not begun or already finished.
+
+One case no single run can close: a writer that takes the lock after the run's
+last check. There is no way to ask whether anyone is waiting on a lock, and a
+command that has finished cannot look again. Such a write is late rather than
+lost — it leaves a record at the old location, which is what the *next*
+`python3 tools/install_drainer.py` finds and moves across, exactly as this one
+did.
 
 Taking over an installation already at this platform's own location is #368.
 
