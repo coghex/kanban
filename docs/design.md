@@ -2966,6 +2966,42 @@ KANBAN_UPDATE_GOLDENS=1 cabal test kanban-test
 - Terminal resize and narrow-layout behavior.
 - Clean terminal restoration after normal exit and exceptions.
 
+### How the suite runs
+
+The suite runs as five concurrent processes — *lanes* — rather than one, and
+each lane runs its own groups one at a time. Most of the wall clock is spent
+waiting on real deadlines (TERM-to-KILL grace periods, provider probes that
+never exit, service invocations proven timed out), and those waits overlap
+across lanes; serially they do not.
+
+The unit of concurrency is a process and not a thread because every expensive
+example establishes what it drives through state the process owns rather than
+the example: environment variables and the `PATH` a fake executable is
+installed on, the working directory, the file-creation mask, the SIGTERM and
+SIGINT dispositions a managed worker installs and restores, and the process
+tree that every census, group sweep and "leaves no survivor" assertion reads.
+Two examples sharing a process share all of it. Two lanes share none of it, and
+a lane is started in a session of its own, so one lane's group sweep cannot
+reach another lane's children and one lane's census cannot find them among its
+own descendants.
+
+Nothing is left to a convention a future test could forget. The runner pins
+hspec to a single job, so a lane cannot run two of its own examples at once
+whatever a spec is annotated with, and it refuses to start the suite at all if
+any example is marked parallelizable. It also reads the suite's own example
+count off the spec tree and fails the run if the lanes between them do not hold
+that many. Which lane a group runs in is a field of the group, so a group
+cannot be added without deciding, and it is a balance decision taken from
+measurement rather than a taxonomy — `--print-slow-items` is how to check it
+again after a group's cost moves.
+
+One lane can be run on its own, which is how a load-sensitivity check repeats a
+group without the rest of the suite:
+
+```console
+KANBAN_TEST_LANE=deadline cabal run kanban-test
+```
+
 ### Packaging tests
 
 One check does not fit the categories above, because what it validates is the

@@ -1,6 +1,13 @@
 -- | The Haskell test suite's entry point. Every group lives in a per-subsystem
--- module under @test/Spec@; this module composes them in the order their
--- @describe@ blocks have always run in, which is the order they appear below.
+-- module under @test/Spec@; this module composes them and says, for each one,
+-- which /lane/ it runs in.
+--
+-- A lane is a suite process of its own — see "Spec.Support.Lanes" for what
+-- that buys and what it costs. What matters here is that the lane is a
+-- property of the group rather than of the runner: a group cannot be added
+-- without deciding what it may overlap with, and the groups inside one lane
+-- still run one at a time, in the order they appear below, which is the order
+-- their @describe@ blocks have always run in.
 module Main (main) where
 
 import qualified Spec.Agent.Capture as Capture
@@ -29,6 +36,8 @@ import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.Repository.Identity as RepositoryIdentity
 import qualified Spec.Repository.State as RepositoryState
+import Spec.Support.Lanes (Lane (..), SuiteGroup (..), runSuiteInLanes)
+import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import qualified Spec.UI.AutoSolve as AutoSolve
 import qualified Spec.UI.Cards as Cards
 import qualified Spec.UI.CompletedHistory as CompletedHistory
@@ -45,59 +54,75 @@ import qualified Spec.UI.SessionCore as SessionCore
 import qualified Spec.UI.SolveChooser as SolveChooser
 import qualified Spec.UI.Text as UIText
 import qualified Spec.UI.Usage as UIUsage
-import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import System.Environment (lookupEnv)
-import Test.Hspec (Spec, hspec)
 
 -- | Ordinarily the suite. When 'localeProbeVariable' is set this process is
 -- the C-locale child a single test re-ran the binary as, and it runs that
 -- probe instead — see "Spec.Support.Locale" for why the condition cannot be
 -- established from inside an already-started test process.
+--
+-- The probe is asked about first and deliberately so: a lane carries its own
+-- marker in the environment its children inherit, and a probe started from
+-- inside a lane must run the probe rather than that lane a second time.
 main :: IO ()
-main = lookupEnv localeProbeVariable >>= maybe (hspec suite) runLocaleProbe
+main = lookupEnv localeProbeVariable >>= maybe (runSuiteInLanes suiteGroups) runLocaleProbe
 
--- | Every group, in its established order.
-suite :: Spec
-suite = do
-  ManagedProcess.spec
-  Supervision.spec
-  Protocol.spec
-  Solve.spec
-  Settings.spec
-  Transcript.spec
-  PullRequestFlow.spec
-  ReviewSession.spec
-  SessionCore.spec
-  RepositoryIdentity.spec
-  UIText.spec
-  Workflow.spec
-  Tracker.spec
-  GitHubDecoding.spec
-  BoardRefresh.spec
-  RefreshCoordinator.spec
-  GitHubHistory.spec
-  Capture.spec
-  SolveChooser.spec
-  Usage.spec
-  UsageMode.spec
-  IssueReviewer.spec
-  Drainer.spec
-  ApprovalService.spec
-  RepositoryState.spec
-  PullRequestStatus.spec
-  ConfigConsumers.spec
-  Cards.spec
-  AutoSolve.spec
-  ConfigLoading.spec
-  Layout.spec
-  OpenData.spec
-  CompletedHistory.spec
-  Filter.spec
-  FilterPanel.spec
-  Golden.spec
-  Incidents.spec
-  UIUsage.spec
-  Keys.spec
-  Search.spec
-  Ping.spec
-  Preflight.spec
+-- | Every group, its lane, and its established order.
+--
+-- The lane column is a packing decision taken from measurement, not a
+-- taxonomy. Serially the suite spends 397 of its 399 seconds inside fifteen
+-- groups that are waiting on a real deadline, so those fifteen are spread
+-- across the five lanes until no lane holds much more than a fifth of them,
+-- and the eleven hundred examples whose cost is computing — under two seconds
+-- between them — ride along wherever there is room. The seconds beside each
+-- group below are what it cost on its own, from
+--
+-- > cabal run kanban-test -- --print-slow-items=2000
+--
+-- which is how to check the packing again after a group's cost moves.
+suiteGroups :: [SuiteGroup]
+suiteGroups =
+  [ SuiteGroup "Spec.Agent.ManagedProcess.Lifecycle" LifecycleLane ManagedProcess.lifecycleSpec, -- 53.8s
+    SuiteGroup "Spec.Agent.ManagedProcess.Deadline" DeadlineLane ManagedProcess.deadlineSpec, -- 63.1s
+    SuiteGroup "Spec.Agent.Supervision" SupervisionLane Supervision.spec, -- 72.6s
+    SuiteGroup "Spec.Agent.Protocol" LifecycleLane Protocol.spec, -- 8.5s
+    SuiteGroup "Spec.Agent.Solve" LifecycleLane Solve.spec, -- 2.8s
+    SuiteGroup "Spec.Config.Settings" PingLane Settings.spec,
+    SuiteGroup "Spec.Agent.Transcript" PingLane Transcript.spec,
+    SuiteGroup "Spec.Agent.PullRequestFlow" PingLane PullRequestFlow.spec, -- 1.9s
+    SuiteGroup "Spec.UI.ReviewSession" PingLane ReviewSession.spec,
+    SuiteGroup "Spec.UI.SessionCore" PingLane SessionCore.spec,
+    SuiteGroup "Spec.Repository.Identity" PingLane RepositoryIdentity.spec,
+    SuiteGroup "Spec.UI.Text" PingLane UIText.spec,
+    SuiteGroup "Spec.Board.Workflow" PingLane Workflow.spec,
+    SuiteGroup "Spec.Board.Tracker" PingLane Tracker.spec,
+    SuiteGroup "Spec.GitHub.Decoding" PingLane GitHubDecoding.spec,
+    SuiteGroup "Spec.GitHub.BoardRefresh" UsageLane BoardRefresh.spec, -- 38.7s
+    SuiteGroup "Spec.GitHub.RefreshCoordinator" PingLane RefreshCoordinator.spec, -- 8.6s
+    SuiteGroup "Spec.GitHub.History" DeadlineLane GitHubHistory.spec, -- 7.9s
+    SuiteGroup "Spec.Agent.Capture" LifecycleLane Capture.spec, -- 10.5s
+    SuiteGroup "Spec.UI.SolveChooser" PingLane SolveChooser.spec,
+    SuiteGroup "Spec.Agent.Usage" UsageLane Usage.spec, -- 45.7s
+    SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
+    SuiteGroup "Spec.Agent.IssueReviewer" PingLane IssueReviewer.spec,
+    SuiteGroup "Spec.Drainer" PingLane Drainer.spec, -- 17.6s
+    SuiteGroup "Spec.ApprovalService" DeadlineLane ApprovalService.spec, -- 8.9s
+    SuiteGroup "Spec.Repository.State" PingLane RepositoryState.spec,
+    SuiteGroup "Spec.GitHub.PullRequestStatus" PingLane PullRequestStatus.spec,
+    SuiteGroup "Spec.Config.Consumers" PingLane ConfigConsumers.spec,
+    SuiteGroup "Spec.UI.Cards" PingLane Cards.spec,
+    SuiteGroup "Spec.UI.AutoSolve" PingLane AutoSolve.spec,
+    SuiteGroup "Spec.Config.Loading" PingLane ConfigLoading.spec,
+    SuiteGroup "Spec.UI.Layout" PingLane Layout.spec,
+    SuiteGroup "Spec.UI.OpenData" PingLane OpenData.spec,
+    SuiteGroup "Spec.UI.CompletedHistory" PingLane CompletedHistory.spec,
+    SuiteGroup "Spec.UI.Filter" PingLane Filter.spec,
+    SuiteGroup "Spec.UI.FilterPanel" PingLane FilterPanel.spec,
+    SuiteGroup "Spec.UI.Golden" PingLane Golden.spec,
+    SuiteGroup "Spec.UI.Incidents" PingLane Incidents.spec,
+    SuiteGroup "Spec.UI.Usage" PingLane UIUsage.spec,
+    SuiteGroup "Spec.UI.Keys" PingLane Keys.spec,
+    SuiteGroup "Spec.UI.Search" PingLane Search.spec,
+    SuiteGroup "Spec.Agent.Ping" PingLane Ping.spec, -- 46.1s
+    SuiteGroup "Spec.Agent.Preflight" SupervisionLane Preflight.spec -- 5.8s
+  ]

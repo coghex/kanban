@@ -39,6 +39,16 @@ Run the Haskell suite:
 cabal test all --test-show-details=direct
 ```
 
+The Haskell suite runs as five concurrent processes — lanes — and prints each
+one's output in turn under an `== lane <name>` heading, followed by a combined
+`N examples, M failures` summary for the whole run. See `docs/design.md`
+section 18 for why the isolation boundary is a process. To repeat one lane on
+its own, name it:
+
+```console
+KANBAN_TEST_LANE=deadline cabal run kanban-test
+```
+
 Run the Python drainer, controller, and installer suite:
 
 ```console
