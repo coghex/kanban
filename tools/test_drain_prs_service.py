@@ -4413,31 +4413,42 @@ class StopAndAcknowledgeGateTests(RedirectedControllerTestCase):
         )
 
     def test_a_stop_refuses_after_the_wait_when_the_installation_moved(self):
-        # The window this closes: the gate passed up front, the runner exited,
-        # and a mover completed while this stop was waiting.
+        # The window this closes, arranged at the instant it actually opens:
+        # the stop's own gate has already passed, the runner has just been
+        # observed gone — so its controller lock is released and nothing
+        # fences a mover out — and the mover completes right there, before
+        # this stop writes anything.
         running = {"state": "running", "drainer_pid": 4242, "active_repo": str(self.repo)}
         stopped = {"state": "stopped", "drainer_pid": None, "active_repo": None}
-        original = drain_prs_service.require_current_installation
-        calls = []
+        readings = []
+        resolved = []
 
-        def gate():
-            calls.append(True)
-            if len(calls) > 1:
+        def snapshot(job):
+            readings.append(True)
+            if len(readings) == 1:
+                return running
+            if len(readings) == 2:
                 self.write_relocation_marker()
-            original()
+            return stopped
 
         with (
-            mock.patch.object(drain_prs_service, "require_current_installation", gate),
             mock.patch.object(drain_prs_service.time, "sleep"),
             mock.patch.object(
+                drain_prs_service, "status_snapshot", side_effect=snapshot
+            ),
+            mock.patch.object(
                 drain_prs_service,
-                "status_snapshot",
-                side_effect=[running, stopped, stopped],
+                "resolve_crash_incidents",
+                side_effect=lambda job, note: resolved.append(note) or [],
             ),
         ):
             with self.assertRaises(drain_prs_service.ServiceError) as raised:
                 drain_prs_service.stop_service(self.job)
         self.assertIn("was relocated to", str(raised.exception))
+        # Refused before the writes the re-gate exists to protect: the stop
+        # got as far as seeing its runner gone and no further.
+        self.assertGreaterEqual(len(readings), 2)
+        self.assertEqual(resolved, [])
 
 
 class ResolverDriftGateTests(RedirectedControllerTestCase):

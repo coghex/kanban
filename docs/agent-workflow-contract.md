@@ -546,9 +546,13 @@ arithmetic, which §2.3 owns.
   job and kicking it is one in which the job is installed and not yet running;
   an uninstall covers the definition removal as well as the record edit; an
   incident acknowledgement covers its single atomic rewrite; and the
-  service-manager `run` path takes it for its startup check alone. A gate
-  evaluated outside the lock is one that can be true when it is read and false
-  when it is acted on, so none of them are. The stabilization wait a start
+  service-manager `run` path takes it for its startup check alone. No transition *acts*
+  on a gate evaluated outside the lock, because such an answer can be true when
+  it is read and false when it is acted on; the authoritative check is always
+  the one taken inside. That is not the same as forbidding a check outside it,
+  and the paragraph below requires one: a cheap unlocked preflight that refuses
+  without touching anything is the only way a refusal can leave the
+  installation as it found it, since taking the lock is itself a write. The stabilization wait a start
   performs after its kick is outside it, so the lock is never held against the
   process it is waiting for.
 
