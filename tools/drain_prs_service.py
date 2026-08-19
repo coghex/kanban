@@ -178,6 +178,215 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+# The one artifact a relocated installation leaves for the processes still
+# bound to it. `tools/install_drainer.py` writes it into the install directory
+# it is taking apart, beside the lock file it may never unlink, and names where
+# the installation went.
+#
+# It exists because managed paths are bound once, at import, and a controller
+# cannot re-resolve them: `mock.patch.object` on those constants is the fixture
+# surface every consumer relies on, and a process that re-derived them at use
+# time would answer differently from the process it is. So the relocation tells
+# the stale process rather than the stale process asking.
+RELOCATION_MARKER_NAME = "relocated.json"
+# The field inside it naming where the installation went. Both names are
+# constants rather than literals because the document is an interface: the
+# movers that write it live in `tools/install_drainer.py`, and a reader and a
+# writer that spelled it separately could drift into never meeting.
+RELOCATION_MARKER_DESTINATION = "install_dir"
+
+
+# The lock a running controller holds for its whole life, so a run that wants
+# to take an installation apart can tell that one is live and refuse. It is
+# not the drainer's own run lock: `drain_prs.py` takes the checkout's `.git`
+# rendezvous non-blockingly, and this process *supervises* a child that does
+# exactly that, so a controller holding the drainer's lock would make every
+# run it supervises fail immediately. Two different objects, both held at once.
+CONTROLLER_LOCK_NAME = "controller.lock"
+
+
+def controller_lock_path(runtime_dir: Path) -> Path:
+    """Where one repository's controller lock lives, from its runtime
+    directory — which is the caller's to resolve, because a mover finds a
+    repository's runtime through the install directory that repository's own
+    definition names rather than through its own binding."""
+    return runtime_dir / CONTROLLER_LOCK_NAME
+
+
+def acquire_controller_lock(runtime_dir: Path) -> int:
+    """Take that lock, or refuse naming the controller that holds it.
+
+    Non-blocking, because both callers want an answer rather than a wait: a
+    second controller for one repository is a mistake to report, and a run
+    that is about to dismantle an installation must not queue behind the
+    process it would be dismantling it underneath.
+
+    The file is never unlinked once created, on the same terms as the
+    discovery record's lock: a writer may be queued on its inode, and
+    unlinking would hand the next one a different lock from the one it is
+    waiting on.
+    """
+    path = controller_lock_path(runtime_dir)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise ServiceError(f"Refusing unsafe controller lock path: {path}") from exc
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(descriptor)
+        raise ServiceError(
+            f"A PR drainer controller is already running for this installation; "
+            f"it holds {path}."
+        ) from exc
+    except OSError as exc:
+        os.close(descriptor)
+        raise ServiceError(f"Could not take the controller lock {path}: {exc}") from exc
+    return descriptor
+
+
+def controller_lock_is_held(runtime_dir: Path) -> bool:
+    """Whether some process holds it, probed without writing.
+
+    A lock this takes and immediately drops leaves nothing behind, and a file
+    that is not there cannot be held by anyone — which is the ordinary answer
+    for a repository whose controller has never run.
+    """
+    path = controller_lock_path(runtime_dir)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
+    return False
+
+
+@dataclass(frozen=True)
+class RelocationNotice:
+    """Where an installation went, and which of this process's two bound
+    locations was told. Both, because `--install-dir` makes them different
+    places and an operator reading the refusal has to know which one moved."""
+
+    path: Path
+    destination: str
+
+
+def relocation_marker() -> RelocationNotice | None:
+    """Where this process's own installation went, if it went anywhere.
+
+    Read out of the install directory *and* the discovery record's directory,
+    which `--install-dir` makes two different places, and by every caller below
+    under the discovery record's own lock — the same lock the
+    relocation holds from before it writes this through after it has taken the
+    installation apart. So a controller that was waiting on that lock sees
+    either the installation intact or this, and never a half-dismantled one.
+    """
+    # Both locations this process is bound to, because `--install-dir` splits
+    # them: a controller installed with one has an install directory the
+    # relocation never touches and a discovery record it removes, so the marker
+    # it must see is the one in the *record's* directory. A controller with no
+    # override has both in one place and reads the same file twice.
+    for directory in (INSTALL_DIR, DISCOVERY_RECORD_PATH.parent):
+        path = directory / RELOCATION_MARKER_NAME
+        document = _read_json_object(path)
+        destination = document.get(RELOCATION_MARKER_DESTINATION)
+        # An absolute path or nothing. A relative destination names no
+        # location a second process could agree on, and every other outcome --
+        # absent, unreadable, not an object, wrong type, empty -- is already
+        # "no marker" rather than an error, because this is asked of a
+        # directory another run may have left in any state.
+        if isinstance(destination, str) and destination and os.path.isabs(destination):
+            return RelocationNotice(path, destination)
+    return None
+
+
+def resolved_installation_drift() -> str | None:
+    """What this host resolves now that this process did not, or None.
+
+    The marker above answers "was my installation relocated away". This
+    answers the other half: "is what I bound still what this host selects at
+    all". They are different questions, and a rolled-back relocation is
+    exactly where they come apart — a controller that started while that run
+    had its destination record in place bound *that* location, and the
+    rollback then took the record, the links and the marker away together,
+    leaving nothing at the destination to warn it and nothing wrong at the
+    legacy one to find.
+    """
+    for described, bound, resolved in (
+        ("discovery record", DISCOVERY_RECORD_PATH, kanban_config.drainer_record_path()),
+        ("install directory", INSTALL_DIR, kanban_config.drainer_install_dir()),
+    ):
+        if bound != resolved:
+            return f"the {described} this host resolves is {resolved}, not {bound}"
+    return None
+
+
+def require_current_installation() -> None:
+    """Refuse to act on an installation that is not the one this process is
+    bound to.
+
+    A controller resolves its managed paths once, when it starts, and cannot
+    re-derive them for its own use — but it can ask whether they are still the
+    answer. One that was already running when `tools/install_drainer.py`
+    relocated the installation, and one that bound itself to a destination a
+    failed relocation has since rolled back, are both processes whose writes
+    would rebuild what another run took away and leave this repository's job
+    naming a controller that does not exist.
+
+    Both questions, in that order: the marker is the precise one and names
+    where the installation went, and the resolver comparison catches the case
+    no marker survives.
+    """
+    marker = relocation_marker()
+    if marker is not None:
+        raise ServiceError(
+            f"The PR drainer installation this controller is bound to was "
+            f"relocated to {marker.destination} while it was running, as "
+            f"{marker.path} records. This process's own paths no longer describe "
+            "it, and nothing was changed. Run this again: a controller resolves "
+            "its installation when it starts, so the next one resolves the new "
+            "location."
+        )
+    drift = resolved_installation_drift()
+    if drift is not None:
+        raise ServiceError(
+            "The PR drainer installation this controller resolved when it "
+            f"started is no longer the one this host resolves: {drift}. Nothing "
+            "was changed. Run this again; the next controller resolves the "
+            "current installation."
+        )
+
+
+@contextlib.contextmanager
+def installation_transaction() -> Iterator[None]:
+    """The discovery record's lock, entered only after this process has proved
+    the installation is still its own — and proved it again inside.
+
+    Two checks rather than one, because taking the lock is itself a write into
+    the installation: `document_lock` creates the record's parent directory,
+    chmods it, and creates the lock file beside it. A stale controller that
+    locked first would therefore mutate the very installation it is about to
+    refuse, which for the `run` path is the difference between a clean
+    preflight refusal and one that rebuilt part of what a mover removed.
+
+    The unlocked check touches nothing and refuses cheaply; the locked one is
+    the authoritative answer, taken where no mover can be running, and it is
+    the one every transition acts on.
+    """
+    require_current_installation()
+    with document_lock(DISCOVERY_RECORD_PATH):
+        require_current_installation()
+        yield
+
+
 def _read_service_config() -> dict[str, Any]:
     """The shared document, with any pre-consolidation --install-dir copy read
     underneath it. The installer folds that copy in on its next run, but a
@@ -1633,37 +1842,53 @@ def retire_legacy_job(job: DrainerJob) -> dict[str, Any] | None:
 
 
 def install_job(job: DrainerJob) -> dict[str, Any]:
-    ensure_dirs(job)
-    manager = service_backend().backend_name()
-    snapshot = status_snapshot(job)
-    conflict = another_checkout_running(job, snapshot)
-    if conflict is not None:
-        raise ServiceError(
-            f"The PR drainer for {job.identity} is already running from {conflict}, "
-            f"which is another checkout of the same repository as {job.repo_path}. "
-            f"Stop it before installing this checkout's {manager} job."
-        )
-    if snapshot["state"] in {"running", "starting", "external"}:
-        raise ServiceError(f"Stop the running drainer before installing its {manager} job.")
-
-    # Before the replacement is written, so the singleton can never be loadable
-    # at the same instant as the job that supersedes it.
-    retired = retire_legacy_job(job)
-
-    backend = service_backend()
-    # One critical section over the three steps that install a job, rather than
-    # one per document write. Writing the definition outside the record's lock
-    # is what let two of these interleave: the definition landed unguarded, and
-    # only then did this ask for a lock another installer or start was holding
-    # -- so a job could be named in the record by one run and described on disk
-    # by another. Mutual exclusion, not a transaction: nothing is rolled back
-    # here, and a step that fails still fails where it stands.
+    # One critical section over the whole install, rather than one per document
+    # write. Writing the definition outside the record's lock is what let two
+    # of these interleave: the definition landed unguarded, and only then did
+    # this ask for a lock another installer or start was holding -- so a job
+    # could be named in the record by one run and described on disk by another.
+    # Mutual exclusion, not a transaction: nothing is rolled back here, and a
+    # step that fails still fails where it stands.
     #
-    # The span is exactly the contiguous sequence. Retiring the singleton stays
-    # ahead of it, because it is about a job this one replaces rather than
-    # about this record; `start_service`'s kick stays after it, because a job
-    # that has been asked to run is no longer being installed.
-    with document_lock(DISCOVERY_RECORD_PATH):
+    # It begins here rather than at the writes below, because every step in
+    # between is one too. `ensure_dirs` creates directories, `retire_legacy_job`
+    # moves the singleton's definition aside, and the gates read state the
+    # relocation changes -- so an install that took the lock later could pass
+    # its checks, wait out a relocation, and rebuild the very directories that
+    # run removed before it ever looked. `require_current_installation` is what
+    # refuses that, and it is first because everything after it writes into the
+    # installation this process is bound to.
+    #
+    # `start_service` below wraps its own call to this in the same lock and
+    # holds it across the kick, so this acquisition is a re-entrant
+    # pass-through there. What that closes is a gap this span alone cannot:
+    # between an install and the kick that follows it there is an instant in
+    # which the job is installed and not yet running, and a reader that took
+    # this lock to decide whether anything is live -- `install_drainer`'s
+    # relocation -- would see nothing running and act on a drainer that is
+    # about to start.
+    with installation_transaction():
+        ensure_dirs(job)
+        manager = service_backend().backend_name()
+        snapshot = status_snapshot(job)
+        conflict = another_checkout_running(job, snapshot)
+        if conflict is not None:
+            raise ServiceError(
+                f"The PR drainer for {job.identity} is already running from "
+                f"{conflict}, which is another checkout of the same repository as "
+                f"{job.repo_path}. Stop it before installing this checkout's "
+                f"{manager} job."
+            )
+        if snapshot["state"] in {"running", "starting", "external"}:
+            raise ServiceError(
+                f"Stop the running drainer before installing its {manager} job."
+            )
+
+        # Before the replacement is written, so the singleton can never be
+        # loadable at the same instant as the job that supersedes it.
+        retired = retire_legacy_job(job)
+
+        backend = service_backend()
         backend.write_definition(service_definition(job))
 
         # Written from the definition on disk, before the service manager is
@@ -1700,14 +1925,22 @@ def uninstall_job(job: DrainerJob) -> dict[str, Any]:
     are the record of what this drainer did, and an uninstall is not an
     acknowledgement.
     """
-    backend = service_backend()
-    snapshot = status_snapshot(job)
-    if snapshot["state"] in {"running", "starting", "external"}:
-        raise ServiceError(
-            f"Stop the PR drainer before uninstalling its {backend.backend_name()} job."
-        )
-    outcome = backend.uninstall_definition(job.label)
-    record = remove_discovery_record(job.identity)
+    # One critical section, on exactly the terms the install above takes one:
+    # removing the definition and removing the record entry are two halves of
+    # one transition, and a stale process that performed either would delete a
+    # definition a relocation had just rewritten or write a fresh record at the
+    # location that relocation emptied. Neither is an uninstall; both are
+    # debris.
+    with installation_transaction():
+        backend = service_backend()
+        snapshot = status_snapshot(job)
+        if snapshot["state"] in {"running", "starting", "external"}:
+            raise ServiceError(
+                "Stop the PR drainer before uninstalling its "
+                f"{backend.backend_name()} job."
+            )
+        outcome = backend.uninstall_definition(job.label)
+        record = remove_discovery_record(job.identity)
     return {
         "uninstalled": True,
         "repository": job.identity,
@@ -1724,26 +1957,51 @@ def start_service(job: DrainerJob) -> dict[str, Any]:
     # instead of naming the operation the user has to finish.
     require_no_operation_in_progress(job.repo_path)
     require_default_branch(job.repo_path, job.remote_name)
-    ensure_dirs(job)
-    snapshot = status_snapshot(job)
-    conflict = another_checkout_running(job, snapshot)
-    if conflict is not None:
-        raise ServiceError(
-            f"The PR drainer for {job.identity} is already running from {conflict}, "
-            f"which is another checkout of the same repository as {job.repo_path}. "
-            "One repository drains from one checkout at a time."
-        )
-    if snapshot["state"] in {"running", "starting"}:
-        return {"started": False, "message": "PR drainer is already running", **snapshot}
-    if snapshot["state"] == "external":
-        raise ServiceError(
-            f"A drainer outside {snapshot['service_manager']} is already running "
-            f"as PID {snapshot['drainer_pid']}."
-        )
-    install_job(job)
-
-    previous_incidents = {path.name for path in incident_files(job, open_only=True)}
-    service_backend().kick(job.label)
+    # One critical section over every decision this start reads out of the
+    # installation and every change it makes to it, ending at the kick.
+    #
+    # The gates are inside it, not merely the writes. A gate evaluated outside
+    # is a gate that can be true when it is read and false when it is acted on:
+    # a start that found nothing running could otherwise block here for the
+    # whole of a relocation and then resume against an installation that had
+    # been taken apart underneath it, recreating the record and the definition
+    # that run had just removed. `require_current_installation` is what refuses
+    # that resumption, and it is first because `ensure_dirs` below would
+    # otherwise rebuild the directories the relocation removed.
+    #
+    # The kick is where the span ends: the instant between installing a job and
+    # kicking it is one in which the job is installed and not yet running, and
+    # a reader deciding under this same lock whether any drainer is live must
+    # not be handed it. A job the manager has been asked to run reads as
+    # running from here on, so the stabilization loop below waits outside the
+    # lock and never holds it against the process it is waiting for.
+    with installation_transaction():
+        ensure_dirs(job)
+        snapshot = status_snapshot(job)
+        conflict = another_checkout_running(job, snapshot)
+        if conflict is not None:
+            raise ServiceError(
+                f"The PR drainer for {job.identity} is already running from "
+                f"{conflict}, which is another checkout of the same repository as "
+                f"{job.repo_path}. One repository drains from one checkout at a "
+                "time."
+            )
+        if snapshot["state"] in {"running", "starting"}:
+            return {
+                "started": False,
+                "message": "PR drainer is already running",
+                **snapshot,
+            }
+        if snapshot["state"] == "external":
+            raise ServiceError(
+                f"A drainer outside {snapshot['service_manager']} is already "
+                f"running as PID {snapshot['drainer_pid']}."
+            )
+        install_job(job)
+        previous_incidents = {
+            path.name for path in incident_files(job, open_only=True)
+        }
+        service_backend().kick(job.label)
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
     running_since: float | None = None
     while time.monotonic() < deadline:
@@ -1798,6 +2056,13 @@ def discharged_between(before: int | None, after: int | None) -> int | None:
 
 
 def stop_service(job: DrainerJob) -> dict[str, Any]:
+    # The gate up front, as every writing transition asks it, and again after
+    # the wait below — because this is the one transition whose own exclusion
+    # disappears while it runs. Signalling the runner is what makes the runner
+    # release its controller lock, so from that instant nothing is fencing a
+    # mover out until this takes the lock itself.
+    with installation_transaction():
+        pass
     snapshot = status_snapshot(job)
     state = snapshot["state"]
     if state == "stopped":
@@ -1818,11 +2083,23 @@ def stop_service(job: DrainerJob) -> dict[str, Any]:
         time.sleep(0.25)
         current = status_snapshot(job)
         if current["state"] == "stopped":
-            cleared_incidents = resolve_crash_incidents(
-                job,
-                "Cleared when the PR drainer was intentionally stopped.",
-            )
-            final = status_snapshot(job)
+            # The runner is gone, so its controller lock is free and this
+            # process is the one that has to hold it: everything below writes
+            # into the installation, and between the exit and these writes a
+            # mover would otherwise find nothing live and take the
+            # installation apart underneath them. Same handoff `run_service`
+            # performs, from the other end -- gate under the record's lock and
+            # take the controller lock before releasing it.
+            with installation_transaction():
+                controller_lock = acquire_controller_lock(job.runtime_dir)
+            try:
+                cleared_incidents = resolve_crash_incidents(
+                    job,
+                    "Cleared when the PR drainer was intentionally stopped.",
+                )
+                final = status_snapshot(job)
+            finally:
+                os.close(controller_lock)
             owed_after = obligation_count(final.get("cleanup_obligations"))
             # A stop that could not discharge everything still succeeded: the
             # remainder is reported here and stays recorded, projected, and
@@ -2190,24 +2467,29 @@ def resolve_cleanup_incident(
 def acknowledge_incident(
     job: DrainerJob, incident_id: str | None, note: str | None
 ) -> dict[str, Any]:
-    paths = incident_files(job, open_only=True)
-    if incident_id:
-        if not re.fullmatch(r"incident-[A-Za-z0-9TZ-]+", incident_id):
-            raise ServiceError(f"Invalid incident ID: {incident_id}")
-        # Named incidents are still resolved inside this repository's own
-        # directory, so one repository can never acknowledge another's.
-        paths = [job.incident_dir / f"{incident_id}.json"]
-    if not paths:
-        raise ServiceError("There is no open incident to acknowledge.")
-    path = paths[0]
-    incident = read_json(path)
-    if incident is None:
-        raise ServiceError(f"Could not read incident: {path}")
-    incident["status"] = "resolved"
-    incident["resolved_at"] = utc_stamp()
-    if note:
-        incident["resolution"] = note
-    atomic_write_json(path, incident)
+    # A bounded transition, so the record's lock spans the gate and the write
+    # together rather than a controller lock being taken for it: a mover holds
+    # that same lock for its whole transition, which is what excludes this one
+    # while it runs, and this one is over in a single atomic write.
+    with installation_transaction():
+        paths = incident_files(job, open_only=True)
+        if incident_id:
+            if not re.fullmatch(r"incident-[A-Za-z0-9TZ-]+", incident_id):
+                raise ServiceError(f"Invalid incident ID: {incident_id}")
+            # Named incidents are still resolved inside this repository's own
+            # directory, so one repository can never acknowledge another's.
+            paths = [job.incident_dir / f"{incident_id}.json"]
+        if not paths:
+            raise ServiceError("There is no open incident to acknowledge.")
+        path = paths[0]
+        incident = read_json(path)
+        if incident is None:
+            raise ServiceError(f"Could not read incident: {path}")
+        incident["status"] = "resolved"
+        incident["resolved_at"] = utc_stamp()
+        if note:
+            incident["resolution"] = note
+        atomic_write_json(path, incident)
     return incident
 
 
@@ -2447,6 +2729,45 @@ def run_service(job: DrainerJob, requested_identity: str | None = None) -> int:
     # front because the advisory below precedes both refusals, and a run that
     # refuses is exactly one whose source state is worth having on record.
     installed = requested_job(job.repo_path, requested_identity, job)
+    # Before the first write of any kind, and the advisory below is one: it
+    # logs, and logging creates the directories it logs into. A runner the
+    # service manager launched before a relocation, or one started by hand
+    # while the record showed nothing live, would otherwise rebuild the very
+    # log and runtime trees that run carried away.
+    #
+    # Under the record's lock, so a relocation still in flight is waited out
+    # rather than raced -- it is held for an instant here and released before
+    # anything long-running begins, which is also why the start that kicked
+    # this process can release its own hold the moment the kick returns.
+    #
+    # The controller lock is taken inside that same span, and that ordering is
+    # the whole guarantee. While this holds the record's lock no mover can be
+    # running at all, so the gate's answer is still true when the lock is
+    # taken; and from the moment the lock is held, a mover fences on it and
+    # refuses instead. Gate first and lock second with the record released in
+    # between would leave exactly the window this closes.
+    try:
+        with installation_transaction():
+            controller_lock = acquire_controller_lock(job.runtime_dir)
+    except ServiceError as exc:
+        # Printed rather than logged, because logging is exactly the write
+        # this is refusing to make. The manager captures stdout, and the exit
+        # is the same clean one every other startup refusal here takes.
+        print(f"PR drainer did not start: {exc}", flush=True)
+        return 0
+    try:
+        return _supervise(job, installed, requested_identity)
+    finally:
+        # Held for this process's whole life and released only here, which is
+        # what a mover's fence reads.
+        os.close(controller_lock)
+
+
+def _supervise(
+    job: DrainerJob, installed: DrainerJob, requested_identity: str | None
+) -> int:
+    """The run itself, once this process has proved the installation is its own
+    and taken the lock that keeps it that way."""
     log_source_advisory(installed)
     try:
         require_requested_identity(job, requested_identity)

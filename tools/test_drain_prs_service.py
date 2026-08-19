@@ -160,10 +160,12 @@ class RecordingBackend(service_manager.ServiceManagerBackend):
         self._record("request_stop", identifier)
 
     def definition_environment(self, identifier):
-        for definition in self.written:
+        # Total, like the real backends': a job this fixture never wrote
+        # answers with no variables rather than with an error.
+        for definition in reversed(self.written):
             if definition.identifier == identifier:
                 return dict(definition.environment)
-        return None
+        return {}
 
     def legacy_definition_exists(self):
         return self.legacy_installed
@@ -187,7 +189,33 @@ class RedirectedControllerTestCase(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.launch_agents = self.root / "LaunchAgents"
         self.launch_agents.mkdir()
-        self.install_dir = self.root / "install"
+        # Shaped as this platform's own convention, and the environment
+        # redirected to match, so `tools/kanban_config.py` resolves exactly the
+        # locations patched below. The controller refuses to act on an
+        # installation that is not the one this host resolves, so a fixture
+        # describing a host that could not exist would fail that gate rather
+        # than the behaviour under test. The platform is simulated for the same
+        # reason every other path suite simulates it: so these cases answer
+        # identically on a macOS laptop and a Linux runner.
+        self.home = self.root / "home"
+        self.data_home = self.root / "data"
+        self.state_home = self.root / "state"
+        self.home.mkdir()
+        patched = mock.patch.dict(
+            os.environ,
+            {
+                "HOME": str(self.home),
+                "XDG_DATA_HOME": str(self.data_home),
+                "XDG_STATE_HOME": str(self.state_home),
+            },
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+        os.environ.pop(kanban_config.DRAINER_INSTALL_DIR_ENV, None)
+        patched = mock.patch.object(kanban_config.sys, "platform", "linux")
+        patched.start()
+        self.addCleanup(patched.stop)
+        self.install_dir = self.data_home / "kanban" / "pr-drainer"
         self.record = self.install_dir / "config.json"
         self.runtime_root = self.root / "runtime"
         self.log_root = self.root / "logs"
@@ -268,6 +296,39 @@ class RedirectedControllerTestCase(unittest.TestCase):
             shared = self.common_dirs.get(args[2], str(Path(args[2]) / ".git"))
             return _completed(0, stdout=shared + "\n")
         return _completed(0)
+
+    def record_lock_is_held(self):
+        """Whether another opener would block on the discovery record's lock.
+
+        `flock` is per open file description, so a second descriptor in this
+        same process contends exactly as another process's would — which makes
+        this an observation of the lock rather than of the code that takes it.
+        """
+        lock_path = self.record.with_name(self.record.name + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(descriptor)
+
+    def write_relocation_marker(self, payload=None):
+        """What `tools/install_drainer.py` leaves in an install directory it
+        has relocated away from."""
+        self.install_dir.mkdir(parents=True, exist_ok=True)
+        marker = self.install_dir / drain_prs_service.RELOCATION_MARKER_NAME
+        marker.write_text(
+            json.dumps({"install_dir": "/new/kanban/pr-drainer"})
+            if payload is None
+            else payload,
+            encoding="utf-8",
+        )
+        return marker
 
     def checkout(self, name, remote_url, **other_remotes):
         """A checkout directory whose `origin` answers `remote_url`, plus any
@@ -866,6 +927,271 @@ class BackendDelegationTests(RedirectedControllerTestCase):
         self.assertNotIn("retire_legacy", self.backend.names())
         self.assertFalse(result["legacy_job"]["retired"])
         self.assertEqual(result["legacy_job"]["repository"], "acme/gadgets")
+
+    def start_the_service(self):
+        stopped = {"state": "stopped", "drainer_pid": None, "active_repo": None}
+        running = {
+            "state": "running",
+            "drainer_pid": 4242,
+            "active_repo": str(self.repo),
+        }
+        with (
+            mock.patch.object(
+                drain_prs_service, "in_progress_operation", return_value=None
+            ),
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(drain_prs_service, "install_job"),
+            mock.patch.object(drain_prs_service, "START_STABILITY_SECONDS", 0),
+            mock.patch.object(drain_prs_service.time, "sleep"),
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                side_effect=[stopped, running, running],
+            ),
+        ):
+            return drain_prs_service.start_service(self.job)
+
+    def test_a_relocated_installation_refuses_a_start_before_anything_is_written(self):
+        # A controller resolves its managed paths when it starts and cannot
+        # re-derive them, so one that was already running when the
+        # installation was relocated still points here. Starting from those
+        # paths would rebuild the record, the definition and the runtime
+        # directories that run removed, and would kick a controller that is
+        # gone.
+        self.write_relocation_marker()
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            self.start_the_service()
+        self.assertIn("was relocated to", str(raised.exception))
+        self.assertIn("/new/kanban/pr-drainer", str(raised.exception))
+        # Nothing asked of the service manager, and nothing rebuilt.
+        self.assertEqual(self.backend.names(), [])
+        self.assertFalse(self.record.exists())
+        self.assertFalse(self.runtime_root.exists())
+        self.assertFalse(self.log_root.exists())
+
+    def test_an_install_writes_nothing_before_its_gate_and_holds_one_lock(self):
+        # `ensure_dirs` is a write, and so is retiring the singleton. An
+        # install that gated before taking the lock could pass, wait out a
+        # relocation, and rebuild the directories that run removed before it
+        # ever looked again — so the gate is the first thing inside the span
+        # rather than the last thing outside it.
+        observed = []
+        real_gate = drain_prs_service.require_current_installation
+
+        def gate():
+            observed.append(("gate", self.record_lock_is_held()))
+            real_gate()
+
+        with (
+            mock.patch.object(
+                drain_prs_service, "require_current_installation", gate
+            ),
+            mock.patch.object(
+                drain_prs_service,
+                "ensure_dirs",
+                side_effect=lambda job: observed.append(
+                    ("ensure_dirs", self.record_lock_is_held())
+                ),
+            ),
+            mock.patch.object(
+                drain_prs_service, "status_snapshot", return_value={"state": "stopped"}
+            ),
+        ):
+            drain_prs_service.install_job(self.job)
+        # Unlocked first, then locked: taking the lock is itself a write into
+        # the installation — `document_lock` creates the record's parent,
+        # chmods it, and creates the lock file — so a stale controller that
+        # locked first would mutate what it is about to refuse.
+        self.assertEqual(
+            observed, [("gate", False), ("gate", True), ("ensure_dirs", True)]
+        )
+
+    def test_an_uninstall_gates_and_removes_under_one_lock(self):
+        observed = []
+        real_gate = drain_prs_service.require_current_installation
+
+        def gate():
+            observed.append(("gate", self.record_lock_is_held()))
+            real_gate()
+
+        with (
+            mock.patch.object(
+                drain_prs_service, "require_current_installation", gate
+            ),
+            mock.patch.object(
+                drain_prs_service, "status_snapshot", return_value={"state": "stopped"}
+            ),
+        ):
+            drain_prs_service.uninstall_job(self.job)
+        self.assertEqual(observed, [("gate", False), ("gate", True)])
+        self.assertIn("uninstall_definition", self.backend.names())
+
+    def test_a_relocated_installation_refuses_an_install_and_an_uninstall(self):
+        self.write_relocation_marker()
+        for transition in (
+            drain_prs_service.install_job,
+            drain_prs_service.uninstall_job,
+        ):
+            with self.subTest(transition=transition.__name__):
+                with self.assertRaises(drain_prs_service.ServiceError) as raised:
+                    transition(self.job)
+                self.assertIn("was relocated to", str(raised.exception))
+        # Refused before it signalled anything: no service-manager traffic.
+        self.assertEqual(self.commands, [])
+        self.assertFalse(self.record.exists())
+        self.assertFalse(self.runtime_root.exists())
+
+    def test_a_relocated_installation_refuses_a_run_before_it_logs(self):
+        # `log_source_advisory` is the first thing a run does and it is a
+        # write, so the gate is ahead of it rather than beside the identity
+        # check that follows.
+        self.write_relocation_marker()
+        self.assertEqual(
+            drain_prs_service.run_service(self.job, self.job.identity), 0
+        )
+        # A no-write preflight refusal. The install directory exists here only
+        # because the marker had to be put somewhere, so the thing to assert is
+        # the lock file: creating it is what taking the record's lock would
+        # have done before this refused.
+        self.assertFalse((self.install_dir / "config.json.lock").exists())
+        self.assertFalse(self.log_root.exists())
+        self.assertFalse(self.runtime_root.exists())
+
+    def test_the_marker_is_found_in_the_records_directory_too(self):
+        # `--install-dir` splits the two locations a controller is bound to,
+        # and the relocation leaves its marker beside the record.
+        record_directory = self.root / "elsewhere"
+        record_directory.mkdir()
+        marker = record_directory / drain_prs_service.RELOCATION_MARKER_NAME
+        marker.write_text(
+            json.dumps({"install_dir": "/new/kanban/pr-drainer"}), encoding="utf-8"
+        )
+        with mock.patch.object(
+            drain_prs_service, "DISCOVERY_RECORD_PATH", record_directory / "config.json"
+        ):
+            notice = drain_prs_service.relocation_marker()
+            self.assertIsNotNone(notice)
+            # The marker's own path, not only the destination: with
+            # `--install-dir` a controller has two bound locations and the
+            # refusal has to say which one moved.
+            self.assertEqual(notice.path, marker)
+            self.assertEqual(notice.destination, "/new/kanban/pr-drainer")
+            with self.assertRaises(drain_prs_service.ServiceError) as raised:
+                drain_prs_service.require_current_installation()
+            self.assertIn(str(marker), str(raised.exception))
+            self.assertIn("/new/kanban/pr-drainer", str(raised.exception))
+
+    def test_the_relocation_gate_is_evaluated_under_the_record_lock(self):
+        # Outside the lock it would be a gate that can be true when it is read
+        # and false when it is acted on, which is the whole hazard.
+        observed = []
+        real = drain_prs_service.relocation_marker
+
+        def marker():
+            observed.append(self.record_lock_is_held())
+            return real()
+
+        with mock.patch.object(drain_prs_service, "relocation_marker", marker):
+            self.assertTrue(self.start_the_service()["started"])
+        # The unlocked preflight, then the authoritative one under the lock.
+        self.assertEqual(observed, [False, True])
+
+    def test_the_refusal_names_the_marker_found_in_the_install_directory(self):
+        marker = self.write_relocation_marker()
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            drain_prs_service.require_current_installation()
+        self.assertIn(str(marker), str(raised.exception))
+
+    def test_a_marker_that_cannot_be_read_at_all_is_not_a_refusal(self):
+        # Absent and present-but-unusable are different questions and both
+        # answer "no relocation". A marker nothing can decode says nothing
+        # about where an installation went, and refusing on it would strand a
+        # controller on a byte sequence — while treating the read failure as
+        # an error would turn every one of these into a crash.
+        marker = self.install_dir / drain_prs_service.RELOCATION_MARKER_NAME
+        self.install_dir.mkdir(parents=True, exist_ok=True)
+
+        def clear():
+            if marker.is_symlink():
+                marker.unlink()
+            elif marker.is_dir():
+                marker.rmdir()
+            elif marker.exists():
+                marker.unlink()
+
+        cases = {
+            "not utf-8": lambda: marker.write_bytes(b'\xff\xfe{"install_dir": "/x"}'),
+            "a directory": lambda: marker.mkdir(),
+            "a dangling symlink": lambda: marker.symlink_to(self.root / "gone.json"),
+        }
+        for name, make in cases.items():
+            with self.subTest(marker=name):
+                clear()
+                make()
+                self.assertIsNone(drain_prs_service.relocation_marker())
+                # And an ordinary transition still runs: an unusable marker
+                # must not stand in for a relocation.
+                drain_prs_service.require_current_installation()
+                self.assertTrue(self.start_the_service()["started"])
+        clear()
+
+    def test_a_marker_that_names_no_destination_is_not_a_refusal(self):
+        # Total, like every other reader here: a file that cannot be read as a
+        # relocation is not one, and must not stop an ordinary start.
+        for payload in ("", "not json", "[]", "{}", '{"install_dir": 4}',
+                        '{"install_dir": ""}', '{"install_dir": "relative/dir"}',
+                        '{"install_dir": null}', '{"elsewhere": "/somewhere"}'):
+            with self.subTest(payload=payload):
+                self.write_relocation_marker(payload)
+                self.assertIsNone(drain_prs_service.relocation_marker())
+                drain_prs_service.require_current_installation()
+
+    def test_an_installation_that_never_moved_starts_normally(self):
+        self.assertIsNone(drain_prs_service.relocation_marker())
+        self.assertTrue(self.start_the_service()["started"])
+
+    def test_the_record_lock_spans_the_install_and_the_kick_that_follows(self):
+        # The instant between them is one in which the job is installed and
+        # not yet running. A reader that took this same lock to decide whether
+        # any drainer is live — `install_drainer`'s relocation — must not be
+        # handed that instant, so the kick is inside the span rather than
+        # after it.
+        stopped = {"state": "stopped", "drainer_pid": None, "active_repo": None}
+        running = {"state": "running", "drainer_pid": 4242, "active_repo": str(self.repo)}
+        observed = []
+        with (
+            mock.patch.object(
+                drain_prs_service, "in_progress_operation", return_value=None
+            ),
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(
+                drain_prs_service,
+                "install_job",
+                side_effect=lambda job: observed.append(
+                    ("install", self.record_lock_is_held())
+                ),
+            ),
+            mock.patch.object(
+                self.backend,
+                "kick",
+                side_effect=lambda identifier: observed.append(
+                    ("kick", self.record_lock_is_held())
+                ),
+            ),
+            mock.patch.object(drain_prs_service, "START_STABILITY_SECONDS", 0),
+            mock.patch.object(drain_prs_service.time, "sleep"),
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                side_effect=[stopped, running, running],
+            ),
+        ):
+            result = drain_prs_service.start_service(self.job)
+        self.assertTrue(result["started"])
+        self.assertEqual(observed, [("install", True), ("kick", True)])
+        # And released before the wait that follows it, so the lock is never
+        # held against the process it is waiting for.
+        self.assertFalse(self.record_lock_is_held())
 
     def test_starting_kicks_the_job_through_the_backend(self):
         stopped = {"state": "stopped", "drainer_pid": None, "active_repo": None}
@@ -3999,6 +4325,351 @@ class InstalledSourceAdvisoryTests(unittest.TestCase):
 
 def _failing_audit():
     raise RuntimeError("boom")
+
+
+class StopAndAcknowledgeGateTests(RedirectedControllerTestCase):
+    """The two writing transitions this issue's own review found.
+
+    A stop is the awkward one: signalling the runner is what makes the runner
+    release its controller lock, so from that instant nothing fences a mover
+    out until the stop takes the lock itself — and everything a stop does after
+    the wait is a write.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.checkout("widgets", "git@github.com:acme/widgets.git")
+        self.job = drain_prs_service.resolve_job(self.repo)
+        # The identity resolution's own `git`, so what a refused transition
+        # does or does not spawn below stands alone.
+        self.commands.clear()
+
+    def an_open_incident(self):
+        drain_prs_service.ensure_dirs(self.job)
+        path = self.job.incident_dir / "incident-20260818T000000Z-1.json"
+        drain_prs_service.atomic_write_json(
+            path,
+            {
+                "incident_id": path.stem,
+                "status": "open",
+                "kind": "drainer-exit",
+                "repository": self.job.identity,
+                "repo": str(self.repo),
+            },
+        )
+        return path
+
+    def test_a_relocated_installation_refuses_a_stop_before_it_signals(self):
+        self.write_relocation_marker()
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            drain_prs_service.stop_service(self.job)
+        self.assertIn("was relocated to", str(raised.exception))
+        # Refused before it signalled anything: no service-manager traffic.
+        self.assertEqual(self.commands, [])
+
+    def test_a_relocated_installation_refuses_an_acknowledgement(self):
+        path = self.an_open_incident()
+        before = path.read_bytes()
+        self.write_relocation_marker()
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            drain_prs_service.acknowledge_incident(self.job, None, "by hand")
+        self.assertIn("was relocated to", str(raised.exception))
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_an_acknowledgement_writes_under_the_record_lock(self):
+        self.an_open_incident()
+        observed = []
+        real = drain_prs_service.atomic_write_json
+
+        def write(path, value):
+            observed.append(self.record_lock_is_held())
+            return real(path, value)
+
+        with mock.patch.object(drain_prs_service, "atomic_write_json", write):
+            drain_prs_service.acknowledge_incident(self.job, None, "by hand")
+        self.assertEqual(observed, [True])
+
+    def test_a_stop_re_gates_and_locks_before_it_writes_after_the_wait(self):
+        # The runner has exited by the time these writes happen, so its own
+        # lock is gone: this is the process that has to hold one.
+        observed = []
+        real_gate = drain_prs_service.require_current_installation
+        real_resolve = drain_prs_service.resolve_crash_incidents
+
+        def gate():
+            observed.append(("gate", self.record_lock_is_held()))
+            real_gate()
+
+        def resolve(job, note):
+            observed.append(
+                (
+                    "write",
+                    drain_prs_service.controller_lock_is_held(job.runtime_dir),
+                )
+            )
+            return real_resolve(job, note)
+
+        running = {"state": "running", "drainer_pid": 4242, "active_repo": str(self.repo)}
+        stopped = {"state": "stopped", "drainer_pid": None, "active_repo": None}
+        with (
+            mock.patch.object(
+                drain_prs_service, "require_current_installation", gate
+            ),
+            mock.patch.object(
+                drain_prs_service, "resolve_crash_incidents", resolve
+            ),
+            mock.patch.object(drain_prs_service.time, "sleep"),
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                side_effect=[running, stopped, stopped],
+            ),
+        ):
+            result = drain_prs_service.stop_service(self.job)
+        self.assertTrue(result["stopped"])
+        # Both ends of the stop: an unlocked-then-locked pair up front, and
+        # the same pair again once the runner is gone, with the controller
+        # lock held for the writes that follow.
+        self.assertEqual(
+            observed,
+            [
+                ("gate", False),
+                ("gate", True),
+                ("gate", False),
+                ("gate", True),
+                ("write", True),
+            ],
+        )
+        # And released once the stop is done.
+        self.assertFalse(
+            drain_prs_service.controller_lock_is_held(self.job.runtime_dir)
+        )
+
+    def test_a_stop_refuses_after_the_wait_when_the_installation_moved(self):
+        # The window this closes, arranged at the instant it actually opens:
+        # the stop's own gate has already passed, the runner has just been
+        # observed gone — so its controller lock is released and nothing
+        # fences a mover out — and the mover completes right there, before
+        # this stop writes anything.
+        running = {"state": "running", "drainer_pid": 4242, "active_repo": str(self.repo)}
+        stopped = {"state": "stopped", "drainer_pid": None, "active_repo": None}
+        readings = []
+        resolved = []
+
+        def snapshot(job):
+            readings.append(True)
+            if len(readings) == 1:
+                return running
+            if len(readings) == 2:
+                self.write_relocation_marker()
+            return stopped
+
+        with (
+            mock.patch.object(drain_prs_service.time, "sleep"),
+            mock.patch.object(
+                drain_prs_service, "status_snapshot", side_effect=snapshot
+            ),
+            mock.patch.object(
+                drain_prs_service,
+                "resolve_crash_incidents",
+                side_effect=lambda job, note: resolved.append(note) or [],
+            ),
+        ):
+            with self.assertRaises(drain_prs_service.ServiceError) as raised:
+                drain_prs_service.stop_service(self.job)
+        self.assertIn("was relocated to", str(raised.exception))
+        # Refused before the writes the re-gate exists to protect: the stop
+        # got as far as seeing its runner gone and no further.
+        self.assertGreaterEqual(len(readings), 2)
+        self.assertEqual(resolved, [])
+
+
+class ResolverDriftGateTests(RedirectedControllerTestCase):
+    """The second signal, which is the only one left when no marker survives.
+
+    A controller that bound itself to a destination record while a relocation
+    was in flight, and which that relocation then rolled back, has no marker
+    anywhere and nothing wrong at the location it came from. What it can still
+    be told is that the record and install directory it resolved are no longer
+    the ones this host resolves.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.checkout("widgets", "git@github.com:acme/widgets.git")
+        self.job = drain_prs_service.resolve_job(self.repo)
+        self.commands.clear()
+
+    def drifted(self, which):
+        """This host resolving somewhere other than what this process bound."""
+        elsewhere = self.root / "elsewhere" / "kanban" / "pr-drainer"
+        if which == "record":
+            return mock.patch.object(
+                kanban_config, "drainer_record_path", return_value=elsewhere / "config.json"
+            )
+        return mock.patch.object(
+            kanban_config, "drainer_install_dir", return_value=elsewhere
+        )
+
+    def transitions(self):
+        """Every transition that writes into an installation, as a callable."""
+        return {
+            "install": lambda: drain_prs_service.install_job(self.job),
+            "start": lambda: drain_prs_service.start_service(self.job),
+            "uninstall": lambda: drain_prs_service.uninstall_job(self.job),
+            "run": lambda: drain_prs_service.run_service(self.job, self.job.identity),
+            "stop": lambda: drain_prs_service.stop_service(self.job),
+            "acknowledge": lambda: drain_prs_service.acknowledge_incident(
+                self.job, None, "by hand"
+            ),
+        }
+
+    def assert_refuses_and_writes_nothing(self, name, call):
+        running = {
+            "state": "running",
+            "drainer_pid": 4242,
+            "active_repo": str(self.repo),
+        }
+        with (
+            mock.patch.object(
+                drain_prs_service, "in_progress_operation", return_value=None
+            ),
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(
+                drain_prs_service, "status_snapshot", return_value=running
+            ),
+        ):
+            if name == "run":
+                # The run path reports a clean refusal rather than raising.
+                self.assertEqual(call(), 0)
+            else:
+                with self.assertRaises(drain_prs_service.ServiceError) as raised:
+                    call()
+                self.assertIn("no longer the one this host resolves", str(raised.exception))
+        # Nothing written, and the install directory never even created.
+        # That is the assertion that matters: `document_lock` creates the
+        # record's parent, chmods it, and creates the lock file inside it, so
+        # a gate that only ran under the lock would leave all three behind in
+        # an installation this process does not belong to.
+        self.assertFalse(self.install_dir.exists())
+        self.assertFalse(self.record.exists())
+        self.assertFalse(self.runtime_root.exists())
+        self.assertFalse(self.log_root.exists())
+        self.assertEqual(self.commands, [])
+
+    def test_every_writing_transition_refuses_on_a_drifted_record(self):
+        for name, call in self.transitions().items():
+            with self.subTest(transition=name):
+                with self.drifted("record"):
+                    self.assert_refuses_and_writes_nothing(name, call)
+
+    def test_every_writing_transition_refuses_on_a_drifted_install_directory(self):
+        for name, call in self.transitions().items():
+            with self.subTest(transition=name):
+                with self.drifted("install"):
+                    self.assert_refuses_and_writes_nothing(name, call)
+
+    def test_an_undrifted_host_reports_no_drift(self):
+        # The fixture describes a host whose resolver agrees with the constants
+        # it patches, which is what makes the two cases above about the
+        # behaviour rather than about the fixture.
+        self.assertIsNone(drain_prs_service.resolved_installation_drift())
+
+
+class ControllerLockTests(RedirectedControllerTestCase):
+    """The lock a running controller holds so a run that wants to take its
+    installation apart can tell it is live.
+
+    Deliberately not the drainer's own run lock: this process supervises a
+    child that takes the checkout's `.git` rendezvous non-blockingly, so a
+    controller holding *that* would make every run it supervises fail
+    immediately. Two different objects, both held at once.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.checkout("widgets", "git@github.com:acme/widgets.git")
+        self.job = drain_prs_service.resolve_job(self.repo)
+
+    def spawn_run(self, observe=None):
+        """One `run_service` whose child exits under the harness. `observe` is
+        called while the run is inside its supervision, which is where the
+        lock has to be held."""
+        with (
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(drain_prs_service.subprocess, "Popen") as spawn,
+            mock.patch.object(drain_prs_service, "write_incident"),
+        ):
+            spawn.return_value.pid = os.getpid()
+            spawn.return_value.wait.side_effect = lambda *a, **k: (
+                observe() if observe else None
+            ) or 0
+            return drain_prs_service.run_service(self.job, "acme/widgets")
+
+    def lock_dir(self):
+        return self.job.runtime_dir
+
+    def test_the_lock_is_held_for_the_run_and_released_after_it(self):
+        held = {}
+        self.spawn_run(
+            observe=lambda: held.__setitem__(
+                "during", drain_prs_service.controller_lock_is_held(self.lock_dir())
+            )
+        )
+        self.assertTrue(held["during"])
+        self.assertFalse(drain_prs_service.controller_lock_is_held(self.lock_dir()))
+
+    def test_it_is_taken_inside_the_record_locks_own_span(self):
+        # The ordering is the whole guarantee: while the record's lock is held
+        # no mover can be running, so the gate's answer is still true when
+        # this lock is taken, and from then on a mover fences on it instead.
+        observed = []
+        real = drain_prs_service.acquire_controller_lock
+
+        def acquire(runtime_dir):
+            observed.append(self.record_lock_is_held())
+            return real(runtime_dir)
+
+        with mock.patch.object(
+            drain_prs_service, "acquire_controller_lock", acquire
+        ):
+            self.spawn_run()
+        self.assertEqual(observed, [True])
+
+    def test_a_second_controller_for_the_same_repository_is_refused(self):
+        descriptor = drain_prs_service.acquire_controller_lock(self.lock_dir())
+        self.addCleanup(os.close, descriptor)
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            drain_prs_service.acquire_controller_lock(self.lock_dir())
+        self.assertIn("already running", str(raised.exception))
+
+    def test_it_does_not_collide_with_the_drainers_own_run_lock(self):
+        # The trap this exists to avoid: the supervised child takes the
+        # checkout's `.git` rendezvous non-blockingly, so a controller lock it
+        # contended for would fail every run.
+        taken = {}
+
+        def child_takes_its_own_lock():
+            lock = drain_prs.acquire_lock(self.repo, mode="polling")
+            taken["child"] = True
+            lock.close()
+
+        self.spawn_run(observe=child_takes_its_own_lock)
+        self.assertTrue(taken["child"])
+
+    def test_a_refused_run_never_creates_the_lock(self):
+        # The gate is ahead of the lock, so a run that refuses leaves no lock
+        # file behind in an installation it does not belong to.
+        self.write_relocation_marker()
+        supervised = []
+        self.assertEqual(self.spawn_run(observe=lambda: supervised.append(True)), 0)
+        self.assertEqual(supervised, [])
+        self.assertFalse(
+            drain_prs_service.controller_lock_path(self.lock_dir()).exists()
+        )
+
+    def test_an_absent_lock_is_not_held(self):
+        self.assertFalse(drain_prs_service.controller_lock_is_held(self.lock_dir()))
 
 
 class SourceAdvisoryRunTests(RedirectedControllerTestCase):

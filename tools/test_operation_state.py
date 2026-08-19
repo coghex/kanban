@@ -14,6 +14,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
 
 import hashlib
+import os
 import subprocess
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ from unittest import mock
 
 import drain_prs
 import drain_prs_service
+import kanban_config
 import service_manager
 
 
@@ -61,6 +63,50 @@ class _OperationFixture(unittest.TestCase):
     """A repository with two conflicting single-line histories, so every
     operation below can be driven into a genuine unresolved state."""
 
+    def redirect_managed_paths(self):
+        """Point every managed location at this fixture's own temporary tree.
+
+        `start_service` takes the discovery record's lock, and taking a lock
+        creates and chmods the directory holding it — so without this these
+        cases would reach the developer's own installation and write a fixture
+        job into a live record. The environment is redirected alongside the
+        constants so `tools/kanban_config.py` resolves what they name, which is
+        what the controller's own staleness gate compares against; a fixture
+        describing a host that could not exist would fail that gate instead of
+        the behaviour under test.
+        """
+        home = self.root / "home"
+        data_home = self.root / "data"
+        home.mkdir()
+        patched = mock.patch.dict(
+            os.environ,
+            {
+                "HOME": str(home),
+                "XDG_DATA_HOME": str(data_home),
+                "XDG_STATE_HOME": str(self.root / "state"),
+            },
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+        os.environ.pop(kanban_config.DRAINER_INSTALL_DIR_ENV, None)
+        patched = mock.patch.object(kanban_config.sys, "platform", "linux")
+        patched.start()
+        self.addCleanup(patched.stop)
+        install_dir = data_home / "kanban" / "pr-drainer"
+        for name, value in (
+            ("INSTALL_DIR", install_dir),
+            ("DISCOVERY_RECORD_PATH", install_dir / "config.json"),
+            ("CONFIG_PATH", install_dir / "config.json"),
+            ("LEGACY_CONFIG_PATH", self.root / "elsewhere" / "config.json"),
+            ("RUNTIME_ROOT", install_dir / "runtime"),
+            ("LOG_ROOT", self.root / "state" / "kanban" / "pr-drainer"),
+            ("CONTROLLER_PATH", install_dir / "drain_prs_service.py"),
+            ("DRAINER_PATH", install_dir / "drain_prs.py"),
+        ):
+            patched = mock.patch.object(drain_prs_service, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -68,6 +114,7 @@ class _OperationFixture(unittest.TestCase):
         self.bare = self.root / "remote.git"
         self.repo = self.root / "main"
         self.repo.mkdir()
+        self.redirect_managed_paths()
 
         run_git(["init", "--bare", "-q", "-b", "master", str(self.bare)], cwd=self.root)
         run_git(["init", "-q", "-b", "master", "."], cwd=self.repo)

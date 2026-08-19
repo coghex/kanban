@@ -538,9 +538,98 @@ arithmetic, which §2.3 owns.
   the manager load are one critical section rather than three, so two installs
   cannot interleave into a job the record names from one run and the disk
   describes from another. Mutual exclusion, not a transaction — nothing is
-  rolled back, and a step that fails fails where it stands. The span is exactly
-  that contiguous sequence: retiring the machine-wide singleton happens before
-  it, and the kick a start performs happens after it. The lock is re-entrant
+  rolled back, and a step that fails fails where it stands. That span is every
+  transition that writes into an installation, from its first write rather than
+  from the record edit it ends with: an install covers `ensure_dirs`, retiring
+  the machine-wide singleton and the definition write; a start covers its own
+  gates and reaches on across its kick, since the instant between installing a
+  job and kicking it is one in which the job is installed and not yet running;
+  an uninstall covers the definition removal as well as the record edit; an
+  incident acknowledgement covers its single atomic rewrite; and the
+  service-manager `run` path takes it for its startup check alone. No transition *acts*
+  on a gate evaluated outside the lock, because such an answer can be true when
+  it is read and false when it is acted on; the authoritative check is always
+  the one taken inside. That is not the same as forbidding a check outside it,
+  and the paragraph below requires one: a cheap unlocked preflight that refuses
+  without touching anything is the only way a refusal can leave the
+  installation as it found it, since taking the lock is itself a write. The stabilization wait a start
+  performs after its kick is outside it, so the lock is never held against the
+  process it is waiting for.
+
+  Each of those transitions — install, start, uninstall, run, stop, and
+  incident acknowledgement, which is every *controller* transition that writes
+  into an installation — asks first whether the installation is still the one this
+  process is bound to, and refuses if it is not. It asks twice: once with no
+  lock held at all, because taking the lock is itself a write into the
+  installation — it creates the record's parent directory, chmods it, and
+  creates the lock file beside it — and again inside, where the answer is
+  authoritative because no mover can be running. A gate that only ran under
+  the lock would mutate the very installation it was about to refuse, which
+  for the `run` path is the difference between a clean preflight refusal and
+  one that rebuilt part of what a mover removed. Managed paths are
+  resolved once, when a component starts, and a controller cannot re-derive
+  them for its own use — so a process that is running when a later run moves or
+  removes an installation would otherwise rebuild exactly what that run took
+  away, and leave its repository's job naming a controller that no longer
+  exists. Two signals answer it, in order: a relocation marker, a JSON document
+  named by a shared constant that a mover leaves in the directory it takes
+  apart, naming where the installation went — and named in the refusal
+  alongside that destination, so an operator with two bound locations is told
+  which one moved — looked for in the bound install
+  directory *and* in the bound discovery record's directory, because
+  `--install-dir` makes those two different places — and, for the case no
+  marker survives, whether the bound record or install directory is still the
+  one this host resolves. Reading the marker is total: absent, unreadable, not
+  an object, or naming no destination is not a relocation. The `run` path
+  refuses by printing rather than logging, because logging creates the
+  directories it logs into.
+
+  The drainer's own writes are deliberately not among them.
+  `tools/drain_prs.py` records conflict and cleanup incidents into the
+  installation through `record_conflict_incident` and
+  `record_cleanup_incident`, in its standalone `--pr` mode as much as under a
+  controller, and neither is gated here. It does not need to be: a drainer run
+  takes the checkout's own run lock as soon as the git directory is known and
+  before any log line, state read, or GitHub call, and a run that moves or
+  removes an installation fences on exactly that lock for every recorded
+  repository — so a drainer cannot be writing while a mover is running, in
+  either order. Gating those writes as well would add a second answer to a
+  question the fence already settles.
+
+  A running controller also holds an exclusive lock on `controller.lock` inside
+  its own runtime directory, taken inside that same startup span — while the
+  record's lock is held no mover can be running, so the gate's answer is still
+  true when this is taken, and from then on a mover fences on it and refuses
+  instead. It is held for the process's whole life and never unlinked once
+  created, on the same terms as the record's own lock. It is deliberately not
+  the drainer's run lock: `drain_prs.py` takes the checkout's `.git` rendezvous
+  non-blockingly and the controller supervises a child that does exactly that,
+  so a controller holding the drainer's lock would make every run it supervises
+  fail immediately. Two objects, both held at once.
+
+  What a mover owes in return is symmetrical and is part of this contract
+  rather than each mover's own invention. It fences on *both* lock kinds — the
+  discovery record's and the controller's — at every location it writes into
+  or removes from, source and destination alike, and it keeps holding them
+  across a rollback, because an undo writes to exactly the locations the
+  transition did. And the marker it leaves is a tombstone rather than a
+  notice: a valid one refuses every gated transition unconditionally, with no
+  expiry and no best-effort reading, until the run that makes that location a
+  live installation again removes or invalidates it. A mover that took a
+  location apart and left a marker behind has therefore said something
+  permanent about it, which is what lets a controller bound there refuse
+  without having to reason about how long ago the move happened.
+
+  Which lock a transition needs follows from how long it lives. A bounded one
+  holds the record's lock across its gate and its writes together, because a
+  mover holds that same lock for its whole transition and is thereby excluded.
+  One that outlives any lock it could hold takes the controller lock as well.
+  A stop is both at once and is the awkward case: signalling the runner is what
+  makes the runner release *its* controller lock, so from that instant nothing
+  fences a mover out — and everything a stop does afterwards, resolving that
+  repository's crash incidents above all, is a write. So a stop re-takes the
+  record's lock once the runner is gone, re-asks the gate, and takes the
+  controller lock itself for the writes that follow. The lock is re-entrant
   within a thread so that span can contain the record write that would
   otherwise block against it, and leaving a nested acquisition releases
   nothing — only the outermost holder does, so another process stays blocked

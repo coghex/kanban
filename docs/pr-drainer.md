@@ -970,6 +970,12 @@ the record without inheriting your environment, so that one cannot move.
 - Service definition: `~/Library/LaunchAgents/com.coghex.drain-prs.<slug>.plist`
   under launchd, or `~/.config/systemd/user/com.coghex.drain-prs.<slug>.service`
   under systemd
+- Controller lock, held for as long as a controller is running for that
+  repository: `<install-dir>/runtime/<slug>/controller.lock`. It is what tells
+  a run that wants to move or remove this installation that one is live. A stop
+  takes it too, once the drainer it stopped has exited and before it clears
+  that repository's crash incidents. It is not the drainer's own run lock below — the controller supervises a drainer
+  that takes that one, so they have to be different objects.
 - Repository queue state: `.git/drain_prs_state.json`
 - Repository run lock: the `.git` directory, plus `.git/drain_prs.lock` holding
   the holder's PID, beside `.git/drain_prs.lock.owner.json`, which records
