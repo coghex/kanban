@@ -2186,6 +2186,13 @@ class UnsealedResidueTests(RelocationFixture):
         self.assertFalse(os.path.lexists(self.legacy_record))
         self.assertIn("could not be sealed", result["repair"])
         self.assertIn("re-run this installer", result["repair"])
+        # And the install does not report success over it: a record path left
+        # open to a controller still bound there is the one thing this run
+        # could not finish, whatever else it did.
+        with self.assertRaises(install_drainer.RelocationUnresolved) as raised:
+            install_drainer._require_relocation_resolved(result)
+        self.assertIn("was left open", str(raised.exception))
+        self.assertIn(str(self.legacy_record), str(raised.exception))
 
     def test_reconciling_and_re_running_then_seals_it(self):
         # What the remediation tells the operator to do, and what it gets them.
@@ -2633,7 +2640,7 @@ class LateWriteReportingTests(RelocationFixture):
 # managed paths at its own import, exactly as any controller does, and then
 # writes the discovery record the way a start or an install does.
 _QUEUED_WRITER = """
-import json, os, sys, time
+import contextlib, io, json, os, sys, time
 from pathlib import Path
 
 for entry in reversed(sys.argv[1].split(os.pathsep)):
@@ -2650,6 +2657,31 @@ ready.write_text(str(drain_prs_service.DISCOVERY_RECORD_PATH), encoding="utf-8")
 while not go.exists():
     time.sleep(0.01)
 outcome = {"bound_record": str(drain_prs_service.DISCOVERY_RECORD_PATH)}
+if sys.argv[10] == "trees":
+    with contextlib.redirect_stdout(io.StringIO()):
+        # Everything a controller puts down before it ever reaches the record, and
+        # every bit of it under no record lock at all: the directories, the status
+        # file, an incident, a log line and the service definition. The backend is
+        # pinned rather than probed because this process cannot count on the host
+        # it runs on having a live user manager, and nothing here asks one for
+        # anything — every one of these is a file write.
+        import service_manager
+
+        service_manager._DETECTED = service_manager.SYSTEMD
+        job = drain_prs_service.resolve_job(Path(checkout))
+        drain_prs_service.ensure_dirs(job)
+        drain_prs_service.atomic_write_json(
+            job.status_path, {"state": "starting", "repository": identity}
+        )
+        drain_prs_service.write_incident(
+            job=job, exit_code=9, command=["drain_prs.py", "--path", checkout]
+        )
+        drain_prs_service.service_log(job, f"pre-gate start for {identity}")
+        drain_prs_service.service_backend().write_definition(
+            drain_prs_service.service_definition(job)
+        )
+        outcome["runtime"] = str(job.runtime_dir)
+        outcome["logs"] = str(job.log_dir)
 queued.write_text("", encoding="utf-8")
 # The record's own lock, taken the way every transition in the controller
 # takes it and before anything is asked about the installation, so where this
@@ -2710,6 +2742,7 @@ class QueuedRecordWriterTests(RelocationFixture):
                 "acme/widgets",
                 str(self.widgets),
                 "0",
+                "record-only",
             ],
             env={"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
             stdout=subprocess.PIPE,
@@ -2821,6 +2854,7 @@ class PreGateWriterTests(RelocationFixture):
         self.writer_script = self.root / "pre_gate_writer.py"
         self.writer_script.write_text(_PRE_GATE_WRITER, encoding="utf-8")
         self.pre_gate = self.build_pre_gate_controller()
+        self.writes = "record-only"
 
     def build_pre_gate_controller(self):
         """This module's own source with exactly the gate this arc added taken
@@ -2867,6 +2901,7 @@ class PreGateWriterTests(RelocationFixture):
                 # Held past the write, so the reconciliation's first pass
                 # blocks on this process once the handoff gives it the lock.
                 "0.4",
+                self.writes,
             ],
             env={"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
             stdout=subprocess.PIPE,
@@ -2965,6 +3000,51 @@ class PreGateWriterTests(RelocationFixture):
         self.assertNotIn("recorded", outcome)
         self.assertIn("Refusing unsafe config path", outcome["refused"])
         self.assert_record_path_is_sealed()
+
+    def test_the_trees_it_lays_down_first_are_found_by_a_later_run(self):
+        """What the seal does not close, and what does answer it.
+
+        A controller bound to the old location writes its directories, its
+        status file, its incidents, its logs and its definition before it ever
+        reaches the record — every one of them under no record lock at all — so
+        the seal refuses only the last of those. Being sealed is therefore a
+        reason for a later run to do nothing only when there is nothing there;
+        this one finds the trees and refuses over them, naming both places
+        rather than choosing.
+        """
+        self.writes = "trees"
+        process = self.start_writer()
+        first = self.relocate()
+        self.assertTrue(first["late_writes"]["sealed"])
+        self.go.write_text("", encoding="utf-8")
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+        outcome = json.loads(self.result.read_text(encoding="utf-8"))
+        # The record it could not write...
+        self.assertIn("Refusing unsafe config path", outcome["refused"])
+        self.assert_record_path_is_sealed()
+        # ...and everything it wrote before getting there.
+        runtime = self.legacy_dir / "runtime" / self.job.slug
+        logs = self.legacy_logs / self.job.slug
+        self.assertEqual(outcome["runtime"], str(runtime))
+        self.assertTrue((runtime / "status.json").is_file())
+        self.assertTrue(any((runtime / "incidents").iterdir()))
+        self.assertTrue((logs / "service.log").is_file())
+        # A later run no longer reads the seal as nothing to do.
+        self.assertIsNone(install_drainer.relocation_disposition(self.destination))
+        before = self.host_state()
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            install_drainer.plan_relocation(self.destination)
+        message = str(raised.exception)
+        self.assertIn(str(runtime), message)
+        self.assertIn(str(self.destination / "runtime" / self.job.slug), message)
+        self.assertEqual(self.host_state(), before)
+
+    def test_a_sealed_location_holding_nothing_is_left_alone(self):
+        self.relocate()
+        self.assertIn(
+            "emptied and sealed",
+            install_drainer.relocation_disposition(self.destination),
+        )
 
     def test_the_seal_is_what_refuses_it_rather_than_any_gate(self):
         """Asked of the copy that has no gate at all.

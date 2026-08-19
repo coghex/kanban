@@ -1082,9 +1082,19 @@ finds the old location clear, `config.json` there is replaced by a link to the
 instead of recreating the record, and anything reading that path finds the note
 saying where the installation went. If the run could *not* finish tidying up,
 it deliberately leaves the path alone so you can see what is there; reconcile it
-and re-run, and that run seals it. Runtime and log directories such a writer
-creates are reported rather than prevented — nothing locks those at all — and
-bounding them is #390.
+and re-run, and that run seals it. A run that could not write the seal at all
+fails rather than reporting success, and tells you to re-run.
+
+That link closes the record and nothing else. A controller still pointing at the
+old location creates its runtime and log directories, its status file, its
+incidents and its unit or plist *before* it ever gets to the record, and nothing
+locks any of those — so one that starts after the run has finished checking
+still leaves directories behind, even though its record write is refused. A
+later run therefore does not treat a sealed old location as finished business
+unless it holds nothing but the link, the lock file and the note: if there are
+trees there it plans and reconciles them exactly as it would an unsealed one,
+and refuses over anything it would have to choose between. Stopping those writes
+happening at all, rather than finding them next time, is #390.
 
 Taking over an installation already at this platform's own location is #368.
 

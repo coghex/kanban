@@ -490,7 +490,13 @@ def _managed_slot(entry: Path, record: str) -> str | None:
     if name in _MANAGED_LINK_NAMES:
         return "link" if entry.is_symlink() else None
     if name == record:
-        return "record" if _plain_file(entry) else None
+        if _plain_file(entry):
+            return "record"
+        # The seal an earlier run left where the record was. Managed, so a run
+        # reconciling what a writer put back beside it recognises this location
+        # as one this installer took apart; never removable, because taking it
+        # away would reopen the path it closed.
+        return "tombstone" if _is_tombstone(entry) else None
     if name == record + ".lock":
         return "lock" if _plain_file(entry) else None
     if name == drain_prs_service.RELOCATION_MARKER_NAME:
@@ -531,6 +537,11 @@ def _read_record(path: Path, description: str) -> dict[str, Any]:
     ordinary answer and reads as an empty document.
     """
     if not os.path.lexists(path):
+        return {}
+    if _is_tombstone(path):
+        # The absence it stands for. A sealed path holds no document, and
+        # reading it as a refusal would make a run reconciling the trees beside
+        # it fail over an earlier run's own work.
         return {}
     if not _plain_file(path):
         raise InstallError(
@@ -1581,6 +1592,11 @@ def _remove_legacy_installation(
     )
     marker.chmod(0o600)
     retained.append(str(marker))
+    if _is_tombstone(plan.legacy_record):
+        # Left by an earlier run and kept by this one, so the scan that ends
+        # the reconciliation does not read this run's own seal as something a
+        # writer put back.
+        retained.append(str(plan.legacy_record))
     entries_removed, entries_retained = _remove_managed_entries(
         transition, plan.removable
     )
@@ -2100,6 +2116,7 @@ def _reconcile_late_writes(
     """
     outcome: dict[str, Any] = {
         "location": str(plan.legacy_dir),
+        "record": str(plan.legacy_record),
         "log_root": str(plan.legacy_log_root),
         "passes": 0,
         "repositories": [],
@@ -2226,6 +2243,28 @@ def _locked_transition(
     return plan, result
 
 
+def _sealed_location_is_empty() -> bool:
+    """Whether a sealed legacy location holds nothing but what sealing it left.
+
+    The seal closes the record path, and that is all it closes: a controller
+    bound to that location writes its runtime tree, its log tree and its
+    definition under no record lock at all, so one starting after a run has
+    finished looking can still put durable state there — its record write is
+    what refuses, and by then the directories exist. Being sealed is therefore
+    a reason to do nothing only when there is nothing there, and a later run
+    reconciles whatever is.
+    """
+    legacy_dir = legacy_install_dir()
+    record = record_name()
+    kept = {record, record + ".lock", drain_prs_service.RELOCATION_MARKER_NAME}
+    if _plain_directory(legacy_dir) and any(
+        child.name not in kept for child in legacy_dir.iterdir()
+    ):
+        return False
+    root = legacy_log_root()
+    return not (_plain_directory(root) and any(root.iterdir()))
+
+
 def relocation_disposition(install_dir: Path) -> str | None:
     """Why this run relocates nothing, or None when it does.
 
@@ -2248,7 +2287,7 @@ def relocation_disposition(install_dir: Path) -> str | None:
     legacy_record = legacy_install_dir() / record_name()
     if not os.path.lexists(legacy_record):
         return "there is no installation at the legacy location"
-    if _is_tombstone(legacy_record):
+    if _is_tombstone(legacy_record) and _sealed_location_is_empty():
         return "the legacy location was emptied and sealed by an earlier run"
     return None
 
@@ -2426,16 +2465,29 @@ def _require_relocation_resolved(relocation: dict[str, Any]) -> None:
     real interface here and unresolved state must not become ambiguous to it.
     """
     late = relocation.get("late_writes")
-    if not isinstance(late, dict) or late.get("resolved", True):
+    if not isinstance(late, dict):
         return
-    repositories = ", ".join(late["repositories"]) or "none recorded"
-    retained = ", ".join(late["retained"]) or "nothing"
+    if late.get("resolved", True) and late.get("sealed", True):
+        return
+    if not late["resolved"]:
+        repositories = ", ".join(late["repositories"]) or "none recorded"
+        retained = ", ".join(late["retained"]) or "nothing"
+        detail = (
+            f"but a writer recorded state at {late['location']} after it was "
+            f"taken apart and it is still there. Affected repositories: "
+            f"{repositories}. Kept where it was written: {retained}."
+        )
+    else:
+        # Clear, and open. The location holds nothing, but the record path is
+        # not closed against a controller still bound to it, so the one thing
+        # this run could not do is the one thing that keeps it closed.
+        detail = (
+            f"but the record path at {late['record']} was left open to a "
+            "controller still bound to that location."
+        )
     raise RelocationUnresolved(
         "The PR drainer installation was relocated to "
-        f"{relocation['destination']}, but a writer recorded state at "
-        f"{late['location']} after it was taken apart and it is still there. "
-        f"Affected repositories: {repositories}. Kept where it was written: "
-        f"{retained}. {late['repair']}",
+        f"{relocation['destination']}, {detail} {late['repair']}",
         late,
     )
 

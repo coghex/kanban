@@ -1346,13 +1346,22 @@ search step and nothing else, which is what `mandatory: no` records.
   so a writer that acquires the lock afterwards refuses where it stands however
   old it is. Following the seal finds the marker rather than a document, so a
   reader bound to that location learns where the installation went instead of
-  finding an empty one, and `relocation_disposition` stops a later run at a
-  sealed location before it has a plan. A location this run could not finish
+  finding an empty one. A location this run could not finish
   reconciling is deliberately left unsealed, because the operator has to see it
   as it stands and the re-run that follows their reconciliation is what seals
-  it. The runtime and log trees such a writer creates are written under no
-  record lock at all and are reported rather than prevented; bounding those is
-  #390.
+  it; a record path that could not be sealed at all fails the install on the
+  same terms as unresolved state, since a path left open to a controller still
+  bound there is the one thing that keeps the rest closed.
+  The seal closes the record and only the record. A controller bound to that
+  location writes its directories, its status file, its incidents, its logs and
+  its definition before it ever reaches the record, under no record lock at all,
+  so one starting after a run has finished looking still leaves those behind —
+  its record write is what refuses, and by then the trees exist. Being sealed is
+  therefore a reason for a later run to do nothing only when the location holds
+  nothing but the seal, the lock and the marker: a sealed location that still
+  holds trees is planned and reconciled exactly as an unsealed one is, which is
+  what stops the seal from making such state permanently invisible. Preventing
+  those writes rather than finding them on the next run is #390.
   Whoever was waiting takes the lock; it keeps the checkout
   and controller fences the whole time, so no drainer or controller can start
   against a tree it is about to move, and it fences any repository it recovers

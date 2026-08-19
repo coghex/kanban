@@ -2516,10 +2516,14 @@ above are unchanged, and persistence the user switched off is not a failure.
   scan finds the location clear seals the emptied record path under that scan's
   own lock, with a symlink to the relocation marker: every copy of the
   controller refuses to write a record path that is present and not a regular
-  file, so a writer waking afterwards refuses rather than recreating it, and a
-  later run stops at the disposition. A location left unresolved is left
-  unsealed for the operator to see, and the runtime and log trees such a writer
-  creates are reported rather than prevented; bounding those is #390. It is
+  file, so a writer waking afterwards refuses rather than recreating it. A
+  location left unresolved is left unsealed for the operator to see, and a
+  record path that could not be sealed fails the install. The seal closes the
+  record and only the record — a controller bound there writes its runtime
+  tree, its logs and its definition under no lock at all and before it reaches
+  the record — so a later run skips a sealed location only when it holds
+  nothing but the seal, the lock and the marker, and otherwise reconciles it
+  exactly as it would an unsealed one; preventing those writes is #390. It is
   bounded at three passes rather than looped, each merging the recreated record
   on those same terms, carrying the trees it brought, rewriting the definitions
   it names, and clearing the location again on the removal's own ownership
