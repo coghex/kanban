@@ -1312,21 +1312,33 @@ search step and nothing else, which is what `mandatory: no` records.
   Those locks serialize every writer queued on them, so a queued writer fails
   without recording anything: it resumes into a location whose record is gone,
   reads that marker under the same lock, and refuses before it writes. They
-  cannot reach a writer that arrives *after* the removal, which finds no record,
-  creates the directory afresh, and opens a lock inode the transition never
-  held. §2.4's write-level gate is what refuses such a writer running *this*
-  code; the reconciliation below is what the gate cannot cover, because the
+  cannot stop one either, only serialize it: a queued writer is guaranteed to
+  wake *after* everything done while those locks are held, so it wakes into a
+  location whose installation is gone and recreates what it needs there.
+  §2.4's write-level gate is what refuses such a writer running *this* code;
+  the reconciliation below is what that gate cannot cover, because the
   installed controller a pre-XDG host is running is an older copy that predates
   it — which is the same premise that puts the installation at `~/Library` in
-  the first place. So the run reconciles whatever came back. Each pass merges
-  the record found there into the destination's on the same
+  the first place.
+  So the reconciliation runs *outside* those locks and re-takes them for each
+  pass, and that sequencing is the point rather than an implementation detail:
+  a sweep inside the transition's own locks could never see a writer queued on
+  them, because releasing is what hands the lock over. Between passes it holds
+  neither record lock, so whoever was waiting takes it; it keeps the checkout
+  and controller fences the whole time, so no drainer or controller can start
+  against a tree it is about to move, and it fences any repository it recovers
+  that the transition had not — once per lock, because a second acquisition of
+  one this process holds would block against this very process. Each pass
+  merges the record found there into the destination's on the same
   destination-wins-per-key terms
   at both levels, carries each runtime and log tree it brought, rewrites and
   reloads every definition it names against this installation, and clears the
   location again on exactly the ownership terms the removal asks: an entry this
   installer did not create is kept and named, and then nothing at that location
   is removed at all. The sweep is bounded rather than looped, at three passes,
-  so a writer that keeps recreating the location cannot hold an installer open.
+  so a writer that keeps taking that lock cannot hold an installer open; one
+  that arrives after the final look is past any installer that terminates at
+  all, which is the write-level gate's half of this rather than the sweep's.
   A tree a distinct tree already exists at the destination for is the one case
   nothing here resolves: both copies are kept and both are named, per tree
   rather than per repository, so a repository whose runtime collided and whose

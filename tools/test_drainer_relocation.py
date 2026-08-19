@@ -2464,10 +2464,11 @@ class LateWriteReportingTests(RelocationFixture):
 # managed paths at its own import, exactly as any controller does, and then
 # writes the discovery record the way a start or an install does.
 _QUEUED_WRITER = """
-import json, sys, time
+import json, os, sys, time
 from pathlib import Path
 
-sys.path.insert(0, sys.argv[1])
+for entry in reversed(sys.argv[1].split(os.pathsep)):
+    sys.path.insert(0, entry)
 ready, go, queued, acquired, result = (
     Path(argument) for argument in sys.argv[2:7]
 )
@@ -2614,6 +2615,162 @@ class QueuedRecordWriterTests(RelocationFixture):
             sorted(path.name for path in self.legacy_dir.iterdir()),
             ["config.json.lock", "relocated.json"],
         )
+
+
+# What the pre-gate writer below runs. Identical to the queued writer above
+# except for the copy of the controller it imports, so the only thing that
+# differs between the two cases is whether that copy refuses.
+_PRE_GATE_WRITER = _QUEUED_WRITER
+
+
+class PreGateWriterTests(RelocationFixture):
+    """The writer no gate in this copy can refuse: an older installed
+    controller.
+
+    A host with a `~/Library` installation is running the controller it
+    installed, from before this arc — that is the premise of the relocation
+    itself — so no edit to *this* copy makes that process refuse. Such a writer
+    queued on the retained record lock wakes once the transition releases it and
+    records itself at the location the run just emptied. What must happen then
+    is that the reconciliation finds it, which is why the reconciliation is
+    sequenced outside those locks and re-takes them pass by pass.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.ready = self.root / "pre-gate.ready"
+        self.go = self.root / "pre-gate.go"
+        self.queued = self.root / "pre-gate.queued"
+        self.acquired = self.root / "pre-gate.acquired"
+        self.result = self.root / "pre-gate.result"
+        self.writer_script = self.root / "pre_gate_writer.py"
+        self.writer_script.write_text(_PRE_GATE_WRITER, encoding="utf-8")
+        self.pre_gate = self.build_pre_gate_controller()
+        self.waited = False
+
+    def build_pre_gate_controller(self):
+        """This module's own source with exactly the gate this arc added taken
+        back out, which is what an older installed copy is.
+
+        Built from the current source rather than checked in, and asserted to
+        have really removed something, so a rename or a re-spelling of that
+        gate cannot quietly turn this into a second test of the gated path.
+        """
+        source = Path(drain_prs_service.__file__).read_text(encoding="utf-8")
+        gate = (
+            "    with installation_transaction():\n"
+            "        return update_json_document("
+        )
+        self.assertEqual(
+            source.count(gate), 2, "the discovery record's write-level gate moved"
+        )
+        directory = self.root / "pre-gate-controller"
+        directory.mkdir()
+        (directory / "drain_prs_service.py").write_text(
+            source.replace(gate, "    return update_json_document("), encoding="utf-8"
+        )
+        return directory
+
+    def start_writer(self):
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(self.writer_script),
+                # Its own copy first and the tracked modules behind it, so this
+                # process really is running the older controller while
+                # resolving paths through the same `kanban_config` every other
+                # component does.
+                os.pathsep.join(
+                    [str(self.pre_gate), str(Path(drain_prs_service.__file__).parent)]
+                ),
+                str(self.ready),
+                str(self.go),
+                str(self.queued),
+                str(self.acquired),
+                str(self.result),
+                "acme/widgets",
+                str(self.widgets),
+            ],
+            env={"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(process.kill)
+        self.process = process
+        self.wait_for(self.ready, "the pre-gate writer never bound its paths")
+        return process
+
+    def wait_for(self, path, message):
+        deadline = time.monotonic() + 30
+        while not path.exists() and time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                self.fail(f"{message}: {self.process.communicate()}")
+            time.sleep(0.02)
+        self.assertTrue(path.exists(), message)
+
+    def relocate_with_pre_gate_writer(self):
+        process = self.start_writer()
+        real_apply = install_drainer._apply_relocation
+        real_locks = install_drainer._record_locks
+
+        def apply_hook(transition, relocation_plan, sources):
+            self.go.write_text("", encoding="utf-8")
+            self.wait_for(self.queued, "the pre-gate writer never reached the lock")
+            time.sleep(0.25)
+            return real_apply(transition, relocation_plan, sources)
+
+        @contextlib.contextmanager
+        def locks_hook(relocation_plan):
+            # Before the first pass takes the lock, never inside it: waiting
+            # for the writer under the lock it is waiting for would be this
+            # test deadlocking itself. What it removes is the scheduler's say
+            # in which of the two gets the lock first, not the release that
+            # makes the writer possible at all.
+            if not self.waited:
+                self.waited = True
+                self.wait_for(self.result, "the pre-gate writer never recorded")
+            with real_locks(relocation_plan):
+                yield
+
+        with mock.patch.object(install_drainer, "_apply_relocation", apply_hook):
+            with mock.patch.object(install_drainer, "_record_locks", locks_hook):
+                result = self.relocate()
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+        return result, json.loads(self.result.read_text(encoding="utf-8"))
+
+    def test_it_blocks_on_the_lock_and_then_really_does_record(self):
+        result, outcome = self.relocate_with_pre_gate_writer()
+        self.assertEqual(outcome["bound_record"], str(self.legacy_record))
+        # It blocked on the retained lock rather than refusing where it stood...
+        self.assertTrue(self.acquired.exists())
+        # ...and, being the older copy, it recorded. Nothing in this repository
+        # can stop that; the reconciliation is what answers it.
+        self.assertTrue(outcome["recorded"])
+        self.assertNotIn("refused", outcome)
+        self.assertEqual(result["late_writes"]["passes"], 1)
+
+    def test_what_it_recorded_is_carried_across_and_the_location_cleared(self):
+        result, _ = self.relocate_with_pre_gate_writer()
+        late = result["late_writes"]
+        self.assertTrue(late["resolved"])
+        self.assertEqual(late["repositories"], ["acme/widgets"])
+        self.assertIn(str(self.legacy_record), late["removed"])
+        self.assertFalse(self.legacy_record.exists())
+        self.assertEqual(
+            sorted(path.name for path in self.legacy_dir.iterdir()),
+            ["config.json.lock", "relocated.json"],
+        )
+        entry = self.record_document(self.destination_record)["repositories"][
+            "acme/widgets"
+        ]
+        self.assertEqual(entry["repository"], str(self.widgets))
+
+    def test_the_install_reports_success_because_nothing_was_left_behind(self):
+        result, _ = self.relocate_with_pre_gate_writer()
+        install_drainer._require_relocation_resolved(result)
+        self.assertIn("cleared again", result["repair"])
 
 
 if __name__ == "__main__":

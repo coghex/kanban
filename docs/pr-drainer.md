@@ -1037,9 +1037,16 @@ holds however such a writer got there. What it cannot cover is a writer running
 an *older* copy of the controller — which is exactly what a host with a
 `~/Library` installation is running, since that is why the installation is
 there — and one of those that turns up after the move just recreates the
-directory and records itself where nothing looks any more. So the run goes back
-and checks,
-up to three times: whatever it finds is merged into the destination record the
+directory and records itself where nothing looks any more.
+
+So the run goes back and checks — and it does that with the lock *let go*,
+which is the part that makes it work at all: a writer waiting on that lock only
+gets it once the move stops holding it, so a check made while still holding it
+could never see what that writer does. Letting go hands it over; taking it again
+for the next check is what finds what they left. Up to three times, and
+throughout it keeps holding each repository's checkout the way a drainer does,
+so nothing can start draining a tree it is about to move. Whatever it finds is
+merged into the destination record the
 same way the move's own merge works, its runtime and log trees are carried
 over, the definitions it names are rewritten and reloaded against the new
 location, and the old one is cleared again — and, exactly as during the move, a
