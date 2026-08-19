@@ -83,8 +83,8 @@ discovery record and `$XDG_STATE_HOME/kanban/pr-drainer` for logs, falling back
 to `~/.local/share` and `~/.local/state` when the variable is unset, empty, or
 not an absolute path. Where this document spells a `~/Library` path, read the
 XDG one on Linux. An install a Linux host made before that — under the
-`~/Library` shapes — is found and kept there rather than moved; see
-[Files and logs](#files-and-logs).
+`~/Library` shapes — is relocated to those locations by the next default
+installer run; see [Files and logs](#files-and-logs).
 
 Preview the changes:
 
@@ -958,6 +958,15 @@ beneath them and nothing else, which is why the record and the logs below name
 `<record-dir>` and `<log-root>` rather than `<install-dir>`: Kanban has to find
 the record without inheriting your environment, so that one cannot move.
 
+The variable and the option are not interchangeable at install time. The
+variable tells an already-installed component which installation it belongs to;
+where the *installer* writes is `--install-dir` alone. Exporting
+`KANBAN_DRAINER_INSTALL_DIR` therefore no longer changes where a plain
+`python3 tools/install_drainer.py` installs — pass `--install-dir` again if you
+want a custom directory — because a run that inherited the variable would
+otherwise count as a custom install and never relocate a `~/Library`
+installation.
+
 - Installed links, shared by every repository: `<install-dir>/`
 - Install record Kanban resolves each job through, and the global
   private configuration (`ntfy_url`) that shares it:
@@ -985,11 +994,44 @@ the record without inheriting your environment, so that one cannot move.
   the lock cannot see.
 
 A Linux host that installed the drainer before these paths took each platform's
-own convention has its installation at the `~/Library` spellings, and it stays
-there: the installer finds an installation wherever it already is rather than
-moving it. Relocating one to this platform's own convention is #367, taking
-over one already at that location is #368, and carrying across what a writer
-installs at a relocated location is #369.
+own convention has its installation at the `~/Library` spellings. The next
+default `python3 tools/install_drainer.py` run moves it: the two discovery
+records merge with the one already at the destination winning per key, the
+script links are installed there, and every repository the record names has its
+runtime tree, its incidents, its status file and its log tree carried over and
+its service definition rewritten and reloaded against the new location. The old
+installation is then removed, except for three things: the record's lock file —
+a writer may be queued on it — the directory that has to remain to contain it,
+and a small `relocated.json` beside that lock naming where the installation
+went. A controller that was already running works out where its files are once,
+when it starts, so that marker is how one still pointing at the old location
+learns it is stale: it refuses to start, install, or uninstall from there and
+tells you to run the command again, rather than rebuilding what the move just
+took away. The same three refuse whenever the locations they resolved at
+startup are no longer the ones this host resolves — which is what catches a
+controller that happened to start while a relocation that later failed was in
+flight.
+
+Nothing is moved on macOS, and nothing is moved when you pass `--install-dir`:
+a custom destination installs there and reports that it relocated nothing.
+Preview the whole move with `--dry-run --json`, which reports it under
+`relocation` and takes no lock. For as long as it runs it also holds each of those
+repositories' checkouts the way a drainer does, so one started in the middle
+refuses immediately rather than draining a checkout that is being moved out
+from under it — and releases them whether it finishes or rolls back.
+
+The run refuses, before changing anything, if a
+drainer is running for any repository the record names, if an entry in it
+cannot be resolved to a live checkout and an installed definition, if either
+record will not parse, if a tree would have to be moved onto a different tree
+already at its destination, or if the old install directory holds anything the
+installer did not put there — move that aside and re-run. A run that fails
+part-way puts everything back and says so, and if it ever ends up with a copy
+of a tree at both locations it keeps both and tells you rather than choosing.
+
+Taking over an installation already at this platform's own location is #368,
+and carrying across what a writer installs at a relocated location is #369.
+
 
 The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Incidents are attributed to the canonical repository rather than to the checkout that raised them, so any clone of that repository can list, acknowledge, and clear them. Stopping the drainer intentionally clears that repository's crash incidents, and no other repository's — a stop ends the supervisor, which is exactly what a crash incident is about. It resolves nothing else: a conflict or cleanup incident stays open across the stop, still naming a debt that is still owed, and clears through its own path once that pull request is mergeable or closed or its last obligation succeeds. Starting the drainer is not gated on an open incident of any kind, and an incident already open when it starts is never mistaken for a startup failure.
 

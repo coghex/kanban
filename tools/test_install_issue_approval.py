@@ -294,6 +294,9 @@ class FakeServiceManager(service_manager.ServiceManagerBackend):
     def identifier_fits(self, slug):
         return len(slug) <= 120
 
+    def definition_environment(self, identifier):
+        return {}
+
     def legacy_identifier(self):
         return service_manager.require_legacy_prefix(self.namespace())
 

@@ -396,6 +396,24 @@ class ServiceManagerBackend(ABC):
         """
 
     @abstractmethod
+    def definition_environment(self, identifier: str) -> dict[str, str]:
+        """The environment one installed definition carries, read back off
+        disk.
+
+        The counterpart of the environment `write_definition` rendered into
+        it, and the only way a caller can ask a definition which installation
+        it was written against: `KANBAN_DRAINER_INSTALL_DIR` is what decides
+        where that job's runtime state lives, and `--install-dir` moves that
+        state without moving the record it is discovered through.
+
+        Total and non-raising on exactly the terms `legacy_service_repository`
+        below is. A definition that is absent, unreadable, or not the shape
+        this backend writes answers with no variables rather than an error,
+        because "which installation does this job name?" is asked of jobs a
+        half-finished install may have left in any state.
+        """
+
+    @abstractmethod
     def legacy_definition_exists(self) -> bool:
         """Whether the singleton's definition is still installed."""
 
@@ -531,6 +549,28 @@ class LaunchdBackend(ServiceManagerBackend):
             definition_removed=remove_definition_file(self.definition_path(identifier)),
         )
 
+    def definition_environment(self, identifier: str) -> dict[str, str]:
+        document = self._read_plist(self.definition_path(identifier))
+        variables = document.get("EnvironmentVariables")
+        if not isinstance(variables, dict):
+            return {}
+        return {
+            name: value
+            for name, value in variables.items()
+            if isinstance(name, str) and isinstance(value, str)
+        }
+
+    def _read_plist(self, path: Path) -> dict[str, Any]:
+        """One plist as a dictionary, or an empty one. The single reader both
+        definition read-backs go through, so an absent, unreadable, or
+        non-dictionary plist answers the same way for either question."""
+        try:
+            with path.open("rb") as handle:
+                document = plistlib.load(handle)
+        except (FileNotFoundError, OSError, plistlib.InvalidFileException, ValueError):
+            return {}
+        return document if isinstance(document, dict) else {}
+
     def legacy_definition_exists(self) -> bool:
         # False rather than an error for a namespace with no singleton: this is
         # the question every caller asks *before* reaching for one, so it has
@@ -542,13 +582,7 @@ class LaunchdBackend(ServiceManagerBackend):
     def legacy_service_repository(self) -> Path | None:
         if self._namespace.legacy_prefix is None:
             return None
-        try:
-            with self.legacy_definition_path().open("rb") as handle:
-                document = plistlib.load(handle)
-        except (FileNotFoundError, OSError, plistlib.InvalidFileException, ValueError):
-            return None
-        if not isinstance(document, dict):
-            return None
+        document = self._read_plist(self.legacy_definition_path())
         arguments = document.get("ProgramArguments")
         if isinstance(arguments, list):
             for index, argument in enumerate(arguments):
@@ -724,6 +758,23 @@ class SystemdBackend(ServiceManagerBackend):
         self._run(["systemctl", "--user", "reset-failed", identifier], check=False)
         return UninstallOutcome(unloaded=unloaded, definition_removed=removed)
 
+    def definition_environment(self, identifier: str) -> dict[str, str]:
+        # Read back through `_unit_assignment` below, which reverses exactly
+        # what `_unit_word` wrote: this answers for the definitions this
+        # backend produced, and treats anything else in the file as no
+        # assignment at all rather than as an error.
+        try:
+            text = self.definition_path(identifier).read_text(encoding="utf-8")
+        except (FileNotFoundError, UnicodeDecodeError, OSError):
+            return {}
+        environment: dict[str, str] = {}
+        for line in text.splitlines():
+            assignment = _unit_assignment(line)
+            if assignment is not None:
+                name, value = assignment
+                environment[name] = value
+        return environment
+
     def legacy_definition_exists(self) -> bool:
         # There has never been a systemd install, so there is no systemd
         # singleton predating per-repository units — for either namespace.
@@ -887,6 +938,54 @@ def _unit_word(word: str) -> str:
     """
     escaped = _unit_value(word).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def _unit_unword(word: str) -> str:
+    """One `ExecStart` or `Environment` word, back from what `_unit_word`
+    wrote it as.
+
+    A single left-to-right pass, because `\\` and `"` unescape into
+    characters that must not then be read as escapes themselves. `%%` is
+    `_unit_value`'s doubling and is undone in the same pass for the same
+    reason. A word that was never quoted is returned as it stands, which is
+    how a hand-edited unit still reads rather than failing.
+    """
+    if len(word) < 2 or not (word.startswith('"') and word.endswith('"')):
+        return word.replace("%%", "%")
+    body = word[1:-1]
+    out: list[str] = []
+    index = 0
+    while index < len(body):
+        character = body[index]
+        if character == "\\" and index + 1 < len(body):
+            out.append(body[index + 1])
+            index += 2
+            continue
+        if character == "%" and body[index : index + 2] == "%%":
+            out.append("%")
+            index += 2
+            continue
+        out.append(character)
+        index += 1
+    return "".join(out)
+
+
+def _unit_assignment(line: str) -> tuple[str, str] | None:
+    """The `NAME=value` one `Environment=` directive carries, or None.
+
+    Total over every other line in a unit file, including a directive this
+    backend never writes and a continuation of one it does: the read-back is
+    asked of definitions a half-finished install may have left in any state,
+    so an unparseable line is no assignment rather than a failure.
+    """
+    stripped = line.strip()
+    prefix = "Environment="
+    if not stripped.startswith(prefix):
+        return None
+    name, separator, value = _unit_unword(stripped[len(prefix) :]).partition("=")
+    if not separator or not name:
+        return None
+    return name, value
 
 
 _UNPROBED = object()

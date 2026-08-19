@@ -24,14 +24,19 @@ also repairs a missing or stale discovery record in place.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import drain_prs
 import drain_prs_service
 import kanban_config
 import service_manager
@@ -41,11 +46,13 @@ import service_manager
 # `tools/service_manager.py`, the identifier derived from it, the definition's
 # path, and the manager target; this installer resolves a job through the
 # controller and reaches the service manager through that same backend rather
-# than restating any of them. Where the installation *is* is resolved the same
-# way, through `tools/kanban_config.py`: it is the one module that writes each
-# managed location down, for every platform it has a convention on, and the
-# only one both this installer and the installed controller can import.
-DEFAULT_INSTALL_DIR = kanban_config.drainer_install_dir()
+# than restating any of them. Where the installation *is*, and where a fresh
+# one goes, are resolved the same way, through `tools/kanban_config.py`: it is
+# the one module that writes each managed location down, for every platform it
+# has a convention on, and the only one both this installer and the installed
+# controller can import. `default_install_dir` below is where those two
+# answers meet, because a host relocating a pre-XDG installation is installing
+# somewhere other than where its installation currently is.
 
 
 class InstallError(RuntimeError):
@@ -280,6 +287,1334 @@ def write_installed_config_path(identity: str, config_path: str) -> Path:
         raise InstallError(str(exc)) from exc
 
 
+# --- Relocating a pre-XDG `~/Library` installation -------------------------
+#
+# A host that installed before `tools/kanban_config.py` resolved these paths
+# per platform has its installation at the macOS-shaped `~/Library` locations,
+# and discovery keeps finding it there — correctly, and forever. This is the
+# one thing that moves it: on a platform that is not macOS, a default install
+# run relocates that whole installation to this platform's own convention and
+# then takes the old one away.
+#
+# The installation is shared. Its discovery record and its four script links
+# serve every repository at once, while each repository owns its definition,
+# its runtime state, its logs, and its incidents. Every definition embeds the
+# controller path, the install-directory environment, the working directory
+# and the log paths, so a removal that did not first rewrite them would strand
+# every sibling repository — which is why this is one transition over the
+# whole installation rather than a move of the directory it lives in.
+
+
+# Every entry this installer puts inside an install directory, by the relative
+# name that selects each managed slot and the object each slot must be for
+# that entry to be this installer's. The name selects; the type proves; every
+# other name refuses, because an install directory holding something nobody
+# here created is not one this can safely take apart.
+_MANAGED_LINK_NAMES = (
+    "drain_prs.py",
+    "drain_prs_service.py",
+    "kanban_config.py",
+    "service_manager.py",
+)
+_RUNTIME_DIRECTORY_NAME = "runtime"
+_BYTECODE_CACHE_NAME = "__pycache__"
+_BYTECODE_SUFFIX = ".pyc"
+
+
+class RelocationFailed(InstallError):
+    """A relocation that had already mutated something when it failed.
+
+    Carries what the rollback could not undo beside the failure that stopped
+    the transition, because a host left holding residue needs both to know
+    what to repair.
+    """
+
+    def __init__(self, message: str, residue: list[str]):
+        super().__init__(message)
+        self.residue = list(residue)
+
+
+def legacy_install_dir() -> Path:
+    """The `~/Library`-spelled install directory a pre-XDG host installed to.
+
+    `tools/kanban_config.py`'s answer rather than a spelling of its own: it is
+    the one module that writes each managed location down, and naming the
+    source of a relocation a second way is exactly how a relocation moves
+    something other than what discovery finds.
+    """
+    return kanban_config.macos_drainer_install_dir()
+
+
+def legacy_log_root() -> Path:
+    """The `~/Library`-spelled log root, on the same terms."""
+    return kanban_config.macos_drainer_log_dir()
+
+
+def record_name() -> str:
+    """The discovery record's filename, which is the same at every location it
+    can resolve to and is therefore taken from the resolver rather than
+    restated."""
+    return kanban_config.drainer_record_path().name
+
+
+def default_install_dir() -> Path:
+    """Where a run that passes no `--install-dir` installs.
+
+    Never `KANBAN_DRAINER_INSTALL_DIR`. `--install-dir` is the only thing that
+    selects a custom destination, and a variable this process merely inherited
+    deciding it would silently turn every ordinary run on a host that exports
+    it into a custom one — which is exactly the run that would otherwise have
+    relocated a `~/Library` installation, so the installation would stay there
+    forever. That variable's job is the other direction: the installed
+    controller is *spawned* with the destination this run selected, so it
+    resolves the same installation the installer just wrote.
+
+    On macOS that destination is wherever the installation already is, since
+    nothing ever relocates a macOS installation. On every other platform it is
+    this platform's own convention, which is where a `~/Library` installation
+    is relocated to.
+    """
+    if kanban_config.is_macos():
+        return kanban_config.installed_drainer_dir()
+    return kanban_config.default_drainer_install_dir()
+
+
+def _plain_file(path: Path) -> bool:
+    return not path.is_symlink() and path.is_file()
+
+
+def _plain_directory(path: Path) -> bool:
+    return not path.is_symlink() and path.is_dir()
+
+
+def _is_bytecode_cache(path: Path) -> bool:
+    """Whether this is a `__pycache__` the interpreter left here.
+
+    Recognised only when it holds nothing but plain `.pyc` files, so a
+    directory that merely carries the name is not removed with the
+    installation.
+    """
+    if not _plain_directory(path):
+        return False
+    return all(
+        _plain_file(entry) and entry.suffix == _BYTECODE_SUFFIX
+        for entry in path.iterdir()
+    )
+
+
+def _managed_slot(entry: Path, record: str) -> str | None:
+    """Which managed slot `entry` occupies, or None when it is not one.
+
+    Ownership is decided by what an entry *is*: the expected relative name
+    selects a slot, and the object type that slot requires is what proves the
+    entry was put there by this installer. A name nothing expects, and an
+    expected name holding the wrong kind of object, both answer None — which
+    is what refuses the whole relocation rather than removing something this
+    installer did not create.
+    """
+    name = entry.name
+    if name in _MANAGED_LINK_NAMES:
+        return "link" if entry.is_symlink() else None
+    if name == record:
+        return "record" if _plain_file(entry) else None
+    if name == record + ".lock":
+        return "lock" if _plain_file(entry) else None
+    if name == drain_prs_service.RELOCATION_MARKER_NAME:
+        return "marker" if _plain_file(entry) else None
+    if name == _RUNTIME_DIRECTORY_NAME:
+        return "runtime" if _plain_directory(entry) else None
+    if name == _BYTECODE_CACHE_NAME:
+        return "cache" if _is_bytecode_cache(entry) else None
+    return None
+
+
+def _same_location(left: Path, right: Path) -> bool:
+    """Whether two paths name the same directory once resolved.
+
+    `main` resolves `--install-dir` before it reaches here while the resolvers
+    answer with the unresolved home-relative spelling they declare, so a home
+    reached through a symlink would otherwise make a plain default run read as
+    a custom destination and relocate nothing.
+    """
+    return left == right or left.resolve() == right.resolve()
+
+
+def _same_tree(left: Path, right: Path) -> bool:
+    if left == right:
+        return True
+    try:
+        return left.exists() and right.exists() and left.samefile(right)
+    except OSError:
+        return False
+
+
+def _read_record(path: Path, description: str) -> dict[str, Any]:
+    """One discovery record, or a refusal naming what is wrong with it.
+
+    Both records get this, not only the legacy one: the merge below preserves
+    the destination's keys, and it cannot preserve them out of a document that
+    will not parse or is not the shape a record has. An absent record is the
+    ordinary answer and reads as an empty document.
+    """
+    if not os.path.lexists(path):
+        return {}
+    if not _plain_file(path):
+        raise InstallError(
+            f"Refusing to relocate: the {description} discovery record at {path} is "
+            "not a regular file. Remove or repair it, then re-run the installer."
+        )
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, OSError, json.JSONDecodeError) as exc:
+        raise InstallError(
+            f"Refusing to relocate: the {description} discovery record at {path} is "
+            f"unreadable ({exc}). Repair it, then re-run the installer."
+        ) from exc
+    if not isinstance(document, dict):
+        raise InstallError(
+            f"Refusing to relocate: the {description} discovery record at {path} is "
+            "not a JSON object."
+        )
+    # Present-and-not-a-table, which includes a present `null`: absent is the
+    # ordinary shape of a record no repository has been installed into yet,
+    # while a key that is there and holds something other than a table is a
+    # document this cannot merge.
+    key = drain_prs_service.RECORD_REPOSITORIES_KEY
+    if key in document and not isinstance(document[key], dict):
+        raise InstallError(
+            f"Refusing to relocate: the {description} discovery record at {path} has "
+            f"a non-table {key!r}."
+        )
+    return document
+
+
+def _merge_records(
+    legacy: dict[str, Any], destination: dict[str, Any]
+) -> dict[str, Any]:
+    """The one document the destination keeps, with the destination winning
+    per key at both levels.
+
+    Top level first, so a `ntfy_url` already configured at the destination is
+    not replaced by the one the legacy installation carried; then the
+    `repositories` table, so a repository installed only under the legacy
+    record survives rather than silently vanishing, and one present at both
+    keeps the destination's entry.
+    """
+    key = drain_prs_service.RECORD_REPOSITORIES_KEY
+    merged = {**legacy, **destination}
+    if key in legacy or key in destination:
+        merged[key] = {
+            **(legacy.get(key) or {}),
+            **(destination.get(key) or {}),
+        }
+    return merged
+
+
+@dataclass(frozen=True)
+class RelocationRepository:
+    """One recorded repository, recovered exactly enough to be moved."""
+
+    identity: str
+    slug: str
+    checkout: Path
+    identifier: str
+    definition_path: Path
+    source_install_dir: Path
+    source_runtime_dir: Path
+    destination_runtime_dir: Path
+    source_log_dir: Path
+    destination_log_dir: Path
+    record_entry: dict[str, Any]
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "repository": self.identity,
+            "checkout": str(self.checkout),
+            "identifier": self.identifier,
+            "definition": str(self.definition_path),
+            "install_dir": str(self.source_install_dir),
+            "runtime": {
+                "source": str(self.source_runtime_dir),
+                "destination": str(self.destination_runtime_dir),
+            },
+            "logs": {
+                "source": str(self.source_log_dir),
+                "destination": str(self.destination_log_dir),
+            },
+        }
+
+
+@dataclass(frozen=True)
+class RelocationPlan:
+    """Everything the transition below will do, decided before it does any of
+    it. Building this is what refuses; applying it is what mutates."""
+
+    install_dir: Path
+    log_root: Path
+    legacy_dir: Path
+    legacy_record: Path
+    destination_record: Path
+    legacy_log_root: Path
+    merged_record: dict[str, Any]
+    repositories: tuple[RelocationRepository, ...]
+    removable: tuple[Path, ...]
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "source": str(self.legacy_dir),
+            "destination": str(self.install_dir),
+            "record": str(self.destination_record),
+            "log_root": str(self.log_root),
+            "repositories": [entry.report() for entry in self.repositories],
+            "removes": [str(path) for path in self.removable],
+        }
+
+
+def _recover_repository(
+    identity_key: Any,
+    entry: Any,
+    *,
+    backend: service_manager.ServiceManagerBackend,
+    remote_name: str,
+    install_dir: Path,
+    log_root: Path,
+    legacy_logs: Path,
+) -> RelocationRepository:
+    """One record entry, recovered exactly, or a refusal naming what could not
+    be.
+
+    Exactly means every value the transition has to act on: the canonical
+    identity the entry is filed under, the checkout its job runs against, the
+    identifier and definition path *this host* derives for it, and the install
+    directory its own definition names — which is where its runtime state
+    actually is, since `--install-dir` moves that state without moving the
+    record. A relocation that guessed any of them would rewrite a definition
+    for a job it had not found, or leave a repository's state behind.
+    """
+    where = f"the discovery record entry for {identity_key!r}"
+    if not isinstance(identity_key, str) or not isinstance(entry, dict):
+        raise InstallError(f"Refusing to relocate: {where} is not a repository record.")
+    try:
+        identity = drain_prs_service.normalize_identity(identity_key)
+    except drain_prs_service.ServiceError as exc:
+        raise InstallError(
+            f"Refusing to relocate: {where} is not filed under a canonical GitHub "
+            f"repository ({exc})."
+        ) from exc
+    if identity != identity_key:
+        raise InstallError(
+            f"Refusing to relocate: {where} is filed under a key that is not its own "
+            f"canonical identity {identity!r}."
+        )
+    checkout = entry.get("repository")
+    if not isinstance(checkout, str) or not checkout:
+        raise InstallError(f"Refusing to relocate: {where} names no checkout.")
+    checkout_path = Path(checkout)
+    if not checkout_path.is_dir():
+        raise InstallError(
+            f"Refusing to relocate: {where} names the checkout {checkout}, which is "
+            "not a directory. Re-install or uninstall that repository, then re-run "
+            "the installer."
+        )
+    # The checkout has to be a checkout *of this repository*, not merely a
+    # directory. A stale entry pointing one identity at another repository's
+    # clone would otherwise produce a definition whose `--path` and `--repo`
+    # disagree — a job that starts and immediately refuses itself.
+    try:
+        checkout_identity = drain_prs_service.repository_identity(
+            checkout_path, remote_name
+        )
+    except drain_prs_service.ServiceError as exc:
+        raise InstallError(
+            f"Refusing to relocate: {where} names the checkout {checkout}, whose "
+            f"canonical identity cannot be read ({exc})."
+        ) from exc
+    if checkout_identity != identity:
+        raise InstallError(
+            f"Refusing to relocate: {where} names the checkout {checkout}, which is "
+            f"a clone of {checkout_identity} rather than of {identity}. Re-install "
+            "or uninstall that repository, then re-run the installer."
+        )
+    try:
+        slug = drain_prs_service.repository_slug(identity)
+    except drain_prs_service.ServiceError as exc:
+        raise InstallError(f"Refusing to relocate: {where} ({exc}).") from exc
+    identifier = backend.service_identifier(slug)
+    definition_path = backend.definition_path(identifier)
+    if not _plain_file(definition_path):
+        raise InstallError(
+            f"Refusing to relocate: {where} derives the {backend.definition_label()} "
+            f"{definition_path}, which is not a regular file on this host. Re-install "
+            "or uninstall that repository, then re-run the installer."
+        )
+    named = backend.definition_environment(identifier).get(
+        kanban_config.DRAINER_INSTALL_DIR_ENV
+    )
+    if not named or not os.path.isabs(named):
+        raise InstallError(
+            f"Refusing to relocate: the {backend.definition_label()} at "
+            f"{definition_path} names no absolute "
+            f"{kanban_config.DRAINER_INSTALL_DIR_ENV}, so the runtime state of "
+            f"{identity} cannot be found. Re-install that repository, then re-run "
+            "the installer."
+        )
+    source_install_dir = Path(named)
+    return RelocationRepository(
+        identity=identity,
+        slug=slug,
+        checkout=checkout_path,
+        identifier=identifier,
+        definition_path=definition_path,
+        source_install_dir=source_install_dir,
+        source_runtime_dir=source_install_dir / _RUNTIME_DIRECTORY_NAME / slug,
+        destination_runtime_dir=install_dir / _RUNTIME_DIRECTORY_NAME / slug,
+        source_log_dir=legacy_logs / slug,
+        destination_log_dir=log_root / slug,
+        # Restated from what this host derives rather than carried across,
+        # exactly as `write_discovery_record` restates it on every install: a
+        # copied-forward identifier or definition path that disagrees with the
+        # job on disk is a record Kanban cannot discover or run this
+        # repository through, and the merge alone would preserve it. Every
+        # other key the entry carried — `config_path` above all — survives
+        # beside them, which is why only the service-manager keys are dropped.
+        record_entry={
+            **{
+                key: value
+                for key, value in entry.items()
+                if key not in service_manager.RECORD_KEYS
+            },
+            **backend.record_entry(identifier, definition_path),
+            "repository": str(checkout_path),
+        },
+    )
+
+
+def _require_nothing_live(
+    repositories: tuple[RelocationRepository, ...],
+    backend: service_manager.ServiceManagerBackend,
+) -> None:
+    """Refuse while any recorded repository is draining.
+
+    Every recorded repository, not merely the one being installed: this run
+    takes away the controller every one of their definitions names, and a
+    drainer that is mid-merge when that happens has nothing left to finish
+    with. Both signals, because a checkout can be draining under
+    `drain_prs.py --pr` with no managed job running at all.
+    """
+    for entry in repositories:
+        if backend.is_running(entry.identifier):
+            raise InstallError(
+                f"Refusing to relocate while the PR drainer for {entry.identity} is "
+                "running. Stop it first."
+            )
+        if repository_drainer_running(entry.checkout):
+            raise InstallError(
+                f"Refusing to relocate while a drainer is running in "
+                f"{entry.checkout} for {entry.identity}. Stop it first."
+            )
+
+
+def _require_tree_shape(kind: str, path: Path, identity: str) -> None:
+    """Refuse a runtime or log path that exists and is not a directory.
+
+    Moving it would carry the corruption to the destination, where nothing
+    would notice: a regular file survives a rename and satisfies "the tree
+    arrived", and the legacy installation is then removed around it. The next
+    controller is the one that finds out, when `ensure_dirs` tries to create a
+    directory at a path already occupied by a file.
+    """
+    if not os.path.lexists(path):
+        return
+    if _plain_directory(path):
+        return
+    raise InstallError(
+        f"Refusing to relocate: {identity}'s {kind} path {path} is not a "
+        "directory. Move or remove it, then re-run the installer."
+    )
+
+
+def _fence_checkout(entry: RelocationRepository) -> Any:
+    """Hold one recorded checkout's own run lock for this transition.
+
+    `_require_nothing_live` above reads a PID file, and a read is a snapshot:
+    a `drain_prs.py` run starting one instant later would take that checkout
+    and drain it while this run moved its runtime tree and removed the
+    controller its own installation names — and whatever it wrote on the way
+    would not be in a plan computed before it existed. The record locks cannot
+    exclude it, because the drainer does not take them.
+
+    So this takes the lock the drainer itself takes, through
+    `drain_prs.acquire_lock` rather than a second spelling of it: one
+    implementation, one contract, and a run that starts after this point fails
+    where it stands naming the holder instead of proceeding. The dry-run shape
+    is the right one — it takes only the `.git` rendezvous every mode takes,
+    and writes nothing at all into a checkout this installer has no business
+    modifying.
+    """
+    try:
+        return drain_prs.acquire_lock(entry.checkout, dry_run=True)
+    except drain_prs.RunLockedError as exc:
+        raise InstallError(
+            f"Refusing to relocate: a drainer holds the run lock for "
+            f"{entry.checkout} ({entry.identity}). {exc} Stop it first."
+        ) from exc
+    except (drain_prs.DrainError, OSError) as exc:
+        raise InstallError(
+            f"Refusing to relocate: {entry.identity}'s checkout {entry.checkout} "
+            f"could not be locked against a concurrent drainer ({exc})."
+        ) from exc
+
+
+def _require_every_checkout_fenced(
+    repositories: tuple[RelocationRepository, ...], fenced: frozenset[Path]
+) -> None:
+    """Refuse a repository the fence above does not cover.
+
+    The fence is taken from the lock-free preflight, because it has to be held
+    before the authoritative plan's own liveness check. A repository that
+    appears only in that later plan is therefore one nothing is holding the
+    run lock for, and acting on it is exactly the race this fence exists to
+    close.
+    """
+    for entry in repositories:
+        if entry.checkout not in fenced:
+            raise InstallError(
+                f"Refusing to relocate: {entry.identity}'s checkout "
+                f"{entry.checkout} appeared after this run took its locks, so no "
+                "run lock is held for it. Re-run the installer."
+            )
+
+
+def _require_no_tree_collision(
+    kind: str, source: Path, destination: Path, identity: str
+) -> None:
+    """Refuse a destination tree a distinct source would be moved onto.
+
+    A destination that already holds this repository's own tree — because
+    `--install-dir` already put it there, or because the log root never moved
+    — is not a collision: it is the tree, already where it is going, and it is
+    preserved in place. Two distinct trees is the case nothing here can
+    resolve, because merging them or choosing one is a judgement about
+    durable state that belongs to the operator.
+    """
+    if not (source.exists() and destination.exists()):
+        return
+    if _same_tree(source, destination):
+        return
+    raise InstallError(
+        f"Refusing to relocate: {identity}'s {kind} tree {source} cannot move onto "
+        f"{destination}, which already exists. Merge or remove one of them, then "
+        "re-run the installer."
+    )
+
+
+def plan_relocation(install_dir: Path) -> RelocationPlan:
+    """Everything this relocation would do, and every reason it will not.
+
+    Reads only. Every refusal in the contract is raised from here, so a
+    relocation that cannot complete fails the run before anything has been
+    written — and fails it rather than installing at the destination, because
+    an installation split between two locations is worse than one that stayed
+    where it was.
+    """
+    backend = service_backend()
+    legacy_dir = legacy_install_dir()
+    record = record_name()
+    legacy_record = legacy_dir / record
+    destination_record = install_dir / record
+    log_root = kanban_config.default_drainer_log_dir()
+    legacy_logs = legacy_log_root()
+
+    legacy_document = _read_record(legacy_record, "legacy")
+    destination_document = _read_record(destination_record, "destination")
+    merged = _merge_records(legacy_document, destination_document)
+
+    # From the merged table rather than the legacy one: a repository recorded
+    # only at the destination is one this run also has to prove recoverable
+    # and usable, since removal below is gated on every recorded repository
+    # working through the destination.
+    entries = merged.get(drain_prs_service.RECORD_REPOSITORIES_KEY) or {}
+    remote_name = drain_prs_service.discovery_remote_name()
+    repositories = tuple(
+        _recover_repository(
+            identity,
+            entry,
+            backend=backend,
+            remote_name=remote_name,
+            install_dir=install_dir,
+            log_root=log_root,
+            legacy_logs=legacy_logs,
+        )
+        for identity, entry in sorted(entries.items(), key=lambda item: str(item[0]))
+    )
+    # The document that will be written is the merge with every recovered
+    # entry restated from this host's own derivation, so the destination
+    # record describes the jobs that actually exist rather than whichever
+    # metadata happened to win the merge.
+    if repositories:
+        merged = {
+            **merged,
+            drain_prs_service.RECORD_REPOSITORIES_KEY: {
+                **entries,
+                **{entry.identity: entry.record_entry for entry in repositories},
+            },
+        }
+    _require_nothing_live(repositories, backend)
+    for entry in repositories:
+        for kind, source, destination in (
+            ("runtime", entry.source_runtime_dir, entry.destination_runtime_dir),
+            ("log", entry.source_log_dir, entry.destination_log_dir),
+        ):
+            # Shape before collision: a path that is not a directory is not a
+            # tree this may move, wherever it sits.
+            _require_tree_shape(kind, source, entry.identity)
+            _require_tree_shape(kind, destination, entry.identity)
+            _require_no_tree_collision(kind, source, destination, entry.identity)
+
+    # Every entry in the legacy install directory has to be one this installer
+    # put there before any of it is taken away.
+    removable = []
+    for child in sorted(legacy_dir.iterdir()):
+        slot = _managed_slot(child, record)
+        if slot is None:
+            raise InstallError(
+                f"Refusing to relocate: {child} is not something this installer "
+                f"created, so {legacy_dir} cannot be taken apart. Move it aside, then "
+                "re-run the installer."
+            )
+        # The lock stays: a writer may be queued on its inode, and unlinking
+        # it would hand the next writer a different lock from the one that
+        # writer is waiting on. A relocation marker left by an earlier run
+        # stays for the same reason the one this run writes does — it is what
+        # a process still bound to this location reads to learn that it is
+        # stale.
+        if slot not in {"lock", "marker"}:
+            removable.append(child)
+    return RelocationPlan(
+        install_dir=install_dir,
+        log_root=log_root,
+        legacy_dir=legacy_dir,
+        legacy_record=legacy_record,
+        destination_record=destination_record,
+        legacy_log_root=legacy_logs,
+        merged_record=merged,
+        repositories=repositories,
+        removable=tuple(removable),
+    )
+
+
+@dataclass
+class _Move:
+    """One tree move, and which half of it has happened.
+
+    The outcome is what the registered undo reads: a move that never started
+    has nothing to reverse, and one that copied and then could not remove its
+    source has two trees no undo may choose between.
+    """
+
+    source: Path
+    destination: Path
+    outcome: str = "unstarted"
+
+
+class _Transition:
+    """The mutating half, with an undo registered before every mutation.
+
+    Each action is registered first and run second, so a failure between the
+    two costs at most an undo that finds nothing to reverse — which is always
+    safe — rather than a mutation nothing knows about. A failure runs every
+    registered undo in reverse and reports whichever ones could not be
+    completed, because a partial rollback the caller cannot see is the one
+    state a host cannot repair.
+    """
+
+    def __init__(self) -> None:
+        self._undos: list[tuple[str, Any]] = []
+        self.residue: list[str] = []
+
+    def register(self, description: str, undo: Any) -> None:
+        self._undos.append((description, undo))
+
+    def note_residue(self, description: str) -> None:
+        self.residue.append(description)
+
+    def roll_back(self) -> list[str]:
+        """Undo everything, in reverse, and answer what could not be undone.
+
+        Total over exception types and never abandons the remaining actions: a
+        rollback that stopped at its first failure would leave the actions
+        below it — the earliest and therefore the most load-bearing — applied.
+        """
+        failures = list(self.residue)
+        for description, undo in reversed(self._undos):
+            try:
+                undo()
+            except BaseException as exc:  # noqa: BLE001 - reported, never raised
+                failures.append(f"{description}: {exc}")
+        return failures
+
+
+def _captured_modes(*paths: Path) -> dict[Path, int]:
+    """The mode each of these directories already has.
+
+    Taken before any lock is acquired, because acquiring one is itself a
+    change to the directory holding the record: `document_lock` creates that
+    parent at 0700 and chmods an existing one to 0700, and it does so before
+    this transition has recorded anything it could undo. A directory this run
+    only ever locked has to come back as restrictive as it was found, and no
+    more.
+    """
+    return {
+        path: path.stat().st_mode & 0o777
+        for path in paths
+        if path.is_dir() and not path.is_symlink()
+    }
+
+
+def _restore_modes(modes: dict[Path, int]) -> list[str]:
+    """Put those modes back, and answer whichever could not be. Idempotent, so
+    a rollback that has already run this costs nothing to repeat."""
+    failures = []
+    for path, mode in modes.items():
+        try:
+            if path.is_dir() and (path.stat().st_mode & 0o777) != mode:
+                path.chmod(mode)
+        except OSError as exc:
+            failures.append(f"restore the mode of {path}: {exc}")
+    return failures
+
+
+def _directory_restorer(path: Path, mode: int) -> Any:
+    """An undo that puts one removed directory back at the mode it had.
+
+    Idempotent, because a removal that raced another writer may have failed
+    after this was registered: recreating a directory that is still there must
+    leave it as it stands rather than fail the rollback that follows.
+    """
+
+    def restore() -> None:
+        path.mkdir(mode=mode, parents=True, exist_ok=True)
+        path.chmod(mode)
+
+    return restore
+
+
+def _remove_created_directories(created: list[Path]) -> None:
+    for directory in created:
+        try:
+            directory.rmdir()
+        except OSError:
+            # Not empty, or already gone: this is as far up as this run
+            # created, so stop rather than reaching into anything else.
+            return
+
+
+def _ensure_directory(transition: _Transition, path: Path) -> None:
+    """Create `path` at the private mode every managed directory carries,
+    registering the undo of exactly what this call changes: the directories it
+    creates, removed while empty, and the mode of one it merely found."""
+    created = [
+        candidate for candidate in (path, *path.parents) if not candidate.exists()
+    ]
+    if created:
+        transition.register(
+            f"remove the directories created for {path}",
+            lambda: _remove_created_directories(created),
+        )
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.chmod(0o700)
+        return
+    previous = path.stat().st_mode & 0o777
+    if previous != 0o700:
+        transition.register(
+            f"restore the mode of {path}", lambda: path.chmod(previous)
+        )
+        path.chmod(0o700)
+
+
+def _write_destination_record(transition: _Transition, plan: RelocationPlan) -> None:
+    """Put the merged document at the destination, durably, before anything
+    legacy is removed — so a run that dies here leaves the whole installation
+    still discoverable at the location it came from."""
+    path = plan.destination_record
+    existed = _plain_file(path)
+    previous = path.read_bytes() if existed else None
+    previous_mode = path.stat().st_mode & 0o777 if existed else None
+
+    def undo() -> None:
+        if previous is None:
+            if os.path.lexists(path):
+                path.unlink()
+            return
+        path.write_bytes(previous)
+        # The mode too, not only the bytes: this transition replaces the
+        # record with a private one, and a rollback that left a previously
+        # accepted document more restrictive than it was found is a change
+        # the run did not undo.
+        if previous_mode is not None:
+            path.chmod(previous_mode)
+
+    transition.register(f"restore the discovery record at {path}", undo)
+    # Under the destination record's own lock, which `relocate` below holds
+    # across this write and the whole rollback that may undo it. From the
+    # instant this file exists, discovery probes the XDG location first and
+    # every other writer on the host resolves *this* record rather than the
+    # legacy one — so without that lock a controller starting beside this run
+    # could record itself here and have its entry unlinked by an undo.
+    drain_prs_service.atomic_write_json(path, plan.merged_record)
+    path.chmod(0o600)
+
+
+def _register_path_restoration(transition: _Transition) -> None:
+    """Put this process's own idea of where the installation is back.
+
+    Registered before anything else, so it runs *after* every other undo: what
+    the managed paths resolve to depends on which discovery records exist, and
+    rebinding them before the destination record had been removed again would
+    leave this process describing an installation the rollback has since taken
+    away.
+    """
+    variable = kanban_config.DRAINER_INSTALL_DIR_ENV
+    previous = os.environ.get(variable)
+
+    def undo() -> None:
+        if previous is None:
+            os.environ.pop(variable, None)
+        else:
+            os.environ[variable] = previous
+        drain_prs_service.bind_managed_paths()
+
+    transition.register("rebind this process's managed paths", undo)
+
+
+def _rebind_managed_paths(install_dir: Path) -> None:
+    """Make this process describe the destination installation.
+
+    The selection `--install-dir` made, pinned into the environment the
+    resolvers read, so an inherited `KANBAN_DRAINER_INSTALL_DIR` cannot decide
+    where the rest of this transition writes; then the controller's own single
+    rule recomputed from it. Everything below — the definitions it renders,
+    the runtime root it moves trees into, the record it verifies through —
+    reads these, so rebinding is what stops the run that moved an installation
+    from continuing to write to where it used to be.
+    """
+    os.environ[kanban_config.DRAINER_INSTALL_DIR_ENV] = str(install_dir)
+    drain_prs_service.bind_managed_paths()
+
+
+def _install_links(
+    transition: _Transition, install_dir: Path, sources: dict[str, Path]
+) -> None:
+    """The four script links, at the destination, before any definition is
+    rewritten to name the controller among them."""
+    for name, source in sorted(sources.items()):
+        destination = install_dir / source.name
+        existing = os.readlink(destination) if destination.is_symlink() else None
+        present = os.path.lexists(destination)
+
+        def undo(destination=destination, existing=existing, present=present) -> None:
+            if os.path.lexists(destination):
+                destination.unlink()
+            if present and existing is not None:
+                destination.symlink_to(existing)
+
+        transition.register(f"restore the link {destination}", undo)
+        install_symlink(source, destination)
+
+
+def _rename_tree(source: Path, destination: Path) -> bool:
+    """Rename one tree within a filesystem, or report that the two are on
+    different ones.
+
+    The single place a cross-filesystem move is recognized, so both the move
+    and its undo below take the copy path on exactly the same condition rather
+    than each spelling it.
+    """
+    try:
+        os.replace(source, destination)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        return False
+    return True
+
+
+def _move_tree(transition: _Transition, move: _Move) -> None:
+    """Move one durable tree, safely at every instant it can be interrupted.
+
+    A rename within one filesystem is atomic and is what happens whenever it
+    can. Across filesystems it is a copy and then a removal, and each half
+    fails on its own terms: a copy that fails takes its incomplete destination
+    with it and leaves the source exactly as it was, while a copy that lands
+    makes the destination authoritative. If the source then survives, both
+    trees are kept and reported rather than one being chosen — deleting either
+    would be this installer deciding which copy of a repository's incidents
+    and status is the real one.
+    """
+    if not move.source.exists():
+        return
+    if _same_tree(move.source, move.destination):
+        return
+    transition.register(
+        f"move {move.destination} back to {move.source}",
+        lambda: _undo_move(move),
+    )
+    move.destination.parent.mkdir(parents=True, exist_ok=True)
+    if _rename_tree(move.source, move.destination):
+        move.outcome = "renamed"
+        return
+    try:
+        shutil.copytree(move.source, move.destination, symlinks=True)
+    except BaseException:
+        # The incomplete destination goes with the failure, leaving the source
+        # untouched and authoritative. A cleanup that cannot itself complete —
+        # a directory the copy created with a mode that forbids it, say — is
+        # reported rather than swallowed: an ignored error here is exactly a
+        # partial destination nothing ever mentions.
+        try:
+            if os.path.lexists(move.destination):
+                shutil.rmtree(move.destination)
+        except OSError as cleanup:
+            move.outcome = "residual"
+            transition.note_residue(
+                f"{move.destination} is an incomplete copy of {move.source} that "
+                f"could not be removed ({cleanup}); {move.source} is untouched "
+                "and remains the authoritative tree"
+            )
+        raise
+    try:
+        shutil.rmtree(move.source)
+    except OSError as exc:
+        move.outcome = "residual"
+        transition.note_residue(
+            f"{move.source} was copied to {move.destination} but could not be "
+            f"removed ({exc}); both trees are kept and the destination is the "
+            "authoritative one"
+        )
+        raise InstallError(
+            f"Could not remove {move.source} after copying it to {move.destination}."
+        ) from exc
+    move.outcome = "copied"
+
+
+def _undo_move(move: _Move) -> None:
+    if move.outcome in {"unstarted", "residual"}:
+        return
+    move.source.parent.mkdir(parents=True, exist_ok=True)
+    if _rename_tree(move.destination, move.source):
+        return
+    shutil.copytree(move.destination, move.source, symlinks=True)
+    shutil.rmtree(move.destination)
+
+
+def _rewrite_definition(
+    transition: _Transition,
+    entry: RelocationRepository,
+    backend: service_manager.ServiceManagerBackend,
+) -> None:
+    """Point one repository's definition at the destination installation.
+
+    Rendered by the controller from the paths this process has just been
+    rebound to, so the controller path, the install-directory environment and
+    the log paths a service manager will actually run this job with are the
+    destination's — and reloaded, because a definition the manager has not
+    re-read is still the old one.
+    """
+    path = entry.definition_path
+    previous = path.read_bytes()
+    # `write_definition_file` installs every definition at the mode its
+    # manager reads it with, so restoring through it would hand back a
+    # definition whose bytes are the original ones and whose permissions are
+    # not. The mode is part of what this transition changed, so it is part of
+    # what the undo puts back.
+    previous_mode = path.stat().st_mode & 0o777
+
+    def undo() -> None:
+        service_manager.write_definition_file(path, previous)
+        path.chmod(previous_mode)
+        backend.load_definition(entry.identifier)
+
+    transition.register(f"restore the definition at {path}", undo)
+    job = drain_prs_service.job_for_identity(entry.checkout, entry.identity)
+    backend.write_definition(drain_prs_service.service_definition(job))
+    backend.load_definition(entry.identifier)
+
+
+def _require_usable_through_destination(
+    plan: RelocationPlan,
+    entry: RelocationRepository,
+    runtime: _Move,
+    records: dict[str, Any],
+    backend: service_manager.ServiceManagerBackend,
+) -> None:
+    """Everything removal is gated on, asked of one repository.
+
+    Read back off disk rather than inferred from the writes above: what makes
+    removal safe is that this repository really is discoverable, describable
+    and runnable through the destination *now*, not that each step reported
+    success.
+    """
+    controller = plan.install_dir / drain_prs_service.CONTROLLER_PATH.name
+    if not controller.is_file():
+        raise InstallError(f"The relocated controller {controller} is not readable.")
+    named = backend.definition_environment(entry.identifier).get(
+        kanban_config.DRAINER_INSTALL_DIR_ENV
+    )
+    if named != str(plan.install_dir):
+        raise InstallError(
+            f"The {backend.definition_label()} for {entry.identity} names "
+            f"{named!r} rather than the destination {plan.install_dir}."
+        )
+    recorded = records.get(entry.identity)
+    if not isinstance(recorded, dict):
+        raise InstallError(
+            f"The destination discovery record {plan.destination_record} has no entry "
+            f"for {entry.identity}."
+        )
+    # Usable, not merely present: Kanban discovers this job by reading the
+    # backend, the identifier, the definition path and the checkout out of
+    # this entry, so an entry that names any of them wrongly is one the
+    # dashboard can neither find nor control.
+    expected = {
+        **backend.record_entry(entry.identifier, entry.definition_path),
+        "repository": str(entry.checkout),
+    }
+    wrong = {
+        key: recorded.get(key)
+        for key, value in expected.items()
+        if recorded.get(key) != value
+    }
+    if wrong:
+        raise InstallError(
+            f"The destination discovery record {plan.destination_record} does not "
+            f"describe {entry.identity}'s job on this host: {wrong!r} rather than "
+            f"{expected!r}."
+        )
+    # Asked of the move rather than of the source, which by now is gone: a
+    # repository that had runtime state has to have it at the destination, and
+    # one that never had any has nothing to prove.
+    if runtime.outcome != "unstarted" and not _plain_directory(
+        entry.destination_runtime_dir
+    ):
+        raise InstallError(
+            f"{entry.identity}'s runtime state is not a directory at "
+            f"{entry.destination_runtime_dir}."
+        )
+
+
+def _remove_legacy_installation(
+    transition: _Transition, plan: RelocationPlan
+) -> tuple[list[str], list[str]]:
+    """Take the shared installation away, once every repository works without
+    it, and answer what went and what stayed.
+
+    The lock file is never among them. Everything else this installer created
+    is, including the legacy runtime directory once the trees below it have
+    moved — and if anything is still there, it stays and is reported rather
+    than being deleted with the installation it happened to sit inside.
+    """
+    removed: list[str] = []
+    retained = [str(plan.legacy_record) + ".lock"]
+    # Before anything is taken away, and beside the lock that outlives this
+    # directory for the same reason. A controller resolves its managed paths
+    # once, when it starts, and cannot re-derive them; one that is waiting on
+    # this record's lock right now would resume against an installation that
+    # no longer exists and rebuild exactly what this run is about to remove.
+    # This is what it reads instead — under the same lock, so it sees the
+    # installation intact or this, and never a half-dismantled one.
+    marker = plan.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+    existing_marker = _plain_file(marker)
+    previous_marker = marker.read_bytes() if existing_marker else None
+    # Its mode too, on the same terms as the record and the definitions: an
+    # earlier run's marker is a managed entry this one is entitled to rewrite
+    # and not entitled to leave more restrictive than it found it.
+    previous_marker_mode = marker.stat().st_mode & 0o777 if existing_marker else None
+
+    def restore_marker() -> None:
+        if previous_marker is None:
+            if os.path.lexists(marker):
+                marker.unlink()
+            return
+        marker.write_bytes(previous_marker)
+        if previous_marker_mode is not None:
+            marker.chmod(previous_marker_mode)
+
+    transition.register(f"restore {marker}", restore_marker)
+    drain_prs_service.atomic_write_json(
+        marker,
+        {
+            # Through the controller's own constant, not a literal: the reader
+            # is `drain_prs_service.relocation_marker` and a writer that
+            # spelled the field separately could drift into never meeting it.
+            drain_prs_service.RELOCATION_MARKER_DESTINATION: str(plan.install_dir),
+            "record": str(plan.destination_record),
+            "log_root": str(plan.log_root),
+        },
+    )
+    marker.chmod(0o600)
+    retained.append(str(marker))
+    for path in plan.removable:
+        if path.is_symlink():
+            target = os.readlink(path)
+            transition.register(
+                f"restore the link {path}",
+                lambda path=path, target=target: path.symlink_to(target),
+            )
+            path.unlink()
+            removed.append(str(path))
+            continue
+        if _plain_file(path):
+            previous = path.read_bytes()
+            mode = path.stat().st_mode & 0o777
+            def undo(path=path, previous=previous, mode=mode) -> None:
+                path.write_bytes(previous)
+                path.chmod(mode)
+            transition.register(f"restore {path}", undo)
+            path.unlink()
+            removed.append(str(path))
+            continue
+        if path.name == _BYTECODE_CACHE_NAME:
+            # Captured and put back rather than regenerated: an undo that
+            # relied on some later interpreter recreating it would be a
+            # mutation this transition performed and cannot reverse, and a
+            # rollback is not entitled to leave anything it deleted deleted.
+            contents = {
+                child.name: (child.read_bytes(), child.stat().st_mode & 0o777)
+                for child in path.iterdir()
+            }
+            mode = path.stat().st_mode & 0o777
+
+            def undo(path=path, contents=contents, mode=mode) -> None:
+                path.mkdir(mode=mode, exist_ok=True)
+                path.chmod(mode)
+                for name, (payload, child_mode) in contents.items():
+                    child = path / name
+                    child.write_bytes(payload)
+                    child.chmod(child_mode)
+
+            transition.register(f"restore {path}", undo)
+            shutil.rmtree(path)
+            removed.append(str(path))
+            continue
+        # Emptiness is decided before the undo is registered, because an undo
+        # for a removal that never happened must not recreate a directory that
+        # is still there — and the mode is captured with it, so what comes
+        # back is the directory that was taken away rather than a fresh one at
+        # this installer's own default.
+        mode = path.stat().st_mode & 0o777
+        if any(path.iterdir()):
+            retained.append(str(path))
+            continue
+        transition.register(
+            f"recreate {path}", _directory_restorer(path, mode)
+        )
+        path.rmdir()
+        removed.append(str(path))
+    # The log root the trees above came out of, once nothing is left in it. A
+    # root still holding something — an unrecorded repository's logs, a
+    # singleton's own — stays and is reported, because taking it away would be
+    # deleting durable state this run never accounted for.
+    root = plan.legacy_log_root
+    if root.is_dir():
+        mode = root.stat().st_mode & 0o777
+        if any(root.iterdir()):
+            retained.append(str(root))
+        else:
+            transition.register(
+                f"recreate {root}", _directory_restorer(root, mode)
+            )
+            root.rmdir()
+            removed.append(str(root))
+    return removed, retained
+
+
+def relocation_disposition(install_dir: Path) -> str | None:
+    """Why this run relocates nothing, or None when it does.
+
+    Three questions in a fixed order, and the first is the platform's own:
+    whether this host keeps its installation where it installs to. It is
+    asked as the platform question and never inferred from two directories
+    differing, because a macOS host whose XDG variables happen to point
+    elsewhere is still a host nothing may move.
+    """
+    if kanban_config.is_macos():
+        return "this platform installs where its installation already is"
+    if not _same_location(install_dir, kanban_config.default_drainer_install_dir()):
+        return "a custom --install-dir destination installs there and relocates nothing"
+    if _same_location(install_dir, legacy_install_dir()):
+        # An absolute XDG root naming `~/Library/Application Support` makes
+        # this platform's own default the legacy directory itself. Taking over
+        # an installation already at the destination is not this run's, so it
+        # installs in place exactly as it always did.
+        return "this platform's default is the location the installation is already at"
+    if not os.path.lexists(legacy_install_dir() / record_name()):
+        return "there is no installation at the legacy location"
+    return None
+
+
+def relocate(install_dir: Path, sources: dict[str, Path]) -> dict[str, Any]:
+    """Move a pre-XDG `~/Library` installation to this platform's own
+    convention, whole, or leave the host as it was found.
+
+    Exactly as it was found, in the case that matters: every refusal is raised
+    before a lock is taken, so a run that refuses changes nothing at all. A run
+    that got as far as taking a lock — the authoritative plan racing a
+    concurrent writer, or a failure inside the transition — puts back
+    everything it changed except the lock files themselves and the directories
+    that have to exist to contain them, because a lock may never be unlinked
+    while a writer might be queued on its inode. That residue is named in the
+    failure it is reported with.
+
+    The entire transition — from the read that decides which repositories
+    exist through the removal that takes away the controller they name, and on
+    through a rollback that may undo it — is held under both discovery
+    records' locks, because every one of those repositories has installs and
+    starts that write to whichever record discovery resolves, and this run
+    changes which one that is. They are taken only here, where something is
+    actually removed.
+    """
+    disposition = relocation_disposition(install_dir)
+    if disposition is not None:
+        return {"relocated": False, "reason": disposition}
+    # Planned once without either lock, so an ordinary refusal never takes one
+    # — the locks are for the transition that removes something, and a run
+    # that refuses removes nothing, while taking a lock creates a lock file no
+    # rollback may unlink.
+    preflight = plan_relocation(install_dir)
+    transition = _Transition()
+    legacy_dir = legacy_install_dir()
+    destination_record = install_dir / record_name()
+    modes = _captured_modes(legacy_dir, install_dir)
+    try:
+        with drain_prs_service.document_lock(legacy_dir / record_name()):
+            with contextlib.ExitStack() as locks:
+                # A destination record that *already exists* has writers this
+                # lock does not exclude: discovery probes the XDG location
+                # first, so they resolve that record rather than the legacy
+                # one and never block here. Its own lock therefore has to be
+                # held across the read that merges it, even at the cost of
+                # creating that lock file in the one state no writer of that
+                # record ever leaves behind — a record with no lock beside it.
+                if os.path.lexists(destination_record):
+                    locks.enter_context(
+                        drain_prs_service.document_lock(destination_record)
+                    )
+                # Before the authoritative plan, because that plan's own
+                # liveness check is a read, and a drainer starting one instant
+                # after it would be one this run never saw. Held for the whole
+                # transition and the rollback, and taken from the preflight's
+                # repositories because the fence has to precede the plan that
+                # would otherwise name them.
+                fenced = set()
+                for entry in preflight.repositories:
+                    locks.callback(_fence_checkout(entry).close)
+                    fenced.add(entry.checkout)
+                plan = plan_relocation(install_dir)
+                _require_every_checkout_fenced(plan.repositories, frozenset(fenced))
+                # A destination record that does *not* exist has no such
+                # writer: every writer on this host resolves the legacy record
+                # and is blocked above. Its lock is therefore taken here,
+                # after the last refusal and before the write that creates the
+                # record and makes it resolvable — which is what keeps a
+                # refusal from ever creating a lock file. Re-entrant, so the
+                # branch above is not repeated.
+                locks.enter_context(
+                    drain_prs_service.document_lock(plan.destination_record)
+                )
+                try:
+                    result = _apply_relocation(transition, plan, sources)
+                except BaseException as exc:
+                    residue = transition.roll_back() + _restore_modes(modes)
+                    detail = "; ".join(residue)
+                    raise RelocationFailed(
+                        f"Relocating the PR drainer installation from "
+                        f"{plan.legacy_dir} to {plan.install_dir} failed and was "
+                        f"rolled back: {exc} The lock file "
+                        f"{plan.destination_record}.lock and the directories "
+                        "holding it remain, because a lock is never unlinked."
+                        + (
+                            f" The rollback could not complete: {detail}."
+                            if residue
+                            else ""
+                        ),
+                        residue,
+                    ) from exc
+    except BaseException:
+        # Whatever got out — a refusal raised once a lock was already held, or
+        # the rolled-back failure above — leaves both directories at the modes
+        # they were found with. Idempotent, so the rollback having already
+        # done it costs nothing.
+        _restore_modes(modes)
+        raise
+    # From here the destination directory's mode is this run's own: it is the
+    # installation this run just made, and `_ensure_directory` set it to the
+    # private mode every managed directory carries. The legacy directory is
+    # one this run only ever locked, so it goes back as it was found.
+    _restore_modes({path: mode for path, mode in modes.items() if path == legacy_dir})
+    return result
+
+
+def _apply_relocation(
+    transition: _Transition, plan: RelocationPlan, sources: dict[str, Path]
+) -> dict[str, Any]:
+    backend = service_backend()
+    _register_path_restoration(transition)
+    _ensure_directory(transition, plan.install_dir)
+    _write_destination_record(transition, plan)
+    _rebind_managed_paths(plan.install_dir)
+    _install_links(transition, plan.install_dir, sources)
+    _ensure_directory(transition, plan.install_dir / _RUNTIME_DIRECTORY_NAME)
+    _ensure_directory(transition, plan.log_root)
+    moves: list[_Move] = []
+    runtimes: dict[str, _Move] = {}
+    for entry in plan.repositories:
+        runtimes[entry.identity] = _Move(
+            entry.source_runtime_dir, entry.destination_runtime_dir
+        )
+        for move in (
+            runtimes[entry.identity],
+            _Move(entry.source_log_dir, entry.destination_log_dir),
+        ):
+            moves.append(move)
+            _move_tree(transition, move)
+        _rewrite_definition(transition, entry, backend)
+    records = _read_record(plan.destination_record, "destination").get(
+        drain_prs_service.RECORD_REPOSITORIES_KEY
+    ) or {}
+    for entry in plan.repositories:
+        _require_usable_through_destination(
+            plan, entry, runtimes[entry.identity], records, backend
+        )
+    removed, retained = _remove_legacy_installation(transition, plan)
+    reappeared = os.path.lexists(plan.legacy_record)
+    return {
+        "relocated": True,
+        "source": str(plan.legacy_dir),
+        "destination": str(plan.install_dir),
+        "record": str(plan.destination_record),
+        "log_root": str(plan.log_root),
+        "repositories": [entry.report() for entry in plan.repositories],
+        "moved": [
+            {
+                "source": str(move.source),
+                "destination": str(move.destination),
+                "how": move.outcome,
+            }
+            for move in moves
+            if move.outcome != "unstarted"
+        ],
+        "removed": removed,
+        "retained": retained,
+        "legacy_record_reappeared": reappeared,
+        "repair": (
+            "A writer recreated the legacy discovery record during this run. Stop "
+            "every drainer, remove that record, and re-run this installer."
+            if reappeared
+            else "Nothing to repair; the installation is at the destination."
+        ),
+    }
+
+
 def install(
     repo: Path,
     install_dir: Path,
@@ -323,6 +1658,19 @@ def install(
     for destination in destinations.values():
         validate_symlink_destination(destination)
     if dry_run:
+        # Planned rather than performed, and outside the legacy record's lock:
+        # a dry run removes nothing, so it takes no lock, and it still reports
+        # every refusal because the plan is what refuses.
+        disposition = relocation_disposition(install_dir)
+        relocation = (
+            {"relocated": False, "reason": disposition}
+            if disposition is not None
+            else {
+                "relocated": False,
+                "dry_run": True,
+                **plan_relocation(install_dir).report(),
+            }
+        )
         return {
             "installed": False,
             "dry_run": True,
@@ -336,8 +1684,21 @@ def install(
             backend.definition_label(): str(job.definition_path),
             "record": str(drain_prs_service.DISCOVERY_RECORD_PATH),
             "config_path": resolved_config_path,
+            "relocation": relocation,
             "started": False,
         }
+
+    # Before anything is installed at the destination, because a relocation
+    # that cannot complete has to fail the run rather than leave an
+    # installation split across two locations. It installs the same four links
+    # itself when it does run, so that the definitions it rewrites name a
+    # controller that is already there; the idempotent pass below then reports
+    # them unchanged.
+    relocation = relocate(install_dir, sources)
+    if relocation["relocated"]:
+        # Through the destination's record now, which is where this
+        # repository's own `config_path` and identity are read from.
+        job = repository_job(repo)
 
     link_results = {
         key: install_symlink(sources[key], destination)
@@ -384,6 +1745,7 @@ def install(
         "repository": job.identity,
         "label": job.label,
         "install_dir": str(install_dir),
+        "relocation": relocation,
         "links": link_results,
         "config": str(shared_config_path()),
         "migrated_config_keys": migrated_keys,
@@ -406,7 +1768,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--install-dir",
-        default=str(DEFAULT_INSTALL_DIR),
+        default=str(default_install_dir()),
         help="Stable per-user script-link directory.",
     )
     parser.add_argument(
