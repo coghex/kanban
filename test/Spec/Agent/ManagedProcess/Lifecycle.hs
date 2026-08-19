@@ -85,9 +85,11 @@ import Spec.Support.Process
     processIdentity,
     runChattyWorker,
     runningWorkerState,
+    shouldNotHaveSwept,
     waitForWorkerState,
     withManagedShell,
     withNonLeaderShell,
+    withSurvivingGroupLeader,
     workerFixtureSpec
   )
 import System.Directory
@@ -162,25 +164,31 @@ examples = do
           Right identities -> identityForPid identity.processIdentityPid identities `shouldBe` Nothing
 
     it "still reaches a surviving group member after its own leader has already exited and been reaped (issue #16: the review client's tool calls and its own app-server shutdown share this primitive)" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        let markerPath = temporaryRoot </> "child.pid"
-        (_, _, _, leader) <-
-          createProcess
-            (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 & echo $! > " <> markerPath <> "; exit 0"])
-              { create_group = True }
-        managed <- managedProcessFor leader
-        -- The leader exits (and this waitForProcess reaps its handle) well
-        -- before we ever signal it: `getPid`/`getProcessExitCode` on `leader`
-        -- would now report it gone, which is exactly the state that used to
-        -- make the old, handle-driven kill a no-op.
-        timeout 3000000 (waitForProcess leader) `shouldReturn` Just ExitSuccess
-        childPidText <- readFile markerPath
-        let childPid = read (filter (`notElem` (" \n" :: String)) childPidText) :: Int
-        killManagedProcess managed
-        snapshot <- readProcessSnapshot
-        case snapshot of
-          Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
-          Right identities -> identityForPid childPid identities `shouldBe` Nothing
+      -- A second process of the same shape, in a group of its own and
+      -- recorded by nothing here: the group kill below has to reach this
+      -- managed group and no further.
+      withSurvivingGroupLeader $ \bystanderPid ->
+        withTemporaryCacheRoot $ \temporaryRoot -> do
+          let markerPath = temporaryRoot </> "child.pid"
+          (_, _, _, leader) <-
+            createProcess
+              (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 & echo $! > " <> markerPath <> "; exit 0"])
+                { create_group = True }
+          managed <- managedProcessFor leader
+          -- The leader exits (and this waitForProcess reaps its handle) well
+          -- before we ever signal it: `getPid`/`getProcessExitCode` on `leader`
+          -- would now report it gone, which is exactly the state that used to
+          -- make the old, handle-driven kill a no-op.
+          timeout 3000000 (waitForProcess leader) `shouldReturn` Just ExitSuccess
+          childPidText <- readFile markerPath
+          let childPid = read (filter (`notElem` (" \n" :: String)) childPidText) :: Int
+          killManagedProcess managed
+          snapshot <- readProcessSnapshot
+          case snapshot of
+            Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+            Right identities -> do
+              identityForPid childPid identities `shouldBe` Nothing
+              identities `shouldNotHaveSwept` bystanderPid
 
     it "round-trips the durable worker protocol including autosolve parent identity" $ do
       let parent =

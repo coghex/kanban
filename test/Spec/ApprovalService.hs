@@ -40,7 +40,7 @@ import Kanban.UI.Types (AppState (..))
 import Spec.Support.App (testAppState)
 import Spec.Support.Env (withTemporaryCacheRoot)
 import Spec.Support.Expect (requireLeft, requireRight, shouldMention, shouldNotMention)
-import Spec.Support.Process (fakeApprovalController, readRecordedPid)
+import Spec.Support.Process (fakeApprovalController, readRecordedPid, shouldNotHaveSwept, withSurvivingGroupLeader)
 import Spec.Support.Env (withEnvironmentValue)
 import System.Directory (createDirectory)
 import System.Environment (lookupEnv)
@@ -547,35 +547,40 @@ spec = do
         runApprovalCommand 5 boardIdentity controller "status" `shouldReturn` Left "the job is not loaded"
 
     it "leaves no survivor from a wedged controller's process group, and says the transition's outcome is unknown" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        -- Requirement 6, and the same shape the drainer is held to: the
-        -- controller and something it started both ignore TERM, and the
-        -- descendant holds the inherited pipes open, so nothing about the
-        -- invocation ending implies either stopped.
-        let leaderFile = temporaryRoot </> "approval-leader-pid"
-            descendantFile = temporaryRoot </> "approval-descendant-pid"
-        controller <-
-          fakeApprovalController
-            temporaryRoot
-            [ "trap '' TERM",
-              "sh -c \"trap '' TERM; while :; do sleep 1; done\" &",
-              ByteString.pack ("echo $! > " <> descendantFile),
-              ByteString.pack ("echo $$ > " <> leaderFile),
-              "while :; do sleep 1; done"
-            ]
-        outcome <- runApprovalCommand 3 boardIdentity controller "start"
-        -- Taken the instant the invocation returns, so this proves the group
-        -- was already empty when the timeout was reported.
-        snapshot <- readProcessSnapshot >>= requireRight "process snapshot after the approval timeout"
-        leaderPid <- readRecordedPid leaderFile
-        descendantPid <- readRecordedPid descendantFile
-        descendantPid `shouldNotBe` leaderPid
-        identityForPid leaderPid snapshot `shouldBe` Nothing
-        identityForPid descendantPid snapshot `shouldBe` Nothing
-        message <- requireLeft "a wedged controller reported success" outcome
-        message `shouldMention` "issue approval start timed out after 3 seconds"
-        message `shouldMention` "the outcome is unknown"
-        message `shouldNotMention` "still running"
+      -- The bystander is shaped exactly like what the escalation is aimed at
+      -- and belongs to nobody it recorded, so the snapshot below has to show
+      -- the sweep reached this invocation's group and stopped there.
+      withSurvivingGroupLeader $ \bystanderPid ->
+        withTemporaryCacheRoot $ \temporaryRoot -> do
+          -- Requirement 6, and the same shape the drainer is held to: the
+          -- controller and something it started both ignore TERM, and the
+          -- descendant holds the inherited pipes open, so nothing about the
+          -- invocation ending implies either stopped.
+          let leaderFile = temporaryRoot </> "approval-leader-pid"
+              descendantFile = temporaryRoot </> "approval-descendant-pid"
+          controller <-
+            fakeApprovalController
+              temporaryRoot
+              [ "trap '' TERM",
+                "sh -c \"trap '' TERM; while :; do sleep 1; done\" &",
+                ByteString.pack ("echo $! > " <> descendantFile),
+                ByteString.pack ("echo $$ > " <> leaderFile),
+                "while :; do sleep 1; done"
+              ]
+          outcome <- runApprovalCommand 3 boardIdentity controller "start"
+          -- Taken the instant the invocation returns, so this proves the group
+          -- was already empty when the timeout was reported.
+          snapshot <- readProcessSnapshot >>= requireRight "process snapshot after the approval timeout"
+          leaderPid <- readRecordedPid leaderFile
+          descendantPid <- readRecordedPid descendantFile
+          descendantPid `shouldNotBe` leaderPid
+          identityForPid leaderPid snapshot `shouldBe` Nothing
+          identityForPid descendantPid snapshot `shouldBe` Nothing
+          snapshot `shouldNotHaveSwept` bystanderPid
+          message <- requireLeft "a wedged controller reported success" outcome
+          message `shouldMention` "issue approval start timed out after 3 seconds"
+          message `shouldMention` "the outcome is unknown"
+          message `shouldNotMention` "still running"
 
     it "keeps the outcome-unknown wording generic for a timed-out status query" $
       withTemporaryCacheRoot $ \temporaryRoot -> do

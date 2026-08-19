@@ -107,8 +107,10 @@ import Spec.Support.Process
     isOrphaned,
     isTerminal,
     managedProcessFor,
+    shouldNotHaveSwept,
     waitForWorkerState,
-    withManagedShell
+    withManagedShell,
+    withSurvivingGroupLeader
   )
 import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist)
 import System.Environment (lookupEnv)
@@ -771,93 +773,99 @@ examples = do
               Right finalState -> finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
 
     it "captures a provider's live descendants into the census before killing it, even when identity recording never ran -- an escaped-descendant regression" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        now <- getCurrentTime
-        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            spec = deadlineFixtureSpec repository (WorkerId "solve-825-escaped-descendant-capture") 825 now 60
-            pidFile = temporaryRoot </> "detached-child.pid"
-            -- Simulates the exact precondition the bug depends on:
-            -- 'recordProviderIdentity' silently swallows a snapshot failure
-            -- ('Left _ -> pure ()') and is never retried, permanently
-            -- leaving 'workerStateProviderIdentity' unset -- which starves
-            -- 'refreshProcessCensus's own descendant walk of a root, so
-            -- 'workerStateKnownProcesses' never discovers anything either,
-            -- for this worker's entire remaining lifetime.
-            fixtureState =
-              WorkerState
-                { workerStateId = spec.workerId,
-                  workerStateStatus = WorkerStarting,
-                  workerStateWorkerPid = 0,
-                  workerStateWorkerIdentity = Nothing,
-                  workerStateProviderPid = Nothing,
-                  workerStateProviderIdentity = Nothing,
-                  workerStateSessionId = Nothing,
-                  workerStateLogPath = Nothing,
-                  workerStateHeartbeatAt = now,
-                  workerStateLastActivity = "",
-                  workerStateKnownProcesses = []
-                }
-        withManagedShell (detachedEscapedDescendantCommand pidFile) $ \providerProcess -> do
-          managed <- managedProcessFor providerProcess
-          -- Independent of 'killVerifiedGroupWith'/'terminateRecordedStateProcessesWith'
-          -- (the very operations under test), so a failing assertion above
-          -- still cannot leak the detached child: 'withManagedShell's own
-          -- 'stop' bracket only ever reaches the *provider's* group, not
-          -- necessarily this deliberately detached one.
-          let cleanupAnyDescendant =
-                void $
-                  (try @SomeException $ do
-                     contents <- readFile pidFile
-                     case reads contents :: [(Int, String)] of
-                       [(childPid, _)] -> signalProcessGroup sigKILL (fromIntegral childPid)
-                       _ -> pure ())
-          ( do
-              stateLock <- newMVar fixtureState
-              providerSlotRef <- newIORef (ProviderSlotRegistered managed)
-              -- Poll for the detached child to actually appear as the
-              -- provider's descendant in a real process snapshot, rather
-              -- than guessing a fixed delay: under load, a fixed sleep can
-              -- fire before the fork/exec has settled, making this flaky
-              -- for reasons unrelated to the fix under test.
-              maybeProviderPid <- managedProcessPid managed
-              providerPid <- case maybeProviderPid of
-                Just pid -> pure pid
-                Nothing -> expectationFailure "provider process had no observable pid" >> fail "unreachable"
-              let waitForDetachedChild attempts = do
-                    snapshotResult <- readProcessSnapshot
-                    case snapshotResult of
-                      Right snapshot | not (null (descendantProcesses [fromIntegral providerPid] snapshot)) -> pure ()
-                      _
-                        | attempts <= (0 :: Int) -> expectationFailure "detached descendant never appeared in a process snapshot"
-                        | otherwise -> threadDelay 100000 >> waitForDetachedChild (attempts - 1)
-              waitForDetachedChild 50
-              providerOk <- terminateProviderRefWith readProcessSnapshot stateLock providerSlotRef
-              providerOk `shouldBe` True
-              -- The real assertion: 'workerStateKnownProcesses' now holds
-              -- the detached child even though 'workerStateProviderIdentity'
-              -- was never set and nothing else ever recorded it --
-              -- 'terminateProviderRefWith' discovered and captured it purely
-              -- from the live handle's own pid and a snapshot it took
-              -- itself. Without that capture this stays empty, exactly the
-              -- gap that let an escaped descendant survive a "verified"
-              -- deadline finalization untracked.
-              capturedState <- readMVar stateLock
-              capturedState.workerStateKnownProcesses `shouldSatisfy` (not . null)
-              -- The second, independent pass 'watchdogLoop' always runs
-              -- right after this one is what actually finishes the job: it
-              -- finds the descendant this call just recorded (whether or
-              -- not the provider's own group-kill already reached it) and
-              -- kills/verifies it for real, closing the gap end to end.
-              recordedOk <- terminateRecordedStateProcessesWith readProcessSnapshot capturedState
-              recordedOk `shouldBe` True
-              finalSnapshot <- readProcessSnapshot
-              case finalSnapshot of
-                Left message -> expectationFailure (Data.Text.unpack message)
-                Right snapshot ->
-                  [p | p <- capturedState.workerStateKnownProcesses, isJust (identityForPid p.processIdentityPid snapshot)]
-                    `shouldBe` []
-            )
-            `finally` cleanupAnyDescendant
+      -- Alive for the whole census and both sweeps, in a group of its own and
+      -- recorded by nothing here: what the census discovers and what the
+      -- recorded-identity sweep then kills both have to stop at this
+      -- provider's own tree.
+      withSurvivingGroupLeader $ \bystanderPid ->
+        withTemporaryCacheRoot $ \temporaryRoot -> do
+          now <- getCurrentTime
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              spec = deadlineFixtureSpec repository (WorkerId "solve-825-escaped-descendant-capture") 825 now 60
+              pidFile = temporaryRoot </> "detached-child.pid"
+              -- Simulates the exact precondition the bug depends on:
+              -- 'recordProviderIdentity' silently swallows a snapshot failure
+              -- ('Left _ -> pure ()') and is never retried, permanently
+              -- leaving 'workerStateProviderIdentity' unset -- which starves
+              -- 'refreshProcessCensus's own descendant walk of a root, so
+              -- 'workerStateKnownProcesses' never discovers anything either,
+              -- for this worker's entire remaining lifetime.
+              fixtureState =
+                WorkerState
+                  { workerStateId = spec.workerId,
+                    workerStateStatus = WorkerStarting,
+                    workerStateWorkerPid = 0,
+                    workerStateWorkerIdentity = Nothing,
+                    workerStateProviderPid = Nothing,
+                    workerStateProviderIdentity = Nothing,
+                    workerStateSessionId = Nothing,
+                    workerStateLogPath = Nothing,
+                    workerStateHeartbeatAt = now,
+                    workerStateLastActivity = "",
+                    workerStateKnownProcesses = []
+                  }
+          withManagedShell (detachedEscapedDescendantCommand pidFile) $ \providerProcess -> do
+            managed <- managedProcessFor providerProcess
+            -- Independent of 'killVerifiedGroupWith'/'terminateRecordedStateProcessesWith'
+            -- (the very operations under test), so a failing assertion above
+            -- still cannot leak the detached child: 'withManagedShell's own
+            -- 'stop' bracket only ever reaches the *provider's* group, not
+            -- necessarily this deliberately detached one.
+            let cleanupAnyDescendant =
+                  void $
+                    (try @SomeException $ do
+                       contents <- readFile pidFile
+                       case reads contents :: [(Int, String)] of
+                         [(childPid, _)] -> signalProcessGroup sigKILL (fromIntegral childPid)
+                         _ -> pure ())
+            ( do
+                stateLock <- newMVar fixtureState
+                providerSlotRef <- newIORef (ProviderSlotRegistered managed)
+                -- Poll for the detached child to actually appear as the
+                -- provider's descendant in a real process snapshot, rather
+                -- than guessing a fixed delay: under load, a fixed sleep can
+                -- fire before the fork/exec has settled, making this flaky
+                -- for reasons unrelated to the fix under test.
+                maybeProviderPid <- managedProcessPid managed
+                providerPid <- case maybeProviderPid of
+                  Just pid -> pure pid
+                  Nothing -> expectationFailure "provider process had no observable pid" >> fail "unreachable"
+                let waitForDetachedChild attempts = do
+                      snapshotResult <- readProcessSnapshot
+                      case snapshotResult of
+                        Right snapshot | not (null (descendantProcesses [fromIntegral providerPid] snapshot)) -> pure ()
+                        _
+                          | attempts <= (0 :: Int) -> expectationFailure "detached descendant never appeared in a process snapshot"
+                          | otherwise -> threadDelay 100000 >> waitForDetachedChild (attempts - 1)
+                waitForDetachedChild 50
+                providerOk <- terminateProviderRefWith readProcessSnapshot stateLock providerSlotRef
+                providerOk `shouldBe` True
+                -- The real assertion: 'workerStateKnownProcesses' now holds
+                -- the detached child even though 'workerStateProviderIdentity'
+                -- was never set and nothing else ever recorded it --
+                -- 'terminateProviderRefWith' discovered and captured it purely
+                -- from the live handle's own pid and a snapshot it took
+                -- itself. Without that capture this stays empty, exactly the
+                -- gap that let an escaped descendant survive a "verified"
+                -- deadline finalization untracked.
+                capturedState <- readMVar stateLock
+                capturedState.workerStateKnownProcesses `shouldSatisfy` (not . null)
+                -- The second, independent pass 'watchdogLoop' always runs
+                -- right after this one is what actually finishes the job: it
+                -- finds the descendant this call just recorded (whether or
+                -- not the provider's own group-kill already reached it) and
+                -- kills/verifies it for real, closing the gap end to end.
+                recordedOk <- terminateRecordedStateProcessesWith readProcessSnapshot capturedState
+                recordedOk `shouldBe` True
+                finalSnapshot <- readProcessSnapshot
+                case finalSnapshot of
+                  Left message -> expectationFailure (Data.Text.unpack message)
+                  Right snapshot -> do
+                    [p | p <- capturedState.workerStateKnownProcesses, isJust (identityForPid p.processIdentityPid snapshot)]
+                      `shouldBe` []
+                    snapshot `shouldNotHaveSwept` bystanderPid
+              )
+              `finally` cleanupAnyDescendant
 
     it "kills a descendant discovered only by a late registration, after the deadline already gave up on an empty spawning census" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
