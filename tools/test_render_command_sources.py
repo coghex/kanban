@@ -17,11 +17,13 @@ things are under test and they fail for different reasons:
   temporary tree, following this suite's convention, so it reports its own
   cause rather than failing again for whatever the live tree is missing.
 
-The subject today is a fixture, deliberately. `tools/plugin_bundle_gate.py`
-takes shippedness from location, so a source rendered into either bundle
-directory would become an invokable command; VEND-0 vendors none, and
-`FixtureIsNotShippedTests` holds both shipped sets to the exact fifteen and
-fourteen names they had before this slice.
+The mechanism's own subject is a fixture, deliberately.
+`tools/plugin_bundle_gate.py` takes shippedness from location, so a source
+rendered into either bundle directory becomes an invokable command; VEND-0
+vendored none, and `FixtureIsNotShippedTests` still holds `fixture-command` to
+that. Since VEND-1 (issue #393) the registry also holds `triage`, which does
+render into both bundles, so the same class pins the shipped sets at sixteen
+and fifteen and pins which registered source belongs to which kind.
 """
 
 from __future__ import annotations
@@ -40,14 +42,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_COMMANDS_PREFIX = "claude-plugin/plugins/kanban/commands"
 CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 
-# The shipped sets as they stood at the comparison base, from the canonical
-# review's correction: Claude's fifteen names, and Codex's the same set minus
+# The shipped sets: Claude's sixteen names, and Codex's the same set minus
 # Claude-only `draft-issues`. Pinned as counts and as the one documented
 # difference rather than as a third copy of the name list, which
 # tools/test_claude_plugin.py and tools/test_codex_plugin.py already assert.
-SHIPPED_CLAUDE_COUNT = 15
-SHIPPED_CODEX_COUNT = 14
+# Both grew by one in VEND-1, which added the first source that ships.
+SHIPPED_CLAUDE_COUNT = 16
+SHIPPED_CODEX_COUNT = 15
 CLAUDE_ONLY_WORKFLOW = "draft-issues"
+
+# The registered sources that render into the two bundles rather than under
+# tools/. Stated here so the fixture's unshippedness stays an assertion about
+# the fixture, not a blanket rule the first vendored workflow had to relax.
+SHIPPING_SOURCE_NAMES = {"triage"}
 
 FIXTURE_SOURCE = "tools/command_sources/fixture-command.md"
 FIXTURE_CLAUDE_OUTPUT = "tools/command_render_fixture/claude/commands/fixture-command.md"
@@ -330,16 +337,32 @@ class StaleArtifactDetectionTests(unittest.TestCase):
 
 
 class FixtureIsNotShippedTests(unittest.TestCase):
-    """Requirements 4 and 5: nothing this slice adds is invokable."""
+    """VEND-0's requirements 4 and 5, held against a registry that now also
+    carries a shipping entry. The fixture's own unshippedness is what those
+    requirements bought and it is asserted directly; a production source
+    rendering into both bundles is the mechanism working, not a violation."""
 
-    def test_no_registered_source_renders_into_either_bundle(self):
-        for entry in renderer.COMMAND_SOURCES:
-            for brand, path in renderer.output_paths(entry).items():
-                self.assertFalse(
-                    path.startswith((CLAUDE_COMMANDS_PREFIX, CODEX_SKILLS_PREFIX)),
-                    f"{entry.name} renders {brand} into a shipped bundle directory "
-                    f"({path}); VEND-0 vendors no command",
-                )
+    def test_the_fixture_renders_into_neither_bundle(self):
+        entry = {source.name: source for source in renderer.COMMAND_SOURCES}[
+            "fixture-command"
+        ]
+        for brand, path in renderer.output_paths(entry).items():
+            self.assertFalse(
+                path.startswith((CLAUDE_COMMANDS_PREFIX, CODEX_SKILLS_PREFIX)),
+                f"fixture-command renders {brand} into a shipped bundle "
+                f"directory ({path}); it must stay invokable by neither provider",
+            )
+
+    def test_a_production_source_renders_into_both_bundles(self):
+        # The registry's two kinds differ by output directory alone, so the
+        # shipping kind is pinned as well as the fixture: an entry that
+        # rendered a vendored workflow outside both bundles would ship
+        # nothing while every other assertion here still passed.
+        for name in SHIPPING_SOURCE_NAMES:
+            entry = {source.name: source for source in renderer.COMMAND_SOURCES}[name]
+            paths = renderer.output_paths(entry)
+            self.assertTrue(paths["claude"].startswith(CLAUDE_COMMANDS_PREFIX), paths)
+            self.assertTrue(paths["codex"].startswith(CODEX_SKILLS_PREFIX), paths)
 
     def test_the_fixture_renders_to_the_two_paths_this_slice_declares(self):
         entry = {source.name: source for source in renderer.COMMAND_SOURCES}[
@@ -353,7 +376,7 @@ class FixtureIsNotShippedTests(unittest.TestCase):
         for path in (FIXTURE_CLAUDE_OUTPUT, FIXTURE_CODEX_OUTPUT):
             self.assertTrue((REPO_ROOT / path).is_file(), f"missing {path}")
 
-    def test_the_shipped_sets_are_the_ones_this_slice_inherited(self):
+    def test_the_shipped_sets_are_the_ones_this_slice_declares(self):
         claude = plugin_bundle_gate.tracked_command_names(
             REPO_ROOT, CLAUDE_COMMANDS_PREFIX
         )
@@ -364,8 +387,9 @@ class FixtureIsNotShippedTests(unittest.TestCase):
         # cannot agree by coincidence while the membership drifted.
         self.assertEqual(codex, claude - {CLAUDE_ONLY_WORKFLOW})
         for entry in renderer.COMMAND_SOURCES:
-            self.assertNotIn(entry.name, claude)
-            self.assertNotIn(entry.name, codex)
+            shipped = entry.name in SHIPPING_SOURCE_NAMES
+            self.assertEqual(entry.name in claude, shipped, entry.name)
+            self.assertEqual(entry.name in codex, shipped, entry.name)
 
 
 class LayoutAndFrontmatterTests(unittest.TestCase):

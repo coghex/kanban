@@ -302,12 +302,16 @@ class ReleaseWorkflowShapeTests(unittest.TestCase):
         self.assertIn("github.", group)
 
     def test_the_build_job_reuses_ci_s_toolchain_and_gates(self):
+        # The versions themselves, and that this job installs, caches, and
+        # verifies them exactly as ci.yml's Haskell job does, are held
+        # between the two workflows by tools/test_toolchain_parity.py --
+        # a comparison neither workflow read alone can make.
         body = "\n".join(job_lines(BUILD_JOB))
         for fragment in (
             "runs-on: ubuntu-latest",
             "fetch-depth: 0",
-            'ghc-version: "9.12.2"',
-            'cabal-version: "3.16.1.0"',
+            "ghc-version: ${{ env.GHC_VERSION }}",
+            "cabal-version: ${{ env.CABAL_VERSION }}",
             "run: cabal check",
             "run: cabal update",
             "run: cabal build all",
