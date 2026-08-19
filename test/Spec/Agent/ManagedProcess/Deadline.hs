@@ -1,5 +1,40 @@
 -- | The second half of the @managed agent processes@ group: the deadline
--- watchdog.
+-- watchdog. Selectable on its own as the nested @deadline watchdog@ group
+-- (see "Spec.Agent.ManagedProcess") because these are the examples a
+-- load-sensitivity check has to be able to run repeatedly by themselves.
+--
+-- Every example here decides something about the ordering between the
+-- watchdog and something else -- a provider exiting, a spawn claim landing,
+-- an orphan poll observing an empty census -- and none of them may decide it
+-- on a margin ambient load can close. Three rules keep that true, and a new
+-- fixture is expected to follow them:
+--
+-- * Where the ordering /is/ the property under test, it is established
+--   through something observable: the state file reaching a status only one
+--   side can have written ('deadlineAdjudicated', 'isOrphaned',
+--   'isTerminal'), the census having actually recorded a pid ('censusHolds'),
+--   an injected snapshot reporting that it was entered, or a provider's own
+--   exit status. Never a @sleep@ or a 'threadDelay' picked to land inside a
+--   window.
+--
+-- * Where a fixture shell has to outlive or predate something, the example
+--   decides when it ends -- 'sentinelProviderCommand' and 'releaseSentinel'
+--   -- rather than a duration guessing when that will be.
+--
+-- * Where a bound genuinely still has to be raced (the supervisor has to
+--   start up and register its provider before its own deadline fires, and
+--   nothing can observe that from outside), the bound is
+--   'deadlineWindowSeconds' rather than one second, and the example waits
+--   past the deadline by measuring the clock ('waitUntilPastDeadline')
+--   instead of sleeping for a guess.
+--
+-- The examples whose bound is a bare literal are the ones where no such race
+-- exists at all: an already-overdue @workerCreatedAt@ (the deadline is
+-- already an hour behind, so nothing can beat it), a task that hangs until
+-- the deadline is the only thing that can end it, a provider that never
+-- exits on its own, or a bound so long (@solve-825@,
+-- @solve-814-supervisor-failure@) that the watchdog is deliberately kept out
+-- of the example entirely.
 module Spec.Agent.ManagedProcess.Deadline (examples) where
 
 import Control.Concurrent
@@ -9,10 +44,11 @@ import Control.Concurrent
     putMVar,
     readMVar,
     takeMVar,
-    threadDelay
+    threadDelay,
+    tryPutMVar
   )
 import Control.Exception (SomeException, finally, throwIO, try, uninterruptibleMask_)
-import Control.Monad (void, when)
+import Control.Monad (unless, void, when)
 import Data.Aeson (eitherDecode, encode)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
@@ -20,7 +56,7 @@ import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (find, findIndex, findIndices)
 import Data.Maybe (isJust)
 import qualified Data.Text
-import Data.Time (addUTCTime, getCurrentTime)
+import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import Kanban.Domain
 import Kanban.Process
   ( ProcessIdentity (..),
@@ -71,7 +107,7 @@ import Spec.Support.Process
     waitForWorkerState,
     withManagedShell
   )
-import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist)
+import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -173,9 +209,16 @@ examples = do
         -- stops at the terminal envelope, so a summary written after it —
         -- or lost with the cancelled thread — is a suppressed count nobody
         -- ever sees.
+        --
+        -- The bound is 'deadlineWindowSeconds' rather than one second
+        -- because the sample notices this counts have to be admitted before
+        -- the watchdog's seal, and the task thread's first instructions are
+        -- exactly what a loaded machine delays: nothing here observes that
+        -- burst finishing, so the bound it runs inside is widened until
+        -- ambient load cannot close it.
         now <- getCurrentTime
         let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            spec = deadlineFixtureSpec repository (WorkerId "solve-813-deadline-aggregate") 813 now 1
+            spec = deadlineFixtureSpec repository (WorkerId "solve-813-deadline-aggregate") 813 now deadlineWindowSeconds
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-813-deadline-aggregate.spec.json"
             statePath = workerRoot </> "solve-813-deadline-aggregate.state.json"
@@ -221,9 +264,13 @@ examples = do
         -- after the flush and emit fresh notices after the final summary —
         -- and after the terminal envelope, where replay stops — while the
         -- occurrences those suppressed died counted but never reported.
+        --
+        -- Same widened bound, for the same reason as the aggregate example
+        -- above: the drain runs until it is killed either way, but its first
+        -- pass still has to admit its samples before the seal.
         now <- getCurrentTime
         let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            spec = deadlineFixtureSpec repository (WorkerId "solve-815-deadline-drain") 815 now 1
+            spec = deadlineFixtureSpec repository (WorkerId "solve-815-deadline-drain") 815 now deadlineWindowSeconds
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-815-deadline-drain.spec.json"
             statePath = workerRoot </> "solve-815-deadline-drain.state.json"
@@ -376,36 +423,66 @@ examples = do
             leaseReleased `shouldBe` False
 
     it "lets an in-flight completion finish instead of being cut off by a deadline that fires while it is running" $
-      withTemporaryCacheRoot $ \temporaryRoot ->
-        withManagedShell "sleep 0.5" $ \providerProcess -> do
-          now <- getCurrentTime
-          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-              spec = deadlineFixtureSpec repository (WorkerId "solve-815-completion-boundary") 815 now 1
-              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
-              specPath = workerRoot </> "solve-815-completion-boundary.spec.json"
-              statePath = workerRoot </> "solve-815-completion-boundary.state.json"
-          createDirectory repository.repositoryRoot
-          createDirectoryIfMissing True workerRoot
-          LazyByteString.writeFile specPath (encode spec)
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = deadlineFixtureSpec repository (WorkerId "solve-815-completion-boundary") 815 now deadlineWindowSeconds
+            deadline = fixtureDeadline spec
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-815-completion-boundary.spec.json"
+            statePath = workerRoot </> "solve-815-completion-boundary.state.json"
+            sentinel = temporaryRoot </> "completion-boundary.release"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        withManagedShell (sentinelProviderCommand sentinel) $ \providerProcess ->
           withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
             descriptors <- discoverWorkerHistory repository
             case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
               Nothing -> expectationFailure "worker fixture was not discoverable"
               Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
             managed <- managedProcessFor providerProcess
-            -- A provider registered here so the deadline-firing completion's
-            -- own verification below has something to actually wait on: an
-            -- empty census would resolve immediately and never overlap the
-            -- deadline. It exits on its own well before the slow snapshot
-            -- resolves, so this always lands on the real completion's
-            -- 'WorkerFinished' rather than an orphan-pending detour.
-            let completeThenSlow _spec _aggregator rememberProvider emit = do
+            -- A provider is registered here so the completion's own
+            -- verification has something to actually wait on: an empty
+            -- census resolves immediately and would never overlap the
+            -- deadline at all.
+            --
+            -- Every step of the ordering this asserts is established by a
+            -- signal rather than by a duration. The snapshot the completion
+            -- verifies against reports that it has been entered -- which can
+            -- only happen after 'complete' won 'claimCompletion', and
+            -- 'complete' only claims while the wall clock is still short of
+            -- the deadline, so reaching this point *is* the proof that the
+            -- completion started in time -- and then blocks until this
+            -- example releases it. Nothing decides the outcome on a race
+            -- between a provider's 'sleep' and a snapshot's delay.
+            censusEntered <- newEmptyMVar
+            censusRelease <- newEmptyMVar
+            let completeThenVerify _spec _aggregator rememberProvider emit = do
                   rememberProvider managed
                   emit (WorkerFinished SolveCompleted)
-                slowSnapshot = threadDelay 2000000 >> readProcessSnapshot
+                gatedSnapshot = do
+                  void (tryPutMVar censusEntered ())
+                  readMVar censusRelease
+                  readProcessSnapshot
             finished <- newEmptyMVar
-            void . forkIO $ runWorkerWithTask slowSnapshot completeThenSlow specPath >>= putMVar finished
-            timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            void . forkIO $ runWorkerWithTask gatedSnapshot completeThenVerify specPath >>= putMVar finished
+            entered <- timeout 30000000 (takeMVar censusEntered)
+            void (requireJust "the completion never reached its own census verification" entered)
+            -- The provider exits on its own, and its exit status proves it:
+            -- a watchdog termination arrives as a signal, never as
+            -- 'ExitSuccess'. This happens while the completion is still in
+            -- flight, so what the verification below finds gone went on its
+            -- own rather than being cut off.
+            releaseSentinel sentinel
+            waitForProcess providerProcess `shouldReturn` ExitSuccess
+            -- Measured, not guessed: the deadline is genuinely behind us
+            -- before the in-flight completion is allowed to resolve, so the
+            -- watchdog's own identically-computed delay has provably elapsed
+            -- while that completion was still running.
+            waitUntilPastDeadline deadline
+            putMVar censusRelease ()
+            timeout 30000000 (takeMVar finished) `shouldReturn` Just (Right ())
             terminalState <- waitForWorkerState statePath isTerminal 10
             terminalState.workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
 
@@ -557,7 +634,7 @@ examples = do
         withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \providerProcess -> do
           now <- getCurrentTime
           let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-              spec = deadlineFixtureSpec repository (WorkerId "solve-821-spawn-registration-race") 821 now 1
+              spec = deadlineFixtureSpec repository (WorkerId "solve-821-spawn-registration-race") 821 now deadlineWindowSeconds
               workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
               specPath = workerRoot </> "solve-821-spawn-registration-race.spec.json"
               statePath = workerRoot </> "solve-821-spawn-registration-race.state.json"
@@ -575,15 +652,25 @@ examples = do
             -- Reproduces the exact narrow window 'runSolve'/'runPullRequestFlow's
             -- own masked spawn-to-registration block leaves open, without
             -- depending on how fast a real 'createProcess' happens to run:
-            -- 'WorkerProviderSpawning True' marks the spawn as started, then
-            -- this masked delay holds 'rememberProvider' back for 2 seconds
-            -- — well past the 1-second deadline — so the watchdog's check
-            -- deterministically lands while the provider slot is still
-            -- 'ProviderSlotSpawning' (not yet registered) and a real, live
-            -- process is already running unrecorded.
+            -- 'WorkerProviderSpawning True' marks the spawn as started, and
+            -- 'rememberProvider' is then held back until the watchdog has
+            -- provably already consulted the provider slot, so its check
+            -- lands while that slot is still 'ProviderSlotSpawning' (not yet
+            -- registered) and a real, live process is already running
+            -- unrecorded.
+            --
+            -- What holds it back is the deadline's own orphan envelope, not
+            -- a delay chosen to outlast the bound. 'watchdogLoop' writes
+            -- that envelope from 'completeBody', which it reaches only after
+            -- 'terminateProviderRefWith' has already read the slot, and it
+            -- cancels this thread only afterwards -- so observing the
+            -- envelope here is an observation of the ordering itself. A
+            -- two-second masked delay merely beating a one-second bound
+            -- assumed the same ordering instead of establishing it, and
+            -- ambient load could reorder what it assumed.
             let spawningThenRegister _spec _aggregator rememberProvider emit = uninterruptibleMask_ $ do
                   emit (WorkerProviderSpawning True)
-                  threadDelay 2000000
+                  _ <- waitForWorkerState statePath deadlineAdjudicated 300
                   rememberProvider managed
             finished <- newEmptyMVar
             void . forkIO $ runWorkerWithTask readProcessSnapshot spawningThenRegister specPath >>= putMVar finished
@@ -748,7 +835,7 @@ examples = do
       withTemporaryCacheRoot $ \temporaryRoot -> do
         now <- getCurrentTime
         let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            spec = deadlineFixtureSpec repository (WorkerId "solve-826-late-registration-descendant") 826 now 1
+            spec = deadlineFixtureSpec repository (WorkerId "solve-826-late-registration-descendant") 826 now deadlineWindowSeconds
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-826-late-registration-descendant.spec.json"
             statePath = workerRoot </> "solve-826-late-registration-descendant.state.json"
@@ -772,15 +859,18 @@ examples = do
                          [(childPid, _)] -> signalProcessGroup sigKILL (fromIntegral childPid)
                          _ -> pure ())
             -- Mirrors 'spawningThenRegister' above (the deadline fires while
-            -- the slot is still 'ProviderSlotSpawning'), but this provider
-            -- has a real descendant in its own process group -- an
-            -- integration check that 'rememberProvider's stopped path
-            -- (now 'terminateProviderRefWith' rather than a bare
-            -- 'killManagedProcess') stays correctly wired end to end and
-            -- still confirms the descendant gone before the lease releases.
+            -- the slot is still 'ProviderSlotSpawning'), including how that
+            -- ordering is established -- by observing the deadline's own
+            -- orphan envelope rather than by outlasting the bound with a
+            -- fixed delay -- but this provider has a real descendant in its
+            -- own process group: an integration check that
+            -- 'rememberProvider's stopped path (now 'terminateProviderRefWith'
+            -- rather than a bare 'killManagedProcess') stays correctly wired
+            -- end to end and still confirms the descendant gone before the
+            -- lease releases.
             let lateRegistrationWithDescendant _spec _aggregator rememberProvider emit = uninterruptibleMask_ $ do
                   emit (WorkerProviderSpawning True)
-                  threadDelay 2000000
+                  _ <- waitForWorkerState statePath deadlineAdjudicated 300
                   rememberProvider managed
             ( do
                 finished <- newEmptyMVar
@@ -815,30 +905,47 @@ examples = do
             statePath = workerRoot </> "solve-820-orphan-then-deadline.state.json"
             eventPath = workerRoot </> "solve-820-orphan-then-deadline.events.jsonl"
             leasePath = workerRoot </> "issue-820.lease"
+            childPidFile = temporaryRoot </> "orphan-then-deadline-child.pid"
+            sentinel = temporaryRoot </> "orphan-then-deadline.release"
         createDirectory repositoryRoot
         createDirectory binaryRoot
         createDirectoryIfMissing True workerRoot
-        -- The provider itself exits normally almost immediately, backgrounding
-        -- a TERM-resistant child first: the normal completion claims
-        -- completedRef and, finding that child still alive, reports
-        -- WorkerOrphansDetected SolveCompleted rather than WorkerFinished. The
-        -- five-second deadline then fires while that orphan-pending state is
-        -- still unresolved.
+        -- The provider itself exits normally, backgrounding a TERM-resistant
+        -- child first: the normal completion claims completedRef and,
+        -- finding that child still alive, reports WorkerOrphansDetected
+        -- SolveCompleted rather than WorkerFinished. The five-second
+        -- deadline then fires while that orphan-pending state is still
+        -- unresolved.
+        --
+        -- This fixture used to have a genuinely two-sided window, and the
+        -- lower side is what a fixed tail could not hold safely. The child
+        -- has to be discovered by descent while this script is still its
+        -- live parent -- once the script exits and the child is reparented,
+        -- no fresh census can find it that way -- and the only thing that
+        -- performs that discovery on its own is 'processCensusLoop', whose
+        -- period is a real constant ('workerCensusIntervalMicros', 250ms),
+        -- not an arbitrary choice. A 500ms tail therefore staked the whole
+        -- example on two census periods elapsing before a shell exited,
+        -- which ambient load can reorder. The tail is now released by the
+        -- example itself, once it has watched the census actually record
+        -- the child's pid, so the lower bound is an observation and the
+        -- 250ms period no longer has to be raced at all.
+        --
+        -- The upper side is unchanged and still holds: the sequence the
+        -- five-second bound now races -- one census discovery, this
+        -- example's own poll of it, and the shell's exit -- is the same
+        -- fraction of a second the old tail was, and every step of it is
+        -- observed rather than assumed, so a slow step delays the release
+        -- instead of skipping it.
         ByteString.writeFile
           fakeCodex
           ( ByteString.unlines
               [ "#!/bin/sh",
                 "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
+                "printf '%s\\n' \"$!\" > " <> ByteString.pack (show childPidFile),
                 "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"orphan-then-deadline-session\"}'",
                 "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created PR #999\"}}'",
-                -- Long enough that the periodic census loop (every 250ms)
-                -- captures the backgrounded child at least once while this
-                -- script is still its live parent -- once this script exits
-                -- and the child gets reparented, a fresh census can no
-                -- longer discover it by descent -- but short enough that
-                -- the normal completion below still lands well before the
-                -- five-second deadline fires.
-                "sleep 0.5"
+                ByteString.pack (sentinelProviderCommand sentinel)
               ]
           )
         setFileMode fakeCodex 0o700
@@ -852,25 +959,21 @@ examples = do
               Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
             finished <- newEmptyMVar
             void . forkIO $ runWorker specPath >>= putMVar finished
+            -- The census has genuinely discovered the backgrounded child by
+            -- descent, while the script is still its live parent. Only then
+            -- is the script released, so its exit can never outrun the
+            -- discovery this example depends on.
+            childPid <- waitForRecordedPid childPidFile 300
+            void (waitForWorkerState statePath (censusHolds childPid) 300)
+            releaseSentinel sentinel
             orphanState <- waitForWorkerState statePath isOrphaned 80
             orphanState.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
             -- The five-second deadline fires next, while the survivor is
             -- still alive and the worker is still orphan-pending on it: it
             -- must take over the pending outcome even though it lost
             -- completedRef to the normal completion above.
-            deadlineTookOver <-
-              waitForWorkerState
-                statePath
-                ( \state -> case state.workerStateStatus of
-                    WorkerOrphaned (SolveFailed message) -> message == workerDeadlineReason
-                    WorkerTerminal (SolveFailed message) -> message == workerDeadlineReason
-                    _ -> False
-                )
-                80
-            deadlineTookOver.workerStateStatus `shouldSatisfy` \status -> case status of
-              WorkerOrphaned (SolveFailed message) -> message == workerDeadlineReason
-              WorkerTerminal (SolveFailed message) -> message == workerDeadlineReason
-              _ -> False
+            deadlineTookOver <- waitForWorkerState statePath deadlineAdjudicated 80
+            deadlineTookOver `shouldSatisfy` deadlineAdjudicated
             timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
             terminalState <- waitForWorkerState statePath isTerminal 30
             terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
@@ -882,18 +985,21 @@ examples = do
             eventBytes `shouldSatisfy` ByteString.isInfixOf "\"SolveCompleted\""
 
     it "does not finalize an orphan-pending normal completion on its own stale outcome once the deadline has passed" $
-      withTemporaryCacheRoot $ \temporaryRoot ->
-        withManagedShell "sleep 0.95" $ \providerProcess -> do
-          now <- getCurrentTime
-          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-              spec = deadlineFixtureSpec repository (WorkerId "solve-822-orphan-poll-race") 822 now 1
-              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
-              specPath = workerRoot </> "solve-822-orphan-poll-race.spec.json"
-              statePath = workerRoot </> "solve-822-orphan-poll-race.state.json"
-              leasePath = workerRoot </> "issue-822.lease"
-          createDirectory repository.repositoryRoot
-          createDirectoryIfMissing True workerRoot
-          LazyByteString.writeFile specPath (encode spec)
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = deadlineFixtureSpec repository (WorkerId "solve-822-orphan-poll-race") 822 now deadlineWindowSeconds
+            deadline = fixtureDeadline spec
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-822-orphan-poll-race.spec.json"
+            statePath = workerRoot </> "solve-822-orphan-poll-race.state.json"
+            leasePath = workerRoot </> "issue-822.lease"
+            survivorPidFile = temporaryRoot </> "orphan-poll-survivor.pid"
+            sentinel = temporaryRoot </> "orphan-poll.release"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        withManagedShell (sentinelProviderWithSurvivorCommand survivorPidFile sentinel) $ \providerProcess ->
           withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
             descriptors <- discoverWorkerHistory repository
             case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
@@ -902,25 +1008,32 @@ examples = do
             managed <- managedProcessFor providerProcess
             -- Unlike the TERM-resistant survivor above (only ever killed by
             -- the watchdog's own verified kill, guaranteeing its takeover
-            -- write lands before the census can ever read empty), this one
-            -- exits entirely on its own, just before the one-second
-            -- deadline: the orphan-poll's own periodic census check can
-            -- observe "empty" from that natural exit alone, independently
-            -- of anything the watchdog does, and can win 'claimLeaseRelease'
-            -- for itself well before the watchdog thread ever gets
-            -- scheduled. This end-to-end run cannot force that exact
-            -- scheduling interleaving deterministically (a direct, isolated
-            -- test of 'waitForOrphanResolution' below covers that
-            -- precisely), but it still exercises 'waitForOrphanResolution's
-            -- own post-win wall-clock recheck for real: this shell's 0.95s
-            -- runtime leaves only a razor-thin margin before the one-second
-            -- deadline, so by the time the orphan-poll's periodic check
-            -- (plus a real 'ps' shell-out) actually observes the census as
-            -- empty, wall-clock time has consistently already crossed the
-            -- deadline in practice. It is kept as an end-to-end
-            -- confirmation that an orphan-pending completion resolves to
-            -- the deadline outcome once genuinely past it, alongside the
-            -- more targeted unit coverage below.
+            -- write lands before the census can ever read empty), the
+            -- registered provider here exits entirely on its own, and its
+            -- exit status says so: a watchdog termination arrives as a
+            -- signal, so 'ExitSuccess' is proof this exit was natural and
+            -- not a kill.
+            --
+            -- What that natural exit must not be allowed to do is let the
+            -- orphan poll read the census empty before the deadline, since
+            -- reporting the pre-deadline 'SolveCompleted' at that point is
+            -- correct rather than the regression this guards. Previously the
+            -- provider's own 0.95s lifetime was what kept the two apart --
+            -- fifty milliseconds of it -- and by the poll's 500ms period
+            -- plus a real 'ps' shell-out that margin decided the outcome.
+            -- Nothing decides it now: the provider backgrounds a survivor
+            -- into its own process group, so after the provider exits the
+            -- census still holds a live process and stays non-empty until
+            -- the deadline's own kill reaches it. The empty census the poll
+            -- eventually reads is therefore necessarily produced after the
+            -- deadline, which the resolution timestamp below asserts
+            -- directly rather than inferring from any duration.
+            --
+            -- The scheduling interleaving in which the poll itself wins
+            -- 'claimLeaseRelease' past the deadline stays out of reach of
+            -- any end-to-end run -- 'watchdogLoop' claims it the instant its
+            -- own delay elapses -- and the direct test below remains the
+            -- deterministic coverage of that arbitration.
             let completeThenOrphan _spec _aggregator rememberProvider emit = do
                   rememberProvider managed
                   emit (WorkerFinished SolveCompleted)
@@ -928,9 +1041,19 @@ examples = do
             void . forkIO $ runWorkerWithTask readProcessSnapshot completeThenOrphan specPath >>= putMVar finished
             orphanState <- waitForWorkerState statePath isOrphaned 80
             orphanState.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
-            terminalState <- waitForWorkerState statePath isTerminal 80
+            -- The survivor is genuinely recorded before the provider is let
+            -- go, so the census cannot empty out on the provider's exit.
+            survivorPid <- waitForRecordedPid survivorPidFile 300
+            void (waitForWorkerState statePath (censusHolds survivorPid) 300)
+            releaseSentinel sentinel
+            waitForProcess providerProcess `shouldReturn` ExitSuccess
+            terminalState <- waitForWorkerState statePath isTerminal 300
+            resolvedAt <- getCurrentTime
             terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
-            timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            -- The resolution this observed was evaluated after the deadline,
+            -- measured against the same instant the worker computes.
+            resolvedAt `shouldSatisfy` (>= deadline)
+            timeout 30000000 (takeMVar finished) `shouldReturn` Just (Right ())
             leaseReleased <- doesDirectoryExist leasePath
             leaseReleased `shouldBe` False
             stateBytes <- LazyByteString.readFile statePath
@@ -1081,3 +1204,85 @@ examples = do
             -- Absence was verified, so the lease is released rather than left
             -- behind for stale-lease recovery.
             doesDirectoryExist leasePath `shouldReturn` False
+
+-- | The runtime bound an example above uses when its worker has to reach
+-- an observable point — a claimed completion, a spawn claim, a recorded
+-- census entry — before the deadline fires. It is deliberately not the
+-- margin any ordering is decided on: each such example establishes its
+-- ordering through a signal it can observe, and this only has to be long
+-- enough that a loaded machine still gets the supervisor started, its
+-- provider registered, and the two or three real @ps@ shell-outs that
+-- involves finished inside it. The one-second bound these fixtures used
+-- before left roughly a hundred milliseconds of slack for that startup,
+-- which is inside the scheduling noise of a busy runner; this leaves
+-- seconds.
+deadlineWindowSeconds :: Int
+deadlineWindowSeconds = 3
+
+-- | The absolute instant a fixture's bound describes, computed exactly as
+-- 'Kanban.Worker.watchdogLoop' and 'waitForOrphanResolution' compute it, so
+-- an example waiting past it waits past the same instant the worker does.
+fixtureDeadline :: WorkerSpec -> UTCTime
+fixtureDeadline spec = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
+
+-- | Blocks until the wall clock has genuinely passed @deadline@. This is a
+-- measurement rather than a guess: nothing here assumes how long anything
+-- took, so ambient load can make it return later but can never make it
+-- report a deadline as passed that has not, or the reverse.
+waitUntilPastDeadline :: UTCTime -> IO ()
+waitUntilPastDeadline deadline = do
+  current <- getCurrentTime
+  unless (current >= deadline) (threadDelay 20000 >> waitUntilPastDeadline deadline)
+
+-- | A provider shell that runs until @sentinel@ exists and then exits
+-- normally, on its own. When that happens is not timed at all — the example
+-- decides — and the shell's own 'ExitSuccess' is what distinguishes this
+-- natural exit from a watchdog termination, which arrives as a signal.
+sentinelProviderCommand :: FilePath -> String
+sentinelProviderCommand sentinel =
+  "while [ ! -e " <> show sentinel <> " ]; do sleep 0.02; done"
+
+-- | Like 'sentinelProviderCommand', but first backgrounds a survivor into
+-- the provider's own process group and records its pid, so the recorded
+-- census still holds a live process after the provider itself has exited.
+sentinelProviderWithSurvivorCommand :: FilePath -> FilePath -> String
+sentinelProviderWithSurvivorCommand pidFile sentinel =
+  "sh -c 'while :; do sleep 1; done' </dev/null >/dev/null 2>&1 & "
+    <> "printf '%s\\n' \"$!\" > "
+    <> show pidFile
+    <> "; "
+    <> sentinelProviderCommand sentinel
+
+-- | Lets a 'sentinelProviderCommand' shell finish.
+releaseSentinel :: FilePath -> IO ()
+releaseSentinel sentinel = ByteString.writeFile sentinel ""
+
+-- | Reads a pid a fixture shell wrote, polling for the file rather than
+-- assuming the shell has already reached the line that writes it.
+waitForRecordedPid :: FilePath -> Int -> IO Int
+waitForRecordedPid path attempts = do
+  exists <- doesFileExist path
+  contents <- if exists then ByteString.unpack <$> ByteString.readFile path else pure ""
+  case reads contents :: [(Int, String)] of
+    [(recorded, _)] -> pure recorded
+    _
+      | attempts <= 0 -> fail ("no pid was ever recorded at " <> path)
+      | otherwise -> threadDelay 100000 >> waitForRecordedPid path (attempts - 1)
+
+-- | Whether the worker has already published the deadline outcome, orphan
+-- pending or fully terminal alike. Both are points the watchdog can only
+-- have reached after it consulted the provider slot and committed, so
+-- waiting for this is an observation of that ordering rather than an
+-- assumption about how long it takes.
+deadlineAdjudicated :: WorkerState -> Bool
+deadlineAdjudicated state = case state.workerStateStatus of
+  WorkerOrphaned (SolveFailed message) -> message == workerDeadlineReason
+  WorkerTerminal (SolveFailed message) -> message == workerDeadlineReason
+  _ -> False
+
+-- | Whether the worker's recorded census currently holds a given pid, so an
+-- example can wait for the census to have actually discovered a process
+-- instead of assuming a fixed delay was long enough for it to.
+censusHolds :: Int -> WorkerState -> Bool
+censusHolds processId state =
+  any ((== processId) . (.processIdentityPid)) state.workerStateKnownProcesses
