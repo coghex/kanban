@@ -103,15 +103,28 @@ BRAND_FRONTMATTER_KEYS = {
 SOURCE_FRONTMATTER_KEYS = ("name", "description", "argument-hint")
 REQUIRED_FRONTMATTER_KEYS = ("name", "description")
 
-# A sigil-prefixed workflow identifier, whole-token by construction. Kept
-# character-for-character equal to `tools/plugin_bundle_gate.py`'s
-# IDENTIFIER_PATTERNS — one notion of "what a workflow token looks like" across
-# the manifest gate and this renderer — and reconciled by a test rather than by
-# an import, because this module is loaded both as a bare top-level name and
-# from a `tools.` namespace package.
+# A sigil-prefixed workflow identifier as `tools/plugin_bundle_gate.py` spells
+# it, character-for-character — one notion of where a workflow token may start,
+# reconciled by a test rather than by an import, because this module is loaded
+# both as a bare top-level name and from a `tools.` namespace package.
 IDENTIFIER_PATTERNS = {
     "/": re.compile(r"(?<![\w/.-])/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)"),
     "$": re.compile(r"(?<![\w$])\$([a-z][a-z0-9]*(?:-[a-z0-9]+)*)"),
+}
+
+# Where such a token may *end*, which the manifest gate does not need and this
+# module does. That gate scans short manifest strings and an over-long match
+# only ever reports a name the bundle does not ship; this scans whole workflow
+# bodies and *refuses the file*, so a false positive blocks legitimate text —
+# `/solve/cache` is a path whose first component happens to be a workflow name,
+# and `$solve_result` a shell variable that merely starts with one. Neither is
+# an invocation. A trailing `.` still ends a token, because prose really does
+# end a sentence on one; a `.` that opens a file extension does not.
+TOKEN_TAIL = r"(?![\w/-]|\.\w)"
+
+LITERAL_INVOCATION_PATTERNS = {
+    sigil: re.compile(pattern.pattern + TOKEN_TAIL)
+    for sigil, pattern in IDENTIFIER_PATTERNS.items()
 }
 
 WORKFLOW_NAME_RE = re.compile(r"\A[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
@@ -362,7 +375,7 @@ def literal_invocation_failures(text: str, names: set[str], *, origin: str) -> l
         ),
     )
     failures = set()
-    for sigil, pattern in IDENTIFIER_PATTERNS.items():
+    for sigil, pattern in LITERAL_INVOCATION_PATTERNS.items():
         for match in pattern.finditer(lintable):
             name = match.group(1)
             if name in names:

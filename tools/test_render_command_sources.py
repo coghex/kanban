@@ -63,6 +63,12 @@ NON_INVOCATIONS = (
     "`docs/design.md`",
     "`/tmp/kanban-scratch`",
     "`/dev/null`",
+    # Round 1 blocker: a path component and a variable prefix that are spelled
+    # like a workflow but are not invocations.
+    "`/solve/cache`",
+    "`/solve.md`",
+    "`/pr-review/scripts/review_pr.py`",
+    "`$solve_result`",
     "`$REPO`",
     "`$WORKTREES_ROOT`",
     "`$HOME`",
@@ -191,9 +197,9 @@ class RegistryShapeTests(unittest.TestCase):
         self.assertNotIn("name", renderer.BRAND_FRONTMATTER_KEYS["claude"])
 
     def test_the_workflow_token_pattern_matches_the_bundle_gates(self):
-        # One notion of "what a sigil-prefixed workflow token looks like"
-        # across the manifest gate and this renderer, reconciled here because
-        # the two modules deliberately do not import each other.
+        # One notion of where a sigil-prefixed workflow token may start, across
+        # the manifest gate and this renderer, reconciled here because the two
+        # modules deliberately do not import each other.
         self.assertEqual(
             {sigil: pattern.pattern for sigil, pattern in renderer.IDENTIFIER_PATTERNS.items()},
             {
@@ -204,6 +210,21 @@ class RegistryShapeTests(unittest.TestCase):
         self.assertEqual(
             sorted(renderer.SIGILS.values()), sorted(renderer.IDENTIFIER_PATTERNS)
         )
+
+    def test_the_refusal_pattern_is_the_shared_one_plus_a_trailing_boundary(self):
+        # The one documented divergence, stated as a derivation rather than a
+        # second hand-written pattern: the manifest gate over-reporting a name
+        # costs a spurious listing, while over-reporting here refuses a file.
+        self.assertEqual(
+            sorted(renderer.LITERAL_INVOCATION_PATTERNS),
+            sorted(renderer.IDENTIFIER_PATTERNS),
+        )
+        for sigil, pattern in renderer.LITERAL_INVOCATION_PATTERNS.items():
+            self.assertEqual(
+                pattern.pattern,
+                renderer.IDENTIFIER_PATTERNS[sigil].pattern + renderer.TOKEN_TAIL,
+                sigil,
+            )
 
 
 class RenderedArtifactsAreCurrentTests(unittest.TestCase):
@@ -497,10 +518,13 @@ class InvocationSigilTests(unittest.TestCase):
 
     def test_neither_file_carries_the_other_brands_sigil_for_a_workflow(self):
         referenced = renderer.referenced_names(read(FIXTURE_SOURCE))
+        # Scanned with the boundary-aware pattern, which is what an invocation
+        # in body text really looks like: the fixture deliberately carries
+        # `$solve_result` and `/solve/cache`, and neither is a leaked sigil.
         for text, wrong in ((self.claude, "$"), (self.codex, "/")):
             found = {
                 match.group(1)
-                for match in renderer.IDENTIFIER_PATTERNS[wrong].finditer(text)
+                for match in renderer.LITERAL_INVOCATION_PATTERNS[wrong].finditer(text)
             }
             self.assertEqual(found & referenced, set(), f"{wrong} leaked")
 
@@ -541,6 +565,47 @@ class InvocationSigilTests(unittest.TestCase):
             self.assertIn("/tmp/scratch", rendered)
             self.assertIn("https://github.com/coghex/kanban", rendered)
             self.assertIn("$REPO", rendered)
+
+    def test_a_workflow_named_path_component_is_not_an_invocation(self):
+        # Round 1 blocker: `/solve/cache` is an absolute path whose first
+        # component happens to be a workflow name, and the refusal must not
+        # fire on it. Asserted for a hyphenated name too, since that is the
+        # spelling the name pattern consumes greedily.
+        source = SYNTHETIC.replace(
+            "Trailing paragraph.",
+            "Cache under /solve/cache, read /solve.md, and /pr-review/scripts/x.py.",
+        )
+        vocabulary = renderer.workflow_vocabulary(REPO_ROOT)
+        for brand in renderer.BRANDS:
+            rendered = render_text(source, brand, vocabulary=vocabulary)
+            self.assertIn("/solve/cache", rendered)
+            self.assertIn("/solve.md", rendered)
+            self.assertIn("/pr-review/scripts/x.py", rendered)
+
+    def test_a_variable_whose_name_starts_with_a_workflow_is_not_an_invocation(self):
+        # The `$` half of the same blocker: `$solve_result` is a shell variable.
+        source = SYNTHETIC.replace(
+            "Trailing paragraph.", "Read $solve_result and $pr-review2 afterwards."
+        )
+        vocabulary = renderer.workflow_vocabulary(REPO_ROOT)
+        for brand in renderer.BRANDS:
+            rendered = render_text(source, brand, vocabulary=vocabulary)
+            self.assertIn("$solve_result", rendered)
+            self.assertIn("$pr-review2", rendered)
+
+    def test_the_boundary_still_refuses_a_real_literal_invocation(self):
+        # The other side of the same boundary: tightening it must not turn the
+        # refusal off for the spellings prose actually uses.
+        vocabulary = renderer.workflow_vocabulary(REPO_ROOT)
+        for phrase in (
+            "Run /solve.",
+            "Run `/solve`, then stop.",
+            "Run /solve",
+            "Run $solve first.",
+        ):
+            source = SYNTHETIC.replace("Trailing paragraph.", phrase)
+            with self.assertRaises(renderer.CommandSourceError, msg=phrase):
+                render_text(source, "claude", vocabulary=vocabulary)
 
     def test_an_unsupported_directive_is_refused(self):
         source = SYNTHETIC.replace("{{cmd:solve}}", "{{command:solve}}")

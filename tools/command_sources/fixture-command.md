@@ -41,7 +41,10 @@ rendering byte-for-byte identically in both files:
 - Repository-relative paths: `docs/design.md`, and the two bundle directories
   named above.
 - Absolute paths: `/tmp/kanban-scratch` and `/dev/null`.
-- Shell variables: `$REPO`, `$WORKTREES_ROOT`, `$HOME`.
+- Paths and files whose first component *is* a workflow name: `/solve/cache`,
+  `/solve.md`, `/pr-review/scripts/review_pr.py`.
+- Shell variables: `$REPO`, `$WORKTREES_ROOT`, `$HOME`, and `$solve_result`,
+  which merely begins with one.
 - Ordinary prose punctuation: a solve and/or review pass, 3/4 of the tree.
 
 ```console
