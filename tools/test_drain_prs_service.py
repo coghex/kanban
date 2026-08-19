@@ -1102,6 +1102,39 @@ class BackendDelegationTests(RedirectedControllerTestCase):
             drain_prs_service.require_current_installation()
         self.assertIn(str(marker), str(raised.exception))
 
+    def test_a_marker_that_cannot_be_read_at_all_is_not_a_refusal(self):
+        # Absent and present-but-unusable are different questions and both
+        # answer "no relocation". A marker nothing can decode says nothing
+        # about where an installation went, and refusing on it would strand a
+        # controller on a byte sequence — while treating the read failure as
+        # an error would turn every one of these into a crash.
+        marker = self.install_dir / drain_prs_service.RELOCATION_MARKER_NAME
+        self.install_dir.mkdir(parents=True, exist_ok=True)
+
+        def clear():
+            if marker.is_symlink():
+                marker.unlink()
+            elif marker.is_dir():
+                marker.rmdir()
+            elif marker.exists():
+                marker.unlink()
+
+        cases = {
+            "not utf-8": lambda: marker.write_bytes(b'\xff\xfe{"install_dir": "/x"}'),
+            "a directory": lambda: marker.mkdir(),
+            "a dangling symlink": lambda: marker.symlink_to(self.root / "gone.json"),
+        }
+        for name, make in cases.items():
+            with self.subTest(marker=name):
+                clear()
+                make()
+                self.assertIsNone(drain_prs_service.relocation_marker())
+                # And an ordinary transition still runs: an unusable marker
+                # must not stand in for a relocation.
+                drain_prs_service.require_current_installation()
+                self.assertTrue(self.start_the_service()["started"])
+        clear()
+
     def test_a_marker_that_names_no_destination_is_not_a_refusal(self):
         # Total, like every other reader here: a file that cannot be read as a
         # relocation is not one, and must not stop an ordinary start.
