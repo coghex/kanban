@@ -450,6 +450,32 @@ def _is_bytecode_cache(path: Path) -> bool:
     )
 
 
+def _is_tombstone(path: Path) -> bool:
+    """Whether this is the record path a relocation sealed.
+
+    A symlink to the relocation marker beside it, which is three things at
+    once. It is not a regular file, and `drain_prs_service.update_json_document`
+    has refused to write a record path that is present and not a regular file
+    since the commit that introduced the discovery record — so *every* copy of
+    the controller old enough to write one refuses this, including the copies
+    predating every gate in this repository, which is the only thing that
+    reaches them. It reads as the relocation notice rather than as a document,
+    since `_read_json_object` follows it to the marker and finds no
+    `repositories` table. And it says, to anyone who lists that directory, what
+    happened to the installation that used to be there.
+
+    Recognised by what it points at rather than by being a symlink, because
+    this installer only owns the one it wrote: a symlink to anywhere else is an
+    entry it did not create and must not take apart.
+    """
+    if not path.is_symlink():
+        return False
+    try:
+        return os.readlink(path) == drain_prs_service.RELOCATION_MARKER_NAME
+    except OSError:
+        return False
+
+
 def _managed_slot(entry: Path, record: str) -> str | None:
     """Which managed slot `entry` occupies, or None when it is not one.
 
@@ -569,10 +595,36 @@ class RelocationRepository:
     definition_path: Path
     source_install_dir: Path
     source_runtime_dir: Path
+    legacy_runtime_dir: Path
     destination_runtime_dir: Path
     source_log_dir: Path
     destination_log_dir: Path
     record_entry: dict[str, Any]
+
+    def trees(self) -> tuple[tuple[str, Path, Path], ...]:
+        """Every durable tree this repository has, by kind and by where it
+        goes. One declaration, because the plan refuses over these, the
+        transition moves them, and the reconciliation carries them.
+
+        The runtime tree its own definition names, its log tree, and — only
+        when that is somewhere else — the runtime tree at the legacy location
+        itself. That last one is what a repository keeps there when a run could
+        not carry it: the definition is rewritten to the destination, so a plan
+        that asked only what the definition names would never see the tree
+        again, and the re-run this installer's own remediation tells the
+        operator to perform would report success over exactly the tree it told
+        them to reconcile.
+        """
+        trees = [
+            ("runtime", self.source_runtime_dir, self.destination_runtime_dir),
+            ("log", self.source_log_dir, self.destination_log_dir),
+        ]
+        if not _same_tree(self.legacy_runtime_dir, self.source_runtime_dir):
+            trees.insert(
+                1,
+                ("runtime", self.legacy_runtime_dir, self.destination_runtime_dir),
+            )
+        return tuple(trees)
 
     def report(self) -> dict[str, Any]:
         return {
@@ -585,6 +637,7 @@ class RelocationRepository:
                 "source": str(self.source_runtime_dir),
                 "destination": str(self.destination_runtime_dir),
             },
+            "legacy_runtime": str(self.legacy_runtime_dir),
             "logs": {
                 "source": str(self.source_log_dir),
                 "destination": str(self.destination_log_dir),
@@ -626,6 +679,7 @@ def _recover_repository(
     remote_name: str,
     install_dir: Path,
     log_root: Path,
+    legacy_dir: Path,
     legacy_logs: Path,
 ) -> RelocationRepository:
     """One record entry, recovered exactly, or a refusal naming what could not
@@ -715,6 +769,7 @@ def _recover_repository(
         definition_path=definition_path,
         source_install_dir=source_install_dir,
         source_runtime_dir=source_install_dir / _RUNTIME_DIRECTORY_NAME / slug,
+        legacy_runtime_dir=legacy_dir / _RUNTIME_DIRECTORY_NAME / slug,
         destination_runtime_dir=install_dir / _RUNTIME_DIRECTORY_NAME / slug,
         source_log_dir=legacy_logs / slug,
         destination_log_dir=log_root / slug,
@@ -955,6 +1010,26 @@ def _require_no_tree_collision(
     )
 
 
+def _require_one_runtime_source(entry: RelocationRepository) -> None:
+    """Refuse a repository whose runtime tree is in two places already.
+
+    `--install-dir` puts a repository's runtime state somewhere its record does
+    not name, and a run that could not carry a tree keeps one at the legacy
+    location; both at once is one repository with two runtime trees and one
+    destination, which is the same judgement about durable state
+    `_require_no_tree_collision` refuses rather than makes.
+    """
+    source = entry.source_runtime_dir
+    legacy = entry.legacy_runtime_dir
+    if _same_tree(source, legacy) or not (source.exists() and legacy.exists()):
+        return
+    raise InstallError(
+        f"Refusing to relocate: {entry.identity}'s runtime tree is in two places, "
+        f"{legacy} and {source}. Merge or remove one of them, then re-run the "
+        "installer."
+    )
+
+
 def plan_relocation(install_dir: Path) -> RelocationPlan:
     """Everything this relocation would do, and every reason it will not.
 
@@ -990,6 +1065,7 @@ def plan_relocation(install_dir: Path) -> RelocationPlan:
             remote_name=remote_name,
             install_dir=install_dir,
             log_root=log_root,
+            legacy_dir=legacy_dir,
             legacy_logs=legacy_logs,
         )
         for identity, entry in sorted(entries.items(), key=lambda item: str(item[0]))
@@ -1008,10 +1084,8 @@ def plan_relocation(install_dir: Path) -> RelocationPlan:
         }
     _require_nothing_live(repositories, backend)
     for entry in repositories:
-        for kind, source, destination in (
-            ("runtime", entry.source_runtime_dir, entry.destination_runtime_dir),
-            ("log", entry.source_log_dir, entry.destination_log_dir),
-        ):
+        _require_one_runtime_source(entry)
+        for kind, source, destination in entry.trees():
             # Shape before collision: a path that is not a directory is not a
             # tree this may move, wherever it sits.
             _require_tree_shape(kind, source, entry.identity)
@@ -1778,6 +1852,7 @@ def _carry_recreated_location(
                     remote_name=remote_name,
                     install_dir=plan.install_dir,
                     log_root=plan.log_root,
+                    legacy_dir=plan.legacy_dir,
                     legacy_logs=plan.legacy_log_root,
                 )
             )
@@ -1802,10 +1877,7 @@ def _carry_recreated_location(
             outcome["failures"].append(str(exc))
             carried = False
             continue
-        for kind, source, tree_destination in (
-            ("runtime", entry.source_runtime_dir, entry.destination_runtime_dir),
-            ("log", entry.source_log_dir, entry.destination_log_dir),
-        ):
+        for kind, source, tree_destination in entry.trees():
             if not _carry_tree(
                 transition, entry, kind, source, tree_destination, outcome
             ):
@@ -1898,6 +1970,52 @@ def _record_locks(plan: RelocationPlan) -> Iterator[None]:
             yield
 
 
+def _seal_record_path(transition: _Transition, plan: RelocationPlan) -> bool:
+    """Close the emptied record path against every writer that could recreate
+    it, and answer whether it is closed.
+
+    This is what answers the writer no lock can: one queued on the retained
+    lock file wakes after this run has finished looking, and neither a pause
+    nor a bound reaches it, because `flock` cannot be asked whether anyone is
+    waiting and a process that has returned cannot look again. So the answer is
+    not to out-wait that writer but to leave it nothing to write: the seal is
+    refused by `update_json_document`, which is the one path every record write
+    in every copy of the controller goes through.
+
+    Placed under the same lock as the final scan and only when that scan found
+    the location clear, so it can never seal over state this run was supposed
+    to carry — and never before the reconciliation, which would stop the very
+    writers it exists to carry across from recording anything for it to find.
+
+    That placement is also why nothing else here knows about it. It goes down
+    after this run's last look, so no step of this run meets it, and
+    `relocation_disposition` stops a later run before that run has a plan, a
+    record to read, or a location to take apart. An unresolved location is left
+    unsealed on purpose: the operator has to see it as it stands, and the
+    re-run that follows their reconciliation is what seals it.
+    """
+    record = plan.legacy_record
+    if os.path.lexists(record):
+        # Already sealed, or holding something this run did not put there and
+        # may not replace. Either way there is nothing here to do.
+        return _is_tombstone(record)
+
+    def undo() -> None:
+        if _is_tombstone(record):
+            record.unlink()
+
+    transition.register(f"unseal {record}", undo)
+    try:
+        record.symlink_to(drain_prs_service.RELOCATION_MARKER_NAME)
+    except OSError:
+        # Total on the same terms as everything else after the removal: a
+        # relocation that succeeded is not rolled back over a seal that could
+        # not be written, and an unsealed location is reported rather than
+        # raised, because it is a location the next run can still seal.
+        return False
+    return True
+
+
 def _late_write_repair(plan: RelocationPlan, outcome: dict[str, Any]) -> str:
     """What the repair for this run's outcome actually is.
 
@@ -1908,12 +2026,23 @@ def _late_write_repair(plan: RelocationPlan, outcome: dict[str, Any]) -> str:
     case a re-run does resolve.
     """
     if outcome["passes"] == 0:
+        if not outcome["sealed"]:
+            return (
+                f"The record path at {plan.legacy_record} could not be sealed "
+                "against a writer bound to that location; re-run this installer."
+            )
         return "Nothing to repair; the installation is at the destination."
     if outcome["resolved"]:
-        return (
+        carried = (
             f"A writer recorded state at {plan.legacy_dir} after it was taken "
-            f"apart; it was carried across to {plan.install_dir} and that location "
-            "was cleared again. Nothing to repair."
+            f"apart; it was carried across to {plan.install_dir} and that "
+            "location was cleared again. "
+        )
+        return carried + (
+            "Nothing to repair."
+            if outcome["sealed"]
+            else f"The record path at {plan.legacy_record} could not be sealed "
+            "against a writer bound to that location; re-run this installer."
         )
     if outcome["collisions"]:
         pairs = "; ".join(
@@ -2005,6 +2134,10 @@ def _reconcile_late_writes(
         # writer queued on it through, and the next pass is what sees them.
     with _record_locks(plan):
         remaining = _recreated_entries(plan, known)
+        # Under the same lock as the look that found it clear, so nothing can
+        # get in between the two, and only then: a location this run could not
+        # finish reconciling is one the operator has to see as it stands.
+        outcome["sealed"] = not remaining and _seal_record_path(transition, plan)
     outcome["retained"] = sorted(
         set(outcome["retained"]) | {str(path) for path in remaining}
     )
@@ -2112,8 +2245,11 @@ def relocation_disposition(install_dir: Path) -> str | None:
         # an installation already at the destination is not this run's, so it
         # installs in place exactly as it always did.
         return "this platform's default is the location the installation is already at"
-    if not os.path.lexists(legacy_install_dir() / record_name()):
+    legacy_record = legacy_install_dir() / record_name()
+    if not os.path.lexists(legacy_record):
         return "there is no installation at the legacy location"
+    if _is_tombstone(legacy_record):
+        return "the legacy location was emptied and sealed by an earlier run"
     return None
 
 
@@ -2205,13 +2341,16 @@ def _apply_relocation(
     moves: list[_Move] = []
     runtimes: dict[str, _Move] = {}
     for entry in plan.repositories:
-        runtimes[entry.identity] = _Move(
-            entry.source_runtime_dir, entry.destination_runtime_dir
-        )
-        for move in (
-            runtimes[entry.identity],
-            _Move(entry.source_log_dir, entry.destination_log_dir),
-        ):
+        for kind, source, destination in entry.trees():
+            move = _Move(source, destination)
+            if kind == "runtime" and (
+                entry.identity not in runtimes
+                or runtimes[entry.identity].outcome == "unstarted"
+            ):
+                # Whichever runtime tree actually moved is the one removal is
+                # gated on having arrived; at most one of them exists, which
+                # `_require_one_runtime_source` is what settles.
+                runtimes[entry.identity] = move
             moves.append(move)
             _move_tree(transition, move)
         _rewrite_definition(transition, entry, backend)

@@ -2512,9 +2512,14 @@ above are unchanged, and persistence the user switched off is not a failure.
   taking those locks again because releasing one does not hand it to any
   waiter in particular. The checkout and controller fences are held throughout
   and extended to any repository it recovers. A writer that acquires after the
-  run's last look is past any process that terminates, and is carried by the
-  next run, which finds a record at the legacy location again and relocates
-  over it; bounding that further is #390. It is
+  run's last look is past any process that terminates, so a run whose final
+  scan finds the location clear seals the emptied record path under that scan's
+  own lock, with a symlink to the relocation marker: every copy of the
+  controller refuses to write a record path that is present and not a regular
+  file, so a writer waking afterwards refuses rather than recreating it, and a
+  later run stops at the disposition. A location left unresolved is left
+  unsealed for the operator to see, and the runtime and log trees such a writer
+  creates are reported rather than prevented; bounding those is #390. It is
   bounded at three passes rather than looped, each merging the recreated record
   on those same terms, carrying the trees it brought, rewriting the definitions
   it names, and clearing the location again on the removal's own ownership

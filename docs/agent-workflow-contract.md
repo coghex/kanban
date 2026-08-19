@@ -1283,6 +1283,9 @@ search step and nothing else, which is what `mandatory: no` records.
   own definition names; either discovery record is present but unreadable, not
   an object, or has a non-table `repositories`; a distinct source tree would be
   moved onto a destination runtime or log tree that already exists; a
+  repository has a runtime tree at the `~/Library` location *and* at the
+  install directory its own definition names, which is one repository with two
+  runtime trees and one destination; a
   per-repository runtime or log path is present and is not a directory, at
   either end, since carrying one would satisfy "the tree arrived" and strand
   the next controller on it; a path it writes through is not a regular file; or the `~/Library` install directory
@@ -1333,10 +1336,23 @@ search step and nothing else, which is what `mandatory: no` records.
   the run's last look is past any process that terminates at all — and the
   writer that can still do it is an older installed controller, from before the
   refusal every discovery-record write now carries, which no gate added here
-  reaches. What answers that one is the next run, which finds a discovery record
-  at the legacy location again and relocates over it, so such state is late
-  rather than lost. Bounding it further, and saying which of the two answers a
-  successful run is giving, is #390.
+  reaches.
+  What answers that one is not timing but leaving it nothing to write. A run
+  whose final scan finds the location clear seals the emptied record path,
+  under that same scan's lock, with a symlink to the relocation marker beside
+  it. `update_json_document` — the one mutator every discovery-record write in
+  every copy of the controller goes through — has refused a record path that is
+  present and not a regular file since the commit that introduced the record,
+  so a writer that acquires the lock afterwards refuses where it stands however
+  old it is. Following the seal finds the marker rather than a document, so a
+  reader bound to that location learns where the installation went instead of
+  finding an empty one, and `relocation_disposition` stops a later run at a
+  sealed location before it has a plan. A location this run could not finish
+  reconciling is deliberately left unsealed, because the operator has to see it
+  as it stands and the re-run that follows their reconciliation is what seals
+  it. The runtime and log trees such a writer creates are written under no
+  record lock at all and are reported rather than prevented; bounding those is
+  #390.
   Whoever was waiting takes the lock; it keeps the checkout
   and controller fences the whole time, so no drainer or controller can start
   against a tree it is about to move, and it fences any repository it recovers
@@ -1356,7 +1372,12 @@ search step and nothing else, which is what `mandatory: no` records.
   nothing here resolves: both copies are kept and both are named, per tree
   rather than per repository, so a repository whose runtime collided and whose
   logs did not still has its logs carried and no status file, incident or log
-  is chosen between. Anything left unresolved — a collision, an entry this
+  is chosen between. A repository's runtime tree at the `~/Library` location is
+  a source in its own right, asked for independently of the install directory
+  its definition names: a run that kept such a tree rewrote that definition to
+  the destination, and a plan that asked only what the definition named would
+  report success over exactly the tree the remediation told the operator to
+  reconcile. Anything left unresolved — a collision, an entry this
   installer did not create, an entry that cannot be recovered, or a writer still
   winning at the bound — preserves the location exactly as it stands and fails
   the install rather than reporting success, naming every affected repository

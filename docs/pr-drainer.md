@@ -1072,12 +1072,19 @@ writes nothing at all, if the installation it worked out at startup is no
 longer the one this host resolves — checked while it holds the record's lock,
 so a move has either not begun or already finished.
 
-One case no single run can close: a writer that takes the lock after the run's
-last check. There is no way to ask whether anyone is waiting on a lock, and a
-command that has finished cannot look again. Such a write is late rather than
-lost — it leaves a record at the old location, which is what the *next*
-`python3 tools/install_drainer.py` finds and moves across, exactly as this one
-did. Bounding that further is #390.
+One case no single run can close by waiting: a writer that takes the lock after
+the run's last check. There is no way to ask whether anyone is waiting on a
+lock, and a command that has finished cannot look again. So instead of trying to
+outlast that writer, the run leaves it nothing to write. Once the last check
+finds the old location clear, `config.json` there is replaced by a link to the
+`relocated.json` beside it — every version of the controller refuses to write a
+`config.json` that is not an ordinary file, so one that wakes up later refuses
+instead of recreating the record, and anything reading that path finds the note
+saying where the installation went. If the run could *not* finish tidying up,
+it deliberately leaves the path alone so you can see what is there; reconcile it
+and re-run, and that run seals it. Runtime and log directories such a writer
+creates are reported rather than prevented — nothing locks those at all — and
+bounding them is #390.
 
 Taking over an installation already at this platform's own location is #368.
 
