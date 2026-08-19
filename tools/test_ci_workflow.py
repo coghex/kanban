@@ -22,6 +22,16 @@ skips when `cabal` is absent, so the Haskell job's step wraps it in a guard
 that turns a skip back into a failure, and that guard is run here against a
 scripted `python3` rather than read.
 
+The two steps around the compiler cache are executed the same way. The prefix
+step has to leave `~/.ghcup` a directory this job owns whatever the runner
+image left there, including a symlink into a prefix it does not own, which is
+only visible by running it against each of those arrangements. The verification
+step has to refuse a toolchain that is not the pinned one however it got that
+way -- a wrong version, a lost executable bit, a prefix redirect that did not
+take -- so it is run against fake `ghc` and `cabal` executables, once per
+refusal. `tools/test_toolchain_parity.py` holds `release.yml`'s copies of both
+scripts identical to these, so running them here covers both workflows.
+
 `tools/test_release_workflow.py` does the same for `release.yml` and carries
 its own copy of this indentation walker. The two stay separate deliberately:
 each is bound to the layout and the questions of one workflow, and a shared
@@ -55,6 +65,12 @@ HASKELL_JOB = "haskell"
 PYTHON_JOB = "python"
 SYSTEMD_JOB = "systemd-drainer-lifecycle"
 SDIST_STEP = "Source distribution"
+PREFIX_STEP = "Establish a runner-owned compiler installation prefix"
+VERIFY_STEP = "Verify the pinned toolchain"
+
+# A PATH with nothing of the developer's own on it, so a locally installed
+# `ghc` cannot stand in for the one the verification step is meant to find.
+BARE_PATH = "/usr/bin:/bin"
 
 # Every dependency result GitHub can report that is not a success. The
 # aggregate has to refuse each one; `skipped` is the case that matters most,
@@ -152,6 +168,26 @@ def job_field(name, field):
     return None
 
 
+def job_env(name):
+    """One job's own `env:` mapping."""
+    body = job_lines(name)
+    try:
+        start = body.index("    env:")
+    except ValueError as error:  # pragma: no cover - a moved block
+        raise AssertionError(f"job {name} declares no env:") from error
+    env = {}
+    for line in body[start + 1 :]:
+        if not line.strip():
+            continue
+        if not line.startswith("      ") or line.startswith("       "):
+            break
+        if line.strip().startswith("#"):
+            continue
+        key, _, value = line.strip().partition(":")
+        env[key] = value.strip().strip('"')
+    return env
+
+
 def job_needs(name):
     """The jobs one job declares as dependencies, inline or block style."""
     body = job_lines(name)
@@ -212,10 +248,12 @@ def step_run_script(job, step_name):
     return "\n".join(script) + "\n"
 
 
-def run_script(script, env, *, extra_path=None):
+def run_script(script, env, *, extra_path=None, path=None):
     """Run an extracted step script the way the runner would."""
     full = dict(os.environ)
     full.update(env)
+    if path is not None:
+        full["PATH"] = path
     if extra_path is not None:
         full["PATH"] = f"{extra_path}{os.pathsep}{full['PATH']}"
     return subprocess.run(
@@ -308,7 +346,9 @@ class CiWorkflowShapeTests(unittest.TestCase):
         directives = job_directives(HASKELL_JOB)
         self.assertIn("tools.test_source_distribution", directives)
         self.assertIn("haskell-actions/setup", directives)
-        self.assertIn('cabal-version: "3.16.1.0"', directives)
+        # Which versions those are, and that `release.yml` installs the same
+        # ones the same way, is tools/test_toolchain_parity.py's subject.
+        self.assertIn("cabal-version:", directives)
 
 
 # -- the aggregate's own decision, executed --------------------------------
@@ -431,6 +471,174 @@ class PackagingGateStepTests(unittest.TestCase):
             expect_exit=1,
         )
         self.assertIn("FAILED (failures=1)", output)
+
+
+# -- the compiler cache's two scripts, executed ----------------------------
+
+
+class InstallationPrefixStepTests(unittest.TestCase):
+    """The prefix step against each arrangement it has to normalize."""
+
+    def prefix(self, arrange):
+        root = tempfile.TemporaryDirectory(prefix="kanban-ci-prefix-")
+        self.addCleanup(root.cleanup)
+        home = Path(root.name) / "home"
+        home.mkdir()
+        arrange(home, Path(root.name))
+        recorded = Path(root.name) / "github-env"
+        recorded.write_text("", encoding="utf-8")
+        proc = run_script(
+            step_run_script(HASKELL_JOB, PREFIX_STEP),
+            {"HOME": str(home), "GITHUB_ENV": str(recorded)},
+        )
+        self.assertEqual(
+            proc.returncode, 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
+        return home, recorded.read_text(encoding="utf-8")
+
+    def assertOwnEmptyDirectory(self, home):
+        ghcup = home / ".ghcup"
+        self.assertTrue(ghcup.is_dir(), f"{ghcup} is not a directory")
+        self.assertFalse(ghcup.is_symlink(), f"{ghcup} is still a redirect")
+        self.assertEqual(sorted(entry.name for entry in ghcup.iterdir()), [])
+
+    def test_it_points_ghcup_at_the_home_it_just_prepared(self):
+        # The whole redirect: without this line ghcup keeps installing into
+        # whatever prefix the image chose, and the cache path holds nothing.
+        home, recorded = self.prefix(lambda home, root: None)
+        self.assertIn(f"GHCUP_INSTALL_BASE_PREFIX={home}\n", recorded)
+        self.assertOwnEmptyDirectory(home)
+
+    def test_a_redirect_left_by_the_image_is_replaced_rather_than_followed(self):
+        # This is the arrangement the runner image actually leaves, and the
+        # one that matters: `~/.ghcup` pointing into a prefix this job does
+        # not own. Removing the link must not reach through it.
+        elsewhere = {}
+
+        def arrange(home, root):
+            shared = root / "usr-local-ghcup"
+            shared.mkdir()
+            (shared / "installed-by-the-image").write_text("x", encoding="utf-8")
+            (home / ".ghcup").symlink_to(shared)
+            elsewhere["path"] = shared
+
+        home, _ = self.prefix(arrange)
+        self.assertOwnEmptyDirectory(home)
+        self.assertTrue(
+            (elsewhere["path"] / "installed-by-the-image").is_file(),
+            "the step deleted through the redirect instead of removing it",
+        )
+
+    def test_an_installation_already_there_is_cleared_out(self):
+        def arrange(home, root):
+            stale = home / ".ghcup" / "ghc" / "9.14.1"
+            stale.mkdir(parents=True)
+            (stale / "marker").write_text("x", encoding="utf-8")
+
+        home, _ = self.prefix(arrange)
+        self.assertOwnEmptyDirectory(home)
+
+
+class ToolchainVerificationStepTests(unittest.TestCase):
+    """The verification step against fake tools, once per refusal."""
+
+    def pins(self):
+        env = job_env(HASKELL_JOB)
+        return env["GHC_VERSION"], env["CABAL_VERSION"]
+
+    def verify(self, *, ghc, cabal, prefix="directory", expect_exit):
+        """Run the step with `ghc`/`cabal` reporting the given versions.
+
+        A version of None omits that executable; `prefix` is what `~/.ghcup`
+        is when the step runs.
+        """
+        ghc_pin, cabal_pin = self.pins()
+        root = tempfile.TemporaryDirectory(prefix="kanban-ci-verify-")
+        self.addCleanup(root.cleanup)
+        home = Path(root.name) / "home"
+        home.mkdir()
+        if prefix == "directory":
+            (home / ".ghcup").mkdir()
+        elif prefix == "redirect":
+            target = Path(root.name) / "usr-local-ghcup"
+            target.mkdir()
+            (home / ".ghcup").symlink_to(target)
+        elif prefix != "absent":  # pragma: no cover - a mistyped case
+            raise AssertionError(f"unknown prefix arrangement {prefix!r}")
+
+        bindir = Path(root.name) / "bin"
+        bindir.mkdir()
+        for tool, reported in (("ghc", ghc), ("cabal", cabal)):
+            if reported is None:
+                continue
+            stub = bindir / tool
+            stub.write_text(
+                "#!/bin/bash\n"
+                'if [ "$1" != "--numeric-version" ]; then exit 2; fi\n'
+                f"echo {reported}\n",
+                encoding="utf-8",
+            )
+            stub.chmod(
+                stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH
+            )
+
+        proc = run_script(
+            step_run_script(HASKELL_JOB, VERIFY_STEP),
+            {"HOME": str(home), "GHC_VERSION": ghc_pin, "CABAL_VERSION": cabal_pin},
+            path=f"{bindir}{os.pathsep}{BARE_PATH}",
+        )
+        self.assertEqual(
+            proc.returncode,
+            expect_exit,
+            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+        )
+        return proc.stdout + proc.stderr
+
+    def test_the_pinned_toolchain_passes(self):
+        ghc_pin, cabal_pin = self.pins()
+        output = self.verify(ghc=ghc_pin, cabal=cabal_pin, expect_exit=0)
+        self.assertIn(ghc_pin, output)
+        self.assertIn(cabal_pin, output)
+
+    def test_a_compiler_that_is_not_the_pinned_one_refuses(self):
+        # What a stale cache entry, or a `set` that quietly picked the
+        # image's default, would leave behind.
+        _, cabal_pin = self.pins()
+        output = self.verify(ghc="9.14.1", cabal=cabal_pin, expect_exit=1)
+        self.assertIn("ghc reports 9.14.1", output)
+
+    def test_a_cabal_that_is_not_the_pinned_one_refuses(self):
+        ghc_pin, _ = self.pins()
+        output = self.verify(ghc=ghc_pin, cabal="3.18.1.0", expect_exit=1)
+        self.assertIn("cabal reports 3.18.1.0", output)
+
+    def test_a_compiler_that_is_not_on_path_refuses(self):
+        # A restore that lost the executable bit leaves exactly this: the
+        # file is there and `command -v` still does not find it.
+        _, cabal_pin = self.pins()
+        output = self.verify(ghc=None, cabal=cabal_pin, expect_exit=1)
+        self.assertIn("no ghc on PATH", output)
+
+    def test_a_cabal_that_is_not_on_path_refuses(self):
+        ghc_pin, _ = self.pins()
+        output = self.verify(ghc=ghc_pin, cabal=None, expect_exit=1)
+        self.assertIn("no cabal on PATH", output)
+
+    def test_an_unowned_installation_prefix_refuses(self):
+        # The redirect the prefix step exists to remove. Reaching the build
+        # with it still in place means the cache covered nothing.
+        ghc_pin, cabal_pin = self.pins()
+        output = self.verify(
+            ghc=ghc_pin, cabal=cabal_pin, prefix="redirect", expect_exit=1
+        )
+        self.assertIn("runner-owned", output)
+
+    def test_a_missing_installation_prefix_refuses(self):
+        ghc_pin, cabal_pin = self.pins()
+        output = self.verify(
+            ghc=ghc_pin, cabal=cabal_pin, prefix="absent", expect_exit=1
+        )
+        self.assertIn("runner-owned", output)
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience
