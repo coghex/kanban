@@ -1029,8 +1029,83 @@ installer did not put there — move that aside and re-run. A run that fails
 part-way puts everything back and says so, and if it ever ends up with a copy
 of a tree at both locations it keeps both and tells you rather than choosing.
 
-Taking over an installation already at this platform's own location is #368,
-and carrying across what a writer installs at a relocated location is #369.
+Holding the old record's lock for the whole move is what makes a writer that
+was already queued on it safe: it wakes into a location whose record is gone,
+reads the marker beside that lock, and fails without recording anything. That
+refusal belongs to the write itself rather than to whatever called it, so it
+holds however such a writer got there. What it cannot cover is a writer running
+an *older* copy of the controller — which is exactly what a host with a
+`~/Library` installation is running, since that is why the installation is
+there — and one of those that turns up after the move just recreates the
+directory and records itself where nothing looks any more.
+
+So the run goes back and checks — and it does that with the lock *let go*,
+which is the part that makes it work at all: a writer waiting on that lock only
+gets it once the move stops holding it, so a check made while still holding it
+could never see what that writer does. Letting go lets them in; a short pause
+before taking it back is what gives them time to actually get it, since letting
+a lock go does not hand it to anyone in particular; and the next check then
+waits on them and finds what they left. Up to three times, and
+throughout it keeps holding each repository's checkout the way a drainer does,
+so nothing can start draining a tree it is about to move. Whatever it finds is
+merged into the destination record the
+same way the move's own merge works, its runtime and log trees are carried
+over, the definitions it names are rewritten and reloaded against the new
+location, and the old one is cleared again — and, exactly as during the move, a
+file the installer did not put there stops that clearing entirely and is
+reported instead of removed. If a repository ends up with a tree in both
+places — a late start for one that had already moved leaves a runtime tree and
+a log tree — both are kept and both are named, one tree at a time, so a
+repository whose runtime clashed and whose logs did not still gets its logs
+carried. Nothing picks which status file, whose incidents or which logs
+survive.
+
+Anything left over leaves the old location standing and fails the install
+rather than reporting success, and it tells you which repositories and which
+paths are involved in the plain output and under `--json` alike. It also tells
+you which repair actually applies: re-running the installer resolves none of
+the kept trees — it refuses over the ones it still finds in both places and
+keeps the rest a second time — so for those you have to merge or remove one
+copy of each pair first, while a location that merely reappeared with nothing
+in two places is one a re-run does resolve. The installer refuses outright, and
+writes nothing at all, if the installation it worked out at startup is no
+longer the one this host resolves — checked while it holds the record's lock,
+so a move has either not begun or already finished.
+
+One case no single run can close by waiting: a writer that takes the lock after
+the run's last check. There is no way to ask whether anyone is waiting on a
+lock, and a command that has finished cannot look again. So instead of trying to
+outlast that writer, the run leaves it nothing to write. Once the last check
+finds the old location clear, `config.json` there is replaced by a link to the
+`relocated.json` beside it — every version of the controller refuses to write a
+`config.json` that is not an ordinary file, so one that wakes up later refuses
+instead of recreating the record, and anything reading that path finds the note
+saying where the installation went. If the run could *not* finish tidying up,
+it deliberately leaves the path alone so you can see what is there; reconcile it
+and re-run, and that run seals it. A run that could not write the seal at all
+fails rather than reporting success, and tells you to re-run.
+
+That link closes the record and nothing else. A controller still pointing at the
+old location creates its runtime and log directories, its status file, its
+incidents and its unit or plist *before* it ever gets to the record, and nothing
+locks any of those — so one that starts after the run has finished checking
+still leaves directories behind, even though its record write is refused. A
+later run therefore does not treat a sealed old location as finished business
+unless it holds nothing but the link, the lock file and the note: if there are
+trees there it plans and reconciles them exactly as it would an unsealed one,
+and refuses over anything it would have to choose between. Stopping those writes
+happening at all, rather than finding them next time, is #390.
+
+Directories under `runtime/` and the old log root that belong to no repository
+in the record are moved across too, under the same name. Two things leave one:
+a controller whose record write was refused — it writes its directories before
+it ever gets to the record — and an uninstall, which leaves a repository's
+state, logs and incidents behind on purpose. Neither can be treated as a
+repository, since nothing records where its checkout is or what its job is
+called, but neither is left at a location nothing reads any more. If the same
+name already exists at the destination, both are kept and both are named.
+
+Taking over an installation already at this platform's own location is #368.
 
 
 The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Incidents are attributed to the canonical repository rather than to the checkout that raised them, so any clone of that repository can list, acknowledge, and clear them. Stopping the drainer intentionally clears that repository's crash incidents, and no other repository's — a stop ends the supervisor, which is exactly what a crash incident is about. It resolves nothing else: a conflict or cleanup incident stays open across the stop, still naming a debt that is still owed, and clears through its own path once that pull request is mergeable or closed or its last obligation succeeds. Starting the drainer is not gated on an open incident of any kind, and an incident already open when it starts is never mistaken for a startup failure.

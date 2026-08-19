@@ -2489,10 +2489,65 @@ above are unchanged, and persistence the user switched off is not a failure.
   elsewhere; rerunning it refreshes
   those links after repository relocation, and repairs a missing or stale
   discovery record in place without an uninstall and without changing the
-  job's identity. An installation that already exists is never moved: the probe
-  finds it at whichever spelling it is on, so a host that inherited one keeps
-  it. Installing a second repository adds its entry beside
-  the first rather than replacing it. Before enabling a repository's derived
+  job's identity. An installation that already exists is found where it is,
+  the probe reading the XDG spelling first and the `~/Library` one second, and
+  a macOS host's is never moved. On every other platform a `~/Library`
+  installation is relocated to this platform's own convention exactly once and
+  whole: the two discovery records merge with the destination winning per key
+  at both levels, every recorded repository's runtime and log trees are
+  carried, and its definition is rewritten and reloaded against the
+  destination, after which the old location is taken apart except for its lock
+  file, the directory that has to remain to contain it, and a marker naming
+  where the installation went. That transition is held under the legacy
+  record's lock from the read that decides which repositories exist through the
+  removal, so a writer queued on that lock fails without recording anything —
+  a refusal every write to that record's `repositories` table carries itself,
+  rather than one its callers each have to remember. It cannot reach a writer
+  running an older installed copy of the controller, from before that gate,
+  which is what a pre-XDG host is running by definition; one of those arriving
+  after the removal recreates what it needs. So the run then reconciles what
+  came back, outside those record locks and re-taking them for each pass:
+  releasing is what lets a writer queued on it through, so a reconciliation
+  inside the transition's own locks could never see them, and it pauses before
+  taking those locks again because releasing one does not hand it to any
+  waiter in particular. The checkout and controller fences are held throughout
+  and extended to any repository it recovers. A writer that acquires after the
+  run's last look is past any process that terminates, so a run whose final
+  scan finds the location clear seals the emptied record path under that scan's
+  own lock, with a symlink to the relocation marker: every copy of the
+  controller refuses to write a record path that is present and not a regular
+  file, so a writer waking afterwards refuses rather than recreating it. A
+  location left unresolved is left unsealed for the operator to see, and a
+  record path that could not be sealed fails the install. The seal closes the
+  record and only the record — a controller bound there writes its runtime
+  tree, its logs and its definition under no lock at all and before it reaches
+  the record — so a later run skips a sealed location only when it holds
+  nothing but the seal, the lock and the marker, and otherwise reconciles it
+  exactly as it would an unsealed one; preventing those writes is #390. A
+  per-repository tree no record names — left by such a controller, or by an
+  uninstall, which keeps a repository's state deliberately — is carried by the
+  directory its state is filed under rather than orphaned, and one already at
+  its destination is kept and named like any other collision. It is
+  bounded at three passes rather than looped, each merging the recreated record
+  on those same terms, carrying the trees it brought, rewriting the definitions
+  it names, and clearing the location again on the removal's own ownership
+  terms, where an entry this installer did not create is kept and named and
+  nothing at that location is removed at all. A tree that a distinct tree
+  already exists at the destination for is kept beside it and both are named,
+  per tree rather than per repository, so a repository whose runtime collided
+  and whose logs did not still has its logs carried and nothing chooses which
+  status file, whose incidents or which logs survive. Anything still unresolved
+  preserves that location and fails the install rather than reporting success,
+  naming every affected repository and every retained path in the default and
+  `--json` modes alike, and distinguishing a collision that has to be
+  reconciled first — a re-run resolves none of those trees — from a location
+  that only needs the installer run again. The installer's own writes
+  are made under the discovery record's lock and refuse outright when the
+  installation this process resolved at import is no longer the one this host
+  resolves, rather than recording into a location nothing reads or handing the
+  installed controller a directory that is gone. Installing a second repository
+  adds its entry beside the first rather than replacing it. Before enabling a
+  repository's derived
   job, the installer retires the machine-wide `com.coghex.drain-prs` singleton
   that predates per-repository jobs when that singleton served the same
   repository — unloading it and setting its plist aside so the two can never
