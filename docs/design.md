@@ -2514,7 +2514,7 @@ above are unchanged, and persistence the user switched off is not a failure.
   and extended to any repository it recovers. A writer that acquires after the
   run's last look is past any process that terminates, and is carried by the
   next run, which finds a record at the legacy location again and relocates
-  over it. It is
+  over it; bounding that further is #390. It is
   bounded at three passes rather than looped, each merging the recreated record
   on those same terms, carrying the trees it brought, rewriting the definitions
   it names, and clearing the location again on the removal's own ownership

@@ -1330,9 +1330,13 @@ search step and nothing else, which is what `mandatory: no` records.
   Once the waiter holds it, the next pass blocks on it and reads what it wrote
   rather than racing it. That pause is a mitigation and not a proof: whether
   anyone is waiting on a lock cannot be asked, and a writer that acquires after
-  the run's last look is past any process that terminates at all. What answers
-  that one is the next run, which finds a discovery record at the legacy
-  location again and relocates over it, so such state is late rather than lost.
+  the run's last look is past any process that terminates at all — and the
+  writer that can still do it is an older installed controller, from before the
+  refusal every discovery-record write now carries, which no gate added here
+  reaches. What answers that one is the next run, which finds a discovery record
+  at the legacy location again and relocates over it, so such state is late
+  rather than lost. Bounding it further, and saying which of the two answers a
+  successful run is giving, is #390.
   Whoever was waiting takes the lock; it keeps the checkout
   and controller fences the whole time, so no drainer or controller can start
   against a tree it is about to move, and it fences any repository it recovers

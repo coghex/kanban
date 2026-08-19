@@ -1077,7 +1077,7 @@ last check. There is no way to ask whether anyone is waiting on a lock, and a
 command that has finished cannot look again. Such a write is late rather than
 lost — it leaves a record at the old location, which is what the *next*
 `python3 tools/install_drainer.py` finds and moves across, exactly as this one
-did.
+did. Bounding that further is #390.
 
 Taking over an installation already at this platform's own location is #368.
 

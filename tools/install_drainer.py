@@ -332,10 +332,12 @@ _BYTECODE_SUFFIX = ".pyc"
 # the pause that makes losing that race a scheduling accident rather than the
 # ordinary case: a process blocked in `flock` is runnable the instant the lock
 # is released, and this is orders of magnitude longer than it takes to be
-# scheduled. It is not a proof, because none is available -- a writer that
-# acquires after this run's last look is past any process that terminates at
-# all, and what carries that one is the next installer run, which relocates
-# again over the record it left.
+# scheduled. It is not a proof, because none is available -- `flock` cannot be
+# asked whether anyone is waiting, and a writer that acquires after this run's
+# last look is past any process that terminates at all. What carries that one
+# is the next installer run, which relocates again over the record it left;
+# bounding it further, and saying which of the two answers a successful run is
+# giving, is #390.
 _LOCK_HANDOFF_SECONDS = 0.1
 
 # How many times one run carries a recreated legacy location across before it
