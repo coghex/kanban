@@ -14,18 +14,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-test:
+  # The Haskell work and the `tools/` work are separate jobs with no dependency
+  # between them, so they overlap instead of queueing. The `tools/` suite needs
+  # no Haskell toolchain, and installing one for it put its whole runtime behind
+  # a toolchain install it never used.
+  haskell:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
-        with:
-          # The plugin bundle version gate in tools/test_claude_plugin.py and
-          # tools/test_codex_plugin.py measures a change unit against its
-          # default-branch merge base. The default depth-1 checkout has no
-          # such base, and that gate fails rather than skipping when the
-          # baseline is missing, so the history has to actually be here.
-          fetch-depth: 0
 
       - uses: haskell-actions/setup@v2
         with:
@@ -53,7 +50,45 @@ jobs:
       - name: Haskell tests
         run: cabal test all --test-show-details=direct
 
-      - name: PR drainer tests
+      - name: Source distribution
+        # tools/test_source_distribution.py builds a real `cabal sdist all`
+        # archive, so it is the one member of the `tools/` suite that needs the
+        # toolchain installed above; the toolchain-free job below collects it
+        # too and it skips there. Absent that toolchain it states its missing
+        # prerequisite and skips, which is the unpacked-release case rather
+        # than a pass -- so in the job that exists to satisfy that prerequisite,
+        # a skipped or uncollected result is a failure.
+        run: |
+          if ! report="$(python3 -m unittest tools.test_source_distribution 2>&1)"; then
+            printf '%s\n' "$report"
+            exit 1
+          fi
+          printf '%s\n' "$report"
+          case "$report" in
+            *skipped*)
+              printf '%s\n' "The packaging gate skipped where its toolchain is installed." >&2
+              exit 1
+              ;;
+            *"Ran 0 tests"*)
+              printf '%s\n' "The packaging gate collected no test, so it checked nothing." >&2
+              exit 1
+              ;;
+          esac
+
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The plugin bundle version gate in tools/test_claude_plugin.py and
+          # tools/test_codex_plugin.py measures a change unit against its
+          # default-branch merge base. The default depth-1 checkout has no
+          # such base, and that gate fails rather than skipping when the
+          # baseline is missing, so the history has to actually be here.
+          fetch-depth: 0
+
+      - name: Tooling tests
         run: python3 -m unittest discover -s tools -p 'test_*.py'
 
   # The evidence for the drainer's Linux support, per
@@ -108,3 +143,50 @@ jobs:
       - name: Stop systemd
         if: always()
         run: docker rm --force kanban-systemd || true
+
+  # The single required CI context, and the only job here that other systems
+  # name: `master`'s branch protection, `tools/drain_prs.py`'s one
+  # `required_ci_check`, and the release gate in docs/design.md all resolve
+  # exactly `build-test`. It therefore has to survive the split above and has
+  # to mean "every job in this workflow succeeded", which it can only do by
+  # deciding for itself: a dependency failure *skips* a dependent job, and a
+  # skipped check is not a failed one to any of those readers. So it runs
+  # under `if: always()` and refuses on any dependency result that is not
+  # `success` -- including a job added later, which
+  # tools/test_ci_workflow.py requires to appear in `needs` below.
+  #
+  # The one outcome this cannot cover is the run being cancelled as a whole,
+  # which `cancel-in-progress` above does on every superseded push: GitHub
+  # cancels a job that has not started, and no job-level `if:` can turn that
+  # into a conclusion this job reports.
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [haskell, python, systemd-drainer-lifecycle]
+    steps:
+      - name: Require every other job to have succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          results = json.loads(os.environ["NEEDS"])
+          if not results:
+              sys.exit("build-test depends on no job, so it gates nothing.")
+
+          refused = []
+          for job in sorted(results):
+              result = results[job].get("result")
+              print(f"{job}: {result}")
+              if result != "success":
+                  refused.append(f"{job} reported {result}")
+
+          if refused:
+              sys.exit("Refusing: " + ", ".join(refused) + ".")
+
+          print(f"Every job in this workflow succeeded ({len(results)} of them).")
+          PY

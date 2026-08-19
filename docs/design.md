@@ -81,12 +81,15 @@ usage-command escape hatch is also implemented. Broader provider-version
 fixtures remain for subsequent slices.
 
 The automated release foundation is already present: `.github/workflows/ci.yml`
-builds and runs both test suites on Linux, `docs/development.md` defines the
-source-distribution check, and the clean-install exercise recorded in milestone
-9 has passed. As of 2026-08-13, `kanban.cabal` and `src/Kanban/CLI.hs` both
-declare version `1.0.0.0` — established by #283 under packaging epic #282,
-along with the root `CHANGELOG.md` whose top section is the first release's
-notes — while the repository has no tags and the remote no GitHub Releases.
+builds and runs both test suites on Linux as independent jobs behind one
+aggregate `build-test` job, which is the single CI context that branch
+protection, `tools/drain_prs.py`, and the release gate below all resolve;
+`docs/development.md` defines the source-distribution check, and the
+clean-install exercise recorded in milestone 9 has passed. As of 2026-08-13,
+`kanban.cabal` and `src/Kanban/CLI.hs` both declare version `1.0.0.0` —
+established by #283 under packaging epic #282, along with the root
+`CHANGELOG.md` whose top section is the first release's notes — while the
+repository has no tags and the remote no GitHub Releases.
 `.github/workflows/release.yml` joins `ci.yml` and `review-gate.yml` as a
 tracked workflow: a push of a `v*` tag publishes the verified `cabal sdist`
 archive as a GitHub Release, and `workflow_dispatch` rehearses the same path
@@ -2927,9 +2930,12 @@ checked for internal consistency: every repository-relative link in a packaged
 document resolves inside the archive, and every setup or installer path those
 documents name exists there.
 
-It reads `cabal` and Git metadata, both of which the required CI job has and an
-unpacked release does not, so it skips with a stated reason rather than failing
-when either is absent. It writes only outside the working tree.
+It reads `cabal` and Git metadata, both of which the CI job carrying the Haskell
+toolchain has and an unpacked release does not, so it skips with a stated reason
+rather than failing when either is absent. A skip is a pass to `unittest`, so
+that job runs this module by name and refuses a skipped result, rather than
+leaving the gate to the toolchain-free job that runs the rest of the suite. It
+writes only outside the working tree.
 
 ### Manual checks
 

@@ -7,7 +7,7 @@ The screenshot's value is that it is derived, not captured: `docs/media`'s
 procedure has to produce the checked-in bytes again from the golden frame. Only
 part of that is checkable everywhere. Turning the frame into cells and colours
 is pure text handling and is tested here in full; turning cells into pixels
-needs Pillow and the pinned DejaVu files, which the required `build-test` job
+needs Pillow and the pinned DejaVu files, which the CI job that runs this suite
 installs neither of, so those cases state the missing prerequisite and skip
 rather than pretending to cover it or failing the build.
 

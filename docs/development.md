@@ -7,14 +7,25 @@ cabal update
 cabal build all
 ```
 
-CI uses GHC 9.12.2 and Cabal 3.16.1.0 on Linux. The required
-`build-test` check validates package metadata, builds the application, and runs
-both test suites. Pull requests also require the `review-approved` check, which
-passes while the current pull request carries `reviewed:approve`. A head change
-removes that label through the review-gate workflow, requiring a fresh review.
-The single exception is a push the workflow can prove touches none of the pull
-request's own files — a base-branch update merged forward — which changes only
-the branch's ancestry and so keeps the label. Anything it cannot prove
+CI uses GHC 9.12.2 and Cabal 3.16.1.0 on Linux. `.github/workflows/ci.yml` runs
+the Haskell work and the `tools/` suite as independent jobs that overlap,
+alongside the container-verified drainer lifecycle. The `tools/` job installs no
+Haskell toolchain: nothing in that suite needs one except the source
+distribution check below, which runs in the Haskell job.
+
+The required `build-test` check is the aggregate over all of them. It runs no
+build or test step of its own and succeeds only when every other job in the
+workflow succeeded, failing explicitly when one did not — a dependency failure
+merely *skips* a dependent job, and nothing that reads this check treats a skip
+as a refusal. A job added to `ci.yml` that `build-test` does not depend on fails
+`tools/test_ci_workflow.py`.
+
+Pull requests also require the `review-approved` check, which passes while the
+current pull request carries `reviewed:approve`. A head change removes that
+label through the review-gate workflow, requiring a fresh review. The single
+exception is a push the workflow can prove touches none of the pull request's
+own files — a base-branch update merged forward — which changes only the
+branch's ancestry and so keeps the label. Anything it cannot prove
 content-free that way, including any failure to establish either file list,
 removes the label as before. A removal the workflow cannot confirm actually
 happened fails the job rather than reporting a decision the label does not
@@ -78,9 +89,11 @@ file under `app/`, `src/`, `test/`, `tools/`, `codex-plugin/`, or
 `kanban.cabal` glob already covers its extension; anything else — a new
 top-level file, a new document under `docs/`, a new file extension — fails the
 check until `kanban.cabal` declares it and `tools/test_source_distribution.py`
-records whether it belongs in a release. It runs in the required `build-test`
-job as part of the Python suite, and skips with a reason where `cabal` or the
-Git metadata is unavailable, such as inside an unpacked release.
+records whether it belongs in a release. It runs in `ci.yml`'s Haskell job,
+which is where the toolchain it drives is installed, and that step fails when
+the check reports a skip rather than a result. It skips with a reason where
+`cabal` or the Git metadata is unavailable — inside an unpacked release, and in
+the toolchain-free job that runs the rest of the Python suite.
 
 ## Changing a workflow bundle
 
