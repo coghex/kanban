@@ -998,7 +998,13 @@ class BackendDelegationTests(RedirectedControllerTestCase):
             ),
         ):
             drain_prs_service.install_job(self.job)
-        self.assertEqual(observed, [("gate", True), ("ensure_dirs", True)])
+        # Unlocked first, then locked: taking the lock is itself a write into
+        # the installation — `document_lock` creates the record's parent,
+        # chmods it, and creates the lock file — so a stale controller that
+        # locked first would mutate what it is about to refuse.
+        self.assertEqual(
+            observed, [("gate", False), ("gate", True), ("ensure_dirs", True)]
+        )
 
     def test_an_uninstall_gates_and_removes_under_one_lock(self):
         observed = []
@@ -1017,7 +1023,7 @@ class BackendDelegationTests(RedirectedControllerTestCase):
             ),
         ):
             drain_prs_service.uninstall_job(self.job)
-        self.assertEqual(observed, [("gate", True)])
+        self.assertEqual(observed, [("gate", False), ("gate", True)])
         self.assertIn("uninstall_definition", self.backend.names())
 
     def test_a_relocated_installation_refuses_an_install_and_an_uninstall(self):
@@ -1043,6 +1049,11 @@ class BackendDelegationTests(RedirectedControllerTestCase):
         self.assertEqual(
             drain_prs_service.run_service(self.job, self.job.identity), 0
         )
+        # A no-write preflight refusal. The install directory exists here only
+        # because the marker had to be put somewhere, so the thing to assert is
+        # the lock file: creating it is what taking the record's lock would
+        # have done before this refused.
+        self.assertFalse((self.install_dir / "config.json.lock").exists())
         self.assertFalse(self.log_root.exists())
         self.assertFalse(self.runtime_root.exists())
 
@@ -1058,9 +1069,17 @@ class BackendDelegationTests(RedirectedControllerTestCase):
         with mock.patch.object(
             drain_prs_service, "DISCOVERY_RECORD_PATH", record_directory / "config.json"
         ):
-            self.assertIsNotNone(drain_prs_service.relocation_marker())
-            with self.assertRaises(drain_prs_service.ServiceError):
+            notice = drain_prs_service.relocation_marker()
+            self.assertIsNotNone(notice)
+            # The marker's own path, not only the destination: with
+            # `--install-dir` a controller has two bound locations and the
+            # refusal has to say which one moved.
+            self.assertEqual(notice.path, marker)
+            self.assertEqual(notice.destination, "/new/kanban/pr-drainer")
+            with self.assertRaises(drain_prs_service.ServiceError) as raised:
                 drain_prs_service.require_current_installation()
+            self.assertIn(str(marker), str(raised.exception))
+            self.assertIn("/new/kanban/pr-drainer", str(raised.exception))
 
     def test_the_relocation_gate_is_evaluated_under_the_record_lock(self):
         # Outside the lock it would be a gate that can be true when it is read
@@ -1074,7 +1093,14 @@ class BackendDelegationTests(RedirectedControllerTestCase):
 
         with mock.patch.object(drain_prs_service, "relocation_marker", marker):
             self.assertTrue(self.start_the_service()["started"])
-        self.assertEqual(observed, [True])
+        # The unlocked preflight, then the authoritative one under the lock.
+        self.assertEqual(observed, [False, True])
+
+    def test_the_refusal_names_the_marker_found_in_the_install_directory(self):
+        marker = self.write_relocation_marker()
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            drain_prs_service.require_current_installation()
+        self.assertIn(str(marker), str(raised.exception))
 
     def test_a_marker_that_names_no_destination_is_not_a_refusal(self):
         # Total, like every other reader here: a file that cannot be read as a
@@ -4368,8 +4394,18 @@ class StopAndAcknowledgeGateTests(RedirectedControllerTestCase):
         ):
             result = drain_prs_service.stop_service(self.job)
         self.assertTrue(result["stopped"])
+        # Both ends of the stop: an unlocked-then-locked pair up front, and
+        # the same pair again once the runner is gone, with the controller
+        # lock held for the writes that follow.
         self.assertEqual(
-            observed, [("gate", True), ("gate", True), ("write", True)]
+            observed,
+            [
+                ("gate", False),
+                ("gate", True),
+                ("gate", False),
+                ("gate", True),
+                ("write", True),
+            ],
         )
         # And released once the stop is done.
         self.assertFalse(
@@ -4402,6 +4438,98 @@ class StopAndAcknowledgeGateTests(RedirectedControllerTestCase):
             with self.assertRaises(drain_prs_service.ServiceError) as raised:
                 drain_prs_service.stop_service(self.job)
         self.assertIn("was relocated to", str(raised.exception))
+
+
+class ResolverDriftGateTests(RedirectedControllerTestCase):
+    """The second signal, which is the only one left when no marker survives.
+
+    A controller that bound itself to a destination record while a relocation
+    was in flight, and which that relocation then rolled back, has no marker
+    anywhere and nothing wrong at the location it came from. What it can still
+    be told is that the record and install directory it resolved are no longer
+    the ones this host resolves.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.checkout("widgets", "git@github.com:acme/widgets.git")
+        self.job = drain_prs_service.resolve_job(self.repo)
+        self.commands.clear()
+
+    def drifted(self, which):
+        """This host resolving somewhere other than what this process bound."""
+        elsewhere = self.root / "elsewhere" / "kanban" / "pr-drainer"
+        if which == "record":
+            return mock.patch.object(
+                kanban_config, "drainer_record_path", return_value=elsewhere / "config.json"
+            )
+        return mock.patch.object(
+            kanban_config, "drainer_install_dir", return_value=elsewhere
+        )
+
+    def transitions(self):
+        """Every transition that writes into an installation, as a callable."""
+        return {
+            "install": lambda: drain_prs_service.install_job(self.job),
+            "start": lambda: drain_prs_service.start_service(self.job),
+            "uninstall": lambda: drain_prs_service.uninstall_job(self.job),
+            "run": lambda: drain_prs_service.run_service(self.job, self.job.identity),
+            "stop": lambda: drain_prs_service.stop_service(self.job),
+            "acknowledge": lambda: drain_prs_service.acknowledge_incident(
+                self.job, None, "by hand"
+            ),
+        }
+
+    def assert_refuses_and_writes_nothing(self, name, call):
+        running = {
+            "state": "running",
+            "drainer_pid": 4242,
+            "active_repo": str(self.repo),
+        }
+        with (
+            mock.patch.object(
+                drain_prs_service, "in_progress_operation", return_value=None
+            ),
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(
+                drain_prs_service, "status_snapshot", return_value=running
+            ),
+        ):
+            if name == "run":
+                # The run path reports a clean refusal rather than raising.
+                self.assertEqual(call(), 0)
+            else:
+                with self.assertRaises(drain_prs_service.ServiceError) as raised:
+                    call()
+                self.assertIn("no longer the one this host resolves", str(raised.exception))
+        # Nothing written, and the install directory never even created.
+        # That is the assertion that matters: `document_lock` creates the
+        # record's parent, chmods it, and creates the lock file inside it, so
+        # a gate that only ran under the lock would leave all three behind in
+        # an installation this process does not belong to.
+        self.assertFalse(self.install_dir.exists())
+        self.assertFalse(self.record.exists())
+        self.assertFalse(self.runtime_root.exists())
+        self.assertFalse(self.log_root.exists())
+        self.assertEqual(self.commands, [])
+
+    def test_every_writing_transition_refuses_on_a_drifted_record(self):
+        for name, call in self.transitions().items():
+            with self.subTest(transition=name):
+                with self.drifted("record"):
+                    self.assert_refuses_and_writes_nothing(name, call)
+
+    def test_every_writing_transition_refuses_on_a_drifted_install_directory(self):
+        for name, call in self.transitions().items():
+            with self.subTest(transition=name):
+                with self.drifted("install"):
+                    self.assert_refuses_and_writes_nothing(name, call)
+
+    def test_an_undrifted_host_reports_no_drift(self):
+        # The fixture describes a host whose resolver agrees with the constants
+        # it patches, which is what makes the two cases above about the
+        # behaviour rather than about the fixture.
+        self.assertIsNone(drain_prs_service.resolved_installation_drift())
 
 
 class ControllerLockTests(RedirectedControllerTestCase):

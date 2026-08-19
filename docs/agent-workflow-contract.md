@@ -555,14 +555,23 @@ arithmetic, which §2.3 owns.
   Each of those transitions — install, start, uninstall, run, stop, and
   incident acknowledgement, which is every one that writes into an
   installation — asks first whether the installation is still the one this
-  process is bound to, and refuses if it is not. Managed paths are
+  process is bound to, and refuses if it is not. It asks twice: once with no
+  lock held at all, because taking the lock is itself a write into the
+  installation — it creates the record's parent directory, chmods it, and
+  creates the lock file beside it — and again inside, where the answer is
+  authoritative because no mover can be running. A gate that only ran under
+  the lock would mutate the very installation it was about to refuse, which
+  for the `run` path is the difference between a clean preflight refusal and
+  one that rebuilt part of what a mover removed. Managed paths are
   resolved once, when a component starts, and a controller cannot re-derive
   them for its own use — so a process that is running when a later run moves or
   removes an installation would otherwise rebuild exactly what that run took
   away, and leave its repository's job naming a controller that no longer
   exists. Two signals answer it, in order: a relocation marker, a JSON document
   named by a shared constant that a mover leaves in the directory it takes
-  apart, naming where the installation went — looked for in the bound install
+  apart, naming where the installation went — and named in the refusal
+  alongside that destination, so an operator with two bound locations is told
+  which one moved — looked for in the bound install
   directory *and* in the bound discovery record's directory, because
   `--install-dir` makes those two different places — and, for the case no
   marker survives, whether the bound record or install directory is still the

@@ -269,7 +269,17 @@ def controller_lock_is_held(runtime_dir: Path) -> bool:
     return False
 
 
-def relocation_marker() -> dict[str, Any] | None:
+@dataclass(frozen=True)
+class RelocationNotice:
+    """Where an installation went, and which of this process's two bound
+    locations was told. Both, because `--install-dir` makes them different
+    places and an operator reading the refusal has to know which one moved."""
+
+    path: Path
+    destination: str
+
+
+def relocation_marker() -> RelocationNotice | None:
     """Where this process's own installation went, if it went anywhere.
 
     Read out of the install directory *and* the discovery record's directory,
@@ -285,7 +295,8 @@ def relocation_marker() -> dict[str, Any] | None:
     # it must see is the one in the *record's* directory. A controller with no
     # override has both in one place and reads the same file twice.
     for directory in (INSTALL_DIR, DISCOVERY_RECORD_PATH.parent):
-        document = _read_json_object(directory / RELOCATION_MARKER_NAME)
+        path = directory / RELOCATION_MARKER_NAME
+        document = _read_json_object(path)
         destination = document.get(RELOCATION_MARKER_DESTINATION)
         # An absolute path or nothing. A relative destination names no
         # location a second process could agree on, and every other outcome --
@@ -293,7 +304,7 @@ def relocation_marker() -> dict[str, Any] | None:
         # "no marker" rather than an error, because this is asked of a
         # directory another run may have left in any state.
         if isinstance(destination, str) and destination and os.path.isabs(destination):
-            return document
+            return RelocationNotice(path, destination)
     return None
 
 
@@ -337,12 +348,12 @@ def require_current_installation() -> None:
     marker = relocation_marker()
     if marker is not None:
         raise ServiceError(
-            f"The PR drainer installation at {INSTALL_DIR} was relocated to "
-            f"{marker[RELOCATION_MARKER_DESTINATION]} while this controller was "
-            "running, so this "
-            "process's own paths no longer describe it. Nothing was changed. Run "
-            "this again: a controller resolves its installation when it starts, "
-            "so the next one resolves the new location."
+            f"The PR drainer installation this controller is bound to was "
+            f"relocated to {marker.destination} while it was running, as "
+            f"{marker.path} records. This process's own paths no longer describe "
+            "it, and nothing was changed. Run this again: a controller resolves "
+            "its installation when it starts, so the next one resolves the new "
+            "location."
         )
     drift = resolved_installation_drift()
     if drift is not None:
@@ -352,6 +363,28 @@ def require_current_installation() -> None:
             "was changed. Run this again; the next controller resolves the "
             "current installation."
         )
+
+
+@contextlib.contextmanager
+def installation_transaction() -> Iterator[None]:
+    """The discovery record's lock, entered only after this process has proved
+    the installation is still its own — and proved it again inside.
+
+    Two checks rather than one, because taking the lock is itself a write into
+    the installation: `document_lock` creates the record's parent directory,
+    chmods it, and creates the lock file beside it. A stale controller that
+    locked first would therefore mutate the very installation it is about to
+    refuse, which for the `run` path is the difference between a clean
+    preflight refusal and one that rebuilt part of what a mover removed.
+
+    The unlocked check touches nothing and refuses cheaply; the locked one is
+    the authoritative answer, taken where no mover can be running, and it is
+    the one every transition acts on.
+    """
+    require_current_installation()
+    with document_lock(DISCOVERY_RECORD_PATH):
+        require_current_installation()
+        yield
 
 
 def _read_service_config() -> dict[str, Any]:
@@ -1834,8 +1867,7 @@ def install_job(job: DrainerJob) -> dict[str, Any]:
     # this lock to decide whether anything is live -- `install_drainer`'s
     # relocation -- would see nothing running and act on a drainer that is
     # about to start.
-    with document_lock(DISCOVERY_RECORD_PATH):
-        require_current_installation()
+    with installation_transaction():
         ensure_dirs(job)
         manager = service_backend().backend_name()
         snapshot = status_snapshot(job)
@@ -1899,8 +1931,7 @@ def uninstall_job(job: DrainerJob) -> dict[str, Any]:
     # definition a relocation had just rewritten or write a fresh record at the
     # location that relocation emptied. Neither is an uninstall; both are
     # debris.
-    with document_lock(DISCOVERY_RECORD_PATH):
-        require_current_installation()
+    with installation_transaction():
         backend = service_backend()
         snapshot = status_snapshot(job)
         if snapshot["state"] in {"running", "starting", "external"}:
@@ -1944,8 +1975,7 @@ def start_service(job: DrainerJob) -> dict[str, Any]:
     # not be handed it. A job the manager has been asked to run reads as
     # running from here on, so the stabilization loop below waits outside the
     # lock and never holds it against the process it is waiting for.
-    with document_lock(DISCOVERY_RECORD_PATH):
-        require_current_installation()
+    with installation_transaction():
         ensure_dirs(job)
         snapshot = status_snapshot(job)
         conflict = another_checkout_running(job, snapshot)
@@ -2031,8 +2061,8 @@ def stop_service(job: DrainerJob) -> dict[str, Any]:
     # disappears while it runs. Signalling the runner is what makes the runner
     # release its controller lock, so from that instant nothing is fencing a
     # mover out until this takes the lock itself.
-    with document_lock(DISCOVERY_RECORD_PATH):
-        require_current_installation()
+    with installation_transaction():
+        pass
     snapshot = status_snapshot(job)
     state = snapshot["state"]
     if state == "stopped":
@@ -2060,8 +2090,7 @@ def stop_service(job: DrainerJob) -> dict[str, Any]:
             # installation apart underneath them. Same handoff `run_service`
             # performs, from the other end -- gate under the record's lock and
             # take the controller lock before releasing it.
-            with document_lock(DISCOVERY_RECORD_PATH):
-                require_current_installation()
+            with installation_transaction():
                 controller_lock = acquire_controller_lock(job.runtime_dir)
             try:
                 cleared_incidents = resolve_crash_incidents(
@@ -2442,8 +2471,7 @@ def acknowledge_incident(
     # together rather than a controller lock being taken for it: a mover holds
     # that same lock for its whole transition, which is what excludes this one
     # while it runs, and this one is over in a single atomic write.
-    with document_lock(DISCOVERY_RECORD_PATH):
-        require_current_installation()
+    with installation_transaction():
         paths = incident_files(job, open_only=True)
         if incident_id:
             if not re.fullmatch(r"incident-[A-Za-z0-9TZ-]+", incident_id):
@@ -2719,8 +2747,7 @@ def run_service(job: DrainerJob, requested_identity: str | None = None) -> int:
     # refuses instead. Gate first and lock second with the record released in
     # between would leave exactly the window this closes.
     try:
-        with document_lock(DISCOVERY_RECORD_PATH):
-            require_current_installation()
+        with installation_transaction():
             controller_lock = acquire_controller_lock(job.runtime_dir)
     except ServiceError as exc:
         # Printed rather than logged, because logging is exactly the write
