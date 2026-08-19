@@ -1749,17 +1749,39 @@ def _recreated_entries(plan: RelocationPlan, known: frozenset[str]) -> tuple[Pat
     """
     found: list[Path] = []
     for directory in (plan.legacy_dir, plan.legacy_log_root):
-        if not _plain_directory(directory) or str(directory) in known:
+        if not _plain_directory(directory):
             continue
-        found.extend(
-            child for child in sorted(directory.iterdir()) if str(child) not in known
-        )
+        found.extend(_unaccounted_children(directory, known))
     return tuple(found)
+
+
+def _unaccounted_children(directory: Path, known: frozenset[str]) -> list[Path]:
+    """Everything under `directory` this run has not accounted for.
+
+    A path the removal reported retaining is one the run knows about — but a
+    *directory* it retained is not, because it was kept precisely for still
+    holding something, and what is inside it is exactly the durable state a
+    location this installer just emptied must not be left holding in silence.
+    So a retained directory is descended into rather than skipped: the runtime
+    and log roots are what a controller writing for a repository no record
+    names leaves its trees under, and hiding a root hides them with it.
+    """
+    found: list[Path] = []
+    for child in sorted(directory.iterdir()):
+        if str(child) not in known:
+            found.append(child)
+        elif _plain_directory(child):
+            found.extend(
+                grandchild
+                for grandchild in sorted(child.iterdir())
+                if str(grandchild) not in known
+            )
+    return found
 
 
 def _carry_tree(
     transition: _Transition,
-    entry: RelocationRepository,
+    identity: str,
     kind: str,
     source: Path,
     destination: Path,
@@ -1779,18 +1801,18 @@ def _carry_tree(
         return True
     if not _plain_directory(source):
         outcome["failures"].append(
-            f"{entry.identity}'s recreated {kind} path {source} is not a directory."
+            f"{identity}'s recreated {kind} path {source} is not a directory."
         )
         return False
     if os.path.lexists(destination) and not _plain_directory(destination):
         outcome["failures"].append(
-            f"{entry.identity}'s {kind} path {destination} is not a directory."
+            f"{identity}'s {kind} path {destination} is not a directory."
         )
         return False
     if destination.exists() and not _same_tree(source, destination):
         outcome["collisions"].append(
             {
-                "repository": entry.identity,
+                "repository": identity,
                 "kind": kind,
                 "source": str(source),
                 "destination": str(destination),
@@ -1802,7 +1824,7 @@ def _carry_tree(
         _move_tree(transition, move)
     except _SWEEP_FAULTS as exc:
         outcome["failures"].append(
-            f"{entry.identity}'s {kind} tree {source} could not be carried to "
+            f"{identity}'s {kind} tree {source} could not be carried to "
             f"{destination}: {exc}"
         )
         return False
@@ -1815,6 +1837,61 @@ def _carry_tree(
             }
         )
     return True
+
+
+def _carry_unaccounted_trees(
+    transition: _Transition, plan: RelocationPlan, outcome: dict[str, Any]
+) -> bool:
+    """Carry the per-repository trees no record names.
+
+    Two things leave one. A controller whose record write the seal refused
+    still wrote its runtime and log trees first, under no record lock at all,
+    so the repository it was installing is named by nothing. And an uninstall
+    deliberately leaves a repository's runtime state, logs and incidents
+    behind, so a repository removed long ago has trees under these roots and no
+    entry anywhere.
+
+    Neither can be recovered *as* a repository — there is no entry to read a
+    checkout, an identifier or a definition out of. Both are a repository's
+    durable state sitting at a location this installer has just emptied, where
+    nothing will ever look for it again. So they are carried by the one name
+    they do have, the directory the state is filed under, to the roots the
+    installation now uses; a tree already there is the collision every other
+    tree's is, kept and named rather than chosen between.
+
+    No fence is taken for them, and none is available: a repository no record
+    names is one this installation can neither discover nor control, so nothing
+    here is running it. Every repository that *is* recorded is fenced by the
+    caller before its own trees are touched.
+    """
+    carried = True
+    for kind, source_root, destination_root in (
+        (
+            "runtime",
+            plan.legacy_dir / _RUNTIME_DIRECTORY_NAME,
+            plan.install_dir / _RUNTIME_DIRECTORY_NAME,
+        ),
+        ("log", plan.legacy_log_root, plan.log_root),
+    ):
+        if not _plain_directory(source_root):
+            continue
+        for source in sorted(source_root.iterdir()):
+            # A recorded repository's own tree is carried above, with its
+            # fences held; one that collided there is still sitting here and
+            # has already been named, so naming it a second time would report
+            # one pair of trees as two.
+            if any(item["source"] == str(source) for item in outcome["collisions"]):
+                continue
+            if not _carry_tree(
+                transition,
+                source.name,
+                kind,
+                source,
+                destination_root / source.name,
+                outcome,
+            ):
+                carried = False
+    return carried
 
 
 def _carry_recreated_location(
@@ -1895,7 +1972,7 @@ def _carry_recreated_location(
             continue
         for kind, source, tree_destination in entry.trees():
             if not _carry_tree(
-                transition, entry, kind, source, tree_destination, outcome
+                transition, entry.identity, kind, source, tree_destination, outcome
             ):
                 carried = False
         try:
@@ -1906,6 +1983,11 @@ def _carry_recreated_location(
                 f"rewritten against {plan.install_dir}: {exc}"
             )
             carried = False
+    # After every recorded repository, so a tree one of them owns is carried
+    # under its own fences and named by its own identity rather than by the
+    # directory it happens to sit in.
+    if not _carry_unaccounted_trees(transition, plan, outcome):
+        carried = False
     if recreated:
         # An entry that could not be recovered is dropped from what is merged
         # forward rather than filed at the destination beside the jobs that

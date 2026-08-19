@@ -1096,6 +1096,15 @@ trees there it plans and reconciles them exactly as it would an unsealed one,
 and refuses over anything it would have to choose between. Stopping those writes
 happening at all, rather than finding them next time, is #390.
 
+Directories under `runtime/` and the old log root that belong to no repository
+in the record are moved across too, under the same name. Two things leave one:
+a controller whose record write was refused — it writes its directories before
+it ever gets to the record — and an uninstall, which leaves a repository's
+state, logs and incidents behind on purpose. Neither can be treated as a
+repository, since nothing records where its checkout is or what its job is
+called, but neither is left at a location nothing reads any more. If the same
+name already exists at the destination, both are kept and both are named.
+
 Taking over an installation already at this platform's own location is #368.
 
 

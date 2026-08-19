@@ -952,33 +952,67 @@ class TransientDestinationControllerTests(RelocationFixture):
         self.assertFalse(self.destination_record.exists())
 
 
-class RetainedResidueTests(RelocationFixture):
-    """What the removal deliberately leaves behind, and says it left."""
+class UnaccountedTreeTests(RelocationFixture):
+    """A repository's durable state that no record names.
 
-    def test_a_legacy_log_root_still_holding_something_is_kept_and_reported(self):
-        # Not this run's to delete: it never accounted for whatever is in
-        # there, and taking a log root away with the installation it happened
-        # to sit beside would be discarding durable state.
+    An uninstall deliberately leaves a repository's runtime state, logs and
+    incidents behind, so a repository removed long ago has trees under these
+    roots and an entry nowhere. Neither the removal nor the plan can recover it
+    *as* a repository — there is no entry to read a checkout or a definition out
+    of — but leaving it where it is would orphan it at a location nothing looks
+    at again. It is carried by the one name it has.
+    """
+
+    def test_a_log_tree_no_record_names_is_carried_rather_than_orphaned(self):
         self.seed_legacy_installation()
         stray = self.legacy_logs / "someone.else"
         stray.mkdir(parents=True)
         (stray / "service.log").write_text("kept\n", encoding="utf-8")
         result = self.relocate()
+        # The removal itself keeps it, because it never accounted for it and
+        # deleting durable state is not its to do...
         self.assertIn(str(self.legacy_logs), result["retained"])
-        self.assertEqual((stray / "service.log").read_text(encoding="utf-8"), "kept\n")
+        # ...and the reconciliation then carries it to the root the
+        # installation now uses, whole.
+        carried = self.destination_logs / "someone.else" / "service.log"
+        self.assertEqual(carried.read_text(encoding="utf-8"), "kept\n")
+        self.assertFalse(stray.exists())
+        self.assertTrue(result["late_writes"]["resolved"])
 
-    def test_a_legacy_runtime_directory_still_holding_something_is_kept(self):
+    def test_a_runtime_tree_no_record_names_is_carried_too(self):
         job = self.seed_legacy_installation()[0]
         stray = self.legacy_dir / "runtime" / "someone.else"
         stray.mkdir(parents=True)
         (stray / "status.json").write_text("{}", encoding="utf-8")
         result = self.relocate()
         self.assertIn(str(self.legacy_dir / "runtime"), result["retained"])
-        self.assertTrue((stray / "status.json").is_file())
+        self.assertTrue(
+            (self.destination / "runtime" / "someone.else" / "status.json").is_file()
+        )
+        self.assertFalse(stray.exists())
         # And what the run *did* account for still moved.
         self.assertTrue(
             (self.destination / "runtime" / job.slug / "status.json").is_file()
         )
+        self.assertTrue(result["late_writes"]["resolved"])
+
+    def test_one_already_at_the_destination_is_kept_and_named(self):
+        # The judgement nothing here makes, asked of a tree with no repository
+        # to name it: both copies stay and both are reported.
+        self.seed_legacy_installation()
+        for root in (self.legacy_logs, self.destination_logs):
+            tree = root / "someone.else"
+            tree.mkdir(parents=True)
+            (tree / "service.log").write_text(f"{root.name}\n", encoding="utf-8")
+        result = self.relocate()
+        late = result["late_writes"]
+        self.assertFalse(late["resolved"])
+        self.assertEqual(
+            [(item["repository"], item["kind"]) for item in late["collisions"]],
+            [("someone.else", "log")],
+        )
+        self.assertTrue((self.legacy_logs / "someone.else").is_dir())
+        self.assertTrue((self.destination_logs / "someone.else").is_dir())
 
 
 class DirectoryModeTests(RelocationFixture):
@@ -2855,6 +2889,8 @@ class PreGateWriterTests(RelocationFixture):
         self.writer_script.write_text(_PRE_GATE_WRITER, encoding="utf-8")
         self.pre_gate = self.build_pre_gate_controller()
         self.writes = "record-only"
+        self.repository = "acme/widgets"
+        self.checkout = self.widgets
 
     def build_pre_gate_controller(self):
         """This module's own source with exactly the gate this arc added taken
@@ -2896,8 +2932,8 @@ class PreGateWriterTests(RelocationFixture):
                 str(self.queued),
                 str(self.acquired),
                 str(self.result),
-                "acme/widgets",
-                str(self.widgets),
+                self.repository,
+                str(self.checkout),
                 # Held past the write, so the reconciliation's first pass
                 # blocks on this process once the handoff gives it the lock.
                 "0.4",
@@ -3055,6 +3091,44 @@ class PreGateWriterTests(RelocationFixture):
         self.assertIn(str(runtime), message)
         self.assertIn(str(self.destination / "runtime" / self.job.slug), message)
         self.assertEqual(self.host_state(), before)
+
+    def test_a_repository_no_record_names_has_its_trees_carried(self):
+        """The writer whose record the seal refused was installing something.
+
+        It writes its directories, its status file, its incidents, its logs and
+        its definition before it reaches the record, so refusing the record
+        leaves a repository nothing names with durable state at a location
+        nothing looks at again. A later run carries it by the one name it has —
+        the slug its state is filed under — rather than retaining it silently.
+        """
+        self.repository = "acme/gadgets"
+        self.checkout = self.make_checkout(
+            "gadgets", "git@github.com:acme/gadgets.git"
+        )
+        self.writes = "trees"
+        process = self.start_writer()
+        self.assertTrue(self.relocate()["late_writes"]["sealed"])
+        self.go.write_text("", encoding="utf-8")
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+        outcome = json.loads(self.result.read_text(encoding="utf-8"))
+        self.assertIn("Refusing unsafe config path", outcome["refused"])
+        slug = drain_prs_service.repository_slug("acme/gadgets")
+        self.assertTrue((self.legacy_dir / "runtime" / slug).is_dir())
+        # Nothing records it, so the destination record still does not name it
+        # — and its state is nonetheless where the installation now is.
+        again = install_drainer.relocate(self.destination, self.sources)
+        self.assertTrue(again["relocated"])
+        self.assertTrue(again["late_writes"]["resolved"])
+        self.assertNotIn(
+            "acme/gadgets",
+            self.record_document(self.destination_record)["repositories"],
+        )
+        self.assertTrue(
+            (self.destination / "runtime" / slug / "status.json").is_file()
+        )
+        self.assertTrue((self.destination_logs / slug / "service.log").is_file())
+        self.assertFalse((self.legacy_dir / "runtime" / slug).exists())
+        self.assert_record_path_is_sealed()
 
     def test_a_sealed_location_holding_nothing_is_left_alone(self):
         self.relocate()

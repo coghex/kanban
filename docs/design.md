@@ -2523,7 +2523,11 @@ above are unchanged, and persistence the user switched off is not a failure.
   tree, its logs and its definition under no lock at all and before it reaches
   the record — so a later run skips a sealed location only when it holds
   nothing but the seal, the lock and the marker, and otherwise reconciles it
-  exactly as it would an unsealed one; preventing those writes is #390. It is
+  exactly as it would an unsealed one; preventing those writes is #390. A
+  per-repository tree no record names — left by such a controller, or by an
+  uninstall, which keeps a repository's state deliberately — is carried by the
+  directory its state is filed under rather than orphaned, and one already at
+  its destination is kept and named like any other collision. It is
   bounded at three passes rather than looped, each merging the recreated record
   on those same terms, carrying the trees it brought, rewriting the definitions
   it names, and clearing the location again on the removal's own ownership

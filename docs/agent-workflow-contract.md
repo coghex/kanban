@@ -1362,6 +1362,19 @@ search step and nothing else, which is what `mandatory: no` records.
   holds trees is planned and reconciled exactly as an unsealed one is, which is
   what stops the seal from making such state permanently invisible. Preventing
   those writes rather than finding them on the next run is #390.
+  A per-repository tree no record names is carried too, by the one name it has
+  — the directory its state is filed under. Two things leave one: a controller
+  whose record write the seal refused, which wrote its trees first, and an
+  uninstall, which deliberately leaves a repository's runtime state, logs and
+  incidents behind. Neither can be recovered *as* a repository, because there
+  is no entry to read a checkout, an identifier or a definition out of, and
+  neither may be left at a location nothing looks at again — so the roots the
+  removal kept are descended into rather than skipped, and what is under them
+  is moved to the roots the installation now uses. One already at its
+  destination is the collision every other tree's is, kept and named rather
+  than chosen between. No fence is taken for such a tree and none is available:
+  a repository no record names is one this installation can neither discover
+  nor control, so nothing is running it.
   Whoever was waiting takes the lock; it keeps the checkout
   and controller fences the whole time, so no drainer or controller can start
   against a tree it is about to move, and it fences any repository it recovers
