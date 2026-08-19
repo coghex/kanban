@@ -21,12 +21,13 @@
 --   decides when it ends -- 'sentinelProviderCommand' and 'releaseSentinel'
 --   -- rather than a duration guessing when that will be.
 --
--- * Where a bound genuinely still has to be raced (the supervisor has to
+-- * Where a bound genuinely still has to be raced -- the supervisor has to
 --   start up and register its provider before its own deadline fires, and
---   nothing can observe that from outside), the bound is
---   'deadlineWindowSeconds' rather than one second, and the example waits
---   past the deadline by measuring the clock ('waitUntilPastDeadline')
---   instead of sleeping for a guess.
+--   nothing outside it can observe that -- the bound is
+--   'deadlineWindowSeconds' (or 'orphanTakeoverWindowSeconds', which also
+--   has to cover an observed setup) rather than one second, and everything
+--   the example does inside it is itself capped, so an overrun fails on its
+--   own poll instead of quietly racing the watchdog.
 --
 -- The examples whose bound is a bare literal are the ones where no such race
 -- exists at all: an already-overdue @workerCreatedAt@ (the deadline is
@@ -38,7 +39,8 @@
 module Spec.Agent.ManagedProcess.Deadline (examples) where
 
 import Control.Concurrent
-  ( forkIO,
+  ( ThreadId,
+    forkIO,
     newEmptyMVar,
     newMVar,
     putMVar,
@@ -48,7 +50,7 @@ import Control.Concurrent
     tryPutMVar
   )
 import Control.Exception (SomeException, finally, throwIO, try, uninterruptibleMask_)
-import Control.Monad (unless, void, when)
+import Control.Monad (void, when)
 import Data.Aeson (eitherDecode, encode)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
@@ -57,6 +59,7 @@ import Data.List (find, findIndex, findIndices)
 import Data.Maybe (isJust)
 import qualified Data.Text
 import Data.Time (UTCTime, addUTCTime, getCurrentTime)
+import GHC.Conc (BlockReason (..), ThreadStatus (..), listThreads, threadStatus)
 import Kanban.Domain
 import Kanban.Process
   ( ProcessIdentity (..),
@@ -458,13 +461,26 @@ examples = do
             -- between a provider's 'sleep' and a snapshot's delay.
             censusEntered <- newEmptyMVar
             censusRelease <- newEmptyMVar
+            cancellationWasPending <- newIORef False
             let completeThenVerify _spec _aggregator rememberProvider emit = do
                   rememberProvider managed
-                  emit (WorkerFinished SolveCompleted)
+                  -- 'complete' runs the whole completion under
+                  -- 'uninterruptibleMask_', so the watchdog's 'killThread'
+                  -- cannot land inside it and is instead delivered at the
+                  -- first interruptible point afterwards. Catching it here
+                  -- records that it was *already pending* when the
+                  -- completion returned -- which is to say that the deadline
+                  -- fired while this completion was still running, not after
+                  -- it had finished. The supervisor takes the same path
+                  -- either way ('supervisorForcedOutcome' is set, so it
+                  -- never consults this task's result).
+                  cutOff <- try @SomeException (emit (WorkerFinished SolveCompleted) >> threadDelay 1000)
+                  writeIORef cancellationWasPending (either (const True) (const False) cutOff)
                 gatedSnapshot = do
                   void (tryPutMVar censusEntered ())
                   readMVar censusRelease
                   readProcessSnapshot
+            alreadyDelivering <- threadsDeliveringCancellation
             finished <- newEmptyMVar
             void . forkIO $ runWorkerWithTask gatedSnapshot completeThenVerify specPath >>= putMVar finished
             entered <- timeout 30000000 (takeMVar censusEntered)
@@ -476,15 +492,27 @@ examples = do
             -- own rather than being cut off.
             releaseSentinel sentinel
             waitForProcess providerProcess `shouldReturn` ExitSuccess
-            -- Measured, not guessed: the deadline is genuinely behind us
-            -- before the in-flight completion is allowed to resolve, so the
-            -- watchdog's own identically-computed delay has provably elapsed
-            -- while that completion was still running.
-            waitUntilPastDeadline deadline
+            -- Observed, not waited out. Merely measuring the clock past the
+            -- deadline would say nothing about whether 'watchdogLoop' has
+            -- actually run: a delayed watchdog would let the completion
+            -- finish first and then preserve its result, and this example
+            -- would pass without ever putting an in-flight completion
+            -- against a fired deadline. The watchdog publishes no event and
+            -- touches no shared state between its delay elapsing and the
+            -- 'killThread' its takeover branch reaches, so that blocked
+            -- 'killThread' is the one thing there is to observe -- and it
+            -- blocks precisely because the completion this example is about
+            -- is still holding its mask.
+            waitForNewCancellationDelivery alreadyDelivering 1500
+            firedAt <- getCurrentTime
+            firedAt `shouldSatisfy` (>= deadline)
             putMVar censusRelease ()
             timeout 30000000 (takeMVar finished) `shouldReturn` Just (Right ())
             terminalState <- waitForWorkerState statePath isTerminal 10
             terminalState.workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
+            -- ...and the completion that produced it was carrying the
+            -- deadline's cancellation the whole time it was finishing.
+            readIORef cancellationWasPending `shouldReturn` True
 
     it "keeps the deadline outcome when a normal completion attempt lands just after it already fired" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -899,7 +927,7 @@ examples = do
             fakeCodex = binaryRoot </> "codex"
             identifier = WorkerId "solve-820-orphan-then-deadline"
             repository = Repository repositoryRoot "coghex" "kanban"
-            spec = deadlineFixtureSpec repository identifier 820 now 5
+            spec = deadlineFixtureSpec repository identifier 820 now orphanTakeoverWindowSeconds
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-820-orphan-then-deadline.spec.json"
             statePath = workerRoot </> "solve-820-orphan-then-deadline.state.json"
@@ -913,9 +941,8 @@ examples = do
         -- The provider itself exits normally, backgrounding a TERM-resistant
         -- child first: the normal completion claims completedRef and,
         -- finding that child still alive, reports WorkerOrphansDetected
-        -- SolveCompleted rather than WorkerFinished. The five-second
-        -- deadline then fires while that orphan-pending state is still
-        -- unresolved.
+        -- SolveCompleted rather than WorkerFinished. The deadline then
+        -- fires while that orphan-pending state is still unresolved.
         --
         -- This fixture used to have a genuinely two-sided window, and the
         -- lower side is what a fixed tail could not hold safely. The child
@@ -931,12 +958,17 @@ examples = do
         -- the child's pid, so the lower bound is an observation and the
         -- 250ms period no longer has to be raced at all.
         --
-        -- The upper side is unchanged and still holds: the sequence the
-        -- five-second bound now races -- one census discovery, this
-        -- example's own poll of it, and the shell's exit -- is the same
-        -- fraction of a second the old tail was, and every step of it is
-        -- observed rather than assumed, so a slow step delays the release
-        -- instead of skipping it.
+        -- The upper side is what the bound itself has to cover, and
+        -- observing the discovery does not on its own make that safe: the
+        -- deadline starts when the worker does, so a slow discovery would
+        -- push the normal completion past it and let the watchdog kill the
+        -- provider first. That is bounded rather than hoped for.
+        -- 'orphanTakeoverWindowSeconds' is the bound, and the two polls
+        -- below are capped ('setupPollAttempts' each) so the whole setup can
+        -- consume at most six of those twelve seconds -- a setup that
+        -- overruns fails loudly on its own poll instead of silently racing
+        -- the watchdog, and the completion always has at least six seconds
+        -- of the window left to land in.
         ByteString.writeFile
           fakeCodex
           ( ByteString.unlines
@@ -963,16 +995,19 @@ examples = do
             -- descent, while the script is still its live parent. Only then
             -- is the script released, so its exit can never outrun the
             -- discovery this example depends on.
-            childPid <- waitForRecordedPid childPidFile 300
-            void (waitForWorkerState statePath (censusHolds childPid) 300)
+            childPid <- waitForRecordedPid childPidFile setupPollAttempts
+            void (waitForWorkerState statePath (censusHolds childPid) setupPollAttempts)
             releaseSentinel sentinel
             orphanState <- waitForWorkerState statePath isOrphaned 80
             orphanState.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
-            -- The five-second deadline fires next, while the survivor is
-            -- still alive and the worker is still orphan-pending on it: it
+            -- The deadline fires next, while the survivor is still alive
+            -- and the worker is still orphan-pending on it: it
             -- must take over the pending outcome even though it lost
             -- completedRef to the normal completion above.
-            deadlineTookOver <- waitForWorkerState statePath deadlineAdjudicated 80
+            -- Waits past 'orphanTakeoverWindowSeconds' with room to spare,
+            -- since that bound is what this is waiting for rather than a
+            -- guess about how long the takeover takes.
+            deadlineTookOver <- waitForWorkerState statePath deadlineAdjudicated 250
             deadlineTookOver `shouldSatisfy` deadlineAdjudicated
             timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
             terminalState <- waitForWorkerState statePath isTerminal 30
@@ -1219,20 +1254,28 @@ examples = do
 deadlineWindowSeconds :: Int
 deadlineWindowSeconds = 3
 
+-- | The bound for the orphan-takeover example, which -- unlike the
+-- examples using 'deadlineWindowSeconds' -- has to cover a whole observed
+-- setup as well as the supervisor's startup: a real provider spawns through
+-- 'Kanban.Solve.runSolve', backgrounds a child, and that child has to be
+-- discovered by descent before the example may let the provider exit. Twelve
+-- seconds against a setup capped at 'setupPollAttempts' twice over is what
+-- makes that a bound rather than a race.
+orphanTakeoverWindowSeconds :: Int
+orphanTakeoverWindowSeconds = 12
+
+-- | How long each half of that observed setup may take. Two of these
+-- (three seconds each) fit inside 'orphanTakeoverWindowSeconds' with half
+-- the window still to spare, so an overrunning setup fails on its own poll
+-- rather than quietly letting the watchdog fire first.
+setupPollAttempts :: Int
+setupPollAttempts = 30
+
 -- | The absolute instant a fixture's bound describes, computed exactly as
 -- 'Kanban.Worker.watchdogLoop' and 'waitForOrphanResolution' compute it, so
 -- an example waiting past it waits past the same instant the worker does.
 fixtureDeadline :: WorkerSpec -> UTCTime
 fixtureDeadline spec = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
-
--- | Blocks until the wall clock has genuinely passed @deadline@. This is a
--- measurement rather than a guess: nothing here assumes how long anything
--- took, so ambient load can make it return later but can never make it
--- report a deadline as passed that has not, or the reverse.
-waitUntilPastDeadline :: UTCTime -> IO ()
-waitUntilPastDeadline deadline = do
-  current <- getCurrentTime
-  unless (current >= deadline) (threadDelay 20000 >> waitUntilPastDeadline deadline)
 
 -- | A provider shell that runs until @sentinel@ exists and then exits
 -- normally, on its own. When that happens is not timed at all — the example
@@ -1268,6 +1311,35 @@ waitForRecordedPid path attempts = do
     _
       | attempts <= 0 -> fail ("no pid was ever recorded at " <> path)
       | otherwise -> threadDelay 100000 >> waitForRecordedPid path (attempts - 1)
+
+-- | The threads currently blocked delivering an asynchronous exception to
+-- another thread. 'killThread' is 'throwTo', which blocks until the target
+-- accepts -- and a target inside 'uninterruptibleMask_' does not accept
+-- until it leaves that mask, so a thread sitting here is a cancellation
+-- being held up by masked work.
+threadsDeliveringCancellation :: IO [ThreadId]
+threadsDeliveringCancellation = do
+  threads <- listThreads
+  labelled <- mapM (\thread -> (,) thread <$> threadStatus thread) threads
+  pure [thread | (thread, ThreadBlocked BlockedOnException) <- labelled]
+
+-- | Blocks until some thread that was not already doing so is blocked
+-- delivering a cancellation. For the completion-boundary example this is
+-- the only externally visible sign that 'Kanban.Worker.watchdogLoop' has
+-- entered its post-deadline path at all: it claims the lease release, sets
+-- its flags, loses the completion claim and reaches 'killThread' without
+-- emitting an event or touching any state an example can read, and it is
+-- that 'killThread' -- held up by the in-flight completion's own mask --
+-- that shows up here.
+waitForNewCancellationDelivery :: [ThreadId] -> Int -> IO ()
+waitForNewCancellationDelivery alreadyDelivering attempts = do
+  current <- threadsDeliveringCancellation
+  if any (`notElem` alreadyDelivering) current
+    then pure ()
+    else
+      if attempts <= 0
+        then fail "no thread ever blocked delivering a cancellation"
+        else threadDelay 20000 >> waitForNewCancellationDelivery alreadyDelivering (attempts - 1)
 
 -- | Whether the worker has already published the deadline outcome, orphan
 -- pending or fully terminal alike. Both are points the watchdog can only
