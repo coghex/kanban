@@ -32,6 +32,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -321,6 +322,17 @@ _BYTECODE_CACHE_NAME = "__pycache__"
 _BYTECODE_SUFFIX = ".pyc"
 
 
+# How many times one run carries a recreated legacy location across before it
+# stops and reports what is still there. Bounded rather than looped: a writer
+# that keeps recreating that location would otherwise hold an installer open
+# for as long as it kept winning, and an installer that never returns is worse
+# than one that names the state it could not resolve. Every writer that merely
+# queued on the legacy record's lock is already excluded by the transition that
+# holds it, so only a writer arriving after each clear can extend this sweep at
+# all.
+_LATE_WRITER_PASSES = 3
+
+
 class RelocationFailed(InstallError):
     """A relocation that had already mutated something when it failed.
 
@@ -332,6 +344,24 @@ class RelocationFailed(InstallError):
     def __init__(self, message: str, residue: list[str]):
         super().__init__(message)
         self.residue = list(residue)
+
+
+class RelocationUnresolved(InstallError):
+    """A relocation that completed and left durable state back at the location
+    it emptied.
+
+    The destination is the installation from here on -- this is not a failure
+    the relocation is rolled back over, and rolling it back would be the one
+    action that could lose what a late writer recorded. What it is instead is
+    an install that must not report success: a host with a repository's status,
+    incidents or logs in two places has a decision to make that this installer
+    may not make for it, and the report carries every repository and every
+    retained path that decision is about.
+    """
+
+    def __init__(self, message: str, report: dict[str, Any]):
+        super().__init__(message)
+        self.report = report
 
 
 def legacy_install_dir() -> Path:
@@ -1079,11 +1109,18 @@ def _ensure_directory(transition: _Transition, path: Path) -> None:
         path.chmod(0o700)
 
 
-def _write_destination_record(transition: _Transition, plan: RelocationPlan) -> None:
-    """Put the merged document at the destination, durably, before anything
+def _write_destination_record(
+    transition: _Transition, path: Path, document: dict[str, Any]
+) -> None:
+    """Put a merged document at the destination, durably, before anything
     legacy is removed — so a run that dies here leaves the whole installation
-    still discoverable at the location it came from."""
-    path = plan.destination_record
+    still discoverable at the location it came from.
+
+    Takes the document rather than reading it off the plan, because the
+    late-writer sweep below merges a *second* record into the destination
+    after the removal and has to land it on exactly these terms: one
+    registered undo, one atomic replacement, one private mode.
+    """
     existed = _plain_file(path)
     previous = path.read_bytes() if existed else None
     previous_mode = path.stat().st_mode & 0o777 if existed else None
@@ -1108,7 +1145,7 @@ def _write_destination_record(transition: _Transition, plan: RelocationPlan) -> 
     # every other writer on the host resolves *this* record rather than the
     # legacy one — so without that lock a controller starting beside this run
     # could record itself here and have its entry unlinked by an undo.
-    drain_prs_service.atomic_write_json(path, plan.merged_record)
+    drain_prs_service.atomic_write_json(path, document)
     path.chmod(0o600)
 
 
@@ -1400,7 +1437,31 @@ def _remove_legacy_installation(
     )
     marker.chmod(0o600)
     retained.append(str(marker))
-    for path in plan.removable:
+    entries_removed, entries_retained = _remove_managed_entries(
+        transition, plan.removable
+    )
+    removed.extend(entries_removed)
+    retained.extend(entries_retained)
+    root_removed, root_retained = _remove_log_root(transition, plan.legacy_log_root)
+    removed.extend(root_removed)
+    retained.extend(root_retained)
+    return removed, retained
+
+
+def _remove_managed_entries(
+    transition: _Transition, entries: tuple[Path, ...]
+) -> tuple[list[str], list[str]]:
+    """Take exactly these managed entries away, and answer what went and what
+    stayed.
+
+    Shared by the relocation's own removal and by the sweep that clears a
+    location a writer put state back at, because "what this installer is
+    entitled to delete, and how it puts each kind back" is one answer and a
+    second spelling of it would drift.
+    """
+    removed: list[str] = []
+    retained: list[str] = []
+    for path in entries:
         if path.is_symlink():
             target = os.readlink(path)
             transition.register(
@@ -1457,22 +1518,381 @@ def _remove_legacy_installation(
         )
         path.rmdir()
         removed.append(str(path))
-    # The log root the trees above came out of, once nothing is left in it. A
-    # root still holding something — an unrecorded repository's logs, a
-    # singleton's own — stays and is reported, because taking it away would be
-    # deleting durable state this run never accounted for.
-    root = plan.legacy_log_root
-    if root.is_dir():
-        mode = root.stat().st_mode & 0o777
-        if any(root.iterdir()):
-            retained.append(str(root))
-        else:
-            transition.register(
-                f"recreate {root}", _directory_restorer(root, mode)
-            )
-            root.rmdir()
-            removed.append(str(root))
     return removed, retained
+
+
+def _remove_log_root(
+    transition: _Transition, root: Path
+) -> tuple[list[str], list[str]]:
+    """The log root the per-repository trees came out of, once nothing is left
+    in it. A root still holding something — an unrecorded repository's logs, a
+    singleton's own — stays and is reported, because taking it away would be
+    deleting durable state this run never accounted for."""
+    if not root.is_dir():
+        return [], []
+    if root.is_symlink():
+        # Not a root this may take apart, and not one to fail the transition
+        # over either: it is reported exactly as a root still holding
+        # something is.
+        return [], [str(root)]
+    mode = root.stat().st_mode & 0o777
+    if any(root.iterdir()):
+        return [], [str(root)]
+    transition.register(f"recreate {root}", _directory_restorer(root, mode))
+    root.rmdir()
+    return [str(root)], []
+
+
+# --- Carrying across what a writer put back afterwards ----------------------
+#
+# The transition above holds the legacy record's lock from before it reads
+# anything through after it has taken the installation apart, which serializes
+# every writer that queues on that lock: such a writer resumes into a location
+# whose record is gone, reads the marker left beside the lock, and fails
+# without recording anything. It cannot reach a writer that arrives *after*
+# that removal. That one finds no record, creates what it needs afresh, and
+# records itself where the XDG-first probe no longer looks — and no lock closes
+# that, because the thing a late writer would contend on is a file the removal
+# left in place only for the writers that were already queued on it.
+#
+# So this is the other half: after the removal, whatever came back is carried
+# across on the same terms the relocation itself carries an installation, and
+# the location is cleared again on the same ownership terms. Bounded, because
+# a writer that keeps winning must not hold an installer open; past the bound,
+# and past anything this may not decide, the run reports what is still there
+# and the install fails over it.
+
+
+# Every fault the sweep answers by reporting rather than by raising. It runs
+# after the removal, where an exception would roll a completed relocation back
+# — and rolling one back is the single action that could lose what the late
+# writer recorded. So the sweep is total over the vocabularies its steps fail
+# in, and what it could not do travels in the report instead.
+_SWEEP_FAULTS = (
+    InstallError,
+    service_manager.ServiceManagerError,
+    drain_prs_service.ServiceError,
+    shutil.Error,
+    OSError,
+)
+
+
+def _recreated_entries(plan: RelocationPlan, known: frozenset[str]) -> tuple[Path, ...]:
+    """Everything at the legacy location that the removal did not leave there.
+
+    `known` is what that removal reported retaining — the lock file, the
+    marker beside it, and any tree it accounted for and kept — so this answers
+    "what appeared after the installation was taken apart" rather than "what is
+    there". Without that distinction the residue a relocation already reported,
+    an unrecorded repository's logs above all, would read as a late write on
+    every pass and no run could ever come out clear.
+    """
+    found: list[Path] = []
+    for directory in (plan.legacy_dir, plan.legacy_log_root):
+        if not _plain_directory(directory) or str(directory) in known:
+            continue
+        found.extend(
+            child for child in sorted(directory.iterdir()) if str(child) not in known
+        )
+    return tuple(found)
+
+
+def _carry_tree(
+    transition: _Transition,
+    entry: RelocationRepository,
+    kind: str,
+    source: Path,
+    destination: Path,
+    outcome: dict[str, Any],
+) -> bool:
+    """One recreated tree, moved to the destination or kept beside the one
+    already there.
+
+    Two distinct trees is the case nothing here can resolve. A late write for a
+    repository whose tree already moved leaves that repository with a status
+    file, incidents or logs in both places, and merging them or choosing one is
+    a judgement about durable state that belongs to the operator — so both are
+    kept and both are named. Per tree rather than per repository: a repository
+    whose runtime collided and whose logs did not still has its logs carried.
+    """
+    if not os.path.lexists(source):
+        return True
+    if not _plain_directory(source):
+        outcome["failures"].append(
+            f"{entry.identity}'s recreated {kind} path {source} is not a directory."
+        )
+        return False
+    if os.path.lexists(destination) and not _plain_directory(destination):
+        outcome["failures"].append(
+            f"{entry.identity}'s {kind} path {destination} is not a directory."
+        )
+        return False
+    if destination.exists() and not _same_tree(source, destination):
+        outcome["collisions"].append(
+            {
+                "repository": entry.identity,
+                "kind": kind,
+                "source": str(source),
+                "destination": str(destination),
+            }
+        )
+        return False
+    move = _Move(source, destination)
+    try:
+        _move_tree(transition, move)
+    except _SWEEP_FAULTS as exc:
+        outcome["failures"].append(
+            f"{entry.identity}'s {kind} tree {source} could not be carried to "
+            f"{destination}: {exc}"
+        )
+        return False
+    if move.outcome != "unstarted":
+        outcome["moved"].append(
+            {
+                "source": str(move.source),
+                "destination": str(move.destination),
+                "how": move.outcome,
+            }
+        )
+    return True
+
+
+def _carry_recreated_location(
+    transition: _Transition,
+    plan: RelocationPlan,
+    backend: service_manager.ServiceManagerBackend,
+    outcome: dict[str, Any],
+) -> bool:
+    """Carry one pass of recreated state across to the destination.
+
+    The record that came back merges into the destination's on exactly the
+    terms the relocation's own merge uses — the destination wins per key at
+    both levels, so a legacy-only top-level key and a legacy-only repository
+    entry survive while nothing the destination already says is overwritten.
+    Each repository it names then has its trees carried and its definition
+    rewritten and reloaded against this installation, because the controller
+    the late writer's definition names is the one this run removed.
+
+    What it cannot carry it reports rather than raises, and answers False so
+    the caller leaves the location standing for the operator; the sweep's own
+    guard catches anything a step raises for the same reason. This runs after
+    the removal, where an exception escaping into the transition would roll a
+    completed relocation back — which is the one action that could lose what
+    the late writer recorded.
+    """
+    key = drain_prs_service.RECORD_REPOSITORIES_KEY
+    try:
+        recreated = _read_record(plan.legacy_record, "recreated legacy")
+        destination = _read_record(plan.destination_record, "destination")
+    except _SWEEP_FAULTS as exc:
+        outcome["failures"].append(str(exc))
+        return False
+    entries = recreated.get(key) or {}
+    # Recovered out of the *merged* table rather than the recreated one, so a
+    # repository the destination already describes is recovered from the
+    # destination's own entry: the merge decides which values win, and this
+    # must not be a second place that decides it differently.
+    merged = _merge_records(recreated, destination)
+    merged_entries = merged.get(key) or {}
+    remote_name = drain_prs_service.discovery_remote_name()
+    repositories: list[RelocationRepository] = []
+    unrecovered: set[str] = set()
+    for identity in sorted(entries, key=str):
+        try:
+            repositories.append(
+                _recover_repository(
+                    identity,
+                    merged_entries.get(identity),
+                    backend=backend,
+                    remote_name=remote_name,
+                    install_dir=plan.install_dir,
+                    log_root=plan.log_root,
+                    legacy_logs=plan.legacy_log_root,
+                )
+            )
+        except _SWEEP_FAULTS as exc:
+            # Reported and left where it is. Merging an entry that cannot be
+            # recovered into the destination record would file a job Kanban
+            # can neither discover nor control beside the ones that work.
+            unrecovered.add(str(identity))
+            outcome["failures"].append(str(exc))
+    carried = not unrecovered
+    for entry in repositories:
+        if entry.identity not in outcome["repositories"]:
+            outcome["repositories"].append(entry.identity)
+        for kind, source, tree_destination in (
+            ("runtime", entry.source_runtime_dir, entry.destination_runtime_dir),
+            ("log", entry.source_log_dir, entry.destination_log_dir),
+        ):
+            if not _carry_tree(
+                transition, entry, kind, source, tree_destination, outcome
+            ):
+                carried = False
+        try:
+            _rewrite_definition(transition, entry, backend)
+        except _SWEEP_FAULTS as exc:
+            outcome["failures"].append(
+                f"{entry.identity}'s {backend.definition_label()} could not be "
+                f"rewritten against {plan.install_dir}: {exc}"
+            )
+            carried = False
+    if recreated:
+        # An entry that could not be recovered is dropped from what is merged
+        # forward rather than filed at the destination beside the jobs that
+        # work; it stays in the record left standing at the location this pass
+        # could not clear, which is where the operator is pointed.
+        carried_record = dict(recreated)
+        if key in carried_record:
+            carried_record[key] = {
+                identity: value
+                for identity, value in entries.items()
+                if str(identity) not in unrecovered
+            }
+        document = _merge_records(carried_record, destination)
+        if repositories:
+            document = {
+                **document,
+                key: {
+                    **(document.get(key) or {}),
+                    **{entry.identity: entry.record_entry for entry in repositories},
+                },
+            }
+        _write_destination_record(transition, plan.destination_record, document)
+    return carried
+
+
+def _clear_recreated_location(
+    transition: _Transition, plan: RelocationPlan, outcome: dict[str, Any]
+) -> None:
+    """Take the recreated location away again, asking the same ownership
+    question the relocation's own removal asks.
+
+    The expected relative name selects a managed slot and the object type that
+    slot requires proves the entry was put there by this installer, so a file
+    nothing here created is kept and named — and nothing at that location is
+    removed at all, because a directory holding something this installer did
+    not create is not one it may take apart. The lock and the marker stay, for
+    the reasons the removal leaves them: a writer may be queued on that inode,
+    and the marker is what a process still bound here reads.
+    """
+    record = record_name()
+    removable: list[Path] = []
+    for child in sorted(plan.legacy_dir.iterdir()):
+        slot = _managed_slot(child, record)
+        if slot is None:
+            outcome["strays"].append(str(child))
+            continue
+        if slot not in {"lock", "marker"}:
+            removable.append(child)
+    if outcome["strays"]:
+        return
+    removed, retained = _remove_managed_entries(transition, tuple(removable))
+    outcome["removed"].extend(removed)
+    outcome["retained"].extend(retained)
+    root_removed, root_retained = _remove_log_root(transition, plan.legacy_log_root)
+    outcome["removed"].extend(root_removed)
+    outcome["retained"].extend(root_retained)
+
+
+def _late_write_repair(plan: RelocationPlan, outcome: dict[str, Any]) -> str:
+    """What the repair for this run's outcome actually is.
+
+    Never "re-run the installer" on its own when trees were kept: a re-run
+    resolves none of them, refusing over exactly the trees it still finds in
+    both places and keeping the rest a second time, so it is advice that cannot
+    work. A location that merely came back, with nothing in two places, is the
+    case a re-run does resolve.
+    """
+    if outcome["passes"] == 0:
+        return "Nothing to repair; the installation is at the destination."
+    if outcome["resolved"]:
+        return (
+            f"A writer recorded state at {plan.legacy_dir} after it was taken "
+            f"apart; it was carried across to {plan.install_dir} and that location "
+            "was cleared again. Nothing to repair."
+        )
+    if outcome["collisions"]:
+        pairs = "; ".join(
+            f"{item['repository']}'s {item['kind']} tree at {item['source']} and "
+            f"{item['destination']}"
+            for item in outcome["collisions"]
+        )
+        return (
+            f"Both copies are kept: {pairs}. A re-run alone is not the repair: it "
+            "refuses over exactly the trees it still finds in both places and keeps "
+            "the rest a second time, so merge or remove one copy of each pair "
+            "first, then re-run this installer."
+        )
+    if outcome["strays"]:
+        return (
+            f"{', '.join(outcome['strays'])} is not something this installer "
+            f"created, so nothing at {plan.legacy_dir} was removed. Move it aside, "
+            "then re-run this installer."
+        )
+    if outcome["failures"]:
+        return (
+            f"What came back at {plan.legacy_dir} could not be carried across: "
+            f"{'; '.join(outcome['failures'])} Repair that, then re-run this "
+            "installer."
+        )
+    return (
+        f"A writer kept recreating {plan.legacy_dir} through "
+        f"{outcome['passes']} reconciliation passes. Stop every drainer, then "
+        "re-run this installer."
+    )
+
+
+def _reconcile_late_writes(
+    transition: _Transition,
+    plan: RelocationPlan,
+    backend: service_manager.ServiceManagerBackend,
+    known: frozenset[str],
+) -> dict[str, Any]:
+    """Carry across whatever was written back after the removal, bounded.
+
+    Each pass carries and then clears, and the next pass asks the location
+    again — so a writer that lands once is absorbed, and one that keeps landing
+    ends the sweep at the bound rather than extending it forever. Whether the
+    run came out resolved is read back off disk rather than inferred from the
+    passes, because what makes the host resolved is that the location really is
+    empty now, not that each step reported success.
+    """
+    outcome: dict[str, Any] = {
+        "location": str(plan.legacy_dir),
+        "log_root": str(plan.legacy_log_root),
+        "passes": 0,
+        "repositories": [],
+        "moved": [],
+        "removed": [],
+        "retained": [],
+        "collisions": [],
+        "strays": [],
+        "failures": [],
+    }
+    for _ in range(_LATE_WRITER_PASSES):
+        if not _recreated_entries(plan, known):
+            break
+        outcome["passes"] += 1
+        # The outer guard, so no fault raised by a step this sweep drives can
+        # escape into the transition's rollback. Partly-applied work stays
+        # applied and is read back below, which is the state the report and
+        # the failing install are about.
+        try:
+            if not _carry_recreated_location(transition, plan, backend, outcome):
+                break
+            _clear_recreated_location(transition, plan, outcome)
+        except _SWEEP_FAULTS as exc:
+            outcome["failures"].append(str(exc))
+            break
+        if outcome["strays"]:
+            break
+    remaining = _recreated_entries(plan, known)
+    outcome["retained"] = sorted(
+        set(outcome["retained"]) | {str(path) for path in remaining}
+    )
+    outcome["resolved"] = not remaining
+    outcome["repair"] = _late_write_repair(plan, outcome)
+    return outcome
 
 
 def relocation_disposition(install_dir: Path) -> str | None:
@@ -1614,7 +2034,7 @@ def _apply_relocation(
     backend = service_backend()
     _register_path_restoration(transition)
     _ensure_directory(transition, plan.install_dir)
-    _write_destination_record(transition, plan)
+    _write_destination_record(transition, plan.destination_record, plan.merged_record)
     _rebind_managed_paths(plan.install_dir)
     _install_links(transition, plan.install_dir, sources)
     _ensure_directory(transition, plan.install_dir / _RUNTIME_DIRECTORY_NAME)
@@ -1640,7 +2060,10 @@ def _apply_relocation(
             plan, entry, runtimes[entry.identity], records, backend
         )
     removed, retained = _remove_legacy_installation(transition, plan)
-    reappeared = os.path.lexists(plan.legacy_record)
+    # Past everything the locks can serialize. A writer that arrives from here
+    # on contends with nothing, so what it leaves is carried across rather than
+    # merely noticed — and what cannot be carried is what the run reports.
+    late = _reconcile_late_writes(transition, plan, backend, frozenset(retained))
     return {
         "relocated": True,
         "source": str(plan.legacy_dir),
@@ -1659,14 +2082,64 @@ def _apply_relocation(
         ],
         "removed": removed,
         "retained": retained,
-        "legacy_record_reappeared": reappeared,
-        "repair": (
-            "A writer recreated the legacy discovery record during this run. Stop "
-            "every drainer, remove that record, and re-run this installer."
-            if reappeared
-            else "Nothing to repair; the installation is at the destination."
-        ),
+        "late_writes": late,
+        "legacy_record_reappeared": late["passes"] > 0,
+        "repair": late["repair"],
     }
+
+
+@contextlib.contextmanager
+def current_installation_transaction() -> Iterator[None]:
+    """The controller's own installation gate, held over this installer's own
+    writes.
+
+    `tools/drain_prs_service.py` binds every managed path once, at import, and
+    this installer imports it — so a run whose installation moved underneath it
+    between that import and these writes would merge its configuration into a
+    record nothing resolves any more and hand the installed controller a
+    directory that is gone. The controller refuses exactly that for its own
+    transitions; this is the same refusal, asked by the installer, through the
+    same predicate rather than a second spelling of it.
+
+    Under the discovery record's lock, and refused before it is taken as well
+    as inside it, so a relocation has either not started or finished by the
+    time anything here is written. It ends before the installed controller is
+    spawned: that is another process, and one that blocked on a lock this one
+    held would never reach its own copy of this gate.
+    """
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(drain_prs_service.installation_transaction())
+        except drain_prs_service.ServiceError as exc:
+            raise InstallError(f"Refusing to install: {exc}") from exc
+        yield
+
+
+def _require_relocation_resolved(relocation: dict[str, Any]) -> None:
+    """Fail an install whose relocation ended with state back at the location
+    it emptied.
+
+    Failed rather than reported, and reported rather than repaired: the
+    destination is the installation from here on, so this is not something to
+    roll back, but an install that returned success would be telling automation
+    that a host with a repository's durable state in two places is finished.
+    Every affected repository and every retained path travels with the failure,
+    in the message and in the structured report both, because `--json` is a
+    real interface here and unresolved state must not become ambiguous to it.
+    """
+    late = relocation.get("late_writes")
+    if not isinstance(late, dict) or late.get("resolved", True):
+        return
+    repositories = ", ".join(late["repositories"]) or "none recorded"
+    retained = ", ".join(late["retained"]) or "nothing"
+    raise RelocationUnresolved(
+        "The PR drainer installation was relocated to "
+        f"{relocation['destination']}, but a writer recorded state at "
+        f"{late['location']} after it was taken apart and it is still there. "
+        f"Affected repositories: {repositories}. Kept where it was written: "
+        f"{retained}. {late['repair']}",
+        late,
+    )
 
 
 def install(
@@ -1749,23 +2222,34 @@ def install(
     # controller that is already there; the idempotent pass below then reports
     # them unchanged.
     relocation = relocate(install_dir, sources)
+    # Before any of this run's own writes, because a relocation that ended with
+    # durable state in two places is not an install that may go on to report
+    # success — and after the relocation itself, which is the one thing on this
+    # host entitled to move an installation and rebinds this process to it.
+    _require_relocation_resolved(relocation)
     if relocation["relocated"]:
         # Through the destination's record now, which is where this
         # repository's own `config_path` and identity are read from.
         job = repository_job(repo)
 
-    link_results = {
-        key: install_symlink(sources[key], destination)
-        for key, destination in destinations.items()
-    }
-    # Ahead of this run's own options, so an explicit --ntfy-url or --config
-    # still wins over whatever the migrated copy carried.
-    migrated_keys = migrate_legacy_installed_config(install_dir)
-    notification_config = None
-    if ntfy_url:
-        notification_config = str(write_notification_config(ntfy_url))
-    if resolved_config_path:
-        write_installed_config_path(job.identity, resolved_config_path)
+    # Every mutation this process performs is inside the gate: the managed
+    # links, the migrated configuration, the notification endpoint and this
+    # repository's `config_path` entry in the discovery record. The definition,
+    # the runtime and log trees and the record entry the installed controller
+    # writes are inside its own copy of it, in the process that writes them.
+    with current_installation_transaction():
+        link_results = {
+            key: install_symlink(sources[key], destination)
+            for key, destination in destinations.items()
+        }
+        # Ahead of this run's own options, so an explicit --ntfy-url or --config
+        # still wins over whatever the migrated copy carried.
+        migrated_keys = migrate_legacy_installed_config(install_dir)
+        notification_config = None
+        if ntfy_url:
+            notification_config = str(write_notification_config(ntfy_url))
+        if resolved_config_path:
+            write_installed_config_path(job.identity, resolved_config_path)
     environment = os.environ.copy()
     environment["KANBAN_DRAINER_INSTALL_DIR"] = str(install_dir)
     environment.pop("KANBAN_DRAINER_NTFY_URL", None)
@@ -1869,7 +2353,14 @@ def main() -> int:
     # past the point `service_backend` translates the selection itself.
     except (InstallError, service_manager.ServiceManagerError, OSError) as exc:
         if args.json:
-            print(json.dumps({"error": str(exc)}, indent=2), file=sys.stderr)
+            # The structured half of the same answer. A failure that names
+            # repositories and retained paths says them in both modes, because
+            # a caller parsing JSON must not have to read prose to find out
+            # which trees are in two places.
+            payload: dict[str, Any] = {"error": str(exc)}
+            if isinstance(exc, RelocationUnresolved):
+                payload["late_writes"] = exc.report
+            print(json.dumps(payload, indent=2, sort_keys=True), file=sys.stderr)
         else:
             print(f"install_drainer.py: {exc}", file=sys.stderr)
         return 1

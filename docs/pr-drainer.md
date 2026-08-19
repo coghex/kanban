@@ -1029,8 +1029,37 @@ installer did not put there — move that aside and re-run. A run that fails
 part-way puts everything back and says so, and if it ever ends up with a copy
 of a tree at both locations it keeps both and tells you rather than choosing.
 
-Taking over an installation already at this platform's own location is #368,
-and carrying across what a writer installs at a relocated location is #369.
+Holding the old record's lock for the whole move is what makes a writer that
+was already queued on it safe: it wakes into a location whose record is gone,
+reads the marker beside that lock, and fails without recording anything. It
+cannot make a writer that turns up *after* the move safe, because there is
+nothing left for that one to queue on — it just recreates the directory and
+records itself where nothing looks any more. So the run goes back and checks,
+up to three times: whatever it finds is merged into the destination record the
+same way the move's own merge works, its runtime and log trees are carried
+over, the definitions it names are rewritten and reloaded against the new
+location, and the old one is cleared again — and, exactly as during the move, a
+file the installer did not put there stops that clearing entirely and is
+reported instead of removed. If a repository ends up with a tree in both
+places — a late start for one that had already moved leaves a runtime tree and
+a log tree — both are kept and both are named, one tree at a time, so a
+repository whose runtime clashed and whose logs did not still gets its logs
+carried. Nothing picks which status file, whose incidents or which logs
+survive.
+
+Anything left over leaves the old location standing and fails the install
+rather than reporting success, and it tells you which repositories and which
+paths are involved in the plain output and under `--json` alike. It also tells
+you which repair actually applies: re-running the installer resolves none of
+the kept trees — it refuses over the ones it still finds in both places and
+keeps the rest a second time — so for those you have to merge or remove one
+copy of each pair first, while a location that merely reappeared with nothing
+in two places is one a re-run does resolve. The installer refuses outright, and
+writes nothing at all, if the installation it worked out at startup is no
+longer the one this host resolves — checked while it holds the record's lock,
+so a move has either not begun or already finished.
+
+Taking over an installation already at this platform's own location is #368.
 
 
 The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Incidents are attributed to the canonical repository rather than to the checkout that raised them, so any clone of that repository can list, acknowledge, and clear them. Stopping the drainer intentionally clears that repository's crash incidents, and no other repository's — a stop ends the supervisor, which is exactly what a crash incident is about. It resolves nothing else: a conflict or cleanup incident stays open across the stop, still naming a debt that is still owed, and clears through its own path once that pull request is mergeable or closed or its last obligation succeeds. Starting the drainer is not gated on an open incident of any kind, and an incident already open when it starts is never mistaken for a startup failure.

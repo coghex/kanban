@@ -1297,11 +1297,42 @@ search step and nothing else, which is what `mandatory: no` records.
   taken out of it. A controller bound to the old location cannot re-resolve
   its own managed paths, so that marker is how it learns it is stale; §2.4
   describes the transitions that refuse on it. Removal happens
-  only once every recorded repository is usable through the destination, and
-  the run then reports whether the legacy record has reappeared and what the
-  repair for that is.
-  Taking over an installation already at this platform's own location is #368,
-  and carrying across what a writer installs at a relocated location is #369.
+  only once every recorded repository is usable through the destination.
+  Those locks serialize every writer queued on them, so a queued writer fails
+  without recording anything: it resumes into a location whose record is gone,
+  reads that marker under the same lock, and refuses before it writes. They
+  cannot reach a writer that arrives *after* the removal, which finds no record,
+  creates the directory afresh, and opens a lock inode the transition never
+  held — so the run reconciles whatever came back. Each pass merges the record
+  found there into the destination's on the same destination-wins-per-key terms
+  at both levels, carries each runtime and log tree it brought, rewrites and
+  reloads every definition it names against this installation, and clears the
+  location again on exactly the ownership terms the removal asks: an entry this
+  installer did not create is kept and named, and then nothing at that location
+  is removed at all. The sweep is bounded rather than looped, at three passes,
+  so a writer that keeps recreating the location cannot hold an installer open.
+  A tree a distinct tree already exists at the destination for is the one case
+  nothing here resolves: both copies are kept and both are named, per tree
+  rather than per repository, so a repository whose runtime collided and whose
+  logs did not still has its logs carried and no status file, incident or log
+  is chosen between. Anything left unresolved — a collision, an entry this
+  installer did not create, an entry that cannot be recovered, or a writer still
+  winning at the bound — preserves the location exactly as it stands and fails
+  the install rather than reporting success, naming every affected repository
+  and every retained path in the default and `--json` command modes alike. The
+  remediation distinguishes the two cases it can be in, because a re-run
+  resolves no kept tree — it refuses over exactly the trees it still finds in
+  both places and keeps the rest a second time — while a location that merely
+  came back with nothing in two places is one a re-run does resolve. The
+  installer's own writes — the managed links, the migrated configuration, the
+  notification endpoint, and this repository's
+  `config_path` entry — are made under the discovery record's lock and behind
+  the same staleness refusal §2.4 describes, so a run whose installation moved
+  between its import and its writes refuses outright rather than recording into
+  a location nothing resolves or handing the installed controller a directory
+  that is gone. It ends before the installed controller is spawned, which takes
+  that lock in its own process.
+  Taking over an installation already at this platform's own location is #368.
   The installed definition carries `$XDG_DATA_HOME` and `$XDG_STATE_HOME`
   alongside `KANBAN_DRAINER_INSTALL_DIR` whenever they are absolute, because
   that option pins the install directory and the runtime root beneath it but
