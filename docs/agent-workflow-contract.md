@@ -1890,6 +1890,7 @@ The `coordination` documents are
 `docs/drainer-bugs.md`, `docs/issue_approval_queue_design.md`,
 `docs/issue_search_design.md`,
 `docs/linux_portability_design.md`, `docs/managed_paths_design.md`,
+`docs/model_settings_design.md`,
 `docs/multi_repo_boards_design.md`,
 `docs/pipeline-hardening.md`, `docs/product_readiness_findings.md`,
 `docs/project_review_386-361.md`,
@@ -1991,6 +1992,7 @@ docs/issue_search_design.md | coordination | audit-report
 docs/linux_portability_design.md | coordination | audit-report
 docs/managed_paths_design.md | coordination | audit-report
 docs/media/README.md | pr-atomic | test-parsed;release-document
+docs/model_settings_design.md | coordination | audit-report
 docs/multi_repo_boards_design.md | coordination | audit-report
 docs/pipeline-hardening.md | coordination | audit-report
 docs/pr-drainer.md | pr-atomic | release-document
