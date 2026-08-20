@@ -2556,9 +2556,13 @@ above are unchanged, and persistence the user switched off is not a failure.
   what the run left. A check taken under the lock cannot see the flock that
   lands behind it, so the run then hands the lock over once more with those
   seals down — releasing, pausing, and taking it back, which waits for whoever
-  was queued — and asks the definition question again, closing the lock only
-  inside a cycle that found nothing to put back and reporting it left open past
-  the bound. A per-repository tree no
+  was queued — and asks the definition question again. Handing it over cannot
+  end that regress, so the last cycle closes the lock's mode, which fixes the
+  set of descriptors that can ever contend, and reads that set out of `/proc`:
+  an empty one proves nothing can ever take this lock, while a set that is not
+  empty and a host that cannot be asked are both reported with the lock left
+  closed, naming the process to stop and failing the install rather than
+  claiming a location a queued process can still act on. A per-repository tree no
   record names — left by a controller whose record write was refused, or by an
   uninstall, which keeps a repository's state deliberately — is carried across
   rather than orphaned, under the repository validated on-disk evidence establishes: a

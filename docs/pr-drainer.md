@@ -1139,12 +1139,18 @@ A check made while the run is holding the lock cannot see a command whose turn
 comes right after it, so the run does not stop there. Once the old
 `config.json` and `runtime/` are sealed it lets go of the lock on purpose,
 waits a moment, and takes it back — which makes it wait for whoever was next in
-line — and asks the same question again. Anything that got a turn in that
-window is refused everywhere the seals refuse it and can only have reached the
-unit or plist, which this pass puts back. The lock file is only closed on a
-pass that found nothing to put back, so the run never finishes with someone
-still waiting behind a door it just shut; if that never settles, it leaves the
-lock open and tells you.
+line — and asks the same question again, putting back anything that changed.
+
+That still cannot settle it by waiting: every check happens while the run holds
+the lock, and the command this is about is the one whose turn comes next. So
+the last pass asks a different question. It closes the lock file first, which
+means nothing new can get in line, and then looks at which processes still have
+that file open. None, and it is finished: nothing can open it again and nothing
+holds it, so nothing can ever take it. If something does hold it — or if the
+host cannot be asked at all — the run leaves the lock closed, tells you which
+process to stop, and fails rather than reporting success over a command that
+can still act. A process belonging to another user is not one of these: the
+installation, its lock and everything that opens it are yours alone.
 
 Directories under `runtime/` and the old log root that belong to no repository
 in the record are moved across too. Two things leave one: a controller that

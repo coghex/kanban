@@ -88,6 +88,15 @@ class RelocationFixture(unittest.TestCase):
         self.launch_agents = self.root / "LaunchAgents"
         self.launch_agents.mkdir()
         self.commands = []
+        # What this host would answer about processes holding the retained lock
+        # open. Simulated for the reason the service manager is: whether a
+        # given host can read another process's descriptors, and what it finds,
+        # is settled by `ProcessDescriptorTests` below, and pinning is what
+        # makes every case here answer identically on a macOS laptop with no
+        # `/proc` and on a Linux runner with one. `()` is "nobody else has it
+        # open", which is what an ordinary host answers.
+        self.lock_holders = ()
+        self.lock_holders_reason = None
         self._platform = None
         self.addCleanup(self._release_platform)
         self._redirect_environment()
@@ -137,6 +146,13 @@ class RelocationFixture(unittest.TestCase):
             service_manager,
             "detect_service_manager",
             return_value=service_manager.SYSTEMD,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(
+            install_drainer,
+            "_processes_holding_open",
+            lambda path: (self.lock_holders, self.lock_holders_reason),
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -4152,6 +4168,214 @@ class UnaccountedIdentityTests(RelocationFixture):
         entry = result["late_writes"]["unattributed"][0]
         self.assertIsNone(entry["repository"])
         self.assertEqual(entry["slug"], slug)
+
+
+class LockDescriptorTests(PreGateControllerFixture):
+    """The turn that comes after every check a run can take.
+
+    A process that opened the retained lock before anything moved holds a
+    descriptor the closed mode does not reach, so it can take that lock after
+    the settle cycle's last look exactly as it could after the final pass's —
+    and no number of cycles changes that, because every one of them is a check
+    taken while the run holds the lock. What ends the regress is a different
+    question: once the mode is closed the set of descriptors that can ever
+    contend can only shrink, so the run reads that set rather than out-waiting
+    it, and a set it cannot prove empty is a location it may not call closed.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.ready = self.root / "pre-gate.ready"
+        self.go = self.root / "pre-gate.go"
+        self.queued = self.root / "pre-gate.queued"
+        self.acquired = self.root / "pre-gate.acquired"
+        self.result = self.root / "pre-gate.result"
+        self.flock_go = self.root / "pre-gate.flock"
+        self.manager_log = self.root / "pre-gate.manager"
+        self.writer_script = self.root / "pre_gate_writer.py"
+        self.writer_script.write_text(_PRE_GATE_WRITER, encoding="utf-8")
+
+    def start_holder(self):
+        """A pre-gate controller that opens the lock and stops there.
+
+        `document_lock` opens the file and takes its flock together; this
+        performs the two halves with a gate between them, which is the only way
+        to hold the state under test — a descriptor open before the relocation
+        whose flock has not landed yet.
+        """
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(self.writer_script),
+                self.controller_path(),
+                str(self.ready),
+                str(self.go),
+                str(self.queued),
+                str(self.acquired),
+                str(self.result),
+                "acme/widgets",
+                str(self.widgets),
+                "0",
+                "uninstall-delayed",
+                str(self.units),
+                str(self.flock_go),
+            ],
+            env={
+                "HOME": str(self.home),
+                "PATH": os.pathsep.join(
+                    [str(self.fake_service_manager()), os.environ.get("PATH", "")]
+                ),
+                "KANBAN_FAKE_MANAGER_LOG": str(self.manager_log),
+                "XDG_STATE_HOME": str(self.legacy_logs.parent.parent),
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(process.kill)
+        self.process = process
+        self.wait_for(self.ready, "the holder never bound its paths")
+        self.go.write_text("", encoding="utf-8")
+        self.wait_for(self.queued, "the holder never opened the lock")
+        # It is holding one now, and this is what a host that can read
+        # descriptors answers about it.
+        self.lock_holders = (process.pid,)
+        return process
+
+    def release(self, process):
+        self.flock_go.write_text("", encoding="utf-8")
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+
+    def test_a_descriptor_opened_before_the_run_leaves_the_lock_reported(self):
+        process = self.start_holder()
+        result = self.relocate()
+        late = result["late_writes"]
+        # The location itself is clear — this process has written nothing —
+        # and the run still may not call it closed.
+        self.assertTrue(late["resolved"])
+        self.assertFalse(late["sealed"])
+        self.assertEqual(late["lock_holders"], [process.pid])
+        self.assertEqual(late["unsealed"], [str(self.legacy_lock)])
+        # Closed all the same: leaving it open would let a fresh invocation in
+        # beside the one already queued. What that descriptor can still reach
+        # is only the definition, because the other two paths are occupied.
+        self.assertFalse(os.access(self.legacy_lock, os.W_OK))
+        self.assertTrue(install_drainer._is_relocation_seal(self.legacy_record))
+        self.assertTrue(install_drainer._is_relocation_seal(self.legacy_guard))
+        # And the install says so, naming what to stop, rather than reporting
+        # success over a location a queued process can still act on.
+        with self.assertRaises(install_drainer.RelocationUnresolved) as raised:
+            install_drainer._require_relocation_resolved(result)
+        message = str(raised.exception)
+        self.assertIn("was left open", message)
+        self.assertIn(str(self.legacy_lock), message)
+        self.assertIn(f"process {process.pid}", result["repair"])
+        self.assertIn("Stop that process", result["repair"])
+        self.release(process)
+
+    def test_it_really_can_still_take_that_lock_once_the_run_is_over(self):
+        """Why the report is the answer and not a formality.
+
+        Released after the run has closed the lock and returned, this process
+        takes the flock its descriptor still carries, is refused at the record
+        it came for, and reaches the definition on the way — which is exactly
+        the state the run declined to call closed.
+        """
+        process = self.start_holder()
+        self.assertFalse(self.relocate()["late_writes"]["sealed"])
+        backend = install_drainer.service_backend()
+        self.assertTrue(backend.definition_path(self.job.label).is_file())
+        self.release(process)
+        outcome = json.loads(self.result.read_text(encoding="utf-8"))
+        self.assertTrue(self.acquired.exists())
+        self.assertIn("Refusing unsafe config path", outcome["refused"])
+        self.assertFalse(backend.definition_path(self.job.label).is_file())
+
+    def test_a_host_that_cannot_be_asked_is_reported_too(self):
+        """Absent evidence is not evidence of absence.
+
+        A host that cannot read another process's descriptors cannot rule one
+        out, and a run that treated "nobody could be asked" as "nobody has it"
+        would close a location over a writer it never looked for.
+        """
+        self.lock_holders = None
+        self.lock_holders_reason = "open descriptors cannot be read on this host"
+        result = self.relocate()
+        late = result["late_writes"]
+        self.assertTrue(late["resolved"])
+        self.assertFalse(late["sealed"])
+        self.assertEqual(late["lock_holders"], [])
+        self.assertEqual(late["unsealed"], [str(self.legacy_lock)])
+        self.assertIn("cannot be ruled out", result["repair"])
+        with self.assertRaises(install_drainer.RelocationUnresolved):
+            install_drainer._require_relocation_resolved(result)
+
+    def test_an_ordinary_host_with_nothing_queued_closes_it(self):
+        # The proof the two cases above are the exception: nothing else has
+        # this file open, nothing can open it again, so nothing can ever take
+        # this lock.
+        result = self.relocate()
+        self.assertTrue(result["late_writes"]["sealed"])
+        self.assertEqual(result["late_writes"]["lock_holders"], [])
+        self.assert_location_is_sealed()
+        install_drainer._require_relocation_resolved(result)
+
+
+class ProcessDescriptorTests(unittest.TestCase):
+    """The reader every fixture above pins.
+
+    Pinned there because whether a host can read another process's descriptors
+    is a property of the host rather than of the relocation, and a suite that
+    probed it would answer differently on a macOS laptop and a Linux runner.
+    Asked for real here, on the hosts that can answer.
+    """
+
+    def test_a_host_with_no_procfs_cannot_be_asked(self):
+        with tempfile.TemporaryDirectory() as root:
+            absent = Path(root) / "no-procfs"
+            held = Path(root) / "held"
+            held.write_text("", encoding="utf-8")
+            with mock.patch.object(install_drainer, "_PROCFS", absent):
+                holders, reason = install_drainer._processes_holding_open(held)
+        # None rather than an empty tuple: the two are different answers, and
+        # only one of them closes anything.
+        self.assertIsNone(holders)
+        self.assertIn(str(absent), reason)
+
+    @unittest.skipUnless(Path("/proc").is_dir(), "this host has no /proc to read")
+    def test_another_process_holding_it_open_is_found_and_this_one_is_not(self):
+        with tempfile.TemporaryDirectory() as root:
+            held = Path(root) / "held"
+            held.write_text("", encoding="utf-8")
+            self.assertEqual(
+                install_drainer._processes_holding_open(held), ((), None)
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys, time\n"
+                    "handle = open(sys.argv[1])\n"
+                    "sys.stdout.write('open')\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(60)\n",
+                    str(held),
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            self.addCleanup(process.kill)
+            self.assertEqual(process.stdout.read(4), "open")
+            holders, reason = install_drainer._processes_holding_open(held)
+            self.assertIsNone(reason)
+            self.assertIn(process.pid, holders)
+            # This process's own descriptor is not another process's, or every
+            # run would find itself.
+            own = held.open(encoding="utf-8")
+            self.addCleanup(own.close)
+            holders, _ = install_drainer._processes_holding_open(held)
+            self.assertNotIn(os.getpid(), holders)
 
 
 class TakeoverFixture(RelocationFixture):

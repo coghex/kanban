@@ -2572,6 +2572,68 @@ def _seal_emptied_location(
     ]
 
 
+# Where a process's open descriptors are readable. A constant rather than a
+# literal so a host without one can be simulated: "nobody else has this open"
+# and "nobody could be asked" are different answers, and only one of them
+# closes anything.
+_PROCFS = Path("/proc")
+
+
+def _processes_holding_open(path: Path) -> tuple[tuple[int, ...] | None, str | None]:
+    """Every *other* process with this file open, or None when this host
+    cannot be asked, beside the reason it cannot.
+
+    The one question that settles whether closing a lock file closed it. A
+    process that opened it before this run holds a descriptor no mode change
+    revokes, so closing the mode fixes the set of descriptors that can ever
+    contend rather than emptying it — and this reads that set. Asked only while
+    this run holds the lock and only *after* the mode is closed, which is what
+    makes the answer total: nothing can join the set between the two.
+
+    Answered from `/proc`, which is where the question is answerable and where
+    this installer runs. A relocation never happens on macOS, and a host with
+    no service manager never reaches one either, so the platform that relocates
+    is the platform that has this. A host without it answers None, and a run
+    that cannot ask reports the location as one it could not finish closing
+    rather than claiming it did.
+
+    A process this user may not inspect is not one of ours. The installation,
+    its lock and every controller that opens it are user-scoped, so a
+    descriptor held under another account is not a stale controller of this
+    installation — and a process that exits mid-scan is one that no longer
+    holds anything.
+    """
+    if not _PROCFS.is_dir():
+        return None, f"open descriptors cannot be read on this host: no {_PROCFS}"
+    try:
+        target = path.stat()
+    except OSError as exc:
+        return None, f"{path} could not be read: {exc}"
+    identity = (target.st_dev, target.st_ino)
+    mine = os.getpid()
+    holders: set[int] = set()
+    try:
+        entries = sorted(_PROCFS.iterdir())
+    except OSError as exc:
+        return None, f"{_PROCFS} could not be read: {exc}"
+    for entry in entries:
+        if not entry.name.isdigit() or int(entry.name) == mine:
+            continue
+        try:
+            descriptors = sorted((entry / "fd").iterdir())
+        except OSError:
+            continue
+        for descriptor in descriptors:
+            try:
+                found = descriptor.stat()
+            except OSError:
+                continue
+            if (found.st_dev, found.st_ino) == identity:
+                holders.add(int(entry.name))
+                break
+    return tuple(sorted(holders)), None
+
+
 def _settle_and_close(
     transition: _Transition,
     plan: RelocationPlan,
@@ -2596,25 +2658,43 @@ def _settle_and_close(
     So the lock is handed over, deliberately, after the seals are down: each
     cycle releases it, pauses for the same reason every other handoff does, and
     takes it back — which blocks until whoever was queued on it has finished —
-    and then asks whether the definitions are still the ones this run wrote.
-    Bounded on the same terms as the passes above, and the lock is closed only
-    inside a cycle that found nothing to put back, so no writer is left queued
-    behind a closure. Past the bound the lock stays open and is reported, since
-    closing it would claim an answer this run does not have.
+    and then asks whether the definitions are still the ones this run wrote,
+    putting back whatever is not. Bounded on the same terms as the passes
+    above.
+
+    Handing it over cannot end the question, though, and no number of cycles
+    can: every check is taken while this run holds the lock, and the writer
+    this is about is precisely the one whose turn comes *after* the check. So
+    the last cycle stops asking about turns and asks about descriptors instead.
+    It closes the mode first, which fixes the set of descriptors that can ever
+    contend, and then reads that set. An empty one is a proof rather than a
+    hope: no process can open this file again, and none has it open, so nothing
+    can ever take this lock. A set that is not empty, and a host that cannot be
+    asked, are both states this run may not call closed — they are reported
+    with the lock left as it is, because an operator who knows which process
+    still holds it can stop it and re-run, and a run that claimed success would
+    be telling them there is nothing to stop.
     """
     lock = _legacy_lock_path(plan.legacy_dir)
     for _ in range(_LATE_WRITER_PASSES):
         with _record_locks(plan):
             try:
                 stale = _stale_definitions(plan, backend)
-                if not stale:
-                    if _restrict_retained_lock(transition, plan):
-                        return []
+                if stale:
+                    for entry in stale:
+                        _rewrite_definition(transition, entry, backend)
+                        if entry.identity not in outcome["restored_definitions"]:
+                            outcome["restored_definitions"].append(entry.identity)
+                    continue
+                if not _restrict_retained_lock(transition, plan):
                     return [str(lock)]
-                for entry in stale:
-                    _rewrite_definition(transition, entry, backend)
-                    if entry.identity not in outcome["restored_definitions"]:
-                        outcome["restored_definitions"].append(entry.identity)
+                # Only now, with the mode closed and this run still holding the
+                # lock: from here the set can only shrink, so what it holds is
+                # everything that could ever contend.
+                holders, reason = _processes_holding_open(lock)
+                outcome["lock_holders"] = list(holders or ())
+                outcome["lock_holders_reason"] = reason
+                return [] if holders == () else [str(lock)]
             except _SWEEP_FAULTS as exc:
                 outcome["failures"].append(str(exc))
                 return [str(lock)]
@@ -2670,10 +2750,25 @@ def _late_write_repair(plan: RelocationPlan, outcome: dict[str, Any]) -> str:
     cannot work. A location that merely came back, with nothing in two places
     and nothing unattributed, is the case a re-run does resolve.
     """
-    unsealed = (
-        f"{', '.join(outcome['unsealed'])} could not be sealed against a "
-        "writer bound to that location; re-run this installer."
-    )
+    if outcome["lock_holders"]:
+        unsealed = (
+            f"{', '.join(outcome['unsealed'])} is still open in "
+            f"{', '.join(f'process {pid}' for pid in outcome['lock_holders'])}, "
+            "which held it before this run closed it and can still take it. "
+            "Stop that process, then re-run this installer."
+        )
+    elif outcome["lock_holders_reason"]:
+        unsealed = (
+            f"{', '.join(outcome['unsealed'])} was closed, but "
+            f"{outcome['lock_holders_reason']}, so a process that opened it "
+            "before this run cannot be ruled out. Stop every drainer and "
+            "controller, then re-run this installer."
+        )
+    else:
+        unsealed = (
+            f"{', '.join(outcome['unsealed'])} could not be sealed against a "
+            "writer bound to that location; re-run this installer."
+        )
     restored = (
         "A writer bound to "
         f"{plan.legacy_dir} removed or rewrote the service definition of "
@@ -2780,6 +2875,8 @@ def _reconcile_late_writes(
         "strays": [],
         "failures": [],
         "restored_definitions": [],
+        "lock_holders": [],
+        "lock_holders_reason": None,
         "sealed": False,
         "unsealed": [],
     }
@@ -3593,9 +3690,9 @@ def _require_relocation_resolved(relocation: dict[str, Any]) -> None:
             f"{unattributed}"
         )
     else:
-        # Clear, and open. The location holds nothing, but a path sealing it
-        # closes is not closed against a controller still bound there, so the
-        # one thing this run could not do is the one thing that keeps it shut.
+        # Clear, and open. The location holds nothing, but a path closing it
+        # is not closed against a controller still bound there, so the one
+        # thing this run could not do is the one thing that keeps it shut.
         detail = (
             f"but a path at {late['location']} was left open to a controller "
             f"still bound to that location: {', '.join(late['unsealed'])}."

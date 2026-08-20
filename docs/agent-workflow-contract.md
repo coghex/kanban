@@ -1530,12 +1530,23 @@ search step and nothing else, which is what `mandatory: no` records.
   down it hands the lock over once more, deliberately: it releases, pauses for
   the reason every other handoff pauses, and takes it back — which blocks until
   whoever was queued on it has finished — and then asks the definition question
-  again. A writer that got its turn in that window is refused everywhere the
-  seals refuse it and can have reached only the definition, which this cycle
-  puts back before the run returns. The lock is closed inside a cycle that
-  found nothing to put back, so the run never ends with a writer queued behind
-  a closure it cannot answer; past the bound the lock is left open and
-  reported, since closing it would claim an answer the run does not have.
+  again, putting back whatever that let through.
+  Handing it over cannot end the question, and no number of cycles can, because
+  every check is taken while the run holds the lock and the writer this is
+  about is the one whose turn comes after the check. So the last cycle stops
+  asking about turns and asks about descriptors. It closes the lock's mode
+  first, which fixes the set of descriptors that can ever contend rather than
+  emptying it, and then reads that set out of `/proc` — the platform that
+  relocates is the platform that has one, since a relocation never happens on
+  macOS and a host with no service manager never reaches one. An empty set is a
+  proof rather than a hope: nothing can open that file again and nothing has it
+  open, so nothing can ever take that lock. A set that is not empty, and a host
+  that cannot be asked, are both states the run may not call closed: the lock
+  stays closed either way, and the run reports which process still holds it, or
+  that it could not be ruled out, and fails the install rather than telling an
+  operator there is nothing to stop. A process this user may not inspect is not
+  one of ours, since the installation, its lock and every controller that opens
+  it are user-scoped.
   A per-repository tree no record names is carried too. Two things leave one: a
   controller that wrote its trees before a refused record write, and an
   uninstall, which deliberately leaves a repository's runtime state, logs and
