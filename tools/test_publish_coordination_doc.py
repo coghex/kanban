@@ -1616,6 +1616,8 @@ class PublishTests(PublishFixture):
         self.assertEqual(self.fx.remote_content("docs/design.md"), "# Design")
         # Applied locally and recoverable from the object database.
         self.assertTrue(result["document_written"])
+        self.assertEqual(result["write_outcome"], "applied-over-baseline")
+        self.assertEqual(result["applied_record"], "recorded")
         self.assertIn("changed", (self.fx.docs / "docs" / "design.md").read_text())
         self.assertIn(
             "changed",
@@ -1628,8 +1630,13 @@ class PublishTests(PublishFixture):
         self.assertEqual(result["status"], "not-published")
         self.assertFalse(result["remote_contains_commit"])
         # A novel document has no baseline on the tip, so it is not written
-        # over — but the approved content is still recoverable.
+        # over — but the approved content is still recoverable. Its own named
+        # outcome, distinct from the two cases that decline a write over
+        # something that is already there (#385).
         self.assertFalse(result["document_written"])
+        self.assertEqual(result["write_outcome"], "no-baseline")
+        self.assertIsNone(result["applied_record"])
+        self.assertIsNone(result["applied_ref"])
         self.assertIn(
             "more", run(["git", "cat-file", "-p", result["approved_blob"]], self.fx.docs)
         )
@@ -1677,6 +1684,190 @@ class PublishTests(PublishFixture):
             # Its own document still receives the approved mutation.
             self.assertTrue(result["document_written"])
             self.assertIn("- two", (other.docs / "docs" / "ui-bugs.md").read_text())
+
+    # -- successive dispositions of an unpublishable document (issue #385) ---
+
+    def unpublishable(self, directory):
+        """A repository that declares no coordination lane for any path.
+
+        Its documents are therefore never published, always written locally,
+        and landed by their owner out of band — which is the only place a
+        second disposition can meet the first one.
+        """
+        return Fixture.create(Path(directory), origin_name="synarchy")
+
+    def test_a_second_disposition_lands_on_the_first_one(self):
+        # The defect itself: writing only over the publication tip's own
+        # baseline is correct exactly once. The second disposition of a
+        # document its owner lands out of band arrives to find the first one
+        # in the working copy, and declining it strands a tracker transaction
+        # no later run can get past.
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = self.unpublishable(other_dir)
+            document = other.docs / "docs" / "ui-bugs.md"
+            first = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertEqual(first["write_outcome"], "applied-over-baseline")
+            self.assertEqual(first["applied_record"], "recorded")
+
+            second = other.publish(
+                "# UI\n\n- one\n- two\n- three\n", repo="coghex/synarchy"
+            )
+            self.assertEqual(second["status"], "not-published")
+            self.assertEqual(second["write_outcome"], "applied-over-local-predecessor")
+            self.assertEqual(second["local_predecessor"], first["approved_blob"])
+            self.assertEqual(second["found_blob"], first["approved_blob"])
+            self.assertTrue(second["document_written"])
+            self.assertEqual(second["applied_record"], "recorded")
+
+            # Both dispositions accumulate, and the reference names exactly the
+            # cumulative content rather than the predecessor it replaced.
+            self.assertEqual(document.read_text(), "# UI\n\n- one\n- two\n- three\n")
+            self.assertEqual(
+                publisher.working_blob(other.docs, "docs/ui-bugs.md"),
+                second["approved_blob"],
+            )
+            self.assertEqual(
+                publisher.read_applied(other.docs, "coghex/synarchy", "docs/ui-bugs.md"),
+                second["approved_blob"],
+            )
+            # Continuation is a working-tree act and nothing more: the branch
+            # is exactly where it was.
+            self.assertEqual(other.remote_content(), "# UI\n\n- one")
+
+    def test_a_working_copy_this_module_did_not_write_is_refused(self):
+        # The other half of the same decision. Recognizing its own predecessor
+        # must not become a licence to overwrite anything that merely differs
+        # from the publication tip.
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = self.unpublishable(other_dir)
+            document = other.docs / "docs" / "ui-bugs.md"
+            foreign = "# UI\n\n- one\n- somebody else's line\n"
+            document.write_text(foreign, encoding="utf-8")
+            before = publisher.working_blob(other.docs, "docs/ui-bugs.md")
+
+            result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertEqual(result["status"], "not-published")
+            self.assertEqual(result["write_outcome"], "unrecognized-working-copy")
+            self.assertFalse(result["document_written"])
+            self.assertIsNone(result["applied_record"])
+            self.assertIsNone(result["applied_ref"])
+            self.assertIsNone(result["local_predecessor"])
+            self.assertEqual(result["found_blob"], before)
+            # The bytes, the reference, and the branch are all as they were.
+            self.assertEqual(document.read_text(), foreign)
+            self.assertIsNone(
+                publisher.read_applied(other.docs, "coghex/synarchy", "docs/ui-bugs.md")
+            )
+            self.assertEqual(other.remote_content(), "# UI\n\n- one")
+            # And the approved mutation is still recoverable, as it is for
+            # every other outcome that publishes nothing.
+            self.assertIn(
+                "- two",
+                run(["git", "cat-file", "-p", result["approved_blob"]], other.docs),
+            )
+
+    def test_an_edit_on_top_of_this_modules_own_disposition_is_refused(self):
+        # A recorded predecessor is not a standing permission: the record has
+        # to name what is actually there right now.
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = self.unpublishable(other_dir)
+            document = other.docs / "docs" / "ui-bugs.md"
+            first = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            document.write_text(document.read_text() + "- somebody else\n")
+            edited = document.read_text()
+
+            second = other.publish(
+                "# UI\n\n- one\n- two\n- three\n", repo="coghex/synarchy"
+            )
+            self.assertEqual(second["write_outcome"], "unrecognized-working-copy")
+            self.assertFalse(second["document_written"])
+            self.assertEqual(second["local_predecessor"], first["approved_blob"])
+            self.assertEqual(document.read_text(), edited)
+            self.assertEqual(
+                publisher.read_applied(other.docs, "coghex/synarchy", "docs/ui-bugs.md"),
+                first["approved_blob"],
+            )
+            self.assertEqual(other.remote_content(), "# UI\n\n- one")
+
+    def test_an_edit_racing_a_continuation_is_refused_and_preserved(self):
+        # The continuation takes the same guarded replacement the publication
+        # path does, so an edit landing between the decision and the swap is
+        # refused rather than destroyed — against the recorded predecessor,
+        # which is the baseline that decision was made from.
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = self.unpublishable(other_dir)
+            document = other.docs / "docs" / "ui-bugs.md"
+            other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+
+            original = publisher.read_for_write
+            state = {"reads": 0}
+
+            def racing_read(path):
+                state["reads"] += 1
+                result = original(path)
+                if state["reads"] == 1:
+                    document.write_text(document.read_text() + "- foreign\n")
+                return result
+
+            publisher.read_for_write = racing_read
+            self.addCleanup(setattr, publisher, "read_for_write", original)
+            with self.assertRaises(publisher.PublishError) as caught:
+                other.publish("# UI\n\n- one\n- two\n- three\n", repo="coghex/synarchy")
+            self.assertEqual(caught.exception.status, "document-changed-before-write")
+            self.assertIn("- foreign", document.read_text())
+            self.assertIn(
+                "- foreign",
+                run(
+                    ["git", "cat-file", "-p", caught.exception.detail["preserved_blob"]],
+                    other.docs,
+                ),
+            )
+            self.assertEqual(other.remote_content(), "# UI\n\n- one")
+
+    def test_a_write_that_cannot_be_recorded_authorizes_no_continuation(self):
+        # `update-ref` can fail for reasons that have nothing to do with the
+        # write that just succeeded. Reporting the write as recorded anyway
+        # would licence a later run to continue over content nothing can prove
+        # this module produced.
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = self.unpublishable(other_dir)
+            document = other.docs / "docs" / "ui-bugs.md"
+            ref = publisher.applied_ref("coghex/synarchy", "docs/ui-bugs.md")
+            # A reference *below* the one the module writes makes update-ref
+            # fail on a real directory/file conflict rather than a stub.
+            run(
+                ["git", "update-ref", f"{ref}/blocked",
+                 run(["git", "rev-parse", "HEAD"], other.docs)],
+                other.docs,
+            )
+
+            first = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertTrue(first["document_written"])
+            self.assertEqual(first["write_outcome"], "applied-over-baseline")
+            self.assertEqual(first["applied_record"], "unrecorded")
+            self.assertIsNone(first["applied_ref"])
+
+            second = other.publish(
+                "# UI\n\n- one\n- two\n- three\n", repo="coghex/synarchy"
+            )
+            self.assertEqual(second["write_outcome"], "unrecognized-working-copy")
+            self.assertFalse(second["document_written"])
+            self.assertEqual(document.read_text(), "# UI\n\n- one\n- two\n")
+
+    def test_a_staged_document_is_refused_before_any_continuation(self):
+        # The state the module promises does not depend on which predecessor
+        # it would have written over.
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = self.unpublishable(other_dir)
+            document = other.docs / "docs" / "ui-bugs.md"
+            other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            run(["git", "add", "docs/ui-bugs.md"], other.docs)
+            with self.assertRaises(publisher.PublishError) as caught:
+                other.publish(
+                    "# UI\n\n- one\n- two\n- three\n", repo="coghex/synarchy"
+                )
+            self.assertEqual(caught.exception.status, "document-staged")
+            self.assertEqual(document.read_text(), "# UI\n\n- one\n- two\n")
 
     # -- a consuming repository's own declared lane (issue #370) -------------
 

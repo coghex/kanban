@@ -334,9 +334,30 @@ on the one structured result it returns:
   belongs to a repository that declares no coordination path for it. The
   approved mutation is not lost: the helper reports `approved_blob`,
   recoverable with `git cat-file -p`, and `document_written` says whether it
-  also applied it to the document. Say which it did and why publication was
-  declined. This is the ordinary outcome for a `pr-atomic` document, not a
-  failure of this run.
+  also applied it to the document. `write_outcome` names which of the four
+  cases the write was, rather than leaving `document_written` to stand for all
+  of them: `applied-over-baseline`, `applied-over-local-predecessor`,
+  `no-baseline`, and
+  `unrecognized-working-copy`. A working copy byte-identical to what the helper
+  last applied locally is its own unlanded write, and the approved mutation is
+  applied on top of it — so successive approved mutations to a document its
+  owner lands out of band accumulate rather than wedging on the first one. A
+  working copy the helper did not write is never overwritten, and nothing is
+  applied over it. Say which outcome it was and why publication was declined.
+  This is the ordinary outcome for a `pr-atomic` document, not a failure of
+  this run.
+
+  `applied_record` is the other half of that. The helper records what it wrote
+  in its own reference, and only `"recorded"` — with `applied_ref` naming that
+  reference — lets a later run continue over the working copy or a transaction
+  resolve from it. `"unrecorded"` means the write happened and the record did
+  not, so no later run may write over that document and no transaction may
+  resolve from it. Report that rather than an ordinary applied mutation.
+
+  **An applied mutation is not durable until the document's owner lands it on
+  the publication branch.** It exists in one write root and nowhere else, so
+  name the write root, the document path, and the preserved `approved_blob`
+  rather than describing the run as complete on the branch.
 - **Any other status.** The document was not published. Report the three states
   the helper returns — whether the edit exists locally and in which worktree and
   path, whether a local publication commit exists and its ID, and whether the
@@ -364,12 +385,15 @@ in the report:
   outstanding checkbox count, and that the observation is captured unprocessed
   for `process-report` to dispose of, one finding per invocation.
 - **Not published, but the document was written.** The observation is in the
-  report in the write root and not on the publication branch. Say both halves
-  and why publication was declined, and name the write root and path.
+  report in the write root and not on the publication branch — applied, and not
+  yet durable. Say both halves and why publication was declined, name the write
+  root and path, and say whether the helper recorded the write: an
+  `"unrecorded"` one is a report no later run may write over.
 - **Nothing was written.** The report is unchanged and the observation is **not
   captured** — this is the outcome for a document absent from the publication
-  tip, an unenrolled report included. Say exactly that, name the preserved
-  `approved_blob` and that `git cat-file -p` recovers it, and do not describe
+  tip, an unenrolled report included, and for a working copy the helper did
+  not write. Say exactly that, name the preserved `approved_blob` and that
+  `git cat-file -p` recovers it, and do not describe
   the run as having noted the problem. Reporting capture here would leave the
   user believing a report holds an observation it does not, which is the one
   failure this workflow's own output can cause.

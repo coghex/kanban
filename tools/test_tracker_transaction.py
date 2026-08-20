@@ -1875,6 +1875,45 @@ class TrackerTransactionTests(TrackerFixture):
         self.assertEqual(outcome["source"], "local")
         self.assertIsNone(self.fx.read(document="docs/design.md")[0])
 
+    SECOND_APPLIED = APPLIED.replace(
+        "- [ ] DW-4. Something else",
+        "- [x] DW-4. Something else — [#312]",
+    )
+
+    def test_successive_local_dispositions_each_resolve(self):
+        # Issue #385, end to end and in the order it was observed. The second
+        # disposition of a document its owner lands out of band used to arrive
+        # at a working copy the publication module would not write, so its
+        # record could never be resolved and every later run stopped at the
+        # preflight. Each disposition resolving in turn is what says the wedge
+        # is gone; asserting the module's own result would not.
+        self.apply_through_the_helper()
+        self.confirmed_pr_atomic_transaction()
+        self.assertEqual(
+            self.fx.resolve(source="local", document="docs/design.md")["status"],
+            "resolved",
+        )
+
+        second = self.fx.publish_document(self.SECOND_APPLIED, path="docs/design.md")
+        self.assertEqual(second["status"], "not-published")
+        self.assertEqual(second["write_outcome"], "applied-over-local-predecessor")
+        self.assertTrue(second["document_written"])
+
+        self.fx.acquire(plan(entry_key="DW-4"), document="docs/design.md")
+        self.fx.begin(0, document="docs/design.md")
+        self.fx.confirm(0, issue_identity(number=312), document="docs/design.md")
+        self.fx.begin(1, document="docs/design.md")
+        self.fx.confirm(1, edit_identity(), document="docs/design.md")
+        outcome = self.fx.resolve(source="local", document="docs/design.md")
+        self.assertEqual(outcome["status"], "resolved")
+        self.assertIsNone(self.fx.read(document="docs/design.md")[0])
+
+        # Both dispositions accumulated in the one local document, which is the
+        # state the old decline could never reach.
+        applied = (self.fx.docs / "docs" / "design.md").read_text()
+        self.assertIn("- [x] DW-3. Checkpoint tracker mutations — [#311]", applied)
+        self.assertIn("- [x] DW-4. Something else — [#312]", applied)
+
     def test_a_hand_edited_document_does_not_resolve_locally(self):
         # The hole this closes: classification says the module *would* decline
         # to publish, which is not the same as the module having applied

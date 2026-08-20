@@ -210,6 +210,36 @@ def applied_ref(repository: str, document: str) -> str:
     return f"{APPLIED_NAMESPACE}/{_key(repository, document)}"
 
 
+def read_applied(root: Path, repository: str, document: str) -> str | None:
+    """The content this module last applied locally to `document`, or None.
+
+    It proves one thing and is worth exactly that: these bytes are what this
+    module wrote the last time it recorded a write. It says nothing about
+    whether that disposition was ever landed anywhere.
+    """
+    out = git(
+        ["rev-parse", "--verify", "--quiet", applied_ref(repository, document)],
+        cwd=root,
+        check=False,
+    ).stdout.decode().strip()
+    return out or None
+
+
+def record_applied(root: Path, repository: str, document: str, blob: str) -> bool:
+    """Record `blob` as what this module wrote, and confirm the record took.
+
+    `update-ref` can fail for reasons that have nothing to do with the write
+    that just succeeded — a full disk, a contended reference lock, a read-only
+    Git directory. Reporting the write as recorded anyway would licence a later
+    run to continue over content nothing can prove this module produced, which
+    is the one thing the reference exists to prevent. So it is read back, and
+    only a reference naming the exact blob counts as recorded.
+    """
+    ref = applied_ref(repository, document)
+    git(["update-ref", ref, blob], cwd=root, check=False)
+    return read_applied(root, repository, document) == blob
+
+
 def common_git_dir(root: Path) -> Path:
     """The repository's common Git directory.
 
@@ -1365,6 +1395,109 @@ def publish(
         raise error
 
 
+def _apply_locally(
+    root: Path,
+    owner: str,
+    document: str,
+    baseline: str | None,
+    content: bytes,
+    approved: str,
+) -> dict:
+    """Apply an unpublishable document's approved mutation to the working copy,
+    and report which of the four cases that was.
+
+    Issue #385: writing only over the publication tip's own baseline is correct
+    exactly once. For a document whose owner declares no lane and lands it out
+    of band, the *second* disposition arrives to find the first one sitting
+    unlanded in the working copy, declines to write, and strands its tracker
+    transaction where no later run can get past it. What tells that predecessor
+    apart from somebody's hand edit is the reference this module writes when —
+    and only when — its own write succeeded, naming the exact content it wrote.
+    A working copy byte-identical to that record is this module's own unlanded
+    disposition, and the approved mutation goes on top of it. Anything else is
+    still never overwritten.
+
+    The distinction is in the result rather than left to `document_written`,
+    which reads identically for a novel document with no baseline, for a
+    document somebody edited by hand, and for the predecessor case this exists
+    to continue.
+    """
+    recorded = read_applied(root, owner, document)
+    current = working_blob(root, document)
+    outcome, why, over = "unrecognized-working-copy", None, None
+    if baseline is None:
+        outcome = "no-baseline"
+        why = (
+            f"{document} is absent from the publication tip, so there is no "
+            "baseline to write over and nothing was written"
+        )
+    elif current == baseline:
+        outcome, over = "applied-over-baseline", baseline
+        why = (
+            f"{document} still carried the publication tip's own content, so "
+            "the approved mutation was applied to it"
+        )
+    elif recorded is not None and current == recorded:
+        outcome, over = "applied-over-local-predecessor", recorded
+        why = (
+            f"{document} was byte-identical to the disposition this module "
+            f"last applied locally ({recorded}), so the approved mutation was "
+            "applied on top of it"
+        )
+    elif current is None:
+        why = (
+            f"{document} does not exist under {root}, so there was nothing "
+            "this module could recognize and nothing was written"
+        )
+    else:
+        why = (
+            f"the working copy of {document} ({current}) is neither the "
+            f"publication tip's content ({baseline}) nor the content this "
+            "module last applied locally ("
+            + (recorded if recorded else "nothing recorded")
+            + "), so it was left untouched and nothing was written"
+        )
+
+    record = None
+    if over is not None:
+        # Guarded against the exact bytes this decision was made from, so an
+        # edit landing in between is refused rather than destroyed — the same
+        # rule the publication path follows, whichever predecessor it is.
+        verify_and_write(root, document, over, content)
+        # Recorded only once the write succeeded, and pointing at the exact
+        # content: this is what lets a later run and a later consumer of an
+        # unpublishable document's cursor distinguish "the module applied the
+        # approved disposition" from "somebody edited the file".
+        record = (
+            "recorded"
+            if record_applied(root, owner, document, approved)
+            else "unrecorded"
+        )
+
+    return {
+        "write_outcome": outcome,
+        "write_reason": why,
+        "document_written": over is not None,
+        "applied_record": record,
+        # Named only when the reference really carries this run's content. A
+        # name printed beside a reference that does not would authorize the
+        # continuation and the local transaction resolution that the failed
+        # record is precisely the reason to refuse.
+        "applied_ref": applied_ref(owner, document) if record == "recorded" else None,
+        "local_predecessor": recorded,
+        # What the document itself held when the decision was made, which after
+        # a write is no longer what it holds: it names the predecessor a
+        # continuation went on top of, and the bytes a refusal declined to
+        # touch.
+        "found_blob": current,
+        "document_edit": {
+            "exists": (root / document).is_file(),
+            "write_root": str(root),
+            "path": document,
+        },
+    }
+
+
 def _publish_locked(*, root, owner, branch, tip, document, content, message, pending):
     """The sequence itself, run with the lock held. Split from publish() so
     every failure leaving it passes through one place that attaches §9.5's
@@ -1395,37 +1528,17 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
         # unconditionally, and onto the document too whenever that can be done
         # without clobbering anything.
         preserved = _preserve(root, content)
-        applied = False
-        if baseline is not None and working_blob(root, document) == baseline:
-            verify_and_write(root, document, baseline, content)
-            applied = True
-            # Recorded only once the write succeeded, and pointing at the exact
-            # content: this is what lets a consumer of an unpublishable
-            # document's cursor distinguish "the module applied the approved
-            # disposition" from "somebody edited the file".
-            git(
-                ["update-ref", applied_ref(owner, document), preserved],
-                cwd=root,
-                check=False,
-            )
         return {
             "status": "not-published",
-            "applied_ref": applied_ref(owner, document) if applied else None,
             "reason": why_not,
             "repository": owner,
             "branch": branch,
             "document": document,
             "publication_tip": tip,
             "approved_blob": preserved,
-            "document_written": applied,
             "remote_contains_commit": False,
             "local_publication_commit": None,
-            "document_edit": {
-                "exists": (root / document).is_file(),
-                "write_root": str(root),
-                "path": document,
-            },
-        }
+        } | _apply_locally(root, owner, document, baseline, content, preserved)
 
     # A record that has not landed and is not being resumed is unresolved
     # work, not debris. Publishing fresh would overwrite the ref and lose the
