@@ -48,8 +48,9 @@ is closed. The contradiction exists at current `master` (`d37dace`).
   GitHub Releases.
 - `docs/design.md:97` — calls release-readiness epic #268 open, although it is
   closed and the processing ledger marks it complete.
-- `docs/design.md:6748` — the same document's REL-4 record says Kanban 1.0.0.0 is
-  published and records the tag, release, asset, and verification.
+- `docs/design.md:6839` — the same document's REL-4 record, whose published-state
+  claim at `docs/design.md:6841` says Kanban 1.0.0.0 is published, and which
+  records the tag, release, asset, and verification.
 
 **Handoff context:**
 
