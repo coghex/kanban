@@ -1938,7 +1938,12 @@ touched are questions about files rather than documents. The rows below stay
 a statement about tracked Markdown alone, and the configuration
 reconciliation in `tools/test_document_classification.py` compares coverage
 over exactly that subject, so the difference is a recorded decision rather
-than drift between the row and the configuration.
+than drift between the row and the configuration. Because that comparison
+cannot see an entry covering no tracked Markdown at all, the reconciliation
+also holds every configured entry to being one of the coordination
+declarations below: a configured `src/` would be invisible to both the
+coverage and the test-parsed checks while the drainer honoured it for every
+file beneath `src/`, and is reported instead.
 
 `reasons` is a `;`-separated set rather than a single choice, because a
 document is frequently `pr-atomic` for more than one of these at once and

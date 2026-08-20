@@ -249,6 +249,20 @@ def coordination_drift(configured, coordination_rows, markdown_paths):
     )
 
 
+def undeclared_configured_entries(configured, coordination_rows):
+    """Configured entries that are not themselves §7 coordination
+    declarations, sorted.
+
+    Coverage over tracked Markdown cannot see these: a configured `src/`
+    covers no tracked Markdown and overlaps no test-parsed declaration, so
+    both comparisons stay silent — yet the drainer reads the entry over every
+    file, and would treat a `src/Kanban/Domain.hs` advance as
+    coordination-only. The declaration strings are the subject here, so the
+    check is exact while still naming a directory as one string with no child
+    enumerated."""
+    return sorted(set(configured) - set(coordination_rows))
+
+
 def declarations_overlap(one: str, other: str) -> bool:
     """Whether two declarations cover any common path: either names the other
     exactly, or a directory declaration covers the other's anchor."""
@@ -802,6 +816,12 @@ class CoordinationPathConfigurationTests(unittest.TestCase):
             "config.toml.example's coghex/kanban coordination_paths and the "
             "coordination rows of docs/agent-workflow-contract.md §7 disagree",
         )
+        self.assertEqual(
+            undeclared_configured_entries(configured, self.coordination),
+            [],
+            "config.toml.example's coghex/kanban coordination_paths carries an "
+            "entry that is no §7 coordination declaration",
+        )
 
     def test_the_directory_row_and_directory_entry_agree_without_enumeration(self):
         # The agreement requirement 9 asks for, proven against an inventory
@@ -879,6 +899,31 @@ class CoordinationPathConfigurationTests(unittest.TestCase):
                     configured_coordination_paths(config, raw)
                 ),
                 [planted],
+            )
+
+    def test_a_configured_entry_covering_no_markdown_is_still_reported(self):
+        # The fail-open gap the Codex review of PR #411 named: `src/` covers
+        # no tracked Markdown, so the coverage comparison reports no drift,
+        # and it overlaps no test-parsed declaration — yet the drainer reads
+        # the entry over every file and would treat a src/Kanban/Domain.hs
+        # advance as coordination-only. The declaration-string reconciliation
+        # is what reports it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.write_fixture(
+                temp_dir, [], sorted(self.coordination | {"src/"})
+            )
+            config, raw, _ = load_example_config(path)
+            configured = configured_coordination_paths(config, raw)
+            # The blind spots, asserted so this regression documents why the
+            # exact check below exists rather than duplicating it.
+            self.assertEqual(
+                coordination_drift(configured, self.coordination, self.markdown),
+                ([], []),
+            )
+            self.assertEqual(configured_test_parsed_paths(configured), [])
+            self.assertEqual(
+                undeclared_configured_entries(configured, self.coordination),
+                ["src/"],
             )
 
     def test_a_configured_directory_covering_test_parsed_content_is_reported(self):
