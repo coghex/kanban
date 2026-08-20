@@ -97,6 +97,38 @@ REVIEW_QUEUE_OUTCOMES = frozenset(
 # The outcomes that name the issue they are about. `idle` and `busy` are about
 # the queue rather than any one issue and carry no number.
 REVIEW_QUEUE_ISSUE_OUTCOMES = frozenset({"advanced", "changes_requested", "retry"})
+# The one bounded document --reconcile-approvals writes to stdout, versioned
+# the same way --review-queue's is so a caller can refuse a document it was not
+# built to read. Separate schema and version from the queue's: the two modes
+# answer different questions and a reader that accepted either would have to
+# guess which it was handed.
+RECONCILE_SCHEMA = "approve-issues-reconcile-approvals"
+RECONCILE_SCHEMA_VERSION = 1
+RECONCILE_RESULT_FIELDS = frozenset({"schema", "version", "outcome", "message", "issues"})
+RECONCILE_ENTRY_FIELDS = frozenset(
+    {"issue", "outcome", "label_removed", "approved", "reasons", "detail"}
+)
+# `reconciled` means every requested issue was examined under the lock.
+# `busy` means the lock was held elsewhere and nothing was read or written --
+# an ordinary outcome that exits zero, not a failure.
+RECONCILE_OUTCOMES = frozenset({"reconciled", "busy"})
+# What one issue's examination concluded.
+#
+# `unlabeled`   the approval label is absent, so there is nothing to reconcile.
+# `current`     the label is backed by a marker that matches this specification
+#               and reads APPROVE. The label stays. `approved` may still be
+#               false -- an incident, a closed issue, or a changes-requested
+#               label refuses the gate without making the marker stale.
+# `removed`     the label was not backed by such a marker and was removed.
+# `unverified`  fail-closed. Nothing was mutated and no readiness claim is
+#               made: an INVALID marker, unmarked legacy provenance under
+#               `--legacy-policy hold`, a GitHub failure, or a post-mutation
+#               re-read that could not confirm the result.
+RECONCILE_ENTRY_OUTCOMES = frozenset({"unlabeled", "current", "removed", "unverified"})
+# The entry outcomes that carry a post-reconciliation `approved` Boolean. An
+# `unverified` entry carries null instead, which is what stops a consumer
+# rendering readiness it never established.
+RECONCILE_APPROVED_OUTCOMES = frozenset({"unlabeled", "current", "removed"})
 # A ceiling, not a page size: `gh issue list` paginates internally up to this
 # many entries. Reaching it means the inventory may be truncated, which the
 # queue treats as a failure rather than as the whole backlog -- see
@@ -2159,6 +2191,481 @@ def emit_review_queue_result(result: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+def approval_reconciliation_decision(
+    issue: dict[str, Any],
+    comments: list[dict[str, Any]],
+    *,
+    legacy_policy: str,
+) -> dict[str, Any]:
+    """Whether this issue's approval label is backed by a current approval.
+
+    Computed from the same `review_record_matches` result and marker `verdict`
+    that `current_gate_status` keys its own freshness reason on, never from
+    that function's `reasons` strings. Only `CURRENT_CHANGES_REASON` is a named
+    constant; the rest are inline human-readable text, and a mutation keyed on
+    matching them would silently stop mutating the day one was reworded.
+
+    The two conditions below are deliberately checked before the marker
+    comparison, because both make `marker_matches` return False for *every*
+    marker -- including one whose `spec` equals the live fingerprint -- and
+    removing a label on that basis would delete a valid approval:
+
+    * An emptied reviewer set. `reviewers_for_origin` answers `[]` for an issue
+      carrying no `issue-origin` marker under `--legacy-policy hold`, and
+      `marker_matches` returns False whenever `reviewers` is empty. That is
+      `current_gate_status`'s separate "legacy issue provenance is unmarked and
+      legacy review is disabled" condition, not marker staleness.
+    * A conflicting pair of origin markers, which raises rather than answering.
+    """
+    labels = issue_labels(issue)
+    if APPROVE_LABEL not in labels:
+        return {"kind": "unlabeled"}
+    try:
+        origin = issue_origin(issue.get("body") or "")
+    except ApproveError as exc:
+        return {"kind": "unverified", "detail": str(exc)}
+    if not reviewers_for_origin(origin, legacy_policy):
+        return {
+            "kind": "unverified",
+            "detail": (
+                "legacy issue provenance is unmarked and legacy review is "
+                "disabled, so no marker can be matched against this "
+                "specification and the approval label is not evidence of "
+                "staleness"
+            ),
+        }
+    record = latest_review_record(comments)
+    marker = record[1] if record is not None else None
+    if marker is not None and marker.get("verdict") == "INVALID":
+        # Reported per issue exactly as --check reports it, never raised.
+        # main()'s InvalidIssueError handler opens a repository circuit-breaker
+        # incident unless APPROVE_ISSUES_MANAGED=1, so raising here would halt
+        # the whole pipeline as a side effect of rendering a roadmap.
+        return {
+            "kind": "unverified",
+            "detail": (
+                "the latest review marker is INVALID at "
+                f"{marker.get('comment_url')}"
+            ),
+        }
+    matched = review_record_matches(
+        comments,
+        record,
+        spec_sha=spec_fingerprint(issue, comments),
+        origin=origin,
+        legacy_policy=legacy_policy,
+    )
+    if matched and marker is not None and marker.get("verdict") == "APPROVE":
+        return {"kind": "current"}
+    if not matched:
+        return {
+            "kind": "stale",
+            "detail": (
+                "no current opposite-agent v2 review marker matches this "
+                "specification"
+            ),
+        }
+    return {
+        "kind": "stale",
+        "detail": (
+            "the current review marker's verdict is "
+            f"{marker.get('verdict') if marker else None}, not APPROVE"
+        ),
+    }
+
+
+def remove_approval_label(ctx: RepoContext, number: int) -> None:
+    """Drop the configured approval label and nothing else.
+
+    Deliberately not `clear_verdict_labels`, which also removes the
+    changes-requested label. This mode reconciles the false-ready signal a
+    stale approval creates; a `reviewed:changes` label is not that signal, and
+    removing it here would erase a barrier the review queue stops at.
+    """
+    run(
+        [
+            "gh",
+            "issue",
+            "edit",
+            str(number),
+            "--repo",
+            ctx.repo_slug,
+            "--remove-label",
+            APPROVE_LABEL,
+        ],
+        cwd=ctx.path,
+    )
+
+
+def reconcile_entry(
+    number: int,
+    outcome: str,
+    *,
+    label_removed: bool,
+    approved: bool | None,
+    reasons: list[str],
+    detail: str | None,
+) -> dict[str, Any]:
+    return {
+        "issue": number,
+        "outcome": outcome,
+        "label_removed": label_removed,
+        "approved": approved,
+        "reasons": reasons,
+        "detail": detail,
+    }
+
+
+def reconcile_one_locked(
+    ctx: RepoContext, number: int, *, legacy_policy: str
+) -> dict[str, Any]:
+    """Reconcile one issue's approval label, holding the approval lock.
+
+    Every read here is taken *after* the lock, so a decision is never made
+    against an observation from before another owner published. That is the
+    whole point of the ordering: a pre-lock read could see a stale label, and
+    by the time the removal ran a concurrent review could have made that very
+    approval current again.
+    """
+    try:
+        issue = get_issue(ctx, number)
+        comments = get_comments(ctx, number)
+    except ApproveError as exc:
+        return reconcile_entry(
+            number,
+            "unverified",
+            label_removed=False,
+            approved=None,
+            reasons=[],
+            detail=f"could not read issue #{number}: {exc}",
+        )
+    decision = approval_reconciliation_decision(
+        issue, comments, legacy_policy=legacy_policy
+    )
+    if decision["kind"] == "unverified":
+        return reconcile_entry(
+            number,
+            "unverified",
+            label_removed=False,
+            approved=None,
+            reasons=[],
+            detail=decision["detail"],
+        )
+    if decision["kind"] in ("unlabeled", "current"):
+        status = apply_pipeline_circuit_breaker(
+            current_gate_status(issue, comments, legacy_policy=legacy_policy),
+            ctx.path,
+            issue_number=number,
+        )
+        return reconcile_entry(
+            number,
+            decision["kind"],
+            label_removed=False,
+            approved=bool(status["approved"]),
+            reasons=list(status["reasons"]),
+            detail=None,
+        )
+    before_fingerprint = spec_fingerprint(issue, comments)
+    try:
+        remove_approval_label(ctx, number)
+    except ApproveError as exc:
+        return reconcile_entry(
+            number,
+            "unverified",
+            label_removed=False,
+            approved=None,
+            reasons=[],
+            detail=f"could not remove {APPROVE_LABEL} from #{number}: {exc}",
+        )
+    try:
+        issue = get_issue(ctx, number)
+        comments = get_comments(ctx, number)
+    except ApproveError as exc:
+        return reconcile_entry(
+            number,
+            "unverified",
+            label_removed=False,
+            approved=None,
+            reasons=[],
+            detail=(
+                f"removed {APPROVE_LABEL} from #{number} but could not re-read "
+                f"the issue to verify it: {exc}"
+            ),
+        )
+    if APPROVE_LABEL in issue_labels(issue):
+        return reconcile_entry(
+            number,
+            "unverified",
+            label_removed=False,
+            approved=None,
+            reasons=[],
+            detail=(
+                f"{APPROVE_LABEL} is still attached to #{number} after the "
+                "removal, so the mutation could not be verified"
+            ),
+        )
+    after_fingerprint = spec_fingerprint(issue, comments)
+    if after_fingerprint != before_fingerprint:
+        # spec_fingerprint excludes the three verdict labels, so removing the
+        # approval label must leave the hash byte-identical. A change means
+        # something other than this mutation altered the issue between the two
+        # reads, and this run can no longer say what it reconciled.
+        return reconcile_entry(
+            number,
+            "unverified",
+            label_removed=True,
+            approved=None,
+            reasons=[],
+            detail=(
+                f"#{number}'s specification changed while its approval label "
+                f"was removed ({before_fingerprint} -> {after_fingerprint})"
+            ),
+        )
+    status = apply_pipeline_circuit_breaker(
+        current_gate_status(issue, comments, legacy_policy=legacy_policy),
+        ctx.path,
+        issue_number=number,
+    )
+    return reconcile_entry(
+        number,
+        "removed",
+        label_removed=True,
+        approved=bool(status["approved"]),
+        reasons=list(status["reasons"]),
+        detail=decision["detail"],
+    )
+
+
+def reconcile_result(
+    outcome: str, *, message: str, entries: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The one JSON document a --reconcile-approvals pass writes to stdout."""
+    return {
+        "schema": RECONCILE_SCHEMA,
+        "version": RECONCILE_SCHEMA_VERSION,
+        "outcome": outcome,
+        "message": message,
+        "issues": entries,
+    }
+
+
+def validate_reconcile_result(
+    result: Any, *, requested: list[int], model_ran: bool
+) -> dict[str, Any]:
+    """Refuse to print a document a consumer could act on wrongly.
+
+    Held to the terms --review-queue's document already follows: an unknown
+    schema or version, a missing or extra field, or a mistyped value is refused
+    rather than emitted. What a triage run does with this document is decide
+    whether to render an issue as ready, so a field it misreads becomes a
+    readiness claim nobody made.
+
+    `requested` and `model_ran` are what the invocation actually observed and
+    are passed in rather than re-derived: they are the claims the document
+    cannot check against itself.
+    """
+    if model_ran:
+        raise ApproveError(
+            "Reconciliation invoked a reviewer model, which it must never do"
+        )
+    if not isinstance(result, dict):
+        raise ApproveError(f"Reconcile result is not a JSON object: {result!r}")
+    keys = set(result)
+    missing = sorted(RECONCILE_RESULT_FIELDS - keys)
+    unexpected = sorted(keys - RECONCILE_RESULT_FIELDS)
+    if missing or unexpected:
+        detail = "; ".join(
+            part
+            for part in (
+                f"missing {', '.join(missing)}" if missing else "",
+                f"unexpected {', '.join(unexpected)}" if unexpected else "",
+            )
+            if part
+        )
+        raise ApproveError(f"Reconcile result has the wrong fields: {detail}")
+    if result["schema"] != RECONCILE_SCHEMA:
+        raise ApproveError(f"Reconcile result has unknown schema {result['schema']!r}")
+    version = result["version"]
+    # The contract pins an integer, and equality alone does not enforce that:
+    # `bool` is an `int` with True == 1, and the JSON float 1.0 compares equal
+    # to 1 as well, so both would pass a bare `!= 1` check.
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != RECONCILE_SCHEMA_VERSION
+    ):
+        raise ApproveError(f"Reconcile result has unknown schema version {version!r}")
+    if result["outcome"] not in RECONCILE_OUTCOMES:
+        raise ApproveError(
+            f"Reconcile result has unknown outcome {result['outcome']!r}"
+        )
+    message = result["message"]
+    if not isinstance(message, str) or not message.strip():
+        raise ApproveError("Reconcile result carries no displayable message")
+    entries = result["issues"]
+    if not isinstance(entries, list):
+        raise ApproveError(f"Reconcile result issues is not a list: {entries!r}")
+    if [entry.get("issue") if isinstance(entry, dict) else entry for entry in entries] != requested:
+        raise ApproveError(
+            "Reconcile result must carry one entry per requested issue, in the "
+            f"order they were requested: asked for {requested}"
+        )
+    for entry in entries:
+        validate_reconcile_entry(entry)
+    return result
+
+
+def validate_reconcile_entry(entry: Any) -> None:
+    if not isinstance(entry, dict):
+        raise ApproveError(f"Reconcile entry is not a JSON object: {entry!r}")
+    keys = set(entry)
+    missing = sorted(RECONCILE_ENTRY_FIELDS - keys)
+    unexpected = sorted(keys - RECONCILE_ENTRY_FIELDS)
+    if missing or unexpected:
+        detail = "; ".join(
+            part
+            for part in (
+                f"missing {', '.join(missing)}" if missing else "",
+                f"unexpected {', '.join(unexpected)}" if unexpected else "",
+            )
+            if part
+        )
+        raise ApproveError(f"Reconcile entry has the wrong fields: {detail}")
+    number = entry["issue"]
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise ApproveError(
+            f"Reconcile entry requires a positive issue number, got {number!r}"
+        )
+    outcome = entry["outcome"]
+    if outcome not in RECONCILE_ENTRY_OUTCOMES:
+        raise ApproveError(f"Reconcile entry has unknown outcome {outcome!r}")
+    removed = entry["label_removed"]
+    if not isinstance(removed, bool):
+        raise ApproveError(
+            f"Reconcile entry label_removed is not a Boolean: {removed!r}"
+        )
+    if removed and outcome not in ("removed", "unverified"):
+        raise ApproveError(
+            f"Reconcile outcome {outcome!r} cannot claim a label was removed"
+        )
+    if outcome == "removed" and not removed:
+        raise ApproveError("Reconcile outcome 'removed' must report label_removed")
+    approved = entry["approved"]
+    if outcome in RECONCILE_APPROVED_OUTCOMES:
+        if not isinstance(approved, bool):
+            raise ApproveError(
+                f"Reconcile outcome {outcome!r} requires a post-reconciliation "
+                f"approved Boolean, got {approved!r}"
+            )
+        if outcome == "removed" and approved:
+            raise ApproveError(
+                "Reconcile outcome 'removed' cannot report the issue as approved"
+            )
+    elif approved is not None:
+        # An unverified entry that carried a Boolean would be read as a
+        # readiness answer, which is exactly what failing closed must not
+        # produce.
+        raise ApproveError(
+            f"Reconcile outcome {outcome!r} must carry no approved Boolean, "
+            f"got {approved!r}"
+        )
+    reasons = entry["reasons"]
+    if not isinstance(reasons, list) or not all(
+        isinstance(reason, str) for reason in reasons
+    ):
+        raise ApproveError(f"Reconcile entry reasons is not a list of strings: {reasons!r}")
+    detail = entry["detail"]
+    if detail is not None and (not isinstance(detail, str) or not detail.strip()):
+        raise ApproveError(f"Reconcile entry detail is not displayable: {detail!r}")
+    if outcome == "unverified" and not detail:
+        raise ApproveError(
+            "Reconcile outcome 'unverified' must say what could not be verified"
+        )
+
+
+def reconcile_approvals(
+    ctx: RepoContext, numbers: list[int], *, legacy_policy: str
+) -> dict[str, Any]:
+    """Reconcile the approval label of each requested issue, under one lock.
+
+    The lock is taken at most once for the whole invocation and released on
+    every exit path, the pattern `review_batch` and `review_queue` already
+    establish. Reconciliation performs no model work, so the hold is short: a
+    triage pass costs one process and at most one lock acquisition rather than
+    one per candidate issue.
+
+    No repository-wide incident check runs ahead of the lock. A blocking
+    incident refuses the *gate* without making any marker stale, so it belongs
+    in each entry's `reasons` -- reported by `apply_pipeline_circuit_breaker`
+    per issue -- rather than halting a pass whose whole job is to describe
+    state.
+    """
+    try:
+        lock = acquire_lock(ctx, mode="reconcile", issue_numbers=list(numbers))
+    except LockContentionError as exc:
+        # Ordinary contention, not a failure: nothing was read under a stale
+        # assumption and nothing was written. Its own outcome, distinguishable
+        # without matching message text, so a consumer renders the affected
+        # issues as unverified-because-busy rather than as broken or as ready.
+        return validate_reconcile_result(
+            reconcile_result(
+                "busy",
+                message=(
+                    f"Approval queue lock is held by {exc.owner_description}; "
+                    "this pass reconciled nothing."
+                ),
+                entries=[
+                    reconcile_entry(
+                        number,
+                        "unverified",
+                        label_removed=False,
+                        approved=None,
+                        reasons=[],
+                        detail=(
+                            "the canonical approval lock was held elsewhere, so "
+                            "this issue's approval state was not read"
+                        ),
+                    )
+                    for number in numbers
+                ],
+            ),
+            requested=list(numbers),
+            model_ran=False,
+        )
+    before = model_invocation_count()
+    try:
+        entries = [
+            reconcile_one_locked(ctx, number, legacy_policy=legacy_policy)
+            for number in numbers
+        ]
+    finally:
+        release_lock(lock)
+    removed = sum(1 for entry in entries if entry["outcome"] == "removed")
+    unverified = sum(1 for entry in entries if entry["outcome"] == "unverified")
+    return validate_reconcile_result(
+        reconcile_result(
+            "reconciled",
+            message=(
+                f"Reconciled {len(entries)} issue(s): removed {removed} stale "
+                f"{APPROVE_LABEL} label(s), left {unverified} unverified."
+            ),
+            entries=entries,
+        ),
+        requested=list(numbers),
+        # Observed at the single reviewer-model funnel, never predicted.
+        model_ran=model_invocation_count() > before,
+    )
+
+
+def emit_reconcile_result(result: dict[str, Any]) -> None:
+    # Rendered whole and written in ONE call, for the reason
+    # emit_review_queue_result documents: a signal cannot be delivered part-way
+    # through a single write, so an interrupt lands either side of this line
+    # and never leaves a truncated document a caller could parse.
+    sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+    sys.stdout.flush()
+
+
 def review_queue_idle_result() -> dict[str, Any]:
     return validate_review_queue_result(
         review_queue_result(
@@ -2810,6 +3317,18 @@ def parse_args() -> argparse.Namespace:
             "one JSON result document (requires --json)."
         ),
     )
+    parser.add_argument(
+        "--reconcile-approvals",
+        type=positive_issue_number,
+        nargs="+",
+        metavar="ISSUE",
+        help=(
+            "Remove the approval label from each named issue whose approval is "
+            "not backed by a current matching APPROVE marker, and print one "
+            "JSON result document (requires --json). Calls no model, publishes "
+            "no review comment, and manufactures no verdict."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print check output as JSON.")
     parser.add_argument("--self-test", action="store_true", help="Run pure unit checks.")
     parser.add_argument(
@@ -2852,27 +3371,37 @@ def main() -> None:
     # opposite -- print that mode's own text and exit zero -- and the --json
     # requirement below would never be reached at all.
     selected_actions = sum(
-        value is not None for value in (args.check, args.review, args.rereview)
+        value is not None
+        for value in (args.check, args.review, args.rereview, args.reconcile_approvals)
     ) + int(args.review_queue)
     if selected_actions > 1:
         fail(
-            "approve-issues.py error: --check, --review, --rereview, and "
-            "--review-queue are mutually exclusive"
+            "approve-issues.py error: --check, --review, --rereview, "
+            "--review-queue, and --reconcile-approvals are mutually exclusive"
         )
-    if args.review_queue:
-        # --self-test joins that exclusivity for this mode alone, leaving the
+    # Both document-producing modes are resolved here, together, because the
+    # obligation is identical and stating it once is what stops the two
+    # drifting: a rejected invocation exits non-zero having written nothing a
+    # caller could read as a result.
+    for flag, selected in (
+        ("--review-queue", args.review_queue),
+        ("--reconcile-approvals", args.reconcile_approvals is not None),
+    ):
+        if not selected:
+            continue
+        # --self-test joins that exclusivity for these modes alone, leaving the
         # other three modes' long-standing handling of it untouched.
         if args.self_test:
             fail(
-                "approve-issues.py error: --review-queue and --self-test are "
+                f"approve-issues.py error: {flag} and --self-test are "
                 "mutually exclusive"
             )
         # Refused before the repository context and therefore before any
-        # GitHub call: --review-queue's result is a document a controller
-        # parses, and LOG_TO_STDERR is bound to --json below, so this is what
-        # guarantees no log line can ever share stdout with it.
+        # GitHub call: the result is a document a caller parses, and
+        # LOG_TO_STDERR is bound to --json below, so this is what guarantees no
+        # log line can ever share stdout with it.
         if not args.json:
-            fail("approve-issues.py error: --review-queue requires --json")
+            fail(f"approve-issues.py error: {flag} requires --json")
     if args.self_test:
         self_test()
         return
@@ -2950,6 +3479,15 @@ def main() -> None:
                 review_queue(ctx, legacy_policy=args.legacy_policy)
             )
             return
+        if args.reconcile_approvals is not None:
+            emit_reconcile_result(
+                reconcile_approvals(
+                    ctx,
+                    args.reconcile_approvals,
+                    legacy_policy=args.legacy_policy,
+                )
+            )
+            return
         if args.rereview is not None:
             status = rereview_one(
                 ctx, args.rereview, legacy_policy=args.legacy_policy
@@ -3003,20 +3541,25 @@ def main() -> None:
         fail(f"approve-issues.py error: {exc}")
     except KeyboardInterrupt:
         # The daemon is meant to be stoppable with Ctrl-C and exits zero for
-        # it. --review-queue cannot: exit zero is its contract for one of five
-        # outcomes, each carrying a complete result document, so an aborted
-        # pass exiting zero with an empty stdout is a success a controller
+        # it. A document-producing mode cannot: exit zero is its contract for
+        # every normal outcome, each carrying a complete result document, so an
+        # aborted pass exiting zero with an empty stdout is a success a caller
         # would believe.
         #
         # Decided at the ONE handler every interrupt inside the run reaches,
         # rather than by wrapping whichever step was noticed last. Loading
         # configuration, resolving the repository, the pass itself, and
-        # writing the document are all before the queue block's return, so
-        # every interrupt that lands here is one that arrived before a
-        # complete result -- wherever in the run that was.
-        if args.review_queue:
+        # writing the document are all before those blocks' returns, so every
+        # interrupt that lands here is one that arrived before a complete
+        # result -- wherever in the run that was. Both modes are named here for
+        # the same reason they share the refusals above: the obligation is
+        # identical, and one of them omitted is one that fails open.
+        interrupted = "--review-queue" if args.review_queue else (
+            "--reconcile-approvals" if args.reconcile_approvals is not None else None
+        )
+        if interrupted is not None:
             fail(
-                "approve-issues.py error: --review-queue was interrupted "
+                f"approve-issues.py error: {interrupted} was interrupted "
                 "before it produced a complete result"
             )
         log("Interrupted; exiting")

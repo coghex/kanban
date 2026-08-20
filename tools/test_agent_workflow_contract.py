@@ -1470,6 +1470,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 "claude-plugin/plugins/kanban/commands/solve.md",
                 "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
                 "claude-plugin/plugins/kanban/commands/issue-rereview.md",
+                "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
+                "claude-plugin/plugins/kanban/commands/triage.md",
             ],
         )
         for relative_path in entry["files"]:
