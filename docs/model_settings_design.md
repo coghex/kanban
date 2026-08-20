@@ -325,14 +325,20 @@ enforces elsewhere, decided up front instead of one blocker per round.
   become lookups, preserving `agentForAction`'s brand routing untouched),
   `beginIssueReview`'s `thread/start` and `sendTurnStart`'s `turn/start`
   (`Review.hs`), and the `kanban_run_claude` argv (`Review/Tools.hs`).
-- **Python:** a `tools/kanban_models.py` reader (tomllib, mirroring
-  `tools/kanban_config.py`'s shape) consumed by `approve_issues.py`,
+- **Python:** a `kanban_models.py` reader (tomllib, mirroring
+  `kanban_config.py`'s shape) consumed by `approve_issues.py`,
   `drain_prs.py`, and the Claude plugin's `review_pr.py`; the Codex plugin's
   copy keeps its no-pinning delegation contract and never gains the reader's
-  model values (D-2 as amended). The drainer re-reads per drain cycle so a
-  roster edit does not require a service restart; a new module under
-  `tools/` means `install_drainer.py` must be rerun on live installs, which
-  the slice must say out loud.
+  model values (D-2 as amended), though it reads the loaded-provider set for
+  MODEL-11's mode awareness. The reader ships exactly the way
+  `kanban_config.py` already does — byte-identical copies in `tools/` and in
+  both plugin bundles' `scripts/` directories, held identical by the same
+  parity discipline — because an installed coordinator runs from its bundle
+  with no `tools/` sibling and must load the reader from beside itself. The
+  drainer re-reads per drain cycle so a roster edit does not require a
+  service restart; a new module under `tools/` means `install_drainer.py`
+  (and the issue-approval installer, which relocates its own module set)
+  must be rerun on live installs, which the slice must say out loud.
 - **Display and prose:** the four constants in `Solve/Event.hs:110-124` become
   functions of the roster (`display` labels), as do the solve chooser rows,
   session/worker labels, `Prompts.hs` reviewer-identity prose, and the
@@ -429,8 +435,10 @@ fresh install is dual and identical to today.
   chooser auto-selects the loaded provider; usage and ping surfaces show only
   that provider.
 - **No-agent** — the board without the pipeline: solve, review, autosolve,
-  and worker actions are unavailable, their shortcuts neither displayed nor
-  bound, and the usage sidebar and ping have nothing to show. Reads, filters,
+  and worker actions are unavailable, their shortcuts hidden from every help
+  and footer surface but deliberately still handled — pressing one produces
+  the mode-naming refusal notice rather than silence — and the usage sidebar
+  and ping have nothing to show. Reads, filters,
   search, and details work untouched. Spawn paths refuse with a mode-naming
   message in the D-3 vocabulary. The drainer degrades gracefully (D-11): it
   keeps merging eligible PRs, and any step needing a model raises a
@@ -793,14 +801,19 @@ concrete proposal before any implementation.
   fallbacks; the Codex plugin's copy keeps its no-pinning delegation
   contract and is held to it by a negative control; one cross-language
   parity gate holds every roster-backed copy to the tracked defaults.
-- **Scope:** the reader module; `issue_gate` consumption in
-  `approve_issues.py` under the D-6 precedence (defaults < roster file <
-  environment); `drain_rereview` in `drain_prs.py`, re-read per drain
-  cycle; the Claude plugin copy's pinned constants become fallbacks behind
-  the reader; a negative assertion that the Codex plugin copy passes no
-  model or effort flags (D-2 as amended); the parity gate; a stated
-  `install_drainer.py` rerun requirement for live installs (new module
-  under `tools/`).
+- **Scope:** the reader module in its three homes — `tools/` plus a
+  byte-identical copy in each plugin bundle's `scripts/`, the shipping
+  pattern `kanban_config.py` already follows, with the copies held
+  byte-identical by the same gate and the new bundled asset declared in the
+  bundle inventories; `issue_gate` consumption in `approve_issues.py` under
+  the D-6 precedence (defaults < roster file < environment);
+  `drain_rereview` in `drain_prs.py`, re-read per drain cycle; the Claude
+  plugin copy's pinned constants become fallbacks behind the reader, loaded
+  from beside the coordinator rather than from `tools/`; a negative
+  assertion that the Codex plugin copy passes no model or effort flags (D-2
+  as amended); the cross-language parity gate; stated rerun requirements
+  for `install_drainer.py` and the issue-approval installer on live
+  installs (new module under `tools/`).
 - **Phase:** 2
 - **Depends on:** MODEL-1
 - **Ordering:** independent
@@ -809,8 +822,9 @@ concrete proposal before any implementation.
   model each roster-backed script passes to its fake CLI and that absence
   preserves today's values; the env layer wins over the file for
   `issue_gate`; the Codex plugin copy still spawns with no model or effort
-  flags; the parity gate fails when any roster-backed copy's fallback drifts
-  from the tracked defaults.
+  flags; the byte-identity gate fails when any of the reader's three copies
+  drifts; the parity gate fails when any roster-backed copy's fallback
+  drifts from the tracked defaults.
 - **Out of scope:** changing which brand any script routes to; giving the
   Codex plugin copy pins — D-2 as amended keeps its delegation contract, and
   the roster never reaches it.
@@ -861,9 +875,10 @@ concrete proposal before any implementation.
 ### MODEL-9. Implement no-agent mode: board-only UI and spawn refusal
 
 - **Outcome:** with zero providers loaded, Kanban is a board: agent actions
-  are unavailable, their shortcuts neither displayed nor bound, spawn paths
-  refuse with a mode-naming message, and the usage sidebar and ping are
-  absent; reads, filters, search, and details are untouched.
+  are unavailable, their shortcuts hidden from every help and footer surface
+  but deliberately still handled so a press produces the mode-naming refusal
+  notice, spawn paths refuse the same way, and the usage sidebar and ping
+  are absent; reads, filters, search, and details are untouched.
 - **Scope:** mode-aware key visibility in `UI/Keys.hs` with the
   `docs/design.md` §7 key-table rows updated in the same PR (the table is a
   tested contract via `Spec.UI.Keys`), refusal arms in `UI/Events.hs`,
