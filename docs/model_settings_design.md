@@ -180,9 +180,9 @@ all (`Ping.hs:139-153` records why).
   checks and gates), and no-agent (board-only UI with agent shortcuts
   hidden and solve/review unavailable).
 - A compiled per-provider adapter interface as the single place Kanban
-  constructs provider processes, with the embedded issue review made
-  provider-generic — including a Claude backend — so no component speaks
-  only one provider's protocol (D-13).
+  constructs agent-session provider processes, with the embedded issue
+  review made provider-generic — including a Claude backend — so no
+  component speaks only one provider's protocol (D-13).
 - Haskell loader/writer, Python reader, and consumption at all nine sites.
 - Display-label and prompt-prose derivation from the roster.
 - Settings-screen editing with persistence and reset-to-default.
@@ -342,9 +342,13 @@ enforces elsewhere, decided up front instead of one blocker per round.
 ### Provider adapter interface (D-13)
 
 A compiled per-provider adapter — one record per brand — becomes the only
-place Kanban constructs provider processes: solve and PR-flow argv assembly,
-the embedded review session, one-shot runs like the nested revision tool,
-and the review tool registry all resolve through it. The existing Codex
+place Kanban constructs *agent-session* provider processes: solve and
+PR-flow argv assembly, the embedded review session, one-shot runs like the
+nested revision tool, and the review tool registry all resolve through it.
+Two launchers deliberately stay outside it, because they are not agent
+sessions and consume no roster value: `Ping.hs` (modelless by design, D-2)
+and the usage probes in `Codex.hs`/`Claude.hs`, which spawn provider CLIs
+only to read account status. The existing Codex
 app-server client (`Review.hs` and its seams) becomes the Codex
 implementation; a new Claude embedded-review backend (mechanism Q-12,
 deliberately open) becomes the Claude one, closing the last single-protocol
@@ -565,7 +569,9 @@ Approved 2026-08-20. The owner's rule: any component that speaks only one
 provider's protocol gets fixed inside this arc. A compiled per-provider
 adapter interface — spawn arguments, the embedded review session, one-shot
 runs, and the review tool registry — becomes the only place Kanban
-constructs provider processes; the existing Codex app-server client becomes
+constructs agent-session provider processes (the modelless ping and the
+usage probes stay outside it by design); the existing Codex app-server
+client becomes
 its Codex implementation, and a Claude embedded-review backend is built
 beside it (mechanism Q-12, deliberately open). The external plugin system —
 providers shipping manifests that declare their interfaces and protocols for
@@ -875,7 +881,8 @@ concrete proposal before any implementation.
 ### MODEL-12. Extract the provider adapter interface behind the agent flows
 
 - **Outcome:** a compiled per-provider adapter record is the only place
-  Kanban constructs provider processes — solve and PR-flow argv assembly,
+  Kanban constructs agent-session provider processes — solve and PR-flow
+  argv assembly,
   the embedded review session, one-shot runs, and the review tool registry —
   with the existing Codex app-server client and Claude CLI paths relocated
   behind it. A pure refactor: no behavior change anywhere.
@@ -888,9 +895,15 @@ concrete proposal before any implementation.
 - **Ordering:** critical path
 - **Relevant decisions:** D-13
 - **Acceptance signals:** the full Haskell suite passes with no golden-frame
-  or argv-expectation updates; a search of `src/` finds no provider process
-  construction outside the adapter module.
-- **Out of scope:** any new backend (MODEL-13); mode-keyed behavior.
+  or argv-expectation updates; the agent-session flows — `Solve.hs`,
+  `PullRequestFlow.hs`, `Review.hs`, and `Review/Tools.hs` — contain no
+  provider process construction outside adapter lookups, with the
+  deliberately unadapted launchers (`Ping.hs` and the `Codex.hs`/`Claude.hs`
+  usage probes, which are not agent sessions and consume no roster value)
+  named as the gate's explicit exclusions rather than silently skipped.
+- **Out of scope:** any new backend (MODEL-13); mode-keyed behavior;
+  adapting the ping and usage-probe launchers, which stay as they are by
+  design.
 - **Open questions:** None
 
 ### MODEL-13. Implement the Claude embedded-review backend
