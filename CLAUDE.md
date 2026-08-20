@@ -46,6 +46,27 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   pr-atomic too — that default fails closed, so a new document never publishes directly
   until section 7 says it may.
 
+### Markdown changes
+
+- Author every Markdown edit in the `docs-wip` worktree, never in the primary checkout.
+  Resolve it by branch rather than a hard-coded path: the PR drainer fast-forwards the
+  primary after every merge and autostashes whatever it finds there, and a restore that
+  conflicts wedges post-merge cleanup until a human clears it.
+- Leave a standalone Markdown change committed in that worktree and unpushed. The
+  maintainer batches those to `master` periodically. Do not push one yourself and do not
+  open a pull request for it; the subsection below is the exception, and it needs an
+  explicit request.
+- Markdown may still travel inside a pull request, and must when a test parses it or an
+  implementation is coupled to it. A plugin command file is held to its bundle version by
+  `BundleVersionGateTests`, and `docs/design.md`'s section 7 key table is compared against
+  `Kanban.UI.Keys` by `Spec.UI.Keys`; splitting either from what gates it leaves `master`
+  red between the two landings.
+- Documentation does not carry code's review burden. A documentation-only change needs
+  neither a canonical review nor the verification depth a behavior change does — most of
+  these documents record the project's current state of mind rather than something a
+  runtime reads. That is a statement about process, not licence to leave the contracts in
+  "The contract" above inconsistent with the behavior they describe.
+
 ### Manual docs-worktree publication
 
 - A user-directed request to publish the docs worktree is an explicit exception to the
