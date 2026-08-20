@@ -2817,11 +2817,20 @@ def run_service(job: DrainerJob, requested_identity: str | None = None) -> int:
         with installation_transaction():
             controller_lock = acquire_controller_lock(job.runtime_dir)
     except ServiceError as exc:
-        # Printed rather than logged, because logging is exactly the write
-        # this is refusing to make. The manager captures stdout, and the exit
-        # is the same clean one every other startup refusal here takes.
+        # Printed rather than logged, because logging is exactly the write this
+        # is refusing to make; the manager captures stdout.
+        #
+        # Non-success, unlike the refusals below, and for a reason none of them
+        # share: this one says the installation this process is bound to is not
+        # the one this host has any more. A run that returned success would be
+        # telling the service manager — and Kanban, which reads the job's state
+        # through it — that a drainer ran for a repository whose installation
+        # moved out from under it. Every definition this installer writes
+        # carries `Restart=no` and `KeepAlive=false`, so a failed exit marks
+        # the job failed for an operator to find rather than starting a restart
+        # loop.
         print(f"PR drainer did not start: {exc}", flush=True)
-        return 0
+        return 1
     try:
         return _supervise(job, installed, requested_identity)
     finally:

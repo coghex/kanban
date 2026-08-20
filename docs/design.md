@@ -2537,7 +2537,11 @@ above are unchanged, and persistence the user switched off is not a failure.
   a stale invocation returns non-success before it creates, removes or modifies
   the legacy runtime or log tree, the corresponding trees at the destination,
   or the repository's on-disk definition, and the definition the manager holds
-  stays the relocated one. Each bound is a fact about the path rather than a
+  stays the relocated one — non-success however that invocation reports one,
+  including the `run` a service manager launches, which catches its own startup
+  refusals and exits non-zero rather than cleanly so that neither the manager
+  nor Kanban reading the job through it is told a drainer ran. Each bound is
+  a fact about the path rather than a
   permission on a directory the invocation writes through, since `ensure_dirs`
   chmods the install directory on every attempt. What an operator sees is that
   copy's own rendering of the fault, which names one of those three paths; the

@@ -903,8 +903,10 @@ class StaleControllerTests(RelocationFixture):
         # the directories it logs into.
         with self.as_the_stale_controller():
             before = self.host_state()
+            # Non-success: a run that reported success would be telling the
+            # service manager a drainer ran for an installation that moved.
             self.assertEqual(
-                drain_prs_service.run_service(self.job, self.job.identity), 0
+                drain_prs_service.run_service(self.job, self.job.identity), 1
             )
             self.assertEqual(self.host_state(), before)
         self.assertFalse((self.legacy_logs / self.job.slug).exists())
@@ -3598,14 +3600,27 @@ def battery():
                 job.status_path, {"state": "starting", "repository": job.identity}
             ),
         ),
+        # The one that reports rather than raises: the service manager's own
+        # entry point catches its refusal and answers with an exit code, so
+        # what this records for it is that code.
+        ("run", lambda: drain_prs_service.run_service(job, job.identity)),
     ):
+        printed = io.StringIO()
         try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                action()
+            with contextlib.redirect_stdout(printed):
+                returned = action()
         except BaseException as error:
-            attempts[name] = {"failed": f"{type(error).__name__}: {error}"}
+            attempts[name] = {
+                "failed": f"{type(error).__name__}: {error}",
+                "returned": None,
+                "printed": printed.getvalue(),
+            }
         else:
-            attempts[name] = {"failed": None}
+            attempts[name] = {
+                "failed": None,
+                "returned": returned,
+                "printed": printed.getvalue(),
+            }
     argv = ["drain_prs_service.py", "--path", str(checkout), "install"]
     stderr = io.StringIO()
     saved = sys.argv
@@ -3711,15 +3726,24 @@ class StaleInvocationFixture(PreGateControllerFixture):
     # Which closed path each writer meets. A transition enters `document_lock`
     # before it reads or writes anything at all, so it meets the retained lock;
     # a writer that creates its own directories meets the runtime guard.
-    TRANSACTIONAL = frozenset({"install", "start", "uninstall", "stop"})
+    TRANSACTIONAL = frozenset({"install", "start", "uninstall", "stop", "run"})
 
     def closed_path(self, writer):
         return self.legacy_lock if writer in self.TRANSACTIONAL else self.legacy_guard
 
+    def refusal(self, writer):
+        """What one writer said about refusing, however it said it."""
+        return writer["failed"] or writer["printed"]
+
     def assert_every_writer_failed(self):
         for index, attempt in enumerate(self.outcome["attempts"]):
             for name, writer in attempt["writers"].items():
-                self.assertIsNotNone(writer["failed"], (index, name))
+                if writer["failed"] is None:
+                    # One that reports rather than raises has to report a
+                    # failure: a stale invocation that returned success would
+                    # be telling whoever started it that it did its work.
+                    self.assertNotEqual(writer["returned"], 0, (index, name))
+                    self.assertIsNotNone(writer["returned"], (index, name))
             self.assertEqual(attempt["exit_code"], 1, index)
 
 
@@ -3756,7 +3780,7 @@ class StaleInvocationBoundTests(StaleInvocationFixture):
         # and says which one by naming it.
         for attempt in self.outcome["attempts"]:
             for name, writer in attempt["writers"].items():
-                self.assertIn(str(self.closed_path(name)), writer["failed"], name)
+                self.assertIn(str(self.closed_path(name)), self.refusal(writer), name)
 
     def test_the_uninstall_no_directory_creation_reaches_is_bounded_too(self):
         """The path the runtime guard alone leaves open.
@@ -3774,6 +3798,22 @@ class StaleInvocationBoundTests(StaleInvocationFixture):
         self.assertTrue(definition.is_file())
         self.assertEqual(definition.read_bytes(), self.before[str(definition)][1])
         self.assertFalse(self.manager_log.exists())
+
+    def test_the_run_the_service_manager_starts_returns_non_success(self):
+        """The invocation that reports rather than raises.
+
+        `run_service` is what a service manager launches, and it catches its
+        own startup refusals and answers with an exit code. A stale one that
+        answered success would be telling that manager — and Kanban, which
+        reads the job's state through it — that a drainer ran for a repository
+        whose installation moved out from under it.
+        """
+        for index, attempt in enumerate(self.outcome["attempts"]):
+            run = attempt["writers"]["run"]
+            self.assertIsNone(run["failed"], index)
+            self.assertEqual(run["returned"], 1, index)
+            self.assertIn("PR drainer did not start", run["printed"])
+            self.assertIn(str(self.legacy_lock), run["printed"])
 
     def test_the_trees_on_both_sides_are_exactly_what_they_were(self):
         after = self.host_state()

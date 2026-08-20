@@ -1493,7 +1493,15 @@ search step and nothing else, which is what `mandatory: no` records.
   creates, removes or modifies the legacy runtime tree, the legacy log tree,
   the corresponding trees at the destination, or the repository's on-disk
   service definition, and the definition the service manager holds stays the
-  relocated one. Each bound is a fact about the path rather than a permission
+  relocated one. Non-success however that invocation reports one: every
+  transition raises, and `run_service` — the one a service manager launches,
+  which catches its own startup refusals — exits non-zero rather than cleanly,
+  because a run that reported success would be telling that manager, and Kanban
+  reading the job's state through it, that a drainer ran for a repository whose
+  installation moved out from under it. Every definition this installer writes
+  carries `Restart=no` and `KeepAlive=false`, so that failed exit marks the job
+  failed rather than starting a restart loop.
+  Each bound is a fact about the path rather than a permission
   on a directory a stale invocation writes through, because `ensure_dirs`
   chmods the install directory on every attempt and would reset that kind of
   guard on the very invocation it is meant to stop; the lock's own mode is not
