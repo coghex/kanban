@@ -104,7 +104,9 @@ REVIEW_QUEUE_ISSUE_OUTCOMES = frozenset({"advanced", "changes_requested", "retry
 # guess which it was handed.
 RECONCILE_SCHEMA = "approve-issues-reconcile-approvals"
 RECONCILE_SCHEMA_VERSION = 1
-RECONCILE_RESULT_FIELDS = frozenset({"schema", "version", "outcome", "message", "issues"})
+RECONCILE_RESULT_FIELDS = frozenset(
+    {"schema", "version", "outcome", "approval_label", "message", "issues"}
+)
 RECONCILE_ENTRY_FIELDS = frozenset(
     {"issue", "outcome", "label_removed", "approved", "reasons", "detail"}
 )
@@ -2477,11 +2479,19 @@ def reconcile_one_locked(
 def reconcile_result(
     outcome: str, *, message: str, entries: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """The one JSON document a --reconcile-approvals pass writes to stdout."""
+    """The one JSON document a --reconcile-approvals pass writes to stdout.
+
+    `approval_label` is the configured label this pass actually decided
+    against, reported rather than assumed: a consumer that hard-coded
+    `reviewed:approve` would silently do nothing in a repository whose
+    `workflow.approval_label` is something else, which is the failure mode
+    naming it here closes.
+    """
     return {
         "schema": RECONCILE_SCHEMA,
         "version": RECONCILE_SCHEMA_VERSION,
         "outcome": outcome,
+        "approval_label": APPROVE_LABEL,
         "message": message,
         "issues": entries,
     }
@@ -2536,6 +2546,16 @@ def validate_reconcile_result(
     if result["outcome"] not in RECONCILE_OUTCOMES:
         raise ApproveError(
             f"Reconcile result has unknown outcome {result['outcome']!r}"
+        )
+    label = result["approval_label"]
+    if not isinstance(label, str) or not label.strip():
+        raise ApproveError(
+            f"Reconcile result names no configured approval label: {label!r}"
+        )
+    if label != APPROVE_LABEL:
+        raise ApproveError(
+            f"Reconcile result names approval label {label!r} but this run "
+            f"decided against {APPROVE_LABEL!r}"
         )
     message = result["message"]
     if not isinstance(message, str) or not message.strip():
@@ -2638,6 +2658,7 @@ def reconcile_approvals(
     per issue -- rather than halting a pass whose whole job is to describe
     state.
     """
+    selecting = not numbers
     try:
         lock = acquire_lock(ctx, mode="reconcile", issue_numbers=list(numbers))
     except LockContentionError as exc:
@@ -2672,6 +2693,22 @@ def reconcile_approvals(
         )
     before = model_invocation_count()
     try:
+        if selecting:
+            # Selection belongs here, under the lock and inside the backend,
+            # for two reasons. The candidate set is defined by the *configured*
+            # approval label, which only the backend has resolved -- a consumer
+            # choosing candidates itself would have to restate that label and
+            # would silently reconcile nothing in a repository that overrides
+            # it. And a set chosen before the lock is a set that could have
+            # changed by the time any decision ran. `queue_open_issues` is used
+            # rather than `get_open_issues` because it refuses a truncated
+            # inventory: a page that quietly stopped short would drop
+            # candidates and report the rest as a complete pass.
+            numbers = [
+                issue["number"]
+                for issue in queue_open_issues(ctx)
+                if APPROVE_LABEL in issue_labels(issue)
+            ]
         entries = [
             reconcile_one_locked(ctx, number, legacy_policy=legacy_policy)
             for number in numbers
@@ -3358,13 +3395,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reconcile-approvals",
         type=positive_issue_number,
-        nargs="+",
+        nargs="*",
         metavar="ISSUE",
         help=(
-            "Remove the approval label from each named issue whose approval is "
-            "not backed by a current matching APPROVE marker, and print one "
-            "JSON result document (requires --json). Calls no model, publishes "
-            "no review comment, and manufactures no verdict."
+            "Remove the approval label from each named issue whose approval "
+            "is not backed by a current matching APPROVE marker, and print one "
+            "JSON result document (requires --json). Named with no issue "
+            "numbers it reconciles every open issue carrying the configured "
+            "approval label, so a caller never has to restate that label. "
+            "Calls no model, publishes no review comment, and manufactures no "
+            "verdict."
         ),
     )
     parser.add_argument("--json", action="store_true", help="Print check output as JSON.")

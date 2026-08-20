@@ -360,7 +360,7 @@ that corrects that, and it is the only one: label-only consumers do not
 reimplement the removal, and `--check` remains read-only.
 
 - **Authority.** `python3 tools/approve_issues.py --path <root> --repo
-  <owner/name> --reconcile-approvals <issue>... --legacy-policy dual --json`.
+  <owner/name> --reconcile-approvals [<issue>...] --legacy-policy dual --json`.
   It joins `--check`, `--review`, `--rereview`, and `--review-queue` in one
   mutual-exclusion set sharing their diagnostic, is mutually exclusive with
   `--self-test`, and requires `--json`. Every one of those refusals is resolved
@@ -397,6 +397,16 @@ reimplement the removal, and `--check` remains read-only.
   carrying the marker's `comment_url`, exactly as `--check` reports rather than
   escalates: raising `InvalidIssueError` here would open a repository
   circuit-breaker incident as a side effect of rendering a roadmap.
+- **Candidate selection.** Given no issue numbers, the mode reconciles every
+  open issue carrying the configured approval label, and it selects them under
+  the lock from an inventory that refuses to be truncated. Selection is the
+  backend's rather than the caller's for two reasons: the candidate set is
+  defined by `workflow.approval_label`, which the backend has already resolved,
+  so a caller choosing candidates would have to restate that label and would
+  silently reconcile nothing in a repository that overrides it; and a set chosen
+  before the lock could change before any decision ran. The result names the
+  label it decided against in `approval_label`, so a consumer reports the
+  repository's own label rather than assuming the default.
 - **Locking.** The canonical `approve_issues.lock` is acquired at most once for
   the whole invocation, whatever the number of issues, and released on every
   exit path including failure and interruption. Every issue and comment read
@@ -411,7 +421,8 @@ reimplement the removal, and `--check` remains read-only.
   (`"approve-issues-reconcile-approvals"`), `version` (`1`), `outcome`,
   `message`, and `issues`: one entry per requested issue, in the order
   requested, each carrying exactly `issue`, `outcome`, `label_removed`,
-  `approved`, `reasons`, and `detail`.
+  `approved`, `reasons`, and `detail`; plus `approval_label`, the configured
+  label this pass decided against.
 
   | `outcome` | meaning |
   | --- | --- |
@@ -428,7 +439,8 @@ reimplement the removal, and `--check` remains read-only.
   Both top-level outcomes are ordinary completions and **exit zero**, `busy`
   included. The document is validated before it is printed, on the terms
   `--review-queue`'s already follows: an unknown schema or version, a missing or
-  additional field at either level, a mistyped or Boolean-as-integer value, an
+  additional field at either level, an `approval_label` disagreeing with the one
+  the run decided against, a mistyped or Boolean-as-integer value, an
   entry set that does not match the requested issues in order, a `removed` that
   claims approval or omits `label_removed`, an `unverified` carrying an
   `approved` Boolean or no `detail`, or any model invocation at all are refused
@@ -446,7 +458,9 @@ reimplement the removal, and `--check` remains read-only.
   `codex-plugin/plugins/kanban/skills/triage/SKILL.md`) are the first, and they
   render their readiness marker from each entry's post-reconciliation
   `approved` rather than issuing a second `--check`, which would reopen the
-  read-then-decide window the lock closes.
+  read-then-decide window the lock closes. They pass no issue numbers and name
+  no candidate label, so a repository configuring its own approval label is
+  reconciled and rendered exactly as the default one is.
 
 ### 2.4 Incident/controller capability — the PR drainer
 

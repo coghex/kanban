@@ -79,7 +79,9 @@ gh issue view -R "$REPO" <number> --json number,title,state,closedAt,body,labels
 
 ## Approval Readiness
 
-A raw `reviewed:approve` label is a **candidate**, not proof. Canonical approval binds an issue to the fingerprint of its current specification through the latest `issue-review:v2` marker, and nothing removes the label when that specification then changes — so a label alone can advertise readiness against a specification no reviewer ever saw. Render `✓` only for an issue the canonical backend confirms is approved right now.
+A raw approval label is a **candidate**, not proof. Canonical approval binds an issue to the fingerprint of its current specification through the latest `issue-review:v2` marker, and nothing removes the label when that specification then changes — so a label alone can advertise readiness against a specification no reviewer ever saw. Render `✓` only for an issue the canonical backend confirms is approved right now.
+
+Which label that is belongs to the repository, not to this workflow. `reviewed:approve` is only the default: a repository may configure `workflow.approval_label` to something else, and a workflow that hard-coded the default would quietly reconcile nothing there and go on rendering the stale readiness this section exists to stop. So never name a candidate label here — ask the backend, which has already resolved the configured one, and read the label it reports back.
 
 Resolve the backend's install location the same way `Kanban.Review.resolveCanonicalIssueReviewer` does rather than a path relative to the repository being triaged or any other personal path. The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path `tools/install_issue_review.py` recorded at a fixed location `--install-dir` cannot move, then — only when that record names none, which is how an installation predating the record looks — the directory the record itself lives in:
 
@@ -117,11 +119,13 @@ PY
 )"
 ```
 
-Then reconcile every candidate in **one** invocation, naming each issue that carries the approval label:
+Then reconcile every candidate in **one** invocation, passing no issue numbers so the backend selects them itself:
 
 ```bash
-python3 "$BACKEND" --path "$(git rev-parse --show-toplevel)" --repo "$REPO" --reconcile-approvals <issue> <issue> ... --legacy-policy dual --json
+python3 "$BACKEND" --path "$(git rev-parse --show-toplevel)" --repo "$REPO" --reconcile-approvals --legacy-policy dual --json
 ```
+
+Selection is the backend's because the candidate set is defined by the configured approval label it has already resolved, and because a set chosen before the lock could change before any decision runs. The returned document names that label in `approval_label`; use it when reporting, and treat every issue it reports as the complete candidate set.
 
 One invocation, not one per issue: the backend takes the canonical approval lock at most once for the whole call, so a pass costs one process and one acquisition rather than one of each per candidate.
 
@@ -279,7 +283,7 @@ Important formatting rules:
 - Use `A01`, `A02` numbering in `Anytime List`.
 - Use `T01`, `T02` numbering in `Tracker Issues`.
 - Preserve issue numbers and concise titles.
-- Append `✓` only to an issue the canonical backend confirmed approved right now, immediately after its title and before bracket notes. A raw `reviewed:approve` label never earns one on its own; see **Approval Readiness**.
+- Append `✓` only to an issue the canonical backend confirmed approved right now, immediately after its title and before bracket notes. A raw approval label never earns one on its own, whatever the repository configured it to be; see **Approval Readiness**.
 - Append exactly one difficulty marker, `[easy]`, `[medium]`, or `[hard]`, after the title/checkmark and before status or placement notes.
 - Append `[assigned: @login]` for every assigned issue, listing all assignees when there is more than one. Also retain any applicable `[in-flight: PR #NNN]` and `[wip]` notes.
 - Do not include URLs unless asked.

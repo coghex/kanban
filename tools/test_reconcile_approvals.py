@@ -102,6 +102,7 @@ class ReconcileHarness(unittest.TestCase):
         self.incidents: list[dict] = []
         self.removal_error: Exception | None = None
         self.read_counts: dict[int, int] = {}
+        self.inventory: list[dict] = []
 
     def state(self, number: int, issue: dict, comments: list[dict]) -> None:
         self.reads.setdefault(number, []).append((issue, comments))
@@ -146,6 +147,10 @@ class ReconcileHarness(unittest.TestCase):
                 raise self.removal_error
             return subprocess.CompletedProcess(args, 0, "", "")
 
+        def fake_queue_open_issues(ctx):
+            events.append(("inventory", None))
+            return list(self.inventory)
+
         with (
             mock.patch.object(approve_issues, "log"),
             mock.patch.object(approve_issues, "APPROVE_LABEL", approve_label),
@@ -156,6 +161,10 @@ class ReconcileHarness(unittest.TestCase):
                 approve_issues, "get_comments", side_effect=fake_get_comments
             ),
             mock.patch.object(approve_issues, "run", side_effect=fake_run),
+            mock.patch.object(
+                approve_issues, "queue_open_issues",
+                side_effect=fake_queue_open_issues,
+            ),
             mock.patch.object(
                 approve_issues, "open_pipeline_incidents",
                 side_effect=lambda path: list(self.incidents),
@@ -536,6 +545,79 @@ class MultipleIssueTests(ReconcileHarness):
         self.assertEqual([item["issue"] for item in result["issues"]], [5, 7, 9])
 
 
+class ConfiguredLabelSelectionTests(ReconcileHarness):
+    """The candidate set is defined by the *configured* approval label, and the
+    backend owns choosing it. A consumer that restated `reviewed:approve` would
+    reconcile nothing in a repository overriding `workflow.approval_label` and
+    would go on rendering exactly the stale readiness this mode exists to stop.
+    """
+
+    def _backlog(self, label):
+        self.inventory = [
+            make_issue(5, labels=[label]),
+            make_issue(6, labels=["bug"]),
+            make_issue(7, labels=[label, "bug"]),
+        ]
+        for number in (5, 7):
+            issue = make_issue(number, labels=[label])
+            self.state(number, issue, [current_marker_for(issue)])
+
+    def test_selection_uses_a_configured_non_default_label(self):
+        self._backlog("acme:go")
+
+        result = self.run_reconcile([], approve_label="acme:go")
+
+        self.assertEqual([item["issue"] for item in result["issues"]], [5, 7])
+        self.assertEqual(result["approval_label"], "acme:go")
+        # #6 carries no approval label, so it is never even read.
+        self.assertNotIn(6, [event[1] for event in self.events if event[0] == "get_issue"])
+
+    def test_selection_uses_the_default_label_when_nothing_overrides_it(self):
+        self._backlog("reviewed:approve")
+
+        result = self.run_reconcile([])
+
+        self.assertEqual([item["issue"] for item in result["issues"]], [5, 7])
+        self.assertEqual(result["approval_label"], "reviewed:approve")
+
+    def test_a_stale_custom_label_is_removed_like_the_default(self):
+        self.inventory = [make_issue(7, labels=["acme:go"])]
+        self.state(7, make_issue(7, labels=["acme:go"]), [marker_comment("0" * 64)])
+        self.state(7, make_issue(7, labels=[]), [marker_comment("0" * 64)])
+
+        result = self.run_reconcile([], approve_label="acme:go")
+
+        entry = self.entry(result, 7)
+        self.assertEqual(entry["outcome"], "removed")
+        self.assertIn("acme:go", self.edits()[0])
+        self.assertNotIn("reviewed:approve", self.edits()[0])
+
+    def test_selection_happens_after_the_lock(self):
+        self._backlog("reviewed:approve")
+
+        self.run_reconcile([])
+
+        kinds = self.kinds()
+        self.assertEqual(kinds[0], "acquire")
+        self.assertLess(kinds.index("acquire"), kinds.index("inventory"))
+        self.assertLess(kinds.index("inventory"), kinds.index("get_issue"))
+
+    def test_explicit_numbers_skip_selection_entirely(self):
+        issue = make_issue(7, labels=["reviewed:approve"])
+        self.state(7, issue, [current_marker_for(issue)])
+
+        self.run_reconcile([7])
+
+        self.assertNotIn("inventory", self.kinds())
+
+    def test_contention_while_selecting_reports_no_issues(self):
+        result = self.run_reconcile([], contended=True)
+
+        self.assertEqual(result["outcome"], "busy")
+        self.assertEqual(result["issues"], [])
+        self.assertNotIn("inventory", self.kinds())
+
+
 class ResultValidationTests(unittest.TestCase):
     """The document is refused rather than emitted when it is wrong."""
 
@@ -551,6 +633,16 @@ class ResultValidationTests(unittest.TestCase):
         return approve_issues.validate_reconcile_result(
             result, requested=list(requested), model_ran=model_ran
         )
+
+    def test_a_document_naming_another_approval_label_is_refused(self):
+        # The document reports the label the run decided against, so a value
+        # disagreeing with it is a document about a different question.
+        with self.assertRaisesRegex(approve_issues.ApproveError, "approval label"):
+            self.validate(self.good(approval_label="something-else"))
+
+    def test_a_document_naming_no_approval_label_is_refused(self):
+        with self.assertRaisesRegex(approve_issues.ApproveError, "approval label"):
+            self.validate(self.good(approval_label=""))
 
     def good(self, **overrides):
         result = approve_issues.reconcile_result(
@@ -752,6 +844,22 @@ class TriageAssetTests(unittest.TestCase):
                 text = path.read_text(encoding="utf-8")
                 self.assertIn("KANBAN_ISSUE_REVIEW_INSTALL_DIR", text)
                 self.assertIn("kanban/issue-review/config.json", text)
+
+    def test_no_asset_names_a_candidate_approval_label(self):
+        # The label belongs to the repository. An asset that named one would
+        # reconcile nothing where workflow.approval_label overrides the default.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                invocation = [
+                    line for line in text.splitlines()
+                    if "--reconcile-approvals" in line and line.startswith("python3")
+                ][0]
+                self.assertNotIn("reviewed:approve", invocation)
+                # No issue numbers either: selection is the backend's, because
+                # only it has resolved the configured label.
+                self.assertIn("--reconcile-approvals --legacy-policy", invocation)
+                self.assertIn("approval_label", text)
 
     def test_the_reconcile_invocation_is_one_plain_command_line(self):
         # The manifest extractor parses asset bash fences as shell, so a
