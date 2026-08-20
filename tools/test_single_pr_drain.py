@@ -24,7 +24,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -32,6 +31,7 @@ from unittest import mock
 
 import drain_prs
 import drain_prs_service
+import git_fixture
 import service_manager
 import fake_cli
 
@@ -104,13 +104,77 @@ def tearDownModule():
     _PINNED_BACKEND.stop()
 
 
-class SinglePrCliFixture(unittest.TestCase):
-    """A temporary repository, a scriptable fake `gh`, and one PR #42."""
+class SinglePrCliFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
+    """A temporary repository, a scriptable fake `gh`, and one PR #42.
+
+    The repository is built once for the whole family by the real `git`
+    commands below and copied per test; see `tools/git_fixture.py`. `setUp`
+    rebuilds everything naming a path -- the fake `gh` included -- against
+    that copy, and stays safe to call again inside a test, which is what a
+    case re-running it per subtest needs.
+    """
+
+    @classmethod
+    def build_git_template(cls, root, data):
+        bare = root / "acme" / "widgets.git"
+        main = root / "main"
+        feature_wt = root / "wt-issue-99"
+        upstream_sim = root / "upstream-sim"
+
+        bare.parent.mkdir(parents=True, exist_ok=True)
+        run_git(["init", "--bare", "-q", "-b", "master", str(bare)], cwd=root)
+        run_git(["init", "-q", "-b", "master", str(main)], cwd=root)
+        run_git(["config", "user.email", "test@example.com"], cwd=main)
+        run_git(["config", "user.name", "Test"], cwd=main)
+        # Keep automatic maintenance from writing into .git behind the tests
+        # that assert a dry run changed nothing.
+        run_git(["config", "gc.auto", "0"], cwd=main)
+        (main / "README").write_text("hello\n", encoding="utf-8")
+        run_git(["add", "README"], cwd=main)
+        run_git(["commit", "-q", "-m", "initial commit"], cwd=main)
+        run_git(["remote", "add", "origin", str(bare)], cwd=main)
+        run_git(["push", "-q", "-u", "origin", "master"], cwd=main)
+
+        run_git(
+            [
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "issue-99-demo",
+                str(feature_wt),
+                "master",
+            ],
+            cwd=main,
+        )
+        (feature_wt / "feature.txt").write_text("new feature\n", encoding="utf-8")
+        run_git(["add", "feature.txt"], cwd=feature_wt)
+        run_git(["commit", "-q", "-m", "add feature"], cwd=feature_wt)
+        data["head_sha"] = run_git(["rev-parse", "HEAD"], cwd=feature_wt)
+        run_git(["push", "-q", "origin", "issue-99-demo"], cwd=feature_wt)
+
+        # Simulate GitHub merging server-side, so the post-merge fast-forward
+        # has somewhere real to move to.
+        run_git(["clone", "-q", str(bare), str(upstream_sim)], cwd=root)
+        run_git(["config", "user.email", "test@example.com"], cwd=upstream_sim)
+        run_git(["config", "user.name", "Test"], cwd=upstream_sim)
+        run_git(
+            [
+                "merge",
+                "-q",
+                "--no-ff",
+                "origin/issue-99-demo",
+                "-m",
+                "Merge pull request #42",
+            ],
+            cwd=upstream_sim,
+        )
+        data["merge_commit_sha"] = run_git(["rev-parse", "HEAD"], cwd=upstream_sim)
+        run_git(["push", "-q", "origin", "master"], cwd=upstream_sim)
+        run_git(["remote", "set-head", "origin", "master"], cwd=main)
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = self.checkout_git_template()
 
         self.bare = self.root / "acme" / "widgets.git"
         self.main = self.root / "main"
@@ -128,57 +192,8 @@ class SinglePrCliFixture(unittest.TestCase):
         self.install_dir = self.root / "drainer-install"
         self.incident_dir = self.install_dir / "runtime" / "incidents"
 
-        self.bare.parent.mkdir(parents=True, exist_ok=True)
-        run_git(["init", "--bare", "-q", "-b", "master", str(self.bare)], cwd=self.root)
-        run_git(["init", "-q", "-b", "master", str(self.main)], cwd=self.root)
-        run_git(["config", "user.email", "test@example.com"], cwd=self.main)
-        run_git(["config", "user.name", "Test"], cwd=self.main)
-        # Keep automatic maintenance from writing into .git behind the tests
-        # that assert a dry run changed nothing.
-        run_git(["config", "gc.auto", "0"], cwd=self.main)
-        (self.main / "README").write_text("hello\n", encoding="utf-8")
-        run_git(["add", "README"], cwd=self.main)
-        run_git(["commit", "-q", "-m", "initial commit"], cwd=self.main)
-        run_git(["remote", "add", "origin", str(self.bare)], cwd=self.main)
-        run_git(["push", "-q", "-u", "origin", "master"], cwd=self.main)
-
-        run_git(
-            [
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "issue-99-demo",
-                str(self.feature_wt),
-                "master",
-            ],
-            cwd=self.main,
-        )
-        (self.feature_wt / "feature.txt").write_text("new feature\n", encoding="utf-8")
-        run_git(["add", "feature.txt"], cwd=self.feature_wt)
-        run_git(["commit", "-q", "-m", "add feature"], cwd=self.feature_wt)
-        self.head_sha = run_git(["rev-parse", "HEAD"], cwd=self.feature_wt)
-        run_git(["push", "-q", "origin", "issue-99-demo"], cwd=self.feature_wt)
-
-        # Simulate GitHub merging server-side, so the post-merge fast-forward
-        # has somewhere real to move to.
-        run_git(["clone", "-q", str(self.bare), str(self.upstream_sim)], cwd=self.root)
-        run_git(["config", "user.email", "test@example.com"], cwd=self.upstream_sim)
-        run_git(["config", "user.name", "Test"], cwd=self.upstream_sim)
-        run_git(
-            [
-                "merge",
-                "-q",
-                "--no-ff",
-                "origin/issue-99-demo",
-                "-m",
-                "Merge pull request #42",
-            ],
-            cwd=self.upstream_sim,
-        )
-        self.merge_commit_sha = run_git(["rev-parse", "HEAD"], cwd=self.upstream_sim)
-        run_git(["push", "-q", "origin", "master"], cwd=self.upstream_sim)
-        run_git(["remote", "set-head", "origin", "master"], cwd=self.main)
+        self.head_sha = self.template_data["head_sha"]
+        self.merge_commit_sha = self.template_data["merge_commit_sha"]
 
         self.fake = fake_cli.FakeCli(self.root / "fake-cli")
         self.fake.install("gh")
@@ -335,6 +350,26 @@ class SinglePrCliFixture(unittest.TestCase):
             },
         )
         self.assertTrue(result["message"].strip())
+
+
+class SinglePrTemplateIsolationTests(
+    git_fixture.SharedTemplateIsolationTests, SinglePrCliFixture
+):
+    """Issue #384: this family's copies must be reachable only from themselves.
+
+    Its bare remote sits two directories down at `acme/widgets.git`, which is
+    a second path shape for relocation to get right, and its `upstream-sim`
+    clone is a repository of its own with an origin pointing at that bare.
+    """
+
+    def _mutate_the_copy(self):
+        run_git(["push", "-q", "origin", "--delete", "issue-99-demo"], cwd=self.main)
+        run_git(["worktree", "remove", "--force", str(self.feature_wt)], cwd=self.main)
+        run_git(["fetch", "-q", "--prune", "origin"], cwd=self.main)
+        run_git(["merge", "-q", "--ff-only", "origin/master"], cwd=self.main)
+        (self.upstream_sim / "README").write_text("rewritten\n", encoding="utf-8")
+        run_git(["commit", "-qam", "a test rewrote history"], cwd=self.upstream_sim)
+        run_git(["push", "-q", "-f", "origin", "master"], cwd=self.upstream_sim)
 
 
 class SinglePrOutcomeTests(SinglePrCliFixture):
@@ -1489,16 +1524,23 @@ class SinglePrDryRunPurityTests(SinglePrCliFixture):
     being compared byte for byte.
     """
 
-    def setUp(self):
-        super().setUp()
-        tools = self.main / "tools"
+    @classmethod
+    def build_git_template(cls, root, data):
+        # The vendored copy is the same for every case here, so it belongs in
+        # a template of this class's own rather than in `setUp`.
+        super().build_git_template(root, data)
+        main = root / "main"
+        tools = main / "tools"
         tools.mkdir()
         for name in SCRIPT_MODULES:
             shutil.copy2(TOOLS_DIR / name, tools / name)
-        (self.main / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
-        run_git(["add", "tools", ".gitignore"], cwd=self.main)
-        run_git(["commit", "-q", "-m", "vendor the drainer"], cwd=self.main)
-        self.embedded_script = tools / "drain_prs.py"
+        (main / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+        run_git(["add", "tools", ".gitignore"], cwd=main)
+        run_git(["commit", "-q", "-m", "vendor the drainer"], cwd=main)
+
+    def setUp(self):
+        super().setUp()
+        self.embedded_script = self.main / "tools" / "drain_prs.py"
 
     def settled_snapshot(self):
         # Deliberately leaves the index's stat cache stale: a plain `git

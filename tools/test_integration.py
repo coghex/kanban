@@ -10,15 +10,14 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 import unittest
-from pathlib import Path
 from unittest import mock
 
 import drain_prs
 import drain_prs_service
 import fake_cli
+import git_fixture
 import service_manager
 
 
@@ -67,59 +66,71 @@ def tearDownModule():
     _PINNED_BACKEND.stop()
 
 
-class ProcessPrFixture(unittest.TestCase):
+class ProcessPrFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
     """Shared scaffolding for process_pr()/loop() tests: a real temporary Git
     repository plus a scriptable fake `gh`, with no real network access.
+
+    The repository is built once for the whole family by the real `git`
+    commands below and copied per test; see `tools/git_fixture.py`. Everything
+    holding a path -- the `RepoContext`, the fake `gh` -- is rebuilt against
+    the copy, since the template's own location is never a valid target.
     """
+
+    @classmethod
+    def build_git_template(cls, root, data):
+        bare = root / "remote.git"
+        main = root / "main"
+        feature_wt = root / "wt-issue-99"
+        upstream_sim = root / "upstream-sim"
+
+        run_git(["init", "--bare", "-q", "-b", "master", str(bare)], cwd=root)
+        run_git(["init", "-q", "-b", "master", str(main)], cwd=root)
+        run_git(["config", "user.email", "test@example.com"], cwd=main)
+        run_git(["config", "user.name", "Test"], cwd=main)
+        (main / "README").write_text("hello\n", encoding="utf-8")
+        run_git(["add", "README"], cwd=main)
+        run_git(["commit", "-q", "-m", "initial commit"], cwd=main)
+        run_git(["remote", "add", "origin", str(bare)], cwd=main)
+        run_git(["push", "-q", "-u", "origin", "master"], cwd=main)
+
+        run_git(
+            ["worktree", "add", "-q", "-b", "issue-99-demo", str(feature_wt), "master"],
+            cwd=main,
+        )
+        (feature_wt / "feature.txt").write_text("new feature\n", encoding="utf-8")
+        run_git(["add", "feature.txt"], cwd=feature_wt)
+        run_git(["commit", "-q", "-m", "add feature"], cwd=feature_wt)
+        data["head_sha"] = run_git(["rev-parse", "HEAD"], cwd=feature_wt)
+        run_git(["push", "-q", "origin", "issue-99-demo"], cwd=feature_wt)
+
+        # Simulate GitHub performing the PR merge server-side, landing a new
+        # commit on the bare remote's master ahead of what `main` has
+        # locally -- so fast-forwarding is a real, observable effect.
+        run_git(["clone", "-q", str(bare), str(upstream_sim)], cwd=root)
+        run_git(["config", "user.email", "test@example.com"], cwd=upstream_sim)
+        run_git(["config", "user.name", "Test"], cwd=upstream_sim)
+        run_git(["checkout", "-q", "master"], cwd=upstream_sim)
+        run_git(
+            ["merge", "-q", "--no-ff", "origin/issue-99-demo", "-m", "Merge pull request #42"],
+            cwd=upstream_sim,
+        )
+        data["merge_commit_sha"] = run_git(["rev-parse", "HEAD"], cwd=upstream_sim)
+        run_git(["push", "-q", "origin", "master"], cwd=upstream_sim)
+
+        run_git(["remote", "set-head", "origin", "master"], cwd=main)
 
     def setUp(self):
         self._build_fixture()
 
     def _build_fixture(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = self.checkout_git_template()
 
         self.bare = self.root / "remote.git"
         self.main = self.root / "main"
         self.feature_wt = self.root / "wt-issue-99"
         self.upstream_sim = self.root / "upstream-sim"
-
-        run_git(["init", "--bare", "-q", "-b", "master", str(self.bare)], cwd=self.root)
-        run_git(["init", "-q", "-b", "master", str(self.main)], cwd=self.root)
-        run_git(["config", "user.email", "test@example.com"], cwd=self.main)
-        run_git(["config", "user.name", "Test"], cwd=self.main)
-        (self.main / "README").write_text("hello\n", encoding="utf-8")
-        run_git(["add", "README"], cwd=self.main)
-        run_git(["commit", "-q", "-m", "initial commit"], cwd=self.main)
-        run_git(["remote", "add", "origin", str(self.bare)], cwd=self.main)
-        run_git(["push", "-q", "-u", "origin", "master"], cwd=self.main)
-
-        run_git(
-            ["worktree", "add", "-q", "-b", "issue-99-demo", str(self.feature_wt), "master"],
-            cwd=self.main,
-        )
-        (self.feature_wt / "feature.txt").write_text("new feature\n", encoding="utf-8")
-        run_git(["add", "feature.txt"], cwd=self.feature_wt)
-        run_git(["commit", "-q", "-m", "add feature"], cwd=self.feature_wt)
-        self.head_sha = run_git(["rev-parse", "HEAD"], cwd=self.feature_wt)
-        run_git(["push", "-q", "origin", "issue-99-demo"], cwd=self.feature_wt)
-
-        # Simulate GitHub performing the PR merge server-side, landing a new
-        # commit on the bare remote's master ahead of what `self.main` has
-        # locally -- so fast-forwarding is a real, observable effect.
-        run_git(["clone", "-q", str(self.bare), str(self.upstream_sim)], cwd=self.root)
-        run_git(["config", "user.email", "test@example.com"], cwd=self.upstream_sim)
-        run_git(["config", "user.name", "Test"], cwd=self.upstream_sim)
-        run_git(["checkout", "-q", "master"], cwd=self.upstream_sim)
-        run_git(
-            ["merge", "-q", "--no-ff", "origin/issue-99-demo", "-m", "Merge pull request #42"],
-            cwd=self.upstream_sim,
-        )
-        self.merge_commit_sha = run_git(["rev-parse", "HEAD"], cwd=self.upstream_sim)
-        run_git(["push", "-q", "origin", "master"], cwd=self.upstream_sim)
-
-        run_git(["remote", "set-head", "origin", "master"], cwd=self.main)
+        self.head_sha = self.template_data["head_sha"]
+        self.merge_commit_sha = self.template_data["merge_commit_sha"]
 
         # Point origin at a GitHub-shaped URL just long enough to exercise
         # the real get_repo_context()/parse_repo_slug() path, then swap back
@@ -229,6 +240,26 @@ class ProcessPrFixture(unittest.TestCase):
                 report=report,
             )
         return result, state
+
+
+class ProcessPrTemplateIsolationTests(
+    git_fixture.SharedTemplateIsolationTests, ProcessPrFixture
+):
+    """Issue #384: this family's copies must be reachable only from themselves.
+
+    Its fixture is the one with every hazard in it at once -- a bare remote, a
+    linked worktree, and a clone standing in for the server -- so the paths
+    each of those records are checked here against what Git resolves.
+    """
+
+    def _mutate_the_copy(self):
+        run_git(["push", "-q", "origin", "--delete", "issue-99-demo"], cwd=self.main)
+        run_git(["worktree", "remove", "--force", str(self.feature_wt)], cwd=self.main)
+        run_git(["fetch", "-q", "--prune", "origin"], cwd=self.main)
+        run_git(["merge", "-q", "--ff-only", "origin/master"], cwd=self.main)
+        (self.upstream_sim / "README").write_text("rewritten\n", encoding="utf-8")
+        run_git(["commit", "-qam", "a test rewrote history"], cwd=self.upstream_sim)
+        run_git(["push", "-q", "-f", "origin", "master"], cwd=self.upstream_sim)
 
 
 class HappyPathDrainCycleTest(ProcessPrFixture):
@@ -482,26 +513,32 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
     MOVED_TIP = "e" * 40
     COORDINATION_PATH = "docs/status.md"
 
-    def setUp(self):
-        super().setUp()
-        self._configure({self.COORDINATION_PATH})
+    @classmethod
+    def build_git_template(cls, root, data):
+        # The scenario's own history, which the shared family template cannot
+        # carry without changing what every other case sees, so this class
+        # extends it into a template of its own -- built once here rather than
+        # from `setUp`, since nothing in it varies per test.
+        #
         # The swap is a real `git fetch` and a real
         # `git push --force-with-lease` against the fixture's own remote, so
         # every commit it names has to be a real one. Rebuild the remote's
         # history as the scenario actually describes it: a default branch that
         # advanced by one coordination-only push, and a merge of this pull
         # request onto exactly that commit, staged but not landed.
-        self.ANCESTOR = run_git(
-            ["rev-parse", f"{self.merge_commit_sha}^1"], cwd=self.upstream_sim
+        super().build_git_template(root, data)
+        upstream_sim = root / "upstream-sim"
+        data["ANCESTOR"] = run_git(
+            ["rev-parse", f"{data['merge_commit_sha']}^1"], cwd=upstream_sim
         )
-        run_git(["checkout", "-q", "-B", "staging", self.ANCESTOR], cwd=self.upstream_sim)
-        (self.upstream_sim / "docs").mkdir(exist_ok=True)
-        (self.upstream_sim / "docs" / "status.md").write_text(
+        run_git(["checkout", "-q", "-B", "staging", data["ANCESTOR"]], cwd=upstream_sim)
+        (upstream_sim / "docs").mkdir(exist_ok=True)
+        (upstream_sim / "docs" / "status.md").write_text(
             "coordination\n", encoding="utf-8"
         )
-        run_git(["add", self.COORDINATION_PATH], cwd=self.upstream_sim)
-        run_git(["commit", "-q", "-m", "a coordination push"], cwd=self.upstream_sim)
-        self.TIP = run_git(["rev-parse", "HEAD"], cwd=self.upstream_sim)
+        run_git(["add", cls.COORDINATION_PATH], cwd=upstream_sim)
+        run_git(["commit", "-q", "-m", "a coordination push"], cwd=upstream_sim)
+        data["TIP"] = run_git(["rev-parse", "HEAD"], cwd=upstream_sim)
         run_git(
             [
                 "merge",
@@ -511,12 +548,12 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
                 "-m",
                 "Merge pull request #42",
             ],
-            cwd=self.upstream_sim,
+            cwd=upstream_sim,
         )
-        self.MERGE_COMMIT = run_git(["rev-parse", "HEAD"], cwd=self.upstream_sim)
+        data["MERGE_COMMIT"] = run_git(["rev-parse", "HEAD"], cwd=upstream_sim)
         run_git(
-            ["push", "-q", "-f", "origin", f"{self.TIP}:refs/heads/master"],
-            cwd=self.upstream_sim,
+            ["push", "-q", "-f", "origin", f"{data['TIP']}:refs/heads/master"],
+            cwd=upstream_sim,
         )
         run_git(
             [
@@ -524,10 +561,17 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
                 "-q",
                 "-f",
                 "origin",
-                f"{self.MERGE_COMMIT}:refs/heads/{self.STAGING_REF}",
+                f"{data['MERGE_COMMIT']}:refs/heads/{cls.STAGING_REF}",
             ],
-            cwd=self.upstream_sim,
+            cwd=upstream_sim,
         )
+
+    def setUp(self):
+        super().setUp()
+        self._configure({self.COORDINATION_PATH})
+        self.ANCESTOR = self.template_data["ANCESTOR"]
+        self.TIP = self.template_data["TIP"]
+        self.MERGE_COMMIT = self.template_data["MERGE_COMMIT"]
 
     def _remote_default_branch(self):
         return run_git(["rev-parse", "master"], cwd=self.bare)
@@ -1658,43 +1702,50 @@ class LockFileIntegrityTests(ProcessPrFixture):
         )
 
 
-class WorktreeFixture(unittest.TestCase):
+class WorktreeFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
     """Shared scaffolding for worktree-selection tests: a real temporary Git
     repository whose PR #42 head lives on a pushed `issue-42-feature` branch,
     with no worktree checked out on it.
+
+    Built once for the family and copied per test; see `tools/git_fixture.py`.
     """
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+    @classmethod
+    def build_git_template(cls, root, data):
+        bare = root / "remote.git"
+        main = root / "main"
 
-        self.bare = self.root / "remote.git"
-        self.main = self.root / "main"
+        run_git(["init", "--bare", "-q", "-b", "master", str(bare)], cwd=root)
+        run_git(["init", "-q", "-b", "master", str(main)], cwd=root)
+        run_git(["config", "user.email", "test@example.com"], cwd=main)
+        run_git(["config", "user.name", "Test"], cwd=main)
+        (main / "README").write_text("hello\n", encoding="utf-8")
+        run_git(["add", "README"], cwd=main)
+        run_git(["commit", "-q", "-m", "initial commit"], cwd=main)
+        data["base_sha"] = run_git(["rev-parse", "HEAD"], cwd=main)
+        run_git(["remote", "add", "origin", str(bare)], cwd=main)
+        run_git(["push", "-q", "-u", "origin", "master"], cwd=main)
 
-        run_git(["init", "--bare", "-q", "-b", "master", str(self.bare)], cwd=self.root)
-        run_git(["init", "-q", "-b", "master", str(self.main)], cwd=self.root)
-        run_git(["config", "user.email", "test@example.com"], cwd=self.main)
-        run_git(["config", "user.name", "Test"], cwd=self.main)
-        (self.main / "README").write_text("hello\n", encoding="utf-8")
-        run_git(["add", "README"], cwd=self.main)
-        run_git(["commit", "-q", "-m", "initial commit"], cwd=self.main)
-        self.base_sha = run_git(["rev-parse", "HEAD"], cwd=self.main)
-        run_git(["remote", "add", "origin", str(self.bare)], cwd=self.main)
-        run_git(["push", "-q", "-u", "origin", "master"], cwd=self.main)
-
-        feature_wt = self.root / "wt-issue-42"
+        feature_wt = root / "wt-issue-42"
         run_git(
             ["worktree", "add", "-q", "-b", "issue-42-feature", str(feature_wt), "master"],
-            cwd=self.main,
+            cwd=main,
         )
         (feature_wt / "feature.txt").write_text("new feature\n", encoding="utf-8")
         run_git(["add", "feature.txt"], cwd=feature_wt)
         run_git(["commit", "-q", "-m", "add feature"], cwd=feature_wt)
-        self.head_sha = run_git(["rev-parse", "HEAD"], cwd=feature_wt)
+        data["head_sha"] = run_git(["rev-parse", "HEAD"], cwd=feature_wt)
         run_git(["push", "-q", "origin", "issue-42-feature"], cwd=feature_wt)
-        run_git(["worktree", "remove", str(feature_wt)], cwd=self.main)
-        run_git(["remote", "set-head", "origin", "master"], cwd=self.main)
+        run_git(["worktree", "remove", str(feature_wt)], cwd=main)
+        run_git(["remote", "set-head", "origin", "master"], cwd=main)
+
+    def setUp(self):
+        self.root = self.checkout_git_template()
+
+        self.bare = self.root / "remote.git"
+        self.main = self.root / "main"
+        self.base_sha = self.template_data["base_sha"]
+        self.head_sha = self.template_data["head_sha"]
 
         run_git(
             ["remote", "set-url", "origin", "https://github.com/acme/widgets.git"],
@@ -1717,6 +1768,21 @@ class WorktreeFixture(unittest.TestCase):
             self.ctx, drain_prs.plan_cleanup(self.pr), dry_run=False
         )
         self.assertEqual(failures, [])
+
+
+class WorktreeTemplateIsolationTests(
+    git_fixture.SharedTemplateIsolationTests, WorktreeFixture
+):
+    """Issue #384: the same guarantee for the worktree-selection family."""
+
+    def _mutate_the_copy(self):
+        run_git(["push", "-q", "origin", "--delete", "issue-42-feature"], cwd=self.main)
+        run_git(["branch", "-D", "issue-42-feature"], cwd=self.main)
+        scratch = self.root / "scratch-worktree"
+        run_git(["worktree", "add", "-q", "--detach", str(scratch)], cwd=self.main)
+        (scratch / "README").write_text("scratch\n", encoding="utf-8")
+        run_git(["commit", "-qam", "a test committed here"], cwd=scratch)
+        run_git(["worktree", "remove", "--force", str(scratch)], cwd=self.main)
 
 
 class WorktreeMatchingSafetyTests(WorktreeFixture):
@@ -1973,6 +2039,29 @@ class MergeConflictIncidentTests(ProcessPrFixture):
     model, and blocking no other PR.
     """
 
+    @classmethod
+    def build_git_template(cls, root, data):
+        # The diverged history every case here needs, added to a template of
+        # this class's own: nothing in it varies per test, so it is built once
+        # rather than from `setUp`.
+        super().build_git_template(root, data)
+        data["conflict_head"] = cls._build_conflicting_branch(root / "upstream-sim")
+
+    @staticmethod
+    def _build_conflicting_branch(upstream_sim):
+        # README diverges on both sides of the merge base, so the local
+        # inspection has a real conflict to name.
+        run_git(["checkout", "-q", "-b", "issue-77-conflict"], cwd=upstream_sim)
+        (upstream_sim / "README").write_text("branch side\n", encoding="utf-8")
+        run_git(["commit", "-q", "-am", "branch side"], cwd=upstream_sim)
+        head = run_git(["rev-parse", "HEAD"], cwd=upstream_sim)
+        run_git(["push", "-q", "origin", "issue-77-conflict"], cwd=upstream_sim)
+        run_git(["checkout", "-q", "master"], cwd=upstream_sim)
+        (upstream_sim / "README").write_text("master side\n", encoding="utf-8")
+        run_git(["commit", "-q", "-am", "master side"], cwd=upstream_sim)
+        run_git(["push", "-q", "origin", "master"], cwd=upstream_sim)
+        return head
+
     def setUp(self):
         super().setUp()
         # Installed but never expected to run: an empty call log is the proof
@@ -1983,21 +2072,7 @@ class MergeConflictIncidentTests(ProcessPrFixture):
         self.incident_dir.mkdir()
         self.drainer_log_dir = self.root / "drainer-logs"
         self.drainer_log_dir.mkdir()
-        self.conflict_head = self._build_conflicting_branch()
-
-    def _build_conflicting_branch(self):
-        # README diverges on both sides of the merge base, so the local
-        # inspection has a real conflict to name.
-        run_git(["checkout", "-q", "-b", "issue-77-conflict"], cwd=self.upstream_sim)
-        (self.upstream_sim / "README").write_text("branch side\n", encoding="utf-8")
-        run_git(["commit", "-q", "-am", "branch side"], cwd=self.upstream_sim)
-        head = run_git(["rev-parse", "HEAD"], cwd=self.upstream_sim)
-        run_git(["push", "-q", "origin", "issue-77-conflict"], cwd=self.upstream_sim)
-        run_git(["checkout", "-q", "master"], cwd=self.upstream_sim)
-        (self.upstream_sim / "README").write_text("master side\n", encoding="utf-8")
-        run_git(["commit", "-q", "-am", "master side"], cwd=self.upstream_sim)
-        run_git(["push", "-q", "origin", "master"], cwd=self.upstream_sim)
-        return head
+        self.conflict_head = self.template_data["conflict_head"]
 
     def _build_fork_pull_request(self):
         """A fork PR: its head is published only at refs/pull/78/head, never as
