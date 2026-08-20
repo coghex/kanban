@@ -272,6 +272,12 @@ effort in that provider's `efforts`, every entry in `agents` must name a
 declared provider, and every role the binary knows must resolve for every
 loaded provider that role applies to (D-14) — a role inapplicable to a
 provider needs no assignment for it, and validation never demands one.
+Unknown role keys and unknown provider keys in the file are errors, not
+ignored — silently skipping a misspelled `[roles.pr_reveiw.codex]` is how an
+operator ships the old model believing they changed it. Editing a
+`[providers.X]` table never changes the loaded set; only the `agents` list
+does (D-10), so a model-list tweak can never switch operating modes as a
+side effect.
 
 ### Compiled defaults
 
@@ -289,12 +295,7 @@ defaults-reproduce-today guarantee holds.
 | `issue_review` | gpt-5.4 · high | claude-opus-5 · xhigh *(new — activates with MODEL-13)* |
 | `issue_revise` | *inapplicable (D-14)* | claude-sonnet-5 · high |
 | `issue_gate` | gpt-5.6-sol · xhigh | claude-opus-5 · xhigh |
-| `drain_rereview` | gpt-5.6-terra · medium | claude-opus-5 · medium *(new — activates with MODEL-11's claude-only resolution)* | Unknown role keys and unknown provider keys in the file
-are errors, not ignored — silently skipping a misspelled
-`[roles.pr_reveiw.codex]` is how an operator ships the old model believing
-they changed it. Editing a `[providers.X]` table never changes the loaded
-set; only the `agents` list does (D-10), so a model-list tweak can never
-switch operating modes as a side effect.
+| `drain_rereview` | gpt-5.6-terra · medium | claude-opus-5 · medium *(new — activates with MODEL-11's claude-only resolution)* |
 
 ### Resolution order
 
