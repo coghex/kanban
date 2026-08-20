@@ -2552,9 +2552,13 @@ above are unchanged, and persistence the user switched off is not a failure.
   since a service manager's definition directory is the installation's own.
   Each pass therefore checks every relocated repository's definition beside the
   location, on the takeover's own terms, and puts back and reloads any that
-  differ, naming them in the report; the seal goes down only once both are what
-  the run left, and a writer acquiring after that last look is the residue the
-  run reports rather than claims to have closed. A per-repository tree no
+  differ, naming them in the report; the two seals go down only once both are
+  what the run left. A check taken under the lock cannot see the flock that
+  lands behind it, so the run then hands the lock over once more with those
+  seals down — releasing, pausing, and taking it back, which waits for whoever
+  was queued — and asks the definition question again, closing the lock only
+  inside a cycle that found nothing to put back and reporting it left open past
+  the bound. A per-repository tree no
   record names — left by a controller whose record write was refused, or by an
   uninstall, which keeps a repository's state deliberately — is carried across
   rather than orphaned, under the repository validated on-disk evidence establishes: a

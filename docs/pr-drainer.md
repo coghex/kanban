@@ -1133,10 +1133,18 @@ plist live in your service manager's own directory, shared with the job that
 was just moved, so closing it would close the installation. What the run does
 instead is check: after every step, it compares each moved repository's unit or
 plist against the bytes it wrote, puts back and reloads any that changed, and
-says so in the report. Only once the old location *and* those definitions are
-as it left them does it seal up and finish. A command that gets its turn after
-that last check is past anything a finished command could see — the one gap the
-run reports rather than claims to have closed.
+says so in the report.
+
+A check made while the run is holding the lock cannot see a command whose turn
+comes right after it, so the run does not stop there. Once the old
+`config.json` and `runtime/` are sealed it lets go of the lock on purpose,
+waits a moment, and takes it back — which makes it wait for whoever was next in
+line — and asks the same question again. Anything that got a turn in that
+window is refused everywhere the seals refuse it and can only have reached the
+unit or plist, which this pass puts back. The lock file is only closed on a
+pass that found nothing to put back, so the run never finishes with someone
+still waiting behind a door it just shut; if that never settles, it leaves the
+lock open and tells you.
 
 Directories under `runtime/` and the old log root that belong to no repository
 in the record are moved across too. Two things leave one: a controller that

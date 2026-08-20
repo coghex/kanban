@@ -2787,7 +2787,7 @@ class LateWriteReportingTests(RelocationFixture):
 # managed paths at its own import, exactly as any controller does, and then
 # writes the discovery record the way a start or an install does.
 _QUEUED_WRITER = """
-import contextlib, io, json, os, sys, time
+import contextlib, fcntl, io, json, os, sys, time
 from pathlib import Path
 
 for entry in reversed(sys.argv[1].split(os.pathsep)):
@@ -2796,6 +2796,7 @@ ready, go, queued, acquired, result = (
     Path(argument) for argument in sys.argv[2:7]
 )
 identity, checkout = sys.argv[7], sys.argv[8]
+flock_go = Path(sys.argv[12])
 
 import drain_prs_service
 import service_manager
@@ -2838,40 +2839,78 @@ if sys.argv[10] == "trees":
         # relocation has sealed refuses the first of these, and what this
         # process did and did not manage to write is the whole observation.
         outcome["trees_refused"] = f"{type(error).__name__}: {error}"
-queued.write_text("", encoding="utf-8")
-# The record's own lock, taken the way every transition in the controller
-# takes it and before anything is asked about the installation, so where this
-# process waits is settled rather than raced. `merge_repository_record` below
-# asks for the same lock again, which re-enters within this one thread exactly
-# as it does inside `install_job`.
-try:
-    with drain_prs_service.document_lock(drain_prs_service.DISCOVERY_RECORD_PATH):
-        acquired.write_text("", encoding="utf-8")
-        try:
-            if sys.argv[10] == "uninstall":
-                # The one transition that creates no directory: it unloads the
-                # job and unlinks the definition before it ever reaches the
-                # record write the seal refuses.
-                with contextlib.redirect_stdout(io.StringIO()):
-                    outcome["uninstalled"] = drain_prs_service.uninstall_job(
-                        drain_prs_service.resolve_job(Path(checkout))
-                    )
-            else:
-                drain_prs_service.merge_repository_record(
-                    identity, {"repository": checkout}
+def act():
+    try:
+        if sys.argv[10].startswith("uninstall"):
+            # The one transition that creates no directory: it unloads the job
+            # and unlinks the definition before it ever reaches the record
+            # write the seal refuses.
+            with contextlib.redirect_stdout(io.StringIO()):
+                outcome["uninstalled"] = drain_prs_service.uninstall_job(
+                    drain_prs_service.resolve_job(Path(checkout))
                 )
-                outcome["recorded"] = True
-        except drain_prs_service.ServiceError as error:
-            outcome["refused"] = str(error)
-        # Held across the write and a moment past it, so a reader that asks for
-        # this lock after the handoff blocks on this process rather than reading
-        # a record it is halfway through replacing.
-        time.sleep(float(sys.argv[9]))
-except drain_prs_service.ServiceError as error:
-    # A location a relocation has finished closing refuses this writer before
-    # it ever holds the lock: `document_lock` opens that file `O_RDWR`, and a
-    # run that emptied this location left it unopenable.
-    outcome["refused"] = str(error)
+        else:
+            drain_prs_service.merge_repository_record(
+                identity, {"repository": checkout}
+            )
+            outcome["recorded"] = True
+    except drain_prs_service.ServiceError as error:
+        outcome["refused"] = str(error)
+    # Held across the write and a moment past it, so a reader that asks for
+    # this lock after the handoff blocks on this process rather than reading a
+    # record it is halfway through replacing.
+    time.sleep(float(sys.argv[9]))
+
+
+if sys.argv[10] == "uninstall-delayed":
+    # `document_lock` opens the lock file and takes its flock together, and the
+    # interleaving under test is exactly the gap between those two: a
+    # descriptor opened before the relocation whose flock lands while the run's
+    # final pass is holding the lock, so that pass cannot see it. The two
+    # halves are therefore performed here with a gate between them, and the
+    # re-entrancy bookkeeping that helper keeps for its outermost holder is
+    # primed with the same entry it would have recorded — which is what makes
+    # the nested acquisition inside `uninstall_job` the pass-through it is in a
+    # real invocation rather than a deadlock against this process's own
+    # descriptor.
+    lock_path = drain_prs_service.DISCOVERY_RECORD_PATH.with_name(
+        drain_prs_service.DISCOVERY_RECORD_PATH.name + ".lock"
+    )
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    resolved = drain_prs_service.DISCOVERY_RECORD_PATH.absolute()
+    queued.write_text("", encoding="utf-8")
+    while not flock_go.exists():
+        time.sleep(0.01)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    acquired.write_text("", encoding="utf-8")
+    held = getattr(drain_prs_service._HELD_DOCUMENT_LOCKS, "paths", None)
+    if held is None:
+        held = drain_prs_service._HELD_DOCUMENT_LOCKS.paths = set()
+    held.add(resolved)
+    try:
+        act()
+    finally:
+        held.discard(resolved)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+else:
+    queued.write_text("", encoding="utf-8")
+    # The record's own lock, taken the way every transition in the controller
+    # takes it and before anything is asked about the installation, so where
+    # this process waits is settled rather than raced. The write below asks for
+    # the same lock again, which re-enters within this one thread exactly as it
+    # does inside `install_job`.
+    try:
+        with drain_prs_service.document_lock(
+            drain_prs_service.DISCOVERY_RECORD_PATH
+        ):
+            acquired.write_text("", encoding="utf-8")
+            act()
+    except drain_prs_service.ServiceError as error:
+        # A location a relocation has finished closing refuses this writer
+        # before it ever holds the lock: `document_lock` opens that file
+        # `O_RDWR`, and a run that emptied this location left it unopenable.
+        outcome["refused"] = str(error)
 result.write_text(json.dumps(outcome), encoding="utf-8")
 """
 
@@ -2917,6 +2956,7 @@ class QueuedRecordWriterTests(RelocationFixture):
                 "0",
                 "record-only",
                 str(self.units),
+                str(self.root / "queued.flock"),
             ],
             env={
                 "HOME": str(self.home),
@@ -3176,6 +3216,7 @@ class PreGateWriterTests(PreGateControllerFixture):
         self.queued = self.root / "pre-gate.queued"
         self.acquired = self.root / "pre-gate.acquired"
         self.result = self.root / "pre-gate.result"
+        self.flock_go = self.root / "pre-gate.flock"
         self.manager_log = self.root / "pre-gate.manager"
         self.writer_script = self.root / "pre_gate_writer.py"
         self.writer_script.write_text(_PRE_GATE_WRITER, encoding="utf-8")
@@ -3201,6 +3242,7 @@ class PreGateWriterTests(PreGateControllerFixture):
                 "0.4",
                 self.writes,
                 str(self.units),
+                str(self.flock_go),
             ],
             env={
                 "HOME": str(self.home),
@@ -3405,6 +3447,88 @@ class PreGateWriterTests(PreGateControllerFixture):
         self.assertTrue(late["sealed"])
         self.assert_location_is_sealed()
         self.assertIn("put it back and reloaded it", result["repair"])
+        install_drainer._require_relocation_resolved(result)
+
+    def test_an_uninstall_that_takes_the_lock_after_the_final_look_is_answered(self):
+        """The writer no check taken while the lock is held can see.
+
+        `document_lock` opens the lock file and takes its flock together; this
+        process performs the two halves with a gate between them, so its
+        descriptor is open before anything moves — which is what no later mode
+        change on that file revokes — and its flock lands while the run's final
+        pass is holding the lock. That pass therefore finds the location clear
+        and the definitions current, seals, and would have returned; the
+        writer's turn comes afterwards.
+
+        What answers it is that the run does not return there. Having sealed
+        the record path and the runtime root, it hands the lock over once more
+        on purpose and takes it back — which blocks until that writer has
+        finished — and only then asks whether the definitions are still its
+        own, puts back what is not, and closes the lock. So the writer is
+        refused where every closed path refuses it, at the record it cannot
+        write, and the one thing it did reach first is restored before this run
+        is over.
+        """
+        self.writes = "uninstall-delayed"
+        self.commands.clear()
+        process = self.start_writer()
+        # Its descriptor is opened before anything moves.
+        self.go.write_text("", encoding="utf-8")
+        self.wait_for(self.queued, "the writer never opened the lock")
+
+        real_seal = install_drainer._seal_emptied_location
+
+        def seal_hook(transition, relocation_plan):
+            open_paths = real_seal(transition, relocation_plan)
+            # Only now: this run still holds the lock, so the flock this writer
+            # asks for lands behind the look that just sealed the location.
+            self.flock_go.write_text("", encoding="utf-8")
+            return open_paths
+
+        real_settle = install_drainer._settle_and_close
+
+        def settle_hook(transition, relocation_plan, backend, outcome):
+            # Waiting here for the handoff to have happened is what makes this
+            # the interleaving under test rather than one a scheduler produced.
+            self.wait_for(self.acquired, "the writer never took the lock")
+            return real_settle(transition, relocation_plan, backend, outcome)
+
+        with mock.patch.object(
+            install_drainer, "_seal_emptied_location", seal_hook
+        ):
+            with mock.patch.object(
+                install_drainer, "_settle_and_close", settle_hook
+            ):
+                result = self.relocate()
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+        outcome = json.loads(self.result.read_text(encoding="utf-8"))
+        # It really did take the lock after the final look, and the record it
+        # came for is the one thing it could not write.
+        self.assertTrue(self.acquired.exists())
+        self.assertNotIn("uninstalled", outcome)
+        self.assertIn("Refusing unsafe config path", outcome["refused"])
+        # ...but it unlinked the definition before reaching that record, and
+        # this run put it back and reloaded it before returning.
+        late = result["late_writes"]
+        self.assertEqual(late["restored_definitions"], ["acme/widgets"])
+        backend = install_drainer.service_backend()
+        self.assertTrue(backend.definition_path(self.job.label).is_file())
+        self.assertEqual(
+            backend.definition_environment(self.job.label)[
+                kanban_config.DRAINER_INSTALL_DIR_ENV
+            ],
+            str(self.destination),
+        )
+        self.assertTrue(
+            any(self.job.label in " ".join(command) for command in self.commands),
+            self.commands,
+        )
+        # And the location itself never came back: the seals were already down
+        # when that writer got its turn.
+        self.assertEqual(late["passes"], 0)
+        self.assertTrue(late["resolved"])
+        self.assertTrue(late["sealed"])
+        self.assert_location_is_sealed()
         install_drainer._require_relocation_resolved(result)
 
     def test_a_sealed_location_holding_nothing_is_left_alone(self):

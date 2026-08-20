@@ -1523,10 +1523,19 @@ search step and nothing else, which is what `mandatory: no` records.
   pass checks every relocated repository's definition beside the location, on
   the same terms a takeover checks one — the bytes this host would render,
   compared whole — and puts back and reloads any that differ, naming them in
-  the report. The seal goes down only once both the location and those
-  definitions are what this run left. A writer that acquires after that last
-  look is past any process that terminates at all, which is the residue every
-  bound here reports rather than claims to have closed.
+  the report. The two seals go down only once both the location and those
+  definitions are what this run left.
+  A check taken while the lock is held cannot see the writer whose flock lands
+  behind it, so the run does not end there either. With those seals already
+  down it hands the lock over once more, deliberately: it releases, pauses for
+  the reason every other handoff pauses, and takes it back — which blocks until
+  whoever was queued on it has finished — and then asks the definition question
+  again. A writer that got its turn in that window is refused everywhere the
+  seals refuse it and can have reached only the definition, which this cycle
+  puts back before the run returns. The lock is closed inside a cycle that
+  found nothing to put back, so the run never ends with a writer queued behind
+  a closure it cannot answer; past the bound the lock is left open and
+  reported, since closing it would claim an answer the run does not have.
   A per-repository tree no record names is carried too. Two things leave one: a
   controller that wrote its trees before a refused record write, and an
   uninstall, which deliberately leaves a repository's runtime state, logs and

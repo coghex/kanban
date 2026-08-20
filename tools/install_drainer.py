@@ -2541,7 +2541,7 @@ def _reopen_retained_lock(lock: Path) -> None:
 def _seal_emptied_location(
     transition: _Transition, plan: RelocationPlan
 ) -> list[str]:
-    """Close every path above, and answer which of them are still open.
+    """Occupy the two paths above, and answer which of them are still open.
 
     Placed under the same lock as the final scan and only when that scan found
     the location clear, so it can never seal over state this run was supposed
@@ -2559,15 +2559,66 @@ def _seal_emptied_location(
     and not the other has to name the one still open: it is the path a
     controller still bound here writes through, and the operator cannot act on
     "not sealed".
+
+    The lock is deliberately not closed here. Closing it is the last thing this
+    run does, after `_settle_and_close` below has handed it over at least once
+    with these seals already down, because closing it while a writer is still
+    queued on it would end the run with that writer's turn still ahead of it.
     """
-    open_paths = [
+    return [
         str(path)
         for path in _sealed_paths(plan)
         if not _seal_path(transition, path)
     ]
-    if not _restrict_retained_lock(transition, plan):
-        open_paths.append(str(_legacy_lock_path(plan.legacy_dir)))
-    return open_paths
+
+
+def _settle_and_close(
+    transition: _Transition,
+    plan: RelocationPlan,
+    backend: service_manager.ServiceManagerBackend,
+    outcome: dict[str, Any],
+) -> list[str]:
+    """Hand the lock over with the seals already down, put back whatever that
+    let through, and close the lock last. Answers what is still open.
+
+    This is the half no check taken while the lock is held can be. A process
+    that opened this lock before the run started holds a descriptor no mode
+    change revokes, and it may take the flock at any moment — including one the
+    final pass was holding the lock through, so that pass sees nothing wrong
+    and the writer's turn comes after it. What such a writer can still do is
+    exactly one thing: the record path and the runtime root are occupied by
+    now, so `update_json_document` and `ensure_dirs` refuse it, and only an
+    uninstall — which creates no directory and unlinks the definition before it
+    reaches the record — gets anywhere. That definition is the one artifact no
+    seal can occupy, since a service manager's definition directory is the
+    installation's own.
+
+    So the lock is handed over, deliberately, after the seals are down: each
+    cycle releases it, pauses for the same reason every other handoff does, and
+    takes it back — which blocks until whoever was queued on it has finished —
+    and then asks whether the definitions are still the ones this run wrote.
+    Bounded on the same terms as the passes above, and the lock is closed only
+    inside a cycle that found nothing to put back, so no writer is left queued
+    behind a closure. Past the bound the lock stays open and is reported, since
+    closing it would claim an answer this run does not have.
+    """
+    lock = _legacy_lock_path(plan.legacy_dir)
+    for _ in range(_LATE_WRITER_PASSES):
+        with _record_locks(plan):
+            try:
+                stale = _stale_definitions(plan, backend)
+                if not stale:
+                    if _restrict_retained_lock(transition, plan):
+                        return []
+                    return [str(lock)]
+                for entry in stale:
+                    _rewrite_definition(transition, entry, backend)
+                    if entry.identity not in outcome["restored_definitions"]:
+                        outcome["restored_definitions"].append(entry.identity)
+            except _SWEEP_FAULTS as exc:
+                outcome["failures"].append(str(exc))
+                return [str(lock)]
+    return [str(lock)]
 
 
 def _stale_definitions(
@@ -2793,6 +2844,12 @@ def _reconcile_late_writes(
                 else [str(path) for path in _closed_paths(plan)]
             )
             outcome["sealed"] = not outcome["unsealed"]
+    if not remaining and not outcome["unsealed"]:
+        # Last, and only over a location this run has already sealed: the
+        # handoff it performs is what lets a writer queued on this lock take
+        # its turn while there is still a run here to see what it did.
+        outcome["unsealed"] = _settle_and_close(transition, plan, backend, outcome)
+        outcome["sealed"] = not outcome["unsealed"]
     outcome["retained"] = sorted(
         set(outcome["retained"]) | {str(path) for path in remaining}
     )
