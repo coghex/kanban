@@ -2562,7 +2562,14 @@ above are unchanged, and persistence the user switched off is not a failure.
   an empty one proves nothing can ever take this lock, while a set that is not
   empty and a host that cannot be asked are both reported with the lock left
   closed, naming the process to stop and failing the install rather than
-  claiming a location a queued process can still act on. That answer is
+  claiming a location a queued process can still act on. A process that
+  already has that lock open when the run starts is refused by the plan
+  instead, before anything is
+  mutated — the host stays as it was found and that process acts on the
+  installation it was invoked against, which is the prevention this arc selects
+  and the only place it is available — and a host that cannot be asked is
+  refused on the same terms, so what the settle cycle answers is only a
+  controller invoked while the run was already under way. That answer is
   written into the relocation marker, because it is the one thing about the
   location a later run cannot work out from the artifacts, and the disposition
   reads it there: a marker that does not say closing finished, a reopened lock,

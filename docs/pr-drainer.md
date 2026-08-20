@@ -1152,6 +1152,16 @@ process to stop, and fails rather than reporting success over a command that
 can still act. A process belonging to another user is not one of these: the
 installation, its lock and everything that opens it are yours alone.
 
+One of those two cases never gets that far. If something already has the lock
+file open when the move starts, the installer refuses before it has changed
+anything — so that command goes on to do whatever it was invoked to do against
+the installation that is still there, which is ordinary work rather than
+damage. A host where the installer cannot check at all is refused the same way,
+because moving on an unchecked assumption leaves you with a moved installation
+and the question still open. What the checks after the move are for is the
+other case: a command started *while* the move was running, which nothing could
+have refused.
+
 Because that answer has to outlive the run, it is written into
 `relocated.json`. Otherwise "stop that process and re-run" would be advice the
 re-run ignores: the next run would see two links and a read-only lock file and

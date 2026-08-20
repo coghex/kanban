@@ -1547,6 +1547,22 @@ search step and nothing else, which is what `mandatory: no` records.
   operator there is nothing to stop. A process this user may not inspect is not
   one of ours, since the installation, its lock and every controller that opens
   it are user-scoped.
+  One of those two states is not answered after the fact at all, because it
+  does not have to be. A process that already has that lock open when the run
+  starts is one the plan can see, and a plan that sees one refuses: the
+  relocation raises before it has mutated anything, so the host stays exactly
+  as it was found, and the process holding that descriptor goes on to act
+  against the installation it was invoked against — an ordinary transition,
+  serialized by this very lock as it always was, rather than a stale one acting
+  on a location that moved while it waited. That is the prevention this arc
+  selects, and it is available only there: once the installation has moved,
+  every answer left is a repair, because a service manager's definition
+  directory is the installation's own and cannot be closed without closing it.
+  A host that cannot be asked is refused on the same terms, since relocating on
+  an unanswered precondition leaves the host moved with the question still
+  open. What the settle cycle answers is therefore only the other population —
+  a controller invoked while the relocation is already under way, which the
+  plan could not have seen.
   A state the run may not call closed has to survive the run, or the repair it
   prints is advice the re-run ignores. Both seals are objects a later run can
   see and the lock's mode is a bit it can read, but whether anything held that

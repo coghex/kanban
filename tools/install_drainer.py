@@ -878,6 +878,54 @@ def _recover_repository(
     )
 
 
+def _require_no_queued_lock_descriptor(legacy_dir: Path) -> None:
+    """Refuse while another process has the legacy record's lock open.
+
+    Raised from the plan, before anything is mutated, because no later step can
+    answer it. A descriptor opened before this run is one no mode change
+    revokes, so a run that relocated past it would leave that process able to
+    take the lock afterwards and run an uninstall — which creates no directory,
+    unlinks the definition this run had just rewritten, and reaches the sealed
+    record only after. Nothing on the filesystem stops that: a service
+    manager's definition directory is the installation's own, shared with the
+    job just relocated, so closing it would close the installation.
+
+    What stops it is not relocating underneath it. A run that refuses here
+    changes nothing at all, so the process holding that descriptor goes on to
+    act against the installation it was invoked against — an ordinary
+    transition, serialized by this very lock exactly as it always was, rather
+    than a stale one acting on a location that moved while it waited. That is
+    the prevention this issue selects, and it is available only here: once the
+    installation has moved, every answer left is a repair.
+
+    A host that cannot be asked is refused on the same terms. "Nobody has it
+    open" and "nobody could be asked" are different answers, and relocating on
+    the second would be relocating on a precondition this run never checked —
+    which is worse than not relocating at all, because it leaves the host moved
+    and the question still open.
+    """
+    lock = _legacy_lock_path(legacy_dir)
+    if not _plain_file(lock):
+        return
+    holders, reason = _processes_holding_open(lock)
+    if holders is None:
+        raise InstallError(
+            f"Refusing to relocate: {reason}, so a process holding {lock} open "
+            "cannot be ruled out. Such a process takes that lock once this run "
+            "releases it and acts on an installation that moved while it "
+            "waited. Stop every drainer and controller, then re-run the "
+            "installer."
+        )
+    if holders:
+        names = ", ".join(f"process {pid}" for pid in holders)
+        raise InstallError(
+            f"Refusing to relocate: {lock} is open in {names}, which takes that "
+            "lock once this run releases it and would act on an installation "
+            "that moved while it waited. Wait for it to finish or stop it, then "
+            "re-run the installer."
+        )
+
+
 def _require_nothing_live(
     repositories: tuple[RelocationRepository, ...],
     backend: service_manager.ServiceManagerBackend,
@@ -1169,6 +1217,9 @@ def plan_relocation(install_dir: Path) -> RelocationPlan:
             },
         }
     _require_nothing_live(repositories, backend)
+    # Before the tree questions and before anything is written, because this is
+    # the one refusal that stops a writer no later step of this run can reach.
+    _require_no_queued_lock_descriptor(legacy_dir)
     for entry in repositories:
         _require_one_runtime_source(entry)
         for kind, source, destination in entry.trees():
