@@ -271,7 +271,25 @@ Validation: an assignment's model must appear in its provider's `models`, its
 effort in that provider's `efforts`, every entry in `agents` must name a
 declared provider, and every role the binary knows must resolve for every
 loaded provider that role applies to (D-14) — a role inapplicable to a
-provider needs no assignment for it, and validation never demands one. Unknown role keys and unknown provider keys in the file
+provider needs no assignment for it, and validation never demands one.
+
+### Compiled defaults
+
+The complete role × provider grid, so totality is checkable at a glance:
+thirteen applicable cells, every one valued. The two cells marked *new* are
+additions this arc makes for the single-provider modes (D-14); neither is
+consulted by any dual-mode spawn until its slice lands, so the
+defaults-reproduce-today guarantee holds.
+
+| role | codex | claude |
+| --- | --- | --- |
+| `solve` | gpt-5.4 · high | claude-sonnet-5 · high |
+| `pr_review` | gpt-5.6-terra · xhigh | claude-opus-5 · xhigh |
+| `pr_revise` | gpt-5.4 · high | claude-sonnet-5 · xhigh |
+| `issue_review` | gpt-5.4 · high | claude-opus-5 · xhigh *(new — activates with MODEL-13)* |
+| `issue_revise` | *inapplicable (D-14)* | claude-sonnet-5 · high |
+| `issue_gate` | gpt-5.6-sol · xhigh | claude-opus-5 · xhigh |
+| `drain_rereview` | gpt-5.6-terra · medium | claude-opus-5 · medium *(new — activates with MODEL-11's claude-only resolution)* | Unknown role keys and unknown provider keys in the file
 are errors, not ignored — silently skipping a misspelled
 `[roles.pr_reveiw.codex]` is how an operator ships the old model believing
 they changed it. Editing a `[providers.X]` table never changes the loaded
@@ -566,13 +584,18 @@ declares, in the compiled role registry, which providers it applies to:
 `issue_revise` is Claude-only by construction (a Codex-only install revises
 inside the review thread), every other role applies to both brands, and
 validation requires an assignment only for loaded providers a role applies
-to. `drain_rereview`, which applies to both, gains the compiled default
-**claude-opus-5 · medium** for its Claude side — inert until a Claude-only
-install actually runs the drainer, at which point MODEL-11's
-loaded-provider resolution has a value to resolve to. Consequences: MODEL-1
-carries applicability in the role registry and the new default; the
-defaults-reproduce-today guarantee is unchanged, because no dual-mode spawn
-consults the new assignment.
+to. Two cells were unvalued under that rule, and both gain compiled
+defaults (approved 2026-08-20): `drain_rereview.claude` =
+**claude-opus-5 · medium**, inert until a Claude-only install runs the
+drainer, where MODEL-11's loaded-provider resolution needs it; and
+`issue_review.claude` = **claude-opus-5 · xhigh**, the assignment the
+Claude embedded-review backend (MODEL-13) resolves — the owner chose to
+match the issue gate's weight rather than mirror the Codex side's
+lighter embedded thread. With those two cells the applicability ×
+assignment grid is total; the Compiled defaults table in Design enumerates
+all thirteen. Consequences: MODEL-1 carries applicability and both new
+defaults; the defaults-reproduce-today guarantee is unchanged, because no
+dual-mode spawn consults either new assignment before its slice lands.
 
 ## Open questions
 
