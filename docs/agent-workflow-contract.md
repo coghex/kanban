@@ -1493,10 +1493,20 @@ search step and nothing else, which is what `mandatory: no` records.
   creates, removes or modifies the legacy runtime tree, the legacy log tree,
   the corresponding trees at the destination, or the repository's on-disk
   service definition, and the definition the service manager holds stays the
-  relocated one. Every transition raises, so every one of them returns
-  non-success. `run_service` is the exception, and only in part: it is what a
-  service manager launches, so it catches its own startup refusals and answers
-  with an exit code. A controller from this change onward answers a failing
+  relocated one. Every transition that reaches a closed path raises, so every
+  one of those returns non-success. Two do not reach one. A `stop` in a copy
+  predating #367 enters no transaction at all: it reads its snapshot and, since
+  the status file it would read is under the sealed runtime root, finds nothing
+  running and returns its "already stopped" result — a read that changes no
+  protected artifact and asks the service manager for nothing, so there is
+  nothing for a bound to refuse and requiring non-success of it would be
+  requiring a filesystem object to change what a read does. That branch is also
+  the only one it can take from an emptied location, since a relocation refuses
+  outright while any managed job or checkout drainer is running; a stop that
+  would signal the manager or write incident state is refused and diagnosed
+  like every other transition. `run_service` is the other, and only in part: it
+  is what a service manager launches, so it catches its own startup refusals
+  and answers with an exit code. A controller from this change onward answers a failing
   one, because a run that reported success would be telling that manager, and
   Kanban reading the job's state through it, that a drainer ran for a
   repository whose installation moved out from under it — and every definition

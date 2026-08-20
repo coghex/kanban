@@ -896,6 +896,22 @@ class StaleControllerTests(RelocationFixture):
         )
         self.assert_location_is_sealed()
 
+    def test_stopping_from_a_stale_controller_refuses_too(self):
+        # The transition whose own exclusion disappears while it runs, which is
+        # why this copy asks the gate up front: signalling the runner is what
+        # frees a mover to act, and a stale stop that signalled would do it
+        # against a drainer this installation no longer describes. A copy
+        # predating that gate reads its snapshot and returns instead, which
+        # `StaleInvocationBoundTests` is where the terms of are asserted.
+        with self.as_the_stale_controller():
+            before = self.host_state()
+            with self.assertRaises(drain_prs_service.ServiceError) as raised:
+                drain_prs_service.stop_service(self.job)
+            self.assertEqual(self.host_state(), before)
+        self.assertIn("was relocated to", str(raised.exception))
+        self.assertIn(str(self.destination), str(raised.exception))
+        self.assertEqual(self.commands, [])
+
     def test_a_queued_run_refuses_before_it_writes_anything(self):
         # The service-manager `run` path: a runner launched before the
         # relocation, or started by hand while the record showed nothing live,
@@ -3125,6 +3141,15 @@ _PRE_GATE_FRAGMENTS = (
         2,
     ),
     (
+        "#367",
+        "the up-front gate it gave a stop, which a copy predating it does not "
+        "enter at all before reading its snapshot",
+        "    with installation_transaction():\n        pass\n"
+        "    snapshot = status_snapshot(job)",
+        "    snapshot = status_snapshot(job)",
+        1,
+    ),
+    (
         "#390",
         "the exit code a refused run answers with, which this arc changed from "
         "a clean one to a failure",
@@ -3743,18 +3768,56 @@ class StaleInvocationFixture(PreGateControllerFixture):
     # Which closed path each writer meets. A transition enters `document_lock`
     # before it reads or writes anything at all, so it meets the retained lock;
     # a writer that creates its own directories meets the runtime guard.
-    TRANSACTIONAL = frozenset({"install", "start", "uninstall", "stop", "run"})
+    TRANSACTIONAL = frozenset({"install", "start", "uninstall", "run"})
 
     def closed_path(self, writer):
         return self.legacy_lock if writer in self.TRANSACTIONAL else self.legacy_guard
 
-    # The writer that reports rather than raises. `run_service` is what a
-    # service manager launches, so it catches its own startup refusals and
-    # answers with an exit code — and a copy predating this arc answers a clean
-    # one, which is its own handling of an exception it already caught and not
-    # something any bound outside that process reaches. What it has to do is
-    # refuse and write nothing.
-    REPORTING = frozenset({"run"})
+    # The writers that do not raise, and why each does not.
+    #
+    # `run_service` is what a service manager launches, so it catches its own
+    # startup refusals and answers with an exit code — and a copy predating
+    # this arc answers a clean one, which is its own handling of an exception
+    # it already caught and not something any bound outside that process
+    # reaches.
+    #
+    # `stop_service` in a copy predating #367 enters no transaction at all: it
+    # reads its snapshot and returns straight away when nothing is running.
+    # Nothing it does on that branch touches a bound, and nothing may: it is a
+    # read that changes no protected artifact and asks the service manager for
+    # nothing. What makes that branch the only one it can take here is the
+    # runtime guard — the status file it would have read is under a path that
+    # is not a directory, so the snapshot is `stopped` however the drainer
+    # ended.
+    REPORTING = frozenset({"run", "stop"})
+
+    # What a stale invocation may ask the service manager for. Reading is
+    # allowed and unavoidable — `status_snapshot` asks whether a unit is
+    # loaded, which reaches nothing this run protects — while loading,
+    # unloading and signalling are exactly what may not happen, because those
+    # change what the manager holds.
+    MANAGER_READS = frozenset({"show", "is-enabled", "is-active", "list-unit-files"})
+
+    def manager_commands(self):
+        if not self.manager_log.exists():
+            return []
+        return [
+            line.strip()
+            for line in self.manager_log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def assert_the_manager_was_only_read(self):
+        """Nothing this invocation sent the manager changes what it holds.
+
+        Asked as an allowlist rather than a list of forbidden verbs: a
+        subcommand nobody here anticipated is one this cannot vouch for, and
+        `is-enabled` contains `enable`, so matching on fragments would answer
+        the wrong question in both directions.
+        """
+        for line in self.manager_commands():
+            verb = next((word for word in line.split() if not word.startswith("-")), "")
+            self.assertIn(verb, self.MANAGER_READS, line)
 
     def refusal(self, writer):
         """What one writer said about refusing, however it said it."""
@@ -3764,9 +3827,6 @@ class StaleInvocationFixture(PreGateControllerFixture):
         for index, attempt in enumerate(self.outcome["attempts"]):
             for name, writer in attempt["writers"].items():
                 if name in self.REPORTING:
-                    self.assertIn(
-                        "did not start", writer["printed"], (index, name)
-                    )
                     continue
                 self.assertIsNotNone(writer["failed"], (index, name))
             self.assertEqual(attempt["exit_code"], 1, index)
@@ -3805,6 +3865,11 @@ class StaleInvocationBoundTests(StaleInvocationFixture):
         # and says which one by naming it.
         for attempt in self.outcome["attempts"]:
             for name, writer in attempt["writers"].items():
+                if name == "stop":
+                    # The one that meets no bound at all, by taking a branch
+                    # that reads and returns; `test_the_stop_...` below is
+                    # where that is asserted.
+                    continue
                 self.assertIn(str(self.closed_path(name)), self.refusal(writer), name)
 
     def test_the_uninstall_no_directory_creation_reaches_is_bounded_too(self):
@@ -3822,7 +3887,34 @@ class StaleInvocationBoundTests(StaleInvocationFixture):
             self.assertIn(str(self.legacy_lock), failure)
         self.assertTrue(definition.is_file())
         self.assertEqual(definition.read_bytes(), self.before[str(definition)][1])
-        self.assertFalse(self.manager_log.exists())
+        self.assert_the_manager_was_only_read()
+
+    def test_the_stop_a_copy_predating_this_arc_runs_is_an_unchanged_no_op(self):
+        """The one transition that meets no bound, and may not have to.
+
+        A `stop_service` predating #367 enters no transaction: it reads its
+        snapshot and, finding nothing running, returns its "already stopped"
+        result. That branch reaches no closed path because it asks for nothing
+        — no lock, no directory, no record — so there is nothing for a bound to
+        refuse, and requiring non-success of it would be requiring a filesystem
+        object to change what a read does.
+
+        It is also the only branch such a stop can take here. The status file
+        it reads is under the sealed runtime root, so the snapshot is `stopped`
+        whatever the drainer was doing, and a relocation refuses outright while
+        any managed job or checkout drainer is running — so the signalling
+        branch, which would ask the service manager for something, is not
+        reachable from a location a run has emptied.
+        """
+        for index, attempt in enumerate(self.outcome["attempts"]):
+            stop = attempt["writers"]["stop"]
+            self.assertIsNone(stop["failed"], index)
+            self.assertEqual(stop["returned"]["stopped"], False, index)
+            self.assertIn("already stopped", stop["returned"]["message"])
+        # And the whole of what that permits: it changed nothing anywhere, and
+        # asked the service manager nothing that changes what it holds.
+        self.assertEqual(self.host_state(), self.before)
+        self.assert_the_manager_was_only_read()
 
     def test_the_run_a_copy_predating_this_arc_reports_but_cannot_fail(self):
         """The one invocation whose non-success no bound can produce.
@@ -3873,14 +3965,9 @@ class StaleInvocationBoundTests(StaleInvocationFixture):
             definition.read_bytes(), self.before[str(definition)][1]
         )
         self.assertIn(str(self.destination), definition.read_text(encoding="utf-8"))
-        # It never asked the manager for anything, so what the manager holds is
-        # still the definition the relocation loaded.
-        self.assertFalse(
-            self.manager_log.exists(),
-            self.manager_log.read_text(encoding="utf-8")
-            if self.manager_log.exists()
-            else "",
-        )
+        # It never asked the manager to change anything, so what the manager
+        # holds is still the definition the relocation loaded.
+        self.assert_the_manager_was_only_read()
 
     def test_the_seals_and_the_notice_beside_them_are_unchanged(self):
         self.assert_location_is_sealed()
@@ -4125,25 +4212,90 @@ class UnaccountedIdentityTests(RelocationFixture):
         self.assertTrue((self.legacy_dir / "runtime" / slug).is_dir())
         self.assertTrue((self.legacy_logs / slug).is_dir())
 
-    def test_malformed_evidence_is_kept_and_named(self):
+    def malformed(self, corrupt):
+        """One repository's trees, with its status document corrupted."""
+        gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
+        slug = drain_prs_service.repository_slug("acme/gadgets")
+        status = self.legacy_dir / "runtime" / slug / "status.json"
+
+        def late():
+            self.lay_down_trees(gadgets)
+            corrupt(status)
+
+        return slug, self.relocate_with(late)
+
+    def assert_malformed(self, corrupt, expected):
+        """One shape of "present and broken", told apart from absent.
+
+        The general readers this repository uses answer `None` for a document
+        that is missing, unreadable, not an object or not what it should hold,
+        which is exactly the collapse requirements 5 and 6 forbid here: absent
+        evidence may be supplied by another permitted source, while evidence
+        that is there and wrong may not be skipped past.
+        """
+        slug, result = self.malformed(corrupt)
+        self.assertFalse(result["late_writes"]["resolved"])
+        self.assertEqual(
+            self.unattributed(result),
+            [(None, slug, "runtime"), (None, slug, "log")],
+        )
+        reason = result["late_writes"]["unattributed"][0]["reason"]
+        self.assertIn("is malformed", reason)
+        self.assertIn(expected, reason)
+        # And the tree is where it was written rather than filed anywhere
+        # under a guess.
+        self.assertTrue((self.legacy_dir / "runtime" / slug).is_dir())
+
+    def test_evidence_that_is_not_a_regular_file_is_malformed(self):
+        def corrupt(status):
+            status.unlink()
+            status.mkdir()
+
+        self.assert_malformed(corrupt, "is not a regular file")
+
+    def test_evidence_that_is_not_a_json_object_is_malformed(self):
+        self.assert_malformed(
+            lambda status: status.write_text("[]", encoding="utf-8"),
+            "is not a JSON object",
+        )
+
+    def test_evidence_naming_something_that_is_not_a_repository_is_malformed(self):
+        self.assert_malformed(
+            lambda status: status.write_text(
+                json.dumps({"repository": "not a github repository"}),
+                encoding="utf-8",
+            ),
+            "which is not a GitHub repository",
+        )
+
+    def test_evidence_that_cannot_be_read_is_malformed(self):
+        self.assert_malformed(
+            lambda status: status.write_text("{not a document", encoding="utf-8"),
+            "could not be read",
+        )
+
+    def test_absent_evidence_is_not_malformed_and_the_slug_carries_it(self):
+        """The other half of the same distinction.
+
+        A status document with no `repository` field is one the controller
+        wrote before that field existed, or one a fixture left empty. It says
+        nothing, which is not the same as saying something wrong: the
+        reversible slug beside it is allowed to answer.
+        """
         gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
         slug = drain_prs_service.repository_slug("acme/gadgets")
 
         def late():
             self.lay_down_trees(gadgets)
             (self.legacy_dir / "runtime" / slug / "status.json").write_text(
-                "{not a document", encoding="utf-8"
+                "{}", encoding="utf-8"
             )
 
         result = self.relocate_with(late)
-        self.assertFalse(result["late_writes"]["resolved"])
-        self.assertEqual(
-            self.unattributed(result),
-            [(None, slug, "runtime"), (None, slug, "log")],
-        )
-        self.assertIn(
-            "is malformed", result["late_writes"]["unattributed"][0]["reason"]
-        )
+        late_writes = result["late_writes"]
+        self.assertTrue(late_writes["resolved"], late_writes["repair"])
+        self.assertEqual(late_writes["unattributed"], [])
+        self.assertEqual(late_writes["repositories"], ["acme/gadgets"])
 
     def test_the_repair_and_the_failure_name_the_slug_and_the_reason(self):
         # Requirement 7 as amended: an unattributed entry carries a null
@@ -4606,6 +4758,109 @@ class LockDescriptorTests(PreGateControllerFixture):
         self.assertTrue(again["late_writes"]["sealed"])
         install_drainer._require_relocation_resolved(again)
         self.assert_location_is_sealed()
+
+
+class DestinationLifecycleTests(RelocationFixture):
+    """What the bound must not reach: the installation the run just made.
+
+    Everything closed here belongs to the location a run emptied — that
+    location's own record path, its own runtime root, its own lock. Nothing
+    else could be: every definition on this host lives in one directory the
+    service manager owns, shared by both namespaces this repository installs
+    and by every unrelated job the user has, so a bound that reached
+    definitions would freeze the installation it had just made along with all
+    of them.
+
+    So this is the other half of the guarantee, asked of a host where the bound
+    is in place: the destination goes on working exactly as it did, and the
+    bound is still in place afterwards.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.assertTrue(self.relocate()["late_writes"]["sealed"])
+        self.assert_location_is_sealed()
+        # The relocation rebound this process to the destination, which is what
+        # a controller invoked now resolves for itself.
+        self.assertEqual(drain_prs_service.INSTALL_DIR, self.destination)
+        self.destination_job = drain_prs_service.resolve_job(self.widgets)
+        self.backend = install_drainer.service_backend()
+        self.commands.clear()
+
+    def definition(self):
+        return self.backend.definition_path(self.destination_job.label)
+
+    def assert_the_bound_is_still_in_place(self):
+        """The location a run emptied is still closed, and a transition there
+        still cannot begin."""
+        self.assert_location_is_sealed()
+        self.assertFalse(os.access(self.legacy_lock, os.W_OK))
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            with drain_prs_service.document_lock(self.legacy_record):
+                pass
+        self.assertIn("Refusing unsafe config lock path", str(raised.exception))
+
+    def test_the_destination_controller_can_refresh_its_own_job(self):
+        # The supported way a repository's installation is repaired or updated,
+        # which writes the definition, the record entry and asks the manager to
+        # load it — all at the destination, and none of it through anything
+        # this run closed.
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = drain_prs_service.install_job(self.destination_job)
+        self.assertTrue(result["installed"])
+        self.assertEqual(
+            self.backend.definition_environment(self.destination_job.label)[
+                kanban_config.DRAINER_INSTALL_DIR_ENV
+            ],
+            str(self.destination),
+        )
+        self.assertIn(
+            "acme/widgets",
+            self.record_document(self.destination_record)["repositories"],
+        )
+        self.assertTrue(
+            any(
+                self.destination_job.label in " ".join(command)
+                for command in self.commands
+            ),
+            self.commands,
+        )
+        self.assert_the_bound_is_still_in_place()
+
+    def test_the_destination_controller_can_uninstall_and_reinstall(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            removed = drain_prs_service.uninstall_job(self.destination_job)
+        self.assertTrue(removed["uninstalled"])
+        self.assertFalse(self.definition().is_file())
+        self.assertNotIn(
+            "acme/widgets",
+            self.record_document(self.destination_record).get("repositories", {}),
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            drain_prs_service.install_job(self.destination_job)
+        self.assertTrue(self.definition().is_file())
+        self.assertIn(
+            "acme/widgets",
+            self.record_document(self.destination_record)["repositories"],
+        )
+        self.assert_the_bound_is_still_in_place()
+
+    def test_an_unrelated_definition_in_the_same_directory_is_untouched(self):
+        # The directory a definition lives in is the manager's, not this
+        # installation's: this repository installs an issue-approval namespace
+        # beside the drainer's, and a user has whatever else they have. A bound
+        # that reached it would reach all of them.
+        neighbour = service_manager.SYSTEMD_USER_DIR / (
+            service_manager.ISSUE_APPROVAL_LABEL_PREFIX + ".acme.widgets.service"
+        )
+        service_manager.write_definition_file(neighbour, b"[Unit]\n")
+        self.assertTrue(neighbour.is_file())
+        self.assertTrue(service_manager.remove_definition_file(neighbour))
+        self.assertFalse(neighbour.exists())
+        # And the drainer's own definition beside it never moved.
+        self.assertTrue(self.definition().is_file())
+        self.assert_the_bound_is_still_in_place()
 
 
 class ProcessDescriptorTests(unittest.TestCase):

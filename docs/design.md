@@ -2537,8 +2537,12 @@ above are unchanged, and persistence the user switched off is not a failure.
   a stale invocation returns non-success before it creates, removes or modifies
   the legacy runtime or log tree, the corresponding trees at the destination,
   or the repository's on-disk definition, and the definition the manager holds
-  stays the relocated one. Every transition raises and so returns non-success;
-  the `run` a service manager launches catches its own startup refusals and
+  stays the relocated one. Every transition that reaches a closed path raises
+  and so returns non-success; a `stop` predating #367 reaches none, since it
+  reads a snapshot that the sealed runtime root makes `stopped` and returns
+  without touching a protected artifact or the manager, while a stop that would
+  signal or write is refused like the rest; and the `run` a service manager
+  launches catches its own startup refusals and
   answers with an exit code, which a controller from this change onward makes a
   failing one so that neither the manager nor Kanban reading the job through it
   is told a drainer ran, and which one predating it cannot be made to change,

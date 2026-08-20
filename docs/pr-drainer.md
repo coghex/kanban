@@ -1117,19 +1117,29 @@ runs before it writes any logs, before it writes its unit or plist, and before
 it touches the record. And every version opens that lock file for writing
 before it does anything at all.
 
-So a stale command fails before it changes anything: no runtime or incident
-state at the old location, no logs at either location, and no change to the
-unit or plist on disk or to the one your service manager is holding. It fails
-rather than exiting quietly. The run your service manager starts is the one
-exception worth knowing about: it catches its own refusal and answers with an
-exit code, and a current controller answers a failing one — jobs are installed
-with no restart policy, so that shows up as a failed job rather than a restart
-loop — while a controller old enough to predate this change answers a clean
-one. Nothing outside that older process can change that; what it does do is
-print the refusal and write nothing. It fails
-that way every time, not just the first — nothing a stale command does can undo
-any of the three, and permissions on the *directory* would not have helped,
-since they get reset by the very command being stopped.
+So a stale command changes nothing: no runtime or incident state at the old
+location, no logs at either location, and no change to the unit or plist on
+disk or to the one your service manager is holding. It stays that way every
+time, not just the first — nothing a stale command does can undo any of the
+three, and permissions on the *directory* would not have helped, since they get
+reset by the very command being stopped.
+
+It also fails rather than exiting quietly, with two exceptions worth knowing
+about.
+
+A `stop` from a controller old enough to predate the gates does not fail. It
+looks at whether the drainer is running, finds it is not — the status file is
+under one of the sealed paths, so there is nothing to read — and says "already
+stopped". It touches nothing and asks your service manager for nothing, so
+there is nothing there for it to be refused by. A stop that would actually
+signal something is refused like everything else.
+
+The run your service manager starts is the other. It catches its own refusal
+and answers with an exit code: a current controller answers a failing one —
+jobs are installed with no restart policy, so that shows up as a failed job
+rather than a restart loop — while a controller old enough to predate this
+change answers a clean one. Nothing outside that older process can change that;
+what it does do is print the refusal and write nothing.
 
 What you see is the controller's own error naming the path it could not use.
 Follow it: the two links lead to `relocated.json`, and the lock file holds the
