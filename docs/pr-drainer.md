@@ -1072,38 +1072,143 @@ writes nothing at all, if the installation it worked out at startup is no
 longer the one this host resolves — checked while it holds the record's lock,
 so a move has either not begun or already finished.
 
-One case no single run can close by waiting: a writer that takes the lock after
-the run's last check. There is no way to ask whether anyone is waiting on a
-lock, and a command that has finished cannot look again. So instead of trying to
-outlast that writer, the run leaves it nothing to write. Once the last check
-finds the old location clear, `config.json` there is replaced by a link to the
-`relocated.json` beside it — every version of the controller refuses to write a
-`config.json` that is not an ordinary file, so one that wakes up later refuses
-instead of recreating the record, and anything reading that path finds the note
-saying where the installation went. If the run could *not* finish tidying up,
-it deliberately leaves the path alone so you can see what is there; reconcile it
-and re-run, and that run seals it. A run that could not write the seal at all
-fails rather than reporting success, and tells you to re-run.
+One case no single run can close by waiting: a command that takes the lock
+after the run's last check. There is no way to ask whether anyone is waiting on
+a lock, and a command that has finished cannot look again. So instead of trying
+to outlast that command, the move never lets it take the lock at all.
 
-That link closes the record and nothing else. A controller still pointing at the
-old location creates its runtime and log directories, its status file, its
-incidents and its unit or plist *before* it ever gets to the record, and nothing
-locks any of those — so one that starts after the run has finished checking
-still leaves directories behind, even though its record write is refused. A
-later run therefore does not treat a sealed old location as finished business
-unless it holds nothing but the link, the lock file and the note: if there are
-trees there it plans and reconciles them exactly as it would an unsealed one,
-and refuses over anything it would have to choose between. Stopping those writes
-happening at all, rather than finding them next time, is #390.
+For the whole of a move, `config.json.lock` at the old location is made
+read-only, and the installer keeps the one handle it opened before doing that
+rather than reopening a file it has closed. It takes the lock *before* it
+changes the file: a run that made it writable first, so it could open it the
+usual way, would be handing a waiting command the lock in that very window, so
+a lock that is already read-only is opened read-only instead.
+
+Nothing else can open it, so nothing else can be waiting for it — and the
+installer checks, right after closing it, that nothing already had it open. If something does, the move **refuses** and
+changes nothing: that command then goes on to do whatever it was invoked to do
+against the installation that is still there, which is ordinary work rather
+than damage. A host where the installer cannot check at all is refused the same
+way, because moving on an unchecked assumption leaves you with a moved
+installation and the question still open.
+
+That is what stops an `uninstall`, and nothing else could. Every command —
+install, start, stop, uninstall — opens that lock file for writing before it
+reads or writes anything, so none of them begins. An uninstall creates no
+directories, so if it did begin, nothing would stand between it and the unit or
+plist it deletes: those live in your service manager's own directory, shared
+with the job that was just moved, so locking that down would lock down the
+installation.
+
+What the move still has to sweep up is the commands that never wanted the lock.
+A controller writes its runtime and log directories, its status file and its
+incidents through one helper that takes no lock at all, so it can still leave
+directories behind while the move runs — which is what the passes after the
+removal are for.
+
+Once the last check finds the old location clear, `config.json` and the
+`runtime/` directory are replaced by links to the `relocated.json` beside them,
+and the lock file keeps the mode it has had all along. All three stop a
+controller that predates all of this, because what refuses them is code that
+predates it too. Every version refuses to write a `config.json` that is not an
+ordinary file. Every version creates its directories through a helper that
+cannot make a directory inside something that is not a directory — a helper it
+runs before it writes any logs, before it writes its unit or plist, and before
+it touches the record. And every version opens that lock file for writing
+before it does anything at all.
+
+So a stale command changes nothing: no runtime or incident state at the old
+location, no logs at either location, and no change to the unit or plist on
+disk or to the one your service manager is holding. It stays that way every
+time, not just the first — nothing a stale command does can undo any of the
+three, and permissions on the *directory* would not have helped, since they get
+reset by the very command being stopped.
+
+It also fails rather than exiting quietly, with two exceptions worth knowing
+about.
+
+A `stop` from a controller old enough to predate the gates does not fail. It
+looks at whether the drainer is running, finds it is not — the status file is
+under one of the sealed paths, so there is nothing to read — and says "already
+stopped". It touches nothing and asks your service manager for nothing, so
+there is nothing there for it to be refused by. A stop that would actually
+signal something is refused like everything else.
+
+The run your service manager starts is the other. It catches its own refusal
+and answers with an exit code: a current controller answers a failing one —
+jobs are installed with no restart policy, so that shows up as a failed job
+rather than a restart loop — while a controller old enough to predate this
+change answers a clean one. Nothing outside that older process can change that;
+what it does do is print the refusal and write nothing.
+
+What you see is the controller's own error naming the path it could not use.
+Follow it: the two links lead to `relocated.json`, and the lock file holds the
+same note as its own text — it is still readable; what a command may not do is
+write it. Either way you get the same thing: that the installation was
+relocated, the old location and the new one by name, and the exact thing to do
+— run the command again, since a controller works out its installation when it
+starts and this host now resolves the new location, and if it still lands on
+the old one, re-run `tools/install_drainer.py` to reinstall the copy that
+predates that resolution.
+
+Before it calls the old location finished, the run looks once more at which
+processes have that lock file open. None, and it really is finished: nothing
+can open it again and nothing holds it, so nothing can ever take it. If
+something does — or if the host cannot be asked at all — the run leaves the
+lock closed, tells you which process to stop, and fails rather than reporting
+success over a command that can still act. A process belonging to another user
+is not one of these: the installation, its lock and everything that opens it
+are yours alone.
+
+If the run could *not* finish tidying up, it deliberately leaves those paths
+open so you can see what is there; reconcile it and re-run, and that run closes
+them. A run that could not close one at all fails rather than reporting
+success, names the path it left open, and tells you to re-run — and a later run
+treats an old location as finished business only when all of it is closed and
+nothing else is there. If there are trees there, or a path is still open, it
+plans and reconciles the location exactly as it would an untouched one, and
+refuses over anything it would have to choose between. The two links are the
+installer's own; nothing removes them, and nothing reports them as strays or as
+something a writer put back.
+
+Because that answer has to outlive the run, it is written into
+`relocated.json`. Otherwise "stop that process and re-run" would be advice the
+re-run ignores: the next run would see two links and a read-only lock file and
+call the old location finished, leaving unrepaired whatever acted on it in the
+meantime. So a re-run over that state does the last part again — it reopens the
+lock only for as long as it holds it, puts back any unit or plist that went
+missing, and closes and records the location once nothing is holding the lock.
+An old location sealed by an earlier version of the installer says nothing
+about its lock either, so it gets the same treatment once.
 
 Directories under `runtime/` and the old log root that belong to no repository
-in the record are moved across too, under the same name. Two things leave one:
-a controller whose record write was refused — it writes its directories before
-it ever gets to the record — and an uninstall, which leaves a repository's
-state, logs and incidents behind on purpose. Neither can be treated as a
-repository, since nothing records where its checkout is or what its job is
-called, but neither is left at a location nothing reads any more. If the same
-name already exists at the destination, both are kept and both are named.
+in the record are moved across too. Two things leave one: a controller that
+wrote its directories before a refused record write, and an uninstall, which
+leaves a repository's state, logs and incidents behind on purpose. Neither can
+be treated as a repository, since nothing records where its checkout is or what
+its job is called, but neither is left at a location nothing reads any more. If
+the same name already exists at the destination, both are kept and both are
+named.
+
+Which repository such a directory belongs to is worked out from evidence, not
+from the name alone. The directory name is a reversible encoding of the
+repository — but only while the encoded spelling is one your service manager
+can carry as a job name, and a longer one gets a hash of the repository
+instead, which reverses to nothing. So a name is trusted only when decoding it
+gives a real GitHub repository *and* re-encoding that repository on this host
+gives back exactly that name; a hashed name is trusted only when the
+`status.json` or an incident inside the directory names a repository, every
+document that names one agrees, and that repository hashes back to the same
+name. A log directory has no such documents and borrows the answer from the
+runtime directory with the identical name. Your checkout's remote and the
+installed unit or plist are never used for this.
+
+Anything that cannot be settled that way is left exactly where it is and
+reported: a hashed name with nothing inside naming a repository, documents that
+disagree, documents that will not parse, a name this host would spell
+differently. The report names the directory and says why, and every repository
+it does name is the real `owner/name` rather than a directory name — so the
+repair you are given always names something you can go and look at.
 
 If your `$XDG_DATA_HOME` names `~/Library/Application Support`, this platform's
 own default install directory *is* the `~/Library` one, so there is nowhere for

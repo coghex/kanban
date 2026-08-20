@@ -32,7 +32,6 @@ import secrets
 import shutil
 import subprocess
 import sys
-import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -322,23 +321,25 @@ _RUNTIME_DIRECTORY_NAME = "runtime"
 _BYTECODE_CACHE_NAME = "__pycache__"
 _BYTECODE_SUFFIX = ".pyc"
 
+# The managed slots a run leaves standing wherever it finds them, rather than
+# taking away with the installation they sit in. The lock, because a writer may
+# be queued on its inode and unlinking it would hand the next writer a
+# different lock from the one that writer is waiting on. The marker, because it
+# is what a process still bound to this location reads to learn that it is
+# stale. And the runtime guard, because it is the bound that stops a controller
+# still bound here from writing a runtime, incident or log tree at all: a run
+# that lifted it, even to put it back at the end, would reopen for the length
+# of that run exactly the window it exists to close.
+#
+# The record path's own seal is deliberately *not* one of these. A run that
+# cannot finish reconciling this location leaves that path open, because the
+# operator has to see the location as it stands and the re-run that follows
+# their reconciliation is what seals it again. The guard answers a different
+# question — not "what does this location look like" but "may anything be
+# written here" — and the answer to that one does not change while an operator
+# is deciding.
+_RETAINED_SLOTS = frozenset({"lock", "marker", "guard"})
 
-# How long one run waits, having released the legacy record's lock, before
-# taking it again. `flock` has no handoff: releasing a lock does not give it to
-# a waiter, it only makes that waiter runnable, and nothing orders a wakeup
-# against this process asking for the lock again. So a run that re-took it
-# immediately could outrun a writer that had been queued on it for the whole
-# transition and report a location that writer is about to write into. This is
-# the pause that makes losing that race a scheduling accident rather than the
-# ordinary case: a process blocked in `flock` is runnable the instant the lock
-# is released, and this is orders of magnitude longer than it takes to be
-# scheduled. It is not a proof, because none is available -- `flock` cannot be
-# asked whether anyone is waiting, and a writer that acquires after this run's
-# last look is past any process that terminates at all. What carries that one
-# is the next installer run, which relocates again over the record it left;
-# bounding it further, and saying which of the two answers a successful run is
-# giving, is #390.
-_LOCK_HANDOFF_SECONDS = 0.1
 
 # How many times one run carries a recreated legacy location across before it
 # stops and reports what is still there. Bounded rather than looped: a writer
@@ -427,6 +428,39 @@ def default_install_dir() -> Path:
     return kanban_config.default_drainer_install_dir()
 
 
+def _legacy_lock_path(legacy_dir: Path) -> Path:
+    """The lock beside the discovery record at the legacy location.
+
+    Spelled the way `drain_prs_service.document_lock` spells it — the record's
+    own name with `.lock` after it — because this is the file that helper
+    opens, and a second spelling of it would close a path nothing meets.
+    """
+    return legacy_dir / (record_name() + ".lock")
+
+
+def _relocation_notice(plan: RelocationPlan) -> tuple[str, str]:
+    """What happened at this location, and what to do about it.
+
+    One place, because it is written into two artifacts: the relocation marker
+    every seal points at, and the retained lock, which is what the refusal a
+    stale transition meets names by path. A copy of the controller predating
+    every gate here renders a fault as the path it could not use and nothing
+    more, so whatever those paths lead to has to carry the rest.
+    """
+    return (
+        f"The PR drainer installation at {plan.legacy_dir} was relocated to "
+        f"{plan.install_dir}. Nothing may be written at {plan.legacy_dir} "
+        "again: a controller still bound to this location fails instead of "
+        "rebuilding what the relocation moved.",
+        "Run the command again. A controller resolves its installation when "
+        f"it starts, and this host now resolves {plan.install_dir}. If it "
+        f"still resolves {plan.legacy_dir}, the installed copy predates that "
+        "resolution — re-run `python3 tools/install_drainer.py --path "
+        f"<checkout>` from the Kanban checkout to reinstall it against "
+        f"{plan.install_dir}.",
+    )
+
+
 def _plain_file(path: Path) -> bool:
     return not path.is_symlink() and path.is_file()
 
@@ -450,23 +484,26 @@ def _is_bytecode_cache(path: Path) -> bool:
     )
 
 
-def _is_tombstone(path: Path) -> bool:
-    """Whether this is the record path a relocation sealed.
+def _is_relocation_seal(path: Path) -> bool:
+    """Whether this is a path a relocation sealed.
 
     A symlink to the relocation marker beside it, which is three things at
-    once. It is not a regular file, and `drain_prs_service.update_json_document`
-    has refused to write a record path that is present and not a regular file
-    since the commit that introduced the discovery record — so *every* copy of
-    the controller old enough to write one refuses this, including the copies
-    predating every gate in this repository, which is the only thing that
-    reaches them. It reads as the relocation notice rather than as a document,
-    since `_read_json_object` follows it to the marker and finds no
-    `repositories` table. And it says, to anyone who lists that directory, what
-    happened to the installation that used to be there.
+    once. It is neither a regular file nor a directory, which is what refuses
+    the two writers that could recreate what a relocation removed, in *every*
+    copy of the controller including the copies predating every gate in this
+    repository — the only thing that reaches them.
+    `drain_prs_service.update_json_document` has refused a record path that is
+    present and not a regular file since the commit that introduced the
+    discovery record, and `ensure_dirs` cannot make a directory underneath a
+    path that is not one, so a runtime root sealed like this stops that helper
+    before it creates anything at all. It reads as the relocation notice rather
+    than as a document, since `_read_json_object` follows it to the marker and
+    finds no `repositories` table. And it says, to anyone who lists that
+    directory, what happened to the installation that used to be there.
 
     Recognised by what it points at rather than by being a symlink, because
-    this installer only owns the one it wrote: a symlink to anywhere else is an
-    entry it did not create and must not take apart.
+    this installer only owns the ones it wrote: a symlink to anywhere else is
+    an entry it did not create and must not take apart.
     """
     if not path.is_symlink():
         return False
@@ -494,15 +531,22 @@ def _managed_slot(entry: Path, record: str) -> str | None:
             return "record"
         # The seal an earlier run left where the record was. Managed, so a run
         # reconciling what a writer put back beside it recognises this location
-        # as one this installer took apart; never removable, because taking it
-        # away would reopen the path it closed.
-        return "tombstone" if _is_tombstone(entry) else None
+        # as one this installer took apart, and removable, unlike the runtime
+        # guard below: `_RETAINED_SLOTS` says why the two differ.
+        return "tombstone" if _is_relocation_seal(entry) else None
     if name == record + ".lock":
         return "lock" if _plain_file(entry) else None
     if name == drain_prs_service.RELOCATION_MARKER_NAME:
         return "marker" if _plain_file(entry) else None
     if name == _RUNTIME_DIRECTORY_NAME:
-        return "runtime" if _plain_directory(entry) else None
+        if _plain_directory(entry):
+            return "runtime"
+        # The guard an earlier run left where the runtime root was. Managed on
+        # exactly the terms the record's own seal is: a run reconciling what a
+        # writer put back beside it recognises this location as one this
+        # installer took apart, and never removes it, because taking it away
+        # would reopen the path it closed.
+        return "guard" if _is_relocation_seal(entry) else None
     if name == _BYTECODE_CACHE_NAME:
         return "cache" if _is_bytecode_cache(entry) else None
     return None
@@ -538,7 +582,7 @@ def _read_record(path: Path, description: str) -> dict[str, Any]:
     """
     if not os.path.lexists(path):
         return {}
-    if _is_tombstone(path):
+    if _is_relocation_seal(path):
         # The absence it stands for. A sealed path holds no document, and
         # reading it as a refusal would make a run reconciling the trees beside
         # it fail over an earlier run's own work.
@@ -692,6 +736,7 @@ def _recover_repository(
     log_root: Path,
     legacy_dir: Path,
     legacy_logs: Path,
+    require_definition: bool = True,
 ) -> RelocationRepository:
     """One record entry, recovered exactly, or a refusal naming what could not
     be.
@@ -754,24 +799,34 @@ def _recover_repository(
         raise InstallError(f"Refusing to relocate: {where} ({exc}).") from exc
     identifier = backend.service_identifier(slug)
     definition_path = backend.definition_path(identifier)
-    if not _plain_file(definition_path):
-        raise InstallError(
-            f"Refusing to relocate: {where} derives the {backend.definition_label()} "
-            f"{definition_path}, which is not a regular file on this host. Re-install "
-            "or uninstall that repository, then re-run the installer."
+    # The definition is insisted on for exactly one thing: the install
+    # directory it names, which is where this repository's runtime state
+    # actually is, since `--install-dir` moves that state without moving the
+    # record. A caller that moves nothing needs neither — and for one of them,
+    # `finish_closing` below, a *missing* definition is the state it exists to
+    # repair, so demanding one would refuse over the very thing being repaired.
+    if not require_definition and not _plain_file(definition_path):
+        source_install_dir = install_dir
+    else:
+        if not _plain_file(definition_path):
+            raise InstallError(
+                f"Refusing to relocate: {where} derives the "
+                f"{backend.definition_label()} {definition_path}, which is not a "
+                "regular file on this host. Re-install or uninstall that "
+                "repository, then re-run the installer."
+            )
+        named = backend.definition_environment(identifier).get(
+            kanban_config.DRAINER_INSTALL_DIR_ENV
         )
-    named = backend.definition_environment(identifier).get(
-        kanban_config.DRAINER_INSTALL_DIR_ENV
-    )
-    if not named or not os.path.isabs(named):
-        raise InstallError(
-            f"Refusing to relocate: the {backend.definition_label()} at "
-            f"{definition_path} names no absolute "
-            f"{kanban_config.DRAINER_INSTALL_DIR_ENV}, so the runtime state of "
-            f"{identity} cannot be found. Re-install that repository, then re-run "
-            "the installer."
-        )
-    source_install_dir = Path(named)
+        if not named or not os.path.isabs(named):
+            raise InstallError(
+                f"Refusing to relocate: the {backend.definition_label()} at "
+                f"{definition_path} names no absolute "
+                f"{kanban_config.DRAINER_INSTALL_DIR_ENV}, so the runtime state of "
+                f"{identity} cannot be found. Re-install that repository, then "
+                "re-run the installer."
+            )
+        source_install_dir = Path(named)
     return RelocationRepository(
         identity=identity,
         slug=slug,
@@ -801,6 +856,54 @@ def _recover_repository(
             "repository": str(checkout_path),
         },
     )
+
+
+def _require_no_queued_lock_descriptor(legacy_dir: Path) -> None:
+    """Refuse while another process has the legacy record's lock open.
+
+    Raised from the plan, before anything is mutated, because no later step can
+    answer it. A descriptor opened before this run is one no mode change
+    revokes, so a run that relocated past it would leave that process able to
+    take the lock afterwards and run an uninstall — which creates no directory,
+    unlinks the definition this run had just rewritten, and reaches the sealed
+    record only after. Nothing on the filesystem stops that: a service
+    manager's definition directory is the installation's own, shared with the
+    job just relocated, so closing it would close the installation.
+
+    What stops it is not relocating underneath it. A run that refuses here
+    changes nothing at all, so the process holding that descriptor goes on to
+    act against the installation it was invoked against — an ordinary
+    transition, serialized by this very lock exactly as it always was, rather
+    than a stale one acting on a location that moved while it waited. That is
+    the prevention this issue selects, and it is available only here: once the
+    installation has moved, every answer left is a repair.
+
+    A host that cannot be asked is refused on the same terms. "Nobody has it
+    open" and "nobody could be asked" are different answers, and relocating on
+    the second would be relocating on a precondition this run never checked —
+    which is worse than not relocating at all, because it leaves the host moved
+    and the question still open.
+    """
+    lock = _legacy_lock_path(legacy_dir)
+    if not _plain_file(lock):
+        return
+    holders, reason = _processes_holding_open(lock)
+    if holders is None:
+        raise InstallError(
+            f"Refusing to relocate: {reason}, so a process holding {lock} open "
+            "cannot be ruled out. Such a process takes that lock once this run "
+            "releases it and acts on an installation that moved while it "
+            "waited. Stop every drainer and controller, then re-run the "
+            "installer."
+        )
+    if holders:
+        names = ", ".join(f"process {pid}" for pid in holders)
+        raise InstallError(
+            f"Refusing to relocate: {lock} is open in {names}, which takes that "
+            "lock once this run releases it and would act on an installation "
+            "that moved while it waited. Wait for it to finish or stop it, then "
+            "re-run the installer."
+        )
 
 
 def _require_nothing_live(
@@ -1094,6 +1197,9 @@ def plan_relocation(install_dir: Path) -> RelocationPlan:
             },
         }
     _require_nothing_live(repositories, backend)
+    # Before the tree questions and before anything is written, because this is
+    # the one refusal that stops a writer no later step of this run can reach.
+    _require_no_queued_lock_descriptor(legacy_dir)
     for entry in repositories:
         _require_one_runtime_source(entry)
         for kind, source, destination in entry.trees():
@@ -1114,13 +1220,9 @@ def plan_relocation(install_dir: Path) -> RelocationPlan:
                 f"created, so {legacy_dir} cannot be taken apart. Move it aside, then "
                 "re-run the installer."
             )
-        # The lock stays: a writer may be queued on its inode, and unlinking
-        # it would hand the next writer a different lock from the one that
-        # writer is waiting on. A relocation marker left by an earlier run
-        # stays for the same reason the one this run writes does — it is what
-        # a process still bound to this location reads to learn that it is
-        # stale.
-        if slot not in {"lock", "marker"}:
+        # The lock, the marker and an earlier run's runtime guard stay, for
+        # the reasons `_RETAINED_SLOTS` gives.
+        if slot not in _RETAINED_SLOTS:
             removable.append(child)
     return RelocationPlan(
         install_dir=install_dir,
@@ -1187,19 +1289,20 @@ class _Transition:
 
 
 def _captured_modes(*paths: Path) -> dict[Path, int]:
-    """The mode each of these directories already has.
+    """The mode each of these managed paths already has.
 
     Taken before any lock is acquired, because acquiring one is itself a
     change to the directory holding the record: `document_lock` creates that
     parent at 0700 and chmods an existing one to 0700, and it does so before
     this transition has recorded anything it could undo. A directory this run
     only ever locked has to come back as restrictive as it was found, and no
-    more.
+    more — and so does the retained lock at a location an earlier run closed,
+    which this run has to be able to open and must not leave open.
     """
     return {
         path: path.stat().st_mode & 0o777
         for path in paths
-        if path.is_dir() and not path.is_symlink()
+        if not path.is_symlink() and (path.is_dir() or path.is_file())
     }
 
 
@@ -1209,7 +1312,7 @@ def _restore_modes(modes: dict[Path, int]) -> list[str]:
     failures = []
     for path, mode in modes.items():
         try:
-            if path.is_dir() and (path.stat().st_mode & 0o777) != mode:
+            if os.path.lexists(path) and (path.stat().st_mode & 0o777) != mode:
                 path.chmod(mode)
         except OSError as exc:
             failures.append(f"restore the mode of {path}: {exc}")
@@ -1469,17 +1572,29 @@ def _rewrite_definition(
     the log paths a service manager will actually run this job with are the
     destination's — and reloaded, because a definition the manager has not
     re-read is still the old one.
+
+    Total over a definition that is not there. The transition itself never
+    meets one — the plan refuses an entry with no definition on this host —
+    but the sweep does: a writer already queued on the legacy record's lock
+    when this run started can be an uninstall, which unlinks the definition
+    before its record write is refused, and putting that back is exactly what
+    the sweep is for. Absence is then what the undo restores, on the same
+    terms the controller's own uninstall leaves it.
     """
     path = entry.definition_path
-    previous = path.read_bytes()
+    existing = _plain_file(path)
+    previous = path.read_bytes() if existing else None
     # `write_definition_file` installs every definition at the mode its
     # manager reads it with, so restoring through it would hand back a
     # definition whose bytes are the original ones and whose permissions are
     # not. The mode is part of what this transition changed, so it is part of
     # what the undo puts back.
-    previous_mode = path.stat().st_mode & 0o777
+    previous_mode = path.stat().st_mode & 0o777 if existing else None
 
     def undo() -> None:
+        if previous is None:
+            backend.uninstall_definition(entry.identifier)
+            return
         service_manager.write_definition_file(path, previous)
         path.chmod(previous_mode)
         backend.load_definition(entry.identifier)
@@ -1573,6 +1688,7 @@ def _remove_legacy_installation(
     # This is what it reads instead — under the same lock, so it sees the
     # installation intact or this, and never a half-dismantled one.
     marker = plan.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+    notice, repair = _relocation_notice(plan)
     existing_marker = _plain_file(marker)
     previous_marker = marker.read_bytes() if existing_marker else None
     # Its mode too, on the same terms as the record and the definitions: an
@@ -1593,21 +1709,36 @@ def _remove_legacy_installation(
     drain_prs_service.atomic_write_json(
         marker,
         {
-            # Through the controller's own constant, not a literal: the reader
-            # is `drain_prs_service.relocation_marker` and a writer that
-            # spelled the field separately could drift into never meeting it.
+            # Through the controller's own constants, not literals: the readers
+            # are `drain_prs_service.relocation_marker` and the operator a seal
+            # sends here, and a writer that spelled a field separately could
+            # drift into never meeting either.
             drain_prs_service.RELOCATION_MARKER_DESTINATION: str(plan.install_dir),
             "record": str(plan.destination_record),
             "log_root": str(plan.log_root),
+            drain_prs_service.RELOCATION_MARKER_SOURCE: str(plan.legacy_dir),
+            # False until a run has proved it: this one is only taking the
+            # installation apart, and what closes this location comes after.
+            drain_prs_service.RELOCATION_MARKER_CLOSED: False,
+            # The operator-facing half. Every seal this run leaves is a symlink
+            # to this document, so a stale invocation that fails on one of them
+            # names a path that leads here — and what a controller predating
+            # every gate in this repository prints is at most the path it could
+            # not use. Saying what happened, naming both locations, and giving
+            # the action that resolves it is therefore this document's job
+            # rather than that process's.
+            drain_prs_service.RELOCATION_MARKER_NOTICE: notice,
+            drain_prs_service.RELOCATION_MARKER_REPAIR: repair,
         },
     )
     marker.chmod(0o600)
     retained.append(str(marker))
-    if _is_tombstone(plan.legacy_record):
-        # Left by an earlier run and kept by this one, so the scan that ends
-        # the reconciliation does not read this run's own seal as something a
-        # writer put back.
-        retained.append(str(plan.legacy_record))
+    # Every seal an earlier run left is kept by this one, so the scan that ends
+    # the reconciliation does not read one of them as something a writer put
+    # back.
+    for sealed in (plan.legacy_record, plan.legacy_dir / _RUNTIME_DIRECTORY_NAME):
+        if _is_relocation_seal(sealed):
+            retained.append(str(sealed))
     entries_removed, entries_retained = _remove_managed_entries(
         transition, plan.removable
     )
@@ -1716,22 +1847,28 @@ def _remove_log_root(
 
 # --- Carrying across what a writer put back afterwards ----------------------
 #
-# The transition above holds the legacy record's lock from before it reads
-# anything through after it has taken the installation apart, which serializes
-# every writer that queues on that lock: such a writer resumes into a location
-# whose record is gone, reads the marker left beside the lock, and fails
-# without recording anything. It cannot reach a writer that arrives *after*
-# that removal. That one finds no record, creates what it needs afresh, and
-# records itself where the XDG-first probe no longer looks — and no lock closes
-# that, because the thing a late writer would contend on is a file the removal
-# left in place only for the writers that were already queued on it.
+# The run holds the legacy record's lock from before it reads anything through
+# after it has taken the installation apart, and closes that lock file against
+# every other opener for the whole of it. So no writer contends for that lock
+# at all: one that already had it open is refused by the plan before anything
+# moves, and one invoked while the run is under way cannot open it. Every
+# transition — install, start, uninstall, stop — and every discovery-record
+# write enters `document_lock` first, so none of them begins.
+#
+# What that does not close is the writers that never take the lock.
+# `ensure_dirs` creates a repository's runtime, incident and log trees under no
+# lock at all, and `atomic_write_json` creates a missing parent on its own, so
+# a controller bound here can still lay trees down at the location this run is
+# emptying, right up until the seals go down at the end.
 #
 # So this is the other half: after the removal, whatever came back is carried
 # across on the same terms the relocation itself carries an installation, and
 # the location is cleared again on the same ownership terms. Bounded, because
 # a writer that keeps winning must not hold an installer open; past the bound,
 # and past anything this may not decide, the run reports what is still there
-# and the install fails over it.
+# and the install fails over it. Its record half is what answers a location
+# that acquired a record some other way — a closure that could not be written,
+# or an installation an installer predating it left behind.
 
 
 # Every fault the sweep answers by reporting rather than by raising. It runs
@@ -1790,9 +1927,212 @@ def _unaccounted_children(directory: Path, known: frozenset[str]) -> list[Path]:
     return found
 
 
+# --- Recovering the repository an unrecorded tree belongs to ----------------
+#
+# A tree under the runtime or log root is filed by its slug, and a slug is not
+# an identity. `drain_prs_service.repository_slug` escapes each half of the
+# identity into an alphabet that excludes `.`, which is reversible — but only
+# when this host's backend accepted the escaped spelling, since one it cannot
+# carry falls back to a SHA-256 of the whole identity, which nothing reverses.
+# So the directory name answers "which repository is this?" sometimes, and the
+# documents the controller wrote inside the tree answer it the rest of the
+# time. Neither is trusted without the other agreeing where both are present,
+# and where nothing establishes an identity the state is kept and named rather
+# than filed under a guess.
+
+
+# The field a runtime document names its repository in. `status.json` carries
+# it and so does every incident, and both are written by the controller from
+# `job.identity`, which is the canonical identity itself. The discovery record
+# entry's field of the same name is a *checkout path* rather than an identity,
+# and mutable besides, so it is never read here.
+_STRUCTURED_IDENTITY_KEY = "repository"
+
+
+@dataclass(frozen=True)
+class _SlugAttribution:
+    """Which repository a directory slug names, or why nothing here can say."""
+
+    slug: str
+    identity: str | None
+    reason: str | None
+
+
+def _decode_identity_segment(segment: str) -> str | None:
+    """The identity segment `drain_prs_service._escape_identity_segment`
+    encodes as this, or None when nothing it produces spells this.
+
+    The inverse of a prefix code: `-` always consumes exactly one following
+    character, `--` spells `-` and `-d` spells `.`, and every other pairing is
+    something that encoding never emitted.
+    """
+    decoded: list[str] = []
+    index = 0
+    while index < len(segment):
+        character = segment[index]
+        if character != "-":
+            decoded.append(character)
+            index += 1
+            continue
+        if index + 1 >= len(segment):
+            return None
+        following = segment[index + 1]
+        if following == "-":
+            decoded.append("-")
+        elif following == "d":
+            decoded.append(".")
+        else:
+            return None
+        index += 2
+    return "".join(decoded) or None
+
+
+def _identity_from_slug(slug: str) -> tuple[str | None, str | None]:
+    """The canonical identity this slug reversibly encodes, and why it does not
+    when it does not.
+
+    Decoding is not enough on its own, because a directory name is whatever is
+    on disk rather than something this installer wrote: the decoded halves have
+    to spell a repository GitHub could name, and re-encoding that repository
+    through the resolver the installation itself uses has to reproduce this
+    exact slug. That round trip is asked of `repository_slug` rather than
+    restated, because the encoding is the backend's: a slug this host's service
+    manager could not carry as an identifier is one the installation files
+    under a hash instead, so a name that decodes cleanly and would nonetheless
+    be spelled differently here is not this host's name for that repository.
+
+    The reason travels with the answer because it is what the operator acts on.
+    "This is a hash", "this decodes to something GitHub could not name" and
+    "this decodes to a repository this host files elsewhere" are three
+    different things to go and look at, and one message covering all three
+    would name none of them.
+    """
+    owner, separator, name = slug.partition(".")
+    decoded_owner = _decode_identity_segment(owner) if separator else None
+    decoded_name = _decode_identity_segment(name) if separator else None
+    if decoded_owner is None or decoded_name is None:
+        return None, (
+            f"{slug} is not a name this host's own slug encoding produces, so "
+            "nothing reverses it"
+        )
+    decoded = f"{decoded_owner}/{decoded_name}"
+    try:
+        identity = drain_prs_service.normalize_identity(decoded)
+    except drain_prs_service.ServiceError:
+        return None, (
+            f"{slug} decodes to {decoded}, which is not a GitHub repository"
+        )
+    derived = drain_prs_service.repository_slug(identity)
+    if derived != slug:
+        return None, (
+            f"{slug} decodes to {identity}, which this host files under {derived}"
+        )
+    return identity, None
+
+
+def _structured_identities(tree: Path) -> tuple[set[str], list[str]]:
+    """Every canonical identity this runtime tree's own documents name, and
+    every reason one of them could not be read as evidence.
+
+    The status file and the incidents, which are the two things the controller
+    writes into a runtime tree with the identity in them. A document that does
+    not carry the field is silent rather than wrong — the status file a run
+    left behind before that field existed, and the empty one a fixture writes,
+    are both simply no evidence — while one that cannot be read, is not an
+    object, or names something that is not a GitHub repository is evidence that
+    is *present and broken*, which is the case nothing here may skip past.
+    """
+    identities: set[str] = set()
+    faults: list[str] = []
+    documents = [tree / "status.json"]
+    incidents = tree / "incidents"
+    if _plain_directory(incidents):
+        documents.extend(sorted(incidents.glob("*.json")))
+    for document_path in documents:
+        if not os.path.lexists(document_path):
+            continue
+        if not _plain_file(document_path):
+            faults.append(f"{document_path} is not a regular file")
+            continue
+        try:
+            document = json.loads(document_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            faults.append(f"{document_path} could not be read: {exc}")
+            continue
+        if not isinstance(document, dict):
+            faults.append(f"{document_path} is not a JSON object")
+            continue
+        if _STRUCTURED_IDENTITY_KEY not in document:
+            continue
+        value = document[_STRUCTURED_IDENTITY_KEY]
+        if not isinstance(value, str) or not value:
+            faults.append(f"{document_path} names no repository")
+            continue
+        try:
+            identities.add(drain_prs_service.normalize_identity(value))
+        except drain_prs_service.ServiceError:
+            faults.append(
+                f"{document_path} names {value!r}, which is not a GitHub repository"
+            )
+    return identities, faults
+
+
+def _attribute_slug(slug: str, tree: Path) -> _SlugAttribution:
+    """Which repository the state filed under `slug` belongs to.
+
+    `tree` is the runtime tree at the location being reconciled whose documents
+    may say so, which is also how a log tree is attributed: it carries no
+    documents of its own, so the runtime tree filed under the exact same slug
+    beside it is what is read for it.
+
+    Fail-closed at every step. Evidence that is present and broken, evidence
+    that disagrees with itself or with the name the state is filed under, and a
+    name nothing reverses all answer with a reason rather than a repository,
+    because filing durable state under the wrong repository is worse than
+    leaving it where the operator can see it.
+    """
+    decoded, decode_reason = _identity_from_slug(slug)
+    identities: set[str] = set()
+    faults: list[str] = []
+    if _plain_directory(tree):
+        identities, faults = _structured_identities(tree)
+    if faults:
+        return _SlugAttribution(
+            slug, None, "its own state is malformed: " + "; ".join(faults)
+        )
+    candidates = set(identities)
+    if decoded is not None:
+        candidates.add(decoded)
+    if not candidates:
+        return _SlugAttribution(
+            slug,
+            None,
+            f"{decode_reason}, and no status document or incident filed under "
+            "it names a repository",
+        )
+    if len(candidates) > 1:
+        return _SlugAttribution(
+            slug,
+            None,
+            "the evidence filed under it names more than one repository: "
+            + ", ".join(sorted(candidates)),
+        )
+    identity = candidates.pop()
+    derived = drain_prs_service.repository_slug(identity)
+    if derived != slug:
+        return _SlugAttribution(
+            slug,
+            None,
+            f"the evidence filed under it names {identity}, which this host "
+            f"files under {derived} rather than {slug}",
+        )
+    return _SlugAttribution(slug, identity, None)
+
+
 def _carry_tree(
     transition: _Transition,
     identity: str,
+    slug: str,
     kind: str,
     source: Path,
     destination: Path,
@@ -1824,6 +2164,11 @@ def _carry_tree(
         outcome["collisions"].append(
             {
                 "repository": identity,
+                # Beside the identity rather than instead of it: the slug is
+                # the directory both copies are filed under, and an operator
+                # reconciling two trees needs the name on disk as well as the
+                # repository it belongs to.
+                "slug": slug,
                 "kind": kind,
                 "source": str(source),
                 "destination": str(destination),
@@ -1863,27 +2208,44 @@ def _carry_unaccounted_trees(
     entry anywhere.
 
     Neither can be recovered *as* a repository — there is no entry to read a
-    checkout, an identifier or a definition out of. Both are a repository's
-    durable state sitting at a location this installer has just emptied, where
-    nothing will ever look for it again. So they are carried by the one name
-    they do have, the directory the state is filed under, to the roots the
+    checkout, an identifier or a definition out of. But which repository the
+    state belongs to is a different question from what job describes it, and
+    that one has an answer on disk: the slug the tree is filed under when this
+    host's own resolver reproduces it, and the identity the controller wrote
+    into the status file and the incidents otherwise. So each tree is carried
+    under the repository that evidence establishes, to the roots the
     installation now uses; a tree already there is the collision every other
-    tree's is, kept and named rather than chosen between.
+    tree's is, kept and named rather than chosen between. A tree nothing
+    establishes an identity for is kept where it was written and named by its
+    slug and the reason, because the alternative is filing a repository's
+    durable state under another repository's name.
 
     No fence is taken for them, and none is available: a repository no record
     names is one this installation can neither discover nor control, so nothing
     here is running it. Every repository that *is* recorded is fenced by the
     caller before its own trees are touched.
     """
-    carried = True
-    for kind, source_root, destination_root in (
-        (
-            "runtime",
-            plan.legacy_dir / _RUNTIME_DIRECTORY_NAME,
-            plan.install_dir / _RUNTIME_DIRECTORY_NAME,
-        ),
+    runtime_root = plan.legacy_dir / _RUNTIME_DIRECTORY_NAME
+    roots = (
+        ("runtime", runtime_root, plan.install_dir / _RUNTIME_DIRECTORY_NAME),
         ("log", plan.legacy_log_root, plan.log_root),
-    ):
+    )
+    # Attributed before anything moves. A log tree is attributed through the
+    # runtime tree filed under the same slug, and that runtime tree is gone the
+    # instant it is carried — so deciding afterwards would answer differently
+    # for the log tree depending on whether its own sibling had moved yet.
+    attributions: dict[str, _SlugAttribution] = {}
+    for _, source_root, _destination_root in roots:
+        if not _plain_directory(source_root):
+            continue
+        for source in sorted(source_root.iterdir()):
+            if source.name in attributions:
+                continue
+            attributions[source.name] = _attribute_slug(
+                source.name, runtime_root / source.name
+            )
+    carried = True
+    for kind, source_root, destination_root in roots:
         if not _plain_directory(source_root):
             continue
         for source in sorted(source_root.iterdir()):
@@ -1893,9 +2255,29 @@ def _carry_unaccounted_trees(
             # one pair of trees as two.
             if any(item["source"] == str(source) for item in outcome["collisions"]):
                 continue
+            attribution = attributions[source.name]
+            if attribution.identity is None:
+                outcome["unattributed"].append(
+                    {
+                        # Null rather than the slug, and the slug beside it: a
+                        # directory name is not an identity, and a report that
+                        # spelled one as the other would hand automation a
+                        # repository that does not exist.
+                        "repository": None,
+                        "slug": attribution.slug,
+                        "kind": kind,
+                        "source": str(source),
+                        "reason": attribution.reason,
+                    }
+                )
+                carried = False
+                continue
+            if attribution.identity not in outcome["repositories"]:
+                outcome["repositories"].append(attribution.identity)
             if not _carry_tree(
                 transition,
-                source.name,
+                attribution.identity,
+                attribution.slug,
                 kind,
                 source,
                 destination_root / source.name,
@@ -1983,7 +2365,13 @@ def _carry_recreated_location(
             continue
         for kind, source, tree_destination in entry.trees():
             if not _carry_tree(
-                transition, entry.identity, kind, source, tree_destination, outcome
+                transition,
+                entry.identity,
+                entry.slug,
+                kind,
+                source,
+                tree_destination,
+                outcome,
             ):
                 carried = False
         try:
@@ -2034,9 +2422,8 @@ def _clear_recreated_location(
     slot requires proves the entry was put there by this installer, so a file
     nothing here created is kept and named — and nothing at that location is
     removed at all, because a directory holding something this installer did
-    not create is not one it may take apart. The lock and the marker stay, for
-    the reasons the removal leaves them: a writer may be queued on that inode,
-    and the marker is what a process still bound here reads.
+    not create is not one it may take apart. The lock, the marker and an
+    earlier run's runtime guard stay, for the reasons `_RETAINED_SLOTS` gives.
     """
     record = record_name()
     removable: list[Path] = []
@@ -2045,7 +2432,7 @@ def _clear_recreated_location(
         if slot is None:
             outcome["strays"].append(str(child))
             continue
-        if slot not in {"lock", "marker"}:
+        if slot not in _RETAINED_SLOTS:
             removable.append(child)
     if outcome["strays"]:
         return
@@ -2061,61 +2448,82 @@ def _clear_recreated_location(
 def _record_locks(plan: RelocationPlan) -> Iterator[None]:
     """Both discovery records' locks, for the span of one reconciliation pass.
 
-    The same two the transition holds, taken in the same order and released
-    together: this pass reads and clears the legacy location and writes the
-    destination record, so a writer at either end has to be excluded while it
-    does — and let through the instant it stops.
+    The legacy record's is the one this run has held since before it decided
+    anything, so asking for it here is the pass-through a nested acquisition
+    already is. It is not released between passes and there is nothing to
+    release it for: `_closed_legacy_record_lock` closed that file the instant
+    this run took it, so no process can be queued on it and none can join. The
+    handoff this used to perform, and the pause that made it a handoff rather
+    than a race, are what a run needed when a writer could still be waiting
+    there; a run that leaves nothing waiting needs neither.
 
-    Preceded by the handoff pause above, because letting one through is the
-    whole point of having released it: a writer queued on the legacy record's
-    lock becomes runnable when this run lets go, and asking for it again in the
-    same instant is how this run would take it back before that writer ever
-    ran. Once the writer holds it, `document_lock` below blocks on it, so the
-    pass that follows reads what it wrote rather than racing it.
+    The destination record's is taken and released per pass, and that one is
+    real: a controller installing or starting a repository at the destination
+    writes that record through its own lock, and it is not this run's to close.
     """
-    time.sleep(_LOCK_HANDOFF_SECONDS)
     with drain_prs_service.document_lock(plan.legacy_record):
         with drain_prs_service.document_lock(plan.destination_record):
             yield
 
 
-def _seal_record_path(transition: _Transition, plan: RelocationPlan) -> bool:
-    """Close the emptied record path against every writer that could recreate
-    it, and answer whether it is closed.
+def _sealed_paths(plan: RelocationPlan) -> tuple[Path, ...]:
+    """The paths a finished relocation occupies with a symlink to the marker.
+
+    Two, because a controller bound here has two ways to put durable state
+    back and they are refused by different code in the same old copy. The
+    record path is what `update_json_document` refuses, which is the one
+    mutator every discovery-record write goes through. The runtime root is what
+    `ensure_dirs` refuses, which is the one helper every runtime, incident and
+    log write goes through — and it is reached first, before the definition is
+    written and before the record is touched at all, so closing it is what
+    bounds the writes the record seal alone leaves open.
+    """
+    return (plan.legacy_record, plan.legacy_dir / _RUNTIME_DIRECTORY_NAME)
+
+
+def _closed_paths(plan: RelocationPlan) -> tuple[Path, ...]:
+    """Every path a finished relocation closes, however it closes it.
+
+    The two above, and the retained lock. That last one is not an object
+    occupying a path and cannot be, because a lock file may never be unlinked
+    — a writer queued on its inode would be handed a different lock from the
+    one it is waiting on — so it is closed by being made unopenable instead.
+    It is the only thing that reaches a transition which never creates a
+    directory: `uninstall_job` does not call `ensure_dirs` at all, so nothing
+    else stops it before it unloads and unlinks the definition a relocation
+    had just rewritten. `document_lock` opens this file `O_RDWR` in every copy
+    of the controller and refuses with `Refusing unsafe config lock path` when
+    that open fails, and every transition — install, start, uninstall, stop,
+    ack, run — enters that helper before it reads or writes anything else.
+    """
+    return _sealed_paths(plan) + (_legacy_lock_path(plan.legacy_dir),)
+
+
+def _seal_path(transition: _Transition, path: Path) -> bool:
+    """Close one emptied path against every writer that could recreate state
+    at it, and answer whether it is closed.
 
     This is what answers the writer no lock can: one queued on the retained
     lock file wakes after this run has finished looking, and neither a pause
     nor a bound reaches it, because `flock` cannot be asked whether anyone is
     waiting and a process that has returned cannot look again. So the answer is
-    not to out-wait that writer but to leave it nothing to write: the seal is
-    refused by `update_json_document`, which is the one path every record write
-    in every copy of the controller goes through.
-
-    Placed under the same lock as the final scan and only when that scan found
-    the location clear, so it can never seal over state this run was supposed
-    to carry — and never before the reconciliation, which would stop the very
-    writers it exists to carry across from recording anything for it to find.
-
-    That placement is also why nothing else here knows about it. It goes down
-    after this run's last look, so no step of this run meets it, and
-    `relocation_disposition` stops a later run before that run has a plan, a
-    record to read, or a location to take apart. An unresolved location is left
-    unsealed on purpose: the operator has to see it as it stands, and the
-    re-run that follows their reconciliation is what seals it.
+    not to out-wait that writer but to leave it nothing to write: what goes
+    down is neither a regular file nor a directory, and the two writers in
+    every copy of the controller both fail on the object they find rather than
+    on any refusal that copy has to contain.
     """
-    record = plan.legacy_record
-    if os.path.lexists(record):
+    if os.path.lexists(path):
         # Already sealed, or holding something this run did not put there and
         # may not replace. Either way there is nothing here to do.
-        return _is_tombstone(record)
+        return _is_relocation_seal(path)
 
     def undo() -> None:
-        if _is_tombstone(record):
-            record.unlink()
+        if _is_relocation_seal(path):
+            path.unlink()
 
-    transition.register(f"unseal {record}", undo)
+    transition.register(f"unseal {path}", undo)
     try:
-        record.symlink_to(drain_prs_service.RELOCATION_MARKER_NAME)
+        path.symlink_to(drain_prs_service.RELOCATION_MARKER_NAME)
     except OSError:
         # Total on the same terms as everything else after the removal: a
         # relocation that succeeded is not rolled back over a seal that could
@@ -2125,45 +2533,469 @@ def _seal_record_path(transition: _Transition, plan: RelocationPlan) -> bool:
     return True
 
 
+def _write_lock_notice(
+    transition: _Transition, plan: RelocationPlan, descriptor: int | None
+) -> bool:
+    """Put the operator's notice into the closed lock, and answer whether it
+    is there.
+
+    The mode is what closes the file; this is what an operator finds when a
+    refusal sends them here by name. The lock is an artifact this installer
+    owns at a location it has emptied, `document_lock` never reads its content,
+    and a path named in a refusal has to lead to something that says what
+    happened rather than to an empty file — so the same notice the marker
+    carries goes in here, and the file is left readable and not writable.
+
+    Written through this run's own descriptor rather than by reopening the
+    file, because reopening it would reopen it for everyone: the mode is closed
+    from the moment this run took the lock, and there is no instant in this run
+    at which it is not. Owner-write is what is taken away rather than every
+    bit, because taking every bit away would close the notice too. A process
+    running as root is bounded by none of this; nothing in a user-scoped
+    installation resolves its managed paths as root, and the seals still refuse
+    one that does.
+    """
+    lock = _legacy_lock_path(plan.legacy_dir)
+    if descriptor is None:
+        # Closed by an earlier run that could not write this, and not something
+        # to repair by reopening the file: whether the notice is there is a
+        # question, and reopening would be an answer to a different one.
+        return bool(lock.read_bytes())
+    previous = lock.read_bytes()
+    transition.register(
+        f"restore {lock}", lambda: os.pwrite(descriptor, previous, 0)
+    )
+    notice, repair = _relocation_notice(plan)
+    marker = plan.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+    payload = f"{notice}\n\n{repair}\n\nSee {marker}.\n".encode("utf-8")
+    try:
+        os.ftruncate(descriptor, 0)
+        os.pwrite(descriptor, payload, 0)
+    except OSError:
+        # Total on the same terms as every other step after the removal: a
+        # location this run could not finish closing is reported rather than
+        # raised, because it is one the next run can still finish.
+        return False
+    return _plain_file(lock) and not os.access(lock, os.W_OK)
+
+
+def _mark_closing_finished(transition: _Transition, plan: RelocationPlan) -> None:
+    """Record, beside the location, that closing it is finished.
+
+    Durable because it is the one thing about this location a later run cannot
+    work out from what is on disk. Both seals are objects it can see and the
+    lock's mode is a bit it can read, but "was anything holding that lock when
+    it was closed" is a question only the run that closed it was in a position
+    to ask — and a descriptor it found then is one that can still delete a
+    definition after that run returns. A later run that read the artifacts
+    alone would call this location finished and never look again, which would
+    make the repair the first run printed — stop that process, then re-run this
+    installer — advice the re-run ignores.
+    """
+    marker = plan.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+    document = drain_prs_service._read_json_object(marker)
+    if document.get(drain_prs_service.RELOCATION_MARKER_CLOSED) is True:
+        return
+    previous = marker.read_bytes() if _plain_file(marker) else None
+    mode = marker.stat().st_mode & 0o777 if previous is not None else 0o600
+
+    def undo() -> None:
+        if previous is None:
+            if os.path.lexists(marker):
+                marker.unlink()
+            return
+        marker.write_bytes(previous)
+        marker.chmod(mode)
+
+    transition.register(f"reopen the closing state at {marker}", undo)
+    drain_prs_service.atomic_write_json(
+        marker, {**document, drain_prs_service.RELOCATION_MARKER_CLOSED: True}
+    )
+    marker.chmod(mode)
+
+
+def _closing_is_finished(legacy_dir: Path) -> bool:
+    """Whether an earlier run finished closing this location.
+
+    The lock's mode and the marker's own answer, in that order. The mode alone
+    is not enough, for the reason `_mark_closing_finished` gives; and the
+    marker alone is not either, since a mode something reopened is a location
+    open to every fresh invocation again. A marker with no answer in it — the
+    one an installer that predates this bound wrote — is not finished, which is
+    how such a host gets closed.
+    """
+    lock = _legacy_lock_path(legacy_dir)
+    if not _plain_file(lock) or os.access(lock, os.W_OK):
+        return False
+    document = drain_prs_service._read_json_object(
+        legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+    )
+    return document.get(drain_prs_service.RELOCATION_MARKER_CLOSED) is True
+
+
+def _leave_lock_as_found(modes: dict[Path, int], lock: Path) -> None:
+    """Put the lock's mode back when this run did not close the location.
+
+    A run that could not finish leaves the location as it stands, for the
+    reason it leaves the record path and the runtime root as they stand: the
+    operator has to see it, and the re-run that follows their reconciliation is
+    what closes it. Leaving the lock closed instead would be the one piece of
+    that state a re-run could not finish — it could take the lock read-only,
+    but not write the notice into it, and a location whose notice can never be
+    written is one no run can ever call closed.
+    """
+    _restore_modes({path: mode for path, mode in modes.items() if path == lock})
+
+
+@contextlib.contextmanager
+def _closed_legacy_record_lock(
+    transition: _Transition, legacy_dir: Path
+) -> Iterator[int | None]:
+    """The legacy record's lock, taken without ever making it takeable, and
+    closed against every other opener for as long as this run holds it.
+
+    The order is the whole point. A run that made this file writable first, so
+    `document_lock` could open it `O_RDWR` the ordinary way, would be handing a
+    stale transition the very lock this exists to keep from it — and a location
+    an earlier run closed is exactly where that temptation arises. So the lock
+    is taken first, on a descriptor opened read-only when that is all this file
+    permits, and only then is the mode touched.
+
+    From the instant the mode is closed the set of processes that can ever
+    contend for this lock is fixed. `plan_relocation` proves that set empty
+    immediately afterwards and refuses if it is not, and nothing can join it
+    while this run lasts — which is what makes the prevention total rather than
+    a race won. A process that already had the lock open when a relocation
+    started is refused before anything moves, so it goes on to act against the
+    installation it was invoked against; one invoked while the run is under way
+    never gets the lock at all. Neither can unlink the definition the run
+    rewrites, which is the one artifact no seal can occupy, since a service
+    manager's definition directory is the installation's own.
+
+    What this closes is every transition at that location, including the ones
+    that would merely record: `install_job`, `start_service`, `uninstall_job`
+    and every discovery-record write enter `document_lock` before they do
+    anything else. So the reconciliation below no longer has late *records* to
+    carry — only trees, which `ensure_dirs` lays down under no lock at all —
+    and its record half stands as what answers a location that acquired one
+    some other way.
+
+    Answers the descriptor the notice is written through, or None when this run
+    could only open the file read-only. That is a location whose mode an
+    earlier run closed and whose notice it could not write, and it is the one
+    state this cannot repair: writing would mean reopening the file to
+    everything, so it is reported instead.
+    """
+    lock = _legacy_lock_path(legacy_dir)
+    if not _plain_file(lock):
+        raise InstallError(
+            f"Refusing to relocate: {lock} is not a regular file, so this run "
+            "cannot close it against a controller still bound to that location."
+        )
+    previous_mode = lock.stat().st_mode & 0o777
+    try:
+        descriptor, writable = os.open(lock, os.O_RDWR), True
+    except OSError:
+        descriptor, writable = os.open(lock, os.O_RDONLY), False
+    try:
+        with drain_prs_service.document_lock_on(
+            legacy_dir / record_name(), descriptor
+        ):
+            transition.register(f"reopen {lock}", lambda: lock.chmod(previous_mode))
+            lock.chmod(0o400)
+            yield descriptor if writable else None
+    finally:
+        os.close(descriptor)
+
+
+def _seal_emptied_location(
+    transition: _Transition, plan: RelocationPlan
+) -> list[str]:
+    """Occupy the two paths above, and answer which of them are still open.
+
+    Placed under the same lock as the final scan and only when that scan found
+    the location clear, so it can never seal over state this run was supposed
+    to carry — and never before the reconciliation, which would stop the very
+    writers it exists to carry across from recording anything for it to find.
+
+    That placement is also why nothing else here knows about these paths. They
+    go down after this run's last look, so no step of this run meets them, and
+    `relocation_disposition` stops a later run before that run has a plan, a
+    record to read, or a location to take apart. An unresolved location is left
+    unsealed on purpose: the operator has to see it as it stands, and the
+    re-run that follows their reconciliation is what seals it.
+
+    Answered as a list rather than a flag because a run that closed one path
+    and not the other has to name the one still open: it is the path a
+    controller still bound here writes through, and the operator cannot act on
+    "not sealed".
+
+    The lock is deliberately not closed here. Closing it is the last thing this
+    run does, after `_settle_and_close` below has handed it over at least once
+    with these seals already down, because closing it while a writer is still
+    queued on it would end the run with that writer's turn still ahead of it.
+    """
+    return [
+        str(path)
+        for path in _sealed_paths(plan)
+        if not _seal_path(transition, path)
+    ]
+
+
+# Where a process's open descriptors are readable. A constant rather than a
+# literal so a host without one can be simulated: "nobody else has this open"
+# and "nobody could be asked" are different answers, and only one of them
+# closes anything.
+_PROCFS = Path("/proc")
+
+
+def _processes_holding_open(path: Path) -> tuple[tuple[int, ...] | None, str | None]:
+    """Every *other* process with this file open, or None when this host
+    cannot be asked, beside the reason it cannot.
+
+    The one question that settles whether closing a lock file closed it. A
+    process that opened it before this run holds a descriptor no mode change
+    revokes, so closing the mode fixes the set of descriptors that can ever
+    contend rather than emptying it — and this reads that set. Asked only while
+    this run holds the lock and only *after* the mode is closed, which is what
+    makes the answer total: nothing can join the set between the two.
+
+    Answered from `/proc`, which is where the question is answerable and where
+    this installer runs. A relocation never happens on macOS, and a host with
+    no service manager never reaches one either, so the platform that relocates
+    is the platform that has this. A host without it answers None, and a run
+    that cannot ask reports the location as one it could not finish closing
+    rather than claiming it did.
+
+    A process this user may not inspect is not one of ours. The installation,
+    its lock and every controller that opens it are user-scoped, so a
+    descriptor held under another account is not a stale controller of this
+    installation — and a process that exits mid-scan is one that no longer
+    holds anything.
+    """
+    if not _PROCFS.is_dir():
+        return None, f"open descriptors cannot be read on this host: no {_PROCFS}"
+    try:
+        target = path.stat()
+    except OSError as exc:
+        return None, f"{path} could not be read: {exc}"
+    identity = (target.st_dev, target.st_ino)
+    mine = os.getpid()
+    holders: set[int] = set()
+    try:
+        entries = sorted(_PROCFS.iterdir())
+    except OSError as exc:
+        return None, f"{_PROCFS} could not be read: {exc}"
+    for entry in entries:
+        if not entry.name.isdigit() or int(entry.name) == mine:
+            continue
+        try:
+            descriptors = sorted((entry / "fd").iterdir())
+        except OSError:
+            continue
+        for descriptor in descriptors:
+            try:
+                found = descriptor.stat()
+            except OSError:
+                continue
+            if (found.st_dev, found.st_ino) == identity:
+                holders.add(int(entry.name))
+                break
+    return tuple(sorted(holders)), None
+
+
+def _settle_and_close(
+    transition: _Transition,
+    plan: RelocationPlan,
+    backend: service_manager.ServiceManagerBackend,
+    outcome: dict[str, Any],
+    descriptor: int,
+) -> list[str]:
+    """Hand the lock over with the seals already down, put back whatever that
+    let through, and close the lock last. Answers what is still open.
+
+    This is the half no check taken while the lock is held can be. A process
+    that opened this lock before the run started holds a descriptor no mode
+    change revokes, and it may take the flock at any moment — including one the
+    final pass was holding the lock through, so that pass sees nothing wrong
+    and the writer's turn comes after it. What such a writer can still do is
+    exactly one thing: the record path and the runtime root are occupied by
+    now, so `update_json_document` and `ensure_dirs` refuse it, and only an
+    uninstall — which creates no directory and unlinks the definition before it
+    reaches the record — gets anywhere. That definition is the one artifact no
+    seal can occupy, since a service manager's definition directory is the
+    installation's own.
+
+    Three questions, in one place, because they answer one thing: whether this
+    location is finished.
+
+    The definitions come first, and are pure defence in depth during a
+    relocation: nothing could have taken them, since every transition enters
+    `document_lock` and that file has been closed since before this run decided
+    anything. `finish_closing` calls this over a location an *earlier* run left
+    open, where something could have, and putting back what it finds is the
+    whole reason that run exists.
+
+    The notice goes into the lock next, through the descriptor this run has
+    held all along, because the file is closed and reopening it would reopen it
+    for everyone.
+
+    The descriptor set comes last, and is the proof rather than a hope: the
+    mode has been closed since before the plan, the plan proved the set empty
+    then, and nothing can have joined it since — so reading it again is what
+    turns "nothing should be able to take this lock" into "nothing can". A set
+    that is not empty, and a host that cannot be asked, are both states this
+    run may not call closed; they are reported with the lock left closed,
+    because an operator who knows which process still holds it can stop it and
+    re-run, and a run that claimed success would be telling them there is
+    nothing to stop.
+    """
+    lock = _legacy_lock_path(plan.legacy_dir)
+    for _ in range(_LATE_WRITER_PASSES):
+        with _record_locks(plan):
+            try:
+                stale = _stale_definitions(plan, backend)
+                if stale:
+                    for entry in stale:
+                        _rewrite_definition(transition, entry, backend)
+                        if entry.identity not in outcome["restored_definitions"]:
+                            outcome["restored_definitions"].append(entry.identity)
+                    continue
+                if not _write_lock_notice(transition, plan, descriptor):
+                    return [str(lock)]
+                # Only now, with the mode closed and this run still holding the
+                # lock: from here the set can only shrink, so what it holds is
+                # everything that could ever contend.
+                holders, reason = _processes_holding_open(lock)
+                outcome["lock_holders"] = list(holders or ())
+                outcome["lock_holders_reason"] = reason
+                return [] if holders == () else [str(lock)]
+            except _SWEEP_FAULTS as exc:
+                outcome["failures"].append(str(exc))
+                return [str(lock)]
+    return [str(lock)]
+
+
+def _stale_definitions(
+    plan: RelocationPlan, backend: service_manager.ServiceManagerBackend
+) -> tuple[RelocationRepository, ...]:
+    """Every repository whose definition is no longer the one this run wrote.
+
+    The definitions are the one thing a writer can still change that no closed
+    path answers. The record path and the runtime root are objects this
+    installer owns at a location it has emptied, and the lock beside them is a
+    file only this installer opens once it is closed — but a service manager's
+    definition directory is none of those. It is the installation's own, shared
+    with the job this run has just relocated and with every other job on the
+    host, so closing it would close the installation.
+
+    And one writer is past the lock's closure by construction: a process that
+    opened it before this run started holds a descriptor no later mode change
+    revokes, so it acquires the lock the moment a pass releases it and then
+    runs bytes predating every gate here. An uninstall in that copy creates no
+    directory at all — it reads the status file, unloads the job and unlinks
+    the definition, and only then reaches the record write the seal refuses —
+    so nothing stops it, and what it destroys is a definition this run wrote
+    minutes earlier.
+
+    So the definitions are checked beside the location, on exactly the terms
+    the takeover checks them — the bytes this host would render, compared whole
+    — and put back and reloaded where they differ.
+
+    During a relocation that check is defence in depth, and expected to find
+    nothing: `_closed_legacy_record_lock` closed the lock before this run
+    decided anything, and every transition that could touch a definition enters
+    `document_lock` first. Where it earns its place is `finish_closing`, over a
+    location an earlier run left open — an installer predating that closure, or
+    a run that could not write it — because something could have taken that
+    lock in between, and an uninstall in a copy predating every gate here
+    unlinks the definition before its record write is refused.
+    """
+    return tuple(
+        entry
+        for entry in plan.repositories
+        if not _definition_is_current(entry, backend)
+    )
+
+
 def _late_write_repair(plan: RelocationPlan, outcome: dict[str, Any]) -> str:
     """What the repair for this run's outcome actually is.
 
     Never "re-run the installer" on its own when trees were kept: a re-run
     resolves none of them, refusing over exactly the trees it still finds in
-    both places and keeping the rest a second time, so it is advice that cannot
-    work. A location that merely came back, with nothing in two places, is the
-    case a re-run does resolve.
+    both places and keeping the rest a second time, and it may not guess which
+    repository unattributed state belongs to at all — so it is advice that
+    cannot work. A location that merely came back, with nothing in two places
+    and nothing unattributed, is the case a re-run does resolve.
     """
+    if outcome["lock_holders"]:
+        unsealed = (
+            f"{', '.join(outcome['unsealed'])} is still open in "
+            f"{', '.join(f'process {pid}' for pid in outcome['lock_holders'])}, "
+            "which held it before this run closed it and can still take it. "
+            "Stop that process, then re-run this installer."
+        )
+    elif outcome["lock_holders_reason"]:
+        unsealed = (
+            f"{', '.join(outcome['unsealed'])} was closed, but "
+            f"{outcome['lock_holders_reason']}, so a process that opened it "
+            "before this run cannot be ruled out. Stop every drainer and "
+            "controller, then re-run this installer."
+        )
+    else:
+        unsealed = (
+            f"{', '.join(outcome['unsealed'])} could not be sealed against a "
+            "writer bound to that location; re-run this installer."
+        )
+    restored = (
+        "A writer bound to "
+        f"{plan.legacy_dir} removed or rewrote the service definition of "
+        f"{', '.join(outcome['restored_definitions'])} after the relocation "
+        "had written it; this run put it back and reloaded it. "
+        if outcome["restored_definitions"]
+        else ""
+    )
     if outcome["passes"] == 0:
         if not outcome["sealed"]:
-            return (
-                f"The record path at {plan.legacy_record} could not be sealed "
-                "against a writer bound to that location; re-run this installer."
-            )
-        return "Nothing to repair; the installation is at the destination."
+            return restored + unsealed
+        return restored + "Nothing to repair; the installation is at the destination."
     if outcome["resolved"]:
         carried = (
             f"A writer recorded state at {plan.legacy_dir} after it was taken "
             f"apart; it was carried across to {plan.install_dir} and that "
             "location was cleared again. "
         )
-        return carried + (
-            "Nothing to repair."
-            if outcome["sealed"]
-            else f"The record path at {plan.legacy_record} could not be sealed "
-            "against a writer bound to that location; re-run this installer."
+        return restored + carried + (
+            "Nothing to repair." if outcome["sealed"] else unsealed
         )
-    if outcome["collisions"]:
-        pairs = "; ".join(
-            f"{item['repository']}'s {item['kind']} tree at {item['source']} and "
-            f"{item['destination']}"
-            for item in outcome["collisions"]
-        )
-        return (
-            f"Both copies are kept: {pairs}. A re-run alone is not the repair: it "
-            "refuses over exactly the trees it still finds in both places and keeps "
-            "the rest a second time, so merge or remove one copy of each pair "
-            "first, then re-run this installer."
+    if outcome["collisions"] or outcome["unattributed"]:
+        kept: list[str] = []
+        if outcome["collisions"]:
+            pairs = "; ".join(
+                f"{item['repository']}'s {item['kind']} tree at {item['source']} "
+                f"and {item['destination']}"
+                for item in outcome["collisions"]
+            )
+            kept.append(f"Both copies are kept: {pairs}.")
+        if outcome["unattributed"]:
+            orphans = "; ".join(
+                f"the {item['kind']} tree at {item['source']}, because "
+                f"{item['reason']}"
+                for item in outcome["unattributed"]
+            )
+            kept.append(
+                "State that belongs to no repository this run could name is kept "
+                f"where it was written: {orphans}."
+            )
+        return " ".join(kept) + (
+            " A re-run alone is not the repair: it refuses over exactly the trees "
+            "it still finds in both places, keeps the rest a second time, and may "
+            "not guess which repository unattributed state belongs to. Merge or "
+            "remove one copy of each colliding pair; identify each unattributed "
+            "tree's repository and move that tree under the slug this host files "
+            f"it by, beneath {plan.install_dir / _RUNTIME_DIRECTORY_NAME} for a "
+            f"runtime tree and {plan.log_root} for a log tree; then re-run this "
+            "installer."
         )
     if outcome["strays"]:
         return (
@@ -2184,30 +3016,12 @@ def _late_write_repair(plan: RelocationPlan, outcome: dict[str, Any]) -> str:
     )
 
 
-def _reconcile_late_writes(
-    transition: _Transition,
-    plan: RelocationPlan,
-    backend: service_manager.ServiceManagerBackend,
-    known: frozenset[str],
-    fences: _Fences,
-) -> dict[str, Any]:
-    """Carry across whatever was written back after the removal, bounded.
-
-    Runs *outside* the transition's record locks and re-takes them for each
-    pass, which is the whole sequencing. A writer queued on the legacy record's
-    lock is guaranteed to wake after everything done while that lock is held,
-    so a sweep inside it could never see what such a writer records; a sweep
-    that takes and releases the lock hands it to whoever is waiting and finds
-    what they left on the next pass. Bounded, so a writer that keeps taking it
-    ends the sweep rather than extending it forever, and one that arrives after
-    the last look is past any installer that terminates at all — which is the
-    other half's job, not this one's.
-
-    Whether the run came out resolved is read back off disk under the lock
-    rather than inferred from the passes, because what makes the host resolved
-    is that the location really is empty, not that each step reported success.
-    """
-    outcome: dict[str, Any] = {
+def _late_write_outcome(plan: RelocationPlan) -> dict[str, Any]:
+    """The report a run makes about the location it emptied, before it has
+    made it. One spelling, because two runs produce one: the reconciliation
+    below, and `finish_closing`, which answers what a reconciliation left
+    open."""
+    return {
         "location": str(plan.legacy_dir),
         "record": str(plan.legacy_record),
         "log_root": str(plan.legacy_log_root),
@@ -2217,31 +3031,77 @@ def _reconcile_late_writes(
         "removed": [],
         "retained": [],
         "collisions": [],
+        "unattributed": [],
         "strays": [],
         "failures": [],
+        "restored_definitions": [],
+        "lock_holders": [],
+        "lock_holders_reason": None,
+        "sealed": False,
+        "unsealed": [],
     }
+
+
+def _reconcile_late_writes(
+    transition: _Transition,
+    plan: RelocationPlan,
+    backend: service_manager.ServiceManagerBackend,
+    known: frozenset[str],
+    fences: _Fences,
+    descriptor: int,
+) -> dict[str, Any]:
+    """Carry across whatever was written back after the removal, bounded.
+
+    Runs inside the lock this run holds and never lets go of, because there is
+    nobody to let go for: the file is closed against every other opener, so no
+    writer is queued on it and none can join. What the passes are for is the
+    writers that never wanted it — `ensure_dirs` lays a repository's runtime,
+    incident and log trees down under no lock at all — and they are bounded so
+    that one which keeps laying them down ends the sweep rather than holding an
+    installer open.
+
+    Whether the run came out resolved is read back off disk rather than
+    inferred from the passes, because what makes the host resolved is that the
+    location really is empty, not that each step reported success.
+    """
+    outcome = _late_write_outcome(plan)
     remaining: tuple[Path, ...] | None = None
     for _ in range(_LATE_WRITER_PASSES):
         with _record_locks(plan):
-            if not _recreated_entries(plan, known):
-                # This is the last look, so the seal goes down here rather
-                # than under a lock taken again for nothing: the handoff has
-                # already happened, and a second pause would hand the lock
-                # over a second time only to find what this look just did.
+            recreated = _recreated_entries(plan, known)
+            # Beside the location, and under the same lock, for the reason
+            # `_stale_definitions` gives: a writer that was already queued on
+            # this lock when the run started is past every closed path, and a
+            # definition is the one thing it can still take away.
+            stale = _stale_definitions(plan, backend)
+            if not recreated and not stale:
+                # This is the last look, so the seals go down here: nothing can
+                # take the lock this run holds, so nothing can put anything
+                # back between this look and them.
                 remaining = ()
-                outcome["sealed"] = _seal_record_path(transition, plan)
+                outcome["unsealed"] = _seal_emptied_location(transition, plan)
+                outcome["sealed"] = not outcome["unsealed"]
                 break
-            outcome["passes"] += 1
             # The outer guard, so no fault raised by a step this sweep drives
             # can escape into the transition's rollback. Partly-applied work
             # stays applied and is read back below, which is the state the
             # report and the failing install are about.
             try:
-                if not _carry_recreated_location(
-                    transition, plan, backend, outcome, fences
-                ):
-                    break
-                _clear_recreated_location(transition, plan, outcome)
+                for entry in stale:
+                    _rewrite_definition(transition, entry, backend)
+                    if entry.identity not in outcome["restored_definitions"]:
+                        outcome["restored_definitions"].append(entry.identity)
+                if recreated:
+                    # Counted only for a location that came back, because that
+                    # is what the bound is about and what the repair names; a
+                    # pass that only put a definition back reconciled no
+                    # location.
+                    outcome["passes"] += 1
+                    if not _carry_recreated_location(
+                        transition, plan, backend, outcome, fences
+                    ):
+                        break
+                    _clear_recreated_location(transition, plan, outcome)
             except _SWEEP_FAULTS as exc:
                 outcome["failures"].append(str(exc))
                 break
@@ -2256,8 +3116,26 @@ def _reconcile_late_writes(
             remaining = _recreated_entries(plan, known)
             # Under the same lock as the look that found it clear, and only
             # then: a location this run could not finish reconciling is one
-            # the operator has to see as it stands.
-            outcome["sealed"] = not remaining and _seal_record_path(transition, plan)
+            # the operator has to see as it stands, so every path sealing would
+            # have closed is left open — and named as open, because "not
+            # sealed" is not something an operator can act on.
+            outcome["unsealed"] = (
+                _seal_emptied_location(transition, plan)
+                if not remaining and not _stale_definitions(plan, backend)
+                else [str(path) for path in _closed_paths(plan)]
+            )
+            outcome["sealed"] = not outcome["unsealed"]
+    if not remaining and not outcome["unsealed"]:
+        # Last, and only over a location this run has already sealed: it is
+        # what puts the notice into the lock and proves nothing can still take
+        # it, which is what makes the location finished rather than merely
+        # emptied.
+        outcome["unsealed"] = _settle_and_close(
+            transition, plan, backend, outcome, descriptor
+        )
+        outcome["sealed"] = not outcome["unsealed"]
+        if outcome["sealed"]:
+            _mark_closing_finished(transition, plan)
     outcome["retained"] = sorted(
         set(outcome["retained"]) | {str(path) for path in remaining}
     )
@@ -2276,94 +3154,112 @@ def _locked_transition(
 ) -> tuple[RelocationPlan, dict[str, Any]]:
     """Everything the relocation does under the two discovery records' locks.
 
-    Its own function because those locks have to end before the run does: the
-    reconciliation that follows them cannot be inside them, and a `with` that
-    ended in the middle of `relocate` would read as though it could be. The
-    checkout and controller fences are registered on `fences`, which `relocate`
-    owns and holds across that reconciliation too — they exclude a drainer or a
-    controller from the trees this run moves, and the sweep moves trees on
-    exactly the same terms.
+    The legacy record's lock is `relocate`'s: it is taken before this is called
+    and held past the reconciliation, because the run closes that lock file
+    against every other opener the instant it has it and may not reopen what it
+    has closed. Only the destination record's lock begins and ends here, and
+    only because its writers are real — a controller installing or starting a
+    repository at the destination is not a process this run has closed anything
+    against.
+
+    Its own function all the same: the transition is what may not be
+    interrupted, and a `with` that ended in the middle of `relocate` would read
+    as though the reconciliation were part of it. The checkout and controller
+    fences are registered on `fences`, which `relocate` owns and holds across
+    that reconciliation too — they exclude a drainer or a controller from the
+    trees this run moves, and the sweep moves trees on exactly the same terms.
     """
-    legacy_dir = legacy_install_dir()
     destination_record = install_dir / record_name()
-    with drain_prs_service.document_lock(legacy_dir / record_name()):
-        with contextlib.ExitStack() as locks:
-            # A destination record that *already exists* has writers this
-            # lock does not exclude: discovery probes the XDG location
-            # first, so they resolve that record rather than the legacy
-            # one and never block here. Its own lock therefore has to be
-            # held across the read that merges it, even at the cost of
-            # creating that lock file in the one state no writer of that
-            # record ever leaves behind — a record with no lock beside it.
-            if os.path.lexists(destination_record):
-                locks.enter_context(
-                    drain_prs_service.document_lock(destination_record)
-                )
-            # Before the authoritative plan, because that plan's own
-            # liveness check is a read, and a drainer starting one instant
-            # after it would be one this run never saw. Held for the whole
-            # transition and the rollback, and taken from the preflight's
-            # repositories because the fence has to precede the plan that
-            # would otherwise name them.
-            for entry in preflight.repositories:
-                fences.hold_checkout(entry)
-            plan = plan_relocation(install_dir)
-            _require_every_checkout_fenced(plan.repositories, fences.checkouts)
-            # After the plan and before any mutation, on the same terms
-            # the destination record's lock is taken: a refusal must not
-            # leave a lock file behind, and nothing can acquire one in the
-            # meantime because doing so needs the record lock held here.
-            for entry in plan.repositories:
-                fences.hold_controllers(entry)
-            # A destination record that does *not* exist has no such
-            # writer: every writer on this host resolves the legacy record
-            # and is blocked above. Its lock is therefore taken here,
-            # after the last refusal and before the write that creates the
-            # record and makes it resolvable — which is what keeps a
-            # refusal from ever creating a lock file. Re-entrant, so the
-            # branch above is not repeated.
+    with contextlib.ExitStack() as locks:
+        # A destination record that *already exists* has writers this
+        # lock does not exclude: discovery probes the XDG location
+        # first, so they resolve that record rather than the legacy
+        # one and never block here. Its own lock therefore has to be
+        # held across the read that merges it, even at the cost of
+        # creating that lock file in the one state no writer of that
+        # record ever leaves behind — a record with no lock beside it.
+        if os.path.lexists(destination_record):
             locks.enter_context(
-                drain_prs_service.document_lock(plan.destination_record)
+                drain_prs_service.document_lock(destination_record)
             )
-            try:
-                result = _apply_relocation(transition, plan, sources)
-            except BaseException as exc:
-                residue = transition.roll_back() + _restore_modes(modes)
-                detail = "; ".join(residue)
-                raise RelocationFailed(
-                    f"Relocating the PR drainer installation from "
-                    f"{plan.legacy_dir} to {plan.install_dir} failed and was "
-                    f"rolled back: {exc} The lock file "
-                    f"{plan.destination_record}.lock and the directories "
-                    "holding it remain, because a lock is never unlinked."
-                    + (
-                        f" The rollback could not complete: {detail}."
-                        if residue
-                        else ""
-                    ),
-                    residue,
-                ) from exc
+        # Before the authoritative plan, because that plan's own
+        # liveness check is a read, and a drainer starting one instant
+        # after it would be one this run never saw. Held for the whole
+        # transition and the rollback, and taken from the preflight's
+        # repositories because the fence has to precede the plan that
+        # would otherwise name them.
+        for entry in preflight.repositories:
+            fences.hold_checkout(entry)
+        plan = plan_relocation(install_dir)
+        _require_every_checkout_fenced(plan.repositories, fences.checkouts)
+        # After the plan and before any mutation, on the same terms
+        # the destination record's lock is taken: a refusal must not
+        # leave a lock file behind, and nothing can acquire one in the
+        # meantime because doing so needs the record lock held here.
+        for entry in plan.repositories:
+            fences.hold_controllers(entry)
+        # A destination record that does *not* exist has no such
+        # writer: every writer on this host resolves the legacy record
+        # and is blocked above. Its lock is therefore taken here,
+        # after the last refusal and before the write that creates the
+        # record and makes it resolvable — which is what keeps a
+        # refusal from ever creating a lock file. Re-entrant, so the
+        # branch above is not repeated.
+        locks.enter_context(
+            drain_prs_service.document_lock(plan.destination_record)
+        )
+        try:
+            result = _apply_relocation(transition, plan, sources)
+        except BaseException as exc:
+            residue = transition.roll_back() + _restore_modes(modes)
+            detail = "; ".join(residue)
+            raise RelocationFailed(
+                f"Relocating the PR drainer installation from "
+                f"{plan.legacy_dir} to {plan.install_dir} failed and was "
+                f"rolled back: {exc} The lock file "
+                f"{plan.destination_record}.lock and the directories "
+                "holding it remain, because a lock is never unlinked."
+                + (
+                    f" The rollback could not complete: {detail}."
+                    if residue
+                    else ""
+                ),
+                residue,
+            ) from exc
     return plan, result
 
 
-def _sealed_location_is_empty() -> bool:
-    """Whether a sealed legacy location holds nothing but what sealing it left.
+def _location_is_emptied_and_sealed() -> bool:
+    """Whether the legacy location holds nothing but what sealing it left, and
+    both paths a seal occupies are occupied.
 
-    The seal closes the record path, and that is all it closes: a controller
-    bound to that location writes its runtime tree, its log tree and its
-    definition under no record lock at all, so one starting after a run has
-    finished looking can still put durable state there — its record write is
-    what refuses, and by then the directories exist. Being sealed is therefore
-    a reason to do nothing only when there is nothing there, and a later run
-    reconciles whatever is.
+    Both halves, because either one alone is a reason to keep looking. A
+    location holding trees is one a later run reconciles however sealed it is:
+    the seals go down after a run's last look, and a controller bound here that
+    started before them wrote its runtime tree, its log tree and its definition
+    already. And a location whose seals are not both down is one a later run
+    has to go back and finish, because a run that emptied it and could not
+    write one of them left a path a controller still bound here writes through
+    — so reading the other seal as an answer would make that path permanently
+    invisible.
+
+    The lock is a separate question, asked by `_retained_lock_is_closed` below.
+    A location this answers True for is one nothing has to move at all, which
+    is what `finish_closing` acts on; whether it is *finished* additionally
+    depends on that lock, and on nothing still holding it open.
     """
     legacy_dir = legacy_install_dir()
     record = record_name()
-    kept = {record, record + ".lock", drain_prs_service.RELOCATION_MARKER_NAME}
-    if _plain_directory(legacy_dir) and any(
-        child.name not in kept for child in legacy_dir.iterdir()
-    ):
-        return False
+    kept = {
+        _legacy_lock_path(legacy_dir).name,
+        drain_prs_service.RELOCATION_MARKER_NAME,
+    }
+    sealed = {record, _RUNTIME_DIRECTORY_NAME}
+    if _plain_directory(legacy_dir):
+        if any(child.name not in kept | sealed for child in legacy_dir.iterdir()):
+            return False
+        if not all(_is_relocation_seal(legacy_dir / name) for name in sealed):
+            return False
     root = legacy_log_root()
     return not (_plain_directory(root) and any(root.iterdir()))
 
@@ -2389,7 +3285,9 @@ def relocation_disposition(install_dir: Path) -> str | None:
     legacy_record = legacy_install_dir() / record_name()
     if not os.path.lexists(legacy_record):
         return "there is no installation at the legacy location"
-    if _is_tombstone(legacy_record) and _sealed_location_is_empty():
+    if _location_is_emptied_and_sealed() and _closing_is_finished(
+        legacy_install_dir()
+    ):
         return "the legacy location was emptied and sealed by an earlier run"
     return None
 
@@ -2750,6 +3648,136 @@ def take_over(install_dir: Path) -> dict[str, Any]:
             raise
 
 
+# --- Finishing a location an earlier run emptied but could not close -------
+#
+# A run that emptied and sealed the legacy location can still fail to close its
+# lock, and can close it and be unable to prove nothing still holds it open.
+# Both are states it reports and fails the install over, and both tell the
+# operator to stop what is holding the lock and re-run. That instruction has to
+# work, which means the re-run has to reach the same answer from what is on
+# disk: the state the first run knew lives in its own result and nothing else,
+# so a later run that read the two seals and the lock's mode alone would call
+# the location finished and never look again — leaving the definition a queued
+# uninstall deletes after the installer returns unrepaired for good.
+#
+# So a location that is emptied and sealed but not provably free is not a
+# relocation at all — there is nothing left to move — and not a disposition
+# either. It is this: the settle half of a relocation, run on its own, over the
+# repositories the destination record names.
+
+
+def _closing_repositories(
+    install_dir: Path, backend: service_manager.ServiceManagerBackend
+) -> tuple[RelocationRepository, ...]:
+    """Every repository the destination record names, recovered as far as
+    closing this location needs and no further.
+
+    Not as far as a relocation recovers one: that one insists on the install
+    directory each repository's own definition names, because it has runtime
+    state to find and move. This has none — the location it is closing is
+    already empty — and the definition it would read that from is exactly what
+    a stale uninstall deletes, so insisting on it would refuse over the state
+    being repaired.
+    """
+    document = _read_record(install_dir / record_name(), "destination")
+    entries = document.get(drain_prs_service.RECORD_REPOSITORIES_KEY) or {}
+    remote_name = drain_prs_service.discovery_remote_name()
+    legacy_dir = legacy_install_dir()
+    return tuple(
+        _recover_repository(
+            identity,
+            entry,
+            backend=backend,
+            remote_name=remote_name,
+            install_dir=install_dir,
+            log_root=kanban_config.default_drainer_log_dir(),
+            legacy_dir=legacy_dir,
+            legacy_logs=legacy_log_root(),
+            require_definition=False,
+        )
+        for identity, entry in sorted(entries.items(), key=lambda item: str(item[0]))
+    )
+
+
+def _closing_plan(
+    install_dir: Path, backend: service_manager.ServiceManagerBackend
+) -> RelocationPlan:
+    """The same plan a relocation carries, for a run with nothing to move: no
+    document to merge and nothing removable, because the location this closes
+    was taken apart by the run that emptied it."""
+    legacy_dir = legacy_install_dir()
+    return RelocationPlan(
+        install_dir=install_dir,
+        log_root=kanban_config.default_drainer_log_dir(),
+        legacy_dir=legacy_dir,
+        legacy_record=legacy_dir / record_name(),
+        destination_record=install_dir / record_name(),
+        legacy_log_root=legacy_log_root(),
+        merged_record={},
+        repositories=_closing_repositories(install_dir, backend),
+        removable=(),
+    )
+
+
+def finish_closing(install_dir: Path) -> dict[str, Any]:
+    """Answer the question an earlier run left open at a location it emptied.
+
+    The settle half of a relocation on its own: the lock is reopened for this
+    run to take, each recorded repository's definition is checked against the
+    bytes this host writes and put back where it differs, and the lock is
+    closed again only inside a cycle that found nothing to put back and could
+    read the set of descriptors that can still take it. So the repair the first
+    run printed — stop that process, then re-run this installer — does what it
+    says: the re-run finds the same state, repairs whatever the holder took in
+    the meantime, and closes the location once nothing is left holding it.
+
+    Reported as a run that migrated nothing, because nothing moved, and with
+    the same `late_writes` block a relocation reports, because what it did and
+    could not do is the same question and `--json` is a real interface.
+    """
+    with _bound_to(install_dir):
+        backend = service_backend()
+        plan = _closing_plan(install_dir, backend)
+        transition = _Transition()
+        legacy_lock = _legacy_lock_path(plan.legacy_dir)
+        modes = _captured_modes(plan.legacy_dir, install_dir, legacy_lock)
+        outcome = _late_write_outcome(plan)
+        try:
+            with contextlib.ExitStack() as stack:
+                # Taken exactly as a relocation takes it, and for the same
+                # reason: this location's lock may already be closed, and
+                # making it writable so it could be opened the ordinary way
+                # would hand a stale transition the lock this run is here to
+                # keep from it.
+                descriptor = stack.enter_context(
+                    _closed_legacy_record_lock(transition, plan.legacy_dir)
+                )
+                outcome["unsealed"] = _settle_and_close(
+                    transition, plan, backend, outcome, descriptor
+                )
+        except BaseException:
+            _restore_modes(modes)
+            raise
+        outcome["sealed"] = not outcome["unsealed"]
+        if outcome["sealed"]:
+            _mark_closing_finished(transition, plan)
+        else:
+            _leave_lock_as_found(modes, legacy_lock)
+        outcome["resolved"] = True
+        outcome["repair"] = _late_write_repair(plan, outcome)
+        return {
+            "relocated": False,
+            "reason": (
+                "an earlier run emptied and sealed the legacy location; this run "
+                + ("closed it" if outcome["sealed"] else "could not finish closing it")
+            ),
+            "source": str(plan.legacy_dir),
+            "destination": str(install_dir),
+            "late_writes": outcome,
+            "repair": outcome["repair"],
+        }
+
+
 def relocation_preview(install_dir: Path) -> dict[str, Any]:
     """What a run would do about a pre-XDG `~/Library` installation, having
     done none of it.
@@ -2766,6 +3794,25 @@ def relocation_preview(install_dir: Path) -> dict[str, Any]:
         if not plan.repositories:
             return _settled_takeover(plan)
         return {"relocated": False, "dry_run": True, **plan.report()}
+    if _location_is_emptied_and_sealed():
+        # Nothing to move and nothing to plan: what is unfinished here is the
+        # lock, and asking whether it is free is the only thing a dry run of
+        # this can do without taking it.
+        holders, reason = _processes_holding_open(
+            _legacy_lock_path(legacy_install_dir())
+        )
+        return {
+            "relocated": False,
+            "dry_run": True,
+            "reason": (
+                "an earlier run emptied and sealed the legacy location; this run "
+                "would finish closing it"
+            ),
+            "source": str(legacy_install_dir()),
+            "destination": str(install_dir),
+            "lock_holders": list(holders or ()),
+            "lock_holders_reason": reason,
+        }
     return {
         "relocated": False,
         "dry_run": True,
@@ -2807,6 +3854,11 @@ def relocate(install_dir: Path, sources: dict[str, Path]) -> dict[str, Any]:
         # there is no source to move from: what this host takes over is the
         # definitions there, and only the ones it would write differently.
         return take_over(install_dir)
+    if _location_is_emptied_and_sealed():
+        # An earlier run already emptied and sealed this location and could not
+        # finish closing its lock. Nothing is left to move, so this is not a
+        # relocation; it is that run's own last step, taken again.
+        return finish_closing(install_dir)
     backend = service_backend()
     # Planned once without either lock, so an ordinary refusal never takes one
     # — the locks are for the transition that removes something, and a run
@@ -2815,27 +3867,46 @@ def relocate(install_dir: Path, sources: dict[str, Path]) -> dict[str, Any]:
     preflight = plan_relocation(install_dir)
     transition = _Transition()
     legacy_dir = legacy_install_dir()
-    modes = _captured_modes(legacy_dir, install_dir)
+    legacy_lock = _legacy_lock_path(legacy_dir)
+    # Captured with the two directories and reopened before anything asks for
+    # it, and only once the preflight above has had its chance to refuse, so a
+    # run that refuses still changes nothing at all.
+    modes = _captured_modes(legacy_dir, install_dir, legacy_lock)
     try:
-        # The fences outlive the record locks, because the sweep below moves
-        # trees and rewrites definitions exactly as the transition does; only
-        # the two record locks end early, and only because ending them is the
-        # whole point.
+        # The fences outlive the transition, because the sweep below moves trees
+        # and rewrites definitions exactly as the transition does.
         with contextlib.ExitStack() as stack:
             fences = _Fences(stack)
+            # One acquisition of the legacy record's lock, held from here
+            # through the reconciliation, and closed against every other opener
+            # the instant it is held. Every `document_lock` for this record
+            # inside is the pass-through a nested acquisition already is, and
+            # nothing reopens the file — nothing may, which is the point: a
+            # controller invoked while this run is under way never gets that
+            # lock, so it never reaches a transition that would act on a
+            # location that moved while it waited.
+            descriptor = stack.enter_context(
+                _closed_legacy_record_lock(transition, legacy_dir)
+            )
             plan, result = _locked_transition(
                 transition, install_dir, preflight, sources, modes, fences
             )
-            # Both record locks are released by now, and that sequencing is
-            # what the reconciliation depends on. A writer queued on the legacy
-            # record's lock cannot be reached while this run holds it: it is
-            # guaranteed to wake *after* everything done under that lock, so a
-            # sweep inside it could never see what such a writer records.
-            # Releasing hands the lock to whoever was waiting; the sweep then
-            # re-takes it, pass by pass, and finds what they left.
+            # Inside that lock rather than after it, which is the whole change
+            # closing the file makes: the sweep used to release and re-take the
+            # lock so a writer queued on it could take its turn where the run
+            # could still see what it did. There is no such writer now. What is
+            # left for the sweep is the trees `ensure_dirs` lays down under no
+            # lock at all, which it finds pass by pass exactly as before.
             late = _reconcile_late_writes(
-                transition, plan, backend, frozenset(result["retained"]), fences
+                transition,
+                plan,
+                backend,
+                frozenset(result["retained"]),
+                fences,
+                descriptor,
             )
+            if not late["sealed"]:
+                _leave_lock_as_found(modes, legacy_lock)
             result = {
                 **result,
                 "late_writes": late,
@@ -2963,18 +4034,32 @@ def _require_relocation_resolved(relocation: dict[str, Any]) -> None:
     if not late["resolved"]:
         repositories = ", ".join(late["repositories"]) or "none recorded"
         retained = ", ".join(late["retained"]) or "nothing"
+        # Named by slug and by why attribution failed, never as a null
+        # repository: this sentence is what an operator acts on, and `None`
+        # spelled into it names nothing they can look for. Once per slug,
+        # because a repository's runtime and log trees fail to attribute for
+        # the same reason and reporting it twice reads as two problems.
+        seen: dict[str, str] = {}
+        for item in late["unattributed"]:
+            seen.setdefault(item["slug"], item["reason"])
+        unattributed = "".join(
+            f" State filed under {slug} could not be attributed to a "
+            f"repository, because {reason}."
+            for slug, reason in seen.items()
+        )
         detail = (
             f"but a writer recorded state at {late['location']} after it was "
             f"taken apart and it is still there. Affected repositories: "
             f"{repositories}. Kept where it was written: {retained}."
+            f"{unattributed}"
         )
     else:
-        # Clear, and open. The location holds nothing, but the record path is
-        # not closed against a controller still bound to it, so the one thing
-        # this run could not do is the one thing that keeps it closed.
+        # Clear, and open. The location holds nothing, but a path closing it
+        # is not closed against a controller still bound there, so the one
+        # thing this run could not do is the one thing that keeps it shut.
         detail = (
-            f"but the record path at {late['record']} was left open to a "
-            "controller still bound to that location."
+            f"but a path at {late['location']} was left open to a controller "
+            f"still bound to that location: {', '.join(late['unsealed'])}."
         )
     raise RelocationUnresolved(
         "The PR drainer installation was relocated to "

@@ -194,6 +194,22 @@ RELOCATION_MARKER_NAME = "relocated.json"
 # movers that write it live in `tools/install_drainer.py`, and a reader and a
 # writer that spelled it separately could drift into never meeting.
 RELOCATION_MARKER_DESTINATION = "install_dir"
+# The rest of that document, which is also the notice an operator meets when a
+# relocated location refuses a stale invocation. The seals a relocation leaves
+# are symlinks to this file, so a refusal naming one of those paths leads here,
+# and what is here has to say what happened and what to do about it rather than
+# only where the installation went. Spelled as constants for the same reason
+# the destination is: `tools/install_drainer.py` writes them, this is where the
+# document is declared, and a writer and a reader spelling one separately could
+# drift into never meeting.
+RELOCATION_MARKER_SOURCE = "source"
+# Whether the run that emptied that location finished closing it. Durable
+# because it is the one thing about that location a later run cannot see: the
+# lock's mode says it is closed, and says nothing about a process that opened
+# it before it was, whose descriptor no mode change revokes.
+RELOCATION_MARKER_CLOSED = "closed"
+RELOCATION_MARKER_NOTICE = "relocated"
+RELOCATION_MARKER_REPAIR = "repair"
 
 
 # The lock a running controller holds for its whole life, so a run that wants
@@ -855,6 +871,40 @@ def document_lock(path: Path) -> Iterator[None]:
     finally:
         held.discard(resolved)
         os.close(descriptor)
+
+
+@contextlib.contextmanager
+def document_lock_on(path: Path, descriptor: int) -> Iterator[None]:
+    """`document_lock`, taken on a descriptor the caller already holds.
+
+    For the one caller that may not open the file the ordinary way.
+    `tools/install_drainer.py` closes a lock file against every opener while it
+    works at the location that lock belongs to, and a file nothing may open is
+    one it may not reopen either — while making it writable first, so that
+    `document_lock` could open it `O_RDWR`, is precisely the window a stale
+    transition takes that lock in. So it opens the file read-only, which a
+    closed lock still permits, takes the lock on that descriptor, and only then
+    changes anything.
+
+    The same bookkeeping `document_lock` keeps for its own outermost holder, so
+    a nested acquisition of this path inside the block is the pass-through it
+    already is there rather than a second descriptor blocking against this one.
+    The descriptor stays the caller's: this neither opens nor closes it.
+    """
+    resolved = path.absolute()
+    held = getattr(_HELD_DOCUMENT_LOCKS, "paths", None)
+    if held is None:
+        held = _HELD_DOCUMENT_LOCKS.paths = set()
+    if resolved in held:
+        yield
+        return
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    held.add(resolved)
+    try:
+        yield
+    finally:
+        held.discard(resolved)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 def update_json_document(
@@ -2767,11 +2817,20 @@ def run_service(job: DrainerJob, requested_identity: str | None = None) -> int:
         with installation_transaction():
             controller_lock = acquire_controller_lock(job.runtime_dir)
     except ServiceError as exc:
-        # Printed rather than logged, because logging is exactly the write
-        # this is refusing to make. The manager captures stdout, and the exit
-        # is the same clean one every other startup refusal here takes.
+        # Printed rather than logged, because logging is exactly the write this
+        # is refusing to make; the manager captures stdout.
+        #
+        # Non-success, unlike the refusals below, and for a reason none of them
+        # share: this one says the installation this process is bound to is not
+        # the one this host has any more. A run that returned success would be
+        # telling the service manager — and Kanban, which reads the job's state
+        # through it — that a drainer ran for a repository whose installation
+        # moved out from under it. Every definition this installer writes
+        # carries `Restart=no` and `KeepAlive=false`, so a failed exit marks
+        # the job failed for an operator to find rather than starting a restart
+        # loop.
         print(f"PR drainer did not start: {exc}", flush=True)
-        return 0
+        return 1
     try:
         return _supervise(job, installed, requested_identity)
     finally:

@@ -1051,10 +1051,11 @@ class BackendDelegationTests(RedirectedControllerTestCase):
     def test_a_relocated_installation_refuses_a_run_before_it_logs(self):
         # `log_source_advisory` is the first thing a run does and it is a
         # write, so the gate is ahead of it rather than beside the identity
-        # check that follows.
+        # check that follows — and the refusal is a failure rather than a
+        # clean exit, because this run did not do what it was started to do.
         self.write_relocation_marker()
         self.assertEqual(
-            drain_prs_service.run_service(self.job, self.job.identity), 0
+            drain_prs_service.run_service(self.job, self.job.identity), 1
         )
         # A no-write preflight refusal. The install directory exists here only
         # because the marker had to be put somewhere, so the thing to assert is
@@ -4547,8 +4548,11 @@ class ResolverDriftGateTests(RedirectedControllerTestCase):
             ),
         ):
             if name == "run":
-                # The run path reports a clean refusal rather than raising.
-                self.assertEqual(call(), 0)
+                # The run path reports its refusal rather than raising, and
+                # reports it as a failure: a run that returned success would
+                # be telling the service manager a drainer ran for an
+                # installation this process does not belong to.
+                self.assertEqual(call(), 1)
             else:
                 with self.assertRaises(drain_prs_service.ServiceError) as raised:
                     call()
@@ -4666,10 +4670,11 @@ class ControllerLockTests(RedirectedControllerTestCase):
 
     def test_a_refused_run_never_creates_the_lock(self):
         # The gate is ahead of the lock, so a run that refuses leaves no lock
-        # file behind in an installation it does not belong to.
+        # file behind in an installation it does not belong to — and says so
+        # with a failing exit rather than a clean one.
         self.write_relocation_marker()
         supervised = []
-        self.assertEqual(self.spawn_run(observe=lambda: supervised.append(True)), 0)
+        self.assertEqual(self.spawn_run(observe=lambda: supervised.append(True)), 1)
         self.assertEqual(supervised, [])
         self.assertFalse(
             drain_prs_service.controller_lock_path(self.lock_dir()).exists()

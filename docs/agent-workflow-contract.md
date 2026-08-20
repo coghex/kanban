@@ -1440,58 +1440,175 @@ search step and nothing else, which is what `mandatory: no` records.
   installed controller a pre-XDG host is running is an older copy that predates
   it — which is the same premise that puts the installation at `~/Library` in
   the first place.
-  So the reconciliation runs *outside* those locks and re-takes them for each
-  pass, and that sequencing is the point rather than an implementation detail:
-  a sweep inside the transition's own locks could never see a writer queued on
-  them, because releasing is what lets one through. Between passes it holds
-  neither record lock, and it pauses before taking them again — `flock` has no
-  handoff, so releasing only makes a waiter runnable and a run that asked again
-  in the same instant could take the lock back before that waiter ever ran.
-  Once the waiter holds it, the next pass blocks on it and reads what it wrote
-  rather than racing it. That pause is a mitigation and not a proof: whether
-  anyone is waiting on a lock cannot be asked, and a writer that acquires after
-  the run's last look is past any process that terminates at all — and the
-  writer that can still do it is an older installed controller, from before the
-  refusal every discovery-record write now carries, which no gate added here
-  reaches.
-  What answers that one is not timing but leaving it nothing to write. A run
-  whose final scan finds the location clear seals the emptied record path,
-  under that same scan's lock, with a symlink to the relocation marker beside
-  it. `update_json_document` — the one mutator every discovery-record write in
-  every copy of the controller goes through — has refused a record path that is
-  present and not a regular file since the commit that introduced the record,
-  so a writer that acquires the lock afterwards refuses where it stands however
-  old it is. Following the seal finds the marker rather than a document, so a
-  reader bound to that location learns where the installation went instead of
-  finding an empty one. A location this run could not finish
-  reconciling is deliberately left unsealed, because the operator has to see it
-  as it stands and the re-run that follows their reconciliation is what seals
-  it; a record path that could not be sealed at all fails the install on the
-  same terms as unresolved state, since a path left open to a controller still
-  bound there is the one thing that keeps the rest closed.
-  The seal closes the record and only the record. A controller bound to that
-  location writes its directories, its status file, its incidents, its logs and
-  its definition before it ever reaches the record, under no record lock at all,
-  so one starting after a run has finished looking still leaves those behind —
-  its record write is what refuses, and by then the trees exist. Being sealed is
-  therefore a reason for a later run to do nothing only when the location holds
-  nothing but the seal, the lock and the marker: a sealed location that still
-  holds trees is planned and reconciled exactly as an unsealed one is, which is
-  what stops the seal from making such state permanently invisible. Preventing
-  those writes rather than finding them on the next run is #390.
-  A per-repository tree no record names is carried too, by the one name it has
-  — the directory its state is filed under. Two things leave one: a controller
-  whose record write the seal refused, which wrote its trees first, and an
+  What answers that writer is not timing but never letting it take the lock.
+  A run closes the legacy record's lock file against every opener but its own
+  for the whole of its span: it opens its own descriptor, takes the lock on it,
+  closes the mode, and keeps that one descriptor rather than reopening a file
+  it has closed. The order is the mechanism, not an implementation detail. A
+  run that loosened the mode first, so `document_lock` could open the file
+  `O_RDWR` the ordinary way, would be handing a stale transition the lock in
+  exactly that window — so a closed lock is opened read-only, which it still
+  permits, and the mode is only ever loosened by a run that already holds the
+  lock. A location an earlier run left closed is where that matters, since it
+  is the only one whose lock a later run cannot open the ordinary way at
+  all. From
+  that instant the set of processes that can ever contend for that lock is
+  fixed, and the plan proves it empty immediately afterwards. A run that finds
+  it is not empty refuses, before anything has moved — so the process holding
+  that descriptor goes on to act against the installation it was invoked
+  against, an ordinary transition serialized by this very lock as it always
+  was, rather than a stale one acting on a location that moved while it waited.
+  A host that cannot be asked is refused on the same terms, since relocating on
+  an unanswered precondition leaves the host moved with the question still
+  open. That is the prevention this arc selects, and it is available only
+  there: once the installation has moved, every answer left is a repair,
+  because a service manager's definition directory is the installation's own,
+  shared with the job just relocated, and cannot be closed without closing the
+  installation.
+  So no transition at that location begins while a relocation runs. `install`,
+  `start`, `uninstall` and `stop` all enter `document_lock` before they read or
+  write anything, as does every discovery-record write, and `document_lock`
+  opens that file `O_RDWR` and refuses with `Refusing unsafe config lock path`
+  when the open fails. `uninstall_job` is why this matters and not merely
+  tidies: it creates no directory at all, so nothing else stands in front of
+  the definition it unlinks.
+  The reconciliation therefore runs inside that lock rather than handing it
+  over, because there is nobody to hand it to. What it is for is the writers
+  that never wanted the lock: `ensure_dirs` creates a repository's runtime,
+  incident and log trees under no lock at all, and `atomic_write_json` creates
+  a missing parent on its own, so a controller bound here can still lay trees
+  down right up until the seals go down. Those passes stay bounded, so a writer
+  that keeps laying them down ends the sweep rather than holding an installer
+  open, and its record half stands as what answers a location that acquired a
+  record some other way.
+  A run whose final scan finds the location clear closes it. The emptied record
+  path and the runtime root are each occupied by a symlink to the relocation
+  marker beside them, and the lock keeps the mode it has had since before the
+  plan. All three refusals live in code that predates this whole arc, which is
+  the only kind that reaches a controller predating it: `update_json_document`
+  has refused a record path that is present and not a regular file since the
+  commit that introduced the record, `ensure_dirs` cannot make a directory
+  beneath a path that is not one, and `document_lock` cannot open a file it has
+  no permission to open. So a stale invocation returns non-success before it
+  creates, removes or modifies the legacy runtime tree, the legacy log tree,
+  the corresponding trees at the destination, or the repository's on-disk
+  service definition, and the definition the service manager holds stays the
+  relocated one. Every transition that reaches a closed path raises, so every
+  one of those returns non-success. Two do not reach one. A `stop` in a copy
+  predating #367 enters no transaction at all: it reads its snapshot and, since
+  the status file it would read is under the sealed runtime root, finds nothing
+  running and returns its "already stopped" result — a read that changes no
+  protected artifact and asks the service manager for nothing, so there is
+  nothing for a bound to refuse and requiring non-success of it would be
+  requiring a filesystem object to change what a read does. That branch is also
+  the only one it can take from an emptied location, since a relocation refuses
+  outright while any managed job or checkout drainer is running; a stop that
+  would signal the manager or write incident state is refused and diagnosed
+  like every other transition. `run_service` is the other, and only in part: it
+  is what a service manager launches, so it catches its own startup refusals
+  and answers with an exit code. A controller from this change onward answers a failing
+  one, because a run that reported success would be telling that manager, and
+  Kanban reading the job's state through it, that a drainer ran for a
+  repository whose installation moved out from under it — and every definition
+  this installer writes carries `Restart=no` and `KeepAlive=false`, so that
+  failed exit marks the job failed rather than starting a restart loop. A
+  controller predating the change answers a clean one, and nothing reaches
+  that: no bound outside a process changes what it does with an exception it
+  already caught, which is the same limit requirement 4 is stated around. What
+  is reachable there is what matters and is guaranteed — it refuses at the
+  closed lock, names it, and writes nothing at all.
+  Each bound is a fact about the path rather than a permission
+  on a directory a stale invocation writes through, because `ensure_dirs`
+  chmods the install directory on every attempt and would reset that kind of
+  guard on the very invocation it is meant to stop; the lock's own mode is not
+  reachable that way, since nothing chmods it but the run that closed it.
+  Following either seal finds the marker rather than a document, so a reader
+  bound to that location learns where the installation went instead of finding
+  an empty one, and the closed lock carries the same notice as its own content
+  — written through the run's own descriptor, and readable, since what a
+  transition may not do is open it for *writing*. That is the whole
+  operator-facing failure available here: a controller predating this arc
+  renders a fault as the path it could not use, and the path it names is one of
+  these three, so what they lead to carries the rest — that the installation
+  was relocated, the legacy location and the destination by name, and the exact
+  action that resolves it, which is to run the command again against the
+  installation this host now resolves and, where the installed copy predates
+  that resolution, to re-run `tools/install_drainer.py` against the
+  destination.
+  Before it declares the location closed the run asks its last question again:
+  it reads the set of processes holding that lock open, out of `/proc` — the
+  platform that relocates is the platform that has one, since a relocation
+  never happens on macOS and a host with no service manager never reaches one.
+  Empty is a proof rather than a hope, since the mode has been closed since
+  before the plan and nothing can have joined the set. A set that is not empty,
+  and a host that cannot be asked, are both states the run may not call closed:
+  the lock stays closed either way, and the run reports which process still
+  holds it, or that it could not be ruled out, and fails the install rather
+  than telling an operator there is nothing to stop. A process this user may
+  not inspect is not one of ours, since the installation, its lock and every
+  controller that opens it are user-scoped.
+  A location this run could not finish reconciling is deliberately left open,
+  because the operator has to see it as it stands and the re-run that follows
+  their reconciliation is what closes it; a path that could not be closed at
+  all fails the install on the same terms as unresolved state, and is named in
+  that failure. Being closed is a reason for a later run to do nothing only
+  when every one of those paths is closed and the location holds nothing else:
+  a sealed location that still holds trees, or one whose paths an earlier run
+  could not close, is planned and reconciled exactly as an unsealed one is,
+  which is what stops a seal from making such state permanently invisible. The
+  two seals are managed entries no run removes, and neither is reported as a
+  stray or as a late write.
+  That answer has to survive the run, or the repair it prints is advice the
+  re-run ignores. Both seals are objects a later run can see and the lock's
+  mode is a bit it can read, but whether the run that closed it was in a
+  position to prove nothing could still take it is a question only that run
+  could ask — so it writes its answer into the relocation marker beside the
+  location, and the disposition reads it there. A location whose marker does
+  not say closing finished, and one whose lock has been reopened, are both
+  locations a later run acts on; an installation an installer predating this
+  bound sealed says nothing either way, which is how such a host is finished.
+  What that run performs is not a relocation, since nothing is left to move: it
+  is the closing half on its own, over the repositories the destination record
+  names, reopening the lock only for as long as it holds it, putting back any
+  definition that went missing while the location stood open, and closing and
+  recording it once nothing is left holding the lock. Recovering those
+  repositories deliberately does not insist on their definitions, unlike the
+  recovery a relocation performs: a missing definition is the state this run
+  exists to repair, and insisting on one would refuse over exactly that.
+  A per-repository tree no record names is carried too. Two things leave one: a
+  controller that wrote its trees before a refused record write, and an
   uninstall, which deliberately leaves a repository's runtime state, logs and
   incidents behind. Neither can be recovered *as* a repository, because there
   is no entry to read a checkout, an identifier or a definition out of, and
   neither may be left at a location nothing looks at again — so the roots the
   removal kept are descended into rather than skipped, and what is under them
-  is moved to the roots the installation now uses. One already at its
-  destination is the collision every other tree's is, kept and named rather
-  than chosen between. No fence is taken for such a tree and none is available:
-  a repository no record names is one this installation can neither discover
-  nor control, so nothing is running it.
+  is moved to the roots the installation now uses.
+  Which repository such a tree belongs to is recovered only from validated
+  on-disk evidence, never guessed and never spelled as the directory name. A
+  reversible slug is authoritative only when it decodes to a canonical GitHub
+  identity *and* re-encoding that identity through the installation's own
+  resolver reproduces the slug exactly, which is a host question rather than a
+  spelling one: a slug the service manager could not carry as an identifier is
+  one this host files under a hash instead. A hash-only slug is attributed only
+  from a canonical `repository` field in the tree's own `status.json` or an
+  incident document there, with every identity present agreeing and the slug
+  derived from it reproducing the directory; a log tree, which carries no such
+  document, uses the validated identity of the runtime tree filed under the
+  exact same slug. Mutable checkout state and the global service definition are
+  never identity evidence. Missing evidence may be supplied by another of those
+  sources, but evidence that is present and malformed or that disagrees is
+  never skipped past: it, a hash-only slug with no structured identity, and a
+  slug this host would spell differently all leave the state where it was
+  written, reported by slug and by the reason attribution failed. Every
+  repository the report names is a canonical identity — never a slug, and never
+  null — and every collision or failure attributable to one names it beside the
+  slug the state is filed under, while an unattributed entry carries a null
+  repository beside its own slug in the data and renders that slug and reason,
+  never the null, in the repair and the failure an operator reads.
+  One already at its destination is the collision every other tree's is, kept
+  and named rather than chosen between. No fence is taken for such a tree and
+  none is available: a repository no record names is one this installation can
+  neither discover nor control, so nothing is running it.
   Whoever was waiting takes the lock; it keeps the checkout
   and controller fences the whole time, so no drainer or controller can start
   against a tree it is about to move, and it fences any repository it recovers

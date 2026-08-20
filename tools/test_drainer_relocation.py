@@ -1,5 +1,6 @@
-"""Issues #367 and #369: relocating a pre-XDG `~/Library` drainer installation,
-and carrying across whatever a writer puts back at the location it emptied.
+"""Issues #367, #369 and #390: relocating a pre-XDG `~/Library` drainer
+installation, carrying across whatever a writer puts back at the location it
+emptied, and closing that location against a writer that arrives later still.
 
 A host that installed before `tools/kanban_config.py` resolved the drainer's
 managed paths per platform has its installation at the macOS-shaped locations,
@@ -7,7 +8,11 @@ and discovery keeps finding it there forever. These are the tests for the one
 thing that moves it, and for the reconciliation that follows the removal: the
 transition's locks serialize every writer queued on them, and a writer that
 arrives afterwards contends with nothing, so what it recorded is carried across
-and what cannot be carried is reported rather than chosen between.
+and what cannot be carried is reported rather than chosen between. What no lock
+and no sweep can reach — a controller predating every gate here that starts
+after the run has finished looking — is answered by leaving it nothing to
+write: the emptied record path and the emptied runtime root are both occupied
+by objects the writers in that old copy fail on.
 
 Hermetic throughout. The platform is simulated rather than read, `$HOME` and
 both XDG base directories are redirected into a temporary tree, and no
@@ -83,6 +88,15 @@ class RelocationFixture(unittest.TestCase):
         self.launch_agents = self.root / "LaunchAgents"
         self.launch_agents.mkdir()
         self.commands = []
+        # What this host would answer about processes holding the retained lock
+        # open. Simulated for the reason the service manager is: whether a
+        # given host can read another process's descriptors, and what it finds,
+        # is settled by `ProcessDescriptorTests` below, and pinning is what
+        # makes every case here answer identically on a macOS laptop with no
+        # `/proc` and on a Linux runner with one. `()` is "nobody else has it
+        # open", which is what an ordinary host answers.
+        self.lock_holders = ()
+        self.lock_holders_reason = None
         self._platform = None
         self.addCleanup(self._release_platform)
         self._redirect_environment()
@@ -132,6 +146,13 @@ class RelocationFixture(unittest.TestCase):
             service_manager,
             "detect_service_manager",
             return_value=service_manager.SYSTEMD,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(
+            install_drainer,
+            "_processes_holding_open",
+            lambda path: (self.lock_holders, self.lock_holders_reason),
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -313,7 +334,7 @@ class RelocationFixture(unittest.TestCase):
 
         return mock.patch.object(install_drainer, "_remove_legacy_installation", hook)
 
-    def write_late(self, checkout, bindings, *, stamp="late"):
+    def write_late(self, checkout, bindings, *, stamp="late", record=True):
         """One repository recorded at the legacy location, after the removal.
 
         Driven through the controller's own writers under the constants a
@@ -330,6 +351,11 @@ class RelocationFixture(unittest.TestCase):
         own writer, unmodified, and the runtime, log and definition writers are
         not gated in either copy. `QueuedRecordWriterTests` below is the other
         half: a writer running *this* copy, in another process, is refused.
+
+        `record=False` is the same writer with only its discovery-record write
+        left out, which is exactly what such a controller leaves when that one
+        write is refused: every directory, document, log line and definition it
+        lays down first, and no entry anywhere naming any of it.
         """
         with self.as_bound(bindings):
             job = drain_prs_service.resolve_job(checkout)
@@ -339,10 +365,11 @@ class RelocationFixture(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 drain_prs_service.ensure_dirs(job)
                 backend.write_definition(drain_prs_service.service_definition(job))
-                with mock.patch.object(
-                    drain_prs_service, "require_current_installation", lambda: None
-                ):
-                    drain_prs_service.write_discovery_record(job)
+                if record:
+                    with mock.patch.object(
+                        drain_prs_service, "require_current_installation", lambda: None
+                    ):
+                        drain_prs_service.write_discovery_record(job)
                 drain_prs_service.atomic_write_json(
                     job.status_path,
                     {"state": "stopped", "repository": job.identity, "stamp": stamp},
@@ -382,6 +409,19 @@ class RelocationFixture(unittest.TestCase):
         return self.legacy_dir / "config.json"
 
     @property
+    def legacy_guard(self):
+        """The runtime root at the legacy location, which a finished
+        relocation seals exactly as it seals the record path."""
+        return self.legacy_dir / "runtime"
+
+    @property
+    def legacy_lock(self):
+        """The retained lock beside the legacy record, which a finished
+        relocation closes by making it unopenable rather than by occupying
+        it: a lock file may never be unlinked."""
+        return self.legacy_dir / "config.json.lock"
+
+    @property
     def destination_record(self):
         return self.destination / "config.json"
 
@@ -412,17 +452,26 @@ class RelocationFixture(unittest.TestCase):
         return state
 
     def lock_is_held(self, record=None):
-        """Whether another opener would block on one record's lock.
+        """Whether another opener would be excluded from one record's lock.
 
         `flock` is per open file description, so a second descriptor in this
         same process contends exactly as another process's would — which is
         what makes this an observation of the lock rather than of the code
         that takes it.
+
+        A relocation additionally closes the legacy record's lock against every
+        opener but its own, for the span it holds that lock. A file another
+        process cannot open is one it cannot take, so that answers this
+        question too — and more strongly than blocking does, since a process
+        that blocks eventually gets its turn.
         """
         lock_path = Path(str(record or self.legacy_record) + ".lock")
         if not lock_path.parent.is_dir():
             return False
-        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        except PermissionError:
+            return True
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -453,24 +502,29 @@ class RelocationFixture(unittest.TestCase):
         )
         self.assertFalse(self.destination_logs.exists())
 
-    def assert_record_path_is_sealed(self):
-        """No document at the legacy record path, and nothing that can put one
-        there.
+    def assert_location_is_sealed(self):
+        """Every path a finished relocation closes, and nothing that can put
+        state back at one of them.
 
-        Asserted as what the seal is rather than as the path being absent:
+        Asserted as what a seal is rather than as the path being absent:
         `Path.exists` follows the symlink to the marker beside it, and the
         point of leaving a symlink is precisely that the path is occupied by
         something no writer will replace.
         """
-        self.assertTrue(install_drainer._is_tombstone(self.legacy_record))
-        self.assertEqual(
-            os.readlink(self.legacy_record),
-            drain_prs_service.RELOCATION_MARKER_NAME,
-        )
+        for path in (self.legacy_record, self.legacy_guard):
+            self.assertTrue(install_drainer._is_relocation_seal(path), path)
+            self.assertEqual(
+                os.readlink(path), drain_prs_service.RELOCATION_MARKER_NAME
+            )
         self.assertNotIn(
             "repositories",
             drain_prs_service._read_json_object(self.legacy_record),
         )
+        # And the lock, which is closed by mode rather than by an object: it
+        # may never be unlinked, so what a transition meets there is an open
+        # that fails.
+        self.assertTrue(_plain_file_at(self.legacy_lock))
+        self.assertFalse(os.access(self.legacy_lock, os.W_OK))
 
     def assert_relocate_refuses_and_changes_nothing(self, expected_fragment):
         """For a refusal the transition raises rather than the plan: the
@@ -495,6 +549,22 @@ class RelocationFixture(unittest.TestCase):
             install_drainer.relocate(self.destination, self.sources)
         self.assertIn(expected_fragment, str(raised.exception))
         self.assertEqual(self.host_state(), before)
+
+    def fake_service_manager(self):
+        """A `systemctl` on a subprocess's PATH which records instead of
+        running, so "it never asked the manager to load or unload anything" is
+        an observation rather than an absence of evidence — and so a
+        subprocess that *does* ask reaches a manager this suite controls
+        rather than the host's."""
+        directory = self.root / "bin"
+        directory.mkdir(exist_ok=True)
+        script = directory / "systemctl"
+        script.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$KANBAN_FAKE_MANAGER_LOG"\n',
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return directory
 
     def relocate(self):
         return install_drainer.relocate(self.destination, self.sources)
@@ -702,12 +772,12 @@ class TwoRepositoryRelocationTests(RelocationFixture):
         # hand the next writer a different lock from the one it is waiting on
         # — which is why the directory containing it survives too, and with it
         # the marker that tells a process still bound here that it is stale.
-        self.assert_record_path_is_sealed()
+        self.assert_location_is_sealed()
         self.assertEqual(
             sorted(path.name for path in self.legacy_dir.iterdir()),
-            ["config.json", "config.json.lock", "relocated.json"],
+            ["config.json", "config.json.lock", "relocated.json", "runtime"],
         )
-        self.assert_record_path_is_sealed()
+        self.assert_location_is_sealed()
         self.assertIn(str(self.legacy_record) + ".lock", self.result["retained"])
         self.assertIn(
             str(self.legacy_dir / "relocated.json"), self.result["retained"]
@@ -795,8 +865,8 @@ class StaleControllerTests(RelocationFixture):
         # The record it would have recreated, the definition it would have
         # rewritten, and the runtime directories `ensure_dirs` would have
         # rebuilt are all still as the relocation left them.
-        self.assert_record_path_is_sealed()
-        self.assertFalse((self.legacy_dir / "runtime").exists())
+        self.assert_location_is_sealed()
+        self.assertTrue(install_drainer._is_relocation_seal(self.legacy_guard))
         self.assertEqual(after, before)
         # And it never asked the service manager for anything.
         self.assertEqual(self.commands, [])
@@ -824,7 +894,23 @@ class StaleControllerTests(RelocationFixture):
             .definition_path(self.job.label)
             .is_file()
         )
-        self.assert_record_path_is_sealed()
+        self.assert_location_is_sealed()
+
+    def test_stopping_from_a_stale_controller_refuses_too(self):
+        # The transition whose own exclusion disappears while it runs, which is
+        # why this copy asks the gate up front: signalling the runner is what
+        # frees a mover to act, and a stale stop that signalled would do it
+        # against a drainer this installation no longer describes. A copy
+        # predating that gate reads its snapshot and returns instead, which
+        # `StaleInvocationBoundTests` is where the terms of are asserted.
+        with self.as_the_stale_controller():
+            before = self.host_state()
+            with self.assertRaises(drain_prs_service.ServiceError) as raised:
+                drain_prs_service.stop_service(self.job)
+            self.assertEqual(self.host_state(), before)
+        self.assertIn("was relocated to", str(raised.exception))
+        self.assertIn(str(self.destination), str(raised.exception))
+        self.assertEqual(self.commands, [])
 
     def test_a_queued_run_refuses_before_it_writes_anything(self):
         # The service-manager `run` path: a runner launched before the
@@ -833,12 +919,14 @@ class StaleControllerTests(RelocationFixture):
         # the directories it logs into.
         with self.as_the_stale_controller():
             before = self.host_state()
+            # Non-success: a run that reported success would be telling the
+            # service manager a drainer ran for an installation that moved.
             self.assertEqual(
-                drain_prs_service.run_service(self.job, self.job.identity), 0
+                drain_prs_service.run_service(self.job, self.job.identity), 1
             )
             self.assertEqual(self.host_state(), before)
         self.assertFalse((self.legacy_logs / self.job.slug).exists())
-        self.assertFalse((self.legacy_dir / "runtime").exists())
+        self.assertTrue(install_drainer._is_relocation_seal(self.legacy_guard))
 
     def test_a_controller_bound_to_the_destination_is_unaffected(self):
         # The gate is about *this* installation having moved, not about a
@@ -892,7 +980,7 @@ class StaleCustomInstallControllerTests(RelocationFixture):
             with self.assertRaises(drain_prs_service.ServiceError):
                 drain_prs_service.install_job(self.job)
             self.assertEqual(self.host_state(), before)
-        self.assert_record_path_is_sealed()
+        self.assert_location_is_sealed()
 
 
 class TransientDestinationControllerTests(RelocationFixture):
@@ -1006,8 +1094,11 @@ class UnaccountedTreeTests(RelocationFixture):
         late = result["late_writes"]
         self.assertFalse(late["resolved"])
         self.assertEqual(
-            [(item["repository"], item["kind"]) for item in late["collisions"]],
-            [("someone.else", "log")],
+            [
+                (item["repository"], item["slug"], item["kind"])
+                for item in late["collisions"]
+            ],
+            [("someone/else", "someone.else", "log")],
         )
         self.assertTrue((self.legacy_logs / "someone.else").is_dir())
         self.assertTrue((self.destination_logs / "someone.else").is_dir())
@@ -1453,7 +1544,7 @@ class LockingTests(RelocationFixture):
         self.assertTrue(result["late_writes"]["resolved"])
         self.assertEqual(result["late_writes"]["passes"], 1)
         self.assertIn("cleared again", result["repair"])
-        self.assert_record_path_is_sealed()
+        self.assert_location_is_sealed()
 
 
 class CheckoutFenceTests(RelocationFixture):
@@ -1584,7 +1675,7 @@ class CheckoutFenceTests(RelocationFixture):
         lock = drain_prs_service.controller_lock_path(runtime)
         self.assertFalse(lock.exists())
         self.assertTrue(self.relocate()["relocated"])
-        self.assertFalse((self.legacy_dir / "runtime").exists())
+        self.assertTrue(install_drainer._is_relocation_seal(self.legacy_guard))
 
     def test_a_repository_the_fence_does_not_cover_refuses(self):
         # Fail closed on the one thing the preflight-derived fence cannot
@@ -2061,9 +2152,9 @@ class LateWriteCarryTests(RelocationFixture):
         result = self.relocate_with_late_write()
         self.assertEqual(
             sorted(path.name for path in self.legacy_dir.iterdir()),
-            ["config.json", "config.json.lock", "relocated.json"],
+            ["config.json", "config.json.lock", "relocated.json", "runtime"],
         )
-        self.assert_record_path_is_sealed()
+        self.assert_location_is_sealed()
         self.assertFalse(self.legacy_logs.exists())
         self.assertIn(str(self.legacy_record), result["late_writes"]["removed"])
         self.assertEqual(result["late_writes"]["retained"], [])
@@ -2107,7 +2198,7 @@ class LateWriteCarryTests(RelocationFixture):
                     drain_prs_service.resolve_job(self.widgets)
                 )
             self.assertEqual(self.host_state(), before)
-        self.assert_record_path_is_sealed()
+        self.assert_location_is_sealed()
 
 
 class SealedRecordPathTests(RelocationFixture):
@@ -2128,20 +2219,36 @@ class SealedRecordPathTests(RelocationFixture):
 
     def test_the_emptied_record_path_is_sealed(self):
         self.assertTrue(self.result["late_writes"]["sealed"])
-        self.assert_record_path_is_sealed()
+        self.assert_location_is_sealed()
 
-    def test_every_record_writer_refuses_it(self):
-        # The shared mutator each of `write_discovery_record`,
-        # `merge_repository_record` and `remove_discovery_record` goes through,
-        # in this copy and in every copy back to the one that introduced the
-        # record. Asked directly, because what makes the seal work is this
-        # refusal and not anything this arc added.
+    def test_the_closed_lock_refuses_a_writer_before_it_reaches_the_record(self):
+        # `document_lock` is the first thing every transition and every record
+        # write enters, and the lock it opens is closed — so this is what a
+        # writer at this location meets now, whatever it came to do.
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            drain_prs_service.update_json_document(
+                self.legacy_record, lambda document: {"repositories": {}}
+            )
+        self.assertIn("Refusing unsafe config lock path", str(raised.exception))
+        self.assertIn(str(self.legacy_lock), str(raised.exception))
+        self.assert_location_is_sealed()
+
+    def test_every_record_writer_still_refuses_the_seal_underneath_it(self):
+        """#369's own bound, asked with the lock out of the way.
+
+        The two are independent, and this is what keeps that true: the shared
+        mutator each of `write_discovery_record`, `merge_repository_record` and
+        `remove_discovery_record` goes through refuses the sealed record path
+        itself, in this copy and in every copy back to the one that introduced
+        the record — not because the lock beside it happens to be closed.
+        """
+        self.legacy_lock.chmod(0o600)
         with self.assertRaises(drain_prs_service.ServiceError) as raised:
             drain_prs_service.update_json_document(
                 self.legacy_record, lambda document: {"repositories": {}}
             )
         self.assertIn("Refusing unsafe config path", str(raised.exception))
-        self.assert_record_path_is_sealed()
+        self.assertTrue(install_drainer._is_relocation_seal(self.legacy_record))
 
     def test_it_reads_as_the_relocation_notice_rather_than_as_a_record(self):
         # Following it finds the marker, which names where the installation
@@ -2160,6 +2267,57 @@ class SealedRecordPathTests(RelocationFixture):
         self.assertFalse(again["relocated"])
         self.assertIn("emptied and sealed", again["reason"])
         self.assertEqual(self.host_state(), before)
+
+    def test_a_later_run_over_residue_keeps_the_guard_rather_than_clearing_it(self):
+        """The guard has to be admitted by this installer's own ownership and
+        emptiness vocabulary, or it would break the sweep it sits inside.
+
+        A sealed location that acquires state again is planned and reconciled
+        exactly as an unsealed one is, so that run meets the guard while
+        deciding what is a stray, what a writer put back, and what may be
+        removed with the installation. It has to answer "mine, and not to be
+        taken away" to all three — and a run that removed it, even to write it
+        again at the end, would reopen for its own length exactly the window
+        the guard exists to close.
+        """
+        stray = self.legacy_logs / "someone.else"
+        stray.mkdir(parents=True)
+        (stray / "service.log").write_text("kept\n", encoding="utf-8")
+        # No longer finished business, so this run really does plan the
+        # location rather than skipping it.
+        self.assertIsNone(install_drainer.relocation_disposition(self.destination))
+        again = self.relocate()
+        self.assertTrue(again["relocated"])
+        late = again["late_writes"]
+        self.assertTrue(late["resolved"], late["repair"])
+        self.assertEqual(late["strays"], [])
+        self.assertEqual(late["unattributed"], [])
+        self.assertIn(str(self.legacy_guard), again["retained"])
+        self.assertNotIn(str(self.legacy_guard), again["removed"])
+        self.assertNotIn(str(self.legacy_guard), late["removed"])
+        # What was there is carried, the guard is the same object it was, and
+        # the location reads as finished business again.
+        self.assertTrue(
+            (self.destination_logs / "someone.else" / "service.log").is_file()
+        )
+        self.assert_location_is_sealed()
+        self.assertIn(
+            "emptied and sealed",
+            install_drainer.relocation_disposition(self.destination),
+        )
+
+    def test_a_location_missing_one_seal_is_not_finished_business(self):
+        """Being sealed is an answer only when every path sealing closes is
+        closed: a run that emptied this location and could not write one of
+        them left a path a controller still bound here writes through, and
+        reading the other seal as an answer would make it invisible forever.
+        """
+        self.legacy_guard.unlink()
+        self.assertIsNone(install_drainer.relocation_disposition(self.destination))
+        again = self.relocate()
+        self.assertTrue(again["relocated"])
+        self.assertTrue(again["late_writes"]["sealed"])
+        self.assert_location_is_sealed()
 
     def test_the_lock_beside_it_is_still_never_unlinked(self):
         self.assertTrue((self.legacy_dir / "config.json.lock").is_file())
@@ -2185,7 +2343,7 @@ class UnsealedResidueTests(RelocationFixture):
             result = self.relocate()
         self.assertFalse(result["late_writes"]["resolved"])
         self.assertFalse(result["late_writes"]["sealed"])
-        self.assertFalse(install_drainer._is_tombstone(self.legacy_record))
+        self.assertFalse(install_drainer._is_relocation_seal(self.legacy_record))
         self.assertTrue(_plain_file_at(self.legacy_record))
 
     def test_a_stray_leaves_it_unsealed_too(self):
@@ -2196,7 +2354,7 @@ class UnsealedResidueTests(RelocationFixture):
         with self.racing(late):
             result = self.relocate()
         self.assertFalse(result["late_writes"]["sealed"])
-        self.assertFalse(install_drainer._is_tombstone(self.legacy_record))
+        self.assertFalse(install_drainer._is_relocation_seal(self.legacy_record))
 
     def test_a_seal_that_cannot_be_written_is_reported_rather_than_raised(self):
         # Total on the same terms as the rest of the reconciliation: this runs
@@ -2235,7 +2393,7 @@ class UnsealedResidueTests(RelocationFixture):
         again = self.relocate()
         self.assertTrue(again["relocated"])
         self.assertTrue(again["late_writes"]["sealed"])
-        self.assert_record_path_is_sealed()
+        self.assert_location_is_sealed()
 
 
 def _plain_file_at(path):
@@ -2672,7 +2830,7 @@ class LateWriteReportingTests(RelocationFixture):
 # managed paths at its own import, exactly as any controller does, and then
 # writes the discovery record the way a start or an install does.
 _QUEUED_WRITER = """
-import contextlib, io, json, os, sys, time
+import contextlib, fcntl, io, json, os, sys, time
 from pathlib import Path
 
 for entry in reversed(sys.argv[1].split(os.pathsep)):
@@ -2681,8 +2839,18 @@ ready, go, queued, acquired, result = (
     Path(argument) for argument in sys.argv[2:7]
 )
 identity, checkout = sys.argv[7], sys.argv[8]
+flock_go = Path(sys.argv[12])
 
 import drain_prs_service
+import service_manager
+
+# Fixture wiring rather than a protection. Which manager this host has is
+# settled by `tools/test_service_manager.py`, and where that manager keeps its
+# definitions has to be the directory the parent process reads, or the two
+# would name different files. The backend is pinned rather than probed because
+# this process cannot count on the host it runs on having a live user manager.
+service_manager._DETECTED = service_manager.SYSTEMD
+service_manager.SYSTEMD_USER_DIR = Path(sys.argv[11])
 
 # Bound here, while the legacy record is still the one this host resolves.
 ready.write_text(str(drain_prs_service.DISCOVERY_RECORD_PATH), encoding="utf-8")
@@ -2690,60 +2858,117 @@ while not go.exists():
     time.sleep(0.01)
 outcome = {"bound_record": str(drain_prs_service.DISCOVERY_RECORD_PATH)}
 if sys.argv[10] == "trees":
-    with contextlib.redirect_stdout(io.StringIO()):
-        # Everything a controller puts down before it ever reaches the record, and
-        # every bit of it under no record lock at all: the directories, the status
-        # file, an incident, a log line and the service definition. The backend is
-        # pinned rather than probed because this process cannot count on the host
-        # it runs on having a live user manager, and nothing here asks one for
-        # anything — every one of these is a file write.
-        import service_manager
-
-        service_manager._DETECTED = service_manager.SYSTEMD
-        job = drain_prs_service.resolve_job(Path(checkout))
-        drain_prs_service.ensure_dirs(job)
-        drain_prs_service.atomic_write_json(
-            job.status_path, {"state": "starting", "repository": identity}
-        )
-        drain_prs_service.write_incident(
-            job=job, exit_code=9, command=["drain_prs.py", "--path", checkout]
-        )
-        drain_prs_service.service_log(job, f"pre-gate start for {identity}")
-        drain_prs_service.service_backend().write_definition(
-            drain_prs_service.service_definition(job)
-        )
-        outcome["runtime"] = str(job.runtime_dir)
-        outcome["logs"] = str(job.log_dir)
-queued.write_text("", encoding="utf-8")
-# The record's own lock, taken the way every transition in the controller
-# takes it and before anything is asked about the installation, so where this
-# process waits is settled rather than raced. `merge_repository_record` below
-# asks for the same lock again, which re-enters within this one thread exactly
-# as it does inside `install_job`.
-with drain_prs_service.document_lock(drain_prs_service.DISCOVERY_RECORD_PATH):
-    acquired.write_text("", encoding="utf-8")
+    # Everything a controller puts down before it ever reaches the record, and
+    # every bit of it under no record lock at all: the directories, the status
+    # file, an incident, a log line and the service definition.
+    job = drain_prs_service.resolve_job(Path(checkout))
+    outcome["runtime"] = str(job.runtime_dir)
+    outcome["logs"] = str(job.log_dir)
     try:
-        drain_prs_service.merge_repository_record(identity, {"repository": checkout})
-        outcome["recorded"] = True
+        with contextlib.redirect_stdout(io.StringIO()):
+            drain_prs_service.ensure_dirs(job)
+            drain_prs_service.atomic_write_json(
+                job.status_path, {"state": "starting", "repository": identity}
+            )
+            drain_prs_service.write_incident(
+                job=job, exit_code=9, command=["drain_prs.py", "--path", checkout]
+            )
+            drain_prs_service.service_log(job, f"pre-gate start for {identity}")
+            drain_prs_service.service_backend().write_definition(
+                drain_prs_service.service_definition(job)
+            )
+    except OSError as error:
+        # Reported rather than fatal: a location whose runtime root a
+        # relocation has sealed refuses the first of these, and what this
+        # process did and did not manage to write is the whole observation.
+        outcome["trees_refused"] = f"{type(error).__name__}: {error}"
+def act():
+    try:
+        if sys.argv[10].startswith("uninstall"):
+            # The one transition that creates no directory: it unloads the job
+            # and unlinks the definition before it ever reaches the record
+            # write the seal refuses.
+            with contextlib.redirect_stdout(io.StringIO()):
+                outcome["uninstalled"] = drain_prs_service.uninstall_job(
+                    drain_prs_service.resolve_job(Path(checkout))
+                )
+        else:
+            drain_prs_service.merge_repository_record(
+                identity, {"repository": checkout}
+            )
+            outcome["recorded"] = True
     except drain_prs_service.ServiceError as error:
         outcome["refused"] = str(error)
     # Held across the write and a moment past it, so a reader that asks for
     # this lock after the handoff blocks on this process rather than reading a
     # record it is halfway through replacing.
     time.sleep(float(sys.argv[9]))
+
+
+if sys.argv[10] == "uninstall-delayed":
+    # `document_lock` opens the lock file and takes its flock together, and the
+    # interleaving under test is exactly the gap between those two: a
+    # descriptor opened before the relocation whose flock lands while the run's
+    # final pass is holding the lock, so that pass cannot see it. The two
+    # halves are therefore performed here with a gate between them, and the
+    # re-entrancy bookkeeping that helper keeps for its outermost holder is
+    # primed with the same entry it would have recorded — which is what makes
+    # the nested acquisition inside `uninstall_job` the pass-through it is in a
+    # real invocation rather than a deadlock against this process's own
+    # descriptor.
+    lock_path = drain_prs_service.DISCOVERY_RECORD_PATH.with_name(
+        drain_prs_service.DISCOVERY_RECORD_PATH.name + ".lock"
+    )
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    resolved = drain_prs_service.DISCOVERY_RECORD_PATH.absolute()
+    queued.write_text("", encoding="utf-8")
+    while not flock_go.exists():
+        time.sleep(0.01)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    acquired.write_text("", encoding="utf-8")
+    held = getattr(drain_prs_service._HELD_DOCUMENT_LOCKS, "paths", None)
+    if held is None:
+        held = drain_prs_service._HELD_DOCUMENT_LOCKS.paths = set()
+    held.add(resolved)
+    try:
+        act()
+    finally:
+        held.discard(resolved)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+else:
+    queued.write_text("", encoding="utf-8")
+    # The record's own lock, taken the way every transition in the controller
+    # takes it and before anything is asked about the installation, so where
+    # this process waits is settled rather than raced. The write below asks for
+    # the same lock again, which re-enters within this one thread exactly as it
+    # does inside `install_job`.
+    try:
+        with drain_prs_service.document_lock(
+            drain_prs_service.DISCOVERY_RECORD_PATH
+        ):
+            acquired.write_text("", encoding="utf-8")
+            act()
+    except drain_prs_service.ServiceError as error:
+        # A location a relocation has finished closing refuses this writer
+        # before it ever holds the lock: `document_lock` opens that file
+        # `O_RDWR`, and a run that emptied this location left it unopenable.
+        outcome["refused"] = str(error)
 result.write_text(json.dumps(outcome), encoding="utf-8")
 """
 
 
 class QueuedRecordWriterTests(RelocationFixture):
-    """A writer in another OS process, queued on the legacy record's lock.
+    """A writer in another OS process, reaching for the legacy record's lock
+    while a relocation holds it.
 
-    The relocation holds that lock across its whole transition and never
-    unlinks the lock file, so this writer really does block on the same inode
-    and really does wake only after the reconciliation has finished — past
-    anything a bounded sweep could have carried across. What it must not be
-    able to do is record anything, and that is what the refusal every
-    discovery-record write carries is for.
+    It never gets it, and never queues for it either. The run closes that lock
+    file against every opener but its own the instant it takes it, and
+    `document_lock` opens it `O_RDWR` before any transition reads or writes a
+    thing — so this writer is refused where it stands. Queuing is what it did
+    before that closure existed, and what made a bounded sweep necessary: a
+    writer that waits gets its turn eventually, on a location that moved while
+    it waited.
     """
 
     def setUp(self):
@@ -2775,8 +3000,16 @@ class QueuedRecordWriterTests(RelocationFixture):
                 str(self.widgets),
                 "0",
                 "record-only",
+                str(self.units),
+                str(self.root / "queued.flock"),
             ],
-            env={"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
+            env={
+                "HOME": str(self.home),
+                "PATH": os.pathsep.join(
+                    [str(self.fake_service_manager()), os.environ.get("PATH", "")]
+                ),
+                "KANBAN_FAKE_MANAGER_LOG": str(self.root / "queued.manager"),
+            },
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -2818,9 +3051,10 @@ class QueuedRecordWriterTests(RelocationFixture):
             return real_apply(transition, relocation_plan, sources)
 
         def remove_hook(transition, relocation_plan):
-            # It cannot have the lock: this run holds it and never unlinks it.
-            # If it does, `flock` did not serialize this writer at all.
-            self.blocked = not self.acquired.exists()
+            # It cannot have the lock: this run holds it, never unlinks it, and
+            # has closed it against every other opener. If it does, neither the
+            # closure nor `flock` excluded this writer at all.
+            self.excluded = not self.acquired.exists()
             return real_remove(transition, relocation_plan)
 
         with mock.patch.object(install_drainer, "_apply_relocation", apply_hook):
@@ -2831,18 +3065,20 @@ class QueuedRecordWriterTests(RelocationFixture):
         self.assertEqual(process.wait(timeout=60), 0, process.communicate())
         return result, json.loads(self.result.read_text(encoding="utf-8"))
 
-    def test_it_blocks_on_the_lock_and_then_records_nothing(self):
+    def test_it_never_takes_the_lock_and_records_nothing(self):
         before_record = self.legacy_record
         _, outcome = self.relocate_with_queued_writer()
         # It really was the stale, legacy-bound process this is about...
         self.assertEqual(outcome["bound_record"], str(before_record))
-        # ...it really did block, rather than refusing before it queued...
-        self.assertTrue(self.blocked, outcome)
-        # ...and it wrote nothing at the location the relocation emptied.
+        # ...it never held the lock while this run was inside the transition...
+        self.assertTrue(self.excluded, outcome)
+        # ...and it was refused by the file rather than by anything in it, so
+        # it never queued and never woke into a location that had moved.
+        self.assertFalse(self.acquired.exists())
         self.assertNotIn("recorded", outcome)
-        self.assertIn("was relocated to", outcome["refused"])
-        self.assertIn(str(self.destination), outcome["refused"])
-        self.assert_record_path_is_sealed()
+        self.assertIn("Refusing unsafe config lock path", outcome["refused"])
+        self.assertIn(str(self.legacy_lock), outcome["refused"])
+        self.assert_location_is_sealed()
 
     def test_the_run_it_woke_into_needed_no_reconciliation(self):
         result, _ = self.relocate_with_queued_writer()
@@ -2852,8 +3088,179 @@ class QueuedRecordWriterTests(RelocationFixture):
         self.assertEqual(result["late_writes"]["passes"], 0)
         self.assertEqual(
             sorted(path.name for path in self.legacy_dir.iterdir()),
-            ["config.json", "config.json.lock", "relocated.json"],
+            ["config.json", "config.json.lock", "relocated.json", "runtime"],
         )
+
+
+def _function_source(source, name):
+    """The whole `def <name>(...)` block, from its own line to the blank lines
+    that end it.
+
+    Sliced by name rather than parsed, so a rename fails here loudly instead of
+    quietly leaving the definition this fixture is about in place.
+    """
+    start = source.index(f"\ndef {name}(") + 1
+    return source[start : source.index("\n\n\n", start) + 1]
+
+
+# Every protection this arc put *inside* the controller, by the issue that
+# added it and the definition an installed copy predating that issue has
+# instead. Whole definitions rather than fragments, because a copy that had
+# only the two write-level wrappers taken out still contains the refusal those
+# wrappers raise and the gate every other transition enters — so it is not a
+# controller predating #367 at all, and any protection added beside them would
+# survive inside the copy this fixture calls old.
+_PRE_GATE_STUBS = (
+    (
+        "#367",
+        "the refusal that answers an installation this process's paths no "
+        "longer describe",
+        "require_current_installation",
+        "def require_current_installation() -> None:\n    return None\n",
+    ),
+    (
+        "#367",
+        "the gate every transition enters, which asks that refusal on either "
+        "side of the discovery record's lock",
+        "installation_transaction",
+        "def installation_transaction() -> Iterator[None]:\n"
+        "    with document_lock(DISCOVERY_RECORD_PATH):\n"
+        "        yield\n",
+    ),
+)
+
+# What this arc changed *inside* existing definitions rather than by adding
+# one, by the issue that changed it and what stood there before. Fragments
+# rather than whole definitions, because that is what these are.
+_PRE_GATE_FRAGMENTS = (
+    (
+        "#367",
+        "the staleness gate held across each of the two discovery-record writes",
+        "    with installation_transaction():\n        return update_json_document(",
+        "    return update_json_document(",
+        2,
+    ),
+    (
+        "#367",
+        "the up-front gate it gave a stop, which a copy predating it does not "
+        "enter at all before reading its snapshot",
+        "    with installation_transaction():\n        pass\n"
+        "    snapshot = status_snapshot(job)",
+        "    snapshot = status_snapshot(job)",
+        1,
+    ),
+    (
+        "#390",
+        "the exit code a refused run answers with, which this arc changed from "
+        "a clean one to a failure",
+        '        print(f"PR drainer did not start: {exc}", flush=True)\n'
+        "        return 1",
+        '        print(f"PR drainer did not start: {exc}", flush=True)\n'
+        "        return 0",
+        1,
+    ),
+)
+
+# The bounds this arc did *not* put inside the controller, by the issue that
+# established each and the code an old copy meets it at. #369 seals the
+# discovery record path and #390 seals the runtime root, and both are
+# filesystem objects the installer leaves: what refuses them is code that
+# predates this repository's whole relocation arc. Each function below is
+# asserted to come out of the transformation byte-identical to the shipped one
+# and to mention nothing relocation-aware, so "this copy lacks that issue's
+# protection" is checked rather than assumed — and a controller-resident gate
+# added at one of them later fails here instead of silently reappearing inside
+# the copy this fixture calls old.
+_PRE_GATE_EXTERNAL = (
+    (
+        "#369",
+        "the discovery record's seal is an installer artifact; what refuses it "
+        "is the historical check on the record path's own object type",
+        "update_json_document",
+        ("Refusing unsafe config path",),
+    ),
+    (
+        "#390",
+        "the runtime root's guard is an installer artifact too; what refuses it "
+        "is a directory creation that cannot succeed beneath a path that is "
+        "not a directory",
+        "ensure_dirs",
+        (),
+    ),
+)
+
+# What none of the code above may mention. Every one of those functions
+# predates this arc, so a relocation-aware refusal appearing in one is a
+# controller-resident bound this fixture would have to account for.
+_PRE_GATE_FORBIDDEN = (
+    "relocation_marker",
+    "require_current_installation",
+    "installation_transaction",
+    "resolved_installation_drift",
+    "RELOCATION_MARKER",
+)
+
+
+class PreGateControllerFixture(RelocationFixture):
+    """A copy of the controller predating every gate in this repository.
+
+    A host with a `~/Library` installation is running the controller it
+    installed, from before this arc — that is the premise of the relocation
+    itself — so no edit to *this* copy makes that process refuse anything. The
+    copy is built from the current source by a transformation that is accounted
+    for per issue, rather than checked in, so it cannot drift away from what
+    the controller actually is; what it may not do is leave a protection in
+    place and still be called old.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.pre_gate = self.build_pre_gate_controller()
+
+    def build_pre_gate_controller(self):
+        current = Path(drain_prs_service.__file__).read_text(encoding="utf-8")
+        source = current
+        for issue, described, name, stub in _PRE_GATE_STUBS:
+            existing = _function_source(source, name)
+            self.assertNotEqual(
+                existing, stub, f"{issue}: {described} is already a stub"
+            )
+            source = source.replace(existing, stub)
+            self.assertNotIn(existing, source, f"{issue}: {described} survived")
+        for issue, described, before, after, count in _PRE_GATE_FRAGMENTS:
+            self.assertEqual(
+                source.count(before), count, f"{issue}: {described} moved"
+            )
+            source = source.replace(before, after)
+        for issue, described, name, required in _PRE_GATE_EXTERNAL:
+            shipped = _function_source(current, name)
+            self.assertEqual(
+                _function_source(source, name), shipped, f"{issue}: {described}"
+            )
+            for fragment in required:
+                self.assertIn(fragment, shipped, f"{issue}: {described}")
+            for fragment in _PRE_GATE_FORBIDDEN:
+                self.assertNotIn(fragment, shipped, f"{issue}: {described}")
+        directory = self.root / "pre-gate-controller"
+        directory.mkdir()
+        (directory / "drain_prs_service.py").write_text(source, encoding="utf-8")
+        return directory
+
+    def controller_path(self):
+        """Its own copy first and the tracked modules behind it, so a
+        subprocess really runs the older controller while resolving paths
+        through the same `kanban_config` every other component does."""
+        return os.pathsep.join(
+            [str(self.pre_gate), str(Path(drain_prs_service.__file__).parent)]
+        )
+
+    def wait_for(self, path, message):
+        deadline = time.monotonic() + 30
+        while not path.exists() and time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                self.fail(f"{message}: {self.process.communicate()}")
+            time.sleep(0.02)
+        self.assertTrue(path.exists(), message)
 
 
 # What the pre-gate writer below runs. Identical to the queued writer above
@@ -2862,17 +3269,17 @@ class QueuedRecordWriterTests(RelocationFixture):
 _PRE_GATE_WRITER = _QUEUED_WRITER
 
 
-class PreGateWriterTests(RelocationFixture):
+class PreGateWriterTests(PreGateControllerFixture):
     """The writer no gate in this copy can refuse: an older installed
     controller.
 
-    A host with a `~/Library` installation is running the controller it
-    installed, from before this arc — that is the premise of the relocation
-    itself — so no edit to *this* copy makes that process refuse. Such a writer
-    queued on the retained record lock wakes once the transition releases it and
-    records itself at the location the run just emptied. What must happen then
-    is that the reconciliation finds it, which is why the reconciliation is
-    sequenced outside those locks and re-takes them pass by pass.
+    Nothing in that copy refuses anything, so what refuses it has to be
+    something it cannot argue with. While a relocation is under way that is the
+    lock file itself, closed against every opener but the run's, which
+    `document_lock` meets before any transition reads or writes a thing. Once
+    the run is over it is the seals at the record path and the runtime root,
+    which `update_json_document` and `ensure_dirs` meet on exactly the same
+    terms.
     """
 
     def setUp(self):
@@ -2883,48 +3290,20 @@ class PreGateWriterTests(RelocationFixture):
         self.queued = self.root / "pre-gate.queued"
         self.acquired = self.root / "pre-gate.acquired"
         self.result = self.root / "pre-gate.result"
+        self.flock_go = self.root / "pre-gate.flock"
+        self.manager_log = self.root / "pre-gate.manager"
         self.writer_script = self.root / "pre_gate_writer.py"
         self.writer_script.write_text(_PRE_GATE_WRITER, encoding="utf-8")
-        self.pre_gate = self.build_pre_gate_controller()
         self.writes = "record-only"
         self.repository = "acme/widgets"
         self.checkout = self.widgets
-
-    def build_pre_gate_controller(self):
-        """This module's own source with exactly the gate this arc added taken
-        back out, which is what an older installed copy is.
-
-        Built from the current source rather than checked in, and asserted to
-        have really removed something, so a rename or a re-spelling of that
-        gate cannot quietly turn this into a second test of the gated path.
-        """
-        source = Path(drain_prs_service.__file__).read_text(encoding="utf-8")
-        gate = (
-            "    with installation_transaction():\n"
-            "        return update_json_document("
-        )
-        self.assertEqual(
-            source.count(gate), 2, "the discovery record's write-level gate moved"
-        )
-        directory = self.root / "pre-gate-controller"
-        directory.mkdir()
-        (directory / "drain_prs_service.py").write_text(
-            source.replace(gate, "    return update_json_document("), encoding="utf-8"
-        )
-        return directory
 
     def start_writer(self):
         process = subprocess.Popen(
             [
                 sys.executable,
                 str(self.writer_script),
-                # Its own copy first and the tracked modules behind it, so this
-                # process really is running the older controller while
-                # resolving paths through the same `kanban_config` every other
-                # component does.
-                os.pathsep.join(
-                    [str(self.pre_gate), str(Path(drain_prs_service.__file__).parent)]
-                ),
+                self.controller_path(),
                 str(self.ready),
                 str(self.go),
                 str(self.queued),
@@ -2936,10 +3315,15 @@ class PreGateWriterTests(RelocationFixture):
                 # blocks on this process once the handoff gives it the lock.
                 "0.4",
                 self.writes,
+                str(self.units),
+                str(self.flock_go),
             ],
             env={
                 "HOME": str(self.home),
-                "PATH": os.environ.get("PATH", ""),
+                "PATH": os.pathsep.join(
+                    [str(self.fake_service_manager()), os.environ.get("PATH", "")]
+                ),
+                "KANBAN_FAKE_MANAGER_LOG": str(self.manager_log),
                 # The install directory and the discovery record are *probed*,
                 # so this process resolves the `~/Library` ones on any host
                 # simply by importing before the destination record exists. The
@@ -2960,14 +3344,6 @@ class PreGateWriterTests(RelocationFixture):
         self.process = process
         self.wait_for(self.ready, "the pre-gate writer never bound its paths")
         return process
-
-    def wait_for(self, path, message):
-        deadline = time.monotonic() + 30
-        while not path.exists() and time.monotonic() < deadline:
-            if self.process.poll() is not None:
-                self.fail(f"{message}: {self.process.communicate()}")
-            time.sleep(0.02)
-        self.assertTrue(path.exists(), message)
 
     def relocate_with_pre_gate_writer(self):
         """Nothing here sequences the writer against the reconciliation.
@@ -2991,29 +3367,34 @@ class PreGateWriterTests(RelocationFixture):
         self.assertEqual(process.wait(timeout=60), 0, process.communicate())
         return result, json.loads(self.result.read_text(encoding="utf-8"))
 
-    def test_it_blocks_on_the_lock_and_then_really_does_record(self):
+    def test_it_never_gets_the_lock_and_records_nothing(self):
+        """What the closed lock does to the writer no gate can refuse.
+
+        It is refused where it stands, before it queues — so it never wakes
+        into a location that moved while it waited, which is the whole state a
+        bounded sweep used to have to answer for.
+        """
         result, outcome = self.relocate_with_pre_gate_writer()
         self.assertEqual(outcome["bound_record"], str(self.legacy_record))
-        # It blocked on the retained lock rather than refusing where it stood...
-        self.assertTrue(self.acquired.exists())
-        # ...and, being the older copy, it recorded. Nothing in this repository
-        # can stop that; the reconciliation is what answers it.
-        self.assertTrue(outcome["recorded"])
-        self.assertNotIn("refused", outcome)
-        self.assertEqual(result["late_writes"]["passes"], 1)
+        self.assertFalse(self.acquired.exists())
+        self.assertNotIn("recorded", outcome)
+        self.assertIn("Refusing unsafe config lock path", outcome["refused"])
+        self.assertIn(str(self.legacy_lock), outcome["refused"])
+        self.assertEqual(result["late_writes"]["passes"], 0)
 
-    def test_what_it_recorded_is_carried_across_and_the_location_cleared(self):
+    def test_the_location_is_never_recreated_so_nothing_is_carried(self):
         result, _ = self.relocate_with_pre_gate_writer()
         late = result["late_writes"]
         self.assertTrue(late["resolved"])
-        self.assertEqual(late["repositories"], ["acme/widgets"])
-        self.assertIn(str(self.legacy_record), late["removed"])
-        self.assert_record_path_is_sealed()
+        self.assertEqual(late["passes"], 0)
+        self.assertEqual(late["repositories"], [])
+        self.assert_location_is_sealed()
         self.assertEqual(
             sorted(path.name for path in self.legacy_dir.iterdir()),
-            ["config.json", "config.json.lock", "relocated.json"],
+            ["config.json", "config.json.lock", "relocated.json", "runtime"],
         )
-        self.assert_record_path_is_sealed()
+        # And the record this run wrote is the destination's, describing the
+        # repository it moved rather than anything a writer put back.
         entry = self.record_document(self.destination_record)["repositories"][
             "acme/widgets"
         ]
@@ -3022,18 +3403,20 @@ class PreGateWriterTests(RelocationFixture):
     def test_the_install_reports_success_because_nothing_was_left_behind(self):
         result, _ = self.relocate_with_pre_gate_writer()
         install_drainer._require_relocation_resolved(result)
-        self.assertIn("cleared again", result["repair"])
+        self.assertIn("Nothing to repair", result["repair"])
 
-    def test_a_writer_that_beats_the_final_look_is_refused_by_the_seal(self):
+    def test_a_writer_that_beats_the_final_look_is_refused_where_it_stands(self):
         """The case no lock can reach, answered by leaving nothing to write.
 
-        This writer takes the lock only once the run is over — past the final
-        scan, past the pause, past the bound, and past anything a process that
-        has returned could observe. What stops it is not timing: the record
-        path it would write is occupied by the seal, and
-        `update_json_document` has refused a present-but-not-a-regular-file
-        record path since the commit that introduced the record, so every copy
-        of the controller old enough to write one refuses this.
+        This writer asks for the lock only once the run is over — past the
+        final scan, past the pause, past the bound, and past anything a process
+        that has returned could observe. What stops it is not timing: the run
+        that emptied this location left the lock unopenable and the record path
+        occupied by a seal, and `document_lock` and `update_json_document` have
+        refused an unopenable lock and a present-but-not-a-regular-file record
+        path respectively since the commit that introduced the record. So every
+        copy of the controller old enough to write one refuses this, and this
+        one never even acquires the lock.
         """
         process = self.start_writer()
         first = self.relocate()
@@ -3044,89 +3427,92 @@ class PreGateWriterTests(RelocationFixture):
         self.go.write_text("", encoding="utf-8")
         self.assertEqual(process.wait(timeout=60), 0, process.communicate())
         outcome = json.loads(self.result.read_text(encoding="utf-8"))
-        self.assertTrue(self.acquired.exists())
+        self.assertFalse(self.acquired.exists())
         self.assertNotIn("recorded", outcome)
-        self.assertIn("Refusing unsafe config path", outcome["refused"])
-        self.assert_record_path_is_sealed()
+        self.assertIn("Refusing unsafe config lock path", outcome["refused"])
+        self.assertIn(str(self.legacy_lock), outcome["refused"])
+        self.assert_location_is_sealed()
 
-    def test_the_trees_it_lays_down_first_are_found_by_a_later_run(self):
-        """What the seal does not close, and what does answer it.
+    def test_the_trees_it_would_lay_down_first_are_refused_too(self):
+        """What the record seal alone does not close, and what does close it.
 
         A controller bound to the old location writes its directories, its
         status file, its incidents, its logs and its definition before it ever
         reaches the record — every one of them under no record lock at all — so
-        the seal refuses only the last of those. Being sealed is therefore a
-        reason for a later run to do nothing only when there is nothing there;
-        this one finds the trees and refuses over them, naming both places
-        rather than choosing.
+        the record seal refuses only the last of those. The guard the same run
+        leaves at the runtime root refuses the first: `ensure_dirs` is the one
+        helper all of them go through, and it cannot make a directory beneath a
+        path that is not one. `StaleInvocationBoundTests` below asks this of
+        every writer separately; this asks it of the writer that also holds the
+        record's lock, so nothing about the ordering of the two seals is
+        assumed.
         """
         self.writes = "trees"
         process = self.start_writer()
         first = self.relocate()
         self.assertTrue(first["late_writes"]["sealed"])
         self.go.write_text("", encoding="utf-8")
+        before = self.host_state()
         self.assertEqual(process.wait(timeout=60), 0, process.communicate())
         outcome = json.loads(self.result.read_text(encoding="utf-8"))
-        # The record it could not write...
-        self.assertIn("Refusing unsafe config path", outcome["refused"])
-        self.assert_record_path_is_sealed()
-        # ...and everything it wrote before getting there.
         runtime = self.legacy_dir / "runtime" / self.job.slug
         logs = self.legacy_logs / self.job.slug
         # Named by the writer itself, so a host that resolved either of them
         # somewhere else fails here rather than through a missing file.
         self.assertEqual(outcome["runtime"], str(runtime))
         self.assertEqual(outcome["logs"], str(logs))
-        self.assertTrue((runtime / "status.json").is_file())
-        self.assertTrue(any((runtime / "incidents").iterdir()))
-        self.assertTrue((logs / "service.log").is_file())
-        # A later run no longer reads the seal as nothing to do.
-        self.assertIsNone(install_drainer.relocation_disposition(self.destination))
-        before = self.host_state()
-        with self.assertRaises(install_drainer.InstallError) as raised:
-            install_drainer.plan_relocation(self.destination)
-        message = str(raised.exception)
-        self.assertIn(str(runtime), message)
-        self.assertIn(str(self.destination / "runtime" / self.job.slug), message)
+        # It got no further than the runtime root, and it says so by naming it.
+        self.assertIn(str(self.legacy_guard), outcome["trees_refused"])
+        self.assertFalse(runtime.exists())
+        self.assertFalse(logs.exists())
+        # The record it could not reach either, and nothing at all changed.
+        self.assertIn("Refusing unsafe config lock path", outcome["refused"])
+        self.assert_location_is_sealed()
         self.assertEqual(self.host_state(), before)
+        # A later run therefore has nothing to find: the location really is
+        # finished business rather than merely sealed.
+        self.assertIn(
+            "emptied and sealed",
+            install_drainer.relocation_disposition(self.destination),
+        )
 
-    def test_a_repository_no_record_names_has_its_trees_carried(self):
-        """The writer whose record the seal refused was installing something.
+    def test_a_queued_uninstall_never_reaches_the_definition_at_all(self):
+        """The transition no seal can stand in front of, prevented anyway.
 
-        It writes its directories, its status file, its incidents, its logs and
-        its definition before it reaches the record, so refusing the record
-        leaves a repository nothing names with durable state at a location
-        nothing looks at again. A later run carries it by the one name it has —
-        the slug its state is filed under — rather than retaining it silently.
+        An uninstall creates no directory: it reads the status file, unloads
+        the job and unlinks the definition, and only then reaches the record
+        the seal refuses. Neither the runtime guard nor the record seal is in
+        front of that definition, and nothing can be — a service manager's
+        definition directory is the installation's own, shared with the job
+        this run has just relocated, so closing it would close the
+        installation.
+
+        What is in front of it is the lock. Every transition enters
+        `document_lock` before it reads or writes a thing, and while this run
+        is under way that file is closed against every opener but its own — so
+        the uninstall never begins, and the definition it would have taken is
+        never reached rather than put back afterwards.
         """
-        self.repository = "acme/gadgets"
-        self.checkout = self.make_checkout(
-            "gadgets", "git@github.com:acme/gadgets.git"
+        self.writes = "uninstall"
+        self.commands.clear()
+        result, outcome = self.relocate_with_pre_gate_writer()
+        self.assertFalse(self.acquired.exists())
+        self.assertNotIn("uninstalled", outcome)
+        self.assertIn("Refusing unsafe config lock path", outcome["refused"])
+        # Untouched rather than restored: nothing was put back because nothing
+        # took it, and the manager was never asked to forget it.
+        backend = install_drainer.service_backend()
+        self.assertTrue(backend.definition_path(self.job.label).is_file())
+        self.assertEqual(result["late_writes"]["restored_definitions"], [])
+        self.assertEqual(
+            backend.definition_environment(self.job.label)[
+                kanban_config.DRAINER_INSTALL_DIR_ENV
+            ],
+            str(self.destination),
         )
-        self.writes = "trees"
-        process = self.start_writer()
-        self.assertTrue(self.relocate()["late_writes"]["sealed"])
-        self.go.write_text("", encoding="utf-8")
-        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
-        outcome = json.loads(self.result.read_text(encoding="utf-8"))
-        self.assertIn("Refusing unsafe config path", outcome["refused"])
-        slug = drain_prs_service.repository_slug("acme/gadgets")
-        self.assertTrue((self.legacy_dir / "runtime" / slug).is_dir())
-        # Nothing records it, so the destination record still does not name it
-        # — and its state is nonetheless where the installation now is.
-        again = install_drainer.relocate(self.destination, self.sources)
-        self.assertTrue(again["relocated"])
-        self.assertTrue(again["late_writes"]["resolved"])
-        self.assertNotIn(
-            "acme/gadgets",
-            self.record_document(self.destination_record)["repositories"],
-        )
-        self.assertTrue(
-            (self.destination / "runtime" / slug / "status.json").is_file()
-        )
-        self.assertTrue((self.destination_logs / slug / "service.log").is_file())
-        self.assertFalse((self.legacy_dir / "runtime" / slug).exists())
-        self.assert_record_path_is_sealed()
+        self.assertTrue(result["late_writes"]["sealed"])
+        self.assert_location_is_sealed()
+        install_drainer._require_relocation_resolved(result)
 
     def test_a_sealed_location_holding_nothing_is_left_alone(self):
         self.relocate()
@@ -3135,21 +3521,1402 @@ class PreGateWriterTests(RelocationFixture):
             install_drainer.relocation_disposition(self.destination),
         )
 
-    def test_the_seal_is_what_refuses_it_rather_than_any_gate(self):
-        """Asked of the copy that has no gate at all.
+    def test_the_copy_it_runs_lacks_every_protection_this_arc_added(self):
+        """Issue #390 requirement 8, asked of the copy from outside.
 
-        The writer above runs a controller built from this source with the
-        record-write gate removed, so what it meets at the sealed path is the
-        refusal every copy has carried since the record existed — not anything
-        this arc added.
+        `build_pre_gate_controller` asserts all of this while it builds that
+        copy — that #367's controller-resident gates really came out, that
+        #369's and #390's bounds are not in the controller at all, and that the
+        code an old copy meets those two at is byte-identical here. This asks
+        the built copy the same questions afterwards, so a transformation that
+        quietly stopped transforming shows up as a failing test rather than as
+        a second test of the gated path.
         """
         source = (self.pre_gate / "drain_prs_service.py").read_text(encoding="utf-8")
-        self.assertNotIn(
-            "    with installation_transaction():\n"
-            "        return update_json_document(",
-            source,
+        for issue, described, _name, stub in _PRE_GATE_STUBS:
+            self.assertIn(stub, source, f"{issue}: {described}")
+        for issue, described, before, after, _count in _PRE_GATE_FRAGMENTS:
+            self.assertNotIn(before, source, f"{issue}: {described}")
+            self.assertIn(after, source, f"{issue}: {described}")
+        for issue, described, name, required in _PRE_GATE_EXTERNAL:
+            body = _function_source(source, name)
+            self.assertEqual(
+                body,
+                _function_source(
+                    Path(drain_prs_service.__file__).read_text(encoding="utf-8"), name
+                ),
+                f"{issue}: {described}",
+            )
+            for fragment in required:
+                self.assertIn(fragment, body, f"{issue}: {described}")
+            for fragment in _PRE_GATE_FORBIDDEN:
+                self.assertNotIn(fragment, body, f"{issue}: {described}")
+
+
+# What the stale invocation below runs: the same pre-gate controller, bound to
+# the legacy installation before the relocation and released only once that run
+# has sealed the location it emptied. A real second process, because a
+# controller's managed paths are constants frozen at its own import and nothing
+# driven from the relocating thread can be that process.
+#
+# It drives each writer separately and records what each one did, because they
+# do not all reach the installation the same way: `install`, `start`, `stop`
+# and `uninstall` enter a transaction, and `uninstall` in particular unloads
+# and unlinks the definition without ever creating a directory; `service_log`
+# and `write_incident` reach the runtime, incident and log trees through
+# `ensure_dirs` on their own; and `atomic_write_json` creates a missing parent
+# without either. A bound proven only through the install path would leave
+# every one of the others unproven. Then it runs the controller's own entry
+# point, which is what an operator really invokes and what renders the failure
+# they really see.
+#
+# Twice, in one process. `ensure_dirs` chmods the install directory on every
+# attempt before it touches anything else, so a bound that lived in that
+# directory's mode would be reset by the very invocation it stops; and a
+# *fresh* process is not the case under test at all, since discovery probes the
+# XDG location first and one started after the relocation resolves the
+# destination.
+_STALE_INVOCATION = """
+import contextlib, io, json, os, sys, time
+from pathlib import Path
+
+# Before anything resolves a managed path. The platform decides the log root,
+# which is single-valued rather than probed, so a subprocess that read the real
+# host's answer would resolve a different root on a macOS laptop than on a
+# Linux runner. This is the platform the fixture relocates on.
+sys.platform = "linux"
+
+for entry in reversed(sys.argv[1].split(os.pathsep)):
+    sys.path.insert(0, entry)
+ready, go, result = (Path(argument) for argument in sys.argv[2:5])
+checkout = Path(sys.argv[5])
+units = Path(sys.argv[6])
+
+import drain_prs_service
+import service_manager
+
+# Fixture wiring rather than a protection. Which manager this host has is
+# settled by `tools/test_service_manager.py`, and where that manager keeps its
+# definitions has to be the directory the parent process reads, or the two
+# would compare different files.
+service_manager._DETECTED = service_manager.SYSTEMD
+service_manager.SYSTEMD_USER_DIR = units
+
+# The two checkout preflights `start_service` runs before it reaches the
+# installation at all. Neither is anything this arc added, and this fixture's
+# checkouts have no commits, so leaving them in would fail that start for a
+# reason with nothing to do with the bound under test.
+drain_prs_service.require_no_operation_in_progress = lambda repo: None
+drain_prs_service.require_default_branch = lambda repo, remote: None
+
+# Bound here, while the legacy record is still the one this host resolves.
+ready.write_text(str(drain_prs_service.DISCOVERY_RECORD_PATH), encoding="utf-8")
+while not go.exists():
+    time.sleep(0.01)
+
+job = drain_prs_service.resolve_job(checkout)
+
+
+def battery():
+    attempts = {}
+    for name, action in (
+        ("install", lambda: drain_prs_service.install_job(job)),
+        ("start", lambda: drain_prs_service.start_service(job)),
+        # The one no directory creation reaches: `uninstall_job` never calls
+        # `ensure_dirs`, and it unloads and unlinks the definition before its
+        # record write is refused. Only the closed lock stops it.
+        ("uninstall", lambda: drain_prs_service.uninstall_job(job)),
+        ("stop", lambda: drain_prs_service.stop_service(job)),
+        ("service_log", lambda: drain_prs_service.service_log(job, "stale start")),
+        (
+            "write_incident",
+            lambda: drain_prs_service.write_incident(
+                job=job,
+                exit_code=9,
+                command=["drain_prs.py", "--path", str(checkout)],
+            ),
+        ),
+        (
+            "atomic_write_json",
+            lambda: drain_prs_service.atomic_write_json(
+                job.status_path, {"state": "starting", "repository": job.identity}
+            ),
+        ),
+        # The one that reports rather than raises: the service manager's own
+        # entry point catches its refusal and answers with an exit code, so
+        # what this records for it is that code.
+        ("run", lambda: drain_prs_service.run_service(job, job.identity)),
+    ):
+        printed = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(printed):
+                returned = action()
+        except BaseException as error:
+            attempts[name] = {
+                "failed": f"{type(error).__name__}: {error}",
+                "returned": None,
+                "printed": printed.getvalue(),
+            }
+        else:
+            attempts[name] = {
+                "failed": None,
+                "returned": returned,
+                "printed": printed.getvalue(),
+            }
+    argv = ["drain_prs_service.py", "--path", str(checkout), "install"]
+    stderr = io.StringIO()
+    saved = sys.argv
+    sys.argv = argv
+    try:
+        with contextlib.redirect_stderr(stderr):
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = drain_prs_service.main()
+    finally:
+        sys.argv = saved
+    return {"writers": attempts, "exit_code": code, "stderr": stderr.getvalue()}
+
+
+result.write_text(
+    json.dumps(
+        {
+            "bound_record": str(drain_prs_service.DISCOVERY_RECORD_PATH),
+            "install_dir": str(drain_prs_service.INSTALL_DIR),
+            "runtime": str(job.runtime_dir),
+            "logs": str(job.log_dir),
+            "definition": str(job.definition_path),
+            "attempts": [battery(), battery()],
+        }
+    ),
+    encoding="utf-8",
+)
+"""
+
+
+class StaleInvocationFixture(PreGateControllerFixture):
+    """A stale invocation of that controller, after the relocation sealed the
+    location it was bound to.
+
+    The ordering is the load-bearing part and is arranged rather than raced:
+    the process binds its managed paths before anything moves, and is released
+    only once `relocate` has returned and the emptied location is sealed. That
+    is precisely the writer no lock and no pause can reach — past the final
+    scan, past the handoff, past the bound, and past anything a process that
+    has returned could observe.
+    """
+
+    # Whether this process's log root is the `~/Library` one a pre-XDG copy
+    # hardcoded, or the single-valued one this platform resolves — which after
+    # the relocation is the destination's. Requirement 3 of #390 names both.
+    legacy_log_binding = True
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.ready = self.root / "stale.ready"
+        self.go = self.root / "stale.go"
+        self.result = self.root / "stale.result"
+        self.manager_log = self.root / "stale.manager"
+        script = self.root / "stale_invocation.py"
+        script.write_text(_STALE_INVOCATION, encoding="utf-8")
+        environment = {
+            "HOME": str(self.home),
+            "PATH": os.pathsep.join(
+                [str(self.fake_service_manager()), os.environ.get("PATH", "")]
+            ),
+            "KANBAN_FAKE_MANAGER_LOG": str(self.manager_log),
+        }
+        if self.legacy_log_binding:
+            environment["XDG_STATE_HOME"] = str(self.legacy_logs.parent.parent)
+        self.process = subprocess.Popen(
+            [
+                sys.executable,
+                str(script),
+                self.controller_path(),
+                str(self.ready),
+                str(self.go),
+                str(self.result),
+                str(self.widgets),
+                str(self.units),
+            ],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
-        self.assertIn("Refusing unsafe config path", source)
+        self.addCleanup(self.process.kill)
+        self.wait_for(self.ready, "the stale controller never bound its paths")
+        self.assertEqual(
+            self.ready.read_text(encoding="utf-8"), str(self.legacy_record)
+        )
+        self.assertTrue(self.relocate()["relocated"])
+        self.assert_location_is_sealed()
+        # Taken with the relocation finished and that process still holding the
+        # bindings it started with: this is the "immediately before the stale
+        # invocation" every comparison below is against.
+        self.before = self.host_state()
+        self.go.write_text("", encoding="utf-8")
+        self.assertEqual(
+            self.process.wait(timeout=120), 0, self.process.communicate()
+        )
+        self.outcome = json.loads(self.result.read_text(encoding="utf-8"))
+
+    def state_under(self, state, root):
+        return {
+            path: value for path, value in state.items() if path.startswith(str(root))
+        }
+
+    # Which closed path each writer meets. A transition enters `document_lock`
+    # before it reads or writes anything at all, so it meets the retained lock;
+    # a writer that creates its own directories meets the runtime guard.
+    TRANSACTIONAL = frozenset({"install", "start", "uninstall", "run"})
+
+    def closed_path(self, writer):
+        return self.legacy_lock if writer in self.TRANSACTIONAL else self.legacy_guard
+
+    # The writers that do not raise, and why each does not.
+    #
+    # `run_service` is what a service manager launches, so it catches its own
+    # startup refusals and answers with an exit code — and a copy predating
+    # this arc answers a clean one, which is its own handling of an exception
+    # it already caught and not something any bound outside that process
+    # reaches.
+    #
+    # `stop_service` in a copy predating #367 enters no transaction at all: it
+    # reads its snapshot and returns straight away when nothing is running.
+    # Nothing it does on that branch touches a bound, and nothing may: it is a
+    # read that changes no protected artifact and asks the service manager for
+    # nothing. What makes that branch the only one it can take here is the
+    # runtime guard — the status file it would have read is under a path that
+    # is not a directory, so the snapshot is `stopped` however the drainer
+    # ended.
+    REPORTING = frozenset({"run", "stop"})
+
+    # What a stale invocation may ask the service manager for. Reading is
+    # allowed and unavoidable — `status_snapshot` asks whether a unit is
+    # loaded, which reaches nothing this run protects — while loading,
+    # unloading and signalling are exactly what may not happen, because those
+    # change what the manager holds.
+    MANAGER_READS = frozenset({"show", "is-enabled", "is-active", "list-unit-files"})
+
+    def manager_commands(self):
+        if not self.manager_log.exists():
+            return []
+        return [
+            line.strip()
+            for line in self.manager_log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def assert_the_manager_was_only_read(self):
+        """Nothing this invocation sent the manager changes what it holds.
+
+        Asked as an allowlist rather than a list of forbidden verbs: a
+        subcommand nobody here anticipated is one this cannot vouch for, and
+        `is-enabled` contains `enable`, so matching on fragments would answer
+        the wrong question in both directions.
+        """
+        for line in self.manager_commands():
+            verb = next((word for word in line.split() if not word.startswith("-")), "")
+            self.assertIn(verb, self.MANAGER_READS, line)
+
+    def refusal(self, writer):
+        """What one writer said about refusing, however it said it."""
+        return writer["failed"] or writer["printed"]
+
+    def assert_every_writer_failed(self):
+        for index, attempt in enumerate(self.outcome["attempts"]):
+            for name, writer in attempt["writers"].items():
+                if name in self.REPORTING:
+                    continue
+                self.assertIsNotNone(writer["failed"], (index, name))
+            self.assertEqual(attempt["exit_code"], 1, index)
+
+
+class StaleInvocationBoundTests(StaleInvocationFixture):
+    """Issue #390 requirement 3: what such an invocation may leave behind.
+
+    Nothing. Every writer it reaches goes through `ensure_dirs`, which reaches
+    the runtime root before the log tree and before the definition is written
+    or the record is touched, and the guard the relocation left there is not a
+    directory — so the invocation returns non-success before it creates,
+    removes or modifies any of them.
+    """
+
+    def test_it_really_is_bound_to_the_legacy_installation(self):
+        self.assertEqual(self.outcome["bound_record"], str(self.legacy_record))
+        self.assertEqual(self.outcome["install_dir"], str(self.legacy_dir))
+        self.assertEqual(
+            self.outcome["runtime"], str(self.legacy_dir / "runtime" / self.job.slug)
+        )
+        self.assertEqual(self.outcome["logs"], str(self.legacy_logs / self.job.slug))
+        # And at the same definition file the relocation just rewrote, so
+        # "unchanged" below is a comparison of the same bytes rather than of
+        # two files that never met.
+        self.assertEqual(
+            self.outcome["definition"],
+            str(
+                install_drainer.service_backend().definition_path(self.job.label)
+            ),
+        )
+
+    def test_every_writer_it_reaches_returns_non_success(self):
+        self.assert_every_writer_failed()
+        # Each of them stopped at a closed path rather than somewhere later,
+        # and says which one by naming it.
+        for attempt in self.outcome["attempts"]:
+            for name, writer in attempt["writers"].items():
+                if name == "stop":
+                    # The one that meets no bound at all, by taking a branch
+                    # that reads and returns; `test_the_stop_...` below is
+                    # where that is asserted.
+                    continue
+                self.assertIn(str(self.closed_path(name)), self.refusal(writer), name)
+
+    def test_the_uninstall_no_directory_creation_reaches_is_bounded_too(self):
+        """The path the runtime guard alone leaves open.
+
+        `uninstall_job` never calls `ensure_dirs`: it reads the status file,
+        unloads the job from the service manager and unlinks the definition,
+        and only then reaches the record write the seal refuses. What stops it
+        before any of that is the retained lock its transaction opens first.
+        """
+        definition = install_drainer.service_backend().definition_path(self.job.label)
+        for attempt in self.outcome["attempts"]:
+            failure = attempt["writers"]["uninstall"]["failed"]
+            self.assertIn("Refusing unsafe config lock path", failure)
+            self.assertIn(str(self.legacy_lock), failure)
+        self.assertTrue(definition.is_file())
+        self.assertEqual(definition.read_bytes(), self.before[str(definition)][1])
+        self.assert_the_manager_was_only_read()
+
+    def test_the_stop_a_copy_predating_this_arc_runs_is_an_unchanged_no_op(self):
+        """The one transition that meets no bound, and may not have to.
+
+        A `stop_service` predating #367 enters no transaction: it reads its
+        snapshot and, finding nothing running, returns its "already stopped"
+        result. That branch reaches no closed path because it asks for nothing
+        — no lock, no directory, no record — so there is nothing for a bound to
+        refuse, and requiring non-success of it would be requiring a filesystem
+        object to change what a read does.
+
+        It is also the only branch such a stop can take here. The status file
+        it reads is under the sealed runtime root, so the snapshot is `stopped`
+        whatever the drainer was doing, and a relocation refuses outright while
+        any managed job or checkout drainer is running — so the signalling
+        branch, which would ask the service manager for something, is not
+        reachable from a location a run has emptied.
+        """
+        for index, attempt in enumerate(self.outcome["attempts"]):
+            stop = attempt["writers"]["stop"]
+            self.assertIsNone(stop["failed"], index)
+            self.assertEqual(stop["returned"]["stopped"], False, index)
+            self.assertIn("already stopped", stop["returned"]["message"])
+        # And the whole of what that permits: it changed nothing anywhere, and
+        # asked the service manager nothing that changes what it holds.
+        self.assertEqual(self.host_state(), self.before)
+        self.assert_the_manager_was_only_read()
+
+    def test_the_run_a_copy_predating_this_arc_reports_but_cannot_fail(self):
+        """The one invocation whose non-success no bound can produce.
+
+        `run_service` is what a service manager launches, so it catches its own
+        startup refusals and answers with an exit code rather than raising. A
+        controller predating this arc answers a clean one there, and nothing
+        outside that process changes what it does with an exception it already
+        caught — the same limit requirement 4 is stated around, where the prose
+        an operator needs cannot come from the stale process either. This
+        fixture restores that answer rather than inheriting the failing exit
+        this arc added, or the copy it calls old would be proving something
+        only a current controller does.
+
+        What is reachable is everything else, and it is the substance: this run
+        refuses at the closed lock, names it, and writes nothing at all.
+        `StaleControllerTests` asserts the failing exit a controller from here
+        on gives instead.
+        """
+        for index, attempt in enumerate(self.outcome["attempts"]):
+            run = attempt["writers"]["run"]
+            self.assertIsNone(run["failed"], index)
+            self.assertEqual(run["returned"], 0, index)
+            self.assertIn("PR drainer did not start", run["printed"])
+            self.assertIn("Refusing unsafe config lock path", run["printed"])
+            self.assertIn(str(self.legacy_lock), run["printed"])
+        # And nothing it would have written exists, which is the whole of what
+        # its exit code cannot carry.
+        self.assertEqual(self.host_state(), self.before)
+
+    def test_the_trees_on_both_sides_are_exactly_what_they_were(self):
+        after = self.host_state()
+        for root in (
+            self.legacy_dir / "runtime",
+            self.legacy_logs,
+            self.destination / "runtime",
+            self.destination_logs,
+        ):
+            self.assertEqual(
+                self.state_under(after, root), self.state_under(self.before, root), root
+            )
+        # And nothing anywhere else moved either.
+        self.assertEqual(after, self.before)
+
+    def test_the_definition_and_the_manager_still_hold_the_relocated_one(self):
+        definition = install_drainer.service_backend().definition_path(self.job.label)
+        self.assertEqual(
+            definition.read_bytes(), self.before[str(definition)][1]
+        )
+        self.assertIn(str(self.destination), definition.read_text(encoding="utf-8"))
+        # It never asked the manager to change anything, so what the manager
+        # holds is still the definition the relocation loaded.
+        self.assert_the_manager_was_only_read()
+
+    def test_the_seals_and_the_notice_beside_them_are_unchanged(self):
+        self.assert_location_is_sealed()
+        self.assertEqual(
+            self.state_under(self.host_state(), self.legacy_dir),
+            self.state_under(self.before, self.legacy_dir),
+        )
+        # Including the mode of the directory itself: `ensure_dirs` chmods it
+        # on every attempt, which is exactly why the bound is an object at a
+        # path rather than a permission on one.
+        self.assertEqual(
+            self.legacy_dir.stat().st_mode & 0o777,
+            self.before[str(self.legacy_dir)][1],
+        )
+
+    def test_the_failure_names_the_guard_and_the_notice_says_what_to_do(self):
+        """Requirement 4, met where it can be met.
+
+        The stale process runs bytes predating every gate here, so nothing in
+        this repository can put prose in its output: what it prints is its own
+        rendering of the fault, which names the path it could not use. That
+        path is an artifact this installer owns, and following it is what
+        carries the rest — that the installation was relocated, both locations,
+        and the action that resolves it.
+        """
+        for attempt in self.outcome["attempts"]:
+            self.assertEqual(attempt["exit_code"], 1)
+            self.assertIn("drain_prs_service.py:", attempt["stderr"])
+            self.assertIn(str(self.legacy_lock), attempt["stderr"])
+        # The lock is the artifact that invocation names, and it is readable:
+        # what a transition may not do is open it for writing.
+        held = self.legacy_lock.read_text(encoding="utf-8")
+        self.assertIn("was relocated to", held)
+        self.assertIn(str(self.legacy_dir), held)
+        self.assertIn(str(self.destination), held)
+        self.assertIn("Run the command again", held)
+        self.assertIn("install_drainer.py", held)
+        self.assertIn(
+            str(self.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME), held
+        )
+        # And the runtime guard, which is what the writers no transaction
+        # covers name, leads to the same notice through the marker.
+        notice = drain_prs_service._read_json_object(self.legacy_guard)
+        self.assertEqual(
+            notice[drain_prs_service.RELOCATION_MARKER_SOURCE], str(self.legacy_dir)
+        )
+        self.assertEqual(
+            notice[drain_prs_service.RELOCATION_MARKER_DESTINATION],
+            str(self.destination),
+        )
+        prose = " ".join(
+            (
+                notice[drain_prs_service.RELOCATION_MARKER_NOTICE],
+                notice[drain_prs_service.RELOCATION_MARKER_REPAIR],
+            )
+        )
+        self.assertIn("was relocated to", prose)
+        self.assertIn(str(self.legacy_dir), prose)
+        self.assertIn(str(self.destination), prose)
+        self.assertIn("Run the command again", prose)
+        self.assertIn("install_drainer.py", prose)
+
+    def test_a_second_invocation_is_refused_identically(self):
+        first, second = self.outcome["attempts"]
+        self.assertEqual(second, first)
+
+
+class StaleInvocationDestinationLogTests(StaleInvocationFixture):
+    """The same invocation on a process whose log root is the destination's.
+
+    The log root is single-valued per platform rather than probed, so a process
+    that resolved it after the platform question changed writes its logs where
+    the relocation put them. Requirement 3 names those trees too, and what
+    protects them is ordering: `ensure_dirs` reaches the runtime root before
+    the log tree, so a guard at the *legacy* runtime root stops a write whose
+    log tree is at the destination exactly as it stops one whose log tree is
+    beside it.
+    """
+
+    legacy_log_binding = False
+
+    def test_its_log_tree_is_the_destinations_and_is_left_alone(self):
+        self.assertEqual(
+            self.outcome["logs"], str(self.destination_logs / self.job.slug)
+        )
+        self.assert_every_writer_failed()
+        self.assertEqual(
+            self.state_under(self.host_state(), self.destination_logs),
+            self.state_under(self.before, self.destination_logs),
+        )
+        self.assertEqual(self.host_state(), self.before)
+
+
+class UnaccountedIdentityTests(RelocationFixture):
+    """Issue #390 requirements 5 to 7: which repository an unrecorded tree
+    belongs to, recovered from validated evidence or not claimed at all.
+
+    A tree under the runtime or log root is filed by a slug, and a slug is not
+    an identity: `repository_slug` escapes the identity reversibly only while
+    the escaped spelling is one this host's service manager can carry as an
+    identifier, and falls back to a hash of the whole identity when it is not.
+    So the directory name answers "which repository is this?" some of the time
+    and the documents the controller wrote inside the tree answer it the rest
+    of the time — and where nothing does, the state is kept where it was
+    written and named by its slug rather than filed under a guess.
+
+    Every tree here is laid down by the controller's own writers under the
+    bindings a process that resolved before the relocation still holds, with
+    only its discovery-record write left out. That is exactly what such a
+    controller leaves when that one write is refused, and it is what makes
+    these trees ones no record names.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.bindings = self.legacy_bindings
+
+    def lay_down_trees(self, checkout):
+        return self.write_late(checkout, self.bindings, record=False)
+
+    def relocate_with(self, write):
+        with self.racing(write):
+            return self.relocate()
+
+    def hashed_repository(self):
+        """A repository this host files under a hash rather than a reversible
+        slug: the escaped spelling outgrows what the service manager can carry
+        as an identifier, so `repository_slug` falls back to a SHA-256 of the
+        whole identity and the directory name reverses to nothing at all."""
+        identity = "acme/widgets" + "-x" * 100
+        checkout = self.make_checkout("hashed", f"git@github.com:{identity}.git")
+        slug = drain_prs_service.repository_slug(identity)
+        self.assertTrue(slug.startswith("h"), slug)
+        return checkout, identity, slug
+
+    def unattributed(self, result):
+        return [
+            (item["repository"], item["slug"], item["kind"])
+            for item in result["late_writes"]["unattributed"]
+        ]
+
+    def test_a_reversible_slug_is_reported_as_its_canonical_identity(self):
+        gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
+        result = self.relocate_with(lambda: self.lay_down_trees(gadgets))
+        late = result["late_writes"]
+        self.assertTrue(late["resolved"])
+        self.assertEqual(late["unattributed"], [])
+        # The identity, not the directory the state is filed under.
+        self.assertEqual(late["repositories"], ["acme/gadgets"])
+        slug = drain_prs_service.repository_slug("acme/gadgets")
+        self.assertEqual(slug, "acme.gadgets")
+        self.assertTrue(
+            (self.destination / "runtime" / slug / "status.json").is_file()
+        )
+        self.assertTrue((self.destination_logs / slug / "service.log").is_file())
+        self.assertFalse((self.legacy_dir / "runtime" / slug).exists())
+        # Recovered for the report and the move rather than filed as a job:
+        # nothing records where its checkout is or what its definition is
+        # called, so the destination record still does not name it.
+        self.assertNotIn(
+            "acme/gadgets",
+            self.record_document(self.destination_record)["repositories"],
+        )
+
+    def test_a_hash_only_slug_is_attributed_from_agreeing_evidence(self):
+        checkout, identity, slug = self.hashed_repository()
+        result = self.relocate_with(lambda: self.lay_down_trees(checkout))
+        late = result["late_writes"]
+        self.assertTrue(late["resolved"], late["repair"])
+        self.assertEqual(late["repositories"], [identity])
+        self.assertTrue(
+            (self.destination / "runtime" / slug / "status.json").is_file()
+        )
+        # The log tree carries no document of its own; it is attributed through
+        # the runtime tree filed under the exact same slug.
+        self.assertTrue((self.destination_logs / slug / "service.log").is_file())
+
+    def test_a_hash_only_slug_with_no_identity_evidence_is_kept_and_named(self):
+        checkout, _identity, slug = self.hashed_repository()
+
+        def late():
+            self.lay_down_trees(checkout)
+            # Its runtime tree is what carried the identity. A log tree that
+            # outlived it is filed under a name nothing reverses and says
+            # nothing about itself.
+            shutil.rmtree(self.legacy_dir / "runtime" / slug)
+
+        result = self.relocate_with(late)
+        self.assertFalse(result["late_writes"]["resolved"])
+        self.assertEqual(result["late_writes"]["repositories"], [])
+        self.assertEqual(self.unattributed(result), [(None, slug, "log")])
+        self.assertIn(
+            "nothing reverses it", result["late_writes"]["unattributed"][0]["reason"]
+        )
+        self.assertTrue((self.legacy_logs / slug / "service.log").is_file())
+
+    def test_a_slug_that_does_not_re_encode_to_itself_is_not_authoritative(self):
+        # `Other.Repo` decodes to a repository GitHub could name, and this host
+        # files that repository under `other.repo` instead — identities are
+        # case-folded and the encoding is this host's own — so the name on disk
+        # is not this host's name for it and nothing here may claim the state
+        # under it.
+        def late():
+            tree = self.legacy_logs / "Other.Repo"
+            tree.mkdir(parents=True)
+            (tree / "service.log").write_text("kept\n", encoding="utf-8")
+
+        result = self.relocate_with(late)
+        self.assertFalse(result["late_writes"]["resolved"])
+        self.assertEqual(self.unattributed(result), [(None, "Other.Repo", "log")])
+        self.assertEqual(
+            result["late_writes"]["unattributed"][0]["reason"],
+            "Other.Repo decodes to other/repo, which this host files under "
+            "other.repo, and no status document or incident filed under it "
+            "names a repository",
+        )
+        self.assertTrue((self.legacy_logs / "Other.Repo" / "service.log").is_file())
+
+    def test_conflicting_identities_are_kept_and_named(self):
+        gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
+        slug = drain_prs_service.repository_slug("acme/gadgets")
+
+        def late():
+            self.lay_down_trees(gadgets)
+            # Evidence that is present and disagrees, which is the case nothing
+            # here may skip past on its way to trusting the directory name.
+            (self.legacy_dir / "runtime" / slug / "status.json").write_text(
+                json.dumps({"repository": "acme/widgets"}), encoding="utf-8"
+            )
+
+        result = self.relocate_with(late)
+        self.assertFalse(result["late_writes"]["resolved"])
+        self.assertEqual(
+            self.unattributed(result),
+            [(None, slug, "runtime"), (None, slug, "log")],
+        )
+        reason = result["late_writes"]["unattributed"][0]["reason"]
+        self.assertIn("more than one repository", reason)
+        self.assertIn("acme/gadgets", reason)
+        self.assertIn("acme/widgets", reason)
+        self.assertTrue((self.legacy_dir / "runtime" / slug).is_dir())
+        self.assertTrue((self.legacy_logs / slug).is_dir())
+
+    def malformed(self, corrupt):
+        """One repository's trees, with its status document corrupted."""
+        gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
+        slug = drain_prs_service.repository_slug("acme/gadgets")
+        status = self.legacy_dir / "runtime" / slug / "status.json"
+
+        def late():
+            self.lay_down_trees(gadgets)
+            corrupt(status)
+
+        return slug, self.relocate_with(late)
+
+    def assert_malformed(self, corrupt, expected):
+        """One shape of "present and broken", told apart from absent.
+
+        The general readers this repository uses answer `None` for a document
+        that is missing, unreadable, not an object or not what it should hold,
+        which is exactly the collapse requirements 5 and 6 forbid here: absent
+        evidence may be supplied by another permitted source, while evidence
+        that is there and wrong may not be skipped past.
+        """
+        slug, result = self.malformed(corrupt)
+        self.assertFalse(result["late_writes"]["resolved"])
+        self.assertEqual(
+            self.unattributed(result),
+            [(None, slug, "runtime"), (None, slug, "log")],
+        )
+        reason = result["late_writes"]["unattributed"][0]["reason"]
+        self.assertIn("is malformed", reason)
+        self.assertIn(expected, reason)
+        # And the tree is where it was written rather than filed anywhere
+        # under a guess.
+        self.assertTrue((self.legacy_dir / "runtime" / slug).is_dir())
+
+    def test_evidence_that_is_not_a_regular_file_is_malformed(self):
+        def corrupt(status):
+            status.unlink()
+            status.mkdir()
+
+        self.assert_malformed(corrupt, "is not a regular file")
+
+    def test_evidence_that_is_not_a_json_object_is_malformed(self):
+        self.assert_malformed(
+            lambda status: status.write_text("[]", encoding="utf-8"),
+            "is not a JSON object",
+        )
+
+    def test_evidence_naming_something_that_is_not_a_repository_is_malformed(self):
+        self.assert_malformed(
+            lambda status: status.write_text(
+                json.dumps({"repository": "not a github repository"}),
+                encoding="utf-8",
+            ),
+            "which is not a GitHub repository",
+        )
+
+    def test_evidence_that_cannot_be_read_is_malformed(self):
+        self.assert_malformed(
+            lambda status: status.write_text("{not a document", encoding="utf-8"),
+            "could not be read",
+        )
+
+    def test_absent_evidence_is_not_malformed_and_the_slug_carries_it(self):
+        """The other half of the same distinction.
+
+        A status document with no `repository` field is one the controller
+        wrote before that field existed, or one a fixture left empty. It says
+        nothing, which is not the same as saying something wrong: the
+        reversible slug beside it is allowed to answer.
+        """
+        gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
+        slug = drain_prs_service.repository_slug("acme/gadgets")
+
+        def late():
+            self.lay_down_trees(gadgets)
+            (self.legacy_dir / "runtime" / slug / "status.json").write_text(
+                "{}", encoding="utf-8"
+            )
+
+        result = self.relocate_with(late)
+        late_writes = result["late_writes"]
+        self.assertTrue(late_writes["resolved"], late_writes["repair"])
+        self.assertEqual(late_writes["unattributed"], [])
+        self.assertEqual(late_writes["repositories"], ["acme/gadgets"])
+
+    def test_the_repair_and_the_failure_name_the_slug_and_the_reason(self):
+        # Requirement 7 as amended: an unattributed entry carries a null
+        # repository beside its own slug in the data, and neither the repair
+        # nor the failure an operator reads ever renders that null.
+        checkout, _identity, slug = self.hashed_repository()
+
+        def late():
+            self.lay_down_trees(checkout)
+            shutil.rmtree(self.legacy_dir / "runtime" / slug)
+
+        result = self.relocate_with(late)
+        repair = result["repair"]
+        self.assertIn(slug, repair)
+        self.assertIn("nothing reverses it", repair)
+        self.assertIn("re-run this installer", repair)
+        self.assertNotIn("None", repair)
+        with self.assertRaises(install_drainer.RelocationUnresolved) as raised:
+            install_drainer._require_relocation_resolved(result)
+        message = str(raised.exception)
+        self.assertIn(slug, message)
+        self.assertIn("could not be attributed to a repository", message)
+        self.assertNotIn("None", message)
+        # And the structured half keeps them apart.
+        entry = result["late_writes"]["unattributed"][0]
+        self.assertIsNone(entry["repository"])
+        self.assertEqual(entry["slug"], slug)
+
+
+class LockDescriptorTests(PreGateControllerFixture):
+    """The descriptor a lock's mode does not reach, and the two populations it
+    comes in.
+
+    `document_lock` opens the lock file and takes its flock together; a process
+    that has done the first and not yet the second holds something no later
+    mode change revokes. One that holds it when a relocation starts is refused
+    before anything moves, which is the only prevention available: with the
+    installation still where it was, that process goes on to perform an
+    ordinary transition against it. One that opens the lock while the run is
+    already under way cannot be refused — the plan is long past — and is
+    answered by the settle cycle instead, which reads the set once the mode is
+    closed and reports what it cannot prove empty.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.ready = self.root / "pre-gate.ready"
+        self.go = self.root / "pre-gate.go"
+        self.queued = self.root / "pre-gate.queued"
+        self.acquired = self.root / "pre-gate.acquired"
+        self.result = self.root / "pre-gate.result"
+        self.flock_go = self.root / "pre-gate.flock"
+        self.manager_log = self.root / "pre-gate.manager"
+        self.writer_script = self.root / "pre_gate_writer.py"
+        self.writer_script.write_text(_PRE_GATE_WRITER, encoding="utf-8")
+
+    def start_holder(self, *, visible=True, open_now=True):
+        """A pre-gate controller that opens the lock and stops there.
+
+        `document_lock` opens the file and takes its flock together; this
+        performs the two halves with a gate between them, which is the only way
+        to hold the state under test — a descriptor open, and its flock not
+        landed yet.
+
+        `open_now=False` stops it one step earlier, with its managed paths
+        bound and the lock not yet open. That is what makes it *stale* for a
+        case that has to relocate first: a process started after the
+        destination record exists resolves the destination and is an ordinary
+        controller, so one that must be bound to the location a later run is
+        finishing has to have started before that record did.
+        """
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(self.writer_script),
+                self.controller_path(),
+                str(self.ready),
+                str(self.go),
+                str(self.queued),
+                str(self.acquired),
+                str(self.result),
+                "acme/widgets",
+                str(self.widgets),
+                "0",
+                "uninstall-delayed",
+                str(self.units),
+                str(self.flock_go),
+            ],
+            env={
+                "HOME": str(self.home),
+                "PATH": os.pathsep.join(
+                    [str(self.fake_service_manager()), os.environ.get("PATH", "")]
+                ),
+                "KANBAN_FAKE_MANAGER_LOG": str(self.manager_log),
+                "XDG_STATE_HOME": str(self.legacy_logs.parent.parent),
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(process.kill)
+        self.process = process
+        self.wait_for(self.ready, "the holder never bound its paths")
+        self.assertEqual(
+            self.ready.read_text(encoding="utf-8"), str(self.legacy_record)
+        )
+        if open_now:
+            self.open_lock(process, visible=visible)
+        return process
+
+    def open_lock(self, process, *, visible=True):
+        """Let it perform the first half of `document_lock` and stop."""
+        self.go.write_text("", encoding="utf-8")
+        self.wait_for(self.queued, "the holder never opened the lock")
+        if visible:
+            # It is holding a descriptor now, and this is what a host that can
+            # read descriptors answers about it.
+            self.lock_holders = (process.pid,)
+
+    def release(self, process):
+        self.flock_go.write_text("", encoding="utf-8")
+        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
+
+    # -- the population a refusal reaches ----------------------------------
+
+    def test_a_descriptor_open_before_the_run_refuses_it_and_changes_nothing(self):
+        """The prevention this issue selects, available in exactly one place.
+
+        Once the installation has moved, every answer left is a repair: nothing
+        on the filesystem stops an uninstall from unlinking a definition, since
+        a service manager's definition directory is the installation's own. So
+        the run does not move it. It refuses, changes nothing, and names what
+        to wait for.
+        """
+        process = self.start_holder()
+        before = self.host_state()
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.relocate()
+        message = str(raised.exception)
+        self.assertIn(str(self.legacy_lock), message)
+        self.assertIn(f"process {process.pid}", message)
+        self.assertIn("Wait for it to finish or stop it", message)
+        self.assertEqual(self.host_state(), before)
+        # And because nothing moved, what that process goes on to do is an
+        # ordinary uninstall of the installation it was invoked against,
+        # serialized by this very lock exactly as it always was — rather than a
+        # stale one acting on a location that moved while it waited.
+        self.release(process)
+        outcome = json.loads(self.result.read_text(encoding="utf-8"))
+        self.assertNotIn("refused", outcome)
+        self.assertTrue(outcome["uninstalled"]["uninstalled"])
+
+    def test_a_dry_run_refuses_over_it_too(self):
+        process = self.start_holder()
+        before = self.host_state()
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            install_drainer.relocation_preview(self.destination)
+        self.assertIn(f"process {process.pid}", str(raised.exception))
+        self.assertEqual(self.host_state(), before)
+        self.release(process)
+
+    def test_a_host_that_cannot_be_asked_refuses_too(self):
+        """Absent evidence is not evidence of absence.
+
+        Relocating on an unanswered precondition is worse than not relocating:
+        it leaves the host moved and the question still open, which is the one
+        state no later run can undo.
+        """
+        self.lock_holders = None
+        self.lock_holders_reason = "open descriptors cannot be read on this host"
+        before = self.host_state()
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.relocate()
+        message = str(raised.exception)
+        self.assertIn("cannot be ruled out", message)
+        self.assertIn(str(self.legacy_lock), message)
+        self.assertEqual(self.host_state(), before)
+
+    # -- the population no refusal can reach --------------------------------
+
+    def test_nothing_can_open_that_lock_while_the_run_is_under_way(self):
+        """The other half, and the half no refusal covers.
+
+        A controller invoked while the relocation is already running is one no
+        plan could have seen. What stops it is the file: from the instant this
+        run holds that lock it is closed against every other opener, so such a
+        process never queues on it and never gets a turn on a location that
+        moved while it waited. That is what makes the prevention total rather
+        than a race won — and it is why the run may not reopen the file for its
+        own later acquisitions, and holds one instead.
+        """
+        observed = {}
+        real = install_drainer._apply_relocation
+
+        def during(transition, relocation_plan, sources):
+            # A second descriptor in this process is another opener exactly as
+            # a second process's is: the mode is the whole mechanism.
+            try:
+                descriptor = os.open(self.legacy_lock, os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError as error:
+                observed["refused"] = f"{type(error).__name__}: {error}"
+            else:
+                os.close(descriptor)
+                observed["refused"] = None
+            return real(transition, relocation_plan, sources)
+
+        with mock.patch.object(install_drainer, "_apply_relocation", during):
+            self.assertTrue(self.relocate()["relocated"])
+        self.assertIsNotNone(observed["refused"])
+        self.assertIn(str(self.legacy_lock), observed["refused"])
+        # Closed afterwards too, now with the notice in it.
+        self.assertFalse(os.access(self.legacy_lock, os.W_OK))
+        self.assert_location_is_sealed()
+
+    def test_a_refusal_after_the_closure_leaves_the_lock_as_it_was_found(self):
+        """The closure is taken before the run has decided anything, so a
+        refusal raised after it has to put the file back — a run that refuses
+        changes nothing at all, and a lock left closed by a run that did
+        nothing else is a lock nothing can ever take again."""
+        before = self.host_state()
+        with mock.patch.object(
+            install_drainer,
+            "_apply_relocation",
+            side_effect=install_drainer.InstallError("refused mid-run"),
+        ):
+            with self.assertRaises(install_drainer.InstallError):
+                self.relocate()
+        self.assertTrue(os.access(self.legacy_lock, os.W_OK))
+        # Everything except the residue a run that got as far as taking a lock
+        # always leaves: the destination's own lock file and the directories
+        # holding it, which are never unlinked.
+        self.assertEqual(
+            self.outside_the_destination(self.host_state()),
+            self.outside_the_destination(before),
+        )
+        self.assert_destination_holds_only_its_lock()
+
+    # -- finishing a location an earlier run left open -----------------------
+
+    def test_an_ordinary_host_with_nothing_queued_closes_it(self):
+        # Nothing else has this file open, nothing could have opened it while
+        # the run held it, so nothing can ever take this lock.
+        result = self.relocate()
+        self.assertTrue(result["late_writes"]["sealed"])
+        self.assertEqual(result["late_writes"]["lock_holders"], [])
+        self.assert_location_is_sealed()
+        install_drainer._require_relocation_resolved(result)
+
+    def test_the_marker_records_that_closing_finished(self):
+        """The durable half of the answer.
+
+        Both seals are objects a later run can see and the lock's mode is a bit
+        it can read, but whether this run was in a position to prove nothing
+        could still take that lock is a question only this run could ask. So it
+        writes its answer down beside the location, in the notice every seal
+        already points at.
+        """
+        marker = self.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+        self.assertTrue(self.relocate()["late_writes"]["sealed"])
+        document = drain_prs_service._read_json_object(marker)
+        self.assertIs(document[drain_prs_service.RELOCATION_MARKER_CLOSED], True)
+        self.assertEqual(
+            document[drain_prs_service.RELOCATION_MARKER_DESTINATION],
+            str(self.destination),
+        )
+        self.assertIn(
+            "was relocated to",
+            document[drain_prs_service.RELOCATION_MARKER_NOTICE],
+        )
+
+    def unfinished(self):
+        """A location an earlier run emptied and sealed without finishing.
+
+        What an installer predating this bound leaves: the seals are down, the
+        lock is open because that installer never closed it, and the marker
+        says nothing about whether anything could still take it.
+        """
+        self.assertTrue(self.relocate()["late_writes"]["sealed"])
+        marker = self.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+        document = drain_prs_service._read_json_object(marker)
+        document.pop(drain_prs_service.RELOCATION_MARKER_CLOSED)
+        drain_prs_service.atomic_write_json(marker, document)
+        self.legacy_lock.chmod(0o600)
+        self.assertIsNone(install_drainer.relocation_disposition(self.destination))
+
+    def test_a_marker_that_predates_this_bound_is_not_finished(self):
+        self.unfinished()
+        again = self.relocate()
+        self.assertFalse(again["relocated"])
+        self.assertIn("closed it", again["reason"])
+        self.assertTrue(again["late_writes"]["sealed"])
+        self.assert_location_is_sealed()
+        self.assertIn(
+            "emptied and sealed",
+            install_drainer.relocation_disposition(self.destination),
+        )
+
+    def test_finishing_a_location_puts_back_a_definition_that_went_missing(self):
+        """Why the finishing run checks definitions at all.
+
+        A location an earlier run could not finish closing is one something may
+        have acted on in between: that run left the lock open, so a controller
+        bound there could still have taken it and uninstalled. The run that
+        finishes the location is the one that puts back what it finds missing.
+        """
+        self.unfinished()
+        backend = install_drainer.service_backend()
+        definition = backend.definition_path(self.job.label)
+        definition.unlink()
+        self.commands.clear()
+        again = self.relocate()
+        late = again["late_writes"]
+        self.assertTrue(late["sealed"])
+        self.assertEqual(late["restored_definitions"], ["acme/widgets"])
+        self.assertTrue(definition.is_file())
+        self.assertEqual(
+            backend.definition_environment(self.job.label)[
+                kanban_config.DRAINER_INSTALL_DIR_ENV
+            ],
+            str(self.destination),
+        )
+        self.assertTrue(
+            any(self.job.label in " ".join(command) for command in self.commands),
+            self.commands,
+        )
+        self.assertIn("put it back and reloaded it", again["repair"])
+        install_drainer._require_relocation_resolved(again)
+
+    def watch_lock_mode(self):
+        """Every change to the legacy lock's mode, beside whether this run held
+        the lock when it made it.
+
+        The instrument is a descriptor opened before the run and kept: `flock`
+        is per open file description, so asking for it non-blocking on that one
+        answers whether anything — this process included — holds the lock right
+        now, which is exactly the question a mode change has to be measured
+        against.
+        """
+        probe = os.open(self.legacy_lock, os.O_RDONLY)
+        self.addCleanup(os.close, probe)
+
+        def held():
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(probe, fcntl.LOCK_UN)
+            return False
+
+        observed = []
+        real = Path.chmod
+
+        def watched(target, mode, **rest):
+            if Path(target) == self.legacy_lock:
+                observed.append((mode, held()))
+            return real(target, mode, **rest)
+
+        return observed, mock.patch.object(Path, "chmod", watched)
+
+    def test_the_lock_is_never_loosened_by_a_run_that_does_not_hold_it(self):
+        """The ordering that makes the closure real, rather than a window.
+
+        A run that made this file writable so it could open it the ordinary way
+        would be handing a stale transition the lock in exactly that window —
+        `document_lock` opens `O_RDWR`, so a controller reaching for the lock
+        while the mode is loose takes it. The rule is therefore that the mode is
+        only ever loosened by a run that already holds the lock, and this
+        watches every change to it on the path where the temptation is
+        strongest: a location whose lock an earlier run left closed.
+        """
+        self.unfinished()
+        # Closed again, so this run has to deal with a lock it cannot open the
+        # ordinary way — which is the state that invites reopening it first.
+        self.legacy_lock.chmod(0o400)
+        observed, watcher = self.watch_lock_mode()
+        with watcher:
+            self.assertTrue(self.relocate()["late_writes"]["sealed"])
+        self.assertTrue(observed, "nothing changed the lock's mode at all")
+        # Not loosening it at all is the strongest outcome and the one this
+        # takes: a closed lock is opened read-only, which needs no change. What
+        # may never happen is a mode that grants write while this run does not
+        # hold the lock.
+        for mode, was_held in observed:
+            if mode & 0o200:
+                self.assertTrue(was_held, (oct(mode), observed))
+
+    def test_a_contender_never_takes_the_lock_while_a_location_is_finished(self):
+        """The retry path takes the lock the same way a relocation does.
+
+        A location an earlier run left open has a *writable* lock — that is
+        what "left open" means — so this is the run that could most easily hand
+        a stale transition the lock, by making the file writable in order to
+        open it the ordinary way. It does not: it opens the file, takes the
+        lock, and only then closes the mode, so a controller reaching for that
+        lock while this run works neither takes it nor opens one.
+        """
+        # Started before anything moves, so it is bound to the location this
+        # run finishes rather than to the destination a later process resolves.
+        process = self.start_holder(visible=False, open_now=False)
+        self.unfinished()
+        self.open_lock(process, visible=False)
+        observed = {}
+        real = install_drainer._settle_and_close
+
+        def during(transition, relocation_plan, backend, outcome, descriptor):
+            observed["acquired"] = self.acquired.exists()
+            try:
+                handle = os.open(self.legacy_lock, os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError as error:
+                observed["open"] = f"{type(error).__name__}: {error}"
+            else:
+                os.close(handle)
+                observed["open"] = None
+            self.lock_holders = (process.pid,)
+            return real(transition, relocation_plan, backend, outcome, descriptor)
+
+        with mock.patch.object(install_drainer, "_settle_and_close", during):
+            unfinished = self.relocate()
+        # It never took the lock while this run held it, and could not have
+        # opened one either.
+        self.assertFalse(observed["acquired"])
+        self.assertIsNotNone(observed["open"])
+        self.assertIn(str(self.legacy_lock), observed["open"])
+        # This run reports it rather than declaring the location closed...
+        self.assertFalse(unfinished["late_writes"]["sealed"])
+        self.assertEqual(unfinished["late_writes"]["lock_holders"], [process.pid])
+        with self.assertRaises(install_drainer.RelocationUnresolved):
+            install_drainer._require_relocation_resolved(unfinished)
+        # ...and the run after it, once that process has had the turn it was
+        # always going to get and gone, puts back what it took and closes.
+        self.release(process)
+        backend = install_drainer.service_backend()
+        self.assertFalse(backend.definition_path(self.job.label).is_file())
+        self.lock_holders = ()
+        again = self.relocate()
+        late = again["late_writes"]
+        self.assertTrue(late["sealed"])
+        self.assertEqual(late["restored_definitions"], ["acme/widgets"])
+        self.assertTrue(backend.definition_path(self.job.label).is_file())
+        install_drainer._require_relocation_resolved(again)
+        self.assert_location_is_sealed()
+
+    def test_finishing_a_location_reports_a_host_it_cannot_ask(self):
+        """The refusal above is not available here: this location is already
+        emptied, so there is nothing to decline to move. What a run that cannot
+        ask does instead is leave the lock closed and say so."""
+        self.unfinished()
+        self.lock_holders = None
+        self.lock_holders_reason = "open descriptors cannot be read on this host"
+        unfinished = self.relocate()
+        self.assertFalse(unfinished["late_writes"]["sealed"])
+        self.assertIn("cannot be ruled out", unfinished["repair"])
+        with self.assertRaises(install_drainer.RelocationUnresolved):
+            install_drainer._require_relocation_resolved(unfinished)
+        # And once it can be asked, the same re-run finishes it.
+        self.lock_holders = ()
+        self.lock_holders_reason = None
+        again = self.relocate()
+        self.assertTrue(again["late_writes"]["sealed"])
+        install_drainer._require_relocation_resolved(again)
+        self.assert_location_is_sealed()
+
+
+class DestinationLifecycleTests(RelocationFixture):
+    """What the bound must not reach: the installation the run just made.
+
+    Everything closed here belongs to the location a run emptied — that
+    location's own record path, its own runtime root, its own lock. Nothing
+    else could be: every definition on this host lives in one directory the
+    service manager owns, shared by both namespaces this repository installs
+    and by every unrelated job the user has, so a bound that reached
+    definitions would freeze the installation it had just made along with all
+    of them.
+
+    So this is the other half of the guarantee, asked of a host where the bound
+    is in place: the destination goes on working exactly as it did, and the
+    bound is still in place afterwards.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.assertTrue(self.relocate()["late_writes"]["sealed"])
+        self.assert_location_is_sealed()
+        # The relocation rebound this process to the destination, which is what
+        # a controller invoked now resolves for itself.
+        self.assertEqual(drain_prs_service.INSTALL_DIR, self.destination)
+        self.destination_job = drain_prs_service.resolve_job(self.widgets)
+        self.backend = install_drainer.service_backend()
+        self.commands.clear()
+
+    def definition(self):
+        return self.backend.definition_path(self.destination_job.label)
+
+    def assert_the_bound_is_still_in_place(self):
+        """The location a run emptied is still closed, and a transition there
+        still cannot begin."""
+        self.assert_location_is_sealed()
+        self.assertFalse(os.access(self.legacy_lock, os.W_OK))
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            with drain_prs_service.document_lock(self.legacy_record):
+                pass
+        self.assertIn("Refusing unsafe config lock path", str(raised.exception))
+
+    def test_the_destination_controller_can_refresh_its_own_job(self):
+        # The supported way a repository's installation is repaired or updated,
+        # which writes the definition, the record entry and asks the manager to
+        # load it — all at the destination, and none of it through anything
+        # this run closed.
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = drain_prs_service.install_job(self.destination_job)
+        self.assertTrue(result["installed"])
+        self.assertEqual(
+            self.backend.definition_environment(self.destination_job.label)[
+                kanban_config.DRAINER_INSTALL_DIR_ENV
+            ],
+            str(self.destination),
+        )
+        self.assertIn(
+            "acme/widgets",
+            self.record_document(self.destination_record)["repositories"],
+        )
+        self.assertTrue(
+            any(
+                self.destination_job.label in " ".join(command)
+                for command in self.commands
+            ),
+            self.commands,
+        )
+        self.assert_the_bound_is_still_in_place()
+
+    def test_the_destination_controller_can_uninstall_and_reinstall(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            removed = drain_prs_service.uninstall_job(self.destination_job)
+        self.assertTrue(removed["uninstalled"])
+        self.assertFalse(self.definition().is_file())
+        self.assertNotIn(
+            "acme/widgets",
+            self.record_document(self.destination_record).get("repositories", {}),
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            drain_prs_service.install_job(self.destination_job)
+        self.assertTrue(self.definition().is_file())
+        self.assertIn(
+            "acme/widgets",
+            self.record_document(self.destination_record)["repositories"],
+        )
+        self.assert_the_bound_is_still_in_place()
+
+    def test_an_unrelated_definition_in_the_same_directory_is_untouched(self):
+        # The directory a definition lives in is the manager's, not this
+        # installation's: this repository installs an issue-approval namespace
+        # beside the drainer's, and a user has whatever else they have. A bound
+        # that reached it would reach all of them.
+        neighbour = service_manager.SYSTEMD_USER_DIR / (
+            service_manager.ISSUE_APPROVAL_LABEL_PREFIX + ".acme.widgets.service"
+        )
+        service_manager.write_definition_file(neighbour, b"[Unit]\n")
+        self.assertTrue(neighbour.is_file())
+        self.assertTrue(service_manager.remove_definition_file(neighbour))
+        self.assertFalse(neighbour.exists())
+        # And the drainer's own definition beside it never moved.
+        self.assertTrue(self.definition().is_file())
+        self.assert_the_bound_is_still_in_place()
+
+
+class ProcessDescriptorTests(unittest.TestCase):
+    """The reader every fixture above pins.
+
+    Pinned there because whether a host can read another process's descriptors
+    is a property of the host rather than of the relocation, and a suite that
+    probed it would answer differently on a macOS laptop and a Linux runner.
+    Asked for real here, on the hosts that can answer.
+    """
+
+    def test_a_host_with_no_procfs_cannot_be_asked(self):
+        with tempfile.TemporaryDirectory() as root:
+            absent = Path(root) / "no-procfs"
+            held = Path(root) / "held"
+            held.write_text("", encoding="utf-8")
+            with mock.patch.object(install_drainer, "_PROCFS", absent):
+                holders, reason = install_drainer._processes_holding_open(held)
+        # None rather than an empty tuple: the two are different answers, and
+        # only one of them closes anything.
+        self.assertIsNone(holders)
+        self.assertIn(str(absent), reason)
+
+    @unittest.skipUnless(Path("/proc").is_dir(), "this host has no /proc to read")
+    def test_another_process_holding_it_open_is_found_and_this_one_is_not(self):
+        with tempfile.TemporaryDirectory() as root:
+            held = Path(root) / "held"
+            held.write_text("", encoding="utf-8")
+            self.assertEqual(
+                install_drainer._processes_holding_open(held), ((), None)
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys, time\n"
+                    "handle = open(sys.argv[1])\n"
+                    "sys.stdout.write('open')\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(60)\n",
+                    str(held),
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            self.addCleanup(process.kill)
+            self.assertEqual(process.stdout.read(4), "open")
+            holders, reason = install_drainer._processes_holding_open(held)
+            self.assertIsNone(reason)
+            self.assertIn(process.pid, holders)
+            # This process's own descriptor is not another process's, or every
+            # run would find itself.
+            own = held.open(encoding="utf-8")
+            self.addCleanup(own.close)
+            holders, _ = install_drainer._processes_holding_open(held)
+            self.assertNotIn(os.getpid(), holders)
 
 
 class TakeoverFixture(RelocationFixture):
@@ -3353,7 +5120,7 @@ class TakeoverTests(TakeoverFixture):
         # The one document, untouched: this run never writes it, so it is not
         # merged with itself either.
         self.assertEqual(self.legacy_record.read_bytes(), record)
-        self.assertFalse(install_drainer._is_tombstone(self.legacy_record))
+        self.assertFalse(install_drainer._is_relocation_seal(self.legacy_record))
         self.assertFalse(
             (self.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME).exists()
         )
