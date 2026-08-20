@@ -34,9 +34,8 @@ versions the required CI job pins, and the ones an install is verified with.
 ### Install from a release archive
 
 Kanban releases are tagged `v<version>` and carry the `cabal sdist` source
-archive `kanban-<version>.tar.gz` as their asset. **The first such archive
-appears when `v1.0.0.0` is published; there is no published release yet.**
-Until then, use the source checkout below.
+archive `kanban-<version>.tar.gz` as their asset. **`v1.0.0.0` is published,
+so the archive install below works today.**
 
 From an empty directory:
 
@@ -101,8 +100,8 @@ start the optional AI actions.
 
 ### Install from a source checkout
 
-Contributors, and anyone who wants Kanban before the first release, install
-from a clone instead:
+Contributors, and anyone who wants the latest source rather than a released
+archive, install from a clone instead:
 
 ```console
 git clone https://github.com/coghex/kanban.git

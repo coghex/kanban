@@ -85,16 +85,17 @@ builds and runs both test suites on Linux as independent jobs behind one
 aggregate `build-test` job, which is the single CI context that branch
 protection, `tools/drain_prs.py`, and the release gate below all resolve;
 `docs/development.md` defines the source-distribution check, and the
-clean-install exercise recorded in milestone 9 has passed. As of 2026-08-13,
-`kanban.cabal` and `src/Kanban/CLI.hs` both declare version `1.0.0.0` —
-established by #283 under packaging epic #282, along with the root
+clean-install exercise recorded in milestone 9 has passed. As of
+2026-08-16 UTC, `kanban.cabal` and `src/Kanban/CLI.hs` both declare version
+`1.0.0.0` — established by #283 under packaging epic #282, along with the root
 `CHANGELOG.md` whose top section is the first release's notes — while the
-repository has no tags and the remote no GitHub Releases.
+repository carries the annotated tag `v1.0.0.0` and the remote the published
+GitHub Release for it, whose sole asset is `kanban-1.0.0.0.tar.gz`.
 `.github/workflows/release.yml` joins `ci.yml` and `review-gate.yml` as a
 tracked workflow: a push of a `v*` tag publishes the verified `cabal sdist`
 archive as a GitHub Release, and `workflow_dispatch` rehearses the same path
 under a `release-dry-run-*` tag that can produce only a draft. It never creates
-a release tag. Open epic #268 now owns this release-readiness arc; closed
+a release tag. Completed epic #268 owns this release-readiness arc; closed
 issue #203 covers the source distribution rather than these manual gates. The
 document classification that gated publication is in place: PR #227 (commit
 518a3de) added `docs/document_workflow_findings.md` to
