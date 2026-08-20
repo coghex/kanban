@@ -492,11 +492,13 @@ data WorkflowConfig = WorkflowConfig
     -- built-in set of names.
     problemStyleLabels :: Set Text,
     uiStyleLabels :: Set Text,
-    -- | Exact, case-sensitive, repository-relative paths whose content is
-    -- coordination rather than code: the PR drainer may merge a candidate
-    -- whose only distance from the default branch is a change to these.
-    -- Nothing in the dashboard reads them, and they default to empty, so a
-    -- repository that configures nothing keeps today's behavior.
+    -- | Case-sensitive, repository-relative coordination declarations — an
+    -- exact file path, or a directory ending in @/@ covering every descendant
+    -- by whole path component, never by glob or string prefix — whose content
+    -- is coordination rather than code: the PR drainer may merge a candidate
+    -- whose only distance from the default branch is a change to covered
+    -- paths. Nothing in the dashboard reads them, and they default to empty,
+    -- so a repository that configures nothing keeps today's behavior.
     coordinationPaths :: Set Text
   }
   deriving stock (Eq, Show, Generic)

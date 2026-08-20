@@ -225,6 +225,131 @@ class WaitForBranchUpdatePolicyTests(unittest.TestCase):
                     self.wait(pr_json(MOVED_HEAD, approved=False, checks=checks))
 
 
+MERGE_BASE = "b" * 40
+TIP = "e" * 40
+
+
+class ComparedPathsTests(unittest.TestCase):
+    """Issue #409 rests on compared_paths reporting every endpoint: the
+    directory-aware membership check below can only be complete if a rename or
+    copy in the advance contributes both of its paths."""
+
+    def compare(self, payload):
+        with mock.patch.object(drain_prs, "run_json", return_value=payload):
+            return drain_prs.compared_paths(make_ctx(), OLD_HEAD, TIP)
+
+    def test_a_rename_contributes_both_of_its_endpoints(self):
+        result = self.compare(
+            {
+                "merge_base_commit": {"sha": MERGE_BASE},
+                "files": [
+                    {
+                        "filename": "docs/coordination/renamed.md",
+                        "previous_filename": "docs/old-place.md",
+                    },
+                    {"filename": "docs/coordination/notes.md"},
+                ],
+            }
+        )
+        self.assertEqual(
+            result,
+            (
+                MERGE_BASE,
+                frozenset(
+                    {
+                        "docs/coordination/renamed.md",
+                        "docs/old-place.md",
+                        "docs/coordination/notes.md",
+                    }
+                ),
+            ),
+        )
+
+    def test_a_file_list_at_the_cap_cannot_be_proven_complete(self):
+        payload = {
+            "merge_base_commit": {"sha": MERGE_BASE},
+            "files": [
+                {"filename": f"docs/coordination/{index}.md"}
+                for index in range(drain_prs.COMPARE_FILE_LIMIT)
+            ],
+        }
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(self.compare(payload))
+
+
+class CoordinationBaseAdvanceTests(unittest.TestCase):
+    """Issue #409: configured coordination declarations cover directories by
+    whole path component at the drainer's runtime base-advance decision, and
+    every uncertain or invalid configuration still requests the ordinary
+    branch update."""
+
+    def decide(self, configured, advanced, own=frozenset({"src/Kanban/UI.hs"})):
+        ctx = make_ctx()
+        pr = {"number": 7, "headRefOid": OLD_HEAD}
+        comparisons = [(MERGE_BASE, frozenset(advanced)), (MERGE_BASE, frozenset(own))]
+        with mock.patch.object(
+            drain_prs, "COORDINATION_PATHS", frozenset(configured)
+        ), mock.patch.object(
+            drain_prs, "default_branch_tip", return_value=TIP
+        ), mock.patch.object(
+            drain_prs, "compared_paths", side_effect=comparisons
+        ), contextlib.redirect_stdout(io.StringIO()) as logged:
+            approval = drain_prs.coordination_only_base_advance(ctx, pr)
+        return approval, logged.getvalue()
+
+    def test_a_descendant_of_a_configured_directory_is_covered(self):
+        approval, _ = self.decide(
+            {"docs/coordination/"},
+            {"docs/coordination/notes.md", "docs/coordination/deep/plan.md"},
+        )
+        self.assertIsNotNone(approval)
+        self.assertEqual(approval.tip, TIP)
+        self.assertEqual(approval.head, OLD_HEAD)
+
+    def test_a_similarly_prefixed_sibling_requests_the_ordinary_update(self):
+        approval, logged = self.decide(
+            {"docs/coordination/"}, {"docs/coordination-old/notes.md"}
+        )
+        self.assertIsNone(approval)
+        self.assertIn("docs/coordination-old/notes.md", logged)
+        self.assertIn("outside the configured coordination paths", logged)
+
+    def test_an_exact_file_entry_still_covers_exactly_itself(self):
+        approval, _ = self.decide({"docs/status.md"}, {"docs/status.md"})
+        self.assertIsNotNone(approval)
+        approval, _ = self.decide({"docs/status.md"}, {"docs/status2.md"})
+        self.assertIsNone(approval)
+
+    def test_an_uncovered_rename_endpoint_requests_the_ordinary_update(self):
+        # compared_paths reports both endpoints, so a rename out of (or into)
+        # the covered directory leaves one endpoint outside the declarations.
+        approval, logged = self.decide(
+            {"docs/coordination/"},
+            {"docs/coordination/renamed.md", "docs/old-place.md"},
+        )
+        self.assertIsNone(approval)
+        self.assertIn("docs/old-place.md", logged)
+
+    def test_an_empty_prefix_declaration_is_reported_and_grants_nothing(self):
+        # `/` would cover every path; honouring it would merge past arbitrary
+        # advances, and dropping it silently would hide the misconfiguration.
+        approval, logged = self.decide(
+            {"/", "docs/coordination/"}, {"docs/coordination/notes.md"}
+        )
+        self.assertIsNone(approval)
+        self.assertIn("empty component prefix", logged)
+        self.assertIn("/", logged)
+
+    def test_an_overlap_with_the_pull_requests_own_files_still_refuses(self):
+        approval, logged = self.decide(
+            {"docs/coordination/"},
+            {"docs/coordination/notes.md"},
+            own={"docs/coordination/notes.md"},
+        )
+        self.assertIsNone(approval)
+        self.assertIn("both change", logged)
+
+
 class ApprovalIsNeverAddedTests(unittest.TestCase):
     """Issue #230: the drainer reads approval verdicts and never writes one.
     No path applies `reviewed:approve`, so no repository can have one restored

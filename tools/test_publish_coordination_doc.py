@@ -76,6 +76,7 @@ CLASSIFICATION = """# Contract
 ```text
 docs/ui-bugs.md | coordination | audit-report
 docs/drainer-bugs.md | coordination | audit-report
+docs/coordination/ | coordination | coordination-note
 docs/design.md | pr-atomic | test-parsed
 codex-plugin/ | pr-atomic | test-parsed
 ```
@@ -2108,20 +2109,87 @@ class PublishTests(PublishFixture):
             self.assertIn("no coordination lane", result["reason"])
             self.assertTrue(result["document_written"])
 
-    def test_a_declared_path_matches_exactly_and_never_by_prefix(self):
-        # `coordination_paths` entries are exact, case-sensitive, relative
-        # paths -- no globs, no directory prefixes. A directory-shaped entry
-        # therefore declares nothing, rather than quietly acquiring §7's
-        # whole-component matching for a repository §7 does not classify.
+    def seed_remote_document(self, fx, path, content):
+        """Land `path` on the publication branch and mirror it in the write
+        root, so a fresh path starts at the tip's own baseline there."""
+        fx.add_remote(path, content)
+        target = fx.docs / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    def test_a_declared_directory_covers_its_descendants(self):
+        # Issue #409 replaces the exact-membership rule this class used to
+        # assert: a trailing-slash entry now declares the directory's whole
+        # descendant set, matched by whole path component — the same
+        # kanban_config predicate the drainer's base-advance decision reads.
         self.write_config(
             '[repositories."coghex/synarchy".workflow]\n'
-            'coordination_paths = ["docs/"]\n'
+            'coordination_paths = ["docs/coordination/"]\n'
         )
         with tempfile.TemporaryDirectory() as other_dir:
             other = Fixture.create(Path(other_dir), origin_name="synarchy")
-            result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.seed_remote_document(
+                other, "docs/coordination/notes.md", "# Notes\n\n- one\n"
+            )
+            result = other.publish(
+                "# Notes\n\n- one\n- two\n",
+                path="docs/coordination/notes.md",
+                repo="coghex/synarchy",
+            )
+            self.assertEqual(result["status"], "published")
+            self.assertIn(
+                "- two", other.remote_content("docs/coordination/notes.md")
+            )
+
+    def test_a_similarly_prefixed_sibling_directory_is_not_declared(self):
+        # The whole-component boundary: `docs/coordination/` is a statement
+        # about one directory, never about every name that begins the same
+        # way, so a directory entry cannot become string-prefix matching.
+        self.write_config(
+            '[repositories."coghex/synarchy".workflow]\n'
+            'coordination_paths = ["docs/coordination/"]\n'
+        )
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
+            self.seed_remote_document(
+                other, "docs/coordination-old/notes.md", "# Old\n\n- one\n"
+            )
+            result = other.publish(
+                "# Old\n\n- one\n- two\n",
+                path="docs/coordination-old/notes.md",
+                repo="coghex/synarchy",
+            )
             self.assertEqual(result["status"], "not-published")
             self.assertIn("no coordination lane", result["reason"])
+            # The approved mutation still lands locally, as for any
+            # undeclared document.
+            self.assertTrue(result["document_written"])
+            self.assertEqual(
+                other.remote_content("docs/coordination-old/notes.md"),
+                "# Old\n\n- one",
+            )
+
+    def test_a_root_covering_declaration_fails_closed_as_invalid(self):
+        # `/` has an empty component prefix and would cover every path in the
+        # repository. Honouring it would publish anything; reading it as no
+        # lane would silently strand documents its owner meant to declare. So
+        # it is invalid configuration, refused before anything is written.
+        self.write_config(
+            '[repositories."coghex/synarchy".workflow]\n'
+            'coordination_paths = ["/"]\n'
+        )
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
+            with self.assertRaises(publisher.PublishError) as caught:
+                other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertEqual(
+                caught.exception.status, "coordination-config-invalid"
+            )
+            self.assertEqual(other.remote_content(), "# UI\n\n- one")
+            self.assertEqual(
+                (other.docs / "docs" / "ui-bugs.md").read_text(),
+                "# UI\n\n- one\n",
+            )
 
     def test_unreadable_configuration_publishes_and_writes_nothing(self):
         # Present-but-invalid is not absent. An empty lane would apply the
@@ -2187,6 +2255,31 @@ class PublishTests(PublishFixture):
         result = self.fx.publish("# Design\n\nchanged\n", path="docs/design.md")
         self.assertEqual(result["status"], "not-published")
         self.assertIn("pr-atomic", result["reason"])
+
+    def test_kanbans_own_directory_row_publishes_a_descendant(self):
+        # §7's `docs/coordination/` row read through the publisher's own
+        # classify(): a document beneath the directory takes the coordination
+        # lane with no row of its own (issue #409).
+        self.seed_remote_document(
+            self.fx, "docs/coordination/notes.md", "# Notes\n\n- one\n"
+        )
+        result = self.fx.publish(
+            "# Notes\n\n- one\n- two\n", path="docs/coordination/notes.md"
+        )
+        self.assertEqual(result["status"], "published")
+        self.assertIn("- two", self.fx.remote_content("docs/coordination/notes.md"))
+
+    def test_kanbans_own_directory_row_never_covers_a_sibling(self):
+        # Whole-component matching on Kanban's own side too: the sibling is
+        # covered by no row, which is the fail-closed pr-atomic default.
+        self.seed_remote_document(
+            self.fx, "docs/coordination-old/notes.md", "# Old\n\n- one\n"
+        )
+        result = self.fx.publish(
+            "# Old\n\n- one\n- two\n", path="docs/coordination-old/notes.md"
+        )
+        self.assertEqual(result["status"], "not-published")
+        self.assertIn("by no §7 row", result["reason"])
 
     # -- isolation -----------------------------------------------------------
 

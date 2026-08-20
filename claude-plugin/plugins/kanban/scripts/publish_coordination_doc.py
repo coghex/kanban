@@ -442,6 +442,9 @@ def classify(rows: dict[str, str], document: str):
     return rows[matched[0]], matched
 
 
+_KANBAN_CONFIG_MODULE = None
+
+
 def kanban_config_module():
     """tools/kanban_config.py, loaded from beside this file.
 
@@ -452,7 +455,14 @@ def kanban_config_module():
     tracked one does. It is the same resolved-configuration reader
     `drain_prs.py` and `approve_issues.py` import, so a repository's declared
     coordination paths mean one thing everywhere rather than one thing here.
+
+    Loaded once and memoized: eligibility() reads both the declaration and the
+    coverage predicate through it, and both must come from the same copy of
+    the loader rather than from two executions that could straddle an install.
     """
+    global _KANBAN_CONFIG_MODULE
+    if _KANBAN_CONFIG_MODULE is not None:
+        return _KANBAN_CONFIG_MODULE
     source = Path(__file__).resolve().parent / "kanban_config.py"
     name = "_kanban_config_for_publication"
     try:
@@ -477,12 +487,14 @@ def kanban_config_module():
             f"so the coordination paths a repository outside {CANONICAL_REPOSITORY} "
             "declares for itself cannot be read",
         ) from error
+    _KANBAN_CONFIG_MODULE = module
     return module
 
 
 def declared_coordination_paths(owner: str) -> tuple[frozenset[str], list[str]]:
-    """The exact repository-relative paths `owner` declares as coordination,
-    and whatever the loader warned about on the way.
+    """The coordination declarations `owner` makes for itself — exact
+    repository-relative file paths, or directories through a trailing-slash
+    entry — and whatever the loader warned about on the way.
 
     Missing configuration is an empty set — the documented default, and the
     reason a consuming repository that declares nothing gets an ordinary
@@ -524,11 +536,30 @@ def eligibility(root: Path, owner: str, tip: str, document: str) -> tuple[bool, 
     documents it classifies, so it holds whether or not an operator ever copied
     config.toml.example. Every other owner's lane is that owner's own
     `workflow.coordination_paths` declaration, which is where a repository that
-    does not track §7 says what its coordination documents are (issue #370).
+    does not track §7 says what its coordination documents are (issue #370) —
+    exact file paths, or whole directories through a trailing-slash entry
+    covering descendants by whole path component, decided by the same
+    kanban_config predicate the drainer's base-advance decision reads. A
+    declaration whose empty component prefix would cover every path (`/`
+    alone) is invalid configuration rather than a broad lane, and fails closed
+    like configuration that cannot be read: silently honouring it would
+    publish anything, and silently dropping it would strand a document its
+    owner meant to declare.
     """
     if owner != CANONICAL_REPOSITORY:
         declared, warnings = declared_coordination_paths(owner)
-        if document in declared:
+        config = kanban_config_module()
+        invalid = config.empty_prefix_coordination_declarations(declared)
+        if invalid:
+            raise PublishError(
+                "coordination-config-invalid",
+                f"{owner}'s workflow.coordination_paths declares "
+                f"{invalid}, whose empty component prefix would cover every "
+                "path in the repository; the declaration grants no lane, and "
+                "nothing is written or published until it is corrected",
+                invalid_declarations=invalid,
+            )
+        if config.coordination_paths_cover(declared, document):
             return True, ""
         noted = f" (configuration warnings: {'; '.join(warnings)})" if warnings else ""
         return False, (

@@ -35,11 +35,14 @@ ui_style_labels = []
 # section 7 does not classify -- which is every repository but Kanban's own --
 # the document workflows publish exactly these paths straight to the default
 # branch, leaving every other document to the ordinary pull-request lane.
-# Each entry is one exact, case-sensitive, repository-
-# relative path: no globs, no directory prefixes, no extension matching, and a
-# rename counts both endpoints, so configure every path you mean. Empty by
-# default, which requests a branch update for every advance as before. Never
-# list a document a test parses -- a change to one really can fail CI.
+# Each entry is one case-sensitive, repository-relative path: an exact file,
+# or a directory declared with a trailing slash, which covers every descendant
+# by whole path component -- "docs/notes/" covers docs/notes/plan.md and never
+# a sibling directory such as docs/notes-old/. No globs, no string prefixes,
+# no extension matching, and a rename counts both endpoints, so a rename out
+# of a declared directory is not a covered advance. Empty by default, which
+# requests a branch update for every advance as before. Never list a document
+# a test parses -- a change to one really can fail CI.
 coordination_paths = []
 
 [limits]
@@ -121,21 +124,24 @@ ping_claude_seconds = 120
 # ping_codex_seconds = 120
 # ping_claude_seconds = 120
 
-# Kanban's own repository, and the one live table in this file. The paths below
-# are exactly the `coordination` rows of docs/agent-workflow-contract.md
+# Kanban's own repository, and the one live table in this file. The entries
+# below are exactly the `coordination` rows of docs/agent-workflow-contract.md
 # section 7 -- the findings, code-health, and design documents whose content no
-# runtime, installer, or test reads -- so the drainer may merge past an advance
-# that only touches them instead of requesting a branch update that cannot
-# change the result. tools/test_document_classification.py reconciles this list
-# against those rows, so the two cannot drift; it also asserts that none of them
-# is a document a test parses, which is what the warning above the global
-# default asks of every entry. That global default stays empty: this
-# classification describes this repository and is never inferred for another.
+# runtime, installer, or test reads, plus the docs/coordination/ directory of
+# free-form notes, declared once rather than per file -- so the drainer may
+# merge past an advance that only touches them instead of requesting a branch
+# update that cannot change the result. tools/test_document_classification.py
+# reconciles this list against those rows by effective coverage, so the two
+# cannot drift; it also asserts that no entry covers a document a test parses,
+# which is what the warning above the global default asks of every entry. That
+# global default stays empty: this classification describes this repository
+# and is never inferred for another.
 [repositories."coghex/kanban".workflow]
 coordination_paths = [
   "docs/card_filter_design.md",
   "docs/claude_document_workflows_design.md",
   "docs/code-health-report.md",
+  "docs/coordination/",
   "docs/document_workflow_findings.md",
   "docs/drainer-bugs.md",
   "docs/issue_approval_queue_design.md",

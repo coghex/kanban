@@ -48,10 +48,12 @@ tracked file has none:
 * Out: `.drain-prs.json`, which `docs/pr-drainer.md` documents as optional
   per-repository drainer configuration and which is therefore the local
   configuration requirement 2 excludes; `.gitignore` and `.github/workflows/`,
-  which only do anything in the upstream Git repository; and the eighteen
-  development audit reports and design documents under `docs/`, which no
-  runtime, setup, test, or workflow path reads and which no packaged document
-  links to.
+  which only do anything in the upstream Git repository; and the development
+  audit reports, design documents, and coordination notes
+  `EXCLUDED_TRACKED_PATHS` declares — each by exact path, or whole directories
+  through a trailing-slash entry such as `docs/coordination/` that covers
+  every tracked descendant by whole path component — which no runtime, setup,
+  test, or workflow path reads and which no packaged document links to.
 
 Prerequisites are `cabal` on `PATH` and a Git checkout of this repository.
 Neither holds inside an unpacked release -- which nonetheless carries this
@@ -76,7 +78,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -123,8 +125,11 @@ RELEASE_DOCUMENTS = (
     "docs/workflow-setup.md",
 )
 
-# Tracked files that deliberately do not ship. See the module docstring for
-# why each one is out.
+# Tracked paths that deliberately do not ship. See the module docstring for
+# why each one is out. An entry ending in `/` declares a whole directory:
+# every tracked descendant is deliberately excluded, compared by whole path
+# component through excluded_entry_covers below, so a coordination note added
+# beneath `docs/coordination/` needs no entry of its own (issue #409).
 EXCLUDED_TRACKED_PATHS = (
     ".drain-prs.json",
     # CI's own harness for the drainer's systemd lifecycle: an image that boots
@@ -142,6 +147,7 @@ EXCLUDED_TRACKED_PATHS = (
     "docs/card_filter_design.md",
     "docs/claude_document_workflows_design.md",
     "docs/code-health-report.md",
+    "docs/coordination/",
     "docs/document_workflow_findings.md",
     "docs/drainer-bugs.md",
     "docs/issue_approval_queue_design.md",
@@ -224,6 +230,45 @@ DOCUMENTED_TREE_PATH = re.compile(
 )
 
 
+def excluded_entry_covers(entry: str, path: str) -> bool:
+    """Whether one EXCLUDED_TRACKED_PATHS entry covers `path`.
+
+    An entry ending in `/` covers every descendant of that directory, compared
+    by whole path component — `docs/coordination/` covers
+    `docs/coordination/scratch-note.md` and never a sibling such as
+    `docs/coordination-old/scratch-note.md`. Any other entry names one file
+    exactly; nothing here is a glob or a string prefix. The same
+    whole-component rule §7's directory rows and `workflow.coordination_paths`
+    use, restated over this module's own subject: tracked files, whatever
+    their extension.
+    """
+    if not entry.endswith("/"):
+        return entry == path
+    prefix = PurePosixPath(entry.rstrip("/")).parts
+    return bool(prefix) and PurePosixPath(path).parts[: len(prefix)] == prefix
+
+
+def expanded_exclusions(tracked, entries=EXCLUDED_TRACKED_PATHS):
+    """(the tracked files the entries deliberately exclude, the directory
+    entries covering no tracked file).
+
+    A directory entry expands over its tracked descendants rather than being
+    treated as a stale file, and a declared directory that exists but covers
+    no tracked content is reported: an exclusion excluding nothing is a stale
+    declaration either way.
+    """
+    files, uncovered = set(), []
+    for entry in entries:
+        if entry.endswith("/"):
+            covered = {path for path in tracked if excluded_entry_covers(entry, path)}
+            if not covered:
+                uncovered.append(entry)
+            files |= covered
+        else:
+            files.add(entry)
+    return files, uncovered
+
+
 def _run(args, **kwargs):
     return subprocess.run(args, text=True, capture_output=True, **kwargs)
 
@@ -277,6 +322,90 @@ def _tracked_files(*paths):
     if proc.returncode != 0:
         raise AssertionError(f"git ls-files failed:\n{proc.stderr}")
     return {entry for entry in proc.stdout.split("\0") if entry}
+
+
+class ExclusionDeclarationTests(unittest.TestCase):
+    """The coverage semantics the two archive checks above decide with,
+    exercised without building an archive so they run wherever the Python
+    suite does — the sdist assertions themselves skip without `cabal`, and a
+    skip is a pass to `unittest`."""
+
+    def test_a_directory_entry_covers_descendants_by_whole_component(self):
+        entry = "docs/coordination/"
+        for covered in (
+            "docs/coordination/scratch-note.md",
+            "docs/coordination/deep/nested.md",
+            "docs/coordination/asset.png",
+        ):
+            self.assertTrue(excluded_entry_covers(entry, covered), covered)
+        for stray in (
+            "docs/coordination-old/scratch-note.md",
+            "docs/coordination.md",
+            "docs/design.md",
+        ):
+            self.assertFalse(excluded_entry_covers(entry, stray), stray)
+
+    def test_a_file_entry_covers_exactly_itself(self):
+        self.assertTrue(excluded_entry_covers("docs/ui-bugs.md", "docs/ui-bugs.md"))
+        self.assertFalse(excluded_entry_covers("docs/ui-bugs.md", "docs/ui-bugs2.md"))
+        self.assertFalse(excluded_entry_covers("docs/ui-bugs.md", "docs/ui-bugs.md/x"))
+
+    def test_a_directory_entry_expands_over_its_tracked_descendants(self):
+        tracked = {
+            "docs/coordination/README.md",
+            "docs/coordination/scratch-note.md",
+            "docs/coordination-old/kept.md",
+            "docs/ui-bugs.md",
+        }
+        files, uncovered = expanded_exclusions(
+            tracked, entries=("docs/coordination/", "docs/ui-bugs.md")
+        )
+        self.assertEqual(uncovered, [])
+        self.assertEqual(
+            files,
+            {
+                "docs/coordination/README.md",
+                "docs/coordination/scratch-note.md",
+                "docs/ui-bugs.md",
+            },
+        )
+
+    def test_a_directory_entry_covering_nothing_is_reported(self):
+        files, uncovered = expanded_exclusions(
+            {"docs/ui-bugs.md"}, entries=("docs/coordination/", "docs/ui-bugs.md")
+        )
+        self.assertEqual(uncovered, ["docs/coordination/"])
+        self.assertEqual(files, {"docs/ui-bugs.md"})
+
+    def test_an_archived_descendant_of_an_excluded_directory_is_detected(self):
+        # The absence check's predicate, driven with a planted archive
+        # inventory: the descendant was never listed by name, and coverage
+        # still finds it.
+        archived = {
+            "docs/coordination/scratch-note.md",
+            "docs/coordination-old/kept.md",
+            "docs/design.md",
+        }
+        present = sorted(
+            path
+            for path in archived
+            if any(
+                excluded_entry_covers(entry, path)
+                for entry in ("docs/coordination/", ".drain-prs.json")
+            )
+        )
+        self.assertEqual(present, ["docs/coordination/scratch-note.md"])
+
+    def test_the_live_declarations_cover_tracked_content_when_git_answers(self):
+        # The live tuple, held to the same rule wherever a Git checkout is
+        # available — which the Python-only CI job is, unlike `cabal`.
+        if shutil.which("git") is None:  # pragma: no cover - environment guard
+            self.skipTest("git is not on PATH")
+        toplevel = _run(["git", "-C", str(REPO_ROOT), "rev-parse", "--show-toplevel"])
+        if toplevel.returncode != 0:
+            self.skipTest(f"{REPO_ROOT} is not a Git checkout")
+        _, uncovered = expanded_exclusions(_tracked_files())
+        self.assertEqual(uncovered, [])
 
 
 class SourceDistributionTest(unittest.TestCase):
@@ -366,13 +495,21 @@ class SourceDistributionTest(unittest.TestCase):
         )
 
     def test_every_tracked_file_has_a_stated_release_decision(self):
+        tracked = _tracked_files()
+        excluded, uncovered = expanded_exclusions(tracked)
+        self.assertEqual(
+            [],
+            uncovered,
+            "These EXCLUDED_TRACKED_PATHS directory entries cover no tracked "
+            "file. A declared directory must exist and cover tracked content; "
+            "remove the stale declarations.",
+        )
         classified = (
             _tracked_files(*RELEASE_TREES)
             | set(RELEASE_ROOT_FILES)
             | set(RELEASE_DOCUMENTS)
-            | set(EXCLUDED_TRACKED_PATHS)
+            | excluded
         )
-        tracked = _tracked_files()
 
         self.assertEqual(
             [],
@@ -440,7 +577,16 @@ class SourceDistributionTest(unittest.TestCase):
         )
 
     def test_deliberately_excluded_tracked_files_are_absent(self):
-        present = sorted(set(EXCLUDED_TRACKED_PATHS) & self.archive_files)
+        # Coverage rather than set membership, so an archived descendant of an
+        # excluded directory is detected, not only an exact listed path.
+        present = sorted(
+            path
+            for path in self.archive_files
+            if any(
+                excluded_entry_covers(entry, path)
+                for entry in EXCLUDED_TRACKED_PATHS
+            )
+        )
         self.assertEqual(
             [],
             present,

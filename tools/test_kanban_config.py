@@ -18,6 +18,75 @@ def write(tmp: Path, text: str) -> Path:
     return path
 
 
+class CoordinationCoverageTests(unittest.TestCase):
+    """Issue #409: the one predicate deciding what a `coordination_paths`
+    entry covers, shared by the drainer's base-advance decision and the
+    publisher's consuming-repository eligibility."""
+
+    def test_a_file_entry_covers_exactly_itself(self):
+        self.assertTrue(kc.coordination_path_covers("docs/status.md", "docs/status.md"))
+        self.assertFalse(kc.coordination_path_covers("docs/status.md", "docs/status2.md"))
+        # No directory semantics without the trailing slash: a file entry
+        # never covers a path beneath a directory of the same name.
+        self.assertFalse(kc.coordination_path_covers("docs/status.md", "docs/status.md/x"))
+
+    def test_a_directory_entry_covers_descendants_by_whole_component(self):
+        declared = "docs/coordination/"
+        self.assertTrue(kc.coordination_path_covers(declared, "docs/coordination/a.md"))
+        self.assertTrue(
+            kc.coordination_path_covers(declared, "docs/coordination/deep/b.md")
+        )
+        # Every extension: the drainer's subject is changed files, not
+        # documents, so a directory entry covers a .png as much as a .md.
+        self.assertTrue(kc.coordination_path_covers(declared, "docs/coordination/a.png"))
+        # The directory itself is not a changed file the comparison reports,
+        # and matching it would be a statement about nothing.
+        self.assertFalse(kc.coordination_path_covers(declared, "docs"))
+
+    def test_a_similarly_prefixed_sibling_is_never_covered(self):
+        declared = "docs/coordination/"
+        for stray in (
+            "docs/coordination-old/a.md",
+            "docs/coordination.md",
+            "docs/coordination2/a.md",
+        ):
+            self.assertFalse(kc.coordination_path_covers(declared, stray), stray)
+
+    def test_an_entry_is_never_a_glob(self):
+        self.assertFalse(kc.coordination_path_covers("docs/*.md", "docs/status.md"))
+        self.assertFalse(kc.coordination_path_covers("docs/*/", "docs/notes/a.md"))
+
+    def test_coverage_over_a_set_answers_for_any_entry(self):
+        declared = frozenset({"ROADMAP.md", "docs/coordination/"})
+        self.assertTrue(kc.coordination_paths_cover(declared, "ROADMAP.md"))
+        self.assertTrue(
+            kc.coordination_paths_cover(declared, "docs/coordination/a.md")
+        )
+        self.assertFalse(kc.coordination_paths_cover(declared, "docs/design.md"))
+        self.assertFalse(kc.coordination_paths_cover(frozenset(), "ROADMAP.md"))
+
+    def test_an_empty_prefix_declaration_grants_no_coverage(self):
+        # PurePosixPath('') and PurePosixPath('.') both have no parts, so a
+        # bare `/` (or `./`) would otherwise cover every path in the tree.
+        for declared in ("/", "//", "./"):
+            with self.subTest(declared=declared):
+                self.assertFalse(
+                    kc.coordination_path_covers(declared, "docs/status.md")
+                )
+
+    def test_empty_prefix_declarations_are_reported_by_name(self):
+        declared = frozenset({"/", "docs/coordination/", "ROADMAP.md", "./"})
+        self.assertEqual(
+            kc.empty_prefix_coordination_declarations(declared), ["./", "/"]
+        )
+        self.assertEqual(
+            kc.empty_prefix_coordination_declarations(
+                frozenset({"docs/coordination/", "ROADMAP.md"})
+            ),
+            [],
+        )
+
+
 class MissingFileTests(unittest.TestCase):
     def test_missing_file_yields_documented_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
