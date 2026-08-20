@@ -2451,7 +2451,7 @@ def _record_locks(plan: RelocationPlan) -> Iterator[None]:
     The legacy record's is the one this run has held since before it decided
     anything, so asking for it here is the pass-through a nested acquisition
     already is. It is not released between passes and there is nothing to
-    release it for: `_lock_closed_to_new_openers` closed that file the instant
+    release it for: `_closed_legacy_record_lock` closed that file the instant
     this run took it, so no process can be queued on it and none can join. The
     handoff this used to perform, and the pause that made it a handoff rather
     than a race, are what a run needed when a writer could still be waiting
@@ -2534,7 +2534,7 @@ def _seal_path(transition: _Transition, path: Path) -> bool:
 
 
 def _write_lock_notice(
-    transition: _Transition, plan: RelocationPlan, descriptor: int
+    transition: _Transition, plan: RelocationPlan, descriptor: int | None
 ) -> bool:
     """Put the operator's notice into the closed lock, and answer whether it
     is there.
@@ -2556,6 +2556,11 @@ def _write_lock_notice(
     one that does.
     """
     lock = _legacy_lock_path(plan.legacy_dir)
+    if descriptor is None:
+        # Closed by an earlier run that could not write this, and not something
+        # to repair by reopening the file: whether the notice is there is a
+        # question, and reopening would be an answer to a different one.
+        return bool(lock.read_bytes())
     previous = lock.read_bytes()
     transition.register(
         f"restore {lock}", lambda: os.pwrite(descriptor, previous, 0)
@@ -2628,43 +2633,43 @@ def _closing_is_finished(legacy_dir: Path) -> bool:
     return document.get(drain_prs_service.RELOCATION_MARKER_CLOSED) is True
 
 
-def _reopen_retained_lock(lock: Path) -> None:
-    """Undo that closure for the span of one installer run.
+def _leave_lock_as_found(modes: dict[Path, int], lock: Path) -> None:
+    """Put the lock's mode back when this run did not close the location.
 
-    A location an earlier run closed is one this run may still have to finish
-    — and every lock this run takes there goes through the same `document_lock`
-    a controller does, so a file nothing may open is one this run may not open
-    either. The run that owns the closure is the run entitled to lift it, and
-    only for as long as it holds the lock: `_lock_closed_to_new_openers` below
-    puts it back the instant this run has it, and `_captured_modes` puts it
-    back on every failing exit.
+    A run that could not finish leaves the location as it stands, for the
+    reason it leaves the record path and the runtime root as they stand: the
+    operator has to see it, and the re-run that follows their reconciliation is
+    what closes it. Leaving the lock closed instead would be the one piece of
+    that state a re-run could not finish — it could take the lock read-only,
+    but not write the notice into it, and a location whose notice can never be
+    written is one no run can ever call closed.
     """
-    if _plain_file(lock) and not os.access(lock, os.W_OK):
-        lock.chmod(0o600)
+    _restore_modes({path: mode for path, mode in modes.items() if path == lock})
 
 
 @contextlib.contextmanager
-def _lock_closed_to_new_openers(
+def _closed_legacy_record_lock(
     transition: _Transition, legacy_dir: Path
-) -> Iterator[int]:
-    """The legacy record's lock, closed against every opener but this run, for
-    as long as this run holds it.
+) -> Iterator[int | None]:
+    """The legacy record's lock, taken without ever making it takeable, and
+    closed against every other opener for as long as this run holds it.
 
-    Taken the instant this run has the lock and before it has decided anything,
-    because closing it is what makes the question answerable at all. A
-    descriptor is opened first and kept — this run's own writing handle, which
-    the mode below does not reach — and the mode is then closed, so from that
-    instant the set of processes that can ever contend for this lock is fixed.
-    `plan_relocation` proves that set empty immediately afterwards and refuses
-    if it is not, and nothing can join it while this run lasts.
+    The order is the whole point. A run that made this file writable first, so
+    `document_lock` could open it `O_RDWR` the ordinary way, would be handing a
+    stale transition the very lock this exists to keep from it — and a location
+    an earlier run closed is exactly where that temptation arises. So the lock
+    is taken first, on a descriptor opened read-only when that is all this file
+    permits, and only then is the mode touched.
 
-    That is what makes the prevention total rather than a race won. A process
-    that already had the lock open when this run started is refused before
-    anything moves, so it goes on to act against the installation it was
-    invoked against; and one invoked while this run is under way never gets the
-    lock at all, so it never reaches the transitions that would act on a
-    location that moved while it waited. Neither can unlink the definition this
-    run rewrites, which is the one artifact no seal can occupy, since a service
+    From the instant the mode is closed the set of processes that can ever
+    contend for this lock is fixed. `plan_relocation` proves that set empty
+    immediately afterwards and refuses if it is not, and nothing can join it
+    while this run lasts — which is what makes the prevention total rather than
+    a race won. A process that already had the lock open when a relocation
+    started is refused before anything moves, so it goes on to act against the
+    installation it was invoked against; one invoked while the run is under way
+    never gets the lock at all. Neither can unlink the definition the run
+    rewrites, which is the one artifact no seal can occupy, since a service
     manager's definition directory is the installation's own.
 
     What this closes is every transition at that location, including the ones
@@ -2674,21 +2679,31 @@ def _lock_closed_to_new_openers(
     carry — only trees, which `ensure_dirs` lays down under no lock at all —
     and its record half stands as what answers a location that acquired one
     some other way.
+
+    Answers the descriptor the notice is written through, or None when this run
+    could only open the file read-only. That is a location whose mode an
+    earlier run closed and whose notice it could not write, and it is the one
+    state this cannot repair: writing would mean reopening the file to
+    everything, so it is reported instead.
     """
     lock = _legacy_lock_path(legacy_dir)
     if not _plain_file(lock):
-        # Nothing to close and nothing that needs closing: `document_lock`
-        # creates this file, so a run holding that lock has one.
         raise InstallError(
             f"Refusing to relocate: {lock} is not a regular file, so this run "
             "cannot close it against a controller still bound to that location."
         )
     previous_mode = lock.stat().st_mode & 0o777
-    descriptor = os.open(lock, os.O_RDWR)
     try:
-        transition.register(f"reopen {lock}", lambda: lock.chmod(previous_mode))
-        lock.chmod(0o400)
-        yield descriptor
+        descriptor, writable = os.open(lock, os.O_RDWR), True
+    except OSError:
+        descriptor, writable = os.open(lock, os.O_RDONLY), False
+    try:
+        with drain_prs_service.document_lock_on(
+            legacy_dir / record_name(), descriptor
+        ):
+            transition.register(f"reopen {lock}", lambda: lock.chmod(previous_mode))
+            lock.chmod(0o400)
+            yield descriptor if writable else None
     finally:
         os.close(descriptor)
 
@@ -2888,7 +2903,7 @@ def _stale_definitions(
     — and put back and reloaded where they differ.
 
     During a relocation that check is defence in depth, and expected to find
-    nothing: `_lock_closed_to_new_openers` closed the lock before this run
+    nothing: `_closed_legacy_record_lock` closed the lock before this run
     decided anything, and every transition that could touch a definition enters
     `document_lock` first. Where it earns its place is `finish_closing`, over a
     location an earlier run left open — an installer predating that closure, or
@@ -3726,20 +3741,16 @@ def finish_closing(install_dir: Path) -> dict[str, Any]:
         transition = _Transition()
         legacy_lock = _legacy_lock_path(plan.legacy_dir)
         modes = _captured_modes(plan.legacy_dir, install_dir, legacy_lock)
-        # Reopened only so this run can take it, and closed again the instant
-        # it has — the same span, on the same terms, as the run that emptied
-        # this location: a file nothing may open is one this run may not open
-        # either, and the window in between is one this run holds no lock
-        # across.
-        _reopen_retained_lock(legacy_lock)
         outcome = _late_write_outcome(plan)
         try:
             with contextlib.ExitStack() as stack:
-                stack.enter_context(
-                    drain_prs_service.document_lock(plan.legacy_record)
-                )
+                # Taken exactly as a relocation takes it, and for the same
+                # reason: this location's lock may already be closed, and
+                # making it writable so it could be opened the ordinary way
+                # would hand a stale transition the lock this run is here to
+                # keep from it.
                 descriptor = stack.enter_context(
-                    _lock_closed_to_new_openers(transition, plan.legacy_dir)
+                    _closed_legacy_record_lock(transition, plan.legacy_dir)
                 )
                 outcome["unsealed"] = _settle_and_close(
                     transition, plan, backend, outcome, descriptor
@@ -3750,6 +3761,8 @@ def finish_closing(install_dir: Path) -> dict[str, Any]:
         outcome["sealed"] = not outcome["unsealed"]
         if outcome["sealed"]:
             _mark_closing_finished(transition, plan)
+        else:
+            _leave_lock_as_found(modes, legacy_lock)
         outcome["resolved"] = True
         outcome["repair"] = _late_write_repair(plan, outcome)
         return {
@@ -3859,7 +3872,6 @@ def relocate(install_dir: Path, sources: dict[str, Path]) -> dict[str, Any]:
     # it, and only once the preflight above has had its chance to refuse, so a
     # run that refuses still changes nothing at all.
     modes = _captured_modes(legacy_dir, install_dir, legacy_lock)
-    _reopen_retained_lock(legacy_lock)
     try:
         # The fences outlive the transition, because the sweep below moves trees
         # and rewrites definitions exactly as the transition does.
@@ -3873,11 +3885,8 @@ def relocate(install_dir: Path, sources: dict[str, Path]) -> dict[str, Any]:
             # controller invoked while this run is under way never gets that
             # lock, so it never reaches a transition that would act on a
             # location that moved while it waited.
-            stack.enter_context(
-                drain_prs_service.document_lock(legacy_dir / record_name())
-            )
             descriptor = stack.enter_context(
-                _lock_closed_to_new_openers(transition, legacy_dir)
+                _closed_legacy_record_lock(transition, legacy_dir)
             )
             plan, result = _locked_transition(
                 transition, install_dir, preflight, sources, modes, fences
@@ -3896,6 +3905,8 @@ def relocate(install_dir: Path, sources: dict[str, Path]) -> dict[str, Any]:
                 fences,
                 descriptor,
             )
+            if not late["sealed"]:
+                _leave_lock_as_found(modes, legacy_lock)
             result = {
                 **result,
                 "late_writes": late,

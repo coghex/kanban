@@ -2224,7 +2224,7 @@ class SealedRecordPathTests(RelocationFixture):
         itself, in this copy and in every copy back to the one that introduced
         the record — not because the lock beside it happens to be closed.
         """
-        install_drainer._reopen_retained_lock(self.legacy_lock)
+        self.legacy_lock.chmod(0o600)
         with self.assertRaises(drain_prs_service.ServiceError) as raised:
             drain_prs_service.update_json_document(
                 self.legacy_record, lambda document: {"repositories": {}}
@@ -4123,13 +4123,20 @@ class LockDescriptorTests(PreGateControllerFixture):
         self.writer_script = self.root / "pre_gate_writer.py"
         self.writer_script.write_text(_PRE_GATE_WRITER, encoding="utf-8")
 
-    def start_holder(self, *, visible=True):
+    def start_holder(self, *, visible=True, open_now=True):
         """A pre-gate controller that opens the lock and stops there.
 
         `document_lock` opens the file and takes its flock together; this
         performs the two halves with a gate between them, which is the only way
         to hold the state under test — a descriptor open, and its flock not
         landed yet.
+
+        `open_now=False` stops it one step earlier, with its managed paths
+        bound and the lock not yet open. That is what makes it *stale* for a
+        case that has to relocate first: a process started after the
+        destination record exists resolves the destination and is an ordinary
+        controller, so one that must be bound to the location a later run is
+        finishing has to have started before that record did.
         """
         process = subprocess.Popen(
             [
@@ -4163,13 +4170,21 @@ class LockDescriptorTests(PreGateControllerFixture):
         self.addCleanup(process.kill)
         self.process = process
         self.wait_for(self.ready, "the holder never bound its paths")
+        self.assertEqual(
+            self.ready.read_text(encoding="utf-8"), str(self.legacy_record)
+        )
+        if open_now:
+            self.open_lock(process, visible=visible)
+        return process
+
+    def open_lock(self, process, *, visible=True):
+        """Let it perform the first half of `document_lock` and stop."""
         self.go.write_text("", encoding="utf-8")
         self.wait_for(self.queued, "the holder never opened the lock")
         if visible:
-            # It is holding one now, and this is what a host that can read
-            # descriptors answers about it.
+            # It is holding a descriptor now, and this is what a host that can
+            # read descriptors answers about it.
             self.lock_holders = (process.pid,)
-        return process
 
     def release(self, process):
         self.flock_go.write_text("", encoding="utf-8")
@@ -4325,14 +4340,16 @@ class LockDescriptorTests(PreGateControllerFixture):
     def unfinished(self):
         """A location an earlier run emptied and sealed without finishing.
 
-        What an installer predating this bound leaves: the seals are down and
-        the lock says nothing about whether anything could still take it.
+        What an installer predating this bound leaves: the seals are down, the
+        lock is open because that installer never closed it, and the marker
+        says nothing about whether anything could still take it.
         """
         self.assertTrue(self.relocate()["late_writes"]["sealed"])
         marker = self.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
         document = drain_prs_service._read_json_object(marker)
         document.pop(drain_prs_service.RELOCATION_MARKER_CLOSED)
         drain_prs_service.atomic_write_json(marker, document)
+        self.legacy_lock.chmod(0o600)
         self.assertIsNone(install_drainer.relocation_disposition(self.destination))
 
     def test_a_marker_that_predates_this_bound_is_not_finished(self):
@@ -4377,6 +4394,120 @@ class LockDescriptorTests(PreGateControllerFixture):
         )
         self.assertIn("put it back and reloaded it", again["repair"])
         install_drainer._require_relocation_resolved(again)
+
+    def watch_lock_mode(self):
+        """Every change to the legacy lock's mode, beside whether this run held
+        the lock when it made it.
+
+        The instrument is a descriptor opened before the run and kept: `flock`
+        is per open file description, so asking for it non-blocking on that one
+        answers whether anything — this process included — holds the lock right
+        now, which is exactly the question a mode change has to be measured
+        against.
+        """
+        probe = os.open(self.legacy_lock, os.O_RDONLY)
+        self.addCleanup(os.close, probe)
+
+        def held():
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(probe, fcntl.LOCK_UN)
+            return False
+
+        observed = []
+        real = Path.chmod
+
+        def watched(target, mode, **rest):
+            if Path(target) == self.legacy_lock:
+                observed.append((mode, held()))
+            return real(target, mode, **rest)
+
+        return observed, mock.patch.object(Path, "chmod", watched)
+
+    def test_the_lock_is_never_loosened_by_a_run_that_does_not_hold_it(self):
+        """The ordering that makes the closure real, rather than a window.
+
+        A run that made this file writable so it could open it the ordinary way
+        would be handing a stale transition the lock in exactly that window —
+        `document_lock` opens `O_RDWR`, so a controller reaching for the lock
+        while the mode is loose takes it. The rule is therefore that the mode is
+        only ever loosened by a run that already holds the lock, and this
+        watches every change to it on the path where the temptation is
+        strongest: a location whose lock an earlier run left closed.
+        """
+        self.unfinished()
+        # Closed again, so this run has to deal with a lock it cannot open the
+        # ordinary way — which is the state that invites reopening it first.
+        self.legacy_lock.chmod(0o400)
+        observed, watcher = self.watch_lock_mode()
+        with watcher:
+            self.assertTrue(self.relocate()["late_writes"]["sealed"])
+        self.assertTrue(observed, "nothing changed the lock's mode at all")
+        # Not loosening it at all is the strongest outcome and the one this
+        # takes: a closed lock is opened read-only, which needs no change. What
+        # may never happen is a mode that grants write while this run does not
+        # hold the lock.
+        for mode, was_held in observed:
+            if mode & 0o200:
+                self.assertTrue(was_held, (oct(mode), observed))
+
+    def test_a_contender_never_takes_the_lock_while_a_location_is_finished(self):
+        """The retry path takes the lock the same way a relocation does.
+
+        A location an earlier run left open has a *writable* lock — that is
+        what "left open" means — so this is the run that could most easily hand
+        a stale transition the lock, by making the file writable in order to
+        open it the ordinary way. It does not: it opens the file, takes the
+        lock, and only then closes the mode, so a controller reaching for that
+        lock while this run works neither takes it nor opens one.
+        """
+        # Started before anything moves, so it is bound to the location this
+        # run finishes rather than to the destination a later process resolves.
+        process = self.start_holder(visible=False, open_now=False)
+        self.unfinished()
+        self.open_lock(process, visible=False)
+        observed = {}
+        real = install_drainer._settle_and_close
+
+        def during(transition, relocation_plan, backend, outcome, descriptor):
+            observed["acquired"] = self.acquired.exists()
+            try:
+                handle = os.open(self.legacy_lock, os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError as error:
+                observed["open"] = f"{type(error).__name__}: {error}"
+            else:
+                os.close(handle)
+                observed["open"] = None
+            self.lock_holders = (process.pid,)
+            return real(transition, relocation_plan, backend, outcome, descriptor)
+
+        with mock.patch.object(install_drainer, "_settle_and_close", during):
+            unfinished = self.relocate()
+        # It never took the lock while this run held it, and could not have
+        # opened one either.
+        self.assertFalse(observed["acquired"])
+        self.assertIsNotNone(observed["open"])
+        self.assertIn(str(self.legacy_lock), observed["open"])
+        # This run reports it rather than declaring the location closed...
+        self.assertFalse(unfinished["late_writes"]["sealed"])
+        self.assertEqual(unfinished["late_writes"]["lock_holders"], [process.pid])
+        with self.assertRaises(install_drainer.RelocationUnresolved):
+            install_drainer._require_relocation_resolved(unfinished)
+        # ...and the run after it, once that process has had the turn it was
+        # always going to get and gone, puts back what it took and closes.
+        self.release(process)
+        backend = install_drainer.service_backend()
+        self.assertFalse(backend.definition_path(self.job.label).is_file())
+        self.lock_holders = ()
+        again = self.relocate()
+        late = again["late_writes"]
+        self.assertTrue(late["sealed"])
+        self.assertEqual(late["restored_definitions"], ["acme/widgets"])
+        self.assertTrue(backend.definition_path(self.job.label).is_file())
+        install_drainer._require_relocation_resolved(again)
+        self.assert_location_is_sealed()
 
     def test_finishing_a_location_reports_a_host_it_cannot_ask(self):
         """The refusal above is not available here: this location is already

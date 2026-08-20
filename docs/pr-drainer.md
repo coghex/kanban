@@ -1079,9 +1079,13 @@ to outlast that command, the move never lets it take the lock at all.
 
 For the whole of a move, `config.json.lock` at the old location is made
 read-only, and the installer keeps the one handle it opened before doing that
-rather than reopening a file it has closed. Nothing else can open it, so nothing
-else can be waiting for it — and the installer checks, right after closing it,
-that nothing already had it open. If something does, the move **refuses** and
+rather than reopening a file it has closed. It takes the lock *before* it
+changes the file: a run that made it writable first, so it could open it the
+usual way, would be handing a waiting command the lock in that very window, so
+a lock that is already read-only is opened read-only instead.
+
+Nothing else can open it, so nothing else can be waiting for it — and the
+installer checks, right after closing it, that nothing already had it open. If something does, the move **refuses** and
 changes nothing: that command then goes on to do whatever it was invoked to do
 against the installation that is still there, which is ordinary work rather
 than damage. A host where the installer cannot check at all is refused the same

@@ -2515,8 +2515,11 @@ above are unchanged, and persistence the user switched off is not a failure.
   and extended to any repository it recovers. A writer that acquires after the
   run's last look is past any process that terminates, so the run never lets it
   take the lock at all: it closes the legacy record's lock file against every
-  opener but its own for its whole span, keeping the one descriptor it opened
-  before doing so rather than reopening a file it has closed, and the plan then
+  opener but its own for its whole span, taking the lock before it changes the
+  file — a closed one is opened read-only, since loosening the mode to open it
+  the ordinary way is the window a stale transition takes it in — and keeping
+  the one descriptor it opened rather than reopening a file it has closed,
+  and the plan then
   proves that nothing already had it open — refusing before anything moves if
   something did, or if this host cannot be asked, since a process refused there
   goes on to act against the installation it was invoked against rather than

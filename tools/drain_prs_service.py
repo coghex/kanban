@@ -873,6 +873,40 @@ def document_lock(path: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
+@contextlib.contextmanager
+def document_lock_on(path: Path, descriptor: int) -> Iterator[None]:
+    """`document_lock`, taken on a descriptor the caller already holds.
+
+    For the one caller that may not open the file the ordinary way.
+    `tools/install_drainer.py` closes a lock file against every opener while it
+    works at the location that lock belongs to, and a file nothing may open is
+    one it may not reopen either — while making it writable first, so that
+    `document_lock` could open it `O_RDWR`, is precisely the window a stale
+    transition takes that lock in. So it opens the file read-only, which a
+    closed lock still permits, takes the lock on that descriptor, and only then
+    changes anything.
+
+    The same bookkeeping `document_lock` keeps for its own outermost holder, so
+    a nested acquisition of this path inside the block is the pass-through it
+    already is there rather than a second descriptor blocking against this one.
+    The descriptor stays the caller's: this neither opens nor closes it.
+    """
+    resolved = path.absolute()
+    held = getattr(_HELD_DOCUMENT_LOCKS, "paths", None)
+    if held is None:
+        held = _HELD_DOCUMENT_LOCKS.paths = set()
+    if resolved in held:
+        yield
+        return
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    held.add(resolved)
+    try:
+        yield
+    finally:
+        held.discard(resolved)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
 def update_json_document(
     path: Path, transform: Callable[[dict[str, Any]], dict[str, Any]]
 ) -> Path:

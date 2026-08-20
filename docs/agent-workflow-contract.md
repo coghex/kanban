@@ -1442,8 +1442,16 @@ search step and nothing else, which is what `mandatory: no` records.
   the first place.
   What answers that writer is not timing but never letting it take the lock.
   A run closes the legacy record's lock file against every opener but its own
-  for the whole of its span: it opens its own descriptor, closes the mode, and
-  keeps that one descriptor rather than reopening a file it has closed. From
+  for the whole of its span: it opens its own descriptor, takes the lock on it,
+  closes the mode, and keeps that one descriptor rather than reopening a file
+  it has closed. The order is the mechanism, not an implementation detail. A
+  run that loosened the mode first, so `document_lock` could open the file
+  `O_RDWR` the ordinary way, would be handing a stale transition the lock in
+  exactly that window — so a closed lock is opened read-only, which it still
+  permits, and the mode is only ever loosened by a run that already holds the
+  lock. A location an earlier run left closed is where that matters, since it
+  is the only one whose lock a later run cannot open the ordinary way at
+  all. From
   that instant the set of processes that can ever contend for that lock is
   fixed, and the plan proves it empty immediately afterwards. A run that finds
   it is not empty refuses, before anything has moved — so the process holding
