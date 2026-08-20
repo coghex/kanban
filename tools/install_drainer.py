@@ -2431,6 +2431,39 @@ _SETTLED_TAKEOVER_REASON = (
 )
 
 
+def _settled_takeover(plan: TakeoverPlan) -> dict[str, Any]:
+    """The nothing-migrated answer, carrying what the plan accounted for.
+
+    Shaped as every other run that migrates nothing is — `relocated` false and
+    one `reason` — because an installation with nothing stale is not a
+    migration and must not report as one.
+
+    What travels beside that reason is the bookkeeping this path would
+    otherwise lose: which repositories were already current, and which
+    recorded entries could not be recovered and were therefore left exactly as
+    they stand. The second is why the reason itself narrows when there is one.
+    An entry this run could not read is an entry whose definition it cannot
+    call current, and answering "every definition here is already what this
+    host would write" over it would be claiming to have compared something it
+    never could.
+    """
+    if plan.unrecoverable:
+        entries = "entry" if len(plan.unrecoverable) == 1 else "entries"
+        reason = (
+            "every definition this run could recover is already what this host "
+            f"would write; {len(plan.unrecoverable)} recorded {entries} could "
+            "not be recovered and were left exactly as they stand"
+        )
+    else:
+        reason = _SETTLED_TAKEOVER_REASON
+    return {
+        "relocated": False,
+        "reason": reason,
+        "settled": list(plan.settled),
+        "unrecoverable": list(plan.unrecoverable),
+    }
+
+
 def _takes_over_in_place(install_dir: Path) -> bool:
     """Whether this run's destination is the location the `~/Library`
     installation is already at.
@@ -2654,7 +2687,9 @@ def take_over(install_dir: Path) -> dict[str, Any]:
     The settled case is the ordinary one and is what a second run of this
     installer sees: nothing is stale, so no document is read a second time, no
     tree moves, no lock is taken, and the answer is the same
-    nothing-migrated answer a host with no `~/Library` installation gets.
+    nothing-migrated answer a host with no `~/Library` installation gets —
+    carrying, as `_settled_takeover` explains, everything the plan accounted
+    for on the way there.
 
     When something is stale, the one record's own lock is held across the
     rewrite. That is not the pair of locks a relocation holds between two
@@ -2668,7 +2703,7 @@ def take_over(install_dir: Path) -> dict[str, Any]:
     with _bound_to(install_dir):
         preflight = plan_takeover(install_dir)
         if not preflight.repositories:
-            return {"relocated": False, "reason": _SETTLED_TAKEOVER_REASON}
+            return _settled_takeover(preflight)
         # Captured before the lock, because taking one chmods the directory
         # holding the record: a refusal raised once it is held must still
         # leave this host as it was found.
@@ -2690,10 +2725,7 @@ def take_over(install_dir: Path) -> dict[str, Any]:
                     for entry in plan.repositories:
                         fences.hold_controllers(entry)
                     if not plan.repositories:
-                        return {
-                            "relocated": False,
-                            "reason": _SETTLED_TAKEOVER_REASON,
-                        }
+                        return _settled_takeover(plan)
                     try:
                         return _apply_takeover(transition, plan)
                     except BaseException as exc:
@@ -2732,7 +2764,7 @@ def relocation_preview(install_dir: Path) -> dict[str, Any]:
     if _takes_over_in_place(install_dir):
         plan = plan_takeover(install_dir)
         if not plan.repositories:
-            return {"relocated": False, "reason": _SETTLED_TAKEOVER_REASON}
+            return _settled_takeover(plan)
         return {"relocated": False, "dry_run": True, **plan.report()}
     return {
         "relocated": False,

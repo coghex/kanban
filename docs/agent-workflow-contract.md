@@ -1552,7 +1552,11 @@ search step and nothing else, which is what `mandatory: no` records.
   refused as an occupied one. An installation with nothing stale is not a
   migration: it reports the same nothing-migrated answer a host with no
   `~/Library` installation gets, having read one document, taken no lock, moved
-  nothing and created nothing.
+  nothing and created nothing. That answer still carries what the run
+  accounted for — which repositories were already current, and which recorded
+  entries could not be recovered — and its reason narrows when there is an
+  unrecoverable entry, since a definition this run could not read is not one it
+  may report as current.
   The guards are scoped to that stale set rather than to every recorded
   repository, and that scoping is load-bearing rather than an optimization:
   they are refusals, so a run that treated a settled sibling as affected would
@@ -1565,7 +1569,8 @@ search step and nothing else, which is what `mandatory: no` records.
   that cannot be recovered is neither refused nor rewritten: this run takes
   nothing apart, so an entry it cannot recover is one it cannot show to be
   affected, and the repository is left exactly as it stands and named in the
-  report. Every mutation registers its undo first on the same terms as the
+  report — in the nothing-migrated answer as much as in a takeover's, since
+  that is the run such an entry is most likely to be the whole of. Every mutation registers its undo first on the same terms as the
   relocation's, so a failure puts every definition and every tree back and
   removes the log root it created. `--dry-run` reports the whole takeover, or
   the nothing-migrated answer, without taking a lock.

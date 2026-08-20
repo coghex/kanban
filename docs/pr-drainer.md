@@ -1121,8 +1121,9 @@ root is where the logs already are — an absolute `$XDG_STATE_HOME` naming
 `~/Library/Logs` — they stay where they are rather than being moved onto
 themselves. An installation whose definitions are all current is not a
 migration at all: it reports that it migrated nothing, exactly as a host with
-no `~/Library` installation does, and `--dry-run --json` reports either answer
-without taking a lock.
+no `~/Library` installation does — naming which repositories were already
+current and any entry it could not read — and `--dry-run --json` reports either
+answer without taking a lock.
 
 Only the repositories whose definitions differ are touched, and only they are
 checked. A settled repository whose drainer happens to be running does not
@@ -1130,7 +1131,10 @@ refuse your install; a stale one that is running does, along with a stale one
 whose checkout is locked or whose controller is up. An entry the installer
 cannot resolve to a live checkout and an installed definition is left alone and
 named in the report rather than failing the run, because this run takes nothing
-apart — re-install or uninstall that repository to clear it. `--install-dir`
+apart — re-install or uninstall that repository to clear it. That holds whether
+or not anything else was stale: a run with nothing to rewrite still says which
+entry it could not read, and says so instead of claiming every definition is
+current. `--install-dir`
 still beats an exported `KANBAN_DRAINER_INSTALL_DIR`, for deciding which
 definitions are stale as well as for what is written into them.
 

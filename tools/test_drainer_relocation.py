@@ -3392,6 +3392,32 @@ class TakeoverTests(TakeoverFixture):
         self.take_over()
         self.assertEqual(self.reset_failed_identifiers(), [])
 
+    def test_the_settled_answer_carries_what_the_plan_accounted_for(self):
+        self.take_over()
+        result = self.take_over()
+        self.assertEqual(result["settled"], ["acme/widgets"])
+        self.assertEqual(result["unrecoverable"], [])
+
+    def test_a_record_holding_only_an_unrecoverable_entry_says_so(self):
+        # Nothing stale, because nothing could be recovered to compare. An
+        # answer of "every definition here is already what this host would
+        # write" would be claiming to have compared one it never read.
+        drain_prs_service.merge_repository_record(
+            "acme/widgets", {"repository": str(self.root / "vanished")}
+        )
+        before = self.host_state()
+        result = self.take_over()
+        self.assertFalse(result["relocated"])
+        self.assertNotIn("takeover", result)
+        self.assertEqual(result["settled"], [])
+        self.assertEqual(len(result["unrecoverable"]), 1)
+        self.assertIn("which is not a directory", result["unrecoverable"][0])
+        self.assertIn("could not be recovered", result["reason"])
+        self.assertNotIn(
+            "every definition at this location is already", result["reason"]
+        )
+        self.assertEqual(self.host_state(), before)
+
 
 class TakeoverLockingTests(TakeoverFixture):
     """Requirement 2: with one document rather than two there is nothing to
@@ -3554,6 +3580,21 @@ class TakeoverScopeTests(TakeoverFixture):
         self.assertIn("a drainer is running in", str(raised.exception))
         self.assertEqual(self.host_state(), before)
 
+    def test_a_settled_run_still_names_an_entry_it_could_not_recover(self):
+        # Every recoverable definition current, one entry unreadable: the run
+        # migrates nothing, and reporting that as a settled installation would
+        # lose the only mention the untouched repository gets.
+        self.take_over()
+        drain_prs_service.merge_repository_record(
+            "acme/gadgets", {"repository": str(self.root / "vanished")}
+        )
+        result = self.take_over()
+        self.assertFalse(result["relocated"])
+        self.assertNotIn("takeover", result)
+        self.assertEqual(result["settled"], ["acme/widgets"])
+        self.assertEqual(len(result["unrecoverable"]), 1)
+        self.assertIn("could not be recovered", result["reason"])
+
     def test_an_entry_that_cannot_be_recovered_is_left_alone_and_named(self):
         # This run takes nothing apart, so an entry it cannot recover is one
         # it cannot show to be affected and does not touch. Refusing over it
@@ -3704,6 +3745,20 @@ class TakeoverPreviewTests(TakeoverFixture):
         relocation = self.install(dry_run=True)["relocation"]
         self.assertNotIn("takeover", relocation)
         self.assertIn("already what this host would write", relocation["reason"])
+        self.assertEqual(relocation["settled"], ["acme/widgets"])
+        self.assertEqual(relocation["unrecoverable"], [])
+        self.assertEqual(self.host_state(), before)
+
+    def test_a_settled_dry_run_names_an_entry_it_could_not_recover_too(self):
+        self.take_over()
+        drain_prs_service.merge_repository_record(
+            "acme/widgets", {"repository": str(self.root / "vanished")}
+        )
+        before = self.host_state()
+        relocation = self.install(dry_run=True)["relocation"]
+        self.assertNotIn("takeover", relocation)
+        self.assertEqual(len(relocation["unrecoverable"]), 1)
+        self.assertIn("could not be recovered", relocation["reason"])
         self.assertEqual(self.host_state(), before)
 
 if __name__ == "__main__":
