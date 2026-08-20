@@ -16,6 +16,16 @@ You expand the issue tracker by finding genuinely new, well-scoped work. Optiona
 
 **Present candidates — STOP:** A categorized list — bug / tech-debt / docs / feature-gap / enhancement — each with a title and a one-line description. Weight toward what the repo actually needs; don't pad. For feature gaps where direction is unclear, keep them high-level and flag them as needing a decision from the user rather than silently resolving the design question. List any gate-deferred candidates in that same presentation under a deferred heading, each naming its gate, so choosing one overrides the deferral. Then STOP and ask which to create — accept "all" or a list. Do NOT run `gh issue create` until told which.
 
+**Where files go:** This workflow files through `gh` and drafts in chat; it should not write into the repository at all. Its one filesystem write is the `--body-file` temp file — put that under the system temp directory, never inside a checkout. If a step ever does need a file in the repo, and that repo keeps a `docs-wip` worktree, write it there rather than the primary checkout: a PR drainer fast-forwards the primary after every merge and autostashes whatever it finds, and a restore that conflicts leaves unmerged index entries and wedges post-merge cleanup until a human clears them. Resolve it by BRANCH, never a hard-coded path:
+
+```bash
+DOCS_WT="$(git worktree list --porcelain \
+  | awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/docs-wip$/{print p; exit}')"
+[ -n "$DOCS_WT" ] || DOCS_WT="$(git rev-parse --show-toplevel)"
+```
+
+A repository with no `docs-wip` worktree does not use this convention — the fallback returns its own primary checkout and you proceed normally.
+
 **Create:** Expand each chosen candidate to hand-off quality — it will be solved by an autonomous agent that does exactly what the issue says and nothing more, so the body is a contract:
 - A bug issue must be verified first: reproduce it, or trace the defect through the actual code and cite `file:line` with the failure path. If verification kills it, report that instead of creating it.
 - Requirements say WHAT must be observably true when done — never HOW to code it (one exception: real constraints like serialization compatibility, determinism, perf budgets, append-only enums are requirements and must be stated).

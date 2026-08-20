@@ -28,7 +28,7 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
 - `docs/development.md` has the build, test, and layout basics; `docs/pr-drainer.md` and
   `docs/workflow-setup.md` cover the optional local components.
 - Every tracked Markdown file takes one of two publication lanes, classified in
-  `docs/agent-workflow-contract.md` section 7. The seventeen coordination
+  `docs/agent-workflow-contract.md` section 7. The eighteen coordination
   documents publish straight to master, bypassing the PR lane:
   `docs/card_filter_design.md`, `docs/claude_document_workflows_design.md`,
   `docs/code-health-report.md`, `docs/document_workflow_findings.md`,
@@ -36,7 +36,8 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   `docs/issue_search_design.md`,
   `docs/linux_portability_design.md`, `docs/managed_paths_design.md`,
   `docs/multi_repo_boards_design.md`,
-  `docs/pipeline-hardening.md`, `docs/project_review_386-361.md`,
+  `docs/pipeline-hardening.md`, `docs/product_readiness_findings.md`,
+  `docs/project_review_386-361.md`,
   `docs/public_release_design.md`,
   `docs/ui-bugs.md`, `docs/usage_awareness_design.md`,
   `docs/workflow_audit_findings.md`, and
@@ -44,6 +45,27 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   lands with its implementation through a pull request. Anything unclassified is
   pr-atomic too — that default fails closed, so a new document never publishes directly
   until section 7 says it may.
+
+### Markdown changes
+
+- Author every Markdown edit in the `docs-wip` worktree, never in the primary checkout.
+  Resolve it by branch rather than a hard-coded path: the PR drainer fast-forwards the
+  primary after every merge and autostashes whatever it finds there, and a restore that
+  conflicts wedges post-merge cleanup until a human clears it.
+- Leave a standalone Markdown change committed in that worktree and unpushed. The
+  maintainer batches those to `master` periodically. Do not push one yourself and do not
+  open a pull request for it; the subsection below is the exception, and it needs an
+  explicit request.
+- Markdown may still travel inside a pull request, and must when a test parses it or an
+  implementation is coupled to it. A plugin command file is held to its bundle version by
+  `BundleVersionGateTests`, and `docs/design.md`'s section 7 key table is compared against
+  `Kanban.UI.Keys` by `Spec.UI.Keys`; splitting either from what gates it leaves `master`
+  red between the two landings.
+- Documentation does not carry code's review burden. A documentation-only change needs
+  neither a canonical review nor the verification depth a behavior change does — most of
+  these documents record the project's current state of mind rather than something a
+  runtime reads. That is a statement about process, not licence to leave the contracts in
+  "The contract" above inconsistent with the behavior they describe.
 
 ### Manual docs-worktree publication
 
@@ -67,6 +89,16 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   repositories; and fake `gh`, `codex`, and `claude` executables placed on a temporary
   `PATH`.
 - Never open or push to a pull request over a failing gate you selected.
+- A workflow command or skill Markdown file is the program an agent executes, so an
+  edit under `claude-plugin/` or `codex-plugin/` is a behavior change and takes a
+  regression assertion like any other. `WriteLocationTests` in
+  `tools/test_drafting_workflow_contract.py` is the pattern: the rules asserted against
+  every asset that owes them, plus a negative control over the assets that delegate
+  instead, so a rule matching everything cannot pass while asserting nothing.
+- Editing a list, tuple, or table means auditing the whole file for prose that counts or
+  describes it, not just the diff. A module docstring saying "the eleven documents" sat
+  seventy lines above the tuple it described, and stayed wrong through several changes
+  that grew it.
 
 ## Source layout
 
