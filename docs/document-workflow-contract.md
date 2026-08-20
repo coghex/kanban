@@ -755,8 +755,27 @@ the same moment, each create a tracker item, and each render a whole-file image
 of the same document. Whichever publishes second would then overwrite the
 first's disposition — invisibly, because it changes exactly the one path a
 correct publication changes. So the publication tip the run was rendered
-against travels with the content, and a branch that has moved since refuses the
-publication and asks for the disposition to be rendered again.
+against travels with the content.
+
+**What that binding guards is the document, not the branch.** Publication is
+refused when the document's own blob differs between the tip the content was
+rendered against and the current one, and the refusal names that document and
+asks for the disposition to be rendered again. A document present at one of the
+two tips and absent at the other differs, and is refused. An advance that left
+the document untouched drops nothing — the rendered image is still a faithful
+whole-file image of the current document — so it publishes against the current
+tip rather than sending the caller round to produce byte-identical content.
+Refusing those would cost exactly the concurrency these workflows encourage: a
+busy publication branch advances under every run, and the run that advanced it
+was usually working a different document entirely.
+
+**Deciding that requires reading both tips, and a lookup that failed is not an
+absence.** A tip that cannot be resolved to a commit, or a tree that cannot be
+read, refuses the publication in its own right rather than answering "no blob"
+— two failed lookups would otherwise compare equal and read as "the document did
+not change", which is the one conclusion this guard exists to prevent. The
+refusal reports both tips and the document's blob, or its proven absence, at
+each, so the operator sees which document moved without deriving it by hand.
 
 **A binding that is absent is a failure, not a waived check.** Publication
 requires it, and an empty one is refused rather than treated as "no tip to
@@ -935,9 +954,9 @@ missing, mismatched, or conflicting recorded artifact stops the run instead of
 adopting a similarly titled one. And the recorded publication tip is preparation
 evidence and mismatch reporting only: a resuming run re-runs the read-only
 preflight, re-renders the recorded disposition and recorded identities against
-the tip that reports, and binds to that one — passing the recorded tip would be
-refused as moved on any branch that had advanced, which on a busy default branch
-is every branch.
+the tip that reports, and binds to that one — passing the recorded tip would
+bind the publication to a rendering nobody made against it, and is refused
+outright wherever the document itself changed in between.
 
 **An interrupted mutation is ambiguous, and ambiguity is never resolved
 automatically.** A step that began and was never confirmed may have landed or

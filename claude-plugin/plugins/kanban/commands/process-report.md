@@ -370,9 +370,13 @@ check quietly switched off.
 
 Keep the `publication_tip` it reports. The document you are about to read and
 re-render is that tip's, and the content you produce is a whole-file image of
-it, so publication must be refused if the branch has moved on since — a second
-run doing the same thing would otherwise drop this one's disposition while
-changing exactly the one path a correct publication changes.
+it, so publication must be refused if *this document* changed on the branch
+since — a second run doing the same thing would otherwise drop this one's
+disposition while changing exactly the one path a correct publication changes.
+An advance that left this document alone drops nothing and still publishes, so
+do not pre-empt the check by re-rendering against a fresher tip because the
+branch moved; the helper compares the document's own blob at the two tips and
+names the document when it refuses.
 
 A `"pending"` result means an earlier approved mutation of this document is
 outstanding — its publication, its tracker mutations, or both, and

@@ -170,8 +170,8 @@ class Fixture:
     def remote_content(self, path="docs/ui-bugs.md"):
         return run(["git", "show", f"origin/master:{path}"], self.primary)
 
-    def advance_remote(self, path="docs/ui-bugs.md", text="\n- somebody else\n"):
-        """Another writer lands a change on the publication branch."""
+    def other_clone(self) -> Path:
+        """A second writer's clone of the same origin, on the branch tip."""
         other = self.dir / "other"
         if not other.exists():
             run(["git", "clone", "-q", str(self.origin), str(other)], self.dir)
@@ -179,11 +179,35 @@ class Fixture:
             run(["git", "config", "user.name", "Other"], other)
         run(["git", "fetch", "-q", "origin", "master"], other)
         run(["git", "checkout", "-q", "-B", "master", "origin/master"], other)
-        target = other / path
-        target.write_text(target.read_text() + text, encoding="utf-8")
+        return other
+
+    def land_other(self, other: Path) -> str:
+        """Commit and push whatever that writer staged; the new tip."""
         run(["git", "add", "-A"], other)
         run(["git", "commit", "-qm", "theirs"], other)
         run(["git", "push", "-q", "origin", "HEAD:master"], other)
+        return run(["git", "rev-parse", "HEAD"], other)
+
+    def advance_remote(self, path="docs/ui-bugs.md", text="\n- somebody else\n"):
+        """Another writer lands a change on the publication branch."""
+        other = self.other_clone()
+        target = other / path
+        target.write_text(target.read_text() + text, encoding="utf-8")
+        return self.land_other(other)
+
+    def add_remote(self, path, content):
+        """Another writer adds a path the branch did not carry."""
+        other = self.other_clone()
+        target = other / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return self.land_other(other)
+
+    def remove_remote(self, path):
+        """Another writer deletes a path the branch carried."""
+        other = self.other_clone()
+        run(["git", "rm", "-q", "--", path], other)
+        return self.land_other(other)
 
 
 class PublishFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
@@ -890,7 +914,29 @@ class PublishTests(PublishFixture):
                     [],
                 )
 
-    def test_content_rendered_against_an_older_tip_is_refused(self):
+    def blob_on_branch(self, revision, path="docs/ui-bugs.md"):
+        """The blob a *test* reads, through git rather than through the module
+        whose answer these cases exist to check."""
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.primary)
+        proc = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{revision}:{path}"],
+            cwd=str(self.fx.primary), capture_output=True, text=True,
+        )
+        return proc.stdout.strip() or None
+
+    def refused_publication(self, *, document, expected_tip, content="# fresh\n"):
+        """Publish `document` against a tip it was not rendered from."""
+        blob = self.fx.dir / "rendered.md"
+        blob.write_text(content, encoding="utf-8")
+        with self.assertRaises(publisher.PublishError) as caught:
+            publisher.publish(
+                repository="coghex/kanban", branch="master", root=self.fx.docs,
+                document=document, content=blob.read_bytes(),
+                message="docs: rendered earlier", expected_tip=expected_tip,
+            )
+        return caught.exception
+
+    def test_content_rendered_against_a_changed_document_is_refused(self):
         # Two runs both pass the preflight, both create a tracker item, and
         # both render from the same document. The first publishes; the second's
         # content is now a whole-file image of a document that no longer
@@ -900,22 +946,159 @@ class PublishTests(PublishFixture):
             self.fx.docs, "coghex/kanban", "master", "docs/ui-bugs.md"
         )["publication_tip"]
         second_tip = first_tip  # the second run looked at the same moment
+        rendered_blob = self.blob_on_branch(first_tip)
 
         self.fx.publish("# UI\n\n- one\n- first run\n")
         self.assertIn("- first run", self.fx.remote_content())
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.primary)
+        published_tip = run(["git", "rev-parse", "origin/master"], self.fx.primary)
+        current_blob = self.blob_on_branch(published_tip)
+        self.assertNotEqual(rendered_blob, current_blob)
 
-        blob = self.fx.dir / "second.md"
-        blob.write_text("# UI\n\n- one\n- second run\n", encoding="utf-8")
-        with self.assertRaises(publisher.PublishError) as caught:
-            publisher.publish(
-                repository="coghex/kanban", branch="master", root=self.fx.docs,
-                document="docs/ui-bugs.md", content=blob.read_bytes(),
-                message="docs: second", expected_tip=second_tip,
-            )
-        self.assertEqual(caught.exception.status, "tip-moved")
+        error = self.refused_publication(
+            document="docs/ui-bugs.md", expected_tip=second_tip,
+            content="# UI\n\n- one\n- second run\n",
+        )
+        self.assertEqual(error.status, "tip-moved")
+        # Issue #387: the refusal names the document that moved, and reports
+        # both tips and its blob at each, so an operator does not re-derive
+        # which document caused it by hand.
+        self.assertIn("docs/ui-bugs.md", error.message)
+        self.assertEqual(error.detail["document"], "docs/ui-bugs.md")
+        self.assertEqual(error.detail["expected_tip"], second_tip)
+        self.assertEqual(error.detail["publication_tip"], published_tip)
+        self.assertEqual(error.detail["expected_blob"], rendered_blob)
+        self.assertEqual(error.detail["publication_blob"], current_blob)
         # The first run's disposition is still on the branch.
         self.assertIn("- first run", self.fx.remote_content())
         self.assertNotIn("- second run", self.fx.remote_content())
+
+    def test_an_advance_touching_only_another_document_publishes(self):
+        # Issue #387: the hazard is the document's, not the branch's. A second
+        # run working a *different* coordination document advances the branch
+        # under this one, and the content rendered here is still a faithful
+        # whole-file image of the document it names.
+        rendered_tip = publisher.check_pending(
+            self.fx.docs, "coghex/kanban", "master", "docs/ui-bugs.md"
+        )["publication_tip"]
+        advanced_tip = self.fx.advance_remote(
+            path="docs/drainer-bugs.md", text="\n- somebody else's report\n"
+        )
+        self.assertNotEqual(rendered_tip, advanced_tip)
+
+        blob = self.fx.dir / "approved.md"
+        blob.write_text("# UI\n\n- one\n- two\n", encoding="utf-8")
+        result = publisher.publish(
+            repository="coghex/kanban", branch="master", root=self.fx.docs,
+            document="docs/ui-bugs.md", content=blob.read_bytes(),
+            message="docs: approved mutation", expected_tip=rendered_tip,
+        )
+        self.assertEqual(result["status"], "published")
+        # Against the *current* tip, not the one the content was rendered
+        # from: the publication commit sits on the advance rather than beside
+        # it, and the intervening work is still there.
+        self.assertEqual(result["publication_tip"], advanced_tip)
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.primary)
+        self.assertEqual(
+            run(["git", "rev-parse", f"{result['commit']}^"], self.fx.primary),
+            advanced_tip,
+        )
+        self.assertEqual(
+            run(["git", "merge-base", advanced_tip, result["commit"]], self.fx.primary),
+            advanced_tip,
+        )
+        self.assertIn(
+            "- somebody else's report",
+            self.fx.remote_content("docs/drainer-bugs.md"),
+        )
+        self.assertIn("- two", self.fx.remote_content())
+
+    def test_a_document_removed_between_the_two_tips_is_refused(self):
+        # Requirement 3: present at one tip and absent at the other differs.
+        # Absence is not "nothing changed" merely because there is no blob to
+        # compare.
+        rendered_tip = publisher.check_pending(
+            self.fx.docs, "coghex/kanban", "master", "docs/drainer-bugs.md"
+        )["publication_tip"]
+        rendered_blob = self.blob_on_branch(rendered_tip, "docs/drainer-bugs.md")
+        self.assertIsNotNone(rendered_blob)
+        removed_tip = self.fx.remove_remote("docs/drainer-bugs.md")
+
+        error = self.refused_publication(
+            document="docs/drainer-bugs.md", expected_tip=rendered_tip,
+        )
+        self.assertEqual(error.status, "tip-moved")
+        self.assertIn("docs/drainer-bugs.md", error.message)
+        self.assertEqual(error.detail["expected_tip"], rendered_tip)
+        self.assertEqual(error.detail["publication_tip"], removed_tip)
+        self.assertEqual(error.detail["expected_blob"], rendered_blob)
+        self.assertIsNone(error.detail["publication_blob"])
+        self.assertIn("absent", error.message)
+
+    def test_a_document_added_between_the_two_tips_is_refused(self):
+        # The mirror case, and the one the two-Nones conflation would wave
+        # through if absence were ever concluded from a failed lookup.
+        self.fx.remove_remote("docs/drainer-bugs.md")
+        rendered_tip = publisher.check_pending(
+            self.fx.docs, "coghex/kanban", "master", "docs/drainer-bugs.md"
+        )["publication_tip"]
+        self.assertIsNone(self.blob_on_branch(rendered_tip, "docs/drainer-bugs.md"))
+        added_tip = self.fx.add_remote("docs/drainer-bugs.md", "# Drainer\n\n- theirs\n")
+        added_blob = self.blob_on_branch(added_tip, "docs/drainer-bugs.md")
+        self.assertIsNotNone(added_blob)
+
+        error = self.refused_publication(
+            document="docs/drainer-bugs.md", expected_tip=rendered_tip,
+        )
+        self.assertEqual(error.status, "tip-moved")
+        self.assertIn("docs/drainer-bugs.md", error.message)
+        self.assertEqual(error.detail["expected_tip"], rendered_tip)
+        self.assertEqual(error.detail["publication_tip"], added_tip)
+        self.assertIsNone(error.detail["expected_blob"])
+        self.assertEqual(error.detail["publication_blob"], added_blob)
+        self.assertIn("- theirs", self.fx.remote_content("docs/drainer-bugs.md"))
+
+    def test_a_rendered_tip_that_cannot_be_resolved_is_not_an_absence(self):
+        # The comparison decides whether an advance may be published through,
+        # so a lookup that merely failed must never supply one of its two
+        # sides. Both documents are absent here, which is exactly where a
+        # rev-parse that collapses failure into None would compare equal and
+        # publish.
+        self.fx.remove_remote("docs/drainer-bugs.md")
+        error = self.refused_publication(
+            document="docs/drainer-bugs.md", expected_tip="0" * 40,
+        )
+        self.assertEqual(error.status, "tip-unreadable")
+        self.assertEqual(error.detail["revision"], "0" * 40)
+        self.assertEqual(error.detail["document"], "docs/drainer-bugs.md")
+        self.assertIsNone(self.blob_on_branch("origin/master", "docs/drainer-bugs.md"))
+
+    def test_a_tree_that_cannot_be_read_is_not_an_absence(self):
+        # The other half of the same rule: the revision resolved, but its tree
+        # did not. Without the advance this publication would have gone
+        # through, so the refusal is the fail-closed answer rather than a
+        # coincidence of the fixture.
+        rendered_tip = publisher.check_pending(
+            self.fx.docs, "coghex/kanban", "master", "docs/ui-bugs.md"
+        )["publication_tip"]
+        self.fx.advance_remote(path="docs/drainer-bugs.md", text="\n- theirs\n")
+        original = publisher.git
+
+        def failing(args, *, cwd, check=True, input_bytes=None):
+            if args and args[0] == "ls-tree":
+                return subprocess.CompletedProcess(
+                    args, 128, b"", b"fatal: not a tree object"
+                )
+            return original(args, cwd=cwd, check=check, input_bytes=input_bytes)
+
+        publisher.git = failing
+        self.addCleanup(setattr, publisher, "git", original)
+        error = self.refused_publication(
+            document="docs/ui-bugs.md", expected_tip=rendered_tip,
+            content="# UI\n\n- one\n- two\n",
+        )
+        self.assertEqual(error.status, "tip-unreadable")
+        self.assertNotIn("- two", self.fx.remote_content())
 
     def test_a_current_tip_still_publishes(self):
         tip = publisher.check_pending(

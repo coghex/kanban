@@ -571,6 +571,82 @@ def blob_at(root: Path, revision: str, document: str) -> str | None:
     return out or None
 
 
+def proven_blob_at(root: Path, revision: str, document: str) -> str | None:
+    """The document's blob at `revision`, or None when the path is *proven*
+    absent from that revision's tree.
+
+    `blob_at` collapses every unsuccessful `rev-parse` into None, which is the
+    right answer where the result only supplies a baseline: an absent path and
+    an unresolvable revision both mean "no baseline here". It is the wrong
+    answer where the result decides whether two revisions carry the same
+    document, because there two failed lookups compare equal and read as "the
+    document did not change" — the one conclusion that must never be reached by
+    accident. So this resolves the revision first, then inspects its tree, and
+    raises rather than answering when either step does not succeed. Only an
+    empty listing from a tree that was read is absence.
+    """
+    commit = git(
+        ["rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}"],
+        cwd=root,
+        check=False,
+    )
+    if commit.returncode != 0:
+        raise PublishError(
+            "tip-unreadable",
+            f"{revision} could not be resolved to a commit, so whether "
+            f"{document} changed between the rendered tip and the current one "
+            "cannot be decided; nothing is published",
+            revision=revision,
+            document=document,
+        )
+    listing = git(
+        # `:(literal)` so the document path is a path rather than a glob, which
+        # is what `rev-parse <rev>:<path>` means everywhere else in this module.
+        ["ls-tree", "--full-tree", "-z", revision, "--", f":(literal){document}"],
+        cwd=root,
+        check=False,
+    )
+    if listing.returncode != 0:
+        detail = (listing.stderr or listing.stdout).decode(errors="replace").strip()
+        raise PublishError(
+            "tip-unreadable",
+            f"the tree at {revision} could not be read for {document} ({detail}), "
+            f"so whether {document} changed between the rendered tip and the "
+            "current one cannot be decided; nothing is published",
+            revision=revision,
+            document=document,
+        )
+    entries = [e for e in listing.stdout.decode(errors="replace").split("\0") if e]
+    if not entries:
+        return None
+    if len(entries) > 1:
+        raise PublishError(
+            "tip-unreadable",
+            f"{document} matches {len(entries)} entries at {revision} rather than "
+            "one file, so whether it changed cannot be decided; nothing is "
+            "published",
+            revision=revision,
+            document=document,
+        )
+    meta, _, _ = entries[0].partition("\t")
+    fields = meta.split()
+    if len(fields) < 3 or fields[1] != "blob":
+        kind = fields[1] if len(fields) > 1 else "an unreadable entry"
+        raise PublishError(
+            "tip-unreadable",
+            f"{document} at {revision} is {kind} rather than a file, so whether "
+            "it changed cannot be decided; nothing is published",
+            revision=revision,
+            document=document,
+        )
+    return fields[2]
+
+
+def describe_blob(blob: str | None) -> str:
+    """How a proven blob or a proven absence reads in a refusal."""
+    return blob[:12] if blob else "absent"
+
+
 def working_blob(root: Path, document: str) -> str | None:
     target = root / document
     if not target.is_file():
@@ -1311,20 +1387,38 @@ def publish(
         tip = git_out(["rev-parse", f"origin/{branch}"], cwd=resolved)
         if expected_tip is not None and expected_tip != tip:
             # The caller rendered its content against `expected_tip` and then
-            # mutated its tracker. If the branch has moved since, that content
-            # is a whole-file image of a document that no longer exists, and
-            # publishing it would drop whatever landed in between — silently,
-            # because it changes exactly the one path a correct publication
-            # changes. The caller has to re-read and re-render.
-            raise PublishError(
-                "tip-moved",
-                f"{branch} advanced from {expected_tip[:12]} to {tip[:12]} after "
-                "this content was rendered; re-read the document and render the "
-                "disposition again",
-                expected_tip=expected_tip,
-                publication_tip=tip,
-                remote_contains_commit=False,
-            )
+            # mutated its tracker. The hazard that guards this is a statement
+            # about the document, not about the branch: if *the document* moved
+            # since, that content is a whole-file image of a document that no
+            # longer exists, and publishing it would drop whatever landed in
+            # between — silently, because it changes exactly the one path a
+            # correct publication changes. The caller has to re-read and
+            # re-render.
+            #
+            # An advance that left this document alone drops nothing. The
+            # rendered image is still a faithful image of the current document,
+            # and refusing it only sends the caller round to render byte-
+            # identical content — a cost that lands on exactly the concurrency
+            # these workflows encourage, since a busy default branch advances
+            # under every run (#387). Everything downstream already derives
+            # from the fetched `tip`, so publication proceeds against it.
+            rendered_blob = proven_blob_at(resolved, expected_tip, document)
+            current_blob = proven_blob_at(resolved, tip, document)
+            if rendered_blob != current_blob:
+                raise PublishError(
+                    "tip-moved",
+                    f"{branch} advanced from {expected_tip[:12]} to {tip[:12]} "
+                    f"after this content was rendered, and {document} changed "
+                    f"with it ({describe_blob(rendered_blob)} to "
+                    f"{describe_blob(current_blob)}); re-read the document and "
+                    "render the disposition again",
+                    expected_tip=expected_tip,
+                    publication_tip=tip,
+                    document=document,
+                    expected_blob=rendered_blob,
+                    publication_blob=current_blob,
+                    remote_contains_commit=False,
+                )
 
         lock = lock_ref(owner, document)
         pending = pending_ref(owner, document)
