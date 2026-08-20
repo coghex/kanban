@@ -49,7 +49,7 @@ issue · `[deferred]` blocked on a concrete precondition
 
 ## Status
 
-- [ ] PROD-1. The README denies the release whose install path it documents
+- [x] PROD-1. The README denies the release whose install path it documents — [#401]
 - [ ] PROD-2. The board screenshot predates two shipped features
 - [ ] PROD-3. The repository describes itself as "my kanban"
 - [ ] PROD-4. The changelog has recorded nothing since the release that opened it
@@ -82,7 +82,7 @@ touch behavior. All of them are the first thing anyone evaluating this project
 reads, and four of the five are stale rather than wrong-by-design — they were
 true when written and were overtaken by work that shipped afterwards.
 
-### PROD-1. The README denies the release whose install path it documents
+### [#401] PROD-1. The README denies the release whose install path it documents
 
 **Verification:** Verified — the README's release-archive section documents the
 correct commands and then asserts, in bold, that the release those commands
