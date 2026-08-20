@@ -348,6 +348,120 @@ arithmetic, which §2.3 owns.
   but a solve session refuses to claim an issue that has not passed the
   read-only gate check.
 
+#### 2.3.1 Stale-approval reconciliation (`--reconcile-approvals`)
+
+A raw `reviewed:approve` label is not evidence that an issue is approved now.
+Canonical approval binds an issue to its current specification fingerprint
+through the latest `issue-review:v2` marker, and the backend removes a stale
+verdict label only once an issue enters `process_issue` — so until review
+begins, a label can advertise readiness to any label-only reader against a
+specification no reviewer saw. `--reconcile-approvals` is the bounded authority
+that corrects that, and it is the only one: label-only consumers do not
+reimplement the removal, and `--check` remains read-only.
+
+- **Authority.** `python3 tools/approve_issues.py --path <root> --repo
+  <owner/name> --reconcile-approvals [<issue>...] --legacy-policy dual --json`.
+  It joins `--check`, `--review`, `--rereview`, and `--review-queue` in one
+  mutual-exclusion set sharing their diagnostic, is mutually exclusive with
+  `--self-test`, and requires `--json`. Every one of those refusals is resolved
+  before the repository context loads, so a rejected invocation costs no GitHub
+  call and writes nothing to stdout. It performs **no** model call — the
+  `MODEL_INVOCATIONS` counter reads zero across a run — publishes no review
+  comment, and manufactures no verdict.
+- **Decision.** An approval label is removed only when no marker exists at all,
+  when the mismatch is one of specification, origin, reviewer route, or accepted
+  model, or when a marker that does match carries a verdict other than
+  `APPROVE`. The decision comes from the `marker_matches` comparison and the
+  marker `verdict` value `current_gate_status` itself keys on, never from that
+  function's human-readable `reasons` strings, and there is no second freshness
+  calculation. Repository-base movement alone never invalidates an approval:
+  `marker_matches` compares `spec`, `origin`, `reviewers`, and `models` and
+  never reads a marker's `base=`, which stays supporting review context.
+
+  The reviewer set is resolved through `expected_reviewers_for_record` *before*
+  that comparison rather than through `review_record_matches`, which collapses a
+  record it cannot resolve — an unknown `mode`, a rereview marker with no
+  matching parent, a trigger disagreeing with its parent's verdicts — into the
+  same `False` a specification mismatch produces. The gate is right to refuse
+  both, but only one of them is evidence that an approval went stale: removing a
+  label because a record could not be *read* is a fail-open mutation. An
+  unresolvable record, or one resolving to no reviewer, is reported as
+  unverified and mutates nothing.
+- **What is never a removal cause.** An emptied reviewer set — unmarked legacy
+  provenance under `--legacy-policy hold` — makes `marker_matches` answer False
+  for *every* marker including a current one, so it is reported as unverified
+  rather than acted on. A blocking pipeline incident, a non-`OPEN` issue, and a
+  present `reviewed:changes` label each refuse the gate while leaving the marker
+  current; those mutate nothing and are reported with the gate's own `reasons`.
+  An `INVALID` latest marker is reported as a per-issue unverified outcome
+  carrying the marker's `comment_url`, exactly as `--check` reports rather than
+  escalates: raising `InvalidIssueError` here would open a repository
+  circuit-breaker incident as a side effect of rendering a roadmap.
+- **Candidate selection.** Given no issue numbers, the mode reconciles every
+  open issue carrying the configured approval label, and it selects them under
+  the lock from an inventory that refuses to be truncated. Selection is the
+  backend's rather than the caller's for two reasons: the candidate set is
+  defined by `workflow.approval_label`, which the backend has already resolved,
+  so a caller choosing candidates would have to restate that label and would
+  silently reconcile nothing in a repository that overrides it; and a set chosen
+  before the lock could change before any decision ran. The result names the
+  label it decided against in `approval_label`, so a consumer reports the
+  repository's own label rather than assuming the default.
+- **Locking.** The canonical `approve_issues.lock` is acquired at most once for
+  the whole invocation, whatever the number of issues, and released on every
+  exit path including failure and interruption. Every issue and comment read
+  that a decision rests on is taken *after* acquisition, so a stale pre-lock
+  observation can never remove an approval that became current concurrently.
+  After a removal the issue is re-read and the result verified — the label
+  really gone, and the specification fingerprint byte-identical, since
+  `spec_fingerprint` excludes the three verdict labels — before success is
+  reported.
+- **Result.** Exactly one bounded, versioned JSON document, written to stdout in
+  a single call, carrying exactly `schema`
+  (`"approve-issues-reconcile-approvals"`), `version` (`1`), `outcome`,
+  `message`, and `issues`: one entry per requested issue, in the order
+  requested, each carrying exactly `issue`, `outcome`, `label_removed`,
+  `approved`, `reasons`, and `detail`; plus `approval_label`, the configured
+  label this pass decided against.
+
+  | `outcome` | meaning |
+  | --- | --- |
+  | `reconciled` | every requested issue was examined under the lock |
+  | `busy` | the lock was held elsewhere; nothing was read or written |
+
+  | entry `outcome` | `label_removed` | `approved` | meaning |
+  | --- | --- | --- | --- |
+  | `unlabeled` | `false` | Boolean | the approval label is absent |
+  | `current` | `false` | Boolean | the label is backed by a current `APPROVE` marker |
+  | `removed` | `true` | `false` | the label was stale and was removed |
+  | `unverified` | either | `null` | nothing could be established; `detail` says what |
+
+  Both top-level outcomes are ordinary completions and **exit zero**, `busy`
+  included. The document is validated before it is printed, on the terms
+  `--review-queue`'s already follows: an unknown schema or version, a missing or
+  additional field at either level, an `approval_label` disagreeing with the one
+  the run decided against, a mistyped or Boolean-as-integer value, an
+  entry set that does not match the requested issues in order, a `removed` that
+  claims approval or omits `label_removed`, an `unverified` carrying an
+  `approved` Boolean or no `detail`, or any model invocation at all are refused
+  rather than emitted.
+- **Failure semantics.** Fail closed. A missing backend, a GitHub read or write
+  failure, a malformed result, or an unverifiable post-mutation state is a
+  per-issue `unverified` entry or a non-zero exit with diagnostics on stderr and
+  no document a caller could read as success — never a claimed removal and never
+  an unverified readiness answer. An interruption is a failure for this mode
+  wherever in the run it lands, for the reason `--review-queue`'s is. A consumer
+  renders no readiness marker for an issue it could not verify, and never
+  presents such an issue as ready to solve.
+- **Consumers.** The rendered triage assets
+  (`claude-plugin/plugins/kanban/commands/triage.md`,
+  `codex-plugin/plugins/kanban/skills/triage/SKILL.md`) are the first, and they
+  render their readiness marker from each entry's post-reconciliation
+  `approved` rather than issuing a second `--check`, which would reopen the
+  read-then-decide window the lock closes. They pass no issue numbers and name
+  no candidate label, so a repository configuring its own approval label is
+  reconciled and rendered exactly as the default one is.
+
 ### 2.4 Incident/controller capability — the PR drainer
 
 - **Owning source:** `tools/drain_prs_service.py` (incident storage and
@@ -1033,7 +1147,7 @@ claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review/Tools.
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
 gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py | kanban | supported | yes
 git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py | kanban | supported | yes
-python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md | kanban | supported | no
+python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
 launchctl-cli | executable | launchctl | tools/service_manager.py | kanban | supported | no
@@ -1042,7 +1156,7 @@ approve-issues-backend | personal-path | /Library/Application Support/kanban/iss
 approve-issues-backend-xdg | personal-path | /.local/share/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir | personal-path | /Library/Logs/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir-xdg | personal-path | /.local/state/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
-issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/Review/Canonical.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md | kanban | supported | no
+issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/Review/Canonical.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/service_manager.py | kanban | supported | no
 drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/Drainer.hs | kanban | supported | no
 drainer-discovery-record-xdg | personal-path | /.local/share/kanban/pr-drainer/config.json | tools/kanban_config.py | kanban | supported | no

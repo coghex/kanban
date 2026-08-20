@@ -66,7 +66,74 @@ gh issue view -R "$REPO" <number> --json number,title,state,closedAt,body,labels
 8. Build the Main Sequence dependency groups and the Anytime priority order using the rules below.
 9. Estimate every issue's implementation difficulty as `easy`, `medium`, or `hard` using the rubric below.
 10. Before final output, verify the classification covers all open issues and has no duplicates.
-11. Mark every issue carrying the exact `reviewed:approve` label with `✓` in the rendered lists. Put the marker immediately after the title and before any bracket note. This is display-only: it does not affect ordering, classification, in-flight status, or `Start with` eligibility.
+11. Verify approval readiness through the canonical backend, as **Approval Readiness** below specifies, and mark only confirmed-current approvals with `✓`. Put the marker immediately after the title and before any bracket note. This is display-only: it does not affect ordering, classification, in-flight status, or `Start with` eligibility.
+
+## Approval Readiness
+
+A raw approval label is a **candidate**, not proof. Canonical approval binds an issue to the fingerprint of its current specification through the latest `issue-review:v2` marker, and nothing removes the label when that specification then changes — so a label alone can advertise readiness against a specification no reviewer ever saw. Render `✓` only for an issue the canonical backend confirms is approved right now.
+
+Which label that is belongs to the repository, not to this workflow. `reviewed:approve` is only the default: a repository may configure `workflow.approval_label` to something else, and a workflow that hard-coded the default would quietly reconcile nothing there and go on rendering the stale readiness this section exists to stop. So never name a candidate label here — ask the backend, which has already resolved the configured one, and read the label it reports back.
+
+Resolve the backend's install location the same way `Kanban.Review.resolveCanonicalIssueReviewer` does rather than a path relative to the repository being triaged or any other personal path. The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path `tools/install_issue_review.py` recorded at a fixed location `--install-dir` cannot move, then — only when that record names none, which is how an installation predating the record looks — the directory the record itself lives in:
+
+```bash
+RECORD="$HOME/Library/Application Support/kanban/issue-review/config.json"
+BACKEND="$(python3 - "$RECORD" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+record = Path(sys.argv[1])
+override = os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")
+if override and override.strip():
+    resolved = Path(override).expanduser() / "approve_issues.py"
+else:
+    if not os.path.lexists(record):
+        document = {}
+    else:
+        try:
+            document = json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise SystemExit(f"The install record at {record} is unreadable ({error}).")
+    if not isinstance(document, dict):
+        raise SystemExit(f"The install record at {record} is not a JSON object.")
+    if "backend_path" not in document:
+        resolved = record.parent / "approve_issues.py"
+    else:
+        recorded = document["backend_path"]
+        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+            raise SystemExit(f"The install record at {record} does not name an absolute backend_path: {recorded!r}.")
+        resolved = Path(recorded)
+if not resolved.is_file():
+    raise SystemExit(f"Canonical issue reviewer was not found at {resolved} (consulted {record}). Run `python3 tools/install_issue_review.py` from the Kanban checkout, adding --install-dir if it belongs elsewhere.")
+print(resolved)
+PY
+)"
+```
+
+Then reconcile every candidate in **one** invocation, passing no issue numbers so the backend selects them itself:
+
+```bash
+python3 "$BACKEND" --path "$(git rev-parse --show-toplevel)" --repo "$REPO" --reconcile-approvals --legacy-policy dual --json
+```
+
+Selection is the backend's because the candidate set is defined by the configured approval label it has already resolved, and because a set chosen before the lock could change before any decision runs. The returned document names that label in `approval_label`; use it when reporting, and treat every issue it reports as the complete candidate set.
+
+One invocation, not one per issue: the backend takes the canonical approval lock at most once for the whole call, so a pass costs one process and one acquisition rather than one of each per candidate.
+
+That mode calls no model, publishes no review comment, and manufactures no verdict. It removes an approval label that is not backed by a current matching `APPROVE` marker, and it does so under the same repository-wide approval lock every other canonical mutation takes, from a read taken after acquiring it. Never reimplement that removal as a bare `gh issue edit` here, and never use `--check` to mutate anything — `--check` is read-only by contract.
+
+Read each entry of the returned document and render from it. Do **not** issue a second `--check` for an issue this document already answered; two separate calls reopen the read-then-decide window the lock exists to close.
+
+| entry `outcome` | what it means | how to render |
+|---|---|---|
+| `current` | the label is backed by a current `APPROVE` marker | `✓` when `approved` is true; otherwise no `✓`, and report the entry's `reasons` |
+| `removed` | the label was stale and the backend removed it | no `✓`; mark `[needs canonical review]` |
+| `unlabeled` | the issue carries no approval label | no `✓` |
+| `unverified` | nothing could be established | no `✓`; mark `[approval unverified]` and say why, from the entry's `detail` |
+
+`current` with `approved` false is **not** a stale approval. The gate also refuses for reasons that leave the marker perfectly current — a blocking pipeline incident, an issue that is no longer open, or a present `reviewed:changes` label — and the backend deliberately mutates nothing in those cases. Report the entry's own `reasons`; do not describe such an issue as requiring canonical review.
+
+**Fail closed.** A missing or unresolvable backend, a `"busy"` document from lock contention, a GitHub read or write failure, a malformed document, or an unverifiable post-mutation state each mean the same thing: render no `✓` for the affected issues, claim no successful removal, and mark each one `[approval unverified]` with the reason. Never fall back to reading the raw label as readiness, and never present an unverified issue as ready to solve.
 
 ## Ordering Heuristics
 
@@ -207,7 +274,7 @@ Important formatting rules:
 - Use `A01`, `A02` numbering in `Anytime List`.
 - Use `T01`, `T02` numbering in `Tracker Issues`.
 - Preserve issue numbers and concise titles.
-- Append `✓` to every issue labeled `reviewed:approve`, immediately after its title and before bracket notes; do not mark unlabeled issues.
+- Append `✓` only to an issue the canonical backend confirmed approved right now, immediately after its title and before bracket notes. A raw approval label never earns one on its own, whatever the repository configured it to be; see **Approval Readiness**.
 - Append exactly one difficulty marker, `[easy]`, `[medium]`, or `[hard]`, after the title/checkmark and before status or placement notes.
 - Append `[assigned: @login]` for every assigned issue, listing all assignees when there is more than one. Also retain any applicable `[in-flight: PR #NNN]` and `[wip]` notes.
 - Do not include URLs unless asked.
@@ -220,7 +287,8 @@ Important formatting rules:
 Before answering:
 
 - Confirm all open issue numbers appear once across the three lists.
-- Confirm every `reviewed:approve` issue has exactly one `✓`, and no issue without that label has one.
+- Confirm every `✓` is backed by a reconciliation entry whose `approved` is true, and that no issue carries one on the strength of its label alone.
+- Confirm every candidate the backend reported as `removed` or `unverified` is rendered without `✓` and carries its `[needs canonical review]` or `[approval unverified]` note, and that no such issue is presented as ready to solve or chosen as `Start with`.
 - Confirm every issue has exactly one valid difficulty marker.
 - Confirm every issue with assignees lists every current assignee, every unassigned issue lacks an assignment note, and no assigned/in-flight issue is `Start with`.
 - Confirm every Main Sequence issue participates in an open prerequisite/blocker chain or an explicit shared-file serialization; move standalone urgent work to Anytime.
