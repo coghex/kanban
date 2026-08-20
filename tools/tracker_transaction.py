@@ -1829,8 +1829,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=("branch", "local"),
         default="branch",
         help="verify resolution against the publication branch, or against the "
-        "locally applied document when the helper reported not-published with "
-        "document_written true",
+        "locally applied document when the helper reported not-published having "
+        "written and recorded that document itself",
     )
     args = parser.parse_args(argv)
 

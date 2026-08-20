@@ -507,6 +507,41 @@ PUBLICATION_CLAUSES = {
         "a run reads the other's approved content and publishes it under its own "
         "document's name"
     ),
+    # Issue #385. `document_written` reads identically for a novel document
+    # with no baseline, for a document somebody edited by hand, and for this
+    # module's own unlanded predecessor — and the third is the one a second
+    # disposition has to be able to continue over. An asset that stated only
+    # the bare boolean would direct a run into the dead end that issue was
+    # filed for, so the four named outcomes and the record that separates them
+    # are pinned rather than left to prose.
+    "write-outcome-names-the-write": (
+        "write_outcome names which of the four cases the write was, rather than "
+        "leaving document_written to stand for all of them"
+    ),
+    "continues-over-its-own-write": (
+        "a working copy byte-identical to what the helper last applied locally "
+        "is its own unlanded write, and the approved mutation is applied on top "
+        "of it"
+    ),
+    "never-overwrites-a-foreign-working-copy": (
+        "a working copy the helper did not write is never overwritten, and "
+        "nothing is applied over it"
+    ),
+    "only-a-recorded-write-licenses-continuation": (
+        'only "recorded" — with applied_ref naming that reference — lets a later '
+        "run continue over the working copy or a transaction resolve from it"
+    ),
+    # Requirement 5: an applied disposition sits in one write root, and a run
+    # that presented that as a finished journey is exactly how the observed
+    # wedge went unnoticed for a whole disposition.
+    "applied-is-not-landed": (
+        "an applied mutation is not durable until the document's owner lands it "
+        "on the publication branch"
+    ),
+    "names-the-write-root-and-the-blob": (
+        "name the write root, the document path, and the preserved approved_blob "
+        "rather than describing the run as complete on the branch"
+    ),
 }
 
 # The one command the assets carry. Anything more would be mechanism.
@@ -672,6 +707,19 @@ TRANSACTION_CLAUSES = {
     ),
     "recovery-state-lives-in-the-record": (
         "the durable transaction record is where that state lives"
+    ),
+    # Issue #385: an outstanding record whose document can never be written was
+    # only ever reported, and the way out — landing that document through the
+    # owner's own lane — was in nobody's instructions. Naming it is what keeps a
+    # stranded transaction from being left to somebody editing a reference.
+    "a-stranded-transaction-has-a-bounded-recovery": (
+        "recover the approved_blob, land the terminal document through the "
+        "owner's ordinary out-of-band or pull-request lane, and then resolve "
+        "the record with --source branch"
+    ),
+    "recovery-repeats-no-confirmed-mutation": (
+        "never repeat a confirmed tracker mutation and never clear a reference "
+        "by hand while that recovery is pending"
     ),
     "failure-reports-tracker-state-too": (
         "whether acquisition succeeded, the transaction state, each planned step "

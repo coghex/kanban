@@ -549,10 +549,14 @@ extension or a directory.
 
 **A repository that declares nothing has no lane, and that is an ordinary
 outcome rather than an error.** The approved mutation is preserved in the object
-database and applied to the document itself whenever the working tree still
-matches the publication tip, and the run reports `"status": "not-published"`
-with `document_written` true — exactly what a `pr-atomic` document of Kanban's
-own reports, and for the same reason. Such a repository lands the document
+database and applied to the document itself whenever the working tree carries
+something the module may write over — the publication tip's own content, or
+the unlanded mutation the module itself last applied — and the run reports
+`"status": "not-published"` with `document_written` true, exactly what a
+`pr-atomic` document of Kanban's own reports and for the same reason. Because
+that lane is a repository's ordinary state rather than an exception, one
+document takes disposition after disposition before any of them lands, which is
+what §9.4's write outcomes are for. Such a repository lands the document
 through the pull-request lane it already has; nothing is vendored into it, and
 it tracks no copy of the mechanism. Configuration that exists but cannot be read
 or is invalid is not an absent declaration: it fails closed before anything is
@@ -680,6 +684,40 @@ empty wins and is left alone — and putting a captured document *back* follows
 the same rule, because a recovery that overwrites is still a write destroyed,
 whichever step performs it. The document is absent for that instant; a reader
 seeing no file is the price of never destroying somebody else's write.
+
+**A document that publishes nowhere still takes more than one disposition.**
+Writing only over the publication tip's own baseline is correct exactly once.
+The second approved mutation to a document whose owner lands it out of band
+arrives to find the first one unlanded in the working copy, and a decline there
+strands the run's tracker transaction where no later run can get past it — the
+defect issue #385 was filed for, observed end to end. So the module says which
+of four things a write outcome was rather than leaving one boolean to stand for
+all of them: the working copy still carried the publication tip's content and
+the mutation was applied to it; the working copy was byte-identical to what this
+module last applied locally, making it this module's own unlanded write, and the
+mutation was applied on top of it; the document is absent from the publication
+tip, so there was no baseline and nothing was written; or the working copy is
+none of those, in which case it is somebody else's and is never overwritten.
+Which predecessor it is changes nothing else: the replacement is guarded against
+the exact bytes the decision was made from, a staged document is still refused,
+and a write that lands in between still wins.
+
+**The module's own record is what tells its predecessor from a hand edit.** A
+working tree is what a hand edit produces too, so the reference the module
+writes — naming the exact content it wrote — is the only thing that separates
+them, and it is written only once the write itself succeeded. Only a reference
+that reads back naming that exact content counts as recorded: a write the
+module could not record is reported as unrecorded, and authorizes neither a
+later continuation nor a local transaction resolution, because a record that
+does not name the bytes cannot prove them. What it proves is bounded in the
+other direction too. It says these bytes are what this module last wrote, and
+nothing at all about whether that mutation was ever landed anywhere.
+
+**An applied mutation is not yet a durable one.** It exists in one write root
+and on no branch, so a run reports the write root, the document path, and the
+preserved blob rather than a completed publication. What makes it durable is its
+owner landing the resulting document on the publication branch, by whatever lane
+that owner has.
 
 **Nothing the module does can leave the document deleted.** For the length of
 that instant the captured copy is the only one, so its content reaches the
@@ -946,8 +984,17 @@ resolution verifies the document against that record. A document it never wrote,
 or one changed since, resolves nothing. Otherwise: a document that does
 have a coordination lane belongs on the branch, and clearing it from a locally
 edited cursor would leave the next preflight clear while the entry never landed.
-Where the module reports `not-published` without having written the document, the record stays
-outstanding and the run reports it. Explicitly approved abandonment may clear an
+Where the module reports `not-published` without having written the document —
+or having written it without being able to record that it did — the record
+stays outstanding and the run reports it. That is bounded rather than
+terminal, and the bound is named so no state needs a hand-edited reference to
+leave: the approved content is recovered from the object database, the
+terminal document is reconciled and landed through the owner's ordinary lane,
+out of band or by pull request, and the existing record is then resolved from
+the branch. No confirmed tracker mutation is repeated and no reference is
+cleared by hand while that recovery is pending — the record already carries
+every identity the recovered document must name.
+Explicitly approved abandonment may clear an
 `intent-only` or `tracker-pending` record without publication, but only against
 authoritative read-only evidence that none of its unconfirmed mutations landed,
 and the run reports every mutation that was already confirmed. Otherwise the

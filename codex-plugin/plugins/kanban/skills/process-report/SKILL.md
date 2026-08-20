@@ -642,8 +642,29 @@ on the one structured result it returns:
   that declares no coordination path for it. The approved mutation is not
   lost: the helper reports `approved_blob`, recoverable with
   `git cat-file -p`, and `document_written` says whether it also applied it to
-  the document. Say which it did and why publication was declined. This is the
-  ordinary outcome for a `pr-atomic` document, not a failure of this run.
+  the document. `write_outcome` names which of the four cases the write was,
+  rather than leaving `document_written` to stand for all of them:
+  `applied-over-baseline`, `applied-over-local-predecessor`, `no-baseline`, and
+  `unrecognized-working-copy`. A working copy byte-identical to what the helper
+  last applied locally is its own unlanded write, and the approved mutation is
+  applied on top of it — so successive approved mutations to a document its
+  owner lands out of band accumulate rather than wedging on the first one. A
+  working copy the helper did not write is never overwritten, and nothing is
+  applied over it. Say which outcome it was and why publication was declined.
+  This is the ordinary outcome for a `pr-atomic` document, not a failure of
+  this run.
+
+  `applied_record` is the other half of that. The helper records what it wrote
+  in its own reference, and only `"recorded"` — with `applied_ref` naming that
+  reference — lets a later run continue over the working copy or a transaction
+  resolve from it. `"unrecorded"` means the write happened and the record did
+  not, so no later run may write over that document and no transaction may
+  resolve from it. Report that rather than an ordinary applied mutation.
+
+  **An applied mutation is not durable until the document's owner lands it on
+  the publication branch.** It exists in one write root and nowhere else, so
+  name the write root, the document path, and the preserved `approved_blob`
+  rather than describing the run as complete on the branch.
 - **Any other status.** The document was not published. Report the three states
   the helper returns — whether the edit exists locally and in which worktree and
   path, whether a local publication commit exists and its ID, and whether the
@@ -671,10 +692,11 @@ beneath the real entry is not the cursor. An entry still `- [ ]`, an incidental 
 terminal entry carrying `[no-issue]` or `[deferred]` beside the link are each
 refused: the first is the interrupted run's own signature, the second is not the
 cursor at all, and the third is a different disposition from the recorded one. On a `not-published`
-result with `document_written` true — the ordinary outcome for a `pr-atomic`,
-unmatched, or not-yet-tracked document — run the same verification against the
-applied local document with `--source local --branch "$DOC_BRANCH"`, which is
-the only evidence there is and a legitimate terminal state for such a document.
+result whose `applied_record` is `"recorded"` — the ordinary outcome for a
+`pr-atomic`, unmatched, or not-yet-tracked document — run the same verification
+against the applied local document with `--source local --branch
+"$DOC_BRANCH"`, which is the only evidence there is and a legitimate terminal
+state for such a document.
 Whether the working tree is admissible at all is the module's decision, not
 yours. It classifies the document itself and refuses a local resolution for one
 that publishes to the branch, because clearing such a record from a locally
@@ -682,9 +704,21 @@ edited cursor would leave the next preflight clear while the entry never landed.
 It also checks the document against the publication module's own record of what
 that module applied, since classification says only that publication *would* be
 declined — a file somebody edited by hand looks the same from there. A document
-the module never wrote, or one changed since it did, resolves nothing. When `document_written`
+the module never wrote, or one changed since it did, resolves nothing — and a
+write the module could not record is one it can no longer prove it wrote,
+however plainly this run watched itself make it. When `document_written`
 is false, nothing carries the disposition anywhere: the record stays
-outstanding, and this run reports it.
+outstanding, and this run reports it; an `applied_record` of `"unrecorded"`
+leaves it exactly as outstanding.
+
+**A stranded transaction has a bounded recovery.** Reporting it is not the end
+of the line, and hand-editing a reference is never how it ends. Recover the
+`approved_blob`, land the terminal document through the owner's ordinary
+out-of-band or pull-request lane, and then resolve the record with `--source
+branch`. Never repeat a confirmed tracker mutation and never clear a reference
+by hand while that recovery is pending: the record already carries every
+identity the recovered document must name, and a repeated mutation files a
+second artifact nobody can take back.
 
 A record this run could not resolve stops the next one, which is what it is for.
 Report it rather than clearing it, and never clear a transaction reference by
