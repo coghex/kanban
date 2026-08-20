@@ -1120,11 +1120,13 @@ before it does anything at all.
 So a stale command fails before it changes anything: no runtime or incident
 state at the old location, no logs at either location, and no change to the
 unit or plist on disk or to the one your service manager is holding. It fails
-rather than exiting quietly, including the run your service manager starts —
-that one catches its own refusal and would otherwise report success, which
-would tell the manager, and Kanban reading the job through it, that a drainer
-ran. Jobs are installed with no restart policy, so a failed exit shows up as a
-failed job rather than a restart loop. It fails
+rather than exiting quietly. The run your service manager starts is the one
+exception worth knowing about: it catches its own refusal and answers with an
+exit code, and a current controller answers a failing one — jobs are installed
+with no restart policy, so that shows up as a failed job rather than a restart
+loop — while a controller old enough to predate this change answers a clean
+one. Nothing outside that older process can change that; what it does do is
+print the refusal and write nothing. It fails
 that way every time, not just the first — nothing a stale command does can undo
 any of the three, and permissions on the *directory* would not have helped,
 since they get reset by the very command being stopped.

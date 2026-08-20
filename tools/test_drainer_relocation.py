@@ -3113,12 +3113,28 @@ _PRE_GATE_STUBS = (
     ),
 )
 
-# The same arc's write-level gate, which is not a whole definition: it is held
-# across each of the two discovery-record writes rather than declared once.
-_PRE_GATE_WRAPPER = (
-    "    with installation_transaction():\n        return update_json_document("
+# What this arc changed *inside* existing definitions rather than by adding
+# one, by the issue that changed it and what stood there before. Fragments
+# rather than whole definitions, because that is what these are.
+_PRE_GATE_FRAGMENTS = (
+    (
+        "#367",
+        "the staleness gate held across each of the two discovery-record writes",
+        "    with installation_transaction():\n        return update_json_document(",
+        "    return update_json_document(",
+        2,
+    ),
+    (
+        "#390",
+        "the exit code a refused run answers with, which this arc changed from "
+        "a clean one to a failure",
+        '        print(f"PR drainer did not start: {exc}", flush=True)\n'
+        "        return 1",
+        '        print(f"PR drainer did not start: {exc}", flush=True)\n'
+        "        return 0",
+        1,
+    ),
 )
-_PRE_GATE_WRAPPERS = 2
 
 # The bounds this arc did *not* put inside the controller, by the issue that
 # established each and the code an old copy meets it at. #369 seals the
@@ -3186,12 +3202,11 @@ class PreGateControllerFixture(RelocationFixture):
             )
             source = source.replace(existing, stub)
             self.assertNotIn(existing, source, f"{issue}: {described} survived")
-        self.assertEqual(
-            source.count(_PRE_GATE_WRAPPER),
-            _PRE_GATE_WRAPPERS,
-            "#367: the discovery record's write-level gate moved",
-        )
-        source = source.replace(_PRE_GATE_WRAPPER, "    return update_json_document(")
+        for issue, described, before, after, count in _PRE_GATE_FRAGMENTS:
+            self.assertEqual(
+                source.count(before), count, f"{issue}: {described} moved"
+            )
+            source = source.replace(before, after)
         for issue, described, name, required in _PRE_GATE_EXTERNAL:
             shipped = _function_source(current, name)
             self.assertEqual(
@@ -3495,7 +3510,9 @@ class PreGateWriterTests(PreGateControllerFixture):
         source = (self.pre_gate / "drain_prs_service.py").read_text(encoding="utf-8")
         for issue, described, _name, stub in _PRE_GATE_STUBS:
             self.assertIn(stub, source, f"{issue}: {described}")
-        self.assertNotIn(_PRE_GATE_WRAPPER, source)
+        for issue, described, before, after, _count in _PRE_GATE_FRAGMENTS:
+            self.assertNotIn(before, source, f"{issue}: {described}")
+            self.assertIn(after, source, f"{issue}: {described}")
         for issue, described, name, required in _PRE_GATE_EXTERNAL:
             body = _function_source(source, name)
             self.assertEqual(
@@ -3731,6 +3748,14 @@ class StaleInvocationFixture(PreGateControllerFixture):
     def closed_path(self, writer):
         return self.legacy_lock if writer in self.TRANSACTIONAL else self.legacy_guard
 
+    # The writer that reports rather than raises. `run_service` is what a
+    # service manager launches, so it catches its own startup refusals and
+    # answers with an exit code — and a copy predating this arc answers a clean
+    # one, which is its own handling of an exception it already caught and not
+    # something any bound outside that process reaches. What it has to do is
+    # refuse and write nothing.
+    REPORTING = frozenset({"run"})
+
     def refusal(self, writer):
         """What one writer said about refusing, however it said it."""
         return writer["failed"] or writer["printed"]
@@ -3738,12 +3763,12 @@ class StaleInvocationFixture(PreGateControllerFixture):
     def assert_every_writer_failed(self):
         for index, attempt in enumerate(self.outcome["attempts"]):
             for name, writer in attempt["writers"].items():
-                if writer["failed"] is None:
-                    # One that reports rather than raises has to report a
-                    # failure: a stale invocation that returned success would
-                    # be telling whoever started it that it did its work.
-                    self.assertNotEqual(writer["returned"], 0, (index, name))
-                    self.assertIsNotNone(writer["returned"], (index, name))
+                if name in self.REPORTING:
+                    self.assertIn(
+                        "did not start", writer["printed"], (index, name)
+                    )
+                    continue
+                self.assertIsNotNone(writer["failed"], (index, name))
             self.assertEqual(attempt["exit_code"], 1, index)
 
 
@@ -3799,21 +3824,34 @@ class StaleInvocationBoundTests(StaleInvocationFixture):
         self.assertEqual(definition.read_bytes(), self.before[str(definition)][1])
         self.assertFalse(self.manager_log.exists())
 
-    def test_the_run_the_service_manager_starts_returns_non_success(self):
-        """The invocation that reports rather than raises.
+    def test_the_run_a_copy_predating_this_arc_reports_but_cannot_fail(self):
+        """The one invocation whose non-success no bound can produce.
 
-        `run_service` is what a service manager launches, and it catches its
-        own startup refusals and answers with an exit code. A stale one that
-        answered success would be telling that manager — and Kanban, which
-        reads the job's state through it — that a drainer ran for a repository
-        whose installation moved out from under it.
+        `run_service` is what a service manager launches, so it catches its own
+        startup refusals and answers with an exit code rather than raising. A
+        controller predating this arc answers a clean one there, and nothing
+        outside that process changes what it does with an exception it already
+        caught — the same limit requirement 4 is stated around, where the prose
+        an operator needs cannot come from the stale process either. This
+        fixture restores that answer rather than inheriting the failing exit
+        this arc added, or the copy it calls old would be proving something
+        only a current controller does.
+
+        What is reachable is everything else, and it is the substance: this run
+        refuses at the closed lock, names it, and writes nothing at all.
+        `StaleControllerTests` asserts the failing exit a controller from here
+        on gives instead.
         """
         for index, attempt in enumerate(self.outcome["attempts"]):
             run = attempt["writers"]["run"]
             self.assertIsNone(run["failed"], index)
-            self.assertEqual(run["returned"], 1, index)
+            self.assertEqual(run["returned"], 0, index)
             self.assertIn("PR drainer did not start", run["printed"])
+            self.assertIn("Refusing unsafe config lock path", run["printed"])
             self.assertIn(str(self.legacy_lock), run["printed"])
+        # And nothing it would have written exists, which is the whole of what
+        # its exit code cannot carry.
+        self.assertEqual(self.host_state(), self.before)
 
     def test_the_trees_on_both_sides_are_exactly_what_they_were(self):
         after = self.host_state()

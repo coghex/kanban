@@ -1493,14 +1493,20 @@ search step and nothing else, which is what `mandatory: no` records.
   creates, removes or modifies the legacy runtime tree, the legacy log tree,
   the corresponding trees at the destination, or the repository's on-disk
   service definition, and the definition the service manager holds stays the
-  relocated one. Non-success however that invocation reports one: every
-  transition raises, and `run_service` — the one a service manager launches,
-  which catches its own startup refusals — exits non-zero rather than cleanly,
-  because a run that reported success would be telling that manager, and Kanban
-  reading the job's state through it, that a drainer ran for a repository whose
-  installation moved out from under it. Every definition this installer writes
-  carries `Restart=no` and `KeepAlive=false`, so that failed exit marks the job
-  failed rather than starting a restart loop.
+  relocated one. Every transition raises, so every one of them returns
+  non-success. `run_service` is the exception, and only in part: it is what a
+  service manager launches, so it catches its own startup refusals and answers
+  with an exit code. A controller from this change onward answers a failing
+  one, because a run that reported success would be telling that manager, and
+  Kanban reading the job's state through it, that a drainer ran for a
+  repository whose installation moved out from under it — and every definition
+  this installer writes carries `Restart=no` and `KeepAlive=false`, so that
+  failed exit marks the job failed rather than starting a restart loop. A
+  controller predating the change answers a clean one, and nothing reaches
+  that: no bound outside a process changes what it does with an exception it
+  already caught, which is the same limit requirement 4 is stated around. What
+  is reachable there is what matters and is guaranteed — it refuses at the
+  closed lock, names it, and writes nothing at all.
   Each bound is a fact about the path rather than a permission
   on a directory a stale invocation writes through, because `ensure_dirs`
   chmods the install directory on every attempt and would reset that kind of
