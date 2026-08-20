@@ -1352,8 +1352,11 @@ search step and nothing else, which is what `mandatory: no` records.
   own managed paths from that same selection; a custom destination installs
   there and relocates nothing, and an inherited `KANBAN_DRAINER_INSTALL_DIR`
   never decides it. A platform default that resolves to the `~/Library`
-  directory itself, because an absolute XDG root names it, installs in place
-  and relocates nothing too.
+  directory itself, because an absolute XDG root names it, is not a reason to
+  skip such a host: whether this platform takes an installation over and
+  whether taking it over *moves* anything are two questions, and answering the
+  first by comparing the two directories reads that host as macOS. Such a run
+  takes the installation over in place instead, on the terms below.
   What moves is the whole shared installation, because nothing less of it can
   move on its own: the two discovery records merge with the destination winning
   per key at both the top level and the `repositories` table and the merged
@@ -1530,7 +1533,42 @@ search step and nothing else, which is what `mandatory: no` records.
   a location nothing resolves or handing the installed controller a directory
   that is gone. It ends before the installed controller is spawned, which takes
   that lock in its own process.
-  Taking over an installation already at this platform's own location is #368.
+  A run whose destination is the location the installation is already at takes
+  it over in place. There is one discovery record rather than two, so nothing
+  is merged, nothing is removed, no marker is written, and no lock is held
+  between two records — with one document the lock such a run would hold is the
+  one the installer's own record write goes on to ask for, and that write keeps
+  it. What can still be out of date is each repository's definition, since it
+  embeds the log paths and the XDG context this host resolves and a pre-XDG one
+  carried neither. Staleness is decided per repository, as the bytes
+  `render_definition` produces for it against the bytes installed, and against
+  the run's *final* install-directory selection: an explicit `--install-dir`
+  beats an inherited `KANBAN_DRAINER_INSTALL_DIR` both for the desired bytes
+  and for the decision. Exactly the stale definitions are rewritten and
+  reloaded, and each such repository's log tree is carried to the log root this
+  host resolves — the one managed location `KANBAN_DRAINER_INSTALL_DIR` does
+  not pin, so an absolute `$XDG_STATE_HOME` naming `~/Library/Logs` makes that
+  root its own destination and the tree is preserved in place rather than
+  refused as an occupied one. An installation with nothing stale is not a
+  migration: it reports the same nothing-migrated answer a host with no
+  `~/Library` installation gets, having read one document, taken no lock, moved
+  nothing and created nothing.
+  The guards are scoped to that stale set rather than to every recorded
+  repository, and that scoping is load-bearing rather than an optimization:
+  they are refusals, so a run that treated a settled sibling as affected would
+  refuse an ordinary install whenever any other repository's drainer happened
+  to be running. A stale repository is fenced exactly as the relocation fences
+  one — its checkout's run lock and any controller lock that already exists,
+  under the one record's own lock, which is what keeps a controller from
+  taking one underneath the run — and a live drainer, managed job or controller
+  for a stale repository refuses before anything is written. A recorded entry
+  that cannot be recovered is neither refused nor rewritten: this run takes
+  nothing apart, so an entry it cannot recover is one it cannot show to be
+  affected, and the repository is left exactly as it stands and named in the
+  report. Every mutation registers its undo first on the same terms as the
+  relocation's, so a failure puts every definition and every tree back and
+  removes the log root it created. `--dry-run` reports the whole takeover, or
+  the nothing-migrated answer, without taking a lock.
   The installed definition carries `$XDG_DATA_HOME` and `$XDG_STATE_HOME`
   alongside `KANBAN_DRAINER_INSTALL_DIR` whenever they are absolute, because
   that option pins the install directory and the runtime root beneath it but

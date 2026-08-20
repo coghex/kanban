@@ -1105,7 +1105,34 @@ repository, since nothing records where its checkout is or what its job is
 called, but neither is left at a location nothing reads any more. If the same
 name already exists at the destination, both are kept and both are named.
 
-Taking over an installation already at this platform's own location is #368.
+If your `$XDG_DATA_HOME` names `~/Library/Application Support`, this platform's
+own default install directory *is* the `~/Library` one, so there is nowhere for
+the installation to move to. The installer still takes it over: whether this
+platform takes an installation over and whether taking it over moves anything
+are two questions, and reading the second as the first would leave such a host
+skipped forever. Nothing is merged, nothing is removed, no `relocated.json` is
+written and no lock is held between two records, because there is only one
+record. What can be out of date is the definitions, since each one carries the
+log paths and the XDG context this host resolves and a pre-XDG one carried
+neither. The run compares each repository's installed definition against the
+bytes this host would write for it, rewrites and reloads exactly the ones that
+differ, and carries their log trees to the log root this host uses. If that
+root is where the logs already are — an absolute `$XDG_STATE_HOME` naming
+`~/Library/Logs` — they stay where they are rather than being moved onto
+themselves. An installation whose definitions are all current is not a
+migration at all: it reports that it migrated nothing, exactly as a host with
+no `~/Library` installation does, and `--dry-run --json` reports either answer
+without taking a lock.
+
+Only the repositories whose definitions differ are touched, and only they are
+checked. A settled repository whose drainer happens to be running does not
+refuse your install; a stale one that is running does, along with a stale one
+whose checkout is locked or whose controller is up. An entry the installer
+cannot resolve to a live checkout and an installed definition is left alone and
+named in the report rather than failing the run, because this run takes nothing
+apart — re-install or uninstall that repository to clear it. `--install-dir`
+still beats an exported `KANBAN_DRAINER_INSTALL_DIR`, for deciding which
+definitions are stale as well as for what is written into them.
 
 
 The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Incidents are attributed to the canonical repository rather than to the checkout that raised them, so any clone of that repository can list, acknowledge, and clear them. Stopping the drainer intentionally clears that repository's crash incidents, and no other repository's — a stop ends the supervisor, which is exactly what a crash incident is about. It resolves nothing else: a conflict or cleanup incident stays open across the stop, still naming a debt that is still owed, and clears through its own path once that pull request is mergeable or closed or its last obligation succeeds. Starting the drainer is not gated on an open incident of any kind, and an incident already open when it starts is never mistaken for a startup failure.
