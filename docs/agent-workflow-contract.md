@@ -1440,146 +1440,109 @@ search step and nothing else, which is what `mandatory: no` records.
   installed controller a pre-XDG host is running is an older copy that predates
   it — which is the same premise that puts the installation at `~/Library` in
   the first place.
-  So the reconciliation runs *outside* those locks and re-takes them for each
-  pass, and that sequencing is the point rather than an implementation detail:
-  a sweep inside the transition's own locks could never see a writer queued on
-  them, because releasing is what lets one through. Between passes it holds
-  neither record lock, and it pauses before taking them again — `flock` has no
-  handoff, so releasing only makes a waiter runnable and a run that asked again
-  in the same instant could take the lock back before that waiter ever ran.
-  Once the waiter holds it, the next pass blocks on it and reads what it wrote
-  rather than racing it. That pause is a mitigation and not a proof: whether
-  anyone is waiting on a lock cannot be asked, and a writer that acquires after
-  the run's last look is past any process that terminates at all — and the
-  writer that can still do it is an older installed controller, from before the
-  refusal every discovery-record write now carries, which no gate added here
-  reaches.
-  What answers that one is not timing but leaving it nothing to write. A run
-  whose final scan finds the location clear closes three paths there, under
-  that same scan's lock. The emptied record path and the runtime root are each
-  occupied by a symlink to the relocation marker beside them; the retained lock
-  is made unopenable instead, because a lock file may never be unlinked and an
-  object cannot be put where it stands. All three refusals live in code that
-  predates this whole arc, which is the only kind that reaches a controller
-  predating it. `update_json_document` — the one mutator every discovery-record
-  write in every copy of the controller goes through — has refused a record
-  path that is present and not a regular file since the commit that introduced
-  the record. `ensure_dirs` — the one helper every runtime, incident and log
-  write goes through — cannot make a directory beneath a path that is not one,
-  and it reaches the runtime root before the log tree, before any definition is
-  written and before the record is touched at all. And `document_lock` opens
-  that lock `O_RDWR` and refuses with `Refusing unsafe config lock path` when
-  the open fails, which is what every transition enters before it reads or
-  writes anything: it is the only thing that reaches `uninstall_job`, which
-  creates no directory at all and would otherwise unload and unlink the
-  definition a relocation had just rewritten before its record write was
-  refused. So a stale invocation returns non-success before it creates, removes
-  or modifies the legacy runtime tree, the legacy log tree, the corresponding
-  trees at the destination, or the repository's on-disk service definition, and
-  the definition the service manager holds stays the relocated one. Each bound
-  is a fact about the path rather than a permission on a directory a stale
-  invocation writes through, because `ensure_dirs` chmods the install directory
-  on every attempt and would reset that kind of guard on the very invocation it
-  is meant to stop; the lock's own mode is not reachable that way, since
-  nothing chmods it but the run that closed it.
+  What answers that writer is not timing but never letting it take the lock.
+  A run closes the legacy record's lock file against every opener but its own
+  for the whole of its span: it opens its own descriptor, closes the mode, and
+  keeps that one descriptor rather than reopening a file it has closed. From
+  that instant the set of processes that can ever contend for that lock is
+  fixed, and the plan proves it empty immediately afterwards. A run that finds
+  it is not empty refuses, before anything has moved — so the process holding
+  that descriptor goes on to act against the installation it was invoked
+  against, an ordinary transition serialized by this very lock as it always
+  was, rather than a stale one acting on a location that moved while it waited.
+  A host that cannot be asked is refused on the same terms, since relocating on
+  an unanswered precondition leaves the host moved with the question still
+  open. That is the prevention this arc selects, and it is available only
+  there: once the installation has moved, every answer left is a repair,
+  because a service manager's definition directory is the installation's own,
+  shared with the job just relocated, and cannot be closed without closing the
+  installation.
+  So no transition at that location begins while a relocation runs. `install`,
+  `start`, `uninstall` and `stop` all enter `document_lock` before they read or
+  write anything, as does every discovery-record write, and `document_lock`
+  opens that file `O_RDWR` and refuses with `Refusing unsafe config lock path`
+  when the open fails. `uninstall_job` is why this matters and not merely
+  tidies: it creates no directory at all, so nothing else stands in front of
+  the definition it unlinks.
+  The reconciliation therefore runs inside that lock rather than handing it
+  over, because there is nobody to hand it to. What it is for is the writers
+  that never wanted the lock: `ensure_dirs` creates a repository's runtime,
+  incident and log trees under no lock at all, and `atomic_write_json` creates
+  a missing parent on its own, so a controller bound here can still lay trees
+  down right up until the seals go down. Those passes stay bounded, so a writer
+  that keeps laying them down ends the sweep rather than holding an installer
+  open, and its record half stands as what answers a location that acquired a
+  record some other way.
+  A run whose final scan finds the location clear closes it. The emptied record
+  path and the runtime root are each occupied by a symlink to the relocation
+  marker beside them, and the lock keeps the mode it has had since before the
+  plan. All three refusals live in code that predates this whole arc, which is
+  the only kind that reaches a controller predating it: `update_json_document`
+  has refused a record path that is present and not a regular file since the
+  commit that introduced the record, `ensure_dirs` cannot make a directory
+  beneath a path that is not one, and `document_lock` cannot open a file it has
+  no permission to open. So a stale invocation returns non-success before it
+  creates, removes or modifies the legacy runtime tree, the legacy log tree,
+  the corresponding trees at the destination, or the repository's on-disk
+  service definition, and the definition the service manager holds stays the
+  relocated one. Each bound is a fact about the path rather than a permission
+  on a directory a stale invocation writes through, because `ensure_dirs`
+  chmods the install directory on every attempt and would reset that kind of
+  guard on the very invocation it is meant to stop; the lock's own mode is not
+  reachable that way, since nothing chmods it but the run that closed it.
   Following either seal finds the marker rather than a document, so a reader
   bound to that location learns where the installation went instead of finding
   an empty one, and the closed lock carries the same notice as its own content
-  — readable, since what a transition may not do is open it for *writing*.
-  That is the whole operator-facing failure available here: a controller
-  predating this arc renders a fault as the path it could not use, and the path
-  it names is one of these three, so what they lead to carries the rest — that
-  the installation was relocated, the legacy location and the destination by
-  name, and the exact action that resolves it, which is to run the command
-  again against the installation this host now resolves and, where the
-  installed copy predates that resolution, to re-run `tools/install_drainer.py`
-  against the destination.
+  — written through the run's own descriptor, and readable, since what a
+  transition may not do is open it for *writing*. That is the whole
+  operator-facing failure available here: a controller predating this arc
+  renders a fault as the path it could not use, and the path it names is one of
+  these three, so what they lead to carries the rest — that the installation
+  was relocated, the legacy location and the destination by name, and the exact
+  action that resolves it, which is to run the command again against the
+  installation this host now resolves and, where the installed copy predates
+  that resolution, to re-run `tools/install_drainer.py` against the
+  destination.
+  Before it declares the location closed the run asks its last question again:
+  it reads the set of processes holding that lock open, out of `/proc` — the
+  platform that relocates is the platform that has one, since a relocation
+  never happens on macOS and a host with no service manager never reaches one.
+  Empty is a proof rather than a hope, since the mode has been closed since
+  before the plan and nothing can have joined the set. A set that is not empty,
+  and a host that cannot be asked, are both states the run may not call closed:
+  the lock stays closed either way, and the run reports which process still
+  holds it, or that it could not be ruled out, and fails the install rather
+  than telling an operator there is nothing to stop. A process this user may
+  not inspect is not one of ours, since the installation, its lock and every
+  controller that opens it are user-scoped.
   A location this run could not finish reconciling is deliberately left open,
   because the operator has to see it as it stands and the re-run that follows
   their reconciliation is what closes it; a path that could not be closed at
   all fails the install on the same terms as unresolved state, and is named in
-  that failure, since a path left open to a controller still bound there is the
-  one thing that keeps the rest closed. Being closed is a reason for a later
-  run to do nothing only when *every* one of those paths is closed and the
-  location holds nothing else: a sealed location that still holds trees, or one
-  whose other paths an earlier run could not close, is planned and reconciled
-  exactly as an unsealed one is, which is what stops a seal from making such
-  state permanently invisible — and an installation sealed before the lock was
-  closed at all is exactly such a location, which is how such a host is
-  finished. The two seals are managed entries no run removes, and neither is
-  reported as a stray or as a late write; the lock is reopened only by the
-  installer run that has to take it, which restores it on every failing exit
-  and closes it again when it seals.
-  One writer is past all three by construction, and nothing can close what it
-  reaches. A process that opened that lock before the run started holds a
-  descriptor no later mode change revokes, so it acquires the lock the moment a
-  pass releases it and then runs bytes predating every gate here — and an
-  uninstall in that copy creates no directory at all, so it unloads the job and
-  unlinks the definition before its record write is refused. That definition
-  cannot be closed against it: a service manager's definition directory is the
-  installation's own, shared with the job this run has just relocated, so
-  closing it would close the installation. What answers that writer is the pass
-  that follows it, which is what the handoff between passes exists for: each
-  pass checks every relocated repository's definition beside the location, on
-  the same terms a takeover checks one — the bytes this host would render,
-  compared whole — and puts back and reloads any that differ, naming them in
-  the report. The two seals go down only once both the location and those
-  definitions are what this run left.
-  A check taken while the lock is held cannot see the writer whose flock lands
-  behind it, so the run does not end there either. With those seals already
-  down it hands the lock over once more, deliberately: it releases, pauses for
-  the reason every other handoff pauses, and takes it back — which blocks until
-  whoever was queued on it has finished — and then asks the definition question
-  again, putting back whatever that let through.
-  Handing it over cannot end the question, and no number of cycles can, because
-  every check is taken while the run holds the lock and the writer this is
-  about is the one whose turn comes after the check. So the last cycle stops
-  asking about turns and asks about descriptors. It closes the lock's mode
-  first, which fixes the set of descriptors that can ever contend rather than
-  emptying it, and then reads that set out of `/proc` — the platform that
-  relocates is the platform that has one, since a relocation never happens on
-  macOS and a host with no service manager never reaches one. An empty set is a
-  proof rather than a hope: nothing can open that file again and nothing has it
-  open, so nothing can ever take that lock. A set that is not empty, and a host
-  that cannot be asked, are both states the run may not call closed: the lock
-  stays closed either way, and the run reports which process still holds it, or
-  that it could not be ruled out, and fails the install rather than telling an
-  operator there is nothing to stop. A process this user may not inspect is not
-  one of ours, since the installation, its lock and every controller that opens
-  it are user-scoped.
-  One of those two states is not answered after the fact at all, because it
-  does not have to be. A process that already has that lock open when the run
-  starts is one the plan can see, and a plan that sees one refuses: the
-  relocation raises before it has mutated anything, so the host stays exactly
-  as it was found, and the process holding that descriptor goes on to act
-  against the installation it was invoked against — an ordinary transition,
-  serialized by this very lock as it always was, rather than a stale one acting
-  on a location that moved while it waited. That is the prevention this arc
-  selects, and it is available only there: once the installation has moved,
-  every answer left is a repair, because a service manager's definition
-  directory is the installation's own and cannot be closed without closing it.
-  A host that cannot be asked is refused on the same terms, since relocating on
-  an unanswered precondition leaves the host moved with the question still
-  open. What the settle cycle answers is therefore only the other population —
-  a controller invoked while the relocation is already under way, which the
-  plan could not have seen.
-  A state the run may not call closed has to survive the run, or the repair it
-  prints is advice the re-run ignores. Both seals are objects a later run can
-  see and the lock's mode is a bit it can read, but whether anything held that
-  lock when it was closed is a question only the run that closed it was in a
-  position to ask — so that run writes its answer into the relocation marker
-  beside the location, and the disposition reads it there. A location whose
-  marker does not say closing finished, and one whose lock has been reopened,
-  are both locations a later run acts on; an installation an older installer
-  sealed says nothing either way, which is how such a host is finished. What
-  that run performs is not a relocation, since nothing is left to move: it is
-  the settle half on its own, over the repositories the destination record
-  names, reopening the lock to take it, putting back any definition the
-  reported holder took in the meantime, and closing and recording the location
-  once nothing is left holding it. Recovering those repositories deliberately
-  does not insist on their definitions, unlike the recovery a relocation
-  performs: a missing definition is the state this run exists to repair, and
-  insisting on one would refuse over exactly that.
+  that failure. Being closed is a reason for a later run to do nothing only
+  when every one of those paths is closed and the location holds nothing else:
+  a sealed location that still holds trees, or one whose paths an earlier run
+  could not close, is planned and reconciled exactly as an unsealed one is,
+  which is what stops a seal from making such state permanently invisible. The
+  two seals are managed entries no run removes, and neither is reported as a
+  stray or as a late write.
+  That answer has to survive the run, or the repair it prints is advice the
+  re-run ignores. Both seals are objects a later run can see and the lock's
+  mode is a bit it can read, but whether the run that closed it was in a
+  position to prove nothing could still take it is a question only that run
+  could ask — so it writes its answer into the relocation marker beside the
+  location, and the disposition reads it there. A location whose marker does
+  not say closing finished, and one whose lock has been reopened, are both
+  locations a later run acts on; an installation an installer predating this
+  bound sealed says nothing either way, which is how such a host is finished.
+  What that run performs is not a relocation, since nothing is left to move: it
+  is the closing half on its own, over the repositories the destination record
+  names, reopening the lock only for as long as it holds it, putting back any
+  definition that went missing while the location stood open, and closing and
+  recording it once nothing is left holding the lock. Recovering those
+  repositories deliberately does not insist on their definitions, unlike the
+  recovery a relocation performs: a missing definition is the state this run
+  exists to repair, and insisting on one would refuse over exactly that.
   A per-repository tree no record names is carried too. Two things leave one: a
   controller that wrote its trees before a refused record write, and an
   uninstall, which deliberately leaves a repository's runtime state, logs and

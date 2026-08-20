@@ -452,17 +452,26 @@ class RelocationFixture(unittest.TestCase):
         return state
 
     def lock_is_held(self, record=None):
-        """Whether another opener would block on one record's lock.
+        """Whether another opener would be excluded from one record's lock.
 
         `flock` is per open file description, so a second descriptor in this
         same process contends exactly as another process's would — which is
         what makes this an observation of the lock rather than of the code
         that takes it.
+
+        A relocation additionally closes the legacy record's lock against every
+        opener but its own, for the span it holds that lock. A file another
+        process cannot open is one it cannot take, so that answers this
+        question too — and more strongly than blocking does, since a process
+        that blocks eventually gets its turn.
         """
         lock_path = Path(str(record or self.legacy_record) + ".lock")
         if not lock_path.parent.is_dir():
             return False
-        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        except PermissionError:
+            return True
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -2932,14 +2941,16 @@ result.write_text(json.dumps(outcome), encoding="utf-8")
 
 
 class QueuedRecordWriterTests(RelocationFixture):
-    """A writer in another OS process, queued on the legacy record's lock.
+    """A writer in another OS process, reaching for the legacy record's lock
+    while a relocation holds it.
 
-    The relocation holds that lock across its whole transition and never
-    unlinks the lock file, so this writer really does block on the same inode
-    and really does wake only after the reconciliation has finished — past
-    anything a bounded sweep could have carried across. What it must not be
-    able to do is record anything, and that is what the refusal every
-    discovery-record write carries is for.
+    It never gets it, and never queues for it either. The run closes that lock
+    file against every opener but its own the instant it takes it, and
+    `document_lock` opens it `O_RDWR` before any transition reads or writes a
+    thing — so this writer is refused where it stands. Queuing is what it did
+    before that closure existed, and what made a bounded sweep necessary: a
+    writer that waits gets its turn eventually, on a location that moved while
+    it waited.
     """
 
     def setUp(self):
@@ -3022,9 +3033,10 @@ class QueuedRecordWriterTests(RelocationFixture):
             return real_apply(transition, relocation_plan, sources)
 
         def remove_hook(transition, relocation_plan):
-            # It cannot have the lock: this run holds it and never unlinks it.
-            # If it does, `flock` did not serialize this writer at all.
-            self.blocked = not self.acquired.exists()
+            # It cannot have the lock: this run holds it, never unlinks it, and
+            # has closed it against every other opener. If it does, neither the
+            # closure nor `flock` excluded this writer at all.
+            self.excluded = not self.acquired.exists()
             return real_remove(transition, relocation_plan)
 
         with mock.patch.object(install_drainer, "_apply_relocation", apply_hook):
@@ -3035,17 +3047,19 @@ class QueuedRecordWriterTests(RelocationFixture):
         self.assertEqual(process.wait(timeout=60), 0, process.communicate())
         return result, json.loads(self.result.read_text(encoding="utf-8"))
 
-    def test_it_blocks_on_the_lock_and_then_records_nothing(self):
+    def test_it_never_takes_the_lock_and_records_nothing(self):
         before_record = self.legacy_record
         _, outcome = self.relocate_with_queued_writer()
         # It really was the stale, legacy-bound process this is about...
         self.assertEqual(outcome["bound_record"], str(before_record))
-        # ...it really did block, rather than refusing before it queued...
-        self.assertTrue(self.blocked, outcome)
-        # ...and it wrote nothing at the location the relocation emptied.
+        # ...it never held the lock while this run was inside the transition...
+        self.assertTrue(self.excluded, outcome)
+        # ...and it was refused by the file rather than by anything in it, so
+        # it never queued and never woke into a location that had moved.
+        self.assertFalse(self.acquired.exists())
         self.assertNotIn("recorded", outcome)
-        self.assertIn("was relocated to", outcome["refused"])
-        self.assertIn(str(self.destination), outcome["refused"])
+        self.assertIn("Refusing unsafe config lock path", outcome["refused"])
+        self.assertIn(str(self.legacy_lock), outcome["refused"])
         self.assert_location_is_sealed()
 
     def test_the_run_it_woke_into_needed_no_reconciliation(self):
@@ -3217,11 +3231,13 @@ class PreGateWriterTests(PreGateControllerFixture):
     """The writer no gate in this copy can refuse: an older installed
     controller.
 
-    Such a writer queued on the retained record lock wakes once the transition
-    releases it and records itself at the location the run just emptied. What
-    must happen then is that the reconciliation finds it, which is why the
-    reconciliation is sequenced outside those locks and re-takes them pass by
-    pass.
+    Nothing in that copy refuses anything, so what refuses it has to be
+    something it cannot argue with. While a relocation is under way that is the
+    lock file itself, closed against every opener but the run's, which
+    `document_lock` meets before any transition reads or writes a thing. Once
+    the run is over it is the seals at the record path and the runtime root,
+    which `update_json_document` and `ensure_dirs` meet on exactly the same
+    terms.
     """
 
     def setUp(self):
@@ -3309,29 +3325,34 @@ class PreGateWriterTests(PreGateControllerFixture):
         self.assertEqual(process.wait(timeout=60), 0, process.communicate())
         return result, json.loads(self.result.read_text(encoding="utf-8"))
 
-    def test_it_blocks_on_the_lock_and_then_really_does_record(self):
+    def test_it_never_gets_the_lock_and_records_nothing(self):
+        """What the closed lock does to the writer no gate can refuse.
+
+        It is refused where it stands, before it queues — so it never wakes
+        into a location that moved while it waited, which is the whole state a
+        bounded sweep used to have to answer for.
+        """
         result, outcome = self.relocate_with_pre_gate_writer()
         self.assertEqual(outcome["bound_record"], str(self.legacy_record))
-        # It blocked on the retained lock rather than refusing where it stood...
-        self.assertTrue(self.acquired.exists())
-        # ...and, being the older copy, it recorded. Nothing in this repository
-        # can stop that; the reconciliation is what answers it.
-        self.assertTrue(outcome["recorded"])
-        self.assertNotIn("refused", outcome)
-        self.assertEqual(result["late_writes"]["passes"], 1)
+        self.assertFalse(self.acquired.exists())
+        self.assertNotIn("recorded", outcome)
+        self.assertIn("Refusing unsafe config lock path", outcome["refused"])
+        self.assertIn(str(self.legacy_lock), outcome["refused"])
+        self.assertEqual(result["late_writes"]["passes"], 0)
 
-    def test_what_it_recorded_is_carried_across_and_the_location_cleared(self):
+    def test_the_location_is_never_recreated_so_nothing_is_carried(self):
         result, _ = self.relocate_with_pre_gate_writer()
         late = result["late_writes"]
         self.assertTrue(late["resolved"])
-        self.assertEqual(late["repositories"], ["acme/widgets"])
-        self.assertIn(str(self.legacy_record), late["removed"])
+        self.assertEqual(late["passes"], 0)
+        self.assertEqual(late["repositories"], [])
         self.assert_location_is_sealed()
         self.assertEqual(
             sorted(path.name for path in self.legacy_dir.iterdir()),
             ["config.json", "config.json.lock", "relocated.json", "runtime"],
         )
-        self.assert_location_is_sealed()
+        # And the record this run wrote is the destination's, describing the
+        # repository it moved rather than anything a writer put back.
         entry = self.record_document(self.destination_record)["repositories"][
             "acme/widgets"
         ]
@@ -3340,7 +3361,7 @@ class PreGateWriterTests(PreGateControllerFixture):
     def test_the_install_reports_success_because_nothing_was_left_behind(self):
         result, _ = self.relocate_with_pre_gate_writer()
         install_drainer._require_relocation_resolved(result)
-        self.assertIn("cleared again", result["repair"])
+        self.assertIn("Nothing to repair", result["repair"])
 
     def test_a_writer_that_beats_the_final_look_is_refused_where_it_stands(self):
         """The case no lock can reach, answered by leaving nothing to write.
@@ -3413,137 +3434,41 @@ class PreGateWriterTests(PreGateControllerFixture):
             install_drainer.relocation_disposition(self.destination),
         )
 
-    def test_a_queued_uninstall_has_the_definition_it_removed_put_back(self):
-        """The one writer every closed path is behind, by construction.
+    def test_a_queued_uninstall_never_reaches_the_definition_at_all(self):
+        """The transition no seal can stand in front of, prevented anyway.
 
-        This process opens the retained lock and blocks in `flock` *before* the
-        relocation takes it, so the mode the seal sets never reaches it: the
-        descriptor is already open, and no later chmod revokes one. It wakes
-        into the reconciliation and runs an uninstall — the transition that
-        creates no directory at all, so neither the runtime guard nor the
-        record seal stands in front of the definition it unlinks. Nothing can:
-        a service manager's definition directory is the installation's own,
-        shared with the job this run has just relocated, so closing it would
-        close the installation.
+        An uninstall creates no directory: it reads the status file, unloads
+        the job and unlinks the definition, and only then reaches the record
+        the seal refuses. Neither the runtime guard nor the record seal is in
+        front of that definition, and nothing can be — a service manager's
+        definition directory is the installation's own, shared with the job
+        this run has just relocated, so closing it would close the
+        installation.
 
-        What answers it is the pass that follows. The handoff is what let this
-        process through, so the pass after that is what sees what it did: the
-        definitions this run wrote are checked beside the location on every
-        pass and put back and reloaded where they differ, and the seal goes
-        down only once both are what this run left.
+        What is in front of it is the lock. Every transition enters
+        `document_lock` before it reads or writes a thing, and while this run
+        is under way that file is closed against every opener but its own — so
+        the uninstall never begins, and the definition it would have taken is
+        never reached rather than put back afterwards.
         """
         self.writes = "uninstall"
         self.commands.clear()
         result, outcome = self.relocate_with_pre_gate_writer()
-        # It really did take the lock, and really did remove the definition:
-        # nothing in this repository could have stopped it.
-        self.assertTrue(self.acquired.exists())
-        self.assertNotIn("refused", outcome)
-        self.assertTrue(outcome["uninstalled"]["uninstalled"])
-        self.assertTrue(outcome["uninstalled"]["unit_removed"])
-        late = result["late_writes"]
-        self.assertEqual(late["restored_definitions"], ["acme/widgets"])
-        # Put back as the bytes this host writes for the destination, and
-        # reloaded, so what the manager holds is the relocated definition.
-        backend = install_drainer.service_backend()
-        definition = backend.definition_path(self.job.label)
-        self.assertTrue(definition.is_file())
-        self.assertEqual(
-            backend.definition_environment(self.job.label)[
-                kanban_config.DRAINER_INSTALL_DIR_ENV
-            ],
-            str(self.destination),
-        )
-        self.assertTrue(
-            any(self.job.label in " ".join(command) for command in self.commands),
-            self.commands,
-        )
-        # And the run finishes as it would have without it.
-        self.assertTrue(late["resolved"])
-        self.assertTrue(late["sealed"])
-        self.assert_location_is_sealed()
-        self.assertIn("put it back and reloaded it", result["repair"])
-        install_drainer._require_relocation_resolved(result)
-
-    def test_an_uninstall_that_takes_the_lock_after_the_final_look_is_answered(self):
-        """The writer no check taken while the lock is held can see.
-
-        `document_lock` opens the lock file and takes its flock together; this
-        process performs the two halves with a gate between them, so its
-        descriptor is open before anything moves — which is what no later mode
-        change on that file revokes — and its flock lands while the run's final
-        pass is holding the lock. That pass therefore finds the location clear
-        and the definitions current, seals, and would have returned; the
-        writer's turn comes afterwards.
-
-        What answers it is that the run does not return there. Having sealed
-        the record path and the runtime root, it hands the lock over once more
-        on purpose and takes it back — which blocks until that writer has
-        finished — and only then asks whether the definitions are still its
-        own, puts back what is not, and closes the lock. So the writer is
-        refused where every closed path refuses it, at the record it cannot
-        write, and the one thing it did reach first is restored before this run
-        is over.
-        """
-        self.writes = "uninstall-delayed"
-        self.commands.clear()
-        process = self.start_writer()
-        # Its descriptor is opened before anything moves.
-        self.go.write_text("", encoding="utf-8")
-        self.wait_for(self.queued, "the writer never opened the lock")
-
-        real_seal = install_drainer._seal_emptied_location
-
-        def seal_hook(transition, relocation_plan):
-            open_paths = real_seal(transition, relocation_plan)
-            # Only now: this run still holds the lock, so the flock this writer
-            # asks for lands behind the look that just sealed the location.
-            self.flock_go.write_text("", encoding="utf-8")
-            return open_paths
-
-        real_settle = install_drainer._settle_and_close
-
-        def settle_hook(transition, relocation_plan, backend, outcome):
-            # Waiting here for the handoff to have happened is what makes this
-            # the interleaving under test rather than one a scheduler produced.
-            self.wait_for(self.acquired, "the writer never took the lock")
-            return real_settle(transition, relocation_plan, backend, outcome)
-
-        with mock.patch.object(
-            install_drainer, "_seal_emptied_location", seal_hook
-        ):
-            with mock.patch.object(
-                install_drainer, "_settle_and_close", settle_hook
-            ):
-                result = self.relocate()
-        self.assertEqual(process.wait(timeout=60), 0, process.communicate())
-        outcome = json.loads(self.result.read_text(encoding="utf-8"))
-        # It really did take the lock after the final look, and the record it
-        # came for is the one thing it could not write.
-        self.assertTrue(self.acquired.exists())
+        self.assertFalse(self.acquired.exists())
         self.assertNotIn("uninstalled", outcome)
-        self.assertIn("Refusing unsafe config path", outcome["refused"])
-        # ...but it unlinked the definition before reaching that record, and
-        # this run put it back and reloaded it before returning.
-        late = result["late_writes"]
-        self.assertEqual(late["restored_definitions"], ["acme/widgets"])
+        self.assertIn("Refusing unsafe config lock path", outcome["refused"])
+        # Untouched rather than restored: nothing was put back because nothing
+        # took it, and the manager was never asked to forget it.
         backend = install_drainer.service_backend()
         self.assertTrue(backend.definition_path(self.job.label).is_file())
+        self.assertEqual(result["late_writes"]["restored_definitions"], [])
         self.assertEqual(
             backend.definition_environment(self.job.label)[
                 kanban_config.DRAINER_INSTALL_DIR_ENV
             ],
             str(self.destination),
         )
-        self.assertTrue(
-            any(self.job.label in " ".join(command) for command in self.commands),
-            self.commands,
-        )
-        # And the location itself never came back: the seals were already down
-        # when that writer got its turn.
-        self.assertEqual(late["passes"], 0)
-        self.assertTrue(late["resolved"])
-        self.assertTrue(late["sealed"])
+        self.assertTrue(result["late_writes"]["sealed"])
         self.assert_location_is_sealed()
         install_drainer._require_relocation_resolved(result)
 
@@ -4246,23 +4171,6 @@ class LockDescriptorTests(PreGateControllerFixture):
             self.lock_holders = (process.pid,)
         return process
 
-    def appearing_mid_run(self, process):
-        """That descriptor answered for as one opened *after* the plan.
-
-        The other population: a controller invoked while the relocation is
-        already under way, which opens the lock and queues on it. No refusal
-        can reach it, because the plan that would raise one is long past, so
-        the run answers it where it can — at the settle cycle, once the mode is
-        closed and the set can only shrink.
-        """
-        real = install_drainer._seal_emptied_location
-
-        def hook(transition, relocation_plan):
-            self.lock_holders = (process.pid,)
-            return real(transition, relocation_plan)
-
-        return mock.patch.object(install_drainer, "_seal_emptied_location", hook)
-
     def release(self, process):
         self.flock_go.write_text("", encoding="utf-8")
         self.assertEqual(process.wait(timeout=60), 0, process.communicate())
@@ -4322,159 +4230,89 @@ class LockDescriptorTests(PreGateControllerFixture):
         self.assertIn(str(self.legacy_lock), message)
         self.assertEqual(self.host_state(), before)
 
-    # -- the population only the settle cycle reaches ------------------------
+    # -- the population no refusal can reach --------------------------------
 
-    def test_one_that_appears_while_the_run_is_under_way_is_reported(self):
-        process = self.start_holder(visible=False)
-        with self.appearing_mid_run(process):
-            result = self.relocate()
-        late = result["late_writes"]
-        # The location itself is clear — this process has written nothing —
-        # and the run still may not call it closed.
-        self.assertTrue(late["resolved"])
-        self.assertFalse(late["sealed"])
-        self.assertEqual(late["lock_holders"], [process.pid])
-        self.assertEqual(late["unsealed"], [str(self.legacy_lock)])
-        # Closed all the same: leaving it open would let a fresh invocation in
-        # beside the one already queued. What that descriptor can still reach
-        # is only the definition, because the other two paths are occupied.
+    def test_nothing_can_open_that_lock_while_the_run_is_under_way(self):
+        """The other half, and the half no refusal covers.
+
+        A controller invoked while the relocation is already running is one no
+        plan could have seen. What stops it is the file: from the instant this
+        run holds that lock it is closed against every other opener, so such a
+        process never queues on it and never gets a turn on a location that
+        moved while it waited. That is what makes the prevention total rather
+        than a race won — and it is why the run may not reopen the file for its
+        own later acquisitions, and holds one instead.
+        """
+        observed = {}
+        real = install_drainer._apply_relocation
+
+        def during(transition, relocation_plan, sources):
+            # A second descriptor in this process is another opener exactly as
+            # a second process's is: the mode is the whole mechanism.
+            try:
+                descriptor = os.open(self.legacy_lock, os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError as error:
+                observed["refused"] = f"{type(error).__name__}: {error}"
+            else:
+                os.close(descriptor)
+                observed["refused"] = None
+            return real(transition, relocation_plan, sources)
+
+        with mock.patch.object(install_drainer, "_apply_relocation", during):
+            self.assertTrue(self.relocate()["relocated"])
+        self.assertIsNotNone(observed["refused"])
+        self.assertIn(str(self.legacy_lock), observed["refused"])
+        # Closed afterwards too, now with the notice in it.
         self.assertFalse(os.access(self.legacy_lock, os.W_OK))
-        self.assertTrue(install_drainer._is_relocation_seal(self.legacy_record))
-        self.assertTrue(install_drainer._is_relocation_seal(self.legacy_guard))
-        with self.assertRaises(install_drainer.RelocationUnresolved) as raised:
-            install_drainer._require_relocation_resolved(result)
-        message = str(raised.exception)
-        self.assertIn("was left open", message)
-        self.assertIn(str(self.legacy_lock), message)
-        self.assertIn(f"process {process.pid}", result["repair"])
-        self.assertIn("Stop that process", result["repair"])
-        self.release(process)
-
-    def test_it_really_can_still_take_that_lock_once_the_run_is_over(self):
-        """Why the report is the answer and not a formality.
-
-        Released after the run has closed the lock and returned, this process
-        takes the flock its descriptor still carries, is refused at the record
-        it came for, and reaches the definition on the way — which is exactly
-        the state the run declined to call closed.
-        """
-        process = self.start_holder(visible=False)
-        with self.appearing_mid_run(process):
-            self.assertFalse(self.relocate()["late_writes"]["sealed"])
-        backend = install_drainer.service_backend()
-        self.assertTrue(backend.definition_path(self.job.label).is_file())
-        self.release(process)
-        outcome = json.loads(self.result.read_text(encoding="utf-8"))
-        self.assertTrue(self.acquired.exists())
-        self.assertIn("Refusing unsafe config path", outcome["refused"])
-        self.assertFalse(backend.definition_path(self.job.label).is_file())
-
-    def test_a_re_run_while_it_still_holds_the_lock_reports_it_again(self):
-        """The repair this run prints has to work, and it only works if the
-        re-run reaches the same answer from what is on disk.
-
-        The state the first run knew — that something still holds this lock —
-        lives in its own result and nowhere else. A later run that read the two
-        seals and the lock's mode alone would call the location finished and
-        never look again, which would make "stop that process, then re-run this
-        installer" advice that does nothing.
-        """
-        process = self.start_holder(visible=False)
-        with self.appearing_mid_run(process):
-            self.assertFalse(self.relocate()["late_writes"]["sealed"])
-        # Not finished business, so the re-run really does act.
-        self.assertIsNone(install_drainer.relocation_disposition(self.destination))
-        again = self.relocate()
-        self.assertFalse(again["relocated"])
-        self.assertIn("could not finish closing it", again["reason"])
-        self.assertEqual(again["late_writes"]["lock_holders"], [process.pid])
-        self.assertEqual(again["late_writes"]["unsealed"], [str(self.legacy_lock)])
-        with self.assertRaises(install_drainer.RelocationUnresolved):
-            install_drainer._require_relocation_resolved(again)
-        self.release(process)
-
-    def test_a_re_run_restores_what_the_holder_took_and_then_closes(self):
-        """The whole repair, end to end.
-
-        The holder takes its turn once the first run is over — exactly as that
-        run's report says it can — and deletes the definition on its way to the
-        record it cannot write. Stopping it and re-running is what the report
-        told the operator to do, and that re-run puts the definition back and
-        closes the location.
-        """
-        process = self.start_holder(visible=False)
-        with self.appearing_mid_run(process):
-            self.assertFalse(self.relocate()["late_writes"]["sealed"])
-        self.release(process)
-        backend = install_drainer.service_backend()
-        self.assertFalse(backend.definition_path(self.job.label).is_file())
-        # Stopped; this is what a host with nothing holding the lock answers.
-        self.lock_holders = ()
-        self.commands.clear()
-        again = self.relocate()
-        self.assertFalse(again["relocated"])
-        self.assertIn("closed it", again["reason"])
-        late = again["late_writes"]
-        self.assertTrue(late["sealed"])
-        self.assertEqual(late["lock_holders"], [])
-        self.assertEqual(late["restored_definitions"], ["acme/widgets"])
-        self.assertTrue(backend.definition_path(self.job.label).is_file())
-        self.assertEqual(
-            backend.definition_environment(self.job.label)[
-                kanban_config.DRAINER_INSTALL_DIR_ENV
-            ],
-            str(self.destination),
-        )
-        self.assertTrue(
-            any(self.job.label in " ".join(command) for command in self.commands),
-            self.commands,
-        )
-        install_drainer._require_relocation_resolved(again)
-        # And only now is the location finished business.
         self.assert_location_is_sealed()
-        self.assertIn(
-            "emptied and sealed",
-            install_drainer.relocation_disposition(self.destination),
-        )
 
-    def test_a_dry_run_over_that_state_reports_it_rather_than_planning_a_move(self):
-        # There is nothing left to move, so a dry run that planned a relocation
-        # would refuse over a location the plan no longer describes — and would
-        # say nothing about the one thing that is unfinished.
-        process = self.start_holder(visible=False)
-        with self.appearing_mid_run(process):
-            self.assertFalse(self.relocate()["late_writes"]["sealed"])
+    def test_a_refusal_after_the_closure_leaves_the_lock_as_it_was_found(self):
+        """The closure is taken before the run has decided anything, so a
+        refusal raised after it has to put the file back — a run that refuses
+        changes nothing at all, and a lock left closed by a run that did
+        nothing else is a lock nothing can ever take again."""
         before = self.host_state()
-        preview = install_drainer.relocation_preview(self.destination)
-        self.assertFalse(preview["relocated"])
-        self.assertTrue(preview["dry_run"])
-        self.assertIn("would finish closing it", preview["reason"])
-        self.assertEqual(preview["lock_holders"], [process.pid])
-        self.assertEqual(self.host_state(), before)
-        self.release(process)
+        with mock.patch.object(
+            install_drainer,
+            "_apply_relocation",
+            side_effect=install_drainer.InstallError("refused mid-run"),
+        ):
+            with self.assertRaises(install_drainer.InstallError):
+                self.relocate()
+        self.assertTrue(os.access(self.legacy_lock, os.W_OK))
+        # Everything except the residue a run that got as far as taking a lock
+        # always leaves: the destination's own lock file and the directories
+        # holding it, which are never unlinked.
+        self.assertEqual(
+            self.outside_the_destination(self.host_state()),
+            self.outside_the_destination(before),
+        )
+        self.assert_destination_holds_only_its_lock()
 
-    def test_the_marker_records_whether_closing_finished(self):
+    # -- finishing a location an earlier run left open -----------------------
+
+    def test_an_ordinary_host_with_nothing_queued_closes_it(self):
+        # Nothing else has this file open, nothing could have opened it while
+        # the run held it, so nothing can ever take this lock.
+        result = self.relocate()
+        self.assertTrue(result["late_writes"]["sealed"])
+        self.assertEqual(result["late_writes"]["lock_holders"], [])
+        self.assert_location_is_sealed()
+        install_drainer._require_relocation_resolved(result)
+
+    def test_the_marker_records_that_closing_finished(self):
         """The durable half of the answer.
 
         Both seals are objects a later run can see and the lock's mode is a bit
-        it can read, but "was anything holding that lock when it was closed" is
-        a question only the run that closed it was in a position to ask. So
-        that run writes its answer down beside the location, in the notice
-        every seal already points at.
+        it can read, but whether this run was in a position to prove nothing
+        could still take that lock is a question only this run could ask. So it
+        writes its answer down beside the location, in the notice every seal
+        already points at.
         """
         marker = self.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
-        process = self.start_holder(visible=False)
-        with self.appearing_mid_run(process):
-            self.assertFalse(self.relocate()["late_writes"]["sealed"])
-        document = drain_prs_service._read_json_object(marker)
-        self.assertIs(document[drain_prs_service.RELOCATION_MARKER_CLOSED], False)
-        self.release(process)
-        self.lock_holders = ()
         self.assertTrue(self.relocate()["late_writes"]["sealed"])
         document = drain_prs_service._read_json_object(marker)
         self.assertIs(document[drain_prs_service.RELOCATION_MARKER_CLOSED], True)
-        # And it is still the notice the seals point at, with everything an
-        # operator meeting one of them needs.
         self.assertEqual(
             document[drain_prs_service.RELOCATION_MARKER_DESTINATION],
             str(self.destination),
@@ -4484,18 +4322,21 @@ class LockDescriptorTests(PreGateControllerFixture):
             document[drain_prs_service.RELOCATION_MARKER_NOTICE],
         )
 
-    # -- finishing a location, with and without an answer --------------------
+    def unfinished(self):
+        """A location an earlier run emptied and sealed without finishing.
 
-    def test_a_marker_that_predates_this_bound_is_not_finished(self):
-        """An installation an older installer sealed says nothing about
-        whether anything held its lock, so it is finished by a run that can
-        answer rather than read as finished by one that never asked."""
+        What an installer predating this bound leaves: the seals are down and
+        the lock says nothing about whether anything could still take it.
+        """
         self.assertTrue(self.relocate()["late_writes"]["sealed"])
         marker = self.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
         document = drain_prs_service._read_json_object(marker)
         document.pop(drain_prs_service.RELOCATION_MARKER_CLOSED)
         drain_prs_service.atomic_write_json(marker, document)
         self.assertIsNone(install_drainer.relocation_disposition(self.destination))
+
+    def test_a_marker_that_predates_this_bound_is_not_finished(self):
+        self.unfinished()
         again = self.relocate()
         self.assertFalse(again["relocated"])
         self.assertIn("closed it", again["reason"])
@@ -4506,15 +4347,42 @@ class LockDescriptorTests(PreGateControllerFixture):
             install_drainer.relocation_disposition(self.destination),
         )
 
+    def test_finishing_a_location_puts_back_a_definition_that_went_missing(self):
+        """Why the finishing run checks definitions at all.
+
+        A location an earlier run could not finish closing is one something may
+        have acted on in between: that run left the lock open, so a controller
+        bound there could still have taken it and uninstalled. The run that
+        finishes the location is the one that puts back what it finds missing.
+        """
+        self.unfinished()
+        backend = install_drainer.service_backend()
+        definition = backend.definition_path(self.job.label)
+        definition.unlink()
+        self.commands.clear()
+        again = self.relocate()
+        late = again["late_writes"]
+        self.assertTrue(late["sealed"])
+        self.assertEqual(late["restored_definitions"], ["acme/widgets"])
+        self.assertTrue(definition.is_file())
+        self.assertEqual(
+            backend.definition_environment(self.job.label)[
+                kanban_config.DRAINER_INSTALL_DIR_ENV
+            ],
+            str(self.destination),
+        )
+        self.assertTrue(
+            any(self.job.label in " ".join(command) for command in self.commands),
+            self.commands,
+        )
+        self.assertIn("put it back and reloaded it", again["repair"])
+        install_drainer._require_relocation_resolved(again)
+
     def test_finishing_a_location_reports_a_host_it_cannot_ask(self):
         """The refusal above is not available here: this location is already
         emptied, so there is nothing to decline to move. What a run that cannot
         ask does instead is leave the lock closed and say so."""
-        self.assertTrue(self.relocate()["late_writes"]["sealed"])
-        marker = self.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
-        document = drain_prs_service._read_json_object(marker)
-        document.pop(drain_prs_service.RELOCATION_MARKER_CLOSED)
-        drain_prs_service.atomic_write_json(marker, document)
+        self.unfinished()
         self.lock_holders = None
         self.lock_holders_reason = "open descriptors cannot be read on this host"
         unfinished = self.relocate()
@@ -4529,16 +4397,6 @@ class LockDescriptorTests(PreGateControllerFixture):
         self.assertTrue(again["late_writes"]["sealed"])
         install_drainer._require_relocation_resolved(again)
         self.assert_location_is_sealed()
-
-    def test_an_ordinary_host_with_nothing_queued_closes_it(self):
-        # The proof the cases above are the exception: nothing else has this
-        # file open, nothing can open it again, so nothing can ever take this
-        # lock.
-        result = self.relocate()
-        self.assertTrue(result["late_writes"]["sealed"])
-        self.assertEqual(result["late_writes"]["lock_holders"], [])
-        self.assert_location_is_sealed()
-        install_drainer._require_relocation_resolved(result)
 
 
 class ProcessDescriptorTests(unittest.TestCase):

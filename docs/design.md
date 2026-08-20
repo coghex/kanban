@@ -2513,89 +2513,71 @@ above are unchanged, and persistence the user switched off is not a failure.
   taking those locks again because releasing one does not hand it to any
   waiter in particular. The checkout and controller fences are held throughout
   and extended to any repository it recovers. A writer that acquires after the
-  run's last look is past any process that terminates, so a run whose final
-  scan finds the location clear closes three paths there under that scan's own
-  lock: the emptied record path and the runtime root, each occupied by a
-  symlink to the relocation marker, and the retained lock, made unopenable
-  because a lock file may never be unlinked. All three refusals predate this
-  whole arc, which is the only kind that reaches a controller predating it —
-  every copy refuses to write a record path that is present and not a regular
-  file, every copy creates its directories through one helper that cannot make
-  a directory beneath a path that is not one, and every copy opens that lock
-  `O_RDWR` before a transition reads or writes anything. The directory helper
-  runs before the log tree, before the definition is written and before the
-  record is touched; the lock is what reaches the one transition that creates
-  no directory at all, an uninstall, which would otherwise unload and unlink
-  the definition before its record write was refused. So a stale invocation
-  returns non-success before it creates, removes or modifies the legacy runtime
-  or log tree, the corresponding trees at the destination, or the repository's
-  on-disk definition, and the definition the manager holds stays the relocated
-  one. Each bound is a fact about the path rather than a permission on a
-  directory the invocation writes through, since that helper chmods the install
-  directory on every attempt. What an operator sees is that copy's own
-  rendering of the fault, which names one of those three paths; the seals lead
-  to the marker and the lock holds the same notice as its own readable content,
-  stating that the installation was relocated, naming the legacy location and
-  the destination, and giving the exact action — run the command again, and
-  re-run the installer where the installed copy predates this host's own
-  resolution. A location left unresolved is left open for the operator to see,
-  and a path that could not be closed fails the install and is named in that
-  failure. A later run skips a location only when all three paths are closed
-  and it holds nothing else — an installation sealed before the lock was closed
-  is not one of them — and otherwise reconciles it exactly as it would an
-  untouched one; the seals themselves are managed entries no run removes or
-  reports as strays, and the lock is reopened only by the run that has to take
-  it. One writer is past all three: a process that opened that lock before the
-  run started keeps a descriptor no mode change revokes, and an uninstall in
-  that copy creates no directory, so it unlinks the definition before its
-  record write is refused — and that definition cannot be closed against it,
-  since a service manager's definition directory is the installation's own.
-  Each pass therefore checks every relocated repository's definition beside the
-  location, on the takeover's own terms, and puts back and reloads any that
-  differ, naming them in the report; the two seals go down only once both are
-  what the run left. A check taken under the lock cannot see the flock that
-  lands behind it, so the run then hands the lock over once more with those
-  seals down — releasing, pausing, and taking it back, which waits for whoever
-  was queued — and asks the definition question again. Handing it over cannot
-  end that regress, so the last cycle closes the lock's mode, which fixes the
-  set of descriptors that can ever contend, and reads that set out of `/proc`:
-  an empty one proves nothing can ever take this lock, while a set that is not
-  empty and a host that cannot be asked are both reported with the lock left
-  closed, naming the process to stop and failing the install rather than
-  claiming a location a queued process can still act on. A process that
-  already has that lock open when the run starts is refused by the plan
-  instead, before anything is
-  mutated — the host stays as it was found and that process acts on the
-  installation it was invoked against, which is the prevention this arc selects
-  and the only place it is available — and a host that cannot be asked is
-  refused on the same terms, so what the settle cycle answers is only a
-  controller invoked while the run was already under way. That answer is
-  written into the relocation marker, because it is the one thing about the
-  location a later run cannot work out from the artifacts, and the disposition
-  reads it there: a marker that does not say closing finished, a reopened lock,
-  and a marker an older installer wrote are all locations a later run acts on.
-  What it performs then is the settle half alone — nothing is left to move —
-  over the repositories the destination record names, recovered without
-  insisting on the definitions a stale uninstall deletes, since those are what
-  it exists to put back. A per-repository tree no
-  record names — left by a controller whose record write was refused, or by an
-  uninstall, which keeps a repository's state deliberately — is carried across
-  rather than orphaned, under the repository validated on-disk evidence establishes: a
-  reversible directory slug only when re-encoding the identity it decodes to
-  through this host's own resolver reproduces that slug exactly, and a
-  hash-only slug only from an agreeing canonical `repository` field in the
-  tree's `status.json` or an incident there that derives back to the same slug,
-  with a log tree borrowing the validated identity of the runtime tree filed
-  under the identical slug and neither checkout state nor the global definition
-  counting as evidence. Evidence that is present and malformed or that
-  disagrees is never skipped past: it, a hash-only slug with no structured
-  identity, and a slug this host would spell differently all leave the state
-  where it was written, reported by slug and by the reason. Every repository
-  the report names is a canonical identity rather than a slug, every collision
-  or failure attributable to one names it beside that slug, and an unattributed
-  entry carries a null repository beside its own slug in the data while the
-  repair and the failure render the slug and the reason instead. One already at
-  its destination is kept and named like any other collision. It is
+  run's last look is past any process that terminates, so the run never lets it
+  take the lock at all: it closes the legacy record's lock file against every
+  opener but its own for its whole span, keeping the one descriptor it opened
+  before doing so rather than reopening a file it has closed, and the plan then
+  proves that nothing already had it open — refusing before anything moves if
+  something did, or if this host cannot be asked, since a process refused there
+  goes on to act against the installation it was invoked against rather than
+  one that moved while it waited. That is the prevention, and it is available
+  only there: every command enters `document_lock` before it reads or writes
+  anything, `uninstall_job` creates no directory at all, and the definition it
+  would unlink lives in the service manager's own directory, which cannot be
+  closed without closing the installation. The reconciliation therefore runs
+  inside that lock rather than handing it over, and what it is for is the
+  writers that never wanted it: `ensure_dirs` lays a repository's runtime,
+  incident and log trees down under no lock at all. A run whose final scan
+  finds the location clear occupies the emptied record path and the runtime
+  root with symlinks to the relocation marker; all three refusals predate this
+  whole arc, which is the only kind that reaches a controller predating it, so
+  a stale invocation returns non-success before it creates, removes or modifies
+  the legacy runtime or log tree, the corresponding trees at the destination,
+  or the repository's on-disk definition, and the definition the manager holds
+  stays the relocated one. Each bound is a fact about the path rather than a
+  permission on a directory the invocation writes through, since `ensure_dirs`
+  chmods the install directory on every attempt. What an operator sees is that
+  copy's own rendering of the fault, which names one of those three paths; the
+  seals lead to the marker and the lock holds the same notice as its own
+  readable content, stating that the installation was relocated, naming the
+  legacy location and the destination, and giving the exact action. Before
+  declaring the location closed the run reads the set of processes holding that
+  lock open, out of `/proc`, which is a proof rather than a hope because the
+  mode has been closed since before the plan; a set that is not empty and a
+  host that cannot be asked are both reported with the lock left closed, naming
+  the process to stop and failing the install. A location left unresolved is
+  left open for the operator to see, and a path that could not be closed fails
+  the install and is named in that failure. A later run skips a location only
+  when all of it is closed and it holds nothing else, and otherwise reconciles
+  it exactly as it would an untouched one; the seals are managed entries no run
+  removes or reports as strays. That answer is written into the relocation
+  marker, because whether the run that closed the lock was in a position to
+  prove nothing could still take it is the one thing a later run cannot work
+  out from the artifacts, and the disposition reads it there: a marker that
+  does not say closing finished, a reopened lock, and a marker an older
+  installer wrote are all locations a later run acts on. What it performs then
+  is the closing half alone — nothing is left to move — over the repositories
+  the destination record names, recovered without insisting on the definitions
+  a stale uninstall deletes, since those are what it exists to put back. A
+  per-repository tree no record names — left by a controller whose record write
+  was refused, or by an uninstall, which keeps a repository's state
+  deliberately — is carried across rather than orphaned, under the repository
+  validated on-disk evidence establishes: a reversible directory slug only when
+  re-encoding the identity it decodes to through this host's own resolver
+  reproduces that slug exactly, and a hash-only slug only from an agreeing
+  canonical `repository` field in the tree's `status.json` or an incident there
+  that derives back to the same slug, with a log tree borrowing the validated
+  identity of the runtime tree filed under the identical slug and neither
+  checkout state nor the global definition counting as evidence. Evidence that
+  is present and malformed or that disagrees is never skipped past: it, a
+  hash-only slug with no structured identity, and a slug this host would spell
+  differently all leave the state where it was written, reported by slug and by
+  the reason. Every repository the report names is a canonical identity rather
+  than a slug, every collision or failure attributable to one names it beside
+  that slug, and an unattributed entry carries a null repository beside its own
+  slug in the data while the repair and the failure render the slug and the
+  reason instead. One already at its destination is kept and named like any
+  other collision. It is
   bounded at three passes rather than looped, each merging the recreated record
   on those same terms, carrying the trees it brought, rewriting the definitions
   it names, and clearing the location again on the removal's own ownership

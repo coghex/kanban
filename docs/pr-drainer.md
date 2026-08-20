@@ -1072,27 +1072,48 @@ writes nothing at all, if the installation it worked out at startup is no
 longer the one this host resolves — checked while it holds the record's lock,
 so a move has either not begun or already finished.
 
-One case no single run can close by waiting: a writer that takes the lock after
-the run's last check. There is no way to ask whether anyone is waiting on a
-lock, and a command that has finished cannot look again. So instead of trying to
-outlast that writer, the run leaves it nothing to write. Once the last check
-finds the old location clear, three paths there are closed. `config.json` and
-the `runtime/` directory are replaced by links to the `relocated.json` beside
-them, and `config.json.lock` is made read-only — a lock file is never deleted,
-so it is closed by being unopenable rather than by being replaced. All three
-stop a controller that predates all of this, because what refuses them is code
-that predates it too. Every version of the controller refuses to write a
-`config.json` that is not an ordinary file, so one that wakes up later refuses
-instead of recreating the record. Every version creates its directories through
-one helper that cannot make a directory inside something that is not a
-directory — a helper it runs before it writes any logs, before it writes its
-unit or plist, and before it touches the record. And every version opens that
-lock file for writing before it does anything at all, which is the only thing
-that catches an *uninstall*: an uninstall creates no directories, so without
-that it would unload and delete the unit or plist the move had just rewritten
-before its record write was refused.
+One case no single run can close by waiting: a command that takes the lock
+after the run's last check. There is no way to ask whether anyone is waiting on
+a lock, and a command that has finished cannot look again. So instead of trying
+to outlast that command, the move never lets it take the lock at all.
 
-So a stale command now fails before it changes anything: no runtime or incident
+For the whole of a move, `config.json.lock` at the old location is made
+read-only, and the installer keeps the one handle it opened before doing that
+rather than reopening a file it has closed. Nothing else can open it, so nothing
+else can be waiting for it — and the installer checks, right after closing it,
+that nothing already had it open. If something does, the move **refuses** and
+changes nothing: that command then goes on to do whatever it was invoked to do
+against the installation that is still there, which is ordinary work rather
+than damage. A host where the installer cannot check at all is refused the same
+way, because moving on an unchecked assumption leaves you with a moved
+installation and the question still open.
+
+That is what stops an `uninstall`, and nothing else could. Every command —
+install, start, stop, uninstall — opens that lock file for writing before it
+reads or writes anything, so none of them begins. An uninstall creates no
+directories, so if it did begin, nothing would stand between it and the unit or
+plist it deletes: those live in your service manager's own directory, shared
+with the job that was just moved, so locking that down would lock down the
+installation.
+
+What the move still has to sweep up is the commands that never wanted the lock.
+A controller writes its runtime and log directories, its status file and its
+incidents through one helper that takes no lock at all, so it can still leave
+directories behind while the move runs — which is what the passes after the
+removal are for.
+
+Once the last check finds the old location clear, `config.json` and the
+`runtime/` directory are replaced by links to the `relocated.json` beside them,
+and the lock file keeps the mode it has had all along. All three stop a
+controller that predates all of this, because what refuses them is code that
+predates it too. Every version refuses to write a `config.json` that is not an
+ordinary file. Every version creates its directories through a helper that
+cannot make a directory inside something that is not a directory — a helper it
+runs before it writes any logs, before it writes its unit or plist, and before
+it touches the record. And every version opens that lock file for writing
+before it does anything at all.
+
+So a stale command fails before it changes anything: no runtime or incident
 state at the old location, no logs at either location, and no change to the
 unit or plist on disk or to the one your service manager is holding. It fails
 that way every time, not just the first — nothing a stale command does can undo
@@ -1109,68 +1130,35 @@ starts and this host now resolves the new location, and if it still lands on
 the old one, re-run `tools/install_drainer.py` to reinstall the copy that
 predates that resolution.
 
+Before it calls the old location finished, the run looks once more at which
+processes have that lock file open. None, and it really is finished: nothing
+can open it again and nothing holds it, so nothing can ever take it. If
+something does — or if the host cannot be asked at all — the run leaves the
+lock closed, tells you which process to stop, and fails rather than reporting
+success over a command that can still act. A process belonging to another user
+is not one of these: the installation, its lock and everything that opens it
+are yours alone.
+
 If the run could *not* finish tidying up, it deliberately leaves those paths
 open so you can see what is there; reconcile it and re-run, and that run closes
 them. A run that could not close one at all fails rather than reporting
 success, names the path it left open, and tells you to re-run — and a later run
-treats an old location as finished business only when *all three* paths are
-closed and nothing else is there. If there are trees there, or one path is
-still open, it plans and reconciles the location exactly as it would an
-untouched one, and refuses over anything it would have to choose between. An
-installation sealed by an older version of the installer, before the lock was
-closed at all, is one of those locations, which is how such a host gets
-finished. The two links are the installer's own; nothing removes them, and
-nothing reports them as strays or as something a writer put back. The lock is
-reopened only by the installer run that has to take it, and closed again when
-that run finishes.
-
-One case none of that reaches. A command that had *already opened* the lock
-file and was waiting for it when the move started keeps a working handle on it
-— closing the file afterwards does not take that away — so it gets its turn the
-moment the move lets go, and if it is an `uninstall` it deletes the unit or
-plist before its record write is refused. Nothing can stop that: the unit and
-plist live in your service manager's own directory, shared with the job that
-was just moved, so closing it would close the installation. What the run does
-instead is check: after every step, it compares each moved repository's unit or
-plist against the bytes it wrote, puts back and reloads any that changed, and
-says so in the report.
-
-A check made while the run is holding the lock cannot see a command whose turn
-comes right after it, so the run does not stop there. Once the old
-`config.json` and `runtime/` are sealed it lets go of the lock on purpose,
-waits a moment, and takes it back — which makes it wait for whoever was next in
-line — and asks the same question again, putting back anything that changed.
-
-That still cannot settle it by waiting: every check happens while the run holds
-the lock, and the command this is about is the one whose turn comes next. So
-the last pass asks a different question. It closes the lock file first, which
-means nothing new can get in line, and then looks at which processes still have
-that file open. None, and it is finished: nothing can open it again and nothing
-holds it, so nothing can ever take it. If something does hold it — or if the
-host cannot be asked at all — the run leaves the lock closed, tells you which
-process to stop, and fails rather than reporting success over a command that
-can still act. A process belonging to another user is not one of these: the
-installation, its lock and everything that opens it are yours alone.
-
-One of those two cases never gets that far. If something already has the lock
-file open when the move starts, the installer refuses before it has changed
-anything — so that command goes on to do whatever it was invoked to do against
-the installation that is still there, which is ordinary work rather than
-damage. A host where the installer cannot check at all is refused the same way,
-because moving on an unchecked assumption leaves you with a moved installation
-and the question still open. What the checks after the move are for is the
-other case: a command started *while* the move was running, which nothing could
-have refused.
+treats an old location as finished business only when all of it is closed and
+nothing else is there. If there are trees there, or a path is still open, it
+plans and reconciles the location exactly as it would an untouched one, and
+refuses over anything it would have to choose between. The two links are the
+installer's own; nothing removes them, and nothing reports them as strays or as
+something a writer put back.
 
 Because that answer has to outlive the run, it is written into
 `relocated.json`. Otherwise "stop that process and re-run" would be advice the
 re-run ignores: the next run would see two links and a read-only lock file and
-call the old location finished, leaving whatever the holder deleted in the
-meantime unrepaired. So a re-run over that state does the last part again — it
-reopens the lock to take it, puts back any unit or plist that went missing, and
-closes and records the location once nothing is holding it. An old location
-sealed by an earlier version of the installer says nothing about its lock
-either, so it gets the same treatment once.
+call the old location finished, leaving unrepaired whatever acted on it in the
+meantime. So a re-run over that state does the last part again — it reopens the
+lock only for as long as it holds it, puts back any unit or plist that went
+missing, and closes and records the location once nothing is holding the lock.
+An old location sealed by an earlier version of the installer says nothing
+about its lock either, so it gets the same treatment once.
 
 Directories under `runtime/` and the old log root that belong to no repository
 in the record are moved across too. Two things leave one: a controller that

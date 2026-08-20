@@ -32,7 +32,6 @@ import secrets
 import shutil
 import subprocess
 import sys
-import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -341,25 +340,6 @@ _BYTECODE_SUFFIX = ".pyc"
 # is deciding.
 _RETAINED_SLOTS = frozenset({"lock", "marker", "guard"})
 
-
-# How long one run waits, having released the legacy record's lock, before
-# taking it again. `flock` has no handoff: releasing a lock does not give it to
-# a waiter, it only makes that waiter runnable, and nothing orders a wakeup
-# against this process asking for the lock again. So a run that re-took it
-# immediately could outrun a writer that had been queued on it for the whole
-# transition and report a location that writer is about to write into. This is
-# the pause that makes losing that race a scheduling accident rather than the
-# ordinary case: a process blocked in `flock` is runnable the instant the lock
-# is released, and this is orders of magnitude longer than it takes to be
-# scheduled. It is not a proof, because none is available -- `flock` cannot be
-# asked whether anyone is waiting, and a writer that acquires after this run's
-# last look is past any process that terminates at all. What answers that one
-# is not this pause but the seals `_seal_emptied_location` leaves once the last
-# look finds the location clear: a writer arriving afterwards finds the record
-# path and the runtime root occupied by objects it cannot write through, so it
-# fails before it creates anything rather than leaving state a later run has to
-# find.
-_LOCK_HANDOFF_SECONDS = 0.1
 
 # How many times one run carries a recreated legacy location across before it
 # stops and reports what is still there. Bounded rather than looped: a writer
@@ -1867,22 +1847,28 @@ def _remove_log_root(
 
 # --- Carrying across what a writer put back afterwards ----------------------
 #
-# The transition above holds the legacy record's lock from before it reads
-# anything through after it has taken the installation apart, which serializes
-# every writer that queues on that lock: such a writer resumes into a location
-# whose record is gone, reads the marker left beside the lock, and fails
-# without recording anything. It cannot reach a writer that arrives *after*
-# that removal. That one finds no record, creates what it needs afresh, and
-# records itself where the XDG-first probe no longer looks — and no lock closes
-# that, because the thing a late writer would contend on is a file the removal
-# left in place only for the writers that were already queued on it.
+# The run holds the legacy record's lock from before it reads anything through
+# after it has taken the installation apart, and closes that lock file against
+# every other opener for the whole of it. So no writer contends for that lock
+# at all: one that already had it open is refused by the plan before anything
+# moves, and one invoked while the run is under way cannot open it. Every
+# transition — install, start, uninstall, stop — and every discovery-record
+# write enters `document_lock` first, so none of them begins.
+#
+# What that does not close is the writers that never take the lock.
+# `ensure_dirs` creates a repository's runtime, incident and log trees under no
+# lock at all, and `atomic_write_json` creates a missing parent on its own, so
+# a controller bound here can still lay trees down at the location this run is
+# emptying, right up until the seals go down at the end.
 #
 # So this is the other half: after the removal, whatever came back is carried
 # across on the same terms the relocation itself carries an installation, and
 # the location is cleared again on the same ownership terms. Bounded, because
 # a writer that keeps winning must not hold an installer open; past the bound,
 # and past anything this may not decide, the run reports what is still there
-# and the install fails over it.
+# and the install fails over it. Its record half is what answers a location
+# that acquired a record some other way — a closure that could not be written,
+# or an installation an installer predating it left behind.
 
 
 # Every fault the sweep answers by reporting rather than by raising. It runs
@@ -2462,19 +2448,19 @@ def _clear_recreated_location(
 def _record_locks(plan: RelocationPlan) -> Iterator[None]:
     """Both discovery records' locks, for the span of one reconciliation pass.
 
-    The same two the transition holds, taken in the same order and released
-    together: this pass reads and clears the legacy location and writes the
-    destination record, so a writer at either end has to be excluded while it
-    does — and let through the instant it stops.
+    The legacy record's is the one this run has held since before it decided
+    anything, so asking for it here is the pass-through a nested acquisition
+    already is. It is not released between passes and there is nothing to
+    release it for: `_lock_closed_to_new_openers` closed that file the instant
+    this run took it, so no process can be queued on it and none can join. The
+    handoff this used to perform, and the pause that made it a handoff rather
+    than a race, are what a run needed when a writer could still be waiting
+    there; a run that leaves nothing waiting needs neither.
 
-    Preceded by the handoff pause above, because letting one through is the
-    whole point of having released it: a writer queued on the legacy record's
-    lock becomes runnable when this run lets go, and asking for it again in the
-    same instant is how this run would take it back before that writer ever
-    ran. Once the writer holds it, `document_lock` below blocks on it, so the
-    pass that follows reads what it wrote rather than racing it.
+    The destination record's is taken and released per pass, and that one is
+    real: a controller installing or starting a repository at the destination
+    writes that record through its own lock, and it is not this run's to close.
     """
-    time.sleep(_LOCK_HANDOFF_SECONDS)
     with drain_prs_service.document_lock(plan.legacy_record):
         with drain_prs_service.document_lock(plan.destination_record):
             yield
@@ -2547,44 +2533,45 @@ def _seal_path(transition: _Transition, path: Path) -> bool:
     return True
 
 
-def _restrict_retained_lock(transition: _Transition, plan: RelocationPlan) -> bool:
-    """Make the retained lock unopenable, and answer whether it is.
+def _write_lock_notice(
+    transition: _Transition, plan: RelocationPlan, descriptor: int
+) -> bool:
+    """Put the operator's notice into the closed lock, and answer whether it
+    is there.
 
-    The mode is what closes it; the bytes are what an operator finds when the
-    refusal sends them here by name. This file is an artifact this installer
+    The mode is what closes the file; this is what an operator finds when a
+    refusal sends them here by name. The lock is an artifact this installer
     owns at a location it has emptied, `document_lock` never reads its content,
-    and an operator pointed at a path has to find something that says what
-    happened rather than an empty file — so the same notice the marker carries
-    goes in here, and the file is left readable and not writable.
+    and a path named in a refusal has to lead to something that says what
+    happened rather than to an empty file — so the same notice the marker
+    carries goes in here, and the file is left readable and not writable.
 
-    Owner-write is what is taken away rather than every bit, because taking
-    every bit away would close the notice too. A process running as root is
-    not bounded by this at all; nothing in a user-scoped installation resolves
-    its managed paths as root, and the seals above still refuse one that does.
+    Written through this run's own descriptor rather than by reopening the
+    file, because reopening it would reopen it for everyone: the mode is closed
+    from the moment this run took the lock, and there is no instant in this run
+    at which it is not. Owner-write is what is taken away rather than every
+    bit, because taking every bit away would close the notice too. A process
+    running as root is bounded by none of this; nothing in a user-scoped
+    installation resolves its managed paths as root, and the seals still refuse
+    one that does.
     """
     lock = _legacy_lock_path(plan.legacy_dir)
-    if not _plain_file(lock):
-        return False
-    previous_mode = lock.stat().st_mode & 0o777
     previous = lock.read_bytes()
-
-    def undo() -> None:
-        lock.chmod(0o600)
-        lock.write_bytes(previous)
-        lock.chmod(previous_mode)
-
-    transition.register(f"reopen {lock}", undo)
+    transition.register(
+        f"restore {lock}", lambda: os.pwrite(descriptor, previous, 0)
+    )
     notice, repair = _relocation_notice(plan)
     marker = plan.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+    payload = f"{notice}\n\n{repair}\n\nSee {marker}.\n".encode("utf-8")
     try:
-        lock.write_text(f"{notice}\n\n{repair}\n\nSee {marker}.\n", encoding="utf-8")
-        lock.chmod(0o400)
+        os.ftruncate(descriptor, 0)
+        os.pwrite(descriptor, payload, 0)
     except OSError:
-        # Total on the same terms as every other step after the removal: an
-        # unclosed path is reported rather than raised, because it is one the
-        # next run can still close.
+        # Total on the same terms as every other step after the removal: a
+        # location this run could not finish closing is reported rather than
+        # raised, because it is one the next run can still finish.
         return False
-    return True
+    return _plain_file(lock) and not os.access(lock, os.W_OK)
 
 
 def _mark_closing_finished(transition: _Transition, plan: RelocationPlan) -> None:
@@ -2642,19 +2629,68 @@ def _closing_is_finished(legacy_dir: Path) -> bool:
 
 
 def _reopen_retained_lock(lock: Path) -> None:
-    """Undo that restriction for the span of one installer run.
+    """Undo that closure for the span of one installer run.
 
-    A location an earlier run closed is one this run may still have to
-    reconcile — a sealed location that acquires state again is planned and
-    swept exactly as an unsealed one is — and every lock this run takes there
-    goes through the same `document_lock` a controller does. So the run that
-    owns the restriction is the run entitled to lift it, and `_captured_modes`
-    below is what puts it back on every failing exit. On a successful one it is
-    left as this run leaves it: closed again if this run sealed the location,
-    and open if it could not, exactly as the record path is.
+    A location an earlier run closed is one this run may still have to finish
+    — and every lock this run takes there goes through the same `document_lock`
+    a controller does, so a file nothing may open is one this run may not open
+    either. The run that owns the closure is the run entitled to lift it, and
+    only for as long as it holds the lock: `_lock_closed_to_new_openers` below
+    puts it back the instant this run has it, and `_captured_modes` puts it
+    back on every failing exit.
     """
     if _plain_file(lock) and not os.access(lock, os.W_OK):
         lock.chmod(0o600)
+
+
+@contextlib.contextmanager
+def _lock_closed_to_new_openers(
+    transition: _Transition, legacy_dir: Path
+) -> Iterator[int]:
+    """The legacy record's lock, closed against every opener but this run, for
+    as long as this run holds it.
+
+    Taken the instant this run has the lock and before it has decided anything,
+    because closing it is what makes the question answerable at all. A
+    descriptor is opened first and kept — this run's own writing handle, which
+    the mode below does not reach — and the mode is then closed, so from that
+    instant the set of processes that can ever contend for this lock is fixed.
+    `plan_relocation` proves that set empty immediately afterwards and refuses
+    if it is not, and nothing can join it while this run lasts.
+
+    That is what makes the prevention total rather than a race won. A process
+    that already had the lock open when this run started is refused before
+    anything moves, so it goes on to act against the installation it was
+    invoked against; and one invoked while this run is under way never gets the
+    lock at all, so it never reaches the transitions that would act on a
+    location that moved while it waited. Neither can unlink the definition this
+    run rewrites, which is the one artifact no seal can occupy, since a service
+    manager's definition directory is the installation's own.
+
+    What this closes is every transition at that location, including the ones
+    that would merely record: `install_job`, `start_service`, `uninstall_job`
+    and every discovery-record write enter `document_lock` before they do
+    anything else. So the reconciliation below no longer has late *records* to
+    carry — only trees, which `ensure_dirs` lays down under no lock at all —
+    and its record half stands as what answers a location that acquired one
+    some other way.
+    """
+    lock = _legacy_lock_path(legacy_dir)
+    if not _plain_file(lock):
+        # Nothing to close and nothing that needs closing: `document_lock`
+        # creates this file, so a run holding that lock has one.
+        raise InstallError(
+            f"Refusing to relocate: {lock} is not a regular file, so this run "
+            "cannot close it against a controller still bound to that location."
+        )
+    previous_mode = lock.stat().st_mode & 0o777
+    descriptor = os.open(lock, os.O_RDWR)
+    try:
+        transition.register(f"reopen {lock}", lambda: lock.chmod(previous_mode))
+        lock.chmod(0o400)
+        yield descriptor
+    finally:
+        os.close(descriptor)
 
 
 def _seal_emptied_location(
@@ -2758,6 +2794,7 @@ def _settle_and_close(
     plan: RelocationPlan,
     backend: service_manager.ServiceManagerBackend,
     outcome: dict[str, Any],
+    descriptor: int,
 ) -> list[str]:
     """Hand the lock over with the seals already down, put back whatever that
     let through, and close the lock last. Answers what is still open.
@@ -2774,25 +2811,29 @@ def _settle_and_close(
     seal can occupy, since a service manager's definition directory is the
     installation's own.
 
-    So the lock is handed over, deliberately, after the seals are down: each
-    cycle releases it, pauses for the same reason every other handoff does, and
-    takes it back — which blocks until whoever was queued on it has finished —
-    and then asks whether the definitions are still the ones this run wrote,
-    putting back whatever is not. Bounded on the same terms as the passes
-    above.
+    Three questions, in one place, because they answer one thing: whether this
+    location is finished.
 
-    Handing it over cannot end the question, though, and no number of cycles
-    can: every check is taken while this run holds the lock, and the writer
-    this is about is precisely the one whose turn comes *after* the check. So
-    the last cycle stops asking about turns and asks about descriptors instead.
-    It closes the mode first, which fixes the set of descriptors that can ever
-    contend, and then reads that set. An empty one is a proof rather than a
-    hope: no process can open this file again, and none has it open, so nothing
-    can ever take this lock. A set that is not empty, and a host that cannot be
-    asked, are both states this run may not call closed — they are reported
-    with the lock left as it is, because an operator who knows which process
-    still holds it can stop it and re-run, and a run that claimed success would
-    be telling them there is nothing to stop.
+    The definitions come first, and are pure defence in depth during a
+    relocation: nothing could have taken them, since every transition enters
+    `document_lock` and that file has been closed since before this run decided
+    anything. `finish_closing` calls this over a location an *earlier* run left
+    open, where something could have, and putting back what it finds is the
+    whole reason that run exists.
+
+    The notice goes into the lock next, through the descriptor this run has
+    held all along, because the file is closed and reopening it would reopen it
+    for everyone.
+
+    The descriptor set comes last, and is the proof rather than a hope: the
+    mode has been closed since before the plan, the plan proved the set empty
+    then, and nothing can have joined it since — so reading it again is what
+    turns "nothing should be able to take this lock" into "nothing can". A set
+    that is not empty, and a host that cannot be asked, are both states this
+    run may not call closed; they are reported with the lock left closed,
+    because an operator who knows which process still holds it can stop it and
+    re-run, and a run that claimed success would be telling them there is
+    nothing to stop.
     """
     lock = _legacy_lock_path(plan.legacy_dir)
     for _ in range(_LATE_WRITER_PASSES):
@@ -2805,7 +2846,7 @@ def _settle_and_close(
                         if entry.identity not in outcome["restored_definitions"]:
                             outcome["restored_definitions"].append(entry.identity)
                     continue
-                if not _restrict_retained_lock(transition, plan):
+                if not _write_lock_notice(transition, plan, descriptor):
                     return [str(lock)]
                 # Only now, with the mode closed and this run still holding the
                 # lock: from here the set can only shrink, so what it holds is
@@ -2842,15 +2883,18 @@ def _stale_definitions(
     so nothing stops it, and what it destroys is a definition this run wrote
     minutes earlier.
 
-    So the definitions are checked beside the location on every pass, on
-    exactly the terms the takeover checks them — the bytes this host would
-    render, compared whole — and put back and reloaded where they differ. That
-    is what the handoff those passes already perform is for: a writer queued on
-    this lock becomes runnable the instant a pass releases it, so the pass that
-    follows is what sees what it did. A writer that acquires after the last
-    look is past any process that terminates at all, which is the same residue
-    every other bound here reports rather than claims to have closed — and the
-    only one this installer cannot leave an object in the way of.
+    So the definitions are checked beside the location, on exactly the terms
+    the takeover checks them — the bytes this host would render, compared whole
+    — and put back and reloaded where they differ.
+
+    During a relocation that check is defence in depth, and expected to find
+    nothing: `_lock_closed_to_new_openers` closed the lock before this run
+    decided anything, and every transition that could touch a definition enters
+    `document_lock` first. Where it earns its place is `finish_closing`, over a
+    location an earlier run left open — an installer predating that closure, or
+    a run that could not write it — because something could have taken that
+    lock in between, and an uninstall in a copy predating every gate here
+    unlinks the definition before its record write is refused.
     """
     return tuple(
         entry
@@ -2989,22 +3033,21 @@ def _reconcile_late_writes(
     backend: service_manager.ServiceManagerBackend,
     known: frozenset[str],
     fences: _Fences,
+    descriptor: int,
 ) -> dict[str, Any]:
     """Carry across whatever was written back after the removal, bounded.
 
-    Runs *outside* the transition's record locks and re-takes them for each
-    pass, which is the whole sequencing. A writer queued on the legacy record's
-    lock is guaranteed to wake after everything done while that lock is held,
-    so a sweep inside it could never see what such a writer records; a sweep
-    that takes and releases the lock hands it to whoever is waiting and finds
-    what they left on the next pass. Bounded, so a writer that keeps taking it
-    ends the sweep rather than extending it forever, and one that arrives after
-    the last look is past any installer that terminates at all — which is the
-    other half's job, not this one's.
+    Runs inside the lock this run holds and never lets go of, because there is
+    nobody to let go for: the file is closed against every other opener, so no
+    writer is queued on it and none can join. What the passes are for is the
+    writers that never wanted it — `ensure_dirs` lays a repository's runtime,
+    incident and log trees down under no lock at all — and they are bounded so
+    that one which keeps laying them down ends the sweep rather than holding an
+    installer open.
 
-    Whether the run came out resolved is read back off disk under the lock
-    rather than inferred from the passes, because what makes the host resolved
-    is that the location really is empty, not that each step reported success.
+    Whether the run came out resolved is read back off disk rather than
+    inferred from the passes, because what makes the host resolved is that the
+    location really is empty, not that each step reported success.
     """
     outcome = _late_write_outcome(plan)
     remaining: tuple[Path, ...] | None = None
@@ -3017,10 +3060,9 @@ def _reconcile_late_writes(
             # definition is the one thing it can still take away.
             stale = _stale_definitions(plan, backend)
             if not recreated and not stale:
-                # This is the last look, so the seal goes down here rather
-                # than under a lock taken again for nothing: the handoff has
-                # already happened, and a second pause would hand the lock
-                # over a second time only to find what this look just did.
+                # This is the last look, so the seals go down here: nothing can
+                # take the lock this run holds, so nothing can put anything
+                # back between this look and them.
                 remaining = ()
                 outcome["unsealed"] = _seal_emptied_location(transition, plan)
                 outcome["sealed"] = not outcome["unsealed"]
@@ -3069,10 +3111,13 @@ def _reconcile_late_writes(
             )
             outcome["sealed"] = not outcome["unsealed"]
     if not remaining and not outcome["unsealed"]:
-        # Last, and only over a location this run has already sealed: the
-        # handoff it performs is what lets a writer queued on this lock take
-        # its turn while there is still a run here to see what it did.
-        outcome["unsealed"] = _settle_and_close(transition, plan, backend, outcome)
+        # Last, and only over a location this run has already sealed: it is
+        # what puts the notice into the lock and proves nothing can still take
+        # it, which is what makes the location finished rather than merely
+        # emptied.
+        outcome["unsealed"] = _settle_and_close(
+            transition, plan, backend, outcome, descriptor
+        )
         outcome["sealed"] = not outcome["unsealed"]
         if outcome["sealed"]:
             _mark_closing_finished(transition, plan)
@@ -3094,73 +3139,78 @@ def _locked_transition(
 ) -> tuple[RelocationPlan, dict[str, Any]]:
     """Everything the relocation does under the two discovery records' locks.
 
-    Its own function because those locks have to end before the run does: the
-    reconciliation that follows them cannot be inside them, and a `with` that
-    ended in the middle of `relocate` would read as though it could be. The
-    checkout and controller fences are registered on `fences`, which `relocate`
-    owns and holds across that reconciliation too — they exclude a drainer or a
-    controller from the trees this run moves, and the sweep moves trees on
-    exactly the same terms.
+    The legacy record's lock is `relocate`'s: it is taken before this is called
+    and held past the reconciliation, because the run closes that lock file
+    against every other opener the instant it has it and may not reopen what it
+    has closed. Only the destination record's lock begins and ends here, and
+    only because its writers are real — a controller installing or starting a
+    repository at the destination is not a process this run has closed anything
+    against.
+
+    Its own function all the same: the transition is what may not be
+    interrupted, and a `with` that ended in the middle of `relocate` would read
+    as though the reconciliation were part of it. The checkout and controller
+    fences are registered on `fences`, which `relocate` owns and holds across
+    that reconciliation too — they exclude a drainer or a controller from the
+    trees this run moves, and the sweep moves trees on exactly the same terms.
     """
-    legacy_dir = legacy_install_dir()
     destination_record = install_dir / record_name()
-    with drain_prs_service.document_lock(legacy_dir / record_name()):
-        with contextlib.ExitStack() as locks:
-            # A destination record that *already exists* has writers this
-            # lock does not exclude: discovery probes the XDG location
-            # first, so they resolve that record rather than the legacy
-            # one and never block here. Its own lock therefore has to be
-            # held across the read that merges it, even at the cost of
-            # creating that lock file in the one state no writer of that
-            # record ever leaves behind — a record with no lock beside it.
-            if os.path.lexists(destination_record):
-                locks.enter_context(
-                    drain_prs_service.document_lock(destination_record)
-                )
-            # Before the authoritative plan, because that plan's own
-            # liveness check is a read, and a drainer starting one instant
-            # after it would be one this run never saw. Held for the whole
-            # transition and the rollback, and taken from the preflight's
-            # repositories because the fence has to precede the plan that
-            # would otherwise name them.
-            for entry in preflight.repositories:
-                fences.hold_checkout(entry)
-            plan = plan_relocation(install_dir)
-            _require_every_checkout_fenced(plan.repositories, fences.checkouts)
-            # After the plan and before any mutation, on the same terms
-            # the destination record's lock is taken: a refusal must not
-            # leave a lock file behind, and nothing can acquire one in the
-            # meantime because doing so needs the record lock held here.
-            for entry in plan.repositories:
-                fences.hold_controllers(entry)
-            # A destination record that does *not* exist has no such
-            # writer: every writer on this host resolves the legacy record
-            # and is blocked above. Its lock is therefore taken here,
-            # after the last refusal and before the write that creates the
-            # record and makes it resolvable — which is what keeps a
-            # refusal from ever creating a lock file. Re-entrant, so the
-            # branch above is not repeated.
+    with contextlib.ExitStack() as locks:
+        # A destination record that *already exists* has writers this
+        # lock does not exclude: discovery probes the XDG location
+        # first, so they resolve that record rather than the legacy
+        # one and never block here. Its own lock therefore has to be
+        # held across the read that merges it, even at the cost of
+        # creating that lock file in the one state no writer of that
+        # record ever leaves behind — a record with no lock beside it.
+        if os.path.lexists(destination_record):
             locks.enter_context(
-                drain_prs_service.document_lock(plan.destination_record)
+                drain_prs_service.document_lock(destination_record)
             )
-            try:
-                result = _apply_relocation(transition, plan, sources)
-            except BaseException as exc:
-                residue = transition.roll_back() + _restore_modes(modes)
-                detail = "; ".join(residue)
-                raise RelocationFailed(
-                    f"Relocating the PR drainer installation from "
-                    f"{plan.legacy_dir} to {plan.install_dir} failed and was "
-                    f"rolled back: {exc} The lock file "
-                    f"{plan.destination_record}.lock and the directories "
-                    "holding it remain, because a lock is never unlinked."
-                    + (
-                        f" The rollback could not complete: {detail}."
-                        if residue
-                        else ""
-                    ),
-                    residue,
-                ) from exc
+        # Before the authoritative plan, because that plan's own
+        # liveness check is a read, and a drainer starting one instant
+        # after it would be one this run never saw. Held for the whole
+        # transition and the rollback, and taken from the preflight's
+        # repositories because the fence has to precede the plan that
+        # would otherwise name them.
+        for entry in preflight.repositories:
+            fences.hold_checkout(entry)
+        plan = plan_relocation(install_dir)
+        _require_every_checkout_fenced(plan.repositories, fences.checkouts)
+        # After the plan and before any mutation, on the same terms
+        # the destination record's lock is taken: a refusal must not
+        # leave a lock file behind, and nothing can acquire one in the
+        # meantime because doing so needs the record lock held here.
+        for entry in plan.repositories:
+            fences.hold_controllers(entry)
+        # A destination record that does *not* exist has no such
+        # writer: every writer on this host resolves the legacy record
+        # and is blocked above. Its lock is therefore taken here,
+        # after the last refusal and before the write that creates the
+        # record and makes it resolvable — which is what keeps a
+        # refusal from ever creating a lock file. Re-entrant, so the
+        # branch above is not repeated.
+        locks.enter_context(
+            drain_prs_service.document_lock(plan.destination_record)
+        )
+        try:
+            result = _apply_relocation(transition, plan, sources)
+        except BaseException as exc:
+            residue = transition.roll_back() + _restore_modes(modes)
+            detail = "; ".join(residue)
+            raise RelocationFailed(
+                f"Relocating the PR drainer installation from "
+                f"{plan.legacy_dir} to {plan.install_dir} failed and was "
+                f"rolled back: {exc} The lock file "
+                f"{plan.destination_record}.lock and the directories "
+                "holding it remain, because a lock is never unlinked."
+                + (
+                    f" The rollback could not complete: {detail}."
+                    if residue
+                    else ""
+                ),
+                residue,
+            ) from exc
     return plan, result
 
 
@@ -3676,10 +3726,24 @@ def finish_closing(install_dir: Path) -> dict[str, Any]:
         transition = _Transition()
         legacy_lock = _legacy_lock_path(plan.legacy_dir)
         modes = _captured_modes(plan.legacy_dir, install_dir, legacy_lock)
+        # Reopened only so this run can take it, and closed again the instant
+        # it has — the same span, on the same terms, as the run that emptied
+        # this location: a file nothing may open is one this run may not open
+        # either, and the window in between is one this run holds no lock
+        # across.
         _reopen_retained_lock(legacy_lock)
         outcome = _late_write_outcome(plan)
         try:
-            outcome["unsealed"] = _settle_and_close(transition, plan, backend, outcome)
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    drain_prs_service.document_lock(plan.legacy_record)
+                )
+                descriptor = stack.enter_context(
+                    _lock_closed_to_new_openers(transition, plan.legacy_dir)
+                )
+                outcome["unsealed"] = _settle_and_close(
+                    transition, plan, backend, outcome, descriptor
+                )
         except BaseException:
             _restore_modes(modes)
             raise
@@ -3797,24 +3861,40 @@ def relocate(install_dir: Path, sources: dict[str, Path]) -> dict[str, Any]:
     modes = _captured_modes(legacy_dir, install_dir, legacy_lock)
     _reopen_retained_lock(legacy_lock)
     try:
-        # The fences outlive the record locks, because the sweep below moves
-        # trees and rewrites definitions exactly as the transition does; only
-        # the two record locks end early, and only because ending them is the
-        # whole point.
+        # The fences outlive the transition, because the sweep below moves trees
+        # and rewrites definitions exactly as the transition does.
         with contextlib.ExitStack() as stack:
             fences = _Fences(stack)
+            # One acquisition of the legacy record's lock, held from here
+            # through the reconciliation, and closed against every other opener
+            # the instant it is held. Every `document_lock` for this record
+            # inside is the pass-through a nested acquisition already is, and
+            # nothing reopens the file — nothing may, which is the point: a
+            # controller invoked while this run is under way never gets that
+            # lock, so it never reaches a transition that would act on a
+            # location that moved while it waited.
+            stack.enter_context(
+                drain_prs_service.document_lock(legacy_dir / record_name())
+            )
+            descriptor = stack.enter_context(
+                _lock_closed_to_new_openers(transition, legacy_dir)
+            )
             plan, result = _locked_transition(
                 transition, install_dir, preflight, sources, modes, fences
             )
-            # Both record locks are released by now, and that sequencing is
-            # what the reconciliation depends on. A writer queued on the legacy
-            # record's lock cannot be reached while this run holds it: it is
-            # guaranteed to wake *after* everything done under that lock, so a
-            # sweep inside it could never see what such a writer records.
-            # Releasing hands the lock to whoever was waiting; the sweep then
-            # re-takes it, pass by pass, and finds what they left.
+            # Inside that lock rather than after it, which is the whole change
+            # closing the file makes: the sweep used to release and re-take the
+            # lock so a writer queued on it could take its turn where the run
+            # could still see what it did. There is no such writer now. What is
+            # left for the sweep is the trees `ensure_dirs` lays down under no
+            # lock at all, which it finds pass by pass exactly as before.
             late = _reconcile_late_writes(
-                transition, plan, backend, frozenset(result["retained"]), fences
+                transition,
+                plan,
+                backend,
+                frozenset(result["retained"]),
+                fences,
+                descriptor,
             )
             result = {
                 **result,
