@@ -30,6 +30,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# `python3 -m unittest tools.test_publish_coordination_doc` imports this module
+# by package path, which puts the repository root on sys.path rather than
+# tools/ -- unlike `-m unittest discover -s tools`. Both invocations have to
+# reach the sibling module, so name the directory outright.
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+
+import git_fixture
+
 
 def _load():
     source = REPO_ROOT / "tools" / "publish_coordination_doc.py"
@@ -84,17 +92,41 @@ def run(args, cwd, **kw):
 
 
 class Fixture:
-    """A bare origin, a primary clone, and a `docs-wip` linked worktree."""
+    """A bare origin, a primary clone, and a `docs-wip` linked worktree.
+
+    Constructing one only names the paths; `create()` is what runs `git`.
+    The split is what lets a test attach to a copy of an already-built
+    template (see `tools/git_fixture.py`) instead of building its own, while
+    everything holding a path is still rebuilt against that copy.
+
+    The owner-mismatch cases still call `create()` directly, because what they
+    need is a *second* repository under a different slug and the shared
+    template is one repository under one slug. Teaching the template a slug
+    option would make every case carry a parameter a handful of them use.
+    """
 
     def __init__(self, directory: Path, *, origin_name: str = "kanban"):
         self.dir = directory
+        self.origin_name = origin_name
         # The helper establishes the owner from the write root's own origin
         # URL, so the bare repository is placed where its *path* normalizes to
         # the slug under test. Rewriting the URL to a github.com address would
         # resolve the same way but break every fetch and push in the fixture.
         self.origin = directory / "coghex" / f"{origin_name}.git"
-        self.origin.parent.mkdir(parents=True, exist_ok=True)
         self.primary = directory / "primary"
+        # The ordinary write root: a linked worktree on its own branch.
+        self.docs = directory / "docs-wip"
+
+    @classmethod
+    def create(cls, directory: Path, *, origin_name: str = "kanban") -> "Fixture":
+        """Build the repository with real `git`, then attach to it."""
+        fixture = cls(directory, origin_name=origin_name)
+        fixture.build()
+        return fixture
+
+    def build(self) -> None:
+        directory = self.dir
+        self.origin.parent.mkdir(parents=True, exist_ok=True)
         run(["git", "init", "-q", "--bare", str(self.origin)], directory)
         run(["git", "clone", "-q", str(self.origin), str(self.primary)], directory)
         run(["git", "config", "user.email", "t@example.com"], self.primary)
@@ -111,8 +143,6 @@ class Fixture:
         run(["git", "branch", "-M", "master"], self.primary)
         run(["git", "push", "-q", "origin", "master:master"], self.primary)
         run(["git", "fetch", "-q", "origin", "master"], self.primary)
-        # The ordinary write root: a linked worktree on its own branch.
-        self.docs = directory / "docs-wip"
         run(
             ["git", "worktree", "add", "-q", "-b", "docs-wip", str(self.docs), "master"],
             self.primary,
@@ -156,11 +186,45 @@ class Fixture:
         run(["git", "push", "-q", "origin", "HEAD:master"], other)
 
 
-class PublishTests(unittest.TestCase):
+class PublishFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
+    """Every case below works on its own copy of one template built by `git`.
+
+    A case that needs the fixture back in its initial state part way through
+    calls `fresh_fixture()` rather than rebuilding the repository, which
+    hands back the same kind of copy `setUp` takes.
+    """
+
+    @classmethod
+    def build_git_template(cls, root, data):
+        Fixture.create(root)
+
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.fx = Fixture(Path(self._tmp.name))
-        self.addCleanup(self._tmp.cleanup)
+        self.fresh_fixture()
+
+    def fresh_fixture(self):
+        """Attach to a copy nothing has published into yet."""
+        self.fx = Fixture(self.checkout_git_template())
+        return self.fx
+
+
+class PublishTemplateIsolationTests(
+    git_fixture.SharedTemplateIsolationTests, PublishFixture
+):
+    """Issue #384: this family's copies must be reachable only from themselves.
+
+    Its write root is a linked worktree and its origin is a bare repository
+    two directories down, so a copy that kept the template's paths would
+    publish into the template's own remote.
+    """
+
+    def _mutate_the_copy(self):
+        self.fx.publish("# UI\n\n- one\n- a test published this\n")
+        self.fx.advance_remote()
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.docs)
+        run(["git", "branch", "-f", "sideways", "origin/master"], self.fx.docs)
+
+
+class PublishTests(PublishFixture):
 
     # -- the ordinary success ------------------------------------------------
 
@@ -320,7 +384,7 @@ class PublishTests(unittest.TestCase):
 
     def test_an_owner_mismatch_reports_all_three_states(self):
         with tempfile.TemporaryDirectory() as other_dir:
-            other = Fixture(Path(other_dir), origin_name="synarchy")
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
             with self.assertRaises(publisher.PublishError) as caught:
                 other.publish("# UI\n\n- one\n- two\n", repo="coghex/kanban")
             for key in ("document_edit", "local_publication_commit", "remote_contains_commit"):
@@ -458,7 +522,7 @@ class PublishTests(unittest.TestCase):
             self.assertIn(key, caught.exception.detail)
 
     def test_unreadable_approved_content_is_a_structured_result(self):
-        missing = Path(self._tmp.name) / "gone.md"
+        missing = self.fx.dir / "gone.md"
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
             code = publisher.main([
@@ -802,9 +866,7 @@ class PublishTests(unittest.TestCase):
             ("read_for_write", OSError(5, "I/O error")),
         ):
             with self.subTest(step=attr, error=error.errno):
-                self._tmp.cleanup()
-                self._tmp = tempfile.TemporaryDirectory()
-                self.fx = Fixture(Path(self._tmp.name))
+                self.fresh_fixture()
                 target = self.fx.docs / "docs" / "ui-bugs.md"
                 before = target.read_text()
                 original = getattr(publisher, attr)
@@ -1406,9 +1468,7 @@ class PublishTests(unittest.TestCase):
         ]
         for doc_state, record_state, expected in cases:
             with self.subTest(document=doc_state, record=record_state):
-                self._tmp.cleanup()
-                self._tmp = tempfile.TemporaryDirectory()
-                self.fx = Fixture(Path(self._tmp.name))
+                self.fresh_fixture()
                 target = self.fx.docs / "docs" / "ui-bugs.md"
                 if record_state != "absent":
                     self._make_pending(landed=(record_state == "landed"))
@@ -1446,7 +1506,7 @@ class PublishTests(unittest.TestCase):
         tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
         running = []
         for name in ("alpha", "beta"):
-            blob = Path(self._tmp.name) / f"{name}.md"
+            blob = self.fx.dir / f"{name}.md"
             blob.write_text(f"# UI\n\n- one\n- {name}\n", encoding="utf-8")
             running.append((name, subprocess.Popen(
                 [sys.executable, str(helper),
@@ -1482,9 +1542,7 @@ class PublishTests(unittest.TestCase):
             ("different", "pending-differs-from-approved"),
         ):
             with self.subTest(case=setup):
-                self._tmp.cleanup()
-                self._tmp = tempfile.TemporaryDirectory()
-                self.fx = Fixture(Path(self._tmp.name))
+                self.fresh_fixture()
                 self._make_pending()
                 target = self.fx.docs / "docs" / "ui-bugs.md"
                 if setup == "stale":
@@ -1603,7 +1661,7 @@ class PublishTests(unittest.TestCase):
         # A caller error rather than an outcome: the inputs disagree, so
         # nothing here can be trusted and nothing is written.
         with tempfile.TemporaryDirectory() as other_dir:
-            other = Fixture(Path(other_dir), origin_name="synarchy")
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
             with self.assertRaises(publisher.PublishError) as caught:
                 other.publish("# UI\n\n- one\n- two\n", repo="coghex/kanban")
             self.assertEqual(caught.exception.status, "owner-mismatch")
@@ -1611,7 +1669,7 @@ class PublishTests(unittest.TestCase):
 
     def test_a_non_kanban_repository_keeps_its_mutation_but_publishes_nothing(self):
         with tempfile.TemporaryDirectory() as other_dir:
-            other = Fixture(Path(other_dir), origin_name="synarchy")
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
             result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
             self.assertEqual(result["status"], "not-published")
             self.assertIn("no coordination lane", result["reason"])
@@ -1639,7 +1697,7 @@ class PublishTests(unittest.TestCase):
             'coordination_paths = ["docs/ui-bugs.md"]\n'
         )
         with tempfile.TemporaryDirectory() as other_dir:
-            other = Fixture(Path(other_dir), origin_name="synarchy")
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
             result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
             self.assertEqual(result["status"], "published")
             self.assertTrue(result["remote_contains_commit"])
@@ -1653,7 +1711,7 @@ class PublishTests(unittest.TestCase):
             'coordination_paths = ["docs/ui-bugs.md"]\n'
         )
         with tempfile.TemporaryDirectory() as other_dir:
-            other = Fixture(Path(other_dir), origin_name="synarchy")
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
             result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
             self.assertEqual(result["status"], "published")
             self.assertIn("- two", other.remote_content())
@@ -1670,7 +1728,7 @@ class PublishTests(unittest.TestCase):
             'coordination_paths = ["docs/drainer-bugs.md"]\n'
         )
         with tempfile.TemporaryDirectory() as other_dir:
-            other = Fixture(Path(other_dir), origin_name="synarchy")
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
             result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
             self.assertEqual(result["status"], "not-published")
             self.assertIn("no coordination lane", result["reason"])
@@ -1686,7 +1744,7 @@ class PublishTests(unittest.TestCase):
             'coordination_paths = ["docs/"]\n'
         )
         with tempfile.TemporaryDirectory() as other_dir:
-            other = Fixture(Path(other_dir), origin_name="synarchy")
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
             result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
             self.assertEqual(result["status"], "not-published")
             self.assertIn("no coordination lane", result["reason"])
@@ -1697,7 +1755,7 @@ class PublishTests(unittest.TestCase):
         # outcome for a document whose owner may really have declared it.
         self.write_config('[repositories."coghex/synarchy".workflow\n')
         with tempfile.TemporaryDirectory() as other_dir:
-            other = Fixture(Path(other_dir), origin_name="synarchy")
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
             with self.assertRaises(publisher.PublishError) as caught:
                 other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
             self.assertEqual(caught.exception.status, "coordination-config-unreadable")
@@ -1726,7 +1784,7 @@ class PublishTests(unittest.TestCase):
             'coordination_path = ["docs/ui-bugs.md"]\n'
         )
         with tempfile.TemporaryDirectory() as other_dir:
-            other = Fixture(Path(other_dir), origin_name="synarchy")
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
             result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
             self.assertEqual(result["status"], "not-published")
             self.assertIn("coordination_path", result["reason"])
@@ -1864,7 +1922,7 @@ class PublishTests(unittest.TestCase):
         # the same repository contends rather than taking its own lock: in a
         # linked worktree `.git` is a file, and a lock placed under it would
         # not be shared.
-        second = Path(self._tmp.name) / "second-wip"
+        second = self.fx.dir / "second-wip"
         run(["git", "worktree", "add", "-q", "-b", "second", str(second), "master"], self.fx.primary)
         lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
         tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)

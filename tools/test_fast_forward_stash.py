@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import drain_prs
 import drain_prs_service
+import git_fixture
 
 
 def run_git(args, *, cwd, check=True):
@@ -66,30 +67,36 @@ def anchor_refs(cwd):
     return run_git(["for-each-ref", "refs/drain-prs/autostash"], cwd=cwd).stdout
 
 
-class _FastForwardStashFixture(unittest.TestCase):
+class _FastForwardStashFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
     """Common repo layout: a bare `origin` and a `main` checkout one commit
     ahead of nothing, with a multi-line tracked file so tests can dirty one
     line locally while `origin` advances a different one.
+
+    Built once by `git` for the whole family and copied per test; see
+    `tools/git_fixture.py`.
     """
 
+    @classmethod
+    def build_git_template(cls, root, data):
+        bare = root / "remote.git"
+        main = root / "main"
+
+        run_git(["init", "--bare", "-q", "-b", "master", str(bare)], cwd=root)
+        run_git(["init", "-q", "-b", "master", str(main)], cwd=root)
+        run_git(["config", "user.email", "test@example.com"], cwd=main)
+        run_git(["config", "user.name", "Test"], cwd=main)
+
+        (main / "shared.txt").write_text("line1\nline2\nline3\n", encoding="utf-8")
+        run_git(["add", "shared.txt"], cwd=main)
+        run_git(["commit", "-q", "-m", "initial"], cwd=main)
+        run_git(["remote", "add", "origin", str(bare)], cwd=main)
+        run_git(["push", "-q", "-u", "origin", "master"], cwd=main)
+
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = self.checkout_git_template()
 
         self.bare = self.root / "remote.git"
         self.main = self.root / "main"
-
-        run_git(["init", "--bare", "-q", "-b", "master", str(self.bare)], cwd=self.root)
-        run_git(["init", "-q", "-b", "master", str(self.main)], cwd=self.root)
-        run_git(["config", "user.email", "test@example.com"], cwd=self.main)
-        run_git(["config", "user.name", "Test"], cwd=self.main)
-
-        (self.main / "shared.txt").write_text("line1\nline2\nline3\n", encoding="utf-8")
-        run_git(["add", "shared.txt"], cwd=self.main)
-        run_git(["commit", "-q", "-m", "initial"], cwd=self.main)
-        run_git(["remote", "add", "origin", str(self.bare)], cwd=self.main)
-        run_git(["push", "-q", "-u", "origin", "master"], cwd=self.main)
 
         self.ctx = drain_prs.RepoContext(self.main, "example/project", "project", "master")
 
@@ -151,6 +158,21 @@ class _FastForwardStashFixture(unittest.TestCase):
         return run_git(
             ["log", "-1", "--format=%cd", "--date=iso-strict", sha], cwd=self.main
         ).stdout.strip()
+
+
+class FastForwardStashTemplateIsolationTests(
+    git_fixture.SharedTemplateIsolationTests, _FastForwardStashFixture
+):
+    """Issue #384: the shared template must be unreachable from a copy."""
+
+    def _mutate_the_copy(self):
+        (self.main / "shared.txt").write_text("mutated\n", encoding="utf-8")
+        run_git(["commit", "-qam", "a test rewrote history"], cwd=self.main)
+        run_git(["push", "-q", "origin", "master"], cwd=self.main)
+        run_git(["branch", "-f", "sideways", "HEAD"], cwd=self.main)
+        scratch = self.root / "scratch-worktree"
+        run_git(["worktree", "add", "-q", "--detach", str(scratch)], cwd=self.main)
+        run_git(["worktree", "remove", str(scratch)], cwd=self.main)
 
 
 class SuccessfulStashRestoreTest(_FastForwardStashFixture):

@@ -24,12 +24,21 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# `python3 -m unittest tools.test_tracker_transaction` imports this module by
+# package path, which puts the repository root on sys.path rather than tools/
+# -- unlike `-m unittest discover -s tools`. Both invocations have to reach
+# the sibling module, so name the directory outright.
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+
+import git_fixture
 
 
 def _load(name, filename):
@@ -255,13 +264,32 @@ def edit_identity(**overrides):
 
 
 class Fixture:
-    """A bare origin, a primary clone, and a `docs-wip` linked worktree."""
+    """A bare origin, a primary clone, and a `docs-wip` linked worktree.
+
+    Constructing one only names the paths; `create()` is what runs `git`.
+    The split is what lets a test attach to a copy of an already-built
+    template (see `tools/git_fixture.py`) instead of building its own, while
+    the mutable per-test state below -- the begin tokens especially -- still
+    starts empty for every case.
+    """
 
     def __init__(self, directory: Path):
         self.dir = directory
         self.origin = directory / "coghex" / "kanban.git"
-        self.origin.parent.mkdir(parents=True, exist_ok=True)
         self.primary = directory / "primary"
+        self.tokens = {}
+        self.docs = directory / "docs-wip"
+
+    @classmethod
+    def create(cls, directory: Path) -> "Fixture":
+        """Build the repository with real `git`, then attach to it."""
+        fixture = cls(directory)
+        fixture.build()
+        return fixture
+
+    def build(self) -> None:
+        directory = self.dir
+        self.origin.parent.mkdir(parents=True, exist_ok=True)
         run(["git", "init", "-q", "--bare", str(self.origin)], directory)
         run(["git", "clone", "-q", str(self.origin), str(self.primary)], directory)
         run(["git", "config", "user.email", "t@example.com"], self.primary)
@@ -277,8 +305,6 @@ class Fixture:
         run(["git", "branch", "-M", "master"], self.primary)
         run(["git", "push", "-q", "origin", "master:master"], self.primary)
         run(["git", "fetch", "-q", "origin", "master"], self.primary)
-        self.tokens = {}
-        self.docs = directory / "docs-wip"
         run(
             ["git", "worktree", "add", "-q", "-b", "docs-wip", str(self.docs), "master"],
             self.primary,
@@ -387,11 +413,38 @@ class Fixture:
         return path
 
 
-class TrackerTransactionTests(unittest.TestCase):
+class TrackerFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
+    """Every case below works on its own copy of one template built by `git`."""
+
+    @classmethod
+    def build_git_template(cls, root, data):
+        Fixture.create(root)
+
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.fx = Fixture(Path(self._tmp.name))
-        self.addCleanup(self._tmp.cleanup)
+        self.fresh_fixture()
+
+    def fresh_fixture(self):
+        """Attach to a copy no transaction has been recorded in yet."""
+        self.fx = Fixture(self.checkout_git_template())
+        return self.fx
+
+
+class TrackerTemplateIsolationTests(
+    git_fixture.SharedTemplateIsolationTests, TrackerFixture
+):
+    """Issue #384: this family's copies must be reachable only from themselves.
+
+    A tracker record is a Git reference and a publication is a push, so a copy
+    still naming the template would write both into shared state.
+    """
+
+    def _mutate_the_copy(self):
+        self.fx.acquire()
+        self.fx.publish_document(DOCUMENT + "\n- a test published this\n")
+        run(["git", "branch", "-f", "sideways", "master"], self.fx.docs)
+
+
+class TrackerTransactionTests(TrackerFixture):
 
     # -- acquisition ---------------------------------------------------------
 
@@ -2053,7 +2106,7 @@ class TrackerTransactionTests(unittest.TestCase):
         self.assertEqual(json.loads(buffer.getvalue())["status"], "owner-mismatch")
 
 
-class PreflightTests(unittest.TestCase):
+class PreflightTests(TrackerFixture):
     """Requirement 8: one pre-mutation preflight reports both records.
 
     What is pinned here is the caller contract the four assets already branch
@@ -2061,11 +2114,6 @@ class PreflightTests(unittest.TestCase):
     they extract — because reporting a new thing must not silently change what
     they were reading before.
     """
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.fx = Fixture(Path(self._tmp.name))
-        self.addCleanup(self._tmp.cleanup)
 
     def preflight(self):
         return publisher.check_pending(
