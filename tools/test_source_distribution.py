@@ -48,7 +48,7 @@ tracked file has none:
 * Out: `.drain-prs.json`, which `docs/pr-drainer.md` documents as optional
   per-repository drainer configuration and which is therefore the local
   configuration requirement 2 excludes; `.gitignore` and `.github/workflows/`,
-  which only do anything in the upstream Git repository; and the eleven
+  which only do anything in the upstream Git repository; and the eighteen
   development audit reports and design documents under `docs/`, which no
   runtime, setup, test, or workflow path reads and which no packaged document
   links to.
