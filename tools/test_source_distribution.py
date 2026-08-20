@@ -150,6 +150,7 @@ EXCLUDED_TRACKED_PATHS = (
     "docs/managed_paths_design.md",
     "docs/multi_repo_boards_design.md",
     "docs/pipeline-hardening.md",
+    "docs/project_review_386-361.md",
     "docs/public_release_design.md",
     "docs/ui-bugs.md",
     "docs/usage_awareness_design.md",
