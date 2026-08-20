@@ -2545,10 +2545,19 @@ above are unchanged, and persistence the user switched off is not a failure.
   is not one of them — and otherwise reconciles it exactly as it would an
   untouched one; the seals themselves are managed entries no run removes or
   reports as strays, and the lock is reopened only by the run that has to take
-  it. A per-repository tree no record names —
-  left by a controller whose record write was refused, or by an uninstall,
-  which keeps a repository's state deliberately — is carried across rather than
-  orphaned, under the repository validated on-disk evidence establishes: a
+  it. One writer is past all three: a process that opened that lock before the
+  run started keeps a descriptor no mode change revokes, and an uninstall in
+  that copy creates no directory, so it unlinks the definition before its
+  record write is refused — and that definition cannot be closed against it,
+  since a service manager's definition directory is the installation's own.
+  Each pass therefore checks every relocated repository's definition beside the
+  location, on the takeover's own terms, and puts back and reloads any that
+  differ, naming them in the report; the seal goes down only once both are what
+  the run left, and a writer acquiring after that last look is the residue the
+  run reports rather than claims to have closed. A per-repository tree no
+  record names — left by a controller whose record write was refused, or by an
+  uninstall, which keeps a repository's state deliberately — is carried across
+  rather than orphaned, under the repository validated on-disk evidence establishes: a
   reversible directory slug only when re-encoding the identity it decodes to
   through this host's own resolver reproduces that slug exactly, and a
   hash-only slug only from an agreeing canonical `repository` field in the

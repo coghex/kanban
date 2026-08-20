@@ -1510,6 +1510,23 @@ search step and nothing else, which is what `mandatory: no` records.
   reported as a stray or as a late write; the lock is reopened only by the
   installer run that has to take it, which restores it on every failing exit
   and closes it again when it seals.
+  One writer is past all three by construction, and nothing can close what it
+  reaches. A process that opened that lock before the run started holds a
+  descriptor no later mode change revokes, so it acquires the lock the moment a
+  pass releases it and then runs bytes predating every gate here — and an
+  uninstall in that copy creates no directory at all, so it unloads the job and
+  unlinks the definition before its record write is refused. That definition
+  cannot be closed against it: a service manager's definition directory is the
+  installation's own, shared with the job this run has just relocated, so
+  closing it would close the installation. What answers that writer is the pass
+  that follows it, which is what the handoff between passes exists for: each
+  pass checks every relocated repository's definition beside the location, on
+  the same terms a takeover checks one — the bytes this host would render,
+  compared whole — and puts back and reloads any that differ, naming them in
+  the report. The seal goes down only once both the location and those
+  definitions are what this run left. A writer that acquires after that last
+  look is past any process that terminates at all, which is the residue every
+  bound here reports rather than claims to have closed.
   A per-repository tree no record names is carried too. Two things leave one: a
   controller that wrote its trees before a refused record write, and an
   uninstall, which deliberately leaves a repository's runtime state, logs and

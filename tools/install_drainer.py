@@ -1530,17 +1530,29 @@ def _rewrite_definition(
     the log paths a service manager will actually run this job with are the
     destination's — and reloaded, because a definition the manager has not
     re-read is still the old one.
+
+    Total over a definition that is not there. The transition itself never
+    meets one — the plan refuses an entry with no definition on this host —
+    but the sweep does: a writer already queued on the legacy record's lock
+    when this run started can be an uninstall, which unlinks the definition
+    before its record write is refused, and putting that back is exactly what
+    the sweep is for. Absence is then what the undo restores, on the same
+    terms the controller's own uninstall leaves it.
     """
     path = entry.definition_path
-    previous = path.read_bytes()
+    existing = _plain_file(path)
+    previous = path.read_bytes() if existing else None
     # `write_definition_file` installs every definition at the mode its
     # manager reads it with, so restoring through it would hand back a
     # definition whose bytes are the original ones and whose permissions are
     # not. The mode is part of what this transition changed, so it is part of
     # what the undo puts back.
-    previous_mode = path.stat().st_mode & 0o777
+    previous_mode = path.stat().st_mode & 0o777 if existing else None
 
     def undo() -> None:
+        if previous is None:
+            backend.uninstall_definition(entry.identifier)
+            return
         service_manager.write_definition_file(path, previous)
         path.chmod(previous_mode)
         backend.load_definition(entry.identifier)
@@ -2558,6 +2570,45 @@ def _seal_emptied_location(
     return open_paths
 
 
+def _stale_definitions(
+    plan: RelocationPlan, backend: service_manager.ServiceManagerBackend
+) -> tuple[RelocationRepository, ...]:
+    """Every repository whose definition is no longer the one this run wrote.
+
+    The definitions are the one thing a writer can still change that no closed
+    path answers. The record path and the runtime root are objects this
+    installer owns at a location it has emptied, and the lock beside them is a
+    file only this installer opens once it is closed — but a service manager's
+    definition directory is none of those. It is the installation's own, shared
+    with the job this run has just relocated and with every other job on the
+    host, so closing it would close the installation.
+
+    And one writer is past the lock's closure by construction: a process that
+    opened it before this run started holds a descriptor no later mode change
+    revokes, so it acquires the lock the moment a pass releases it and then
+    runs bytes predating every gate here. An uninstall in that copy creates no
+    directory at all — it reads the status file, unloads the job and unlinks
+    the definition, and only then reaches the record write the seal refuses —
+    so nothing stops it, and what it destroys is a definition this run wrote
+    minutes earlier.
+
+    So the definitions are checked beside the location on every pass, on
+    exactly the terms the takeover checks them — the bytes this host would
+    render, compared whole — and put back and reloaded where they differ. That
+    is what the handoff those passes already perform is for: a writer queued on
+    this lock becomes runnable the instant a pass releases it, so the pass that
+    follows is what sees what it did. A writer that acquires after the last
+    look is past any process that terminates at all, which is the same residue
+    every other bound here reports rather than claims to have closed — and the
+    only one this installer cannot leave an object in the way of.
+    """
+    return tuple(
+        entry
+        for entry in plan.repositories
+        if not _definition_is_current(entry, backend)
+    )
+
+
 def _late_write_repair(plan: RelocationPlan, outcome: dict[str, Any]) -> str:
     """What the repair for this run's outcome actually is.
 
@@ -2572,17 +2623,27 @@ def _late_write_repair(plan: RelocationPlan, outcome: dict[str, Any]) -> str:
         f"{', '.join(outcome['unsealed'])} could not be sealed against a "
         "writer bound to that location; re-run this installer."
     )
+    restored = (
+        "A writer bound to "
+        f"{plan.legacy_dir} removed or rewrote the service definition of "
+        f"{', '.join(outcome['restored_definitions'])} after the relocation "
+        "had written it; this run put it back and reloaded it. "
+        if outcome["restored_definitions"]
+        else ""
+    )
     if outcome["passes"] == 0:
         if not outcome["sealed"]:
-            return unsealed
-        return "Nothing to repair; the installation is at the destination."
+            return restored + unsealed
+        return restored + "Nothing to repair; the installation is at the destination."
     if outcome["resolved"]:
         carried = (
             f"A writer recorded state at {plan.legacy_dir} after it was taken "
             f"apart; it was carried across to {plan.install_dir} and that "
             "location was cleared again. "
         )
-        return carried + ("Nothing to repair." if outcome["sealed"] else unsealed)
+        return restored + carried + (
+            "Nothing to repair." if outcome["sealed"] else unsealed
+        )
     if outcome["collisions"] or outcome["unattributed"]:
         kept: list[str] = []
         if outcome["collisions"]:
@@ -2667,13 +2728,20 @@ def _reconcile_late_writes(
         "unattributed": [],
         "strays": [],
         "failures": [],
+        "restored_definitions": [],
         "sealed": False,
         "unsealed": [],
     }
     remaining: tuple[Path, ...] | None = None
     for _ in range(_LATE_WRITER_PASSES):
         with _record_locks(plan):
-            if not _recreated_entries(plan, known):
+            recreated = _recreated_entries(plan, known)
+            # Beside the location, and under the same lock, for the reason
+            # `_stale_definitions` gives: a writer that was already queued on
+            # this lock when the run started is past every closed path, and a
+            # definition is the one thing it can still take away.
+            stale = _stale_definitions(plan, backend)
+            if not recreated and not stale:
                 # This is the last look, so the seal goes down here rather
                 # than under a lock taken again for nothing: the handoff has
                 # already happened, and a second pause would hand the lock
@@ -2682,17 +2750,26 @@ def _reconcile_late_writes(
                 outcome["unsealed"] = _seal_emptied_location(transition, plan)
                 outcome["sealed"] = not outcome["unsealed"]
                 break
-            outcome["passes"] += 1
             # The outer guard, so no fault raised by a step this sweep drives
             # can escape into the transition's rollback. Partly-applied work
             # stays applied and is read back below, which is the state the
             # report and the failing install are about.
             try:
-                if not _carry_recreated_location(
-                    transition, plan, backend, outcome, fences
-                ):
-                    break
-                _clear_recreated_location(transition, plan, outcome)
+                for entry in stale:
+                    _rewrite_definition(transition, entry, backend)
+                    if entry.identity not in outcome["restored_definitions"]:
+                        outcome["restored_definitions"].append(entry.identity)
+                if recreated:
+                    # Counted only for a location that came back, because that
+                    # is what the bound is about and what the repair names; a
+                    # pass that only put a definition back reconciled no
+                    # location.
+                    outcome["passes"] += 1
+                    if not _carry_recreated_location(
+                        transition, plan, backend, outcome, fences
+                    ):
+                        break
+                    _clear_recreated_location(transition, plan, outcome)
             except _SWEEP_FAULTS as exc:
                 outcome["failures"].append(str(exc))
                 break
@@ -2712,7 +2789,7 @@ def _reconcile_late_writes(
             # sealed" is not something an operator can act on.
             outcome["unsealed"] = (
                 _seal_emptied_location(transition, plan)
-                if not remaining
+                if not remaining and not _stale_definitions(plan, backend)
                 else [str(path) for path in _closed_paths(plan)]
             )
             outcome["sealed"] = not outcome["unsealed"]

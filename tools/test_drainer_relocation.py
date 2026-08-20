@@ -525,6 +525,22 @@ class RelocationFixture(unittest.TestCase):
         self.assertIn(expected_fragment, str(raised.exception))
         self.assertEqual(self.host_state(), before)
 
+    def fake_service_manager(self):
+        """A `systemctl` on a subprocess's PATH which records instead of
+        running, so "it never asked the manager to load or unload anything" is
+        an observation rather than an absence of evidence — and so a
+        subprocess that *does* ask reaches a manager this suite controls
+        rather than the host's."""
+        directory = self.root / "bin"
+        directory.mkdir(exist_ok=True)
+        script = directory / "systemctl"
+        script.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$KANBAN_FAKE_MANAGER_LOG"\n',
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return directory
+
     def relocate(self):
         return install_drainer.relocate(self.destination, self.sources)
 
@@ -2782,6 +2798,15 @@ ready, go, queued, acquired, result = (
 identity, checkout = sys.argv[7], sys.argv[8]
 
 import drain_prs_service
+import service_manager
+
+# Fixture wiring rather than a protection. Which manager this host has is
+# settled by `tools/test_service_manager.py`, and where that manager keeps its
+# definitions has to be the directory the parent process reads, or the two
+# would name different files. The backend is pinned rather than probed because
+# this process cannot count on the host it runs on having a live user manager.
+service_manager._DETECTED = service_manager.SYSTEMD
+service_manager.SYSTEMD_USER_DIR = Path(sys.argv[11])
 
 # Bound here, while the legacy record is still the one this host resolves.
 ready.write_text(str(drain_prs_service.DISCOVERY_RECORD_PATH), encoding="utf-8")
@@ -2791,13 +2816,7 @@ outcome = {"bound_record": str(drain_prs_service.DISCOVERY_RECORD_PATH)}
 if sys.argv[10] == "trees":
     # Everything a controller puts down before it ever reaches the record, and
     # every bit of it under no record lock at all: the directories, the status
-    # file, an incident, a log line and the service definition. The backend is
-    # pinned rather than probed because this process cannot count on the host
-    # it runs on having a live user manager, and nothing here asks one for
-    # anything — every one of these is a file write.
-    import service_manager
-
-    service_manager._DETECTED = service_manager.SYSTEMD
+    # file, an incident, a log line and the service definition.
     job = drain_prs_service.resolve_job(Path(checkout))
     outcome["runtime"] = str(job.runtime_dir)
     outcome["logs"] = str(job.log_dir)
@@ -2829,10 +2848,19 @@ try:
     with drain_prs_service.document_lock(drain_prs_service.DISCOVERY_RECORD_PATH):
         acquired.write_text("", encoding="utf-8")
         try:
-            drain_prs_service.merge_repository_record(
-                identity, {"repository": checkout}
-            )
-            outcome["recorded"] = True
+            if sys.argv[10] == "uninstall":
+                # The one transition that creates no directory: it unloads the
+                # job and unlinks the definition before it ever reaches the
+                # record write the seal refuses.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    outcome["uninstalled"] = drain_prs_service.uninstall_job(
+                        drain_prs_service.resolve_job(Path(checkout))
+                    )
+            else:
+                drain_prs_service.merge_repository_record(
+                    identity, {"repository": checkout}
+                )
+                outcome["recorded"] = True
         except drain_prs_service.ServiceError as error:
             outcome["refused"] = str(error)
         # Held across the write and a moment past it, so a reader that asks for
@@ -2888,8 +2916,15 @@ class QueuedRecordWriterTests(RelocationFixture):
                 str(self.widgets),
                 "0",
                 "record-only",
+                str(self.units),
             ],
-            env={"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
+            env={
+                "HOME": str(self.home),
+                "PATH": os.pathsep.join(
+                    [str(self.fake_service_manager()), os.environ.get("PATH", "")]
+                ),
+                "KANBAN_FAKE_MANAGER_LOG": str(self.root / "queued.manager"),
+            },
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -3141,6 +3176,7 @@ class PreGateWriterTests(PreGateControllerFixture):
         self.queued = self.root / "pre-gate.queued"
         self.acquired = self.root / "pre-gate.acquired"
         self.result = self.root / "pre-gate.result"
+        self.manager_log = self.root / "pre-gate.manager"
         self.writer_script = self.root / "pre_gate_writer.py"
         self.writer_script.write_text(_PRE_GATE_WRITER, encoding="utf-8")
         self.writes = "record-only"
@@ -3164,10 +3200,14 @@ class PreGateWriterTests(PreGateControllerFixture):
                 # blocks on this process once the handoff gives it the lock.
                 "0.4",
                 self.writes,
+                str(self.units),
             ],
             env={
                 "HOME": str(self.home),
-                "PATH": os.environ.get("PATH", ""),
+                "PATH": os.pathsep.join(
+                    [str(self.fake_service_manager()), os.environ.get("PATH", "")]
+                ),
+                "KANBAN_FAKE_MANAGER_LOG": str(self.manager_log),
                 # The install directory and the discovery record are *probed*,
                 # so this process resolves the `~/Library` ones on any host
                 # simply by importing before the destination record exists. The
@@ -3314,6 +3354,58 @@ class PreGateWriterTests(PreGateControllerFixture):
             "emptied and sealed",
             install_drainer.relocation_disposition(self.destination),
         )
+
+    def test_a_queued_uninstall_has_the_definition_it_removed_put_back(self):
+        """The one writer every closed path is behind, by construction.
+
+        This process opens the retained lock and blocks in `flock` *before* the
+        relocation takes it, so the mode the seal sets never reaches it: the
+        descriptor is already open, and no later chmod revokes one. It wakes
+        into the reconciliation and runs an uninstall — the transition that
+        creates no directory at all, so neither the runtime guard nor the
+        record seal stands in front of the definition it unlinks. Nothing can:
+        a service manager's definition directory is the installation's own,
+        shared with the job this run has just relocated, so closing it would
+        close the installation.
+
+        What answers it is the pass that follows. The handoff is what let this
+        process through, so the pass after that is what sees what it did: the
+        definitions this run wrote are checked beside the location on every
+        pass and put back and reloaded where they differ, and the seal goes
+        down only once both are what this run left.
+        """
+        self.writes = "uninstall"
+        self.commands.clear()
+        result, outcome = self.relocate_with_pre_gate_writer()
+        # It really did take the lock, and really did remove the definition:
+        # nothing in this repository could have stopped it.
+        self.assertTrue(self.acquired.exists())
+        self.assertNotIn("refused", outcome)
+        self.assertTrue(outcome["uninstalled"]["uninstalled"])
+        self.assertTrue(outcome["uninstalled"]["unit_removed"])
+        late = result["late_writes"]
+        self.assertEqual(late["restored_definitions"], ["acme/widgets"])
+        # Put back as the bytes this host writes for the destination, and
+        # reloaded, so what the manager holds is the relocated definition.
+        backend = install_drainer.service_backend()
+        definition = backend.definition_path(self.job.label)
+        self.assertTrue(definition.is_file())
+        self.assertEqual(
+            backend.definition_environment(self.job.label)[
+                kanban_config.DRAINER_INSTALL_DIR_ENV
+            ],
+            str(self.destination),
+        )
+        self.assertTrue(
+            any(self.job.label in " ".join(command) for command in self.commands),
+            self.commands,
+        )
+        # And the run finishes as it would have without it.
+        self.assertTrue(late["resolved"])
+        self.assertTrue(late["sealed"])
+        self.assert_location_is_sealed()
+        self.assertIn("put it back and reloaded it", result["repair"])
+        install_drainer._require_relocation_resolved(result)
 
     def test_a_sealed_location_holding_nothing_is_left_alone(self):
         self.relocate()
@@ -3545,20 +3637,6 @@ class StaleInvocationFixture(PreGateControllerFixture):
             self.process.wait(timeout=120), 0, self.process.communicate()
         )
         self.outcome = json.loads(self.result.read_text(encoding="utf-8"))
-
-    def fake_service_manager(self):
-        """A `systemctl` on that process's PATH which records instead of
-        running, so "it never asked the manager to load or unload anything" is
-        an observation rather than an absence of evidence."""
-        directory = self.root / "bin"
-        directory.mkdir(exist_ok=True)
-        script = directory / "systemctl"
-        script.write_text(
-            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$KANBAN_FAKE_MANAGER_LOG"\n',
-            encoding="utf-8",
-        )
-        script.chmod(0o755)
-        return directory
 
     def state_under(self, state, root):
         return {

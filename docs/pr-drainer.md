@@ -1124,6 +1124,20 @@ nothing reports them as strays or as something a writer put back. The lock is
 reopened only by the installer run that has to take it, and closed again when
 that run finishes.
 
+One case none of that reaches. A command that had *already opened* the lock
+file and was waiting for it when the move started keeps a working handle on it
+— closing the file afterwards does not take that away — so it gets its turn the
+moment the move lets go, and if it is an `uninstall` it deletes the unit or
+plist before its record write is refused. Nothing can stop that: the unit and
+plist live in your service manager's own directory, shared with the job that
+was just moved, so closing it would close the installation. What the run does
+instead is check: after every step, it compares each moved repository's unit or
+plist against the bytes it wrote, puts back and reloads any that changed, and
+says so in the report. Only once the old location *and* those definitions are
+as it left them does it seal up and finish. A command that gets its turn after
+that last check is past anything a finished command could see — the one gap the
+run reports rather than claims to have closed.
+
 Directories under `runtime/` and the old log root that belong to no repository
 in the record are moved across too. Two things leave one: a controller that
 wrote its directories before a refused record write, and an uninstall, which
