@@ -1547,6 +1547,23 @@ search step and nothing else, which is what `mandatory: no` records.
   operator there is nothing to stop. A process this user may not inspect is not
   one of ours, since the installation, its lock and every controller that opens
   it are user-scoped.
+  A state the run may not call closed has to survive the run, or the repair it
+  prints is advice the re-run ignores. Both seals are objects a later run can
+  see and the lock's mode is a bit it can read, but whether anything held that
+  lock when it was closed is a question only the run that closed it was in a
+  position to ask — so that run writes its answer into the relocation marker
+  beside the location, and the disposition reads it there. A location whose
+  marker does not say closing finished, and one whose lock has been reopened,
+  are both locations a later run acts on; an installation an older installer
+  sealed says nothing either way, which is how such a host is finished. What
+  that run performs is not a relocation, since nothing is left to move: it is
+  the settle half on its own, over the repositories the destination record
+  names, reopening the lock to take it, putting back any definition the
+  reported holder took in the meantime, and closing and recording the location
+  once nothing is left holding it. Recovering those repositories deliberately
+  does not insist on their definitions, unlike the recovery a relocation
+  performs: a missing definition is the state this run exists to repair, and
+  insisting on one would refuse over exactly that.
   A per-repository tree no record names is carried too. Two things leave one: a
   controller that wrote its trees before a refused record write, and an
   uninstall, which deliberately leaves a repository's runtime state, logs and

@@ -2562,7 +2562,15 @@ above are unchanged, and persistence the user switched off is not a failure.
   an empty one proves nothing can ever take this lock, while a set that is not
   empty and a host that cannot be asked are both reported with the lock left
   closed, naming the process to stop and failing the install rather than
-  claiming a location a queued process can still act on. A per-repository tree no
+  claiming a location a queued process can still act on. That answer is
+  written into the relocation marker, because it is the one thing about the
+  location a later run cannot work out from the artifacts, and the disposition
+  reads it there: a marker that does not say closing finished, a reopened lock,
+  and a marker an older installer wrote are all locations a later run acts on.
+  What it performs then is the settle half alone — nothing is left to move —
+  over the repositories the destination record names, recovered without
+  insisting on the definitions a stale uninstall deletes, since those are what
+  it exists to put back. A per-repository tree no
   record names — left by a controller whose record write was refused, or by an
   uninstall, which keeps a repository's state deliberately — is carried across
   rather than orphaned, under the repository validated on-disk evidence establishes: a

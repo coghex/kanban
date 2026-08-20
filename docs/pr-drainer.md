@@ -1152,6 +1152,16 @@ process to stop, and fails rather than reporting success over a command that
 can still act. A process belonging to another user is not one of these: the
 installation, its lock and everything that opens it are yours alone.
 
+Because that answer has to outlive the run, it is written into
+`relocated.json`. Otherwise "stop that process and re-run" would be advice the
+re-run ignores: the next run would see two links and a read-only lock file and
+call the old location finished, leaving whatever the holder deleted in the
+meantime unrepaired. So a re-run over that state does the last part again — it
+reopens the lock to take it, puts back any unit or plist that went missing, and
+closes and records the location once nothing is holding it. An old location
+sealed by an earlier version of the installer says nothing about its lock
+either, so it gets the same treatment once.
+
 Directories under `runtime/` and the old log root that belong to no repository
 in the record are moved across too. Two things leave one: a controller that
 wrote its directories before a refused record write, and an uninstall, which

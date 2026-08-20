@@ -203,6 +203,11 @@ RELOCATION_MARKER_DESTINATION = "install_dir"
 # document is declared, and a writer and a reader spelling one separately could
 # drift into never meeting.
 RELOCATION_MARKER_SOURCE = "source"
+# Whether the run that emptied that location finished closing it. Durable
+# because it is the one thing about that location a later run cannot see: the
+# lock's mode says it is closed, and says nothing about a process that opened
+# it before it was, whose descriptor no mode change revokes.
+RELOCATION_MARKER_CLOSED = "closed"
 RELOCATION_MARKER_NOTICE = "relocated"
 RELOCATION_MARKER_REPAIR = "repair"
 

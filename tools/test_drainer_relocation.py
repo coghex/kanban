@@ -4311,6 +4311,153 @@ class LockDescriptorTests(PreGateControllerFixture):
         with self.assertRaises(install_drainer.RelocationUnresolved):
             install_drainer._require_relocation_resolved(result)
 
+    def test_a_re_run_while_it_still_holds_the_lock_reports_it_again(self):
+        """The repair this run prints has to work, and it only works if the
+        re-run reaches the same answer from what is on disk.
+
+        The state the first run knew — that something still holds this lock —
+        lives in its own result and nowhere else. A later run that read the two
+        seals and the lock's mode alone would call the location finished and
+        never look again, which would make "stop that process, then re-run this
+        installer" advice that does nothing.
+        """
+        process = self.start_holder()
+        self.assertFalse(self.relocate()["late_writes"]["sealed"])
+        # Not finished business, so the re-run really does act.
+        self.assertIsNone(install_drainer.relocation_disposition(self.destination))
+        again = self.relocate()
+        self.assertFalse(again["relocated"])
+        self.assertIn("could not finish closing it", again["reason"])
+        self.assertEqual(again["late_writes"]["lock_holders"], [process.pid])
+        self.assertEqual(again["late_writes"]["unsealed"], [str(self.legacy_lock)])
+        with self.assertRaises(install_drainer.RelocationUnresolved):
+            install_drainer._require_relocation_resolved(again)
+        self.release(process)
+
+    def test_a_re_run_restores_what_the_holder_took_and_then_closes(self):
+        """The whole repair, end to end.
+
+        The holder takes its turn once the first run is over — exactly as that
+        run's report says it can — and deletes the definition on its way to the
+        record it cannot write. Stopping it and re-running is what the report
+        told the operator to do, and that re-run puts the definition back and
+        closes the location.
+        """
+        process = self.start_holder()
+        self.assertFalse(self.relocate()["late_writes"]["sealed"])
+        self.release(process)
+        backend = install_drainer.service_backend()
+        self.assertFalse(backend.definition_path(self.job.label).is_file())
+        # Stopped; this is what a host with nothing holding the lock answers.
+        self.lock_holders = ()
+        self.commands.clear()
+        again = self.relocate()
+        self.assertFalse(again["relocated"])
+        self.assertIn("closed it", again["reason"])
+        late = again["late_writes"]
+        self.assertTrue(late["sealed"])
+        self.assertEqual(late["lock_holders"], [])
+        self.assertEqual(late["restored_definitions"], ["acme/widgets"])
+        self.assertTrue(backend.definition_path(self.job.label).is_file())
+        self.assertEqual(
+            backend.definition_environment(self.job.label)[
+                kanban_config.DRAINER_INSTALL_DIR_ENV
+            ],
+            str(self.destination),
+        )
+        self.assertTrue(
+            any(self.job.label in " ".join(command) for command in self.commands),
+            self.commands,
+        )
+        install_drainer._require_relocation_resolved(again)
+        # And only now is the location finished business.
+        self.assert_location_is_sealed()
+        self.assertIn(
+            "emptied and sealed",
+            install_drainer.relocation_disposition(self.destination),
+        )
+
+    def test_a_dry_run_over_that_state_reports_it_rather_than_planning_a_move(self):
+        # There is nothing left to move, so a dry run that planned a relocation
+        # would refuse over a location the plan no longer describes — and would
+        # say nothing about the one thing that is unfinished.
+        process = self.start_holder()
+        self.assertFalse(self.relocate()["late_writes"]["sealed"])
+        before = self.host_state()
+        preview = install_drainer.relocation_preview(self.destination)
+        self.assertFalse(preview["relocated"])
+        self.assertTrue(preview["dry_run"])
+        self.assertIn("would finish closing it", preview["reason"])
+        self.assertEqual(preview["lock_holders"], [process.pid])
+        self.assertEqual(self.host_state(), before)
+        self.release(process)
+
+    def test_a_host_that_could_not_be_asked_is_finished_once_it_can(self):
+        self.lock_holders = None
+        self.lock_holders_reason = "open descriptors cannot be read on this host"
+        self.assertFalse(self.relocate()["late_writes"]["sealed"])
+        self.assertIsNone(install_drainer.relocation_disposition(self.destination))
+        self.lock_holders = ()
+        self.lock_holders_reason = None
+        again = self.relocate()
+        self.assertTrue(again["late_writes"]["sealed"])
+        install_drainer._require_relocation_resolved(again)
+        self.assert_location_is_sealed()
+        self.assertIn(
+            "emptied and sealed",
+            install_drainer.relocation_disposition(self.destination),
+        )
+
+    def test_the_marker_records_whether_closing_finished(self):
+        """The durable half of the answer.
+
+        Both seals are objects a later run can see and the lock's mode is a bit
+        it can read, but "was anything holding that lock when it was closed" is
+        a question only the run that closed it was in a position to ask. So
+        that run writes its answer down beside the location, in the notice
+        every seal already points at.
+        """
+        marker = self.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+        process = self.start_holder()
+        self.assertFalse(self.relocate()["late_writes"]["sealed"])
+        document = drain_prs_service._read_json_object(marker)
+        self.assertIs(document[drain_prs_service.RELOCATION_MARKER_CLOSED], False)
+        self.release(process)
+        self.lock_holders = ()
+        self.assertTrue(self.relocate()["late_writes"]["sealed"])
+        document = drain_prs_service._read_json_object(marker)
+        self.assertIs(document[drain_prs_service.RELOCATION_MARKER_CLOSED], True)
+        # And it is still the notice the seals point at, with everything an
+        # operator meeting one of them needs.
+        self.assertEqual(
+            document[drain_prs_service.RELOCATION_MARKER_DESTINATION],
+            str(self.destination),
+        )
+        self.assertIn(
+            "was relocated to",
+            document[drain_prs_service.RELOCATION_MARKER_NOTICE],
+        )
+
+    def test_a_marker_that_predates_this_bound_is_not_finished(self):
+        """An installation an older installer sealed says nothing about
+        whether anything held its lock, so it is finished by a run that can
+        answer rather than read as finished by one that never asked."""
+        self.assertTrue(self.relocate()["late_writes"]["sealed"])
+        marker = self.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+        document = drain_prs_service._read_json_object(marker)
+        document.pop(drain_prs_service.RELOCATION_MARKER_CLOSED)
+        drain_prs_service.atomic_write_json(marker, document)
+        self.assertIsNone(install_drainer.relocation_disposition(self.destination))
+        again = self.relocate()
+        self.assertFalse(again["relocated"])
+        self.assertIn("closed it", again["reason"])
+        self.assertTrue(again["late_writes"]["sealed"])
+        self.assert_location_is_sealed()
+        self.assertIn(
+            "emptied and sealed",
+            install_drainer.relocation_disposition(self.destination),
+        )
+
     def test_an_ordinary_host_with_nothing_queued_closes_it(self):
         # The proof the two cases above are the exception: nothing else has
         # this file open, nothing can open it again, so nothing can ever take

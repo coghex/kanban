@@ -756,6 +756,7 @@ def _recover_repository(
     log_root: Path,
     legacy_dir: Path,
     legacy_logs: Path,
+    require_definition: bool = True,
 ) -> RelocationRepository:
     """One record entry, recovered exactly, or a refusal naming what could not
     be.
@@ -818,24 +819,34 @@ def _recover_repository(
         raise InstallError(f"Refusing to relocate: {where} ({exc}).") from exc
     identifier = backend.service_identifier(slug)
     definition_path = backend.definition_path(identifier)
-    if not _plain_file(definition_path):
-        raise InstallError(
-            f"Refusing to relocate: {where} derives the {backend.definition_label()} "
-            f"{definition_path}, which is not a regular file on this host. Re-install "
-            "or uninstall that repository, then re-run the installer."
+    # The definition is insisted on for exactly one thing: the install
+    # directory it names, which is where this repository's runtime state
+    # actually is, since `--install-dir` moves that state without moving the
+    # record. A caller that moves nothing needs neither — and for one of them,
+    # `finish_closing` below, a *missing* definition is the state it exists to
+    # repair, so demanding one would refuse over the very thing being repaired.
+    if not require_definition and not _plain_file(definition_path):
+        source_install_dir = install_dir
+    else:
+        if not _plain_file(definition_path):
+            raise InstallError(
+                f"Refusing to relocate: {where} derives the "
+                f"{backend.definition_label()} {definition_path}, which is not a "
+                "regular file on this host. Re-install or uninstall that "
+                "repository, then re-run the installer."
+            )
+        named = backend.definition_environment(identifier).get(
+            kanban_config.DRAINER_INSTALL_DIR_ENV
         )
-    named = backend.definition_environment(identifier).get(
-        kanban_config.DRAINER_INSTALL_DIR_ENV
-    )
-    if not named or not os.path.isabs(named):
-        raise InstallError(
-            f"Refusing to relocate: the {backend.definition_label()} at "
-            f"{definition_path} names no absolute "
-            f"{kanban_config.DRAINER_INSTALL_DIR_ENV}, so the runtime state of "
-            f"{identity} cannot be found. Re-install that repository, then re-run "
-            "the installer."
-        )
-    source_install_dir = Path(named)
+        if not named or not os.path.isabs(named):
+            raise InstallError(
+                f"Refusing to relocate: the {backend.definition_label()} at "
+                f"{definition_path} names no absolute "
+                f"{kanban_config.DRAINER_INSTALL_DIR_ENV}, so the runtime state of "
+                f"{identity} cannot be found. Re-install that repository, then "
+                "re-run the installer."
+            )
+        source_install_dir = Path(named)
     return RelocationRepository(
         identity=identity,
         slug=slug,
@@ -1675,6 +1686,9 @@ def _remove_legacy_installation(
             "record": str(plan.destination_record),
             "log_root": str(plan.log_root),
             drain_prs_service.RELOCATION_MARKER_SOURCE: str(plan.legacy_dir),
+            # False until a run has proved it: this one is only taking the
+            # installation apart, and what closes this location comes after.
+            drain_prs_service.RELOCATION_MARKER_CLOSED: False,
             # The operator-facing half. Every seal this run leaves is a symlink
             # to this document, so a stale invocation that fails on one of them
             # names a path that leads here — and what a controller predating
@@ -2522,6 +2536,60 @@ def _restrict_retained_lock(transition: _Transition, plan: RelocationPlan) -> bo
     return True
 
 
+def _mark_closing_finished(transition: _Transition, plan: RelocationPlan) -> None:
+    """Record, beside the location, that closing it is finished.
+
+    Durable because it is the one thing about this location a later run cannot
+    work out from what is on disk. Both seals are objects it can see and the
+    lock's mode is a bit it can read, but "was anything holding that lock when
+    it was closed" is a question only the run that closed it was in a position
+    to ask — and a descriptor it found then is one that can still delete a
+    definition after that run returns. A later run that read the artifacts
+    alone would call this location finished and never look again, which would
+    make the repair the first run printed — stop that process, then re-run this
+    installer — advice the re-run ignores.
+    """
+    marker = plan.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+    document = drain_prs_service._read_json_object(marker)
+    if document.get(drain_prs_service.RELOCATION_MARKER_CLOSED) is True:
+        return
+    previous = marker.read_bytes() if _plain_file(marker) else None
+    mode = marker.stat().st_mode & 0o777 if previous is not None else 0o600
+
+    def undo() -> None:
+        if previous is None:
+            if os.path.lexists(marker):
+                marker.unlink()
+            return
+        marker.write_bytes(previous)
+        marker.chmod(mode)
+
+    transition.register(f"reopen the closing state at {marker}", undo)
+    drain_prs_service.atomic_write_json(
+        marker, {**document, drain_prs_service.RELOCATION_MARKER_CLOSED: True}
+    )
+    marker.chmod(mode)
+
+
+def _closing_is_finished(legacy_dir: Path) -> bool:
+    """Whether an earlier run finished closing this location.
+
+    The lock's mode and the marker's own answer, in that order. The mode alone
+    is not enough, for the reason `_mark_closing_finished` gives; and the
+    marker alone is not either, since a mode something reopened is a location
+    open to every fresh invocation again. A marker with no answer in it — the
+    one an installer that predates this bound wrote — is not finished, which is
+    how such a host gets closed.
+    """
+    lock = _legacy_lock_path(legacy_dir)
+    if not _plain_file(lock) or os.access(lock, os.W_OK):
+        return False
+    document = drain_prs_service._read_json_object(
+        legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+    )
+    return document.get(drain_prs_service.RELOCATION_MARKER_CLOSED) is True
+
+
 def _reopen_retained_lock(lock: Path) -> None:
     """Undo that restriction for the span of one installer run.
 
@@ -2838,6 +2906,32 @@ def _late_write_repair(plan: RelocationPlan, outcome: dict[str, Any]) -> str:
     )
 
 
+def _late_write_outcome(plan: RelocationPlan) -> dict[str, Any]:
+    """The report a run makes about the location it emptied, before it has
+    made it. One spelling, because two runs produce one: the reconciliation
+    below, and `finish_closing`, which answers what a reconciliation left
+    open."""
+    return {
+        "location": str(plan.legacy_dir),
+        "record": str(plan.legacy_record),
+        "log_root": str(plan.legacy_log_root),
+        "passes": 0,
+        "repositories": [],
+        "moved": [],
+        "removed": [],
+        "retained": [],
+        "collisions": [],
+        "unattributed": [],
+        "strays": [],
+        "failures": [],
+        "restored_definitions": [],
+        "lock_holders": [],
+        "lock_holders_reason": None,
+        "sealed": False,
+        "unsealed": [],
+    }
+
+
 def _reconcile_late_writes(
     transition: _Transition,
     plan: RelocationPlan,
@@ -2861,25 +2955,7 @@ def _reconcile_late_writes(
     rather than inferred from the passes, because what makes the host resolved
     is that the location really is empty, not that each step reported success.
     """
-    outcome: dict[str, Any] = {
-        "location": str(plan.legacy_dir),
-        "record": str(plan.legacy_record),
-        "log_root": str(plan.legacy_log_root),
-        "passes": 0,
-        "repositories": [],
-        "moved": [],
-        "removed": [],
-        "retained": [],
-        "collisions": [],
-        "unattributed": [],
-        "strays": [],
-        "failures": [],
-        "restored_definitions": [],
-        "lock_holders": [],
-        "lock_holders_reason": None,
-        "sealed": False,
-        "unsealed": [],
-    }
+    outcome = _late_write_outcome(plan)
     remaining: tuple[Path, ...] | None = None
     for _ in range(_LATE_WRITER_PASSES):
         with _record_locks(plan):
@@ -2947,6 +3023,8 @@ def _reconcile_late_writes(
         # its turn while there is still a run here to see what it did.
         outcome["unsealed"] = _settle_and_close(transition, plan, backend, outcome)
         outcome["sealed"] = not outcome["unsealed"]
+        if outcome["sealed"]:
+            _mark_closing_finished(transition, plan)
     outcome["retained"] = sorted(
         set(outcome["retained"]) | {str(path) for path in remaining}
     )
@@ -3037,34 +3115,34 @@ def _locked_transition(
 
 def _location_is_emptied_and_sealed() -> bool:
     """Whether the legacy location holds nothing but what sealing it left, and
-    every path sealing closes is closed.
+    both paths a seal occupies are occupied.
 
     Both halves, because either one alone is a reason to keep looking. A
     location holding trees is one a later run reconciles however sealed it is:
     the seals go down after a run's last look, and a controller bound here that
     started before them wrote its runtime tree, its log tree and its definition
-    already. And a location whose seals are not all down is one a later run has
-    to go back and finish, because a run that emptied it and could not write
-    one of them left a path a controller still bound here writes through — so
-    reading the other seal as an answer would make that path permanently
+    already. And a location whose seals are not both down is one a later run
+    has to go back and finish, because a run that emptied it and could not
+    write one of them left a path a controller still bound here writes through
+    — so reading the other seal as an answer would make that path permanently
     invisible.
+
+    The lock is a separate question, asked by `_retained_lock_is_closed` below.
+    A location this answers True for is one nothing has to move at all, which
+    is what `finish_closing` acts on; whether it is *finished* additionally
+    depends on that lock, and on nothing still holding it open.
     """
     legacy_dir = legacy_install_dir()
     record = record_name()
-    lock = _legacy_lock_path(legacy_dir)
-    kept = {lock.name, drain_prs_service.RELOCATION_MARKER_NAME}
+    kept = {
+        _legacy_lock_path(legacy_dir).name,
+        drain_prs_service.RELOCATION_MARKER_NAME,
+    }
     sealed = {record, _RUNTIME_DIRECTORY_NAME}
     if _plain_directory(legacy_dir):
         if any(child.name not in kept | sealed for child in legacy_dir.iterdir()):
             return False
         if not all(_is_relocation_seal(legacy_dir / name) for name in sealed):
-            return False
-        # The lock too, and by the same rule: a location whose lock an earlier
-        # run left openable is one a stale transition still enters, so this run
-        # has to go back and close it rather than reading the two seals beside
-        # it as an answer. An installation sealed before this bound existed is
-        # exactly that location, which is how such a host is finished.
-        if _plain_file(lock) and os.access(lock, os.W_OK):
             return False
     root = legacy_log_root()
     return not (_plain_directory(root) and any(root.iterdir()))
@@ -3091,7 +3169,9 @@ def relocation_disposition(install_dir: Path) -> str | None:
     legacy_record = legacy_install_dir() / record_name()
     if not os.path.lexists(legacy_record):
         return "there is no installation at the legacy location"
-    if _location_is_emptied_and_sealed():
+    if _location_is_emptied_and_sealed() and _closing_is_finished(
+        legacy_install_dir()
+    ):
         return "the legacy location was emptied and sealed by an earlier run"
     return None
 
@@ -3452,6 +3532,124 @@ def take_over(install_dir: Path) -> dict[str, Any]:
             raise
 
 
+# --- Finishing a location an earlier run emptied but could not close -------
+#
+# A run that emptied and sealed the legacy location can still fail to close its
+# lock, and can close it and be unable to prove nothing still holds it open.
+# Both are states it reports and fails the install over, and both tell the
+# operator to stop what is holding the lock and re-run. That instruction has to
+# work, which means the re-run has to reach the same answer from what is on
+# disk: the state the first run knew lives in its own result and nothing else,
+# so a later run that read the two seals and the lock's mode alone would call
+# the location finished and never look again — leaving the definition a queued
+# uninstall deletes after the installer returns unrepaired for good.
+#
+# So a location that is emptied and sealed but not provably free is not a
+# relocation at all — there is nothing left to move — and not a disposition
+# either. It is this: the settle half of a relocation, run on its own, over the
+# repositories the destination record names.
+
+
+def _closing_repositories(
+    install_dir: Path, backend: service_manager.ServiceManagerBackend
+) -> tuple[RelocationRepository, ...]:
+    """Every repository the destination record names, recovered as far as
+    closing this location needs and no further.
+
+    Not as far as a relocation recovers one: that one insists on the install
+    directory each repository's own definition names, because it has runtime
+    state to find and move. This has none — the location it is closing is
+    already empty — and the definition it would read that from is exactly what
+    a stale uninstall deletes, so insisting on it would refuse over the state
+    being repaired.
+    """
+    document = _read_record(install_dir / record_name(), "destination")
+    entries = document.get(drain_prs_service.RECORD_REPOSITORIES_KEY) or {}
+    remote_name = drain_prs_service.discovery_remote_name()
+    legacy_dir = legacy_install_dir()
+    return tuple(
+        _recover_repository(
+            identity,
+            entry,
+            backend=backend,
+            remote_name=remote_name,
+            install_dir=install_dir,
+            log_root=kanban_config.default_drainer_log_dir(),
+            legacy_dir=legacy_dir,
+            legacy_logs=legacy_log_root(),
+            require_definition=False,
+        )
+        for identity, entry in sorted(entries.items(), key=lambda item: str(item[0]))
+    )
+
+
+def _closing_plan(
+    install_dir: Path, backend: service_manager.ServiceManagerBackend
+) -> RelocationPlan:
+    """The same plan a relocation carries, for a run with nothing to move: no
+    document to merge and nothing removable, because the location this closes
+    was taken apart by the run that emptied it."""
+    legacy_dir = legacy_install_dir()
+    return RelocationPlan(
+        install_dir=install_dir,
+        log_root=kanban_config.default_drainer_log_dir(),
+        legacy_dir=legacy_dir,
+        legacy_record=legacy_dir / record_name(),
+        destination_record=install_dir / record_name(),
+        legacy_log_root=legacy_log_root(),
+        merged_record={},
+        repositories=_closing_repositories(install_dir, backend),
+        removable=(),
+    )
+
+
+def finish_closing(install_dir: Path) -> dict[str, Any]:
+    """Answer the question an earlier run left open at a location it emptied.
+
+    The settle half of a relocation on its own: the lock is reopened for this
+    run to take, each recorded repository's definition is checked against the
+    bytes this host writes and put back where it differs, and the lock is
+    closed again only inside a cycle that found nothing to put back and could
+    read the set of descriptors that can still take it. So the repair the first
+    run printed — stop that process, then re-run this installer — does what it
+    says: the re-run finds the same state, repairs whatever the holder took in
+    the meantime, and closes the location once nothing is left holding it.
+
+    Reported as a run that migrated nothing, because nothing moved, and with
+    the same `late_writes` block a relocation reports, because what it did and
+    could not do is the same question and `--json` is a real interface.
+    """
+    with _bound_to(install_dir):
+        backend = service_backend()
+        plan = _closing_plan(install_dir, backend)
+        transition = _Transition()
+        legacy_lock = _legacy_lock_path(plan.legacy_dir)
+        modes = _captured_modes(plan.legacy_dir, install_dir, legacy_lock)
+        _reopen_retained_lock(legacy_lock)
+        outcome = _late_write_outcome(plan)
+        try:
+            outcome["unsealed"] = _settle_and_close(transition, plan, backend, outcome)
+        except BaseException:
+            _restore_modes(modes)
+            raise
+        outcome["sealed"] = not outcome["unsealed"]
+        if outcome["sealed"]:
+            _mark_closing_finished(transition, plan)
+        outcome["resolved"] = True
+        outcome["repair"] = _late_write_repair(plan, outcome)
+        return {
+            "relocated": False,
+            "reason": (
+                "an earlier run emptied and sealed the legacy location; this run "
+                + ("closed it" if outcome["sealed"] else "could not finish closing it")
+            ),
+            "source": str(plan.legacy_dir),
+            "destination": str(install_dir),
+            "late_writes": outcome,
+            "repair": outcome["repair"],
+        }
+
+
 def relocation_preview(install_dir: Path) -> dict[str, Any]:
     """What a run would do about a pre-XDG `~/Library` installation, having
     done none of it.
@@ -3468,6 +3666,25 @@ def relocation_preview(install_dir: Path) -> dict[str, Any]:
         if not plan.repositories:
             return _settled_takeover(plan)
         return {"relocated": False, "dry_run": True, **plan.report()}
+    if _location_is_emptied_and_sealed():
+        # Nothing to move and nothing to plan: what is unfinished here is the
+        # lock, and asking whether it is free is the only thing a dry run of
+        # this can do without taking it.
+        holders, reason = _processes_holding_open(
+            _legacy_lock_path(legacy_install_dir())
+        )
+        return {
+            "relocated": False,
+            "dry_run": True,
+            "reason": (
+                "an earlier run emptied and sealed the legacy location; this run "
+                "would finish closing it"
+            ),
+            "source": str(legacy_install_dir()),
+            "destination": str(install_dir),
+            "lock_holders": list(holders or ()),
+            "lock_holders_reason": reason,
+        }
     return {
         "relocated": False,
         "dry_run": True,
@@ -3509,6 +3726,11 @@ def relocate(install_dir: Path, sources: dict[str, Path]) -> dict[str, Any]:
         # there is no source to move from: what this host takes over is the
         # definitions there, and only the ones it would write differently.
         return take_over(install_dir)
+    if _location_is_emptied_and_sealed():
+        # An earlier run already emptied and sealed this location and could not
+        # finish closing its lock. Nothing is left to move, so this is not a
+        # relocation; it is that run's own last step, taken again.
+        return finish_closing(install_dir)
     backend = service_backend()
     # Planned once without either lock, so an ordinary refusal never takes one
     # — the locks are for the transition that removes something, and a run
