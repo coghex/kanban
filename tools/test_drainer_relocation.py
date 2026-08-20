@@ -585,20 +585,18 @@ class DispositionTests(RelocationFixture):
         self.assertEqual(result["destination"], str(self.destination))
         self.assertFalse(inherited.exists())
 
-    def test_a_platform_default_that_aliases_the_legacy_directory_installs_in_place(self):
+    def test_a_platform_default_that_aliases_the_legacy_directory_is_migrated(self):
         # An absolute XDG root naming `~/Library/Application Support` makes
-        # this platform's own default the legacy directory itself. Taking over
-        # an installation already at the destination is #368's, so this
-        # installs where it always did.
+        # this platform's own default the legacy directory itself. Deciding
+        # whether this platform migrates by comparing the two directories
+        # reads such a host as macOS and skips it forever, so the disposition
+        # asks only the platform question and leaves the shape of the
+        # migration to `EqualLocationDispositionTests` below.
         self.seed_legacy_installation()
         with mock.patch.dict(
             os.environ, {"XDG_DATA_HOME": str(self.home / "Library/Application Support")}
         ):
-            before = self.host_state()
-            result = install_drainer.relocate(self.legacy_dir, self.sources)
-        self.assertFalse(result["relocated"])
-        self.assertIn("already at", result["reason"])
-        self.assertEqual(self.host_state(), before)
+            self.assertIsNone(install_drainer.relocation_disposition(self.legacy_dir))
 
     def test_a_resolved_destination_is_still_this_platforms_own_convention(self):
         # `main` resolves `--install-dir` before it reaches the disposition
@@ -3153,6 +3151,615 @@ class PreGateWriterTests(RelocationFixture):
         )
         self.assertIn("Refusing unsafe config path", source)
 
+
+class TakeoverFixture(RelocationFixture):
+    """Issue #368: a host whose own default install directory *is* the
+    `~/Library` one.
+
+    An absolute `$XDG_DATA_HOME` naming `~/Library/Application Support` makes
+    this platform's default the legacy directory itself, so a default run's
+    destination is the location the installation is already at. Nothing has to
+    move — and the definitions there still name the log root the pre-XDG
+    resolution answered with and carry none of the XDG context this host's own
+    resolution puts in them.
+
+    Seeded exactly as every other group here is, through the controller's own
+    writers under the resolution a pre-XDG host ran with, and only then told
+    that this platform's default resolves to that same directory.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.alias_data_home()
+
+    def alias_data_home(self):
+        """Make this platform's own default install directory the `~/Library`
+        one, the way an operator who exported an absolute `$XDG_DATA_HOME`
+        already has."""
+        patcher = mock.patch.dict(
+            os.environ,
+            {"XDG_DATA_HOME": str(self.home / "Library" / "Application Support")},
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        drain_prs_service.bind_managed_paths()
+
+    # -- driving ------------------------------------------------------------
+
+    def take_over(self):
+        """The run an operator performs: a default install, whose destination
+        happens to be where the installation already is."""
+        return install_drainer.relocate(self.legacy_dir, self.sources)
+
+    def desired_definition(self, job):
+        """The bytes this host would write for that job right now, through the
+        same `render_definition` boundary the installer compares against."""
+        backend = install_drainer.service_backend()
+        return backend.render_definition(
+            drain_prs_service.service_definition(
+                drain_prs_service.job_for_identity(job.repo_path, job.identity)
+            )
+        )
+
+    def definition_environment(self, job):
+        return install_drainer.service_backend().definition_environment(job.label)
+
+    def recorded_locks(self):
+        """Every discovery-record lock taken from here on, by path.
+
+        The real lock is still taken, so what this observes is the run's own
+        behaviour rather than a stand-in for it.
+        """
+        taken = []
+        real = drain_prs_service.document_lock
+
+        @contextlib.contextmanager
+        def recording(path):
+            taken.append(Path(path))
+            with real(path):
+                yield
+
+        patcher = mock.patch.object(drain_prs_service, "document_lock", recording)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return taken
+
+    def no_relocation_machinery(self):
+        """Neither of the two things a relocation does that a takeover has no
+        second location for: merging one record into another, and holding the
+        pair of locks between them."""
+        stack = contextlib.ExitStack()
+        for name in ("_merge_records", "_record_locks"):
+            stack.enter_context(
+                mock.patch.object(
+                    install_drainer,
+                    name,
+                    mock.Mock(side_effect=AssertionError(f"{name} was reached")),
+                )
+            )
+        return stack
+
+    def tree_contents(self, root):
+        return {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in sorted(root.rglob("*"))
+            if path.is_file() and not path.is_symlink()
+        }
+
+    def reset_failed_identifiers(self):
+        """Which definitions the service manager was asked to re-read.
+
+        `load_definition` ends in a `reset-failed` naming the one identifier it
+        reloaded, so this counts reloads per repository rather than in total.
+        """
+        return [
+            command[-1]
+            for command in self.commands
+            if command[:3] == ["systemctl", "--user", "reset-failed"]
+        ]
+
+
+class EqualLocationDispositionTests(TakeoverFixture):
+    """Requirement 1: such a run takes the installation over, and every other
+    reason to migrate nothing still holds."""
+
+    def test_this_platform_takes_over_a_location_that_is_also_its_own_default(self):
+        self.assertEqual(
+            install_drainer.default_install_dir(), self.legacy_dir
+        )
+        self.assertIsNone(install_drainer.relocation_disposition(self.legacy_dir))
+
+    def test_macos_still_takes_nothing_over(self):
+        # The platform question, still asked as the platform question: a macOS
+        # host whose XDG variables happen to point at its own install
+        # directory is still a host nothing may migrate.
+        self.set_platform("darwin")
+        before = self.host_state()
+        result = self.take_over()
+        self.assertFalse(result["relocated"])
+        self.assertIn("installs where its installation already is", result["reason"])
+        self.assertEqual(self.host_state(), before)
+
+    def test_a_custom_destination_elsewhere_still_migrates_nothing(self):
+        before = self.host_state()
+        result = install_drainer.relocate(self.root / "elsewhere", self.sources)
+        self.assertFalse(result["relocated"])
+        self.assertIn("custom --install-dir destination", result["reason"])
+        self.assertEqual(self.host_state(), before)
+
+    def test_a_location_holding_no_record_is_nothing_to_take_over(self):
+        shutil.rmtree(self.legacy_dir)
+        result = self.take_over()
+        self.assertFalse(result["relocated"])
+        self.assertIn("no installation at the legacy location", result["reason"])
+
+
+class TakeoverTests(TakeoverFixture):
+    """Requirements 1, 2 and 3 for one stale repository: what such a run
+    rewrites, what it moves, and everything it leaves exactly as it stands."""
+
+    def test_the_definition_becomes_the_bytes_this_host_would_write(self):
+        before = self.job.definition_path.read_bytes()
+        self.assertNotEqual(before, self.desired_definition(self.job))
+        self.take_over()
+        self.assertEqual(
+            self.job.definition_path.read_bytes(), self.desired_definition(self.job)
+        )
+
+    def test_the_rewritten_definition_names_this_hosts_log_root_and_context(self):
+        self.take_over()
+        environment = self.definition_environment(self.job)
+        self.assertEqual(
+            environment["XDG_DATA_HOME"],
+            str(self.home / "Library" / "Application Support"),
+        )
+        # The install directory did not move, so the one thing pinned by
+        # `KANBAN_DRAINER_INSTALL_DIR` is the one thing unchanged.
+        self.assertEqual(
+            environment[kanban_config.DRAINER_INSTALL_DIR_ENV], str(self.legacy_dir)
+        )
+        text = self.job.definition_path.read_text(encoding="utf-8")
+        self.assertIn(str(self.destination_logs / self.job.slug), text)
+        self.assertNotIn(str(self.legacy_logs / self.job.slug), text)
+
+    def test_the_log_tree_moves_to_the_root_this_host_uses(self):
+        source = self.legacy_logs / self.job.slug
+        contents = self.tree_contents(source)
+        self.assertTrue(contents)
+        self.take_over()
+        self.assertFalse(source.exists())
+        self.assertEqual(
+            self.tree_contents(self.destination_logs / self.job.slug), contents
+        )
+
+    def test_the_runtime_tree_is_preserved_where_it_already_is(self):
+        runtime = self.legacy_dir / "runtime" / self.job.slug
+        contents = self.tree_contents(runtime)
+        self.assertTrue(contents)
+        result = self.take_over()
+        self.assertEqual(self.tree_contents(runtime), contents)
+        self.assertEqual(
+            [move for move in result["moved"] if "runtime" in move["source"]], []
+        )
+
+    def test_nothing_at_that_location_is_taken_apart(self):
+        entries = sorted(path.name for path in self.legacy_dir.iterdir())
+        record = self.legacy_record.read_bytes()
+        self.take_over()
+        self.assertEqual(
+            sorted(path.name for path in self.legacy_dir.iterdir()), entries
+        )
+        # The one document, untouched: this run never writes it, so it is not
+        # merged with itself either.
+        self.assertEqual(self.legacy_record.read_bytes(), record)
+        self.assertFalse(install_drainer._is_tombstone(self.legacy_record))
+        self.assertFalse(
+            (self.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME).exists()
+        )
+
+    def test_the_result_reports_a_takeover_rather_than_a_relocation(self):
+        result = self.take_over()
+        self.assertFalse(result["relocated"])
+        self.assertTrue(result["takeover"])
+        self.assertEqual(result["location"], str(self.legacy_dir))
+        self.assertEqual(result["record"], str(self.legacy_record))
+        self.assertEqual(result["log_root"], str(self.destination_logs))
+        self.assertEqual(result["rewritten"], [str(self.job.definition_path)])
+        self.assertEqual(result["settled"], [])
+        self.assertEqual(result["unrecoverable"], [])
+        self.assertEqual(
+            [entry["repository"] for entry in result["repositories"]], ["acme/widgets"]
+        )
+
+    def test_the_stale_definition_is_reloaded_exactly_once(self):
+        self.commands.clear()
+        self.take_over()
+        self.assertEqual(self.reset_failed_identifiers(), [self.job.label])
+
+    def test_a_settled_installation_reports_no_migration(self):
+        self.assertTrue(self.take_over()["takeover"])
+        before = self.host_state()
+        result = self.take_over()
+        self.assertFalse(result["relocated"])
+        self.assertNotIn("takeover", result)
+        self.assertIn("already what this host would write", result["reason"])
+        self.assertEqual(self.host_state(), before)
+
+    def test_a_settled_run_reloads_nothing(self):
+        self.take_over()
+        self.commands.clear()
+        self.take_over()
+        self.assertEqual(self.reset_failed_identifiers(), [])
+
+    def test_the_settled_answer_carries_what_the_plan_accounted_for(self):
+        self.take_over()
+        result = self.take_over()
+        self.assertEqual(result["settled"], ["acme/widgets"])
+        self.assertEqual(result["unrecoverable"], [])
+
+    def test_a_record_holding_only_an_unrecoverable_entry_says_so(self):
+        # Nothing stale, because nothing could be recovered to compare. An
+        # answer of "every definition here is already what this host would
+        # write" would be claiming to have compared one it never read.
+        drain_prs_service.merge_repository_record(
+            "acme/widgets", {"repository": str(self.root / "vanished")}
+        )
+        before = self.host_state()
+        result = self.take_over()
+        self.assertFalse(result["relocated"])
+        self.assertNotIn("takeover", result)
+        self.assertEqual(result["settled"], [])
+        self.assertEqual(len(result["unrecoverable"]), 1)
+        self.assertIn("which is not a directory", result["unrecoverable"][0])
+        self.assertIn("could not be recovered", result["reason"])
+        self.assertNotIn(
+            "every definition at this location is already", result["reason"]
+        )
+        self.assertEqual(self.host_state(), before)
+
+
+class TakeoverLockingTests(TakeoverFixture):
+    """Requirement 2: with one document rather than two there is nothing to
+    merge and no lock to hold between two records — and the record write that
+    follows keeps the lock it has always taken."""
+
+    def test_a_settled_run_takes_no_lock_and_merges_no_document(self):
+        self.take_over()
+        locks = self.recorded_locks()
+        with self.no_relocation_machinery():
+            result = self.take_over()
+        self.assertIn("already what this host would write", result["reason"])
+        self.assertEqual(locks, [])
+
+    def test_an_acting_run_merges_nothing_and_locks_only_that_one_record(self):
+        locks = self.recorded_locks()
+        with self.no_relocation_machinery():
+            self.assertTrue(self.take_over()["takeover"])
+        self.assertEqual(set(locks), {self.legacy_record})
+
+    def test_the_installers_own_record_write_is_still_locked(self):
+        # The other half of the same requirement, and the reason the takeover
+        # needs no lock of its own: the lock it would hold is the one this
+        # write goes on to ask for.
+        self.take_over()
+        locks = self.recorded_locks()
+        install_drainer.write_installed_config_path(
+            self.job.identity, str(self.root / "config.toml")
+        )
+        self.assertIn(self.legacy_record, locks)
+
+    def test_a_drainer_starting_mid_run_is_fenced_out(self):
+        # The same fence the relocation takes, over the shorter transition:
+        # the definitions being rewritten belong to jobs whose checkouts a
+        # drainer could take one instant after the preflight looked.
+        observed = {}
+        real = install_drainer._apply_takeover
+
+        def during(transition, plan):
+            with self.assertRaises(drain_prs.RunLockedError):
+                drain_prs.acquire_lock(self.widgets, mode="single-pr", pull_request=1)
+            observed["fenced"] = True
+            return real(transition, plan)
+
+        with mock.patch.object(install_drainer, "_apply_takeover", during):
+            self.assertTrue(self.take_over()["takeover"])
+        self.assertTrue(observed["fenced"])
+
+    def test_a_running_controller_refuses_the_run(self):
+        descriptor = drain_prs_service.acquire_controller_lock(
+            self.legacy_dir / "runtime" / self.job.slug
+        )
+        self.addCleanup(lambda: os.close(descriptor))
+        before = self.host_state()
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.take_over()
+        self.assertIn("controller is running", str(raised.exception))
+        self.assertEqual(self.host_state(), before)
+
+    def test_a_failure_puts_every_definition_back(self):
+        before = self.host_state()
+        with mock.patch.object(
+            install_drainer,
+            "_rewrite_definition",
+            mock.Mock(side_effect=OSError("no room")),
+        ):
+            with self.assertRaises(install_drainer.RelocationFailed):
+                self.take_over()
+        self.assertEqual(self.host_state(), before)
+
+
+class TakeoverScopeTests(TakeoverFixture):
+    """Requirements 3 and 4: exactly the stale definitions, and guards that
+    see only them.
+
+    The settled repository is installed under *this* host's own resolution, by
+    the same installer that would otherwise rewrite it, so its definition is
+    already the bytes this host would write rather than a hand-made copy of
+    them.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
+        self.settled = self.seed_repository(self.gadgets)
+
+    def test_the_settled_repository_starts_out_current(self):
+        # The premise of every case below, asserted rather than assumed: a
+        # group that seeded two stale definitions would prove nothing about
+        # scoping.
+        self.assertEqual(
+            self.settled.definition_path.read_bytes(),
+            self.desired_definition(self.settled),
+        )
+        self.assertNotEqual(
+            self.job.definition_path.read_bytes(), self.desired_definition(self.job)
+        )
+
+    def test_only_the_stale_definition_is_rewritten(self):
+        settled = self.settled.definition_path.read_bytes()
+        result = self.take_over()
+        self.assertEqual(result["rewritten"], [str(self.job.definition_path)])
+        self.assertEqual(result["settled"], ["acme/gadgets"])
+        self.assertEqual(self.settled.definition_path.read_bytes(), settled)
+        self.assertEqual(
+            self.job.definition_path.read_bytes(), self.desired_definition(self.job)
+        )
+
+    def test_only_the_stale_definition_is_reloaded(self):
+        self.commands.clear()
+        self.take_over()
+        self.assertEqual(self.reset_failed_identifiers(), [self.job.label])
+
+    def test_a_settled_repositorys_own_trees_are_left_alone(self):
+        logs = self.tree_contents(self.destination_logs / self.settled.slug)
+        runtime = self.tree_contents(self.legacy_dir / "runtime" / self.settled.slug)
+        self.assertTrue(logs)
+        self.assertTrue(runtime)
+        self.take_over()
+        self.assertEqual(
+            self.tree_contents(self.destination_logs / self.settled.slug), logs
+        )
+        self.assertEqual(
+            self.tree_contents(self.legacy_dir / "runtime" / self.settled.slug), runtime
+        )
+
+    def test_a_settled_siblings_live_drainer_does_not_refuse_the_run(self):
+        # Requirement 4, at the shape it matters in: the preflight's guards
+        # are refusals, so a run that treated every recorded repository as
+        # affected would refuse an ordinary install whenever any other
+        # repository's drainer happened to be running.
+        (self.gadgets / ".git" / "drain_prs.lock").write_text(
+            str(os.getpid()), encoding="utf-8"
+        )
+        result = self.take_over()
+        self.assertEqual(result["rewritten"], [str(self.job.definition_path)])
+
+    def test_a_settled_siblings_live_managed_job_does_not_refuse_it_either(self):
+        # The other liveness signal, on the same terms: a settled sibling's
+        # job being up is not this run's business, because this run does not
+        # touch it.
+        settled = self.settled.label
+
+        def is_running(backend, identifier):
+            return identifier == settled
+
+        with mock.patch.object(
+            type(install_drainer.service_backend()), "is_running", is_running
+        ):
+            result = self.take_over()
+        self.assertEqual(result["rewritten"], [str(self.job.definition_path)])
+
+    def test_the_stale_repositorys_own_live_drainer_still_refuses(self):
+        (self.widgets / ".git" / "drain_prs.lock").write_text(
+            str(os.getpid()), encoding="utf-8"
+        )
+        before = self.host_state()
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.take_over()
+        self.assertIn("a drainer is running in", str(raised.exception))
+        self.assertEqual(self.host_state(), before)
+
+    def test_a_settled_run_still_names_an_entry_it_could_not_recover(self):
+        # Every recoverable definition current, one entry unreadable: the run
+        # migrates nothing, and reporting that as a settled installation would
+        # lose the only mention the untouched repository gets.
+        self.take_over()
+        drain_prs_service.merge_repository_record(
+            "acme/gadgets", {"repository": str(self.root / "vanished")}
+        )
+        result = self.take_over()
+        self.assertFalse(result["relocated"])
+        self.assertNotIn("takeover", result)
+        self.assertEqual(result["settled"], ["acme/widgets"])
+        self.assertEqual(len(result["unrecoverable"]), 1)
+        self.assertIn("could not be recovered", result["reason"])
+
+    def test_an_entry_that_cannot_be_recovered_is_left_alone_and_named(self):
+        # This run takes nothing apart, so an entry it cannot recover is one
+        # it cannot show to be affected and does not touch. Refusing over it
+        # would be the same over-wide refusal requirement 4 rejects.
+        definition = self.settled.definition_path.read_bytes()
+        drain_prs_service.merge_repository_record(
+            "acme/gadgets", {"repository": str(self.root / "vanished")}
+        )
+        result = self.take_over()
+        self.assertEqual(result["rewritten"], [str(self.job.definition_path)])
+        self.assertEqual(result["settled"], [])
+        self.assertEqual(len(result["unrecoverable"]), 1)
+        self.assertIn("which is not a directory", result["unrecoverable"][0])
+        self.assertEqual(self.settled.definition_path.read_bytes(), definition)
+
+
+class TakeoverSelectionTests(TakeoverFixture):
+    """The review's amendment: staleness is decided against the final
+    effective install-directory selection, so an explicit `--install-dir`
+    beats an inherited `KANBAN_DRAINER_INSTALL_DIR`."""
+
+    def inherited(self):
+        return mock.patch.dict(
+            os.environ,
+            {kanban_config.DRAINER_INSTALL_DIR_ENV: str(self.root / "inherited")},
+        )
+
+    def test_the_selection_decides_the_bytes_that_are_written(self):
+        with self.inherited():
+            result = self.take_over()
+        self.assertTrue(result["takeover"])
+        self.assertFalse((self.root / "inherited").exists())
+        self.assertEqual(
+            self.definition_environment(self.job)[
+                kanban_config.DRAINER_INSTALL_DIR_ENV
+            ],
+            str(self.legacy_dir),
+        )
+
+    def test_the_selection_decides_which_definitions_are_stale(self):
+        # Judged against the inherited directory instead, a settled
+        # installation would read as stale for as long as that variable was
+        # exported, and every run would rewrite every definition.
+        self.assertTrue(self.take_over()["takeover"])
+        before = self.host_state()
+        with self.inherited():
+            result = self.take_over()
+        self.assertIn("already what this host would write", result["reason"])
+        self.assertEqual(self.host_state(), before)
+
+    def test_the_process_still_describes_what_it_described_before(self):
+        # A takeover moves nothing, so unlike a relocation it has no reason to
+        # leave this process bound anywhere else.
+        with self.inherited():
+            # Bound under that variable, which is what a process launched with
+            # it exported holds from its own import onwards.
+            drain_prs_service.bind_managed_paths()
+            before = self.stale_bindings()
+            self.take_over()
+            self.assertEqual(self.stale_bindings(), before)
+            self.assertEqual(
+                os.environ[kanban_config.DRAINER_INSTALL_DIR_ENV],
+                str(self.root / "inherited"),
+            )
+
+    def test_an_override_that_was_absent_is_still_absent(self):
+        self.assertNotIn(kanban_config.DRAINER_INSTALL_DIR_ENV, os.environ)
+        before = self.stale_bindings()
+        self.take_over()
+        self.assertNotIn(kanban_config.DRAINER_INSTALL_DIR_ENV, os.environ)
+        self.assertEqual(self.stale_bindings(), before)
+
+
+class TakeoverLogRootTests(TakeoverFixture):
+    """Requirement 5: a log root that is its own destination is preserved in
+    place rather than refused as an occupied one."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.dict(
+            os.environ, {"XDG_STATE_HOME": str(self.home / "Library" / "Logs")}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        drain_prs_service.bind_managed_paths()
+
+    def test_this_hosts_log_root_is_the_one_the_logs_are_already_under(self):
+        self.assertEqual(kanban_config.default_drainer_log_dir(), self.legacy_logs)
+
+    def test_the_log_tree_is_preserved_rather_than_moved_onto_itself(self):
+        logs = self.legacy_logs / self.job.slug
+        contents = self.tree_contents(logs)
+        self.assertTrue(contents)
+        result = self.take_over()
+        self.assertTrue(result["takeover"])
+        self.assertEqual(result["moved"], [])
+        self.assertEqual(self.tree_contents(logs), contents)
+
+    def test_the_definition_is_still_brought_up_to_this_hosts_context(self):
+        # Stale for a reason the log root cannot show: the definition carries
+        # neither XDG variable, and this host resolves both.
+        self.take_over()
+        environment = self.definition_environment(self.job)
+        self.assertEqual(
+            environment["XDG_STATE_HOME"], str(self.home / "Library" / "Logs")
+        )
+        self.assertEqual(
+            self.job.definition_path.read_bytes(), self.desired_definition(self.job)
+        )
+
+
+class TakeoverPreviewTests(TakeoverFixture):
+    """What `--dry-run` reports, and that reporting it changes nothing."""
+
+    def setUp(self):
+        super().setUp()
+        self.kanban = self.make_checkout("kanban", "git@github.com:acme/widgets.git")
+        tools = self.kanban / "tools"
+        tools.mkdir()
+        for source in self.sources.values():
+            (tools / source.name).write_text(
+                source.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+
+    def install(self, **options):
+        return install_drainer.install(
+            self.kanban, self.legacy_dir, ntfy_url=None, **options
+        )
+
+    def test_a_dry_run_reports_the_takeover_and_takes_no_lock(self):
+        locks = self.recorded_locks()
+        before = self.host_state()
+        relocation = self.install(dry_run=True)["relocation"]
+        self.assertTrue(relocation["dry_run"])
+        self.assertTrue(relocation["takeover"])
+        self.assertFalse(relocation["relocated"])
+        self.assertEqual(relocation["location"], str(self.legacy_dir))
+        self.assertEqual(
+            [entry["repository"] for entry in relocation["repositories"]],
+            ["acme/widgets"],
+        )
+        self.assertEqual(locks, [])
+        self.assertEqual(self.host_state(), before)
+
+    def test_a_settled_dry_run_reports_no_migration(self):
+        self.take_over()
+        before = self.host_state()
+        relocation = self.install(dry_run=True)["relocation"]
+        self.assertNotIn("takeover", relocation)
+        self.assertIn("already what this host would write", relocation["reason"])
+        self.assertEqual(relocation["settled"], ["acme/widgets"])
+        self.assertEqual(relocation["unrecoverable"], [])
+        self.assertEqual(self.host_state(), before)
+
+    def test_a_settled_dry_run_names_an_entry_it_could_not_recover_too(self):
+        self.take_over()
+        drain_prs_service.merge_repository_record(
+            "acme/widgets", {"repository": str(self.root / "vanished")}
+        )
+        before = self.host_state()
+        relocation = self.install(dry_run=True)["relocation"]
+        self.assertNotIn("takeover", relocation)
+        self.assertEqual(len(relocation["unrecoverable"]), 1)
+        self.assertIn("could not be recovered", relocation["reason"])
+        self.assertEqual(self.host_state(), before)
 
 if __name__ == "__main__":
     unittest.main()

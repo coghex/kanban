@@ -1378,6 +1378,19 @@ def _rename_tree(source: Path, destination: Path) -> bool:
     return True
 
 
+def _move_is_real(move: _Move) -> bool:
+    """Whether moving this tree would move anything.
+
+    A source that does not exist has nothing to move, and a source that is
+    already its own destination — because `--install-dir` put it there, or
+    because the log root never changed — is the tree, where it is going. One
+    predicate rather than two, because the takeover below has to create the
+    root a tree lands in through its own transition and must decide that on
+    exactly the terms the move itself decides to move at all.
+    """
+    return move.source.exists() and not _same_tree(move.source, move.destination)
+
+
 def _move_tree(transition: _Transition, move: _Move) -> None:
     """Move one durable tree, safely at every instant it can be interrupted.
 
@@ -1390,9 +1403,7 @@ def _move_tree(transition: _Transition, move: _Move) -> None:
     would be this installer deciding which copy of a repository's incidents
     and status is the real one.
     """
-    if not move.source.exists():
-        return
-    if _same_tree(move.source, move.destination):
+    if not _move_is_real(move):
         return
     transition.register(
         f"move {move.destination} back to {move.source}",
@@ -2358,24 +2369,23 @@ def _sealed_location_is_empty() -> bool:
 
 
 def relocation_disposition(install_dir: Path) -> str | None:
-    """Why this run relocates nothing, or None when it does.
+    """Why this run migrates nothing, or None when it does.
 
-    Three questions in a fixed order, and the first is the platform's own:
-    whether this host keeps its installation where it installs to. It is
-    asked as the platform question and never inferred from two directories
-    differing, because a macOS host whose XDG variables happen to point
-    elsewhere is still a host nothing may move.
+    The first question is the platform's own: whether this host keeps its
+    installation where it installs to. It is asked as the platform question
+    and never inferred from two directories differing, because a macOS host
+    whose XDG variables happen to point elsewhere is still a host nothing may
+    move — and because the reverse reading, taking two equal directories for a
+    macOS host, is exactly how a Linux host whose XDG root names
+    `~/Library/Application Support` would be skipped. Whether this platform
+    migrates and whether migrating *moves* anything are two questions;
+    `_takes_over_in_place` below answers the second, and only for a run this
+    one has already said migrates.
     """
     if kanban_config.is_macos():
         return "this platform installs where its installation already is"
     if not _same_location(install_dir, kanban_config.default_drainer_install_dir()):
         return "a custom --install-dir destination installs there and relocates nothing"
-    if _same_location(install_dir, legacy_install_dir()):
-        # An absolute XDG root naming `~/Library/Application Support` makes
-        # this platform's own default the legacy directory itself. Taking over
-        # an installation already at the destination is not this run's, so it
-        # installs in place exactly as it always did.
-        return "this platform's default is the location the installation is already at"
     legacy_record = legacy_install_dir() / record_name()
     if not os.path.lexists(legacy_record):
         return "there is no installation at the legacy location"
@@ -2384,9 +2394,393 @@ def relocation_disposition(install_dir: Path) -> str | None:
     return None
 
 
+# --- Taking over an installation already at this platform's own location ---
+#
+# An absolute `$XDG_DATA_HOME` naming `~/Library/Application Support` makes
+# this platform's own default the `~/Library` directory itself, so a default
+# run's destination is the location the installation is already at. Nothing
+# has to move — and the definitions installed there still name the log root a
+# pre-XDG resolution answered with and carry none of the XDG context this
+# host's own resolution puts in them, and nothing else would ever rewrite
+# them.
+#
+# Whether this platform takes an installation over, and whether taking it over
+# *moves* anything, are two questions. Only the first is the platform's, which
+# is why the disposition above stops asking the second: two directories being
+# equal reads a Linux host as macOS and skips it.
+#
+# What is left when nothing moves is one document rather than two, so there is
+# nothing to merge and no pair of records to hold a lock between; one location
+# rather than two, so nothing is taken apart; and, as the only thing that can
+# be out of date, each repository's definition — compared as the bytes the
+# backend renders and rewritten only where they differ. A log tree still moves
+# when the log root itself changed, since that root is the one managed
+# location `KANBAN_DRAINER_INSTALL_DIR` does not pin.
+#
+# That scoping is load-bearing rather than an optimization. Every guard in the
+# plan above is refusal-shaped, so a takeover that treated every recorded
+# repository as affected would refuse an ordinary install of one repository
+# because an unrelated sibling's drainer happened to be running.
+
+
+# What a run reports when every definition at this location is already the one
+# this host would write: not a migration, and therefore the same
+# nothing-migrated answer every other such run gives.
+_SETTLED_TAKEOVER_REASON = (
+    "every definition at this location is already what this host would write"
+)
+
+
+def _settled_takeover(plan: TakeoverPlan) -> dict[str, Any]:
+    """The nothing-migrated answer, carrying what the plan accounted for.
+
+    Shaped as every other run that migrates nothing is — `relocated` false and
+    one `reason` — because an installation with nothing stale is not a
+    migration and must not report as one.
+
+    What travels beside that reason is the bookkeeping this path would
+    otherwise lose: which repositories were already current, and which
+    recorded entries could not be recovered and were therefore left exactly as
+    they stand. The second is why the reason itself narrows when there is one.
+    An entry this run could not read is an entry whose definition it cannot
+    call current, and answering "every definition here is already what this
+    host would write" over it would be claiming to have compared something it
+    never could.
+    """
+    if plan.unrecoverable:
+        entries = "entry" if len(plan.unrecoverable) == 1 else "entries"
+        reason = (
+            "every definition this run could recover is already what this host "
+            f"would write; {len(plan.unrecoverable)} recorded {entries} could "
+            "not be recovered and were left exactly as they stand"
+        )
+    else:
+        reason = _SETTLED_TAKEOVER_REASON
+    return {
+        "relocated": False,
+        "reason": reason,
+        "settled": list(plan.settled),
+        "unrecoverable": list(plan.unrecoverable),
+    }
+
+
+def _takes_over_in_place(install_dir: Path) -> bool:
+    """Whether this run's destination is the location the `~/Library`
+    installation is already at.
+
+    Asked only after `relocation_disposition` above has settled the platform
+    question and the destination, so this never decides *that* a host migrates
+    — it decides which shape that migration has.
+    """
+    return _same_location(install_dir, legacy_install_dir())
+
+
+@contextlib.contextmanager
+def _bound_to(install_dir: Path) -> Iterator[None]:
+    """This process describing the installation at `install_dir` for one
+    block, and describing whatever it described before once that block ends.
+
+    A takeover moves nothing, so where this process thinks the installation is
+    is the same before and after. What has to be this run's own is narrower:
+    the definitions it renders, compares and rewrites must be the ones *this
+    run's selection* would write. `--install-dir` is that selection, and an
+    inherited `KANBAN_DRAINER_INSTALL_DIR` naming somewhere else must decide
+    neither the bytes staleness is decided against nor which definitions come
+    out stale.
+
+    Scoped rather than pinned, which is the whole difference from
+    `_rebind_managed_paths` above: that one is how a relocation stops writing
+    to where the installation used to be, and a takeover has no used-to-be.
+    """
+    variable = kanban_config.DRAINER_INSTALL_DIR_ENV
+    previous = os.environ.get(variable)
+    os.environ[variable] = str(install_dir)
+    drain_prs_service.bind_managed_paths()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(variable, None)
+        else:
+            os.environ[variable] = previous
+        drain_prs_service.bind_managed_paths()
+
+
+@dataclass(frozen=True)
+class TakeoverPlan:
+    """Everything a takeover would do, decided before it does any of it, and
+    every recorded repository it accounted for on the way."""
+
+    install_dir: Path
+    log_root: Path
+    record: Path
+    legacy_log_root: Path
+    repositories: tuple[RelocationRepository, ...]
+    settled: tuple[str, ...]
+    unrecoverable: tuple[str, ...]
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "takeover": True,
+            "location": str(self.install_dir),
+            "record": str(self.record),
+            "log_root": str(self.log_root),
+            "legacy_log_root": str(self.legacy_log_root),
+            "repositories": [entry.report() for entry in self.repositories],
+            "settled": list(self.settled),
+            "unrecoverable": list(self.unrecoverable),
+        }
+
+
+def _definition_is_current(
+    entry: RelocationRepository, backend: service_manager.ServiceManagerBackend
+) -> bool:
+    """Whether this repository's installed definition is already the bytes
+    this host would write for it.
+
+    Compared as the rendered bytes rather than as any field inside them,
+    because the definition is an artifact a service manager reads whole: two
+    that differ anywhere differ to the manager, and `render_definition` is the
+    boundary the rest of this repository already treats as that contract. A
+    definition that cannot be read is not one this run may call settled, so it
+    is stale and gets rewritten.
+    """
+    job = drain_prs_service.job_for_identity(entry.checkout, entry.identity)
+    desired = backend.render_definition(drain_prs_service.service_definition(job))
+    try:
+        return entry.definition_path.read_bytes() == desired
+    except OSError:
+        return False
+
+
+def plan_takeover(install_dir: Path) -> TakeoverPlan:
+    """Which definitions at this location are not what this host would write,
+    and every reason the run that rewrites them will not.
+
+    Reads only, and reads *one* record: the location it would merge from is
+    the location it would merge into, so there is no second document and no
+    lock to hold between two of them.
+
+    A recorded repository that cannot be recovered exactly is neither refused
+    nor rewritten. `plan_relocation` above refuses over one because it goes on
+    to take the shared installation away and would strand it; this run takes
+    nothing apart, so such a repository is left precisely as it stands — and
+    an entry that cannot be recovered cannot be shown to be affected either,
+    which is the same reason the guards below see only the stale set. It is
+    reported rather than passed over silently.
+
+    Bound to `install_dir` for its whole span, because which definitions are
+    stale is decided against this run's own selection and not against an
+    inherited `KANBAN_DRAINER_INSTALL_DIR`. Re-entering that binding inside a
+    caller that already holds it changes nothing, which is what lets the
+    transition ask for the authoritative plan without spelling the selection a
+    second time.
+    """
+    with _bound_to(install_dir):
+        return _plan_takeover(install_dir)
+
+
+def _plan_takeover(install_dir: Path) -> TakeoverPlan:
+    backend = service_backend()
+    record = install_dir / record_name()
+    log_root = kanban_config.default_drainer_log_dir()
+    legacy_logs = legacy_log_root()
+    document = _read_record(record, "installed")
+    entries = document.get(drain_prs_service.RECORD_REPOSITORIES_KEY) or {}
+    remote_name = drain_prs_service.discovery_remote_name()
+    stale: list[RelocationRepository] = []
+    settled: list[str] = []
+    unrecoverable: list[str] = []
+    for identity, entry in sorted(entries.items(), key=lambda item: str(item[0])):
+        try:
+            recovered = _recover_repository(
+                identity,
+                entry,
+                backend=backend,
+                remote_name=remote_name,
+                install_dir=install_dir,
+                log_root=log_root,
+                legacy_dir=install_dir,
+                legacy_logs=legacy_logs,
+            )
+        except InstallError as exc:
+            unrecoverable.append(str(exc))
+            continue
+        if _definition_is_current(recovered, backend):
+            settled.append(recovered.identity)
+            continue
+        stale.append(recovered)
+    repositories = tuple(stale)
+    # Only over the stale set, which is what keeps this an ordinary install: a
+    # settled sibling is one this run does not touch, and refusing because its
+    # drainer is running would make every install on this host conditional on
+    # every other repository being idle.
+    _require_nothing_live(repositories, backend)
+    for entry in repositories:
+        _require_one_runtime_source(entry)
+        for kind, source, destination in entry.trees():
+            # Shape before collision, exactly as the relocation asks it: a
+            # path that is not a directory is not a tree this may move,
+            # wherever it sits. A log root that is its own destination answers
+            # `_same_tree` and is preserved in place rather than refused as an
+            # occupied destination.
+            _require_tree_shape(kind, source, entry.identity)
+            _require_tree_shape(kind, destination, entry.identity)
+            _require_no_tree_collision(kind, source, destination, entry.identity)
+    return TakeoverPlan(
+        install_dir=install_dir,
+        log_root=log_root,
+        record=record,
+        legacy_log_root=legacy_logs,
+        repositories=repositories,
+        settled=tuple(settled),
+        unrecoverable=tuple(unrecoverable),
+    )
+
+
+def _apply_takeover(
+    transition: _Transition, plan: TakeoverPlan
+) -> dict[str, Any]:
+    """Rewrite and reload exactly the stale definitions, carrying whichever
+    trees this host's own roots no longer name.
+
+    Nothing is removed and no record is written. The script links are already
+    at this location and the install that follows re-links them; the one
+    document here is the one that install's own record write locks for
+    itself.
+    """
+    backend = service_backend()
+    moves: list[_Move] = []
+    for entry in plan.repositories:
+        for _kind, source, destination in entry.trees():
+            move = _Move(source, destination)
+            moves.append(move)
+            if _move_is_real(move):
+                # The root this tree lands in, created through the transition
+                # rather than by the move, so a rollback takes back a root
+                # this run brought into existence. A run that moves nothing
+                # creates nothing, which is what keeps the settled case from
+                # leaving a directory behind.
+                _ensure_directory(transition, destination.parent)
+            _move_tree(transition, move)
+        _rewrite_definition(transition, entry, backend)
+    return {
+        "relocated": False,
+        **plan.report(),
+        "moved": [
+            {
+                "source": str(move.source),
+                "destination": str(move.destination),
+                "how": move.outcome,
+            }
+            for move in moves
+            if move.outcome != "unstarted"
+        ],
+        "rewritten": [str(entry.definition_path) for entry in plan.repositories],
+    }
+
+
+def take_over(install_dir: Path) -> dict[str, Any]:
+    """Bring an installation already at this platform's own location up to
+    what this host would write, or report that it already is.
+
+    The settled case is the ordinary one and is what a second run of this
+    installer sees: nothing is stale, so no document is read a second time, no
+    tree moves, no lock is taken, and the answer is the same
+    nothing-migrated answer a host with no `~/Library` installation gets —
+    carrying, as `_settled_takeover` explains, everything the plan accounted
+    for on the way there.
+
+    When something is stale, the one record's own lock is held across the
+    rewrite. That is not the pair of locks a relocation holds between two
+    records — there is only one record here, and this run never writes it —
+    but the lock a controller installing or uninstalling one of these very
+    definitions holds while it does, and the lock that makes the controller
+    fence below sound: a controller takes its own lock inside a record-locked
+    startup transaction, so one either held it before this started or cannot
+    take it at all.
+    """
+    with _bound_to(install_dir):
+        preflight = plan_takeover(install_dir)
+        if not preflight.repositories:
+            return _settled_takeover(preflight)
+        # Captured before the lock, because taking one chmods the directory
+        # holding the record: a refusal raised once it is held must still
+        # leave this host as it was found.
+        modes = _captured_modes(install_dir)
+        transition = _Transition()
+        try:
+            with drain_prs_service.document_lock(preflight.record):
+                with contextlib.ExitStack() as stack:
+                    fences = _Fences(stack)
+                    # Before the authoritative plan, whose own liveness check
+                    # is a read: a drainer starting one instant after it would
+                    # be one this run never saw.
+                    for entry in preflight.repositories:
+                        fences.hold_checkout(entry)
+                    plan = plan_takeover(install_dir)
+                    _require_every_checkout_fenced(
+                        plan.repositories, fences.checkouts
+                    )
+                    for entry in plan.repositories:
+                        fences.hold_controllers(entry)
+                    if not plan.repositories:
+                        return _settled_takeover(plan)
+                    try:
+                        return _apply_takeover(transition, plan)
+                    except BaseException as exc:
+                        residue = transition.roll_back() + _restore_modes(modes)
+                        detail = "; ".join(residue)
+                        raise RelocationFailed(
+                            "Taking over the PR drainer installation at "
+                            f"{plan.install_dir} failed and was rolled back: "
+                            f"{exc}"
+                            + (
+                                f" The rollback could not complete: {detail}."
+                                if residue
+                                else ""
+                            ),
+                            residue,
+                        ) from exc
+        except BaseException:
+            # A refusal raised once the lock was held leaves the directory
+            # holding the record at the mode it was found with. Idempotent, so
+            # the rollback above having already done it costs nothing.
+            _restore_modes(modes)
+            raise
+
+
+def relocation_preview(install_dir: Path) -> dict[str, Any]:
+    """What a run would do about a pre-XDG `~/Library` installation, having
+    done none of it.
+
+    One answer for the dry run, resolved through the same disposition and the
+    same plans the real run uses, so the two can never describe this host
+    differently.
+    """
+    disposition = relocation_disposition(install_dir)
+    if disposition is not None:
+        return {"relocated": False, "reason": disposition}
+    if _takes_over_in_place(install_dir):
+        plan = plan_takeover(install_dir)
+        if not plan.repositories:
+            return _settled_takeover(plan)
+        return {"relocated": False, "dry_run": True, **plan.report()}
+    return {
+        "relocated": False,
+        "dry_run": True,
+        **plan_relocation(install_dir).report(),
+    }
+
+
 def relocate(install_dir: Path, sources: dict[str, Path]) -> dict[str, Any]:
     """Move a pre-XDG `~/Library` installation to this platform's own
     convention, whole, or leave the host as it was found.
+
+    The one entry point for both shapes a migration has. A destination that is
+    the location the installation is already at has nothing to move, and
+    `take_over` above is what such a run does instead; everything below is the
+    relocating case.
 
     Exactly as it was found, in the case that matters: every refusal is raised
     before a lock is taken, so a run that refuses changes nothing at all. A run
@@ -2408,6 +2802,11 @@ def relocate(install_dir: Path, sources: dict[str, Path]) -> dict[str, Any]:
     disposition = relocation_disposition(install_dir)
     if disposition is not None:
         return {"relocated": False, "reason": disposition}
+    if _takes_over_in_place(install_dir):
+        # The destination is the location the installation is already at, so
+        # there is no source to move from: what this host takes over is the
+        # definitions there, and only the ones it would write differently.
+        return take_over(install_dir)
     backend = service_backend()
     # Planned once without either lock, so an ordinary refusal never takes one
     # — the locks are for the transition that removes something, and a run
@@ -2630,16 +3029,7 @@ def install(
         # Planned rather than performed, and outside the legacy record's lock:
         # a dry run removes nothing, so it takes no lock, and it still reports
         # every refusal because the plan is what refuses.
-        disposition = relocation_disposition(install_dir)
-        relocation = (
-            {"relocated": False, "reason": disposition}
-            if disposition is not None
-            else {
-                "relocated": False,
-                "dry_run": True,
-                **plan_relocation(install_dir).report(),
-            }
-        )
+        relocation = relocation_preview(install_dir)
         return {
             "installed": False,
             "dry_run": True,
@@ -2662,7 +3052,9 @@ def install(
     # installation split across two locations. It installs the same four links
     # itself when it does run, so that the definitions it rewrites name a
     # controller that is already there; the idempotent pass below then reports
-    # them unchanged.
+    # them unchanged. A takeover installs none, because the controller its
+    # definitions name is the one already at this location — the same pass
+    # below re-links it.
     relocation = relocate(install_dir, sources)
     # Before any of this run's own writes, because a relocation that ended with
     # durable state in two places is not an install that may go on to report
