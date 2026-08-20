@@ -68,6 +68,16 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   repositories; and fake `gh`, `codex`, and `claude` executables placed on a temporary
   `PATH`.
 - Never open or push to a pull request over a failing gate you selected.
+- A workflow command or skill Markdown file is the program an agent executes, so an
+  edit under `claude-plugin/` or `codex-plugin/` is a behavior change and takes a
+  regression assertion like any other. `WriteLocationTests` in
+  `tools/test_drafting_workflow_contract.py` is the pattern: the rules asserted against
+  every asset that owes them, plus a negative control over the assets that delegate
+  instead, so a rule matching everything cannot pass while asserting nothing.
+- Editing a list, tuple, or table means auditing the whole file for prose that counts or
+  describes it, not just the diff. A module docstring saying "the eleven documents" sat
+  seventy lines above the tuple it described, and stayed wrong through several changes
+  that grew it.
 
 ## Source layout
 
