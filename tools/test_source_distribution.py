@@ -154,6 +154,7 @@ EXCLUDED_TRACKED_PATHS = (
     "docs/issue_search_design.md",
     "docs/linux_portability_design.md",
     "docs/managed_paths_design.md",
+    "docs/model_settings_design.md",
     "docs/multi_repo_boards_design.md",
     "docs/pipeline-hardening.md",
     "docs/product_readiness_findings.md",
