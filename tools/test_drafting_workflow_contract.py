@@ -90,6 +90,42 @@ ISSUE_CREATING_ASSETS = {
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md": "codex",
 }
 
+# Issue-creating drafting assets that must state where a file may be written.
+# These workflows file through `gh` and draft in chat, so their only filesystem
+# write is the `--body-file` temp file; the rules below keep that write out of a
+# checkout, and route a genuine in-repository write to the `docs-wip` worktree
+# the PR drainer does not fast-forward and autostash.
+#
+# `autoissue` is exempt by delegation rather than by omission: §1 of both its
+# assets runs `/issue` and states that it "does not replace either contract",
+# so it inherits these rules instead of restating them. A restated copy there
+# could drift from the one it delegates to.
+#
+# The Codex `issue` skill is NOT yet covered. It writes a `--body-file` the same
+# way and carries no such section, so this tuple is deliberately Claude-only
+# until that asset states the rules too -- a known gap recorded here rather than
+# a principled exemption.
+WRITE_LOCATION_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/issue.md",
+    "claude-plugin/plugins/kanban/commands/draft-issues.md",
+)
+
+# Lowercase: compared against canonical() output, so reflowing the paragraph or
+# bolding a phrase does not fail CI. Each rule is operational rather than
+# decorative -- dropping any one of them puts a file somewhere a drainer
+# autostash or an unreachable publication lane can lose it.
+WRITE_LOCATION_RULES = (
+    # The only write these workflows make, and where it goes.
+    "its one filesystem write is the --body-file temp file",
+    "put that under the system temp directory, never inside a checkout",
+    # Where a genuine in-repository write goes instead.
+    "write it there rather than the primary checkout",
+    # By branch, because a hard-coded path is wrong in every other checkout.
+    "resolve it by branch, never a hard-coded path",
+    # And the repositories that do not use the convention at all.
+    "a repository with no docs-wip worktree does not use this convention",
+)
+
 AUTOISSUE_ASSETS = {
     "claude-plugin/plugins/kanban/commands/autoissue.md": "/",
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md": "$",
@@ -520,6 +556,68 @@ class DocumentedBoundaryTests(unittest.TestCase):
 
     def test_document_states_the_haskell_parity_exclusion(self):
         self.assertIn("user- or daemon-invoked, never spawned by Kanban's own CLI", self.text)
+
+
+class WriteLocationTests(unittest.TestCase):
+    """Where an issue-drafting workflow is allowed to put a file.
+
+    These workflows create issues through `gh` and present drafts in chat, so
+    the only file they write is the `--body-file` temp file. Nothing said so,
+    and nothing said where a file belonged if a step ever did need one, which
+    is how a findings report reached a checkout no publication mechanism could
+    read and how uncommitted work reached the primary checkout the PR drainer
+    fast-forwards and autostashes after every merge.
+
+    There is no behavioral prompt-testing harness here, so the reviewable
+    property is the asset text itself, exactly as ScopeGateTests treats issue
+    #116's gate rules.
+    """
+
+    def setUp(self):
+        self.assets = {
+            path: canonical((REPO_ROOT / path).read_text(encoding="utf-8"))
+            for path in WRITE_LOCATION_ASSETS
+        }
+
+    def test_every_write_location_asset_states_every_rule(self):
+        missing = []
+        for path in WRITE_LOCATION_ASSETS:
+            for rule in WRITE_LOCATION_RULES:
+                if rule not in self.assets[path]:
+                    missing.append(f"{path}: missing write-location rule {rule!r}")
+        self.assertEqual(missing, [], "\n".join(missing))
+
+    def test_dropping_a_rule_from_an_asset_is_reported(self):
+        # The property under test is that removal fails, not merely that the
+        # text happens to be present today. Each rule is deleted in turn from a
+        # copy of each asset and the same check must catch it, so a future edit
+        # cannot quietly drop one and stay green.
+        for path in WRITE_LOCATION_ASSETS:
+            for rule in WRITE_LOCATION_RULES:
+                mutated = self.assets[path].replace(rule, "")
+                self.assertNotIn(
+                    rule,
+                    mutated,
+                    f"{path}: {rule!r} survived its own removal, so this check "
+                    "would not notice the edit",
+                )
+
+    def test_the_rules_are_not_vacuous(self):
+        # A rule that matched every asset in the tree would pass the check above
+        # while asserting nothing. autoissue delegates to /issue and the Codex
+        # issue skill does not carry the section, so both must fail these rules.
+        for path in (
+            "claude-plugin/plugins/kanban/commands/autoissue.md",
+            "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
+        ):
+            text = canonical((REPO_ROOT / path).read_text(encoding="utf-8"))
+            for rule in WRITE_LOCATION_RULES:
+                self.assertNotIn(
+                    rule,
+                    text,
+                    f"{path} now states {rule!r}; add it to WRITE_LOCATION_ASSETS "
+                    "so the rule is enforced there rather than silently exempt",
+                )
 
 
 class ScopeGateTests(unittest.TestCase):
