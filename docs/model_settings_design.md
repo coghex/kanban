@@ -329,9 +329,10 @@ and the review tool registry all resolve through it. The existing Codex
 app-server client (`Review.hs` and its seams) becomes the Codex
 implementation; a new Claude embedded-review backend (mechanism Q-12,
 deliberately open) becomes the Claude one, closing the last single-protocol
-component. The nested revision tool registers per loaded provider, so a
-Codex-only install simply routes revisions to Codex instead of carrying a
-dead Claude tool. This interface is deliberately the seed of the future
+component. The nested revision tool is Claude-only (D-14) and registers only
+when Claude is loaded: a Codex-only install carries no revision tool at all,
+and its review thread performs revisions itself rather than delegating to a
+nested spawn. This interface is deliberately the seed of the future
 plugin arc: an external provider manifest system would populate exactly this
 record at load time instead of compiling it in, which is why that arc can be
 separate without rework here.
@@ -872,9 +873,10 @@ concrete proposal before any implementation.
 
 - **Outcome:** the embedded issue review runs on Claude through its adapter
   backend, with the review tool registry (the `gh` runner; the nested
-  revision tool registered per loaded provider) and transcript/diagnostic
-  parity with the Codex path; a Claude-only install keeps the embedded
-  review action.
+  revision tool registered only when Claude is loaded, per D-14 — a
+  Codex-only install carries no revision tool and revises inside the review
+  thread) and transcript/diagnostic parity with the Codex path; a
+  Claude-only install keeps the embedded review action.
 - **Scope:** the backend per Q-12's resolution, tool availability, failure
   vocabulary parity through `Review.Diagnostics`, and fake-executable tests
   mirroring the Codex client's coverage.
