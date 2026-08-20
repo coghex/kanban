@@ -55,7 +55,7 @@ None is tracked here, and the two brand copies have already diverged:
 | `backlog-review` | 30 | 46 | 29 |
 | `drain-prs` | 94 | 77 | 123 |
 | `finalize` | 23 | absent | — |
-| `janitor` | 22 | 24 | 8 |
+| `janitor` | 23 | 25 | 8 |
 | `project-review` | 79 | 220 | **223** |
 | `retriage` | 179 | 179 | 10 |
 | `triage` | 161 | 152 | 17 |
@@ -394,8 +394,10 @@ Arc-level signals:
 - **Depends on:** `VEND-0`, `VEND-5`
 - **Ordering:** `not on the critical path`
 - **Relevant decisions:** D-1, D-2, D-4, D-5, D-7
-- **Acceptance signals:** a janitor run reports stale claims, zombie worktrees
-  and orphan branches, and cleans up only what was approved.
+- **Acceptance signals:** a janitor run reports stale claims, zombie worktrees,
+  orphan branches, and abandoned stashes — each stash classified as fully
+  landed, holding unlanded content, or contradicted by current behavior — and
+  cleans up only what was approved.
 - **Out of scope:** changing what counts as a stale signal.
 - **Open questions:** `None`
 
