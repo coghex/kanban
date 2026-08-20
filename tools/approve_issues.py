@@ -2248,15 +2248,51 @@ def approval_reconciliation_decision(
                 f"{marker.get('comment_url')}"
             ),
         }
-    matched = review_record_matches(
-        comments,
-        record,
+    if record is None:
+        # No marker at all is a genuine mismatch, not an unverifiable one: the
+        # label is backed by nothing.
+        return {
+            "kind": "stale",
+            "detail": "no opposite-agent v2 review marker exists for this issue",
+        }
+    # Deliberately not `review_record_matches`, which converts a record it
+    # cannot resolve -- an unknown `mode`, a rereview marker with no matching
+    # parent, a trigger disagreeing with its parent's verdicts -- into the same
+    # False a specification mismatch produces. The gate is right to refuse both,
+    # but only one of them is evidence that the approval went stale, and
+    # removing a label because a record could not be *read* is a fail-open
+    # mutation. Resolving the reviewers first is what keeps the two apart, and
+    # the comparison below is still `marker_matches` on the same inputs, so
+    # this is the one freshness calculation rather than a second.
+    try:
+        reviewers = expected_reviewers_for_record(
+            comments,
+            record,
+            origin=origin,
+            legacy_policy=legacy_policy,
+        )
+    except ApproveError as exc:
+        return {
+            "kind": "unverified",
+            "detail": (
+                "the latest review marker's record could not be resolved "
+                f"({exc}), so it cannot be compared against this specification"
+            ),
+        }
+    if not reviewers:
+        return {
+            "kind": "unverified",
+            "detail": (
+                "the latest review marker's record resolves to no reviewer, so "
+                "it cannot be compared against this specification"
+            ),
+        }
+    matched = marker_matches(
+        marker,
         spec_sha=spec_fingerprint(issue, comments),
         origin=origin,
-        legacy_policy=legacy_policy,
+        reviewers=reviewers,
     )
-    if matched and marker is not None and marker.get("verdict") == "APPROVE":
-        return {"kind": "current"}
     if not matched:
         return {
             "kind": "stale",
@@ -2265,6 +2301,8 @@ def approval_reconciliation_decision(
                 "specification"
             ),
         }
+    if marker is not None and marker.get("verdict") == "APPROVE":
+        return {"kind": "current"}
     return {
         "kind": "stale",
         "detail": (

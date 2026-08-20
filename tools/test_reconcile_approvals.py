@@ -365,6 +365,91 @@ class NotStaleRefusalTests(ReconcileHarness):
         self.assertIn("issuecomment", entry["detail"])
         self.assertEqual(self.edits(), [])
 
+    def test_an_unresolvable_record_is_unverified_rather_than_stale(self):
+        # review_record_matches turns a record it cannot resolve into the same
+        # False a specification mismatch produces. The gate refuses both, but
+        # only one is evidence the approval went stale: removing a label
+        # because a record could not be *read* is a fail-open mutation. Here
+        # the marker's spec, origin, route and models all match and only its
+        # `mode` is unknown, so a predicate keyed on the collapsed False would
+        # delete a valid approval.
+        issue = make_issue(7, labels=["reviewed:approve"])
+        marker = current_marker_for(issue)
+        marker["body"] = marker["body"].replace("mode=initial", "mode=sideways")
+        self.state(7, issue, [marker])
+
+        result = self.run_reconcile([7])
+
+        entry = self.entry(result, 7)
+        self.assertEqual(entry["outcome"], "unverified")
+        self.assertFalse(entry["label_removed"])
+        self.assertIsNone(entry["approved"])
+        self.assertIn("could not be resolved", entry["detail"])
+        self.assertEqual(self.edits(), [])
+
+    def test_a_rereview_marker_without_its_parent_is_unverified(self):
+        issue = make_issue(7, labels=["reviewed:approve"])
+        marker = current_marker_for(issue)
+        marker["body"] = marker["body"].replace("mode=initial", "mode=rereview")
+        self.state(7, issue, [marker])
+
+        result = self.run_reconcile([7])
+
+        entry = self.entry(result, 7)
+        self.assertEqual(entry["outcome"], "unverified")
+        self.assertFalse(entry["label_removed"])
+        self.assertEqual(self.edits(), [])
+
+    def test_no_marker_at_all_is_still_a_removal(self):
+        # The fix above must not widen into "anything unresolved is spared": a
+        # label backed by nothing is exactly the false-ready signal this mode
+        # exists to correct.
+        issue = make_issue(7, labels=["reviewed:approve"])
+        self.state(7, issue, [])
+        self.state(7, make_issue(7, labels=[]), [])
+
+        result = self.run_reconcile([7])
+
+        entry = self.entry(result, 7)
+        self.assertEqual(entry["outcome"], "removed")
+        self.assertTrue(entry["label_removed"])
+        self.assertIn("no opposite-agent v2 review marker exists", entry["detail"])
+
+    def test_a_genuine_specification_mismatch_is_still_a_removal(self):
+        issue = make_issue(7, labels=["reviewed:approve"])
+        self.state(7, issue, [marker_comment("0" * 64)])
+        self.state(7, make_issue(7, labels=[]), [marker_comment("0" * 64)])
+
+        result = self.run_reconcile([7])
+
+        entry = self.entry(result, 7)
+        self.assertEqual(entry["outcome"], "removed")
+        self.assertIn("matches this specification", entry["detail"])
+
+    def test_a_wrong_reviewer_route_is_still_a_removal(self):
+        issue = make_issue(7, labels=["reviewed:approve"])
+        spec = approve_issues.spec_fingerprint(issue, [])
+        # A claude-origin issue routes to codex; a marker claiming claude
+        # reviewed it is a route mismatch, which is an explicit removal cause.
+        self.state(7, issue, [marker_comment(spec, reviewers="claude")])
+        self.state(7, make_issue(7, labels=[]), [marker_comment(spec, reviewers="claude")])
+
+        result = self.run_reconcile([7])
+
+        self.assertEqual(self.entry(result, 7)["outcome"], "removed")
+
+    def test_a_current_marker_with_a_non_approve_verdict_is_removed(self):
+        issue = make_issue(7, labels=["reviewed:approve"])
+        marker = current_marker_for(issue, verdict="CHANGES_REQUESTED")
+        self.state(7, issue, [marker])
+        self.state(7, make_issue(7, labels=[]), [marker])
+
+        result = self.run_reconcile([7])
+
+        entry = self.entry(result, 7)
+        self.assertEqual(entry["outcome"], "removed")
+        self.assertIn("not APPROVE", entry["detail"])
+
     def test_an_unlabeled_issue_is_left_alone(self):
         issue = make_issue(7, labels=["bug"])
         self.state(7, issue, [])

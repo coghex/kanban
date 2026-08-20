@@ -368,15 +368,25 @@ reimplement the removal, and `--check` remains read-only.
   call and writes nothing to stdout. It performs **no** model call — the
   `MODEL_INVOCATIONS` counter reads zero across a run — publishes no review
   comment, and manufactures no verdict.
-- **Decision.** An approval label is removed only when the mismatch is one of
-  specification, origin, reviewer route, or accepted model, or when a marker
-  that does match carries a verdict other than `APPROVE`. The decision comes
-  from the same `review_record_matches` result and marker `verdict` value
-  `current_gate_status` keys on, never from its human-readable `reasons`
-  strings, and there is no second freshness calculation. Repository-base
-  movement alone never invalidates an approval: `marker_matches` compares
-  `spec`, `origin`, `reviewers`, and `models` and never reads a marker's
-  `base=`, which stays supporting review context.
+- **Decision.** An approval label is removed only when no marker exists at all,
+  when the mismatch is one of specification, origin, reviewer route, or accepted
+  model, or when a marker that does match carries a verdict other than
+  `APPROVE`. The decision comes from the `marker_matches` comparison and the
+  marker `verdict` value `current_gate_status` itself keys on, never from that
+  function's human-readable `reasons` strings, and there is no second freshness
+  calculation. Repository-base movement alone never invalidates an approval:
+  `marker_matches` compares `spec`, `origin`, `reviewers`, and `models` and
+  never reads a marker's `base=`, which stays supporting review context.
+
+  The reviewer set is resolved through `expected_reviewers_for_record` *before*
+  that comparison rather than through `review_record_matches`, which collapses a
+  record it cannot resolve — an unknown `mode`, a rereview marker with no
+  matching parent, a trigger disagreeing with its parent's verdicts — into the
+  same `False` a specification mismatch produces. The gate is right to refuse
+  both, but only one of them is evidence that an approval went stale: removing a
+  label because a record could not be *read* is a fail-open mutation. An
+  unresolvable record, or one resolving to no reviewer, is reported as
+  unverified and mutates nothing.
 - **What is never a removal cause.** An emptied reviewer set — unmarked legacy
   provenance under `--legacy-policy hold` — makes `marker_matches` answer False
   for *every* marker including a current one, so it is reported as unverified
