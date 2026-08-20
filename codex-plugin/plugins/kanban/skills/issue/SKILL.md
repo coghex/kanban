@@ -37,6 +37,16 @@ Body template (match the tracker's existing style if it differs): title in the i
 
 **Signoff — STOP:** Present the draft exactly as it will be posted: title, proposed labels (existing labels only — check `gh label list`), and the full body verbatim. Below it, three short notes: evidence (why it's real, one or two sentences), dedup (nearest existing issue and why this is different), runners-up (one line each, listing any gate-deferred candidate with the gate that deferred it, so asking for one overrides the deferral). Then STOP and wait. **Do NOT run `gh issue create` until the user explicitly approves.** If they ask for changes, revise and re-present the full body.
 
+**Where files go:** This workflow files through `gh` and drafts in chat; it should not write into the repository at all. Its one filesystem write is the `--body-file` temp file — put that under the system temp directory, never inside a checkout. If a step ever does need a file in the repo, and that repo keeps a `docs-wip` worktree, write it there rather than the primary checkout: a PR drainer fast-forwards the primary after every merge and autostashes whatever it finds, and a restore that conflicts leaves unmerged index entries and wedges post-merge cleanup until a human clears them. Resolve it by BRANCH, never a hard-coded path:
+
+```bash
+DOCS_WT="$(git worktree list --porcelain \
+  | awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/docs-wip$/{print p; exit}')"
+[ -n "$DOCS_WT" ] || DOCS_WT="$(git rev-parse --show-toplevel)"
+```
+
+A repository with no `docs-wip` worktree does not use this convention — the fallback returns its own primary checkout and you proceed normally.
+
 **Create:** Only after approval: ensure the final body still ends with `<!-- issue-origin:codex -->`, write it to a temp file, then `gh issue create --title "..." --body-file <file> --label "..."`. Report the issue number and URL in one line. (Only possible if the current Codex session has write/network access — the default read-only sandbox can't call `gh issue create`; if sandboxed, hand the user the exact command instead.)
 
 **Ambiguity:** If anything is unclear or you'd be guessing, stop and ask in plain text — no assumptions.

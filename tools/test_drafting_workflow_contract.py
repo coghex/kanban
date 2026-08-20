@@ -96,18 +96,28 @@ ISSUE_CREATING_ASSETS = {
 # checkout, and route a genuine in-repository write to the `docs-wip` worktree
 # the PR drainer does not fast-forward and autostash.
 #
+# Both brands' issue-drafting assets are covered. The Codex `issue` skill writes
+# a `--body-file` exactly as its Claude twin does, and
+# docs/drafting-workflow-contract.md §2 declares the two as paired assets, so a
+# rule stated in only one of them is the cross-brand drift
+# tools/test_coordinator_parity.py exists to prevent for review_pr.py.
+# Claude-only `/draft-issues` has no Codex counterpart to pair with.
+#
 # `autoissue` is exempt by delegation rather than by omission: §1 of both its
 # assets runs `/issue` and states that it "does not replace either contract",
 # so it inherits these rules instead of restating them. A restated copy there
 # could drift from the one it delegates to.
-#
-# The Codex `issue` skill is NOT yet covered. It writes a `--body-file` the same
-# way and carries no such section, so this tuple is deliberately Claude-only
-# until that asset states the rules too -- a known gap recorded here rather than
-# a principled exemption.
+# The negative control for WRITE_LOCATION_RULES: both brands' autoissue assets
+# delegate to their /issue and must never restate these rules.
+DELEGATING_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/autoissue.md",
+    "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
+)
+
 WRITE_LOCATION_ASSETS = (
     "claude-plugin/plugins/kanban/commands/issue.md",
     "claude-plugin/plugins/kanban/commands/draft-issues.md",
+    "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
 )
 
 # Lowercase: compared against canonical() output, so reflowing the paragraph or
@@ -604,20 +614,25 @@ class WriteLocationTests(unittest.TestCase):
 
     def test_the_rules_are_not_vacuous(self):
         # A rule that matched every asset in the tree would pass the check above
-        # while asserting nothing. autoissue delegates to /issue and the Codex
-        # issue skill does not carry the section, so both must fail these rules.
-        for path in (
-            "claude-plugin/plugins/kanban/commands/autoissue.md",
-            "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
-        ):
+        # while asserting nothing. Both autoissue assets delegate to their
+        # brand's /issue and must not restate these rules, so they are the
+        # negative control that keeps the tuple meaningful.
+        #
+        # The failure is reported as a plain list rather than through assertIn:
+        # these assets canonicalize to thousands of characters, and a membership
+        # assertion dumps the whole text into the report, burying the one line
+        # that says what to do about it.
+        offenders = []
+        for path in DELEGATING_ASSETS:
             text = canonical((REPO_ROOT / path).read_text(encoding="utf-8"))
             for rule in WRITE_LOCATION_RULES:
-                self.assertNotIn(
-                    rule,
-                    text,
-                    f"{path} now states {rule!r}; add it to WRITE_LOCATION_ASSETS "
-                    "so the rule is enforced there rather than silently exempt",
-                )
+                if rule in text:
+                    offenders.append(
+                        f"{path} now states {rule!r}; add it to "
+                        "WRITE_LOCATION_ASSETS so the rule is enforced there "
+                        "rather than silently exempt"
+                    )
+        self.assertEqual(offenders, [], "\n".join(offenders))
 
 
 class ScopeGateTests(unittest.TestCase):
