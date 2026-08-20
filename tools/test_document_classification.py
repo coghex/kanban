@@ -45,11 +45,19 @@ KANBAN_REPOSITORY_KEY = "coghex/kanban"
 
 CLASSES = ("coordination", "pr-atomic")
 
-# §7's reason vocabulary. `audit-report` is the only one that admits the
-# coordination lane; the other three are the ways a document can be coupled to
-# the tree tightly enough that changing it alone can break something.
-REASONS = ("test-parsed", "release-document", "implementation-coupled", "audit-report")
-COORDINATION_REASON = "audit-report"
+# §7's reason vocabulary. `audit-report` and `coordination-note` are the only
+# two that admit the coordination lane — the ledgered reports and the
+# free-form notes under docs/coordination/ (issue #409) — and the other three
+# are the ways a document can be coupled to the tree tightly enough that
+# changing it alone can break something.
+REASONS = (
+    "test-parsed",
+    "release-document",
+    "implementation-coupled",
+    "audit-report",
+    "coordination-note",
+)
+COORDINATION_REASONS = ("audit-report", "coordination-note")
 
 # The documents a tracked test reads as data, and what reads each. Pinned
 # rather than discovered: a grep for a path in a test module also hits the
@@ -81,13 +89,14 @@ TEST_PARSED_PATHS = {
     "tools/",
 }
 
-# The coordination documents §7 names in prose, so a contributor can place
+# The coordination declarations §7 names in prose, so a contributor can place
 # a known document without reading the machine-readable rows. Reconciled
 # against those rows below: the prose is the human-readable answer, and it must
-# not be able to drift from the one the check enforces. The count word is
-# matched loosely so adding a report only updates the sentence, not this regex.
+# not be able to drift from the one the check enforces. The sentence carries no
+# count — a count would go stale the moment a note landed under a directory
+# row (issue #409) — so what is compared is the set of backticked paths.
 PROSE_COORDINATION_SENTENCE_RE = re.compile(
-    r"The \w+ `coordination` documents are\s+(?P<body>.*?)\.\s*\*\*Every other",
+    r"The `coordination` documents are\s+(?P<body>.*?)\.\s*\*\*Every other",
     re.DOTALL,
 )
 
@@ -135,6 +144,13 @@ CONTRACT_STATEMENTS = {
     ),
     "component-boundary": "matched by whole path component rather than by string prefix",
     "assets-are-not-documents": "it classifies documents, not bundle assets",
+    # Issue #409: the release exclusion and the drainer read a directory
+    # declaration over every tracked descendant, deliberately, while the rows
+    # classify tracked Markdown alone — recorded so the difference cannot be
+    # read as drift between the row and the configuration.
+    "wider-coverage-is-deliberate": (
+        "covers every tracked descendant whatever its extension"
+    ),
 }
 
 CLAUDE_MD_STATEMENTS = {
@@ -208,21 +224,81 @@ def configured_coordination_paths(config, raw, key=KANBAN_REPOSITORY_KEY):
     return set(config.resolve_config(key, raw).workflow.coordination_paths)
 
 
-def coordination_drift(configured, coordination_rows):
-    """(configured but unclassified, classified but unconfigured). Empty on both
-    sides is the only agreement between §7's rows and the example override."""
+def declared_coverage(declared_paths, markdown_paths):
+    """The tracked Markdown paths `declared_paths` covers — §7's own subject,
+    which is the set the rows and the configured entries are reconciled over.
+    The release and drainer consumers deliberately cover more (every tracked
+    descendant of a directory declaration, whatever its extension); §7 records
+    that difference, and this comparison stays on the classification's side of
+    it."""
+    return {path for path in markdown_paths if matching_rows(declared_paths, path)}
+
+
+def coordination_drift(configured, coordination_rows, markdown_paths):
+    """(covered by configuration but by no coordination row, covered by a row
+    but by no configured entry), over the tracked Markdown inventory. Empty on
+    both sides is the only agreement between §7's rows and the example
+    override — compared as effective coverage rather than set membership, so
+    the `docs/coordination/` row and the identical configured entry agree
+    without either side enumerating the directory's children (issue #409)."""
+    configured_cover = declared_coverage(configured, markdown_paths)
+    row_cover = declared_coverage(coordination_rows, markdown_paths)
     return (
-        sorted(set(configured) - set(coordination_rows)),
-        sorted(set(coordination_rows) - set(configured)),
+        sorted(configured_cover - row_cover),
+        sorted(row_cover - configured_cover),
     )
 
 
+def undeclared_configured_entries(configured, coordination_rows):
+    """Configured entries that are not themselves §7 coordination
+    declarations, sorted.
+
+    Coverage over tracked Markdown cannot see these: a configured `src/`
+    covers no tracked Markdown and overlaps no test-parsed declaration, so
+    both comparisons stay silent — yet the drainer reads the entry over every
+    file, and would treat a `src/Kanban/Domain.hs` advance as
+    coordination-only. The declaration strings are the subject here, so the
+    check is exact while still naming a directory as one string with no child
+    enumerated."""
+    return sorted(set(configured) - set(coordination_rows))
+
+
+def declarations_overlap(one: str, other: str) -> bool:
+    """Whether two declarations cover any common path: either names the other
+    exactly, or a directory declaration covers the other's anchor."""
+    return row_covers(one, other.rstrip("/")) or row_covers(other, one.rstrip("/"))
+
+
 def configured_test_parsed_paths(configured, declared=TEST_PARSED_PATHS):
-    """Configured coordination paths a tracked test reads as data. Matched
-    through row_covers() rather than by set intersection, because two of the
-    declared entries are directory rows: a bundle document listed by its own
-    path would slip past `in TEST_PARSED_PATHS`."""
-    return sorted(path for path in configured if matching_rows(declared, path))
+    """Configured coordination entries that overlap content a tracked test
+    reads as data, in either direction: a test-parsed declaration covering the
+    configured entry (a bundle document listed by its own path would slip past
+    `in TEST_PARSED_PATHS`), or a configured directory covering a test-parsed
+    declaration — a broad entry such as `docs/` covers `docs/design.md`
+    without being covered by anything (issue #409)."""
+    return sorted(
+        path
+        for path in configured
+        if any(declarations_overlap(path, parsed) for parsed in declared)
+    )
+
+
+def invalid_coordination_lane_reasons(rows):
+    """Rows whose class and reasons disagree about the coordination lane, with
+    the stray reasons: a `coordination` row citing anything outside
+    `audit-report`/`coordination-note`, or a `pr-atomic` row citing either of
+    them. Both halves matter — without the second, a coordination reason could
+    quietly spread to documents that must not publish directly."""
+    violations = {}
+    for path, row in sorted(rows.items()):
+        cited = set(row["reasons"])
+        if row["klass"] == "coordination":
+            stray = sorted(cited - set(COORDINATION_REASONS))
+        else:
+            stray = sorted(cited & set(COORDINATION_REASONS))
+        if stray:
+            violations[path] = stray
+    return violations
 
 
 def tracked_markdown(repo_root=REPO_ROOT):
@@ -358,16 +434,42 @@ class ClassificationShapeTests(unittest.TestCase):
             for reason in row["reasons"]:
                 self.assertIn(reason, REASONS, path)
 
-    def test_the_audit_report_reason_is_exactly_the_coordination_lane(self):
-        # The two halves of §7's "this is the only reason that admits the
-        # coordination lane": a coordination row cites nothing else, and no
-        # pr-atomic row cites it. Without the second half the reason could
-        # quietly spread to documents that must not publish directly.
-        for path, row in sorted(self.rows.items()):
-            if row["klass"] == "coordination":
-                self.assertEqual(row["reasons"], [COORDINATION_REASON], path)
-            else:
-                self.assertNotIn(COORDINATION_REASON, row["reasons"], path)
+    def test_the_coordination_reasons_are_exactly_the_coordination_lane(self):
+        # The two halves of §7's "audit-report and coordination-note are the
+        # only reasons that admit the coordination lane": a coordination row
+        # cites nothing outside that pair, and no pr-atomic row cites either.
+        # Without the second half a coordination reason could quietly spread
+        # to documents that must not publish directly.
+        self.assertEqual(invalid_coordination_lane_reasons(self.rows), {})
+
+    def test_a_lane_reason_violation_is_reported_in_both_directions(self):
+        # The check above is load-bearing rather than decorative: a planted
+        # coordination row citing a pr-atomic reason, and a planted pr-atomic
+        # row citing either coordination reason, are each named.
+        def planted(path, klass, reasons):
+            return {path: {"path": path, "klass": klass, "reasons": reasons}}
+
+        self.assertEqual(
+            invalid_coordination_lane_reasons(
+                planted("docs/x.md", "coordination", ["release-document"])
+            ),
+            {"docs/x.md": ["release-document"]},
+        )
+        for reason in COORDINATION_REASONS:
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    invalid_coordination_lane_reasons(
+                        planted("docs/y.md", "pr-atomic", ["test-parsed", reason])
+                    ),
+                    {"docs/y.md": [reason]},
+                )
+        self.assertEqual(
+            invalid_coordination_lane_reasons(
+                planted("docs/z.md", "coordination", ["audit-report"])
+                | planted("docs/coordination/", "coordination", ["coordination-note"])
+            ),
+            {},
+        )
 
     def test_the_test_parsed_reason_names_exactly_the_parsed_documents(self):
         declared = {
@@ -489,6 +591,45 @@ class ClassificationCoverageTests(unittest.TestCase):
                 FIXTURE_DECLARED, FIXTURE_INVENTORY + ["codex-plugin-old/x.md"]
             ),
             ["codex-plugin-old/x.md"],
+        )
+
+    def test_the_coordination_directory_is_covered_through_its_directory_row(self):
+        # Issue #409's directory row, exercised against the live tree: every
+        # tracked note under docs/coordination/ reaches the coordination lane
+        # through the one row, and the seed README proves the set non-empty.
+        self.assertIn("docs/coordination/", self.declared)
+        covered = [
+            path for path in self.markdown if path.startswith("docs/coordination/")
+        ]
+        self.assertIn("docs/coordination/README.md", covered)
+        for path in covered:
+            self.assertEqual(
+                matching_rows(self.declared, path), ["docs/coordination/"], path
+            )
+            self.assertNotIn(path, self.declared, f"{path} is covered twice")
+
+    def test_a_note_added_under_the_coordination_directory_is_already_covered(self):
+        # Requirement 5: tracking a new note needs no §7 edit. The added path
+        # inherits the directory row rather than being reported unclassified.
+        added = "docs/coordination/scratch-note.md"
+        self.assertEqual(matching_rows(self.declared, added), ["docs/coordination/"])
+        self.assertEqual(unclassified_paths(self.declared, self.markdown + [added]), [])
+
+    def test_a_coordination_directory_sibling_is_not_covered(self):
+        # The whole-component boundary on the new row: a similarly prefixed
+        # sibling matches no row and therefore fails closed as pr-atomic.
+        for stray in (
+            "docs/coordination-old/scratch-note.md",
+            "docs/coordination2/scratch-note.md",
+        ):
+            self.assertEqual(matching_rows(self.declared, stray), [], stray)
+
+    def test_an_overlapping_directory_and_file_declaration_is_a_conflict(self):
+        # Requirement 10's example: `docs/` plus `docs/ui-bugs.md` covers one
+        # document twice, which is two lanes and therefore no lane.
+        self.assertEqual(
+            doubly_classified_paths({"docs/", "docs/ui-bugs.md"}, ["docs/ui-bugs.md"]),
+            {"docs/ui-bugs.md": ["docs/", "docs/ui-bugs.md"]},
         )
 
     def test_a_declared_path_missing_from_the_tree_is_reported(self):
@@ -629,6 +770,7 @@ class CoordinationPathConfigurationTests(unittest.TestCase):
         self.coordination = {
             path for path, row in self.rows.items() if row["klass"] == "coordination"
         }
+        self.markdown = tracked_markdown()
         self.config, self.raw, self.warnings = load_example_config()
 
     def write_fixture(self, directory, global_paths, override_paths):
@@ -660,14 +802,43 @@ class CoordinationPathConfigurationTests(unittest.TestCase):
             "for a consuming repository",
         )
 
-    def test_the_kanban_override_is_exactly_the_section_7_coordination_rows(self):
+    def test_the_kanban_override_covers_exactly_the_section_7_coordination_set(self):
+        # Effective coverage over the tracked Markdown inventory rather than
+        # set membership, so the `docs/coordination/` directory row and the
+        # identical configured entry agree without enumerating children.
         configured = configured_coordination_paths(self.config, self.raw)
-        unclassified, unconfigured = coordination_drift(configured, self.coordination)
+        unclassified, unconfigured = coordination_drift(
+            configured, self.coordination, self.markdown
+        )
         self.assertEqual(
             (unclassified, unconfigured),
             ([], []),
             "config.toml.example's coghex/kanban coordination_paths and the "
             "coordination rows of docs/agent-workflow-contract.md §7 disagree",
+        )
+        self.assertEqual(
+            undeclared_configured_entries(configured, self.coordination),
+            [],
+            "config.toml.example's coghex/kanban coordination_paths carries an "
+            "entry that is no §7 coordination declaration",
+        )
+
+    def test_the_directory_row_and_directory_entry_agree_without_enumeration(self):
+        # The agreement requirement 9 asks for, proven against an inventory
+        # holding children neither side names: one row, one entry, any number
+        # of notes.
+        rows = {"docs/coordination/", "docs/ui-bugs.md"}
+        inventory = [
+            "docs/coordination/README.md",
+            "docs/coordination/scratch-note.md",
+            "docs/ui-bugs.md",
+        ]
+        self.assertEqual(coordination_drift(rows, rows, inventory), ([], []))
+        # A configuration that lost the directory reports every covered note,
+        # not a stale-looking directory string.
+        self.assertEqual(
+            coordination_drift({"docs/ui-bugs.md"}, rows, inventory),
+            ([], ["docs/coordination/README.md", "docs/coordination/scratch-note.md"]),
         )
 
     def test_no_configured_coordination_path_is_a_test_parsed_document(self):
@@ -693,7 +864,9 @@ class CoordinationPathConfigurationTests(unittest.TestCase):
             config, raw, _ = load_example_config(path)
             self.assertEqual(
                 coordination_drift(
-                    configured_coordination_paths(config, raw), self.coordination
+                    configured_coordination_paths(config, raw),
+                    self.coordination,
+                    self.markdown,
                 ),
                 (["docs/design.md"], ["docs/ui-bugs.md"]),
             )
@@ -727,6 +900,64 @@ class CoordinationPathConfigurationTests(unittest.TestCase):
                 ),
                 [planted],
             )
+
+    def test_a_configured_entry_covering_no_markdown_is_still_reported(self):
+        # The fail-open gap the Codex review of PR #411 named: `src/` covers
+        # no tracked Markdown, so the coverage comparison reports no drift,
+        # and it overlaps no test-parsed declaration — yet the drainer reads
+        # the entry over every file and would treat a src/Kanban/Domain.hs
+        # advance as coordination-only. The declaration-string reconciliation
+        # is what reports it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.write_fixture(
+                temp_dir, [], sorted(self.coordination | {"src/"})
+            )
+            config, raw, _ = load_example_config(path)
+            configured = configured_coordination_paths(config, raw)
+            # The blind spots, asserted so this regression documents why the
+            # exact check below exists rather than duplicating it.
+            self.assertEqual(
+                coordination_drift(configured, self.coordination, self.markdown),
+                ([], []),
+            )
+            self.assertEqual(configured_test_parsed_paths(configured), [])
+            self.assertEqual(
+                undeclared_configured_entries(configured, self.coordination),
+                ["src/"],
+            )
+
+    def test_a_configured_directory_covering_test_parsed_content_is_reported(self):
+        # The reverse direction issue #409 closes: nothing covers the broad
+        # entry `docs/`, but `docs/` covers `docs/design.md`, which a tracked
+        # test parses — so the entry itself is reported.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.write_fixture(
+                temp_dir, [], sorted(self.coordination | {"docs/"})
+            )
+            config, raw, _ = load_example_config(path)
+            self.assertEqual(
+                configured_test_parsed_paths(
+                    configured_coordination_paths(config, raw)
+                ),
+                ["docs/"],
+            )
+
+    def test_test_parsed_overlap_is_detected_in_both_directions(self):
+        # The predicate itself, both ways and neither: a configured directory
+        # covering a test-parsed file, a configured file beneath a test-parsed
+        # directory, and a coordination directory overlapping nothing.
+        self.assertEqual(
+            configured_test_parsed_paths({"docs/"}),
+            ["docs/"],
+        )
+        self.assertEqual(
+            configured_test_parsed_paths({"claude-plugin/commands/solve.md"}),
+            ["claude-plugin/commands/solve.md"],
+        )
+        self.assertEqual(
+            configured_test_parsed_paths({"docs/coordination/", "docs/ui-bugs.md"}),
+            [],
+        )
 
     def test_a_non_empty_global_default_is_reported(self):
         with tempfile.TemporaryDirectory() as temp_dir:

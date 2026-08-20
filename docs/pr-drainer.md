@@ -628,11 +628,17 @@ of, in `workflow.coordination_paths` (`config.toml.example`):
 coordination_paths = ["docs/status.md", "ROADMAP.md"]
 ```
 
-Each entry is one exact, case-sensitive, repository-relative path. Globs,
-directory prefixes, and extension matching are not implied, and a rename counts
-both its source and its destination, so every path you mean has to be listed.
-The key defaults to empty; a repository that sets nothing requests a branch
-update for every advance, exactly as the drainer always has. Never list a
+Each entry is one case-sensitive, repository-relative path: an exact file, or
+a directory declared with a trailing slash — `docs/notes/` — which covers
+every descendant by whole path component, so `docs/notes/plan.md` is covered
+and a similarly named sibling such as `docs/notes-old/plan.md` never is.
+Globs, string prefixes, and extension matching are not implied, and a rename
+counts both its source and its destination, so a rename out of a declared
+directory is not a covered advance. An entry whose directory prefix is empty —
+a bare `/` — would cover everything; it declares nothing, is reported, and the
+ordinary branch update is requested. The key defaults to empty; a repository
+that sets nothing requests a branch update for every advance, exactly as the
+drainer always has. Never list a
 document a test parses — a change to one really can fail `build-test`, and that
 is a rebuild worth paying for. In this repository the authoritative set is the
 `test-parsed` rows of
@@ -647,7 +653,7 @@ The drainer is not the only reader. In a repository
 [agent-workflow-contract §7](agent-workflow-contract.md#7-document-publication-classification)
 does not classify — which is every repository but Kanban's own — the packaged
 document workflows take this same key as their direct-publication lane, so a
-path listed here is also one those workflows publish straight to the default
+path covered here is also one those workflows publish straight to the default
 branch (issue #370). That is the same statement about the same documents read
 twice, which is why it is one key: a document whose content cannot change a
 build result is a document a coordination mutation can land on its own. A
@@ -657,9 +663,11 @@ every advance, and the ordinary pull-request lane for every document.
 The drainer merges past an advance only when all of this holds:
 
 - The candidate's `mergeStateStatus` is `BEHIND`.
-- `coordination_paths` is non-empty.
+- `coordination_paths` is non-empty, and no entry has an empty directory
+  prefix.
 - Every file the default branch gained between this pull request's merge base
-  and the current default-branch tip is one of those exact paths.
+  and the current default-branch tip is covered by one of those declarations —
+  named exactly, or a whole-component descendant of a declared directory.
 - None of those files is a file the pull request itself changes.
 - Both file sets were established completely, pinned to the pull request head,
   merge base, and default-tip object IDs, and both comparisons agreed on the

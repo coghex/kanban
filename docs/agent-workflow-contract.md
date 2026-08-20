@@ -1870,9 +1870,10 @@ other's rows, and a third fence added later cannot silently displace either.
 Every tracked Markdown file in this repository takes exactly one publication
 lane:
 
-- `coordination` — a coordination record: a findings, code-health, or design
-  document and its status ledger, whose content no runtime, installer, or test
-  reads.
+- `coordination` — a coordination record whose content no runtime, installer,
+  or test reads: a findings, code-health, or design document and its status
+  ledger, or a free-form note or roadmap sketch under a declared coordination
+  directory.
   Eligible for direct publication to `master`, bypassing the pull-request lane.
 - `pr-atomic` — a document that lands atomically with its implementation
   through the pull-request lane, because changing it on its own can invalidate
@@ -1883,7 +1884,7 @@ never direct-master eligible: the table below is an allowlist for the
 `coordination` lane alone, so a tracked Markdown file matching no row is a
 check failure rather than a document that publishes directly.
 
-The eighteen `coordination` documents are
+The `coordination` documents are
 `docs/card_filter_design.md`, `docs/claude_document_workflows_design.md`,
 `docs/code-health-report.md`, `docs/document_workflow_findings.md`,
 `docs/drainer-bugs.md`, `docs/issue_approval_queue_design.md`,
@@ -1894,8 +1895,10 @@ The eighteen `coordination` documents are
 `docs/project_review_386-361.md`,
 `docs/public_release_design.md`,
 `docs/ui-bugs.md`, `docs/usage_awareness_design.md`,
-`docs/workflow_audit_findings.md`, and
-`docs/workflow_command_vendoring_design.md`. **Every other tracked
+`docs/workflow_audit_findings.md`,
+`docs/workflow_command_vendoring_design.md`, and — through its directory row,
+with no declaration per file — every tracked Markdown file under
+`docs/coordination/`. **Every other tracked
 Markdown file in this repository is `pr-atomic`.** Those two sentences are the
 human-readable answer to "which lane does this document take", and
 `tools/test_document_classification.py` reconciles them against the rows below,
@@ -1905,7 +1908,9 @@ This classification is Kanban's own. It describes this repository and nothing
 else. A consuming repository declares its own coordination paths through the
 drainer configuration key `workflow.coordination_paths`
 ([pr-drainer.md](pr-drainer.md#merging-past-a-coordination-only-base-advance)),
-which ships empty; Kanban never infers a consuming repository's classes from
+which ships empty — exact file paths, or whole directories through a
+trailing-slash entry matched by the same whole-component rule the rows below
+use; Kanban never infers a consuming repository's classes from
 file extension or directory, and never applies the rows below to another
 repository's tree.
 
@@ -1916,11 +1921,29 @@ A row naming a directory ends with `/` and covers the tracked Markdown files
 beneath it, matched by whole path component rather than by string prefix: the
 `codex-plugin/` row covers
 `codex-plugin/plugins/kanban/skills/solve/SKILL.md` and never a sibling
-directory such as `codex-plugin-old/`. That component boundary is the point of
-a directory row — it is a statement about one tracked component, not about
+directory such as `codex-plugin-old/`, just as the `docs/coordination/` row
+covers `docs/coordination/scratch-note.md` and never
+`docs/coordination-old/scratch-note.md`. That component boundary is the point
+of a directory row — it is a statement about one tracked component, not about
 every name that happens to begin the same way. Non-Markdown files beneath a
 declared directory are outside this classification entirely: it classifies
 documents, not bundle assets.
+
+Two consumers deliberately read a directory declaration more widely than this
+classification does: a trailing-slash entry in
+`tools/test_source_distribution.py`'s `EXCLUDED_TRACKED_PATHS` and in
+`workflow.coordination_paths` covers every tracked descendant whatever its
+extension, because what ships in a release archive and what a base advance
+touched are questions about files rather than documents. The rows below stay
+a statement about tracked Markdown alone, and the configuration
+reconciliation in `tools/test_document_classification.py` compares coverage
+over exactly that subject, so the difference is a recorded decision rather
+than drift between the row and the configuration. Because that comparison
+cannot see an entry covering no tracked Markdown at all, the reconciliation
+also holds every configured entry to being one of the coordination
+declarations below: a configured `src/` would be invisible to both the
+coverage and the test-parsed checks while the drainer honoured it for every
+file beneath `src/`, and is reported instead.
 
 `reasons` is a `;`-separated set rather than a single choice, because a
 document is frequently `pr-atomic` for more than one of these at once and
@@ -1935,8 +1958,13 @@ recording only one would understate what a change to it can break:
   file to stay consistent with behavior in the same pull request.
 - `audit-report` — a findings, code-health, or design document carrying its
   own status ledger, which `tools/test_source_distribution.py` lists in
-  `EXCLUDED_TRACKED_PATHS`. This is the only reason that admits the
-  `coordination` lane.
+  `EXCLUDED_TRACKED_PATHS`.
+- `coordination-note` — a free-form note, roadmap sketch, or other
+  non-authoritative coordination document whose content no runtime,
+  installer, or test reads, covered by an `EXCLUDED_TRACKED_PATHS`
+  declaration the same way. `audit-report` and `coordination-note` are the
+  only reasons that admit the `coordination` lane, and neither is valid on a
+  `pr-atomic` row.
 
 ```text
 AGENTS.md | pr-atomic | release-document;implementation-coupled
@@ -1951,6 +1979,7 @@ docs/bugs.md | pr-atomic | release-document
 docs/card_filter_design.md | coordination | audit-report
 docs/claude_document_workflows_design.md | coordination | audit-report
 docs/code-health-report.md | coordination | audit-report
+docs/coordination/ | coordination | coordination-note
 docs/design.md | pr-atomic | test-parsed;release-document;implementation-coupled
 docs/development.md | pr-atomic | release-document
 docs/document-workflow-contract.md | pr-atomic | test-parsed;release-document
@@ -2021,8 +2050,8 @@ parses the table in §7 and:
   two lanes;
 - fails if a row names a class outside `coordination`/`pr-atomic`, states no
   reason, or states a reason outside the vocabulary above;
-- fails if a `coordination` row cites any reason other than `audit-report`, or
-  if a `pr-atomic` row cites `audit-report`;
+- fails if a `coordination` row cites any reason outside `audit-report` and
+  `coordination-note`, or if a `pr-atomic` row cites either of those reasons;
 - fails if an entry in `RELEASE_DOCUMENTS` in `tools/test_source_distribution.py`
   does not classify `pr-atomic`, and if a path declaring `release-document`
   appears in no release inventory there or appears in

@@ -364,14 +364,18 @@ class WorkflowConfig:
     # but nothing here reads their styling meaning.
     problem_style_labels: frozenset[str] = frozenset()
     ui_style_labels: frozenset[str] = frozenset()
-    # Exact, case-sensitive, repository-relative paths whose content is
-    # coordination rather than code. drain_prs.py may merge a candidate whose
-    # only distance from the default branch is a change to these, and since
-    # issue #370 publish_coordination_doc.py takes them as the direct-publication
-    # lane of any repository docs/agent-workflow-contract.md §7 does not
-    # classify -- which is every repository but this one. Empty by default,
-    # which is no lane and no merge exception, and is today's behavior
-    # everywhere.
+    # Case-sensitive, repository-relative coordination declarations: an exact
+    # file path, or a directory ending in `/` that covers every descendant by
+    # whole path component -- `docs/notes/` covers `docs/notes/a.md` and never
+    # a sibling such as `docs/notes-old/a.md`; no globs, no string prefixes.
+    # drain_prs.py may merge a candidate whose only distance from the default
+    # branch is a change to covered paths, and since issue #370
+    # publish_coordination_doc.py takes them as the direct-publication lane of
+    # any repository docs/agent-workflow-contract.md §7 does not classify --
+    # which is every repository but this one. Both consumers decide coverage
+    # through coordination_path_covers below, so an entry means one thing
+    # everywhere. Empty by default, which is no lane and no merge exception,
+    # and is today's behavior everywhere.
     coordination_paths: frozenset[str] = frozenset()
 
 
@@ -469,6 +473,57 @@ class ResolvedConfig:
     limits: LimitsConfig
     timeouts: TimeoutsConfig
     usage: UsageConfig
+
+
+# --------------------------------------------- coordination-path coverage --
+#
+# The one definition of what a `workflow.coordination_paths` entry covers.
+# drain_prs.py's base-advance decision and publish_coordination_doc.py's
+# consuming-repository eligibility both call these, which is what keeps "is
+# this path coordination?" one question with one answer: a path the drainer
+# would merge past is exactly a path the document workflows would publish.
+
+
+def coordination_path_covers(declared: str, path: str) -> bool:
+    """Whether one coordination declaration covers `path`.
+
+    An entry ending in `/` declares a directory and covers every descendant,
+    compared by whole path component: `docs/notes/` covers `docs/notes/a.md`
+    and never a sibling such as `docs/notes-old/a.md`. Any other entry names
+    one file exactly -- no globs, no string prefixes, no extension matching.
+    A directory entry whose component prefix is empty (`/` alone, or `./`)
+    would cover every path in the repository; it grants nothing here, and
+    empty_prefix_coordination_declarations below is how a consumer reports it
+    rather than silently honouring or silently dropping it.
+    """
+    if not declared.endswith("/"):
+        return declared == path
+    prefix = PurePosixPath(declared.rstrip("/")).parts
+    if not prefix:
+        return False
+    return PurePosixPath(path).parts[: len(prefix)] == prefix
+
+
+def coordination_paths_cover(declared, path: str) -> bool:
+    """Whether any of the declared coordination entries covers `path`."""
+    return any(coordination_path_covers(entry, path) for entry in declared)
+
+
+def empty_prefix_coordination_declarations(declared) -> list[str]:
+    """The declared entries whose directory prefix is empty, sorted.
+
+    `PurePosixPath("").parts` and `PurePosixPath(".").parts` are both `()`,
+    so entries such as `/`, `//`, or `./` would match every path if the
+    trailing-slash comparison ran on them. They are invalid declarations
+    rather than broad ones: each consumer refuses to treat one as coverage
+    and reports it, because an operator who wrote one meant something this
+    schema cannot express.
+    """
+    return sorted(
+        entry
+        for entry in declared
+        if entry.endswith("/") and not PurePosixPath(entry.rstrip("/")).parts
+    )
 
 
 def default_config_path() -> Path:

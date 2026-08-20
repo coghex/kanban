@@ -28,20 +28,12 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
 - `docs/development.md` has the build, test, and layout basics; `docs/pr-drainer.md` and
   `docs/workflow-setup.md` cover the optional local components.
 - Every tracked Markdown file takes one of two publication lanes, classified in
-  `docs/agent-workflow-contract.md` section 7. The eighteen coordination
-  documents publish straight to master, bypassing the PR lane:
-  `docs/card_filter_design.md`, `docs/claude_document_workflows_design.md`,
-  `docs/code-health-report.md`, `docs/document_workflow_findings.md`,
-  `docs/drainer-bugs.md`, `docs/issue_approval_queue_design.md`,
-  `docs/issue_search_design.md`,
-  `docs/linux_portability_design.md`, `docs/managed_paths_design.md`,
-  `docs/multi_repo_boards_design.md`,
-  `docs/pipeline-hardening.md`, `docs/product_readiness_findings.md`,
-  `docs/project_review_386-361.md`,
-  `docs/public_release_design.md`,
-  `docs/ui-bugs.md`, `docs/usage_awareness_design.md`,
-  `docs/workflow_audit_findings.md`, and
-  `docs/workflow_command_vendoring_design.md`. Everything else is pr-atomic and
+  `docs/agent-workflow-contract.md` section 7. The coordination
+  documents publish straight to master, bypassing the PR lane: the findings,
+  code-health, and design documents section 7's `coordination` rows name by
+  exact path, plus every tracked Markdown file under `docs/coordination/` —
+  that directory's row covers new notes as they are added, with no
+  classification edit anywhere. Everything else is pr-atomic and
   lands with its implementation through a pull request. Anything unclassified is
   pr-atomic too — that default fails closed, so a new document never publishes directly
   until section 7 says it may.

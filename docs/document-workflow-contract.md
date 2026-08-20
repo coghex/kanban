@@ -537,15 +537,24 @@ and stays unpublished.
 §7 is Kanban's own statement about Kanban, so it authorizes a `coordination`
 lane for `coghex/kanban` and for no other repository — a fork included. Every
 other owner declares its own lane, in the `workflow.coordination_paths` key §7
-already delegates a consuming repository's classification to: exact,
-case-sensitive, repository-relative paths, read through the same resolved
+already delegates a consuming repository's classification to: case-sensitive,
+repository-relative declarations — an exact file path, or a directory ending
+in `/` covering every descendant by whole path component, so `docs/notes/`
+declares `docs/notes/plan.md` and never a similarly prefixed sibling such as
+`docs/notes-old/plan.md` — read through the same resolved
 configuration `tools/drain_prs.py` reads, with the same global-then-repository
-merge and the same array replacement. The two roots never mix in either
+merge, the same array replacement, and the same coverage predicate the
+drainer's base-advance decision uses. The two roots never mix in either
 direction. Kanban's own eligibility is decided from §7 as the publication tip
 itself carries it and never from configuration, so it holds whether or not an
 operator ever copied `config.toml.example`; every other repository's is decided
 from its own declaration alone, so nothing here infers a lane from a file
-extension or a directory.
+extension or from a directory nothing declared — coverage exists only where a
+declaration names it, exactly or through a declared directory's descendants. A
+declaration whose directory prefix is empty — a bare `/`, which would cover
+every path — is invalid configuration rather than a broad lane: it fails
+closed before anything is written or published, like configuration that cannot
+be read.
 
 **A repository that declares nothing has no lane, and that is an ordinary
 outcome rather than an error.** The approved mutation is preserved in the object

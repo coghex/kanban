@@ -34,12 +34,16 @@ import kanban_config
 
 APPROVE_LABEL = "reviewed:approve"
 CHANGES_LABEL = "reviewed:changes"
-# `workflow.coordination_paths`, resolved for this repository in main(). Exact,
-# case-sensitive, repository-relative paths whose content coordinates the
-# pipeline rather than building it, so a default-branch advance touching only
-# these cannot change a candidate's build result. Empty by default: every
-# repository that sets nothing keeps requesting a branch update for every
-# advance, exactly as before.
+# `workflow.coordination_paths`, resolved for this repository in main().
+# Case-sensitive, repository-relative declarations whose content coordinates
+# the pipeline rather than building it, so a default-branch advance touching
+# only covered paths cannot change a candidate's build result. An entry is one
+# exact file path, or a directory ending in `/` covering every descendant by
+# whole path component -- never by string prefix or glob; coverage is decided
+# by kanban_config.coordination_path_covers, the same predicate the document
+# workflows' publisher reads. Empty by default: every repository that sets
+# nothing keeps requesting a branch update for every advance, exactly as
+# before.
 COORDINATION_PATHS: frozenset[str] = frozenset()
 DEFAULT_REQUIRED_CI_CHECK = "build-test"
 DEFAULT_REQUIRED_REVIEW_CHECK = "review-approved"
@@ -1367,18 +1371,34 @@ def coordination_only_base_advance(
     """The default-branch tip a behind candidate may be merged against anyway.
 
     None -- request the ordinary branch update -- unless every file the default
-    branch gained since this pull request's merge base is a configured
-    coordination path, and none of them is a file the pull request itself
-    changes. Reaching a merge grants nothing: the returned tip only says this
-    advance cannot change the candidate's build result, and every gate is still
-    evaluated exactly as it would have been.
+    branch gained since this pull request's merge base is covered by a
+    configured coordination declaration -- an exact path, or a descendant of a
+    configured directory by whole path component -- and none of them is a file
+    the pull request itself changes. A rename or copy in the advance
+    contributes both of its endpoints to that file set (compared_paths), so
+    eligibility requires every endpoint to be covered. Reaching a merge grants
+    nothing: the returned tip only says this advance cannot change the
+    candidate's build result, and every gate is still evaluated exactly as it
+    would have been.
 
-    Uncertainty is not eligibility. An empty configured set, an unreadable tip,
+    Uncertainty is not eligibility. An empty configured set, a declaration
+    whose empty component prefix would cover every path, an unreadable tip,
     an incomplete or malformed file set, and two comparisons that disagree
     about the merge base all take the ordinary update.
     """
     number = pr["number"]
     if not COORDINATION_PATHS:
+        return None
+    invalid = kanban_config.empty_prefix_coordination_declarations(
+        COORDINATION_PATHS
+    )
+    if invalid:
+        log(
+            f"PR #{number}: workflow.coordination_paths declares "
+            f"{describe_paths(invalid)}, whose empty component prefix would "
+            "cover every path in the repository; the declaration grants "
+            "nothing, so the ordinary branch update is requested"
+        )
         return None
     head_sha = pr.get("headRefOid")
     if not isinstance(head_sha, str) or not OBJECT_ID_RE.fullmatch(head_sha):
@@ -1415,7 +1435,11 @@ def coordination_only_base_advance(
         )
         return None
 
-    outside = sorted(advanced_paths - COORDINATION_PATHS)
+    outside = sorted(
+        path
+        for path in advanced_paths
+        if not kanban_config.coordination_paths_cover(COORDINATION_PATHS, path)
+    )
     if outside:
         log(
             f"PR #{number}: {ctx.default_branch} advanced past {merge_base[:12]} in "
