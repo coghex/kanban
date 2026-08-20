@@ -1076,41 +1076,53 @@ One case no single run can close by waiting: a writer that takes the lock after
 the run's last check. There is no way to ask whether anyone is waiting on a
 lock, and a command that has finished cannot look again. So instead of trying to
 outlast that writer, the run leaves it nothing to write. Once the last check
-finds the old location clear, two paths there are replaced by links to the
-`relocated.json` beside them: `config.json`, and the `runtime/` directory. Both
-of them stop a controller that predates all of this, because what refuses them
-is code that predates it too. Every version of the controller refuses to write
-a `config.json` that is not an ordinary file, so one that wakes up later
-refuses instead of recreating the record. And every version creates its
-directories through one helper that cannot make a directory inside something
-that is not a directory — a helper it runs before it writes any logs, before it
-writes its unit or plist, and before it touches the record at all.
+finds the old location clear, three paths there are closed. `config.json` and
+the `runtime/` directory are replaced by links to the `relocated.json` beside
+them, and `config.json.lock` is made read-only — a lock file is never deleted,
+so it is closed by being unopenable rather than by being replaced. All three
+stop a controller that predates all of this, because what refuses them is code
+that predates it too. Every version of the controller refuses to write a
+`config.json` that is not an ordinary file, so one that wakes up later refuses
+instead of recreating the record. Every version creates its directories through
+one helper that cannot make a directory inside something that is not a
+directory — a helper it runs before it writes any logs, before it writes its
+unit or plist, and before it touches the record. And every version opens that
+lock file for writing before it does anything at all, which is the only thing
+that catches an *uninstall*: an uninstall creates no directories, so without
+that it would unload and delete the unit or plist the move had just rewritten
+before its record write was refused.
 
-So a stale command now fails before it creates anything: no runtime or incident
+So a stale command now fails before it changes anything: no runtime or incident
 state at the old location, no logs at either location, and no change to the
 unit or plist on disk or to the one your service manager is holding. It fails
-that way every time, not just the first — the guard is a link occupying a path
-rather than a permission, and permissions on that directory get reset by the
-very command being stopped.
+that way every time, not just the first — nothing a stale command does can undo
+any of the three, and permissions on the *directory* would not have helped,
+since they get reset by the very command being stopped.
 
-What you see is the controller's own error naming the path it could not use,
-which is one of those two links. Follow it: `relocated.json` says the
-installation was relocated, names the old location and the new one, and gives
-the exact thing to do — run the command again, since a controller works out its
-installation when it starts and this host now resolves the new location, and if
-it still lands on the old one, re-run `tools/install_drainer.py` to reinstall
-the copy that predates that resolution.
+What you see is the controller's own error naming the path it could not use.
+Follow it: the two links lead to `relocated.json`, and the lock file holds the
+same note as its own text — it is still readable; what a command may not do is
+write it. Either way you get the same thing: that the installation was
+relocated, the old location and the new one by name, and the exact thing to do
+— run the command again, since a controller works out its installation when it
+starts and this host now resolves the new location, and if it still lands on
+the old one, re-run `tools/install_drainer.py` to reinstall the copy that
+predates that resolution.
 
 If the run could *not* finish tidying up, it deliberately leaves those paths
-alone so you can see what is there; reconcile it and re-run, and that run seals
-them. A run that could not write a seal at all fails rather than reporting
+open so you can see what is there; reconcile it and re-run, and that run closes
+them. A run that could not close one at all fails rather than reporting
 success, names the path it left open, and tells you to re-run — and a later run
-treats a sealed old location as finished business only when *both* paths are
-sealed and nothing else is there. If there are trees there, or one seal is
-missing, it plans and reconciles the location exactly as it would an unsealed
-one, and refuses over anything it would have to choose between. The two links
-are the installer's own; nothing removes them, and nothing reports them as
-strays or as something a writer put back.
+treats an old location as finished business only when *all three* paths are
+closed and nothing else is there. If there are trees there, or one path is
+still open, it plans and reconciles the location exactly as it would an
+untouched one, and refuses over anything it would have to choose between. An
+installation sealed by an older version of the installer, before the lock was
+closed at all, is one of those locations, which is how such a host gets
+finished. The two links are the installer's own; nothing removes them, and
+nothing reports them as strays or as something a writer put back. The lock is
+reopened only by the installer run that has to take it, and closed again when
+that run finishes.
 
 Directories under `runtime/` and the old log root that belong to no repository
 in the record are moved across too. Two things leave one: a controller that

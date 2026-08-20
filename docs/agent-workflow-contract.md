@@ -1455,9 +1455,11 @@ search step and nothing else, which is what `mandatory: no` records.
   refusal every discovery-record write now carries, which no gate added here
   reaches.
   What answers that one is not timing but leaving it nothing to write. A run
-  whose final scan finds the location clear seals two paths there, under that
-  same scan's lock, each with a symlink to the relocation marker beside it: the
-  emptied record path, and the runtime root. Both refusals live in code that
+  whose final scan finds the location clear closes three paths there, under
+  that same scan's lock. The emptied record path and the runtime root are each
+  occupied by a symlink to the relocation marker beside them; the retained lock
+  is made unopenable instead, because a lock file may never be unlinked and an
+  object cannot be put where it stands. All three refusals live in code that
   predates this whole arc, which is the only kind that reaches a controller
   predating it. `update_json_document` — the one mutator every discovery-record
   write in every copy of the controller goes through — has refused a record
@@ -1465,37 +1467,49 @@ search step and nothing else, which is what `mandatory: no` records.
   the record. `ensure_dirs` — the one helper every runtime, incident and log
   write goes through — cannot make a directory beneath a path that is not one,
   and it reaches the runtime root before the log tree, before any definition is
-  written and before the record is touched at all. So a stale invocation
-  returns non-success before it creates, removes or modifies the legacy runtime
-  tree, the legacy log tree, the corresponding trees at the destination, or the
-  repository's on-disk service definition; the definition the service manager
-  holds stays the relocated one for the same reason, since loading it comes
-  after the record write that the same invocation never reaches. The bound is
-  an object occupying a path rather than a permission on one, because
-  `ensure_dirs` chmods the install directory on every attempt and would reset
-  a permission-shaped guard on the very invocation it is meant to stop.
+  written and before the record is touched at all. And `document_lock` opens
+  that lock `O_RDWR` and refuses with `Refusing unsafe config lock path` when
+  the open fails, which is what every transition enters before it reads or
+  writes anything: it is the only thing that reaches `uninstall_job`, which
+  creates no directory at all and would otherwise unload and unlink the
+  definition a relocation had just rewritten before its record write was
+  refused. So a stale invocation returns non-success before it creates, removes
+  or modifies the legacy runtime tree, the legacy log tree, the corresponding
+  trees at the destination, or the repository's on-disk service definition, and
+  the definition the service manager holds stays the relocated one. Each bound
+  is a fact about the path rather than a permission on a directory a stale
+  invocation writes through, because `ensure_dirs` chmods the install directory
+  on every attempt and would reset that kind of guard on the very invocation it
+  is meant to stop; the lock's own mode is not reachable that way, since
+  nothing chmods it but the run that closed it.
   Following either seal finds the marker rather than a document, so a reader
   bound to that location learns where the installation went instead of finding
-  an empty one. That is also the whole operator-facing failure available here:
-  a controller predating this arc renders a fault as the path it could not use,
-  and the path it names is one of these seals, so the marker they lead to
-  carries the rest — that the installation was relocated, the legacy location
-  and the destination by name, and the exact action that resolves it, which is
-  to run the command again against the installation this host now resolves and,
-  where the installed copy predates that resolution, to re-run
-  `tools/install_drainer.py` against the destination.
-  A location this run could not finish reconciling is deliberately left
-  unsealed, because the operator has to see it as it stands and the re-run that
-  follows their reconciliation is what seals it; a path that could not be
-  sealed at all fails the install on the same terms as unresolved state, and is
-  named in that failure, since a path left open to a controller still bound
-  there is the one thing that keeps the rest closed. Being sealed is a reason
-  for a later run to do nothing only when *every* one of those paths is closed
-  and the location holds nothing else: a sealed location that still holds
-  trees, or one whose other seal an earlier run could not write, is planned and
-  reconciled exactly as an unsealed one is, which is what stops a seal from
-  making such state permanently invisible. Both seals are managed entries no
-  run removes, and neither is reported as a stray or as a late write.
+  an empty one, and the closed lock carries the same notice as its own content
+  — readable, since what a transition may not do is open it for *writing*.
+  That is the whole operator-facing failure available here: a controller
+  predating this arc renders a fault as the path it could not use, and the path
+  it names is one of these three, so what they lead to carries the rest — that
+  the installation was relocated, the legacy location and the destination by
+  name, and the exact action that resolves it, which is to run the command
+  again against the installation this host now resolves and, where the
+  installed copy predates that resolution, to re-run `tools/install_drainer.py`
+  against the destination.
+  A location this run could not finish reconciling is deliberately left open,
+  because the operator has to see it as it stands and the re-run that follows
+  their reconciliation is what closes it; a path that could not be closed at
+  all fails the install on the same terms as unresolved state, and is named in
+  that failure, since a path left open to a controller still bound there is the
+  one thing that keeps the rest closed. Being closed is a reason for a later
+  run to do nothing only when *every* one of those paths is closed and the
+  location holds nothing else: a sealed location that still holds trees, or one
+  whose other paths an earlier run could not close, is planned and reconciled
+  exactly as an unsealed one is, which is what stops a seal from making such
+  state permanently invisible — and an installation sealed before the lock was
+  closed at all is exactly such a location, which is how such a host is
+  finished. The two seals are managed entries no run removes, and neither is
+  reported as a stray or as a late write; the lock is reopened only by the
+  installer run that has to take it, which restores it on every failing exit
+  and closes it again when it seals.
   A per-repository tree no record names is carried too. Two things leave one: a
   controller that wrote its trees before a refused record write, and an
   uninstall, which deliberately leaves a repository's runtime state, logs and

@@ -2514,30 +2514,38 @@ above are unchanged, and persistence the user switched off is not a failure.
   waiter in particular. The checkout and controller fences are held throughout
   and extended to any repository it recovers. A writer that acquires after the
   run's last look is past any process that terminates, so a run whose final
-  scan finds the location clear seals two paths there under that scan's own
-  lock, each with a symlink to the relocation marker: the emptied record path
-  and the runtime root. Both refusals predate this whole arc, which is the only
-  kind that reaches a controller predating it — every copy refuses to write a
-  record path that is present and not a regular file, and every copy creates
-  its directories through one helper that cannot make a directory beneath a
-  path that is not one. That helper runs before the log tree, before the
-  definition is written and before the record is touched, so a stale invocation
+  scan finds the location clear closes three paths there under that scan's own
+  lock: the emptied record path and the runtime root, each occupied by a
+  symlink to the relocation marker, and the retained lock, made unopenable
+  because a lock file may never be unlinked. All three refusals predate this
+  whole arc, which is the only kind that reaches a controller predating it —
+  every copy refuses to write a record path that is present and not a regular
+  file, every copy creates its directories through one helper that cannot make
+  a directory beneath a path that is not one, and every copy opens that lock
+  `O_RDWR` before a transition reads or writes anything. The directory helper
+  runs before the log tree, before the definition is written and before the
+  record is touched; the lock is what reaches the one transition that creates
+  no directory at all, an uninstall, which would otherwise unload and unlink
+  the definition before its record write was refused. So a stale invocation
   returns non-success before it creates, removes or modifies the legacy runtime
   or log tree, the corresponding trees at the destination, or the repository's
   on-disk definition, and the definition the manager holds stays the relocated
-  one because loading it comes later still. The bound is an object occupying a
-  path rather than a permission on one, since that helper chmods the install
+  one. Each bound is a fact about the path rather than a permission on a
+  directory the invocation writes through, since that helper chmods the install
   directory on every attempt. What an operator sees is that copy's own
-  rendering of the fault, which names one of those seals; following it finds
-  the marker, which states that the installation was relocated, names the
-  legacy location and the destination, and gives the exact action — run the
-  command again, and re-run the installer where the installed copy predates
-  this host's own resolution. A location left unresolved is left unsealed for
-  the operator to see, and a path that could not be sealed fails the install
-  and is named in that failure. A later run skips a location only when both
-  paths are sealed and it holds nothing else, and otherwise reconciles it
-  exactly as it would an unsealed one; the seals themselves are managed entries
-  no run removes or reports as strays. A per-repository tree no record names —
+  rendering of the fault, which names one of those three paths; the seals lead
+  to the marker and the lock holds the same notice as its own readable content,
+  stating that the installation was relocated, naming the legacy location and
+  the destination, and giving the exact action — run the command again, and
+  re-run the installer where the installed copy predates this host's own
+  resolution. A location left unresolved is left open for the operator to see,
+  and a path that could not be closed fails the install and is named in that
+  failure. A later run skips a location only when all three paths are closed
+  and it holds nothing else — an installation sealed before the lock was closed
+  is not one of them — and otherwise reconciles it exactly as it would an
+  untouched one; the seals themselves are managed entries no run removes or
+  reports as strays, and the lock is reopened only by the run that has to take
+  it. A per-repository tree no record names —
   left by a controller whose record write was refused, or by an uninstall,
   which keeps a repository's state deliberately — is carried across rather than
   orphaned, under the repository validated on-disk evidence establishes: a

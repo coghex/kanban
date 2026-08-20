@@ -448,6 +448,39 @@ def default_install_dir() -> Path:
     return kanban_config.default_drainer_install_dir()
 
 
+def _legacy_lock_path(legacy_dir: Path) -> Path:
+    """The lock beside the discovery record at the legacy location.
+
+    Spelled the way `drain_prs_service.document_lock` spells it — the record's
+    own name with `.lock` after it — because this is the file that helper
+    opens, and a second spelling of it would close a path nothing meets.
+    """
+    return legacy_dir / (record_name() + ".lock")
+
+
+def _relocation_notice(plan: RelocationPlan) -> tuple[str, str]:
+    """What happened at this location, and what to do about it.
+
+    One place, because it is written into two artifacts: the relocation marker
+    every seal points at, and the retained lock, which is what the refusal a
+    stale transition meets names by path. A copy of the controller predating
+    every gate here renders a fault as the path it could not use and nothing
+    more, so whatever those paths lead to has to carry the rest.
+    """
+    return (
+        f"The PR drainer installation at {plan.legacy_dir} was relocated to "
+        f"{plan.install_dir}. Nothing may be written at {plan.legacy_dir} "
+        "again: a controller still bound to this location fails instead of "
+        "rebuilding what the relocation moved.",
+        "Run the command again. A controller resolves its installation when "
+        f"it starts, and this host now resolves {plan.install_dir}. If it "
+        f"still resolves {plan.legacy_dir}, the installed copy predates that "
+        "resolution — re-run `python3 tools/install_drainer.py --path "
+        f"<checkout>` from the Kanban checkout to reinstall it against "
+        f"{plan.install_dir}.",
+    )
+
+
 def _plain_file(path: Path) -> bool:
     return not path.is_symlink() and path.is_file()
 
@@ -1214,19 +1247,20 @@ class _Transition:
 
 
 def _captured_modes(*paths: Path) -> dict[Path, int]:
-    """The mode each of these directories already has.
+    """The mode each of these managed paths already has.
 
     Taken before any lock is acquired, because acquiring one is itself a
     change to the directory holding the record: `document_lock` creates that
     parent at 0700 and chmods an existing one to 0700, and it does so before
     this transition has recorded anything it could undo. A directory this run
     only ever locked has to come back as restrictive as it was found, and no
-    more.
+    more — and so does the retained lock at a location an earlier run closed,
+    which this run has to be able to open and must not leave open.
     """
     return {
         path: path.stat().st_mode & 0o777
         for path in paths
-        if path.is_dir() and not path.is_symlink()
+        if not path.is_symlink() and (path.is_dir() or path.is_file())
     }
 
 
@@ -1236,7 +1270,7 @@ def _restore_modes(modes: dict[Path, int]) -> list[str]:
     failures = []
     for path, mode in modes.items():
         try:
-            if path.is_dir() and (path.stat().st_mode & 0o777) != mode:
+            if os.path.lexists(path) and (path.stat().st_mode & 0o777) != mode:
                 path.chmod(mode)
         except OSError as exc:
             failures.append(f"restore the mode of {path}: {exc}")
@@ -1600,6 +1634,7 @@ def _remove_legacy_installation(
     # This is what it reads instead — under the same lock, so it sees the
     # installation intact or this, and never a half-dismantled one.
     marker = plan.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+    notice, repair = _relocation_notice(plan)
     existing_marker = _plain_file(marker)
     previous_marker = marker.read_bytes() if existing_marker else None
     # Its mode too, on the same terms as the record and the definitions: an
@@ -1635,23 +1670,8 @@ def _remove_legacy_installation(
             # not use. Saying what happened, naming both locations, and giving
             # the action that resolves it is therefore this document's job
             # rather than that process's.
-            drain_prs_service.RELOCATION_MARKER_NOTICE: (
-                f"The PR drainer installation at {plan.legacy_dir} was "
-                f"relocated to {plan.install_dir}. Nothing may be written at "
-                f"{plan.legacy_dir} again: the discovery record path and the "
-                "runtime root there are sealed against it, so a controller "
-                "still bound to this location fails instead of rebuilding "
-                "what the relocation moved."
-            ),
-            drain_prs_service.RELOCATION_MARKER_REPAIR: (
-                "Run the command again. A controller resolves its "
-                "installation when it starts, and this host now resolves "
-                f"{plan.install_dir}. If it still resolves {plan.legacy_dir}, "
-                "the installed copy predates that resolution — re-run "
-                "`python3 tools/install_drainer.py --path <checkout>` from "
-                "the Kanban checkout to reinstall it against "
-                f"{plan.install_dir}."
-            ),
+            drain_prs_service.RELOCATION_MARKER_NOTICE: notice,
+            drain_prs_service.RELOCATION_MARKER_REPAIR: repair,
         },
     )
     marker.chmod(0o600)
@@ -2384,7 +2404,7 @@ def _record_locks(plan: RelocationPlan) -> Iterator[None]:
 
 
 def _sealed_paths(plan: RelocationPlan) -> tuple[Path, ...]:
-    """Every path at the emptied location a finished relocation closes.
+    """The paths a finished relocation occupies with a symlink to the marker.
 
     Two, because a controller bound here has two ways to put durable state
     back and they are refused by different code in the same old copy. The
@@ -2396,6 +2416,24 @@ def _sealed_paths(plan: RelocationPlan) -> tuple[Path, ...]:
     bounds the writes the record seal alone leaves open.
     """
     return (plan.legacy_record, plan.legacy_dir / _RUNTIME_DIRECTORY_NAME)
+
+
+def _closed_paths(plan: RelocationPlan) -> tuple[Path, ...]:
+    """Every path a finished relocation closes, however it closes it.
+
+    The two above, and the retained lock. That last one is not an object
+    occupying a path and cannot be, because a lock file may never be unlinked
+    — a writer queued on its inode would be handed a different lock from the
+    one it is waiting on — so it is closed by being made unopenable instead.
+    It is the only thing that reaches a transition which never creates a
+    directory: `uninstall_job` does not call `ensure_dirs` at all, so nothing
+    else stops it before it unloads and unlinks the definition a relocation
+    had just rewritten. `document_lock` opens this file `O_RDWR` in every copy
+    of the controller and refuses with `Refusing unsafe config lock path` when
+    that open fails, and every transition — install, start, uninstall, stop,
+    ack, run — enters that helper before it reads or writes anything else.
+    """
+    return _sealed_paths(plan) + (_legacy_lock_path(plan.legacy_dir),)
 
 
 def _seal_path(transition: _Transition, path: Path) -> bool:
@@ -2432,6 +2470,62 @@ def _seal_path(transition: _Transition, path: Path) -> bool:
     return True
 
 
+def _restrict_retained_lock(transition: _Transition, plan: RelocationPlan) -> bool:
+    """Make the retained lock unopenable, and answer whether it is.
+
+    The mode is what closes it; the bytes are what an operator finds when the
+    refusal sends them here by name. This file is an artifact this installer
+    owns at a location it has emptied, `document_lock` never reads its content,
+    and an operator pointed at a path has to find something that says what
+    happened rather than an empty file — so the same notice the marker carries
+    goes in here, and the file is left readable and not writable.
+
+    Owner-write is what is taken away rather than every bit, because taking
+    every bit away would close the notice too. A process running as root is
+    not bounded by this at all; nothing in a user-scoped installation resolves
+    its managed paths as root, and the seals above still refuse one that does.
+    """
+    lock = _legacy_lock_path(plan.legacy_dir)
+    if not _plain_file(lock):
+        return False
+    previous_mode = lock.stat().st_mode & 0o777
+    previous = lock.read_bytes()
+
+    def undo() -> None:
+        lock.chmod(0o600)
+        lock.write_bytes(previous)
+        lock.chmod(previous_mode)
+
+    transition.register(f"reopen {lock}", undo)
+    notice, repair = _relocation_notice(plan)
+    marker = plan.legacy_dir / drain_prs_service.RELOCATION_MARKER_NAME
+    try:
+        lock.write_text(f"{notice}\n\n{repair}\n\nSee {marker}.\n", encoding="utf-8")
+        lock.chmod(0o400)
+    except OSError:
+        # Total on the same terms as every other step after the removal: an
+        # unclosed path is reported rather than raised, because it is one the
+        # next run can still close.
+        return False
+    return True
+
+
+def _reopen_retained_lock(lock: Path) -> None:
+    """Undo that restriction for the span of one installer run.
+
+    A location an earlier run closed is one this run may still have to
+    reconcile — a sealed location that acquires state again is planned and
+    swept exactly as an unsealed one is — and every lock this run takes there
+    goes through the same `document_lock` a controller does. So the run that
+    owns the restriction is the run entitled to lift it, and `_captured_modes`
+    below is what puts it back on every failing exit. On a successful one it is
+    left as this run leaves it: closed again if this run sealed the location,
+    and open if it could not, exactly as the record path is.
+    """
+    if _plain_file(lock) and not os.access(lock, os.W_OK):
+        lock.chmod(0o600)
+
+
 def _seal_emptied_location(
     transition: _Transition, plan: RelocationPlan
 ) -> list[str]:
@@ -2454,11 +2548,14 @@ def _seal_emptied_location(
     controller still bound here writes through, and the operator cannot act on
     "not sealed".
     """
-    return [
+    open_paths = [
         str(path)
         for path in _sealed_paths(plan)
         if not _seal_path(transition, path)
     ]
+    if not _restrict_retained_lock(transition, plan):
+        open_paths.append(str(_legacy_lock_path(plan.legacy_dir)))
+    return open_paths
 
 
 def _late_write_repair(plan: RelocationPlan, outcome: dict[str, Any]) -> str:
@@ -2472,7 +2569,7 @@ def _late_write_repair(plan: RelocationPlan, outcome: dict[str, Any]) -> str:
     and nothing unattributed, is the case a re-run does resolve.
     """
     unsealed = (
-        f"{' and '.join(outcome['unsealed'])} could not be sealed against a "
+        f"{', '.join(outcome['unsealed'])} could not be sealed against a "
         "writer bound to that location; re-run this installer."
     )
     if outcome["passes"] == 0:
@@ -2616,7 +2713,7 @@ def _reconcile_late_writes(
             outcome["unsealed"] = (
                 _seal_emptied_location(transition, plan)
                 if not remaining
-                else [str(path) for path in _sealed_paths(plan)]
+                else [str(path) for path in _closed_paths(plan)]
             )
             outcome["sealed"] = not outcome["unsealed"]
     outcome["retained"] = sorted(
@@ -2723,12 +2820,20 @@ def _location_is_emptied_and_sealed() -> bool:
     """
     legacy_dir = legacy_install_dir()
     record = record_name()
-    kept = {record + ".lock", drain_prs_service.RELOCATION_MARKER_NAME}
+    lock = _legacy_lock_path(legacy_dir)
+    kept = {lock.name, drain_prs_service.RELOCATION_MARKER_NAME}
     sealed = {record, _RUNTIME_DIRECTORY_NAME}
     if _plain_directory(legacy_dir):
         if any(child.name not in kept | sealed for child in legacy_dir.iterdir()):
             return False
         if not all(_is_relocation_seal(legacy_dir / name) for name in sealed):
+            return False
+        # The lock too, and by the same rule: a location whose lock an earlier
+        # run left openable is one a stale transition still enters, so this run
+        # has to go back and close it rather than reading the two seals beside
+        # it as an answer. An installation sealed before this bound existed is
+        # exactly that location, which is how such a host is finished.
+        if _plain_file(lock) and os.access(lock, os.W_OK):
             return False
     root = legacy_log_root()
     return not (_plain_directory(root) and any(root.iterdir()))
@@ -3181,7 +3286,12 @@ def relocate(install_dir: Path, sources: dict[str, Path]) -> dict[str, Any]:
     preflight = plan_relocation(install_dir)
     transition = _Transition()
     legacy_dir = legacy_install_dir()
-    modes = _captured_modes(legacy_dir, install_dir)
+    legacy_lock = _legacy_lock_path(legacy_dir)
+    # Captured with the two directories and reopened before anything asks for
+    # it, and only once the preflight above has had its chance to refuse, so a
+    # run that refuses still changes nothing at all.
+    modes = _captured_modes(legacy_dir, install_dir, legacy_lock)
+    _reopen_retained_lock(legacy_lock)
     try:
         # The fences outlive the record locks, because the sweep below moves
         # trees and rewrites definitions exactly as the transition does; only
@@ -3353,8 +3463,8 @@ def _require_relocation_resolved(relocation: dict[str, Any]) -> None:
         # closes is not closed against a controller still bound there, so the
         # one thing this run could not do is the one thing that keeps it shut.
         detail = (
-            f"but {' and '.join(late['unsealed'])} was left open to a "
-            "controller still bound to that location."
+            f"but a path at {late['location']} was left open to a controller "
+            f"still bound to that location: {', '.join(late['unsealed'])}."
         )
     raise RelocationUnresolved(
         "The PR drainer installation was relocated to "
