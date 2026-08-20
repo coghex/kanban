@@ -2514,20 +2514,47 @@ above are unchanged, and persistence the user switched off is not a failure.
   waiter in particular. The checkout and controller fences are held throughout
   and extended to any repository it recovers. A writer that acquires after the
   run's last look is past any process that terminates, so a run whose final
-  scan finds the location clear seals the emptied record path under that scan's
-  own lock, with a symlink to the relocation marker: every copy of the
-  controller refuses to write a record path that is present and not a regular
-  file, so a writer waking afterwards refuses rather than recreating it. A
-  location left unresolved is left unsealed for the operator to see, and a
-  record path that could not be sealed fails the install. The seal closes the
-  record and only the record — a controller bound there writes its runtime
-  tree, its logs and its definition under no lock at all and before it reaches
-  the record — so a later run skips a sealed location only when it holds
-  nothing but the seal, the lock and the marker, and otherwise reconciles it
-  exactly as it would an unsealed one; preventing those writes is #390. A
-  per-repository tree no record names — left by such a controller, or by an
-  uninstall, which keeps a repository's state deliberately — is carried by the
-  directory its state is filed under rather than orphaned, and one already at
+  scan finds the location clear seals two paths there under that scan's own
+  lock, each with a symlink to the relocation marker: the emptied record path
+  and the runtime root. Both refusals predate this whole arc, which is the only
+  kind that reaches a controller predating it — every copy refuses to write a
+  record path that is present and not a regular file, and every copy creates
+  its directories through one helper that cannot make a directory beneath a
+  path that is not one. That helper runs before the log tree, before the
+  definition is written and before the record is touched, so a stale invocation
+  returns non-success before it creates, removes or modifies the legacy runtime
+  or log tree, the corresponding trees at the destination, or the repository's
+  on-disk definition, and the definition the manager holds stays the relocated
+  one because loading it comes later still. The bound is an object occupying a
+  path rather than a permission on one, since that helper chmods the install
+  directory on every attempt. What an operator sees is that copy's own
+  rendering of the fault, which names one of those seals; following it finds
+  the marker, which states that the installation was relocated, names the
+  legacy location and the destination, and gives the exact action — run the
+  command again, and re-run the installer where the installed copy predates
+  this host's own resolution. A location left unresolved is left unsealed for
+  the operator to see, and a path that could not be sealed fails the install
+  and is named in that failure. A later run skips a location only when both
+  paths are sealed and it holds nothing else, and otherwise reconciles it
+  exactly as it would an unsealed one; the seals themselves are managed entries
+  no run removes or reports as strays. A per-repository tree no record names —
+  left by a controller whose record write was refused, or by an uninstall,
+  which keeps a repository's state deliberately — is carried across rather than
+  orphaned, under the repository validated on-disk evidence establishes: a
+  reversible directory slug only when re-encoding the identity it decodes to
+  through this host's own resolver reproduces that slug exactly, and a
+  hash-only slug only from an agreeing canonical `repository` field in the
+  tree's `status.json` or an incident there that derives back to the same slug,
+  with a log tree borrowing the validated identity of the runtime tree filed
+  under the identical slug and neither checkout state nor the global definition
+  counting as evidence. Evidence that is present and malformed or that
+  disagrees is never skipped past: it, a hash-only slug with no structured
+  identity, and a slug this host would spell differently all leave the state
+  where it was written, reported by slug and by the reason. Every repository
+  the report names is a canonical identity rather than a slug, every collision
+  or failure attributable to one names it beside that slug, and an unattributed
+  entry carries a null repository beside its own slug in the data while the
+  repair and the failure render the slug and the reason instead. One already at
   its destination is kept and named like any other collision. It is
   bounded at three passes rather than looped, each merging the recreated record
   on those same terms, carrying the trees it brought, rewriting the definitions

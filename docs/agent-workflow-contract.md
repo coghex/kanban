@@ -1455,43 +1455,81 @@ search step and nothing else, which is what `mandatory: no` records.
   refusal every discovery-record write now carries, which no gate added here
   reaches.
   What answers that one is not timing but leaving it nothing to write. A run
-  whose final scan finds the location clear seals the emptied record path,
-  under that same scan's lock, with a symlink to the relocation marker beside
-  it. `update_json_document` — the one mutator every discovery-record write in
-  every copy of the controller goes through — has refused a record path that is
-  present and not a regular file since the commit that introduced the record,
-  so a writer that acquires the lock afterwards refuses where it stands however
-  old it is. Following the seal finds the marker rather than a document, so a
-  reader bound to that location learns where the installation went instead of
-  finding an empty one. A location this run could not finish
-  reconciling is deliberately left unsealed, because the operator has to see it
-  as it stands and the re-run that follows their reconciliation is what seals
-  it; a record path that could not be sealed at all fails the install on the
-  same terms as unresolved state, since a path left open to a controller still
-  bound there is the one thing that keeps the rest closed.
-  The seal closes the record and only the record. A controller bound to that
-  location writes its directories, its status file, its incidents, its logs and
-  its definition before it ever reaches the record, under no record lock at all,
-  so one starting after a run has finished looking still leaves those behind —
-  its record write is what refuses, and by then the trees exist. Being sealed is
-  therefore a reason for a later run to do nothing only when the location holds
-  nothing but the seal, the lock and the marker: a sealed location that still
-  holds trees is planned and reconciled exactly as an unsealed one is, which is
-  what stops the seal from making such state permanently invisible. Preventing
-  those writes rather than finding them on the next run is #390.
-  A per-repository tree no record names is carried too, by the one name it has
-  — the directory its state is filed under. Two things leave one: a controller
-  whose record write the seal refused, which wrote its trees first, and an
+  whose final scan finds the location clear seals two paths there, under that
+  same scan's lock, each with a symlink to the relocation marker beside it: the
+  emptied record path, and the runtime root. Both refusals live in code that
+  predates this whole arc, which is the only kind that reaches a controller
+  predating it. `update_json_document` — the one mutator every discovery-record
+  write in every copy of the controller goes through — has refused a record
+  path that is present and not a regular file since the commit that introduced
+  the record. `ensure_dirs` — the one helper every runtime, incident and log
+  write goes through — cannot make a directory beneath a path that is not one,
+  and it reaches the runtime root before the log tree, before any definition is
+  written and before the record is touched at all. So a stale invocation
+  returns non-success before it creates, removes or modifies the legacy runtime
+  tree, the legacy log tree, the corresponding trees at the destination, or the
+  repository's on-disk service definition; the definition the service manager
+  holds stays the relocated one for the same reason, since loading it comes
+  after the record write that the same invocation never reaches. The bound is
+  an object occupying a path rather than a permission on one, because
+  `ensure_dirs` chmods the install directory on every attempt and would reset
+  a permission-shaped guard on the very invocation it is meant to stop.
+  Following either seal finds the marker rather than a document, so a reader
+  bound to that location learns where the installation went instead of finding
+  an empty one. That is also the whole operator-facing failure available here:
+  a controller predating this arc renders a fault as the path it could not use,
+  and the path it names is one of these seals, so the marker they lead to
+  carries the rest — that the installation was relocated, the legacy location
+  and the destination by name, and the exact action that resolves it, which is
+  to run the command again against the installation this host now resolves and,
+  where the installed copy predates that resolution, to re-run
+  `tools/install_drainer.py` against the destination.
+  A location this run could not finish reconciling is deliberately left
+  unsealed, because the operator has to see it as it stands and the re-run that
+  follows their reconciliation is what seals it; a path that could not be
+  sealed at all fails the install on the same terms as unresolved state, and is
+  named in that failure, since a path left open to a controller still bound
+  there is the one thing that keeps the rest closed. Being sealed is a reason
+  for a later run to do nothing only when *every* one of those paths is closed
+  and the location holds nothing else: a sealed location that still holds
+  trees, or one whose other seal an earlier run could not write, is planned and
+  reconciled exactly as an unsealed one is, which is what stops a seal from
+  making such state permanently invisible. Both seals are managed entries no
+  run removes, and neither is reported as a stray or as a late write.
+  A per-repository tree no record names is carried too. Two things leave one: a
+  controller that wrote its trees before a refused record write, and an
   uninstall, which deliberately leaves a repository's runtime state, logs and
   incidents behind. Neither can be recovered *as* a repository, because there
   is no entry to read a checkout, an identifier or a definition out of, and
   neither may be left at a location nothing looks at again — so the roots the
   removal kept are descended into rather than skipped, and what is under them
-  is moved to the roots the installation now uses. One already at its
-  destination is the collision every other tree's is, kept and named rather
-  than chosen between. No fence is taken for such a tree and none is available:
-  a repository no record names is one this installation can neither discover
-  nor control, so nothing is running it.
+  is moved to the roots the installation now uses.
+  Which repository such a tree belongs to is recovered only from validated
+  on-disk evidence, never guessed and never spelled as the directory name. A
+  reversible slug is authoritative only when it decodes to a canonical GitHub
+  identity *and* re-encoding that identity through the installation's own
+  resolver reproduces the slug exactly, which is a host question rather than a
+  spelling one: a slug the service manager could not carry as an identifier is
+  one this host files under a hash instead. A hash-only slug is attributed only
+  from a canonical `repository` field in the tree's own `status.json` or an
+  incident document there, with every identity present agreeing and the slug
+  derived from it reproducing the directory; a log tree, which carries no such
+  document, uses the validated identity of the runtime tree filed under the
+  exact same slug. Mutable checkout state and the global service definition are
+  never identity evidence. Missing evidence may be supplied by another of those
+  sources, but evidence that is present and malformed or that disagrees is
+  never skipped past: it, a hash-only slug with no structured identity, and a
+  slug this host would spell differently all leave the state where it was
+  written, reported by slug and by the reason attribution failed. Every
+  repository the report names is a canonical identity — never a slug, and never
+  null — and every collision or failure attributable to one names it beside the
+  slug the state is filed under, while an unattributed entry carries a null
+  repository beside its own slug in the data and renders that slug and reason,
+  never the null, in the repair and the failure an operator reads.
+  One already at its destination is the collision every other tree's is, kept
+  and named rather than chosen between. No fence is taken for such a tree and
+  none is available: a repository no record names is one this installation can
+  neither discover nor control, so nothing is running it.
   Whoever was waiting takes the lock; it keeps the checkout
   and controller fences the whole time, so no drainer or controller can start
   against a tree it is about to move, and it fences any repository it recovers

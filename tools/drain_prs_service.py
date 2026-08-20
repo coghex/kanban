@@ -194,6 +194,17 @@ RELOCATION_MARKER_NAME = "relocated.json"
 # movers that write it live in `tools/install_drainer.py`, and a reader and a
 # writer that spelled it separately could drift into never meeting.
 RELOCATION_MARKER_DESTINATION = "install_dir"
+# The rest of that document, which is also the notice an operator meets when a
+# relocated location refuses a stale invocation. The seals a relocation leaves
+# are symlinks to this file, so a refusal naming one of those paths leads here,
+# and what is here has to say what happened and what to do about it rather than
+# only where the installation went. Spelled as constants for the same reason
+# the destination is: `tools/install_drainer.py` writes them, this is where the
+# document is declared, and a writer and a reader spelling one separately could
+# drift into never meeting.
+RELOCATION_MARKER_SOURCE = "source"
+RELOCATION_MARKER_NOTICE = "relocated"
+RELOCATION_MARKER_REPAIR = "repair"
 
 
 # The lock a running controller holds for its whole life, so a run that wants

@@ -1076,34 +1076,70 @@ One case no single run can close by waiting: a writer that takes the lock after
 the run's last check. There is no way to ask whether anyone is waiting on a
 lock, and a command that has finished cannot look again. So instead of trying to
 outlast that writer, the run leaves it nothing to write. Once the last check
-finds the old location clear, `config.json` there is replaced by a link to the
-`relocated.json` beside it — every version of the controller refuses to write a
-`config.json` that is not an ordinary file, so one that wakes up later refuses
-instead of recreating the record, and anything reading that path finds the note
-saying where the installation went. If the run could *not* finish tidying up,
-it deliberately leaves the path alone so you can see what is there; reconcile it
-and re-run, and that run seals it. A run that could not write the seal at all
-fails rather than reporting success, and tells you to re-run.
+finds the old location clear, two paths there are replaced by links to the
+`relocated.json` beside them: `config.json`, and the `runtime/` directory. Both
+of them stop a controller that predates all of this, because what refuses them
+is code that predates it too. Every version of the controller refuses to write
+a `config.json` that is not an ordinary file, so one that wakes up later
+refuses instead of recreating the record. And every version creates its
+directories through one helper that cannot make a directory inside something
+that is not a directory — a helper it runs before it writes any logs, before it
+writes its unit or plist, and before it touches the record at all.
 
-That link closes the record and nothing else. A controller still pointing at the
-old location creates its runtime and log directories, its status file, its
-incidents and its unit or plist *before* it ever gets to the record, and nothing
-locks any of those — so one that starts after the run has finished checking
-still leaves directories behind, even though its record write is refused. A
-later run therefore does not treat a sealed old location as finished business
-unless it holds nothing but the link, the lock file and the note: if there are
-trees there it plans and reconciles them exactly as it would an unsealed one,
-and refuses over anything it would have to choose between. Stopping those writes
-happening at all, rather than finding them next time, is #390.
+So a stale command now fails before it creates anything: no runtime or incident
+state at the old location, no logs at either location, and no change to the
+unit or plist on disk or to the one your service manager is holding. It fails
+that way every time, not just the first — the guard is a link occupying a path
+rather than a permission, and permissions on that directory get reset by the
+very command being stopped.
+
+What you see is the controller's own error naming the path it could not use,
+which is one of those two links. Follow it: `relocated.json` says the
+installation was relocated, names the old location and the new one, and gives
+the exact thing to do — run the command again, since a controller works out its
+installation when it starts and this host now resolves the new location, and if
+it still lands on the old one, re-run `tools/install_drainer.py` to reinstall
+the copy that predates that resolution.
+
+If the run could *not* finish tidying up, it deliberately leaves those paths
+alone so you can see what is there; reconcile it and re-run, and that run seals
+them. A run that could not write a seal at all fails rather than reporting
+success, names the path it left open, and tells you to re-run — and a later run
+treats a sealed old location as finished business only when *both* paths are
+sealed and nothing else is there. If there are trees there, or one seal is
+missing, it plans and reconciles the location exactly as it would an unsealed
+one, and refuses over anything it would have to choose between. The two links
+are the installer's own; nothing removes them, and nothing reports them as
+strays or as something a writer put back.
 
 Directories under `runtime/` and the old log root that belong to no repository
-in the record are moved across too, under the same name. Two things leave one:
-a controller whose record write was refused — it writes its directories before
-it ever gets to the record — and an uninstall, which leaves a repository's
-state, logs and incidents behind on purpose. Neither can be treated as a
-repository, since nothing records where its checkout is or what its job is
-called, but neither is left at a location nothing reads any more. If the same
-name already exists at the destination, both are kept and both are named.
+in the record are moved across too. Two things leave one: a controller that
+wrote its directories before a refused record write, and an uninstall, which
+leaves a repository's state, logs and incidents behind on purpose. Neither can
+be treated as a repository, since nothing records where its checkout is or what
+its job is called, but neither is left at a location nothing reads any more. If
+the same name already exists at the destination, both are kept and both are
+named.
+
+Which repository such a directory belongs to is worked out from evidence, not
+from the name alone. The directory name is a reversible encoding of the
+repository — but only while the encoded spelling is one your service manager
+can carry as a job name, and a longer one gets a hash of the repository
+instead, which reverses to nothing. So a name is trusted only when decoding it
+gives a real GitHub repository *and* re-encoding that repository on this host
+gives back exactly that name; a hashed name is trusted only when the
+`status.json` or an incident inside the directory names a repository, every
+document that names one agrees, and that repository hashes back to the same
+name. A log directory has no such documents and borrows the answer from the
+runtime directory with the identical name. Your checkout's remote and the
+installed unit or plist are never used for this.
+
+Anything that cannot be settled that way is left exactly where it is and
+reported: a hashed name with nothing inside naming a repository, documents that
+disagree, documents that will not parse, a name this host would spell
+differently. The report names the directory and says why, and every repository
+it does name is the real `owner/name` rather than a directory name — so the
+repair you are given always names something you can go and look at.
 
 If your `$XDG_DATA_HOME` names `~/Library/Application Support`, this platform's
 own default install directory *is* the `~/Library` one, so there is nowhere for
