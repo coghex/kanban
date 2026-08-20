@@ -229,7 +229,14 @@ Two layers, deliberately provider-generic:
   reviewers resolve through `pr_review`. `issue_review` and `issue_gate` stay
   distinct roles (D-5) — today they genuinely differ (gpt-5.4 vs gpt-5.6-sol),
   and preserving the true matrix means no behavior changes on day one; an
-  operator who wants them unified assigns them the same values.
+  operator who wants them unified assigns them the same values. Each role
+  also carries a compiled *applicability* — which providers it can run on at
+  all (D-14): `issue_revise` is Claude-only by construction (it names the
+  authenticated-Claude revision tool; a Codex-only install revises inside the
+  review thread itself), `drain_rereview` applies to both brands, and every
+  other role applies to both. Applicability is code structure, not
+  configuration, so it lives beside the compiled role registry rather than in
+  the file.
 
 ### File sketch
 
@@ -263,7 +270,8 @@ display = "Opus 5 xhigh"
 Validation: an assignment's model must appear in its provider's `models`, its
 effort in that provider's `efforts`, every entry in `agents` must name a
 declared provider, and every role the binary knows must resolve for every
-*loaded* provider. Unknown role keys and unknown provider keys in the file
+loaded provider that role applies to (D-14) — a role inapplicable to a
+provider needs no assignment for it, and validation never demands one. Unknown role keys and unknown provider keys in the file
 are errors, not ignored — silently skipping a misspelled
 `[roles.pr_reveiw.codex]` is how an operator ships the old model believing
 they changed it. Editing a `[providers.X]` table never changes the loaded
@@ -300,10 +308,12 @@ enforces elsewhere, decided up front instead of one blocker per round.
   (`Review.hs`), and the `kanban_run_claude` argv (`Review/Tools.hs`).
 - **Python:** a `tools/kanban_models.py` reader (tomllib, mirroring
   `tools/kanban_config.py`'s shape) consumed by `approve_issues.py`,
-  `drain_prs.py`, and both `review_pr.py` copies. The drainer re-reads per
-  drain cycle so a roster edit does not require a service restart; a new
-  module under `tools/` means `install_drainer.py` must be rerun on live
-  installs, which the slice must say out loud.
+  `drain_prs.py`, and the Claude plugin's `review_pr.py`; the Codex plugin's
+  copy keeps its no-pinning delegation contract and never gains the reader's
+  model values (D-2 as amended). The drainer re-reads per drain cycle so a
+  roster edit does not require a service restart; a new module under
+  `tools/` means `install_drainer.py` must be rerun on live installs, which
+  the slice must say out loud.
 - **Display and prose:** the four constants in `Solve/Event.hs:110-124` become
   functions of the roster (`display` labels), as do the solve chooser rows,
   session/worker labels, `Prompts.hs` reviewer-identity prose, and the
@@ -421,11 +431,18 @@ Python reads it with stdlib `tomllib`, and no YAML parser enters
 ### D-2. The roster governs the full matrix
 
 Approved 2026-08-20. All nine sites are in scope: the four Haskell spawn
-paths, `approve_issues.py`, the drainer's stale-head rereview, and both
-plugin `review_pr.py` copies. Ping stays out by design. Consequences: the arc
-keeps MODEL-4 (Python and plugin consumption) and the cross-language parity
-gate; "which model reviews issues" resolves to one answer; the plugin pins
-become fallbacks behind the shared reader.
+paths, `approve_issues.py`, the drainer's stale-head rereview, and the Claude
+plugin's pinned `review_pr.py` reviewers. Ping stays out by design — and,
+amended on canonical review the same day, so does the Codex plugin's
+`review_pr.py` copy: it deliberately passes no model or effort flags (brand
+selection only, recording `models=unspecified`, the delegation contract
+§2.2 documents), so there is nothing for a roster to replace, and giving it
+pins would change day-one behavior the compiled defaults are required to
+preserve. MODEL-4 asserts that no-pinning contract as a negative control
+instead of covering it. Consequences: the arc keeps MODEL-4 (Python and
+plugin consumption) and the cross-language parity gate; "which model reviews
+issues" resolves to one answer; the Claude plugin's pins become fallbacks
+behind the shared reader.
 
 ### D-3. A present-but-unusable roster refuses agent spawns
 
@@ -538,6 +555,24 @@ Consequences: two new slices (MODEL-12, MODEL-13), and single-agent routing
 (MODEL-10) lands after the Claude backend so Claude-only mode never ships
 with a refused embedded review.
 
+### D-14. Roles carry compiled applicability, and `drain_rereview` gains a Claude default
+
+Approved 2026-08-20, resolving a canonical-review blocker: the baseline
+matrix has no Codex assignment for `issue_revise` and had no Claude
+assignment for `drain_rereview`, which the every-role-resolves validation
+rule and the single-provider modes jointly could not tolerate. Each role now
+declares, in the compiled role registry, which providers it applies to:
+`issue_revise` is Claude-only by construction (a Codex-only install revises
+inside the review thread), every other role applies to both brands, and
+validation requires an assignment only for loaded providers a role applies
+to. `drain_rereview`, which applies to both, gains the compiled default
+**claude-opus-5 · medium** for its Claude side — inert until a Claude-only
+install actually runs the drainer, at which point MODEL-11's
+loaded-provider resolution has a value to resolve to. Consequences: MODEL-1
+carries applicability in the role registry and the new default; the
+defaults-reproduce-today guarantee is unchanged, because no dual-mode spawn
+consults the new assignment.
+
 ## Open questions
 
 ### Q-1. Which invocation sites are in scope for configurability?
@@ -640,13 +675,14 @@ concrete proposal before any implementation.
   with the full failure vocabulary, and atomic save mirroring `Settings.hs`.
   No call site changes; the module is fully tested but unconsumed.
 - **Scope:** types, defaults, parse/print, validation, the `agents`
-  loaded-provider list (D-10), file path (`~/.config/kanban/models.toml` per
-  D-4), load-at-startup plumbing into the app's resolved configuration
-  without any consumer reading it yet.
+  loaded-provider list (D-10), per-role compiled applicability with the
+  `drain_rereview` Claude default (D-14), file path
+  (`~/.config/kanban/models.toml` per D-4), load-at-startup plumbing into
+  the app's resolved configuration without any consumer reading it yet.
 - **Phase:** 1
 - **Depends on:** none
 - **Ordering:** critical path
-- **Relevant decisions:** D-1, D-3, D-4, D-5, D-10
+- **Relevant decisions:** D-1, D-3, D-4, D-5, D-10, D-14
 - **Acceptance signals:** round-trip and validation tests pass; decoding the
   tracked example file yields exactly `defaultRoster`; the D-3 failure matrix
   has one asserted arm per cause.
@@ -720,27 +756,33 @@ concrete proposal before any implementation.
 
 ### MODEL-4. Resolve the Python and plugin spawn sites from the roster
 
-- **Outcome:** `approve_issues.py`, `drain_prs.py`, and both `review_pr.py`
-  copies resolve model/effort through a shared `tools/kanban_models.py`
-  reader with their current values as compiled fallbacks; one cross-language
-  parity gate holds all copies to the tracked defaults.
+- **Outcome:** `approve_issues.py`, `drain_prs.py`, and the Claude plugin's
+  `review_pr.py` resolve model/effort through a shared
+  `tools/kanban_models.py` reader with their current values as compiled
+  fallbacks; the Codex plugin's copy keeps its no-pinning delegation
+  contract and is held to it by a negative control; one cross-language
+  parity gate holds every roster-backed copy to the tracked defaults.
 - **Scope:** the reader module; `issue_gate` consumption in
-  `approve_issues.py` with the env-var precedence Q-5 decides;
-  `drain_rereview` in `drain_prs.py`, re-read per drain cycle; the plugin
-  copies' pinned constants become fallbacks behind the reader; the parity
-  gate; a stated `install_drainer.py` rerun requirement for live installs
-  (new module under `tools/`).
+  `approve_issues.py` under the D-6 precedence (defaults < roster file <
+  environment); `drain_rereview` in `drain_prs.py`, re-read per drain
+  cycle; the Claude plugin copy's pinned constants become fallbacks behind
+  the reader; a negative assertion that the Codex plugin copy passes no
+  model or effort flags (D-2 as amended); the parity gate; a stated
+  `install_drainer.py` rerun requirement for live installs (new module
+  under `tools/`).
 - **Phase:** 2
 - **Depends on:** MODEL-1
 - **Ordering:** independent
 - **Relevant decisions:** D-1, D-2, D-3, D-6
 - **Acceptance signals:** the Python suite proves a roster file changes the
-  model each script passes to its fake CLI and that absence preserves today's
-  values; the env layer wins over the file for `issue_gate`; the parity gate
-  fails when any copy's fallback drifts from the tracked defaults.
-- **Out of scope:** changing which brand any script routes to; the
-  `no-model-pinning` prose contract in the codex-plugin copy (it gains the
-  reader, not a pin).
+  model each roster-backed script passes to its fake CLI and that absence
+  preserves today's values; the env layer wins over the file for
+  `issue_gate`; the Codex plugin copy still spawns with no model or effort
+  flags; the parity gate fails when any roster-backed copy's fallback drifts
+  from the tracked defaults.
+- **Out of scope:** changing which brand any script routes to; giving the
+  Codex plugin copy pins — D-2 as amended keeps its delegation contract, and
+  the roster never reaches it.
 - **Open questions:** None
 
 ### MODEL-5. Extend the settings screen to edit role assignments
