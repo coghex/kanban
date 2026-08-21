@@ -28,7 +28,7 @@ concrete precondition
 - [x] PATH-2. Route the drainer's install, record, runtime, and log paths — [#358]
 - [x] PATH-3. Resolve the Haskell consumers' managed paths per platform — [#444]
 - [x] PATH-5. Relocate a pre-XDG `~/Library` installation on a non-macOS host — [#367]
-- [ ] PATH-4. Repoint the packaged plugin assets at the resolved record
+- [x] PATH-4. Repoint the packaged plugin assets at the resolved record — [#445]
 
 ## Epic contract
 
@@ -566,6 +566,8 @@ reconciliation fails closed on a spelling whose row is missing.
 - **Open questions:** None
 
 ### PATH-4. Repoint the packaged plugin assets at the resolved record
+
+> Processed as #445.
 
 - **Outcome:** both bundles' scripts, workflow documents, and READMEs try both
   record locations in the fixed order and use whichever exists.
