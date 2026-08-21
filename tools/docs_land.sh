@@ -19,9 +19,10 @@
 # origin/master so no unselected committed work can ride along; gates every
 # path against docs/agent-workflow-contract.md §7 as published on
 # origin/master (via tools/docs_land_paths.py beside this script); warns
-# BEFORE doing anything when a dirty file you are NOT landing also changed
-# upstream; judges success by rev-list reachability, never by push output;
-# and fast-forwards the primary checkout only when it is clean.
+# BEFORE doing anything when a dirty or untracked file — ignored included —
+# that you are NOT landing also changed upstream; judges success by rev-list
+# reachability, never by push output; and fast-forwards the primary checkout
+# only when it is clean.
 #
 # Usage:
 #   tools/docs_land.sh -m "Commit subject" docs/foo.md [docs/bar.md ...]
@@ -135,27 +136,40 @@ path_action() {
 # Files that are dirty or untracked here, NOT being landed, and ALSO changed
 # on master since our merge base are exactly the ones the reconciliation
 # rebase stumbles on: a tracked dirty file is autostashed and can conflict on
-# replay, and an untracked file that master newly adds is never stashed at
-# all, so the rebase's checkout refuses it outright — after the push already
-# landed. Both are detected here, before anything is published. Written for
-# bash 3.2 (macOS /bin/bash): no mapfile, no bare expansion of a
-# possibly-empty array under `set -u`.
+# replay, an untracked file that master newly adds is never stashed at all so
+# the rebase's checkout refuses it outright, and an untracked file that is
+# also IGNORED is worse — checkout silently overwrites it. All three are
+# detected here, before anything is published, by walking the (small)
+# upstream-changed set and asking about each path's local state — presence on
+# disk without an index entry covers untracked and ignored alike, which an
+# --exclude-standard listing would not. Written for bash 3.2 (macOS
+# /bin/bash): no mapfile, no bare expansion of a possibly-empty array under
+# `set -u`.
+CHANGED_UPSTREAM="$(git diff --name-only "$BASE" origin/master)"
+DIRTY="$( { git diff --name-only; git diff --cached --name-only; } | sort -u )"
 RISK=""
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   landing=0
   for p in "$@"; do [ "$f" = "$p" ] && landing=1; done
   [ "$landing" = 1 ] && continue
-  if git diff --name-only "$BASE" origin/master | grep -qxF -- "$f"; then
-    case "$RISK" in *"|$f|"*) ;; *) RISK="$RISK|$f|" ;; esac
+  at_risk=0
+  if printf '%s\n' "$DIRTY" | grep -qxF -- "$f"; then
+    at_risk=1
+  elif [ -e "$f" ] && ! GIT_LITERAL_PATHSPECS=1 git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+    at_risk=1
   fi
-done < <( { git diff --name-only; git diff --cached --name-only; \
-            git ls-files --others --exclude-standard; } | sort -u )
+  [ "$at_risk" = 1 ] || continue
+  case "$RISK" in *"|$f|"*) ;; *) RISK="$RISK|$f|" ;; esac
+done <<EOF
+$CHANGED_UPSTREAM
+EOF
 if [ -n "$RISK" ]; then
   echo "WARNING: these files are dirty or untracked here AND changed on master:" >&2
   printf '%s\n' "$RISK" | tr '|' '\n' | grep -v '^$' | sed 's/^/  /' >&2
   echo "The reconciliation rebase would stash and replay the tracked ones, which" >&2
-  echo "can conflict, and an untracked one blocks its checkout outright." >&2
+  echo "can conflict; an untracked one blocks its checkout outright, and an" >&2
+  echo "ignored one would be silently overwritten." >&2
   echo "Land or commit them first, or accept the risk and re-run with -f." >&2
   [ "$FORCE" = 1 ] || [ "$DRY" = 1 ] || exit 3
 fi
@@ -165,7 +179,7 @@ fi
 # edit. That is sometimes wanted (-f), never silent.
 SELRISK=""
 for p in "$@"; do
-  if git diff --name-only "$BASE" origin/master | grep -qxF -- "$p"; then
+  if printf '%s\n' "$CHANGED_UPSTREAM" | grep -qxF -- "$p"; then
     [ "$(path_action "$p")" = unchanged ] && continue
     case "$SELRISK" in *"|$p|"*) ;; *) SELRISK="$SELRISK|$p|" ;; esac
   fi

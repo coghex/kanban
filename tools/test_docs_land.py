@@ -425,6 +425,31 @@ class RebasePathTests(DocsLandCase):
             (sb.docs / "docs/new.md").read_text(encoding="utf-8"),
             "local untracked draft\n")
 
+    def test_ignored_untracked_upstream_collision_is_predicted(self):
+        # An IGNORED untracked file is the worst spelling of the collision
+        # above: an --exclude-standard listing never shows it, and the
+        # reconciliation checkout does not refuse it — it silently overwrites
+        # it after the push already landed. The predictor asks about each
+        # upstream-changed path's local state directly, so ignored and
+        # unignored untracked files stop the run the same way.
+        sb = self.sb
+        sb.move_master_upstream("docs/new.md")
+        exclude = sb.main / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("docs/new.md\n", encoding="utf-8")
+        sb.write(sb.docs, "docs/new.md", "ignored local draft\n")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn("docs/new.md", blocked.stderr)
+        self.assertIn("ignored", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
+        self.assertEqual(
+            (sb.docs / "docs/new.md").read_text(encoding="utf-8"),
+            "ignored local draft\n")
+
     def test_selected_path_changed_upstream_is_refused_without_force(self):
         # A named path that also moved upstream would be overwritten
         # wholesale by the landing; that must be a stop, not a silent loss.
