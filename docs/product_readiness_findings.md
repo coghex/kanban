@@ -52,7 +52,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-1. The README denies the release whose install path it documents — [#401]
 - [x] PROD-2. The board screenshot predates two shipped features — [#417]
 - [x] PROD-3. The repository describes itself as "my kanban" — [no-issue]
-- [ ] PROD-4. The changelog has recorded nothing since the release that opened it
+- [x] PROD-4. The changelog has recorded nothing since the release that opened it — [#418]
 - [ ] PROD-5. Nothing states when a release is cut, so 34 merges sit unreleased
 - [ ] PROD-6. The screenshot gate is skipped on every CI run by that job's own design
 - [ ] PROD-7. The approval-relocation example passes alone and fails in the full suite
@@ -205,7 +205,7 @@ is a three-word personal note.
   with `kanban.cabal:4` so there is one description of this project, not three.
   Deciding the topic list is part of the work; there is no existing list to copy.
 
-### PROD-4. The changelog has recorded nothing since the release that opened it
+### [#418] PROD-4. The changelog has recorded nothing since the release that opened it
 
 **Verification:** Verified — the changelog was created with the 1.0.0.0 release,
 declares that per-change entries begin with the next release, and has not been
