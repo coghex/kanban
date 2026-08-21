@@ -827,6 +827,37 @@ class PushVerificationTests(DocsLandCase):
         self.assertEqual(sb.blob("origin/master", "docs/a.md"), "a landed\n")
         self.assertEqual(sb.git("rev-parse", "HEAD").strip(), main_head)
 
+    def test_ignored_child_under_a_flattened_directory_blocks_the_primary_ff(self):
+        # The primary-side twin of the docs-worktree directory-to-file case:
+        # the primary is behind a push that flattened a tracked directory
+        # into a file, and an ignored document inside its local copy of that
+        # directory would be lost by the fast-forward.
+        sb = self.sb
+        sb.git("rm", "-r", "-q", "docs/coordination")
+        sb.write(sb.main, "docs/coordination", "now a file\n")
+        sb.git("add", "docs/coordination")
+        sb.git("commit", "-q", "-m", "flatten coordination")
+        sb.git("push", "-q", "origin", "master")
+        sb.git("reset", "--hard", "-q", "HEAD~1")
+        exclude = sb.main / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("docs/coordination/local.md\n", encoding="utf-8")
+        sb.write(sb.main, "docs/coordination/local.md",
+                 "primary ignored child\n")
+        main_head = sb.git("rev-parse", "HEAD").strip()
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("landed: origin/master now contains", done.stdout)
+        self.assertIn("not fast-forwarding", done.stdout)
+        self.assertIn("docs/coordination/local.md", done.stdout)
+        self.assertEqual(sb.git("rev-parse", "HEAD").strip(), main_head)
+        self.assertEqual(
+            (sb.main / "docs/coordination/local.md").read_text(
+                encoding="utf-8"),
+            "primary ignored child\n")
+
     def test_dirty_primary_checkout_skips_the_fast_forward(self):
         sb = self.sb
         sb.write(sb.main, "docs/keep.md", "primary wip\n")
@@ -842,7 +873,79 @@ class PushVerificationTests(DocsLandCase):
             "primary wip\n")
 
 
+class InProgressOperationTests(DocsLandCase):
+    def test_a_stopped_rebase_refuses_before_reading_anything(self):
+        # A stopped rebase leaves worktree files half-replayed, possibly
+        # holding conflict markers; hashing them onto master would publish
+        # exactly those bytes. The refusal must come before any mutation.
+        sb = self.sb
+        sb.write(sb.main, "docs/b.md",
+                 B_SEED.replace("b line 1\n", "b upstream 1\n"))
+        sb.git("add", "docs/b.md")
+        sb.git("commit", "-q", "-m", "upstream edits b line 1")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/b.md",
+                 B_SEED.replace("b line 1\n", "b local 1\n"))
+        sb.git("add", "docs/b.md", cwd=sb.docs)
+        sb.git("commit", "-q", "-m", "local edits b line 1", cwd=sb.docs)
+        sb.git("fetch", "-q", "origin", cwd=sb.docs)
+        stopped = subprocess.run(
+            ["git", "rebase", "origin/master"], cwd=str(sb.docs),
+            env=sb.env, capture_output=True, text=True)
+        self.assertNotEqual(stopped.returncode, 0, stopped.stdout)
+
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("rebase in progress", done.stderr)
+        self.assertEqual(sb.blob("origin/master", "docs/a.md"), "a seed\n")
+
+
 class ClassificationGateTests(DocsLandCase):
+    def test_an_upstream_file_ancestor_is_refused_by_name(self):
+        # master flattened the tracked directory into a file; a new local
+        # document beneath the (still-directory) local copy cannot land,
+        # and the refusal must name the topology rather than surfacing a
+        # raw index-plumbing error mid-run.
+        sb = self.sb
+        sb.git("rm", "-r", "-q", "docs/coordination")
+        sb.write(sb.main, "docs/coordination", "now a file\n")
+        sb.git("add", "docs/coordination")
+        sb.git("commit", "-q", "-m", "flatten coordination")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/coordination/fresh.md", "new note\n")
+        before = sb.snapshot()
+
+        done = sb.run_script(
+            "-m", "Land fresh", "docs/coordination/fresh.md")
+        self.assertEqual(done.returncode, 6, done.stdout)
+        self.assertIn("docs/coordination is a file on origin/master",
+                      done.stderr)
+        self.assertEqual(sb.head("origin/master"), before["upstream"])
+
+    def test_an_upstream_directory_at_the_leaf_is_refused_by_name(self):
+        sb = self.sb
+        sb.write(sb.main, "docs/tree-doc.md/inner.md", "nested\n")
+        sb.git("add", "docs/tree-doc.md")
+        sb.git("commit", "-q", "-m", "a directory named like a document")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/tree-doc.md", "a local file\n")
+        before = sb.snapshot()
+
+        done = sb.run_script("-m", "Land tree-doc", "docs/tree-doc.md")
+        self.assertEqual(done.returncode, 6, done.stdout)
+        self.assertIn("is a directory on origin/master", done.stderr)
+        self.assertEqual(sb.head("origin/master"), before["upstream"])
+
+    def test_selection_nesting_conflicts_are_detected(self):
+        module = _load_paths_module()
+        self.assertEqual(
+            module.selection_nesting_conflicts(
+                ["docs/x.md", "docs/x.md/y.md"]),
+            [["docs/x.md", "docs/x.md/y.md"]])
+        self.assertEqual(
+            module.selection_nesting_conflicts(["docs/a.md", "docs/b.md"]),
+            [])
     def test_a_code_gated_path_is_refused_by_name(self):
         sb = self.sb
         sb.write(sb.docs, "docs/design.md", "design wip\n")

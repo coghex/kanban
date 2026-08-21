@@ -382,6 +382,30 @@ def casefold_collision(worktree: Path, path: str) -> str | None:
     return None
 
 
+def upstream_object_type(worktree: Path, path: str) -> str | None:
+    """The object type at `path` on the publication tip, or None when the
+    tip has nothing there."""
+    proc = run_git(
+        worktree, "cat-file", "-t", f"{CONTRACT_REF}:{path}", check=False
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def selection_nesting_conflicts(paths: list[str]) -> list[list[str]]:
+    """Pairs among `paths` where one is a whole-component prefix of another.
+    A tree cannot hold `docs/x.md` as a file and `docs/x.md/y.md` beneath it
+    at once, so such a selection must refuse rather than reach the index
+    build as a plumbing error."""
+    conflicts: list[list[str]] = []
+    for one in paths:
+        for other in paths:
+            if one != other and row_covers(one + "/", other):
+                pair = sorted([one, other])
+                if pair not in conflicts:
+                    conflicts.append(pair)
+    return conflicts
+
+
 def selection_casefold_conflicts(paths: list[str]) -> list[list[str]]:
     """Groups of distinct spellings among `paths` — or their directory
     prefixes — that fold to the same name. `casefold_collision` compares a
@@ -411,6 +435,23 @@ def verify_names_a_document(worktree: Path, path: str) -> None:
             f"{path}: differs only by case from the existing {collision!r}; "
             "name the exact spelling — a second entry differing only by case "
             "cannot be checked out on a case-insensitive filesystem"
+        )
+    # The landing commit is built directly on the publication tip, so the
+    # named path must fit that tree's topology: a file (or symlink) at an
+    # ancestor position there, or a directory at the leaf, would otherwise
+    # surface as a raw index-plumbing error instead of a refusal.
+    parts = PurePosixPath(path).parts
+    for depth in range(1, len(parts)):
+        prefix = "/".join(parts[:depth])
+        if upstream_object_type(worktree, prefix) == "blob":
+            raise Refusal(
+                f"{path}: {prefix} is a file on {CONTRACT_REF}, so nothing "
+                "can land beneath it"
+            )
+    if upstream_object_type(worktree, path) == "tree":
+        raise Refusal(
+            f"{path}: is a directory on {CONTRACT_REF}; land documents one "
+            "file at a time"
         )
     # A symlinked ancestor would resolve the leaf outside the worktree (or to
     # a different tracked location), so `is_file()` and the classification
@@ -502,6 +543,11 @@ def gate(worktree: Path, arguments: list[str]) -> int:
             f"{' and '.join(variants)}: differ only by case within one "
             "selection, and a tree carrying both could never check out on a "
             "case-insensitive filesystem"
+        )
+    for pair in selection_nesting_conflicts(canonical):
+        refusals.append(
+            f"{' and '.join(pair)}: one selected path nests beneath the "
+            "other, and a tree cannot carry both"
         )
     if refusals:
         for refusal in refusals:

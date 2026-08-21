@@ -70,9 +70,34 @@ resolve_worktree() {
   git worktree list --porcelain \
     | awk -v want="branch refs/heads/$1" '/^worktree /{p=substr($0,10)} $0==want{print p}'
 }
+# A stopped rebase detaches HEAD, so the branch record disappears from the
+# listing while rebase-merge/head-name (or rebase-apply/head-name) still
+# names the branch being rebased. Prints the worktree in that state, if any.
+rebasing_worktree() {
+  git worktree list --porcelain \
+    | awk '/^worktree /{print substr($0,10)}' \
+    | while IFS= read -r _wt; do
+        for _state in rebase-merge rebase-apply; do
+          _head_file="$(git -C "$_wt" rev-parse --git-path "$_state/head-name" 2>/dev/null)" || continue
+          if [ -f "$_head_file" ]; then
+            IFS= read -r _rebased < "$_head_file" || continue
+            if [ "$_rebased" = "refs/heads/$1" ]; then
+              printf '%s\n' "$_wt"
+              return 0
+            fi
+          fi
+        done
+      done
+}
 require_one() {
   # $1: branch name, $2: resolved paths (newline-separated)
   if [ -z "$2" ]; then
+    _mid="$(rebasing_worktree "$1")"
+    if [ -n "$_mid" ]; then
+      echo "error: the worktree at $_mid has a rebase in progress on branch $1;" >&2
+      echo "finish it with 'git rebase --continue' or abort it before landing" >&2
+      exit 1
+    fi
     echo "error: no worktree is on branch $1. Create one with:" >&2
     echo "  git worktree add ../kanban-docs -b docs-wip origin/master" >&2
     exit 1
@@ -91,6 +116,27 @@ require_one docs-wip "$DOCS_WT"
 PRIMARY="$(resolve_worktree master)"
 require_one master "$PRIMARY"
 cd "$DOCS_WT"
+
+# --- Refuse a docs worktree stopped mid-operation --------------------------
+# A stopped rebase, merge, or conflicted stash application leaves worktree
+# files half-replayed — possibly holding conflict markers — and a landing
+# would hash exactly those bytes onto master. Nothing is read or landed
+# until the operation is finished or aborted.
+for _marker in rebase-merge rebase-apply; do
+  if [ -d "$(git rev-parse --git-path "$_marker")" ]; then
+    echo "error: the docs worktree has a rebase in progress; finish it with" >&2
+    echo "'git rebase --continue' or abort it before landing" >&2
+    exit 1
+  fi
+done
+if [ -f "$(git rev-parse --git-path MERGE_HEAD)" ]; then
+  echo "error: the docs worktree has a merge in progress; conclude or abort it before landing" >&2
+  exit 1
+fi
+if [ -n "$(git ls-files -u)" ]; then
+  echo "error: the docs worktree has unmerged paths; resolve them before landing" >&2
+  exit 1
+fi
 
 git fetch -q origin
 
