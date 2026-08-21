@@ -214,6 +214,7 @@ data BoardMouseAction
   = -- | Move the live search to this column, consuming the press.
     TransferSearch BoardColumn
   | ToggleDrainerFromClick
+  | ToggleApprovalFromClick
   | RefreshAllFromClick
   | ToggleFilterBoxFromClick FilterBox
   | ToggleEpicFromClick BoardColumn Int Int
@@ -226,15 +227,16 @@ data BoardMouseAction
 --
 -- A live search outranks every column press: a left or right press aimed at
 -- any column but the searched one moves the search there and does nothing
--- else, wherever in that column it landed. It does not outrank the two sidebar
--- controls or a filter checkbox, none of which is a column target at all and
--- all of which are answered first, and it claims neither the wheel — which
--- retargets nothing, so it keeps scrolling whatever is under the pointer — nor
--- the middle button.
+-- else, wherever in that column it landed. It does not outrank the three
+-- sidebar controls or a filter checkbox, none of which is a column target at
+-- all and all of which are answered first, and it claims neither the wheel —
+-- which retargets nothing, so it keeps scrolling whatever is under the
+-- pointer — nor the middle button.
 --
--- Both sidebar controls take a plain left press and nothing else. A middle,
--- right, wheel, or modifier-carrying press over one falls through every arm
--- below, which name only column targets, and the board claims nothing for it.
+-- All three sidebar controls take a plain left press and nothing else. A
+-- middle, right, wheel, or modifier-carrying press over one falls through
+-- every arm below, which name only column targets, and the board claims
+-- nothing for it.
 --
 -- The completed-history blocker outranks every /card/ press and nothing else.
 -- No column is drawn under it, so a @CardTarget@, @EpicTarget@, or
@@ -245,6 +247,7 @@ data BoardMouseAction
 boardMouseAction :: AppState -> Name -> Vty.Button -> [Vty.Modifier] -> Maybe BoardMouseAction
 boardMouseAction state name button modifiers = case (name, button, modifiers) of
   (DrainerButton, Vty.BLeft, []) -> Just ToggleDrainerFromClick
+  (ApprovalButton, Vty.BLeft, []) -> Just ToggleApprovalFromClick
   (UpdateButton, Vty.BLeft, []) -> Just RefreshAllFromClick
   (FilterBoxTarget box, Vty.BLeft, _) -> Just (ToggleFilterBoxFromClick box)
   _ | completedCardsBlocked state -> Nothing
@@ -268,6 +271,11 @@ boardMousePress :: BoardMouseAction -> AppState -> AppState
 boardMousePress = \case
   TransferSearch column -> transferSearchTo column
   ToggleDrainerFromClick -> fst . drainerTogglePress
+  -- The key's own pure core, not a second decision: 'toggleApprovalService'
+  -- is exactly this half of 'approvalTogglePress' followed by the handoff
+  -- 'applyBoardMouseAction' runs below, so the click cannot acquire a toggle
+  -- policy of its own.
+  ToggleApprovalFromClick -> fst . approvalTogglePress
   -- The update is not a state transition of its own. Every mark it leaves —
   -- the loading freshness, the notice, the coalesced follow-up — is made by
   -- the same 'startAllRefreshes' the key reaches, which is where a press made
@@ -282,9 +290,10 @@ boardMousePress = \case
   ScrollColumnBy _ _ -> \state -> state {appEnsureSelectionVisible = False}
 
 -- | Carries out one decided press: its effect on the state, and then the
--- four things that are not state — the viewport scroll, the controller
--- handoff a drainer press makes, the update an update press starts, and the
--- transcript a newly opened session overlay has to be shown the tail of.
+-- five things that are not state — the viewport scroll, the controller
+-- handoff a drainer press makes, the controller handoff an approval press
+-- makes, the update an update press starts, and the transcript a newly opened
+-- session overlay has to be shown the tail of.
 applyBoardMouseAction :: BoardMouseAction -> EventM Name AppState ()
 applyBoardMouseAction action = do
   before <- get
@@ -292,6 +301,10 @@ applyBoardMouseAction action = do
   case action of
     ScrollColumnBy column amount -> vScrollBy (viewportScroll (ColumnViewport column)) amount
     ToggleDrainerFromClick -> runDrainerToggleHandoff before
+    -- Read off the state the press was taken from, which is what makes this
+    -- the same handoff the key path runs: 'toggleApprovalService' decides
+    -- from the pre-press state too.
+    ToggleApprovalFromClick -> runApprovalToggleHandoff before
     -- The key's own dispatch, not a second call to whatever it happens to
     -- reach today, so the click cannot acquire a refresh path of its own.
     RefreshAllFromClick -> applyBoardAction RefreshAll
@@ -324,8 +337,9 @@ applyBoardAction action = do
 -- Everything that reaches a card does: the blocker draws none, so a press that
 -- moved, opened, or acted on one would be resolving a selection left over from
 -- the frame before it. Nothing else is touched — the filter panel that put the
--- blocker up, the footer, help, options, refresh, the drainer, the sidebar,
--- @Esc@, @q@, and @Ctrl-C@ all stay exactly as usable as they were.
+-- blocker up, the footer, help, options, refresh, the drainer, the issue
+-- approval service, the sidebar, @Esc@, @q@, and @Ctrl-C@ all stay exactly as
+-- usable as they were.
 --
 -- Total in 'BoardAction' for the same reason 'mutatesSelectedWork' is: a
 -- binding added to the table in "Kanban.UI.Keys" cannot reach the board
@@ -351,6 +365,7 @@ blockedByCompletedLoad = \case
   ShowProcesses -> False
   ShowIncidents -> False
   RefreshAll -> False
+  ToggleApproval -> False
   ToggleDrainer -> False
   ToggleSidebar -> False
   ShowSettings -> False
@@ -407,6 +422,7 @@ mutatesSelectedWork = \case
   ShowProcesses -> False
   ShowIncidents -> False
   RefreshAll -> False
+  ToggleApproval -> False
   ToggleDrainer -> False
   ToggleSidebar -> False
   ShowSettings -> False
@@ -432,6 +448,7 @@ dispatchBoardAction = \case
   ShowProcesses -> openProcesses
   ShowIncidents -> handleIncidentsAction OpenIncidentsPanel
   RefreshAll -> startAllRefreshes
+  ToggleApproval -> toggleApprovalService
   ToggleDrainer -> toggleDrainer
   MergeDoneCard -> onSelection mergeItemDoneCard mergeSelectedDoneCard
   ToggleSidebar -> modify (\current -> current {appSidebarVisible = not current.appSidebarVisible})

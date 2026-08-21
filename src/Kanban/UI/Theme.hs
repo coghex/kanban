@@ -1,5 +1,6 @@
 module Kanban.UI.Theme
-  ( approvedAttr,
+  ( approvalStatusAttr,
+    approvedAttr,
     approvedInteriorAttr,
     attentionAttr,
     cardBorderStyle,
@@ -53,6 +54,10 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as Vty
+import Kanban.ApprovalService
+  ( ApprovalState (..),
+    ApprovalStatus (..)
+    )
 import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
 import Kanban.Domain
 import Kanban.Drainer
@@ -74,6 +79,24 @@ drainerStatusAttr status = case status.drainerState of
   DrainerStopping -> pendingAttr
   DrainerWarning -> pendingAttr
   DrainerError -> problemAttr
+
+-- | The issue approval service's colour, declared beside the drainer's
+-- because the two controls stack in the same sidebar and a reader comparing
+-- them should not have to look in two modules.
+--
+-- It is a separate table over a separate type rather than a shared one keyed
+-- on a shared status, for the reason "Kanban.ApprovalService" gives
+-- 'ApprovalState' its own constructors: the two services reach these colours
+-- from different facts, and one table would be one place either service's
+-- state could be written into the other's colour.
+approvalStatusAttr :: ApprovalStatus -> AttrName
+approvalStatusAttr status = case status.approvalState of
+  ApprovalOff -> neutralAttr
+  ApprovalOn -> readyAttr
+  ApprovalStarting -> pendingAttr
+  ApprovalStopping -> pendingAttr
+  ApprovalWarning -> pendingAttr
+  ApprovalError -> problemAttr
 
 usageStatusAttribute :: Freshness -> AttrName
 usageStatusAttribute Loading = noticeAttr

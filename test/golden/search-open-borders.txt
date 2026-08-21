@@ -34,10 +34,10 @@
                                                                   │  code-health              │                                       │  reviewed:approve         │
                                                                   │ @claude-agent · updated   │                                       │  feature                  │
                                                                   │ 4h ago                    │                                       │ #901 · agent-name →       │
-                                                                  │ Make the fresh-install    │                                       │ master · updated 3h ago   │
-                                                                  │ behavior explicit and     │                                       │ Reads the cache through   │
-                                                                  │ keep local state outside… │                                       │ the versioned envelope    │
-                                                                  ╰───────────────────────────╯                                       │ and reports a truncated…  │
+ ┏━━━━━━━━━━━━━━━━━━━┓                                            │ Make the fresh-install    │                                       │ master · updated 3h ago   │
+ ┃ approve_issues.py ┃                                            │ behavior explicit and     │                                       │ Reads the cache through   │
+ ┗━━━━━━━━━━━━━━━━━━━┛                                            │ keep local state outside… │                                       │ the versioned envelope    │
+ off                                                              ╰───────────────────────────╯                                       │ and reports a truncated…  │
  ┏━━━━━━━━━━━━━━┓                                                                                                                     │ ◐ CI 9/12 · behind        │
  ┃ drain_prs.py ┃                                                                                                                     ╰───────────────────────────╯
  ┗━━━━━━━━━━━━━━┛

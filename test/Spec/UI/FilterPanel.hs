@@ -29,7 +29,7 @@ import Kanban.UI.Board
     footerHintLine,
     searchFooterHintLine,
   )
-import Kanban.UI.Events (BoardMouseAction (..), blockedByCompletedLoad, boardMouseAction, boardMousePress)
+import Kanban.UI.Events (BoardMouseAction (..), blockedByCompletedLoad, boardMouseAction, boardMousePress, mutatesSelectedWork)
 import Kanban.UI.Filter
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Search (SearchInput (..), applySearchInput, entriesFor, openSearch, searchInput)
@@ -758,10 +758,16 @@ mouseSpec = describe "mouse" $ do
             (ColumnViewport Active, Vty.BScrollUp)
           ]
       ]
-    -- The two things drawn through the blocker still answer.
+    -- The things drawn through the blocker still answer: the panel that put it
+    -- up, and all three sidebar controls, none of which is a card target.
     boardMouseAction blocked (FilterBoxTarget (LifecycleBox LifecycleClosed)) Vty.BLeft []
       `shouldBe` Just (ToggleFilterBoxFromClick (LifecycleBox LifecycleClosed))
     boardMouseAction blocked DrainerButton Vty.BLeft [] `shouldBe` Just ToggleDrainerFromClick
+    boardMouseAction blocked ApprovalButton Vty.BLeft [] `shouldBe` Just ToggleApprovalFromClick
+    boardMouseAction blocked UpdateButton Vty.BLeft [] `shouldBe` Just RefreshAllFromClick
+    -- And the key path the click shares its action with is not blocked either.
+    blockedByCompletedLoad ToggleApproval `shouldBe` False
+    mutatesSelectedWork ToggleApproval `shouldBe` False
 
 -- ---------------------------------------------------------------------------
 -- What the board says about the criteria

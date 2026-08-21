@@ -50,10 +50,10 @@
 ║┃                          ┃┃  │ versioned envelope before… │ ┃                                ┃                                ┃                                ┃║
 ║┃                          ┃┃  ╰────────────────────────────╯ ┃                                ┃                                ┃                                ┃║
 ║┃                          ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  ╭────────────────────────────╮ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │ #901 Add repository        │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │ snapshot cache             │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │  feature                   │ ┃                                ┃                                ┃                                ┃║
+║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  ╭────────────────────────────╮ ┃                                ┃                                ┃                                ┃║
+║┃ ┃ approve_issues.py ┃    ┃┃  │ #901 Add repository        │ ┃                                ┃                                ┃                                ┃║
+║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ snapshot cache             │ ┃                                ┃                                ┃                                ┃║
+║┃ off                      ┃┃  │  feature                   │ ┃                                ┃                                ┃                                ┃║
 ║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  │ unassigned · updated 4h    │ ┃                                ┃                                ┃                                ┃║
 ║┃ ┃ drain_prs.py ┃         ┃┃  │ ago                        │ ┃                                ┃                                ┃                                ┃║
 ║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  │ Load the last good GitHub  │ ┃                                ┃                                ┃                                ┃║

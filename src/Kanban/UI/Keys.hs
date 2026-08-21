@@ -117,6 +117,7 @@ data BoardAction
   | ShowProcesses
   | ShowIncidents
   | RefreshAll
+  | ToggleApproval
   | ToggleDrainer
   | MergeDoneCard
   | ToggleSidebar
@@ -214,6 +215,13 @@ binding action = case action of
   RefreshAll ->
     KeyBinding action [key 'u'] [BoardScope] (Just "click") "update" "update board and both usage providers"
       "Update GitHub board data and both usage providers"
+  -- Lowercase, because uppercase `A` is autosolve and the two are unrelated.
+  -- A live search still types this letter into its query: `searchInput`
+  -- decodes a printable key ahead of this table, exactly as it does for the
+  -- other lowercase bindings.
+  ToggleApproval ->
+    KeyBinding action [key 'a'] [BoardScope] (Just "click") "approvals" "start or stop issue approval service"
+      "Start or stop the service-managed issue approval service"
   ToggleDrainer ->
     KeyBinding action [key 'd'] [BoardScope] (Just "click") "drainer" "start or stop PR drainer"
       "Start or stop the service-managed PR drainer"

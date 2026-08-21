@@ -33,10 +33,10 @@
                                 ╰───────────────────────────╯     │ category defaults         │                                       │ envelope in the snapshot… │
                                                                   │  code-health              │                                       │  reviewed:approve         │
                                 ╭───────────────────────────╮     │ @claude-agent · updated   │                                       │  feature                  │
-                                │ #756 Define the           │     │ 4h ago                    │                                       │ #901 · agent-name →       │
-                                │ persistence contract      │     │ Make the fresh-install    │                                       │ master · updated 3h ago   │
-                                │  architecture             │     │ behavior explicit and     │                                       │ Reads the cache through   │
-                                │ unassigned · updated 4h   │     │ keep local state outside… │                                       │ the versioned envelope    │
+ ┏━━━━━━━━━━━━━━━━━━━┓          │ #756 Define the           │     │ 4h ago                    │                                       │ #901 · agent-name →       │
+ ┃ approve_issues.py ┃          │ persistence contract      │     │ Make the fresh-install    │                                       │ master · updated 3h ago   │
+ ┗━━━━━━━━━━━━━━━━━━━┛          │  architecture             │     │ behavior explicit and     │                                       │ Reads the cache through   │
+ off                            │ unassigned · updated 4h   │     │ keep local state outside… │                                       │ the versioned envelope    │
  ┏━━━━━━━━━━━━━━┓               │ ago                       │     ╰───────────────────────────╯                                       │ and reports a truncated…  │
  ┃ drain_prs.py ┃               │ Document root owners,     │                                                                         │ ◐ CI 9/12 · behind        │
  ┗━━━━━━━━━━━━━━┛               │ snapshot barriers, and    │                                                                         ╰───────────────────────────╯

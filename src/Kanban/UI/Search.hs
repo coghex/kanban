@@ -317,7 +317,7 @@ moveSelectionBy amount state = case safeIndex nextPosition rows of
 -- | The board column a mouse press landed in, for the one question a live
 -- search asks of a press: which column was it aimed at?
 --
--- Only the three names a column draws answer. The drainer button is its own
+-- Only the three names a column draws answer. Each sidebar control is its own
 -- 'Name' dispatched by its own arm, and every overlay target belongs to
 -- something that is not a column, so neither can transfer a search.
 mouseColumn :: Name -> Maybe BoardColumn

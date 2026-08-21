@@ -131,6 +131,12 @@ data Name
   | IncidentsPanel
   | IncidentTarget IncidentRef
   | DrainerButton
+  | -- | The usage sidebar's issue approval service control, drawn directly
+    -- above 'DrainerButton'. Its own name rather than a shared service
+    -- target, for the reason "Kanban.UI.Approval" keeps the two lifecycles
+    -- apart: one name would be one place a press meant for either service
+    -- could reach the other.
+    ApprovalButton
   | -- | The usage sidebar's update control. Registered only while the
     -- sidebar is drawn, so a collapsed sidebar leaves no extent for a press
     -- to land on and the control is unclickable exactly when it is invisible.

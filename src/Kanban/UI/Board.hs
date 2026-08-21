@@ -1,11 +1,13 @@
 module Kanban.UI.Board
   ( CardEnv (..),
+    approvalControlLabel,
     boardFooterHintLine,
     boardHintLine,
     cardExcerptLimit,
     cardStatusAttribute,
     completedLoadingHeading,
     completedUnavailableHeading,
+    drainerLabel,
     drawBase,
     drawCardFrame,
     drawLiveActivity,
@@ -55,6 +57,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (TimeZone, UTCTime, diffUTCTime)
 import Kanban.CLI (Options (..))
+import Kanban.ApprovalService
+  ( ApprovalStatus (..)
+    )
 import Kanban.Card
   ( CardChip (..),
     boundedLines,
@@ -150,7 +155,11 @@ drawUsage state
       vBox
         [ vBox [drawProvider state Codex, txt "", drawProvider state Claude],
           drawUpdateButton state,
-          padTop Max (drawDrainerButton state)
+          -- One padded stack rather than two, so the pair stays together at
+          -- the sidebar's foot: padding each separately would push the
+          -- approval control up to the update button and leave the gap
+          -- between two service controls that belong beside each other.
+          padTop Max (vBox [drawApprovalButton state, drawDrainerButton state])
         ]
 
 -- | One nested sidebar control, drawn under §10's convention: its own box out
@@ -191,6 +200,32 @@ drawDrainerButton state =
 -- sixteen-column footprint.
 drainerLabel :: Text
 drainerLabel = " drain_prs.py "
+
+-- | The issue approval service's control, drawn exactly as the drainer's is
+-- and directly above it.
+--
+-- The detail line is 'approvalDetail' verbatim. Every wording it can carry --
+-- @checking…@ before the first poll answers, the transition text a press
+-- writes, and the steady, barrier, and error compositions the controller's
+-- document decodes into -- is already composed in
+-- "Kanban.ApprovalService" and "Kanban.UI.Approval", so composing anything
+-- here would be a second place the operator's text could be decided.
+drawApprovalButton :: AppState -> Widget Name
+drawApprovalButton state =
+  vBox
+    [ sidebarControl state ApprovalButton (approvalStatusAttr status) approvalControlLabel,
+      withAttr (approvalStatusAttr status) (txtWrap status.approvalDetail)
+    ]
+  where
+    status = state.appApprovalStatus
+
+-- | The approval control's interior row, padded the way the drainer's is.
+--
+-- Nineteen cells of label make a twenty-one-cell box, which is what has to
+-- fit: 'usageSidebarInterior' is 24, so the widest sidebar control still
+-- clears the interior it is drawn in without wrapping.
+approvalControlLabel :: Text
+approvalControlLabel = " approve_issues.py "
 
 -- | The update control: the board-and-usage update @u@ performs, made
 -- clickable. It carries no status or detail line of its own, because the

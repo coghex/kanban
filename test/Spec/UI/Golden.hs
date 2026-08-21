@@ -26,7 +26,8 @@ module Spec.UI.Golden (spec) where
 import Brick (AttrMap)
 import Brick.AttrMap (attrMapLookup)
 import Brick.BChan (BChan, newBChan)
-import Data.List (findIndex, isInfixOf, isPrefixOf)
+import qualified Data.ByteString.Lazy.Char8 as LazyByteString
+import Data.List (findIndex, intercalate, isInfixOf, isPrefixOf, nub)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -35,15 +36,19 @@ import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime, utc)
 import qualified Graphics.Vty.Attributes as Vty
 import Kanban.ApprovalService
   ( ApprovalActivity (..),
+    ApprovalBackend (..),
+    ApprovalController (..),
     ApprovalState (..),
     ApprovalStatus (..),
     ApprovalUnavailable (..),
+    approvalBarrierSummary,
+    decodeApprovalStatus,
   )
 import Kanban.CLI (BorderPolicy (..), Options (..))
 import Data.IORef (IORef, newIORef)
 import Kanban.Card (displayWidth)
 import Kanban.Domain
-import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
+import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..), normalizedRepositoryIdentity)
 import Kanban.Filter
   ( FilterBox (..),
     KindFacet (..),
@@ -56,17 +61,22 @@ import Kanban.GitHub (HistoryTraversal, RefreshCoordinator, newHistoryTraversal)
 import Kanban.Models (defaultRoster)
 import Kanban.Settings (defaultSettings)
 import Kanban.UI (drawApplication)
+import Kanban.UI.Approval (approvalStatusApplied, approvalTogglePress)
 import Kanban.UI.Board
-  ( completedLoadingHeading,
+  ( approvalControlLabel,
+    completedLoadingHeading,
     completedUnavailableHeading,
+    drainerLabel,
     openDataLoadingHeading,
     openDataUnavailableHeading,
+    usageSidebarInterior,
   )
 import Kanban.UI.Filter (focusFilterPanel, refreshVisibleBoard, toggleFilterBoxFromClick, toggleFilterPanel)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Search (SearchInput (..), applySearchInput, openSearch)
 import Kanban.UI.Theme
   ( approvedAttr,
+    neutralAttr,
     pendingAttr,
     problemAttr,
     readyAttr,
@@ -407,6 +417,75 @@ spec = describe "golden frames" $ do
           ]
     leaked `shouldBe` []
 
+  -- §6: the two service controls are one stack at the foot of the sidebar,
+  -- the approval service above the drainer, each with its own detail line
+  -- directly under its own box. Read off the frame rather than asserted about
+  -- the widget tree, because the order they are drawn in is the whole claim.
+  it "draws the approval control directly above the drainer control, each over its own detail" $ do
+    frame <- renderCase wideCase
+    let (approvalRow, approvalColumn) = controlAt frame approvalControlLabel
+        (drainerRow, drainerColumn) = controlAt frame drainerLabel
+    -- Three box rows and one detail line between the two label rows: the
+    -- approval control's own box, its own status line, and then the drainer's
+    -- box opening directly under it.
+    drainerRow - approvalRow `shouldBe` 4
+    approvalColumn `shouldBe` drainerColumn
+    -- Each detail belongs to the box above it. The resting service is off, so
+    -- both read "off" -- which is exactly why the rows have to be told apart
+    -- by position rather than by text.
+    approvalDetailText frame `shouldBe` "off"
+    interiorRow frame drainerColumn (drainerRow + 2) `shouldBe` "off"
+
+  -- Requirement 2, which no @.txt@ golden can carry: the frames record
+  -- characters and these record the colour each 'ApprovalState' is drawn in.
+  -- Every constructor is covered, so a mapping cannot be added or repointed
+  -- without a frame here naming it.
+  it "colors the approval control by ApprovalState, in all six states" $ do
+    let theme = themeFor testOptions
+        expectations =
+          [ ("off" :: String, wideCase, neutralAttr),
+            ("on", frameCaseNamed "approval-on", readyAttr),
+            ("starting", frameCaseNamed "approval-starting", pendingAttr),
+            ("stopping", frameCaseNamed "approval-stopping", pendingAttr),
+            ("warning", frameCaseNamed "approval-warning", pendingAttr),
+            ("error", frameCaseNamed "approval-error", problemAttr)
+          ]
+    sequence_
+      [ do
+          frame <- renderCase frameCase
+          let attributes = approvalControlAttributes frame
+          (label, null attributes) `shouldBe` (label, False)
+          (label, nub attributes) `shouldBe` (label, [attrMapLookup expected theme])
+      | (label, frameCase, expected) <- expectations
+      ]
+
+  -- Requirement 3: the control renders what "Kanban.ApprovalService" and
+  -- "Kanban.UI.Approval" composed, with nothing added on the way to the
+  -- screen. Each of these is a distinct composition, and none of them is
+  -- spelled anywhere in @src/Kanban/UI/Board.hs@.
+  it "renders the approval detail line verbatim, in every state" $ do
+    let expectations =
+          [ (frameCaseNamed "approval-on", "on"),
+            (frameCaseNamed "approval-starting", "starting…"),
+            (frameCaseNamed "approval-stopping", "stopping…"),
+            (frameCaseNamed "approval-warning", "on · unresolved incident · " <> approvalBarrierSummary 812),
+            (frameCaseNamed "approval-error", "stopped · a backend pass failed")
+          ]
+    sequence_
+      [ do
+          frame <- renderCase frameCase
+          (expected, approvalDetailText frame) `shouldBe` (expected, expected)
+      | (frameCase, expected) <- expectations
+      ]
+
+  -- Requirement 6's other half, on the one row that reports it: a press writes
+  -- its transition notice, and the frame the press produced shows it.
+  it "shows the transition notice a press leaves, on both the start and the stop" $ do
+    starting <- frameLines <$> renderCase (frameCaseNamed "approval-starting")
+    stopping <- frameLines <$> renderCase (frameCaseNamed "approval-stopping")
+    Data.Text.isInfixOf "Starting issue approval service…" starting `shouldBe` True
+    Data.Text.isInfixOf "Stopping issue approval service…" stopping `shouldBe` True
+
   -- Requirement 8's compact status, on the one row that is always on screen.
   it "states where the completed generation stands in the footer" $ do
     current <- frameLines <$> renderCase wideCase
@@ -558,6 +637,7 @@ frameCases =
   ]
     <> openDataCases
     <> filterCases
+    <> approvalCases
 
 -- | §7's two blocking panels at every setting the populated board is captured
 -- at, because a panel that replaces the board has to survive the same
@@ -693,6 +773,111 @@ filterCases =
            }
        ]
 
+-- | The issue approval control's five non-resting states, each drawn above the
+-- drainer's in a sidebar the board is wide enough to show.
+--
+-- Every board frame above already covers the sixth: 'restingState' leaves the
+-- service settled off, so @off@ is what the whole existing sidebar-visible set
+-- is captured with — and the narrow case, which hides the sidebar entirely,
+-- keeps proving that a collapsed sidebar draws neither control.
+--
+-- None of these writes an 'ApprovalStatus' into the record. The two
+-- transitions come from 'approvalTogglePress', which is the same press both
+-- the @a@ binding and a click on the control run, and the three steady states
+-- from 'decodeApprovalStatus' over a controller document, applied through the
+-- poll path 'approvalStatusApplied' — so a frame cannot show a status the
+-- service could not actually report, and the detail line under each box is
+-- whatever those two mechanisms composed rather than anything this suite
+-- wrote.
+approvalCases :: [FrameCase]
+approvalCases =
+  [ FrameCase
+      { frameCaseName = "approval-on",
+        frameCaseWidth = 164,
+        frameCaseHeight = 48,
+        frameCaseSummary = "the approval control green above the drainer, the queue being worked",
+        frameCaseState = polled (approvalDocument "running" Nothing)
+      },
+    FrameCase
+      { frameCaseName = "approval-starting",
+        frameCaseWidth = 164,
+        frameCaseHeight = 48,
+        frameCaseSummary = "a start pressed from off: the optimistic transition and its notice",
+        frameCaseState = pressingApproval
+      },
+    FrameCase
+      { frameCaseName = "approval-stopping",
+        frameCaseWidth = 164,
+        frameCaseHeight = 48,
+        frameCaseSummary = "a stop pressed from on: the optimistic transition and its notice",
+        frameCaseState = pressingApproval . polled (approvalDocument "running" Nothing)
+      },
+    FrameCase
+      { frameCaseName = "approval-warning",
+        frameCaseWidth = 164,
+        frameCaseHeight = 48,
+        frameCaseSummary = "amber at the durable barrier, naming the issue that requested changes",
+        frameCaseState = polled (approvalDocument "running" (Just 812))
+      },
+    FrameCase
+      { frameCaseName = "approval-error",
+        frameCaseWidth = 164,
+        frameCaseHeight = 48,
+        frameCaseSummary = "red on a backend pass that failed and ended the run",
+        frameCaseState = polled (approvalDocument "child_failure" Nothing)
+      }
+  ]
+
+-- | One controller status document, in the shape "Spec.ApprovalService"
+-- already builds them in: the schema and version this reader pins, the
+-- repository the fixture board is for, a state, and — for the barrier case —
+-- the durable record that outlives a stop.
+approvalDocument :: String -> Maybe Int -> LazyByteString.ByteString
+approvalDocument state barrier =
+  LazyByteString.pack
+    ( "{"
+        <> intercalate
+          ","
+          ( [ "\"schema\":\"kanban-issue-approval-status\"",
+              "\"version\":1",
+              "\"repository\":\"" <> Data.Text.unpack (normalizedRepositoryIdentity fixtureRepository) <> "\"",
+              "\"state\":\"" <> state <> "\""
+            ]
+              <> foldMap (\issue -> ["\"barrier_issue\":" <> show issue]) barrier
+          )
+        <> "}"
+    )
+
+-- | One controller document applied the way a poll applies it.
+polled :: LazyByteString.ByteString -> AppState -> AppState
+polled document state =
+  fst
+    ( approvalStatusApplied
+        state.appApprovalTransition
+        (decodeApprovalStatus (normalizedRepositoryIdentity state.appRepository) document)
+        state
+    )
+
+-- | One press of the approval control, taken against a discovered controller
+-- so the press is a real transition rather than the unavailable refusal the
+-- resting state's absent controller produces. The handoff the press returns is
+-- deliberately dropped: nothing a frame shows depends on it.
+pressingApproval :: AppState -> AppState
+pressingApproval state =
+  fst (approvalTogglePress state {appApprovalController = Right fixtureApprovalController})
+
+-- | A controller that exists as a value and names a path nothing will run.
+-- 'approvalTogglePress' only reads it into the handoff it returns, which these
+-- frames discard.
+fixtureApprovalController :: ApprovalController
+fixtureApprovalController =
+  ApprovalController "/nonexistent/kanban-test-approval-controller" [] ApprovalLaunchd
+
+-- | The repository every frame is drawn for, named once so the controller
+-- documents above are addressed to the same identity 'restingState' carries.
+fixtureRepository :: Repository
+fixtureRepository = Repository "/fixture/kanban" "coghex" "kanban"
+
 -- | Show the panel and toggle the named boxes through the click transition,
 -- which is the same criteria edit the keyboard makes.
 withBoxes :: [FilterBox] -> AppState -> AppState
@@ -811,7 +996,7 @@ withOptions change state = state {appOptions = change state.appOptions}
 restingState :: BChan AppEvent -> RefreshCoordinator BoardRefreshOutcome -> HistoryTraversal -> IORef Int -> AppState
 restingState channel refreshCoordinator historyTraversal approvalEpoch =
   AppState
-    { appRepository = Repository "/fixture/kanban" "coghex" "kanban",
+    { appRepository = fixtureRepository,
       appBoard = fixtureBoard,
       -- The default criteria admit the open board unchanged, so every golden
       -- frame is drawn from exactly the board it always was.
@@ -1021,6 +1206,60 @@ issuesColumnBounds frame = (left, columnOf frame boardTop left '┳')
   where
     boardTop = fst (frameTextAt frame "ISSUES")
     left = columnOf frame boardTop (-1) '┏'
+
+-- | Where one sidebar control's box is: the row its label is drawn on, and
+-- the column that box opens at. Located by the label the control is declared
+-- with rather than by a copy of it, so a renamed control moves these with it.
+controlAt :: [[FrameCell]] -> Text -> (Int, Int)
+controlAt frame label = (row, column - 2)
+  where
+    -- The label is drawn one cell inside its own vertical edge, so the box
+    -- opens two cells left of where the stripped text starts.
+    (row, column) = frameTextAt frame (Data.Text.strip label)
+
+-- | One row of the sidebar's interior, read from the column a control's box
+-- opens at rather than from a fixed offset, so this holds at every width the
+-- sidebar is drawn at.
+interiorRow :: [[FrameCell]] -> Int -> Int -> Text
+interiorRow frame left rowIndex =
+  Data.Text.strip . Data.Text.pack $
+    [ frameCellCharacter (cellAt frame rowIndex columnIndex)
+    | columnIndex <- [left .. left + usageSidebarInterior - 1]
+    ]
+
+-- | The status line drawn under the approval control's box: every interior
+-- row between that box and the drainer's, rejoined the way 'txtWrap' split
+-- it, so a detail too long for the 24-cell interior is read back whole rather
+-- than as its first line.
+approvalDetailText :: [[FrameCell]] -> Text
+approvalDetailText frame =
+  Data.Text.unwords
+    ( filter
+        (not . Data.Text.null)
+        [interiorRow frame left rowIndex | rowIndex <- [row + 2 .. drainerRow - 2]]
+    )
+  where
+    (row, left) = controlAt frame approvalControlLabel
+    (drainerRow, _) = controlAt frame drainerLabel
+
+-- | The attribute every glyph of the approval control carries: its own box,
+-- edge to edge, and the status line under it.
+--
+-- The edges are read rather than only the label because they are the point of
+-- §10's own-box rule: Brick's border widgets draw their runs under an
+-- attribute the theme does not name, so a control that wrapped its label in
+-- one would lose its colour exactly there.
+approvalControlAttributes :: [[FrameCell]] -> [Vty.Attr]
+approvalControlAttributes frame =
+  [ frameCellAttribute cell
+  | rowIndex <- [row - 1 .. drainerRow - 2],
+    columnIndex <- [left .. left + displayWidth approvalControlLabel + 1],
+    let cell = cellAt frame rowIndex columnIndex,
+    frameCellCharacter cell /= ' '
+  ]
+  where
+    (row, left) = controlAt frame approvalControlLabel
+    (drainerRow, _) = controlAt frame drainerLabel
 
 -- | Where a piece of text first appears: its row, and the cell it starts at.
 frameTextAt :: [[FrameCell]] -> Text -> (Int, Int)
