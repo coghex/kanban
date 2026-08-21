@@ -44,7 +44,10 @@ concrete precondition
   imitation; default batches stop at their first changes-requested or
   indeterminate result; an explicit auto-remediation policy can apply bounded
   recommendations and rereview; card actions and attention notices reopen the
-  relevant retained history; and no path merges a pull request.
+  relevant retained history; parent death leaves no surviving descendants;
+  runner/host failure stays interrupted until the ordinary action hotkey starts
+  worktree-aware recovery; direct user steering is recorded and obeyed; and the
+  superagent never bypasses the repository's drainer-only merge authority.
 - **Users and operators:** A maintainer using Kanban as the control surface for
   long-running, agent-assisted work on one repository.
 - **Arc label:** `agent-workflows` proposed.
@@ -182,6 +185,17 @@ concrete precondition
 - The operator can pause future dispatch, cancel a queued child, terminate a
   live owned process tree through existing worker semantics, or resume a
   waiting mission with guidance. Every control action is journaled.
+- A service crash, logout, or machine restart never resumes autonomous work by
+  itself. Kanban renders the affected mission or session as `interrupted`.
+  Pressing its normal action hotkey again starts manual recovery, verifies that
+  the former process subtree is gone, inspects any existing worktree and live
+  GitHub state, and launches a fresh agent with the failure and recovery
+  context. It does not create a clean replacement worktree over unfinished
+  work.
+- Direct user guidance to an active agent is authoritative even when it changes
+  the immediate task. The session records the redirection and obeys it; model
+  planners, child agents, and hotkey-dispatched workflows do not receive the
+  same power merely by repeating user-like language from repository content.
 
 ## Scope
 
@@ -195,6 +209,9 @@ concrete precondition
 - A service-supervised repository runner that continues explicitly dispatched
   missions after the TUI exits and persists every step needed for later
   reattachment.
+- Structured parent/child concurrency: a parent cannot finish while registered
+  children remain, and parent failure, cancellation, or termination recursively
+  stops and reaps its complete descendant subtree.
 - A closed registry of typed workflow actions backed by Kanban's canonical
   issue review/revision, solve/autosolve, PR review/revise/rereview, and
   approval-service capabilities.
@@ -211,6 +228,11 @@ concrete precondition
   external effect.
 - Per-mission decision authority that defaults to asking the operator but can
   be widened in natural language to make bounded product or scope decisions.
+- Manual interrupted-session recovery that preserves and inspects an existing
+  worktree, branch, commits, uncommitted changes, logs, and live tracker state
+  before a fresh agent continues.
+- Direct trusted-user steering of an active agent, including redirection beyond
+  the mission's current step, with the plan impact recorded and reconciled.
 - Repository identity, locking, private file modes, schema migration, tests,
   documentation, and preflight integration.
 
@@ -226,6 +248,9 @@ concrete precondition
   inventing a success after an unknown outcome, or merging a pull request.
 - Arbitrary source-code work unrelated to a tracked/registered Kanban workflow
   in the first arc.
+- A first-release promise that provider-internal subagents with no stable
+  identity/event/cancellation protocol are separately visible or steerable;
+  their output remains preserved within the parent session.
 - Cross-repository missions before the multi-repository board contract is
   implemented. Durable mission identity is nevertheless repository-qualified
   so that later support does not require a migration.
@@ -270,6 +295,27 @@ the controller records the child before launch. A registered child may make the
 same request recursively, so arbitrary mission depth does not require a
 per-provider special case.
 
+Registered sessions follow **structured concurrency**. A parent remains live
+until all of its children have completed or been cancelled and reaped. Killing,
+cancelling, timing out, or unexpectedly losing a parent recursively terminates
+its full descendant subtree, deepest children first, and verifies every
+recorded process identity is absent before declaring the parent settled. A
+child is never silently reparented to the mission runner and never survives as
+an independent stray agent. Parallel batch targets are siblings whose living
+parent is the mission runner; pausing the batch does not kill them, while
+terminating the mission does.
+
+Because a process cannot clean up after its own crash, every executable parent
+is itself inside a longer-lived ownership boundary. The repository service
+launches a small mission supervisor; that supervisor launches the scheduler,
+and the scheduler owns session supervisors. Each layer records child identities
+before admitting work. A scheduler or session-parent exit is observed by its
+living supervisor, which performs the cascade. The outer service-manager job
+provides process containment for supervisor failure, and manual recovery
+performs a second identity-verified sweep before any replacement starts. A host
+whose service manager cannot supply a trustworthy outer containment/refusal
+boundary is unsupported rather than allowed to leak agents.
+
 Process census and provider logs still observe unregistered subprocesses for
 termination safety and transcript completeness. They cannot, by themselves,
 recover semantic facts such as which subprocess is an agent, its provider
@@ -279,16 +325,25 @@ of its parent's durable transcript rather than appearing as a separately
 reattachable child. Claiming otherwise would turn a PID ancestry guess into a
 false session contract.
 
-Today's worker contract deliberately refuses to call a worker terminal while
+Today's worker contract already refuses to call a worker terminal while
 recorded descendants survive; it reports them as orphaned until they exit or
-are killed. A child intended to outlive its creator must therefore be promoted
-before launch to its own mission-owned supervisor, process group, lease, and
-log. It cannot be implemented as a background process abandoned beneath a
-parent worker without breaking current termination and recovery guarantees.
+are killed. The mission tree generalizes that invariant across registered agent
+sessions. If a provider starts an opaque internal subagent, it stays within the
+parent's owned process subtree and must exit or be killed with that parent.
 
 Provider integrations may later promote internal subagents to managed children
 when their protocols expose stable IDs and event streams. The durable tree
 schema allows that without requiring every provider to support it initially.
+
+#### Follow-on design seed: provider-native subagent observability
+
+A later design should explore promoting provider-internal subagents into the
+visible tree through native APIs, an agent-spawn proxy, or an explicit
+registration tool. It must require a stable child ID, parent ID, ordered event
+stream, log ownership, cancellation operation, and proof that parent death
+cascades to the child. Until those capabilities exist for a provider, the
+honest representation is one opaque child transcript nested inside its parent,
+not a guessed session reconstructed from process ancestry.
 
 ### The controller, not the model, owns progression
 
@@ -308,6 +363,32 @@ Known commands do not need a planner turn. Their parser builds the same typed
 plan directly, making `solve 123` fast and deterministic even when no planning
 model is available. Natural-language requests use a planner constrained to the
 registry and display the normalized plan before any ambiguity expands scope.
+
+### User authority and redirection
+
+The typed action boundary governs autonomous mission dispatch, model-to-model
+requests, and hotkey workflows. It is not a cage around a trusted user's direct
+conversation with an already-running agent. Input typed by the operator into a
+selected live session is forwarded as user guidance even when it redirects the
+agent away from the current step. The agent follows it using the tools and
+authority that session already possesses.
+
+Before delivery, Kanban appends a `user_override` event containing the exact
+message, target session, prior step/plan version, and timestamp. After the turn,
+the controller reconciles actual effects and marks the prior plan satisfied,
+superseded, divergent, or still pending rather than pretending the redirection
+was part of the original autonomous plan. Whether a completely different task
+amends the current mission or becomes a new sibling mission remains Q-11.
+
+Only authenticated console input receives this status. Issue bodies, comments,
+repository files, provider output, and one agent instructing another remain
+untrusted/model input and cannot manufacture a `user_override` or widen the
+mission's decision policy. Direct user steering also does not silently grant an
+executable, credential, or repository mutation the session did not already
+possess. Repository-wide hard authorities, including the current rule that only
+the PR drainer merges, remain in force unless the user deliberately changes
+that authoritative contract rather than merely asking a workflow agent to
+ignore it.
 
 ### Workflow action registry
 
@@ -334,6 +415,21 @@ does not exist, belongs to another repository, is historical/read-only, or is
 incompatible with the verb is rejected before dispatch. Explicit `issue 123`
 and `pr 123` forms remain useful both for clarity and for stale-cache recovery.
 
+#### Future capability expansion
+
+The registry is intentionally extensible. Later arcs may add managed actions
+for test and playtest campaigns, test-result assessment, free-form repository
+exploration, audits/findings capture, issue drafting, design-document sessions,
+report processing, backlog work, release operations, or other Kanban-owned
+project workflows. Each addition names its own authority, durable state,
+completion evidence, mutation budget, interruption behavior, and child-session
+contract rather than widening one permanent superagent prompt invisibly.
+
+Those capabilities are not first-release requirements. Direct user steering of
+a live agent remains broader than autonomous registry dispatch, so the narrow
+registry does not prevent the operator from redirecting a session while the
+formal capability surface grows over time.
+
 ### Durable mission record
 
 Each mission should live under a private, repository-qualified durable XDG
@@ -347,7 +443,7 @@ contain conceptually:
   attention item, planner summary, retry counters, and last reconciliation;
 - an append-only JSONL event journal: commands, accepted plans, dispatch
   attempts, worker/service references, outcomes, questions, answers, policy
-  changes, cancellation, and recovery decisions; and
+  changes, cancellation, and recovery decisions;
 - a session tree with provider IDs, parent IDs, process ownership, and live log
   references; and
 - mission-owned sealed archives of every child event stream and raw provider
@@ -378,11 +474,14 @@ planner's context, but never substitute for or rewrite the retained raw log.
 ### Mission lifecycle and reconciliation
 
 At minimum a mission distinguishes `planned`, `running`, `waiting_input`,
-`waiting_barrier`, `paused`, `completed`, `failed`, and `cancelled`. A step
+`waiting_barrier`, `paused`, `interrupted`, `recovering`, `completed`, `failed`,
+and `cancelled`. A step
 distinguishes `pending`, `dispatching`, `running`, `outcome_unknown`,
-`succeeded`, `needs_changes`, `needs_input`, `failed`, and `cancelled`.
+`interrupted`, `orphaned`, `recovering`, `succeeded`, `needs_changes`,
+`needs_input`, `failed`, and `cancelled`.
 
-On startup or runner recovery, the controller:
+On normal dashboard attachment, live-runner reconciliation, or an explicitly
+initiated interrupted-work recovery pass, the controller:
 
 1. validates repository identity and the mission schemas;
 2. claims the mission lease;
@@ -573,13 +672,20 @@ launches bounded planner/worker turns as needed, and continues until every
 mission is terminal, paused, or waiting for input/policy. The model processes
 remain episodic even though the controller persists.
 
+The installed service process is the lightweight supervisor, not the scheduler
+directly. It maintains the scheduler/descendant census and publishes
+`interrupted` after a scheduler failure only after cascading termination is
+verified. It then stays stopped or waiting for manual resume; it never replaces
+the failed scheduler automatically.
+
 The mission itself has no four-hour lifetime. Individual agent executions
 remain bounded so one lost provider cannot own a target or mission forever. A
 long operation checkpoints its result and yields another registered step or
-continuation; the next bounded agent receives the durable mission brief and
-logs. The exact child deadline may remain the current four hours or become a
-mission policy, but an agent may not evade it by abandoning an unregistered
-background descendant.
+continuation. Once that parent and its descendants have settled, the runner may
+spawn the next sequential step under the still-live mission root; the next
+bounded agent receives the durable mission brief and logs. The exact child
+deadline may remain the current four hours or become a mission policy, but an
+agent may not evade it by abandoning an unregistered background descendant.
 
 The TUI never needs to stay alive for progress. On exit it disconnects only its
 event reader; it does not stop the runner or active child processes. On the
@@ -588,10 +694,51 @@ history, and follows the live tail. A runner waiting exclusively for operator
 input may remain cheaply idle or exit and be restarted by the answer, provided
 both choices publish the same durable waiting state.
 
-Whether an authorized mission automatically resumes after a service crash,
-machine restart, or login remains Q-8. Continuing across an ordinary TUI exit
-is settled; recovery across loss of the host process manager's live run is a
-separate safety choice.
+The installed job does not automatically resume interrupted missions after a
+service crash, logout, machine restart, or login. Continuing across ordinary
+TUI exit is settled because the runner never died; recovery after its death is
+manual and follows the contract below.
+
+### Interrupted recovery and worktree handoff
+
+An unexpected runner exit, stale heartbeat with no matching runner identity,
+logout, or reboot moves every nonterminal mission it owned to the derived
+`interrupted` presentation. No provider or next step starts merely because the
+service manager or TUI returned. The mission's normal action hotkey becomes
+**resume interrupted work**; activating it starts one bounded recovery pass,
+not a blind replay of the failed command.
+
+Recovery first walks the durable session tree. Any descendant that should have
+died with its parent is terminated through recorded process identities and the
+result is verified. A surviving or unverifiable descendant leaves the mission
+`interrupted · orphaned` and blocks resume rather than permitting a second
+agent to overlap it.
+
+Once the old tree is provably settled, recovery reconciles external effects and
+builds a durable handoff containing at least:
+
+- the original mission and current plan/policy versions;
+- the failed runner, session, step, last activity, timestamp, and available
+  provider/session identifiers;
+- the complete prior log plus a bounded summary of progress, decisions,
+  questions, and the failure boundary;
+- live issue/PR state, canonical verdicts, labels, comments, and outcome-unknown
+  checks relevant to the step; and
+- for implementation work, the exact worktree path, branch, base and current
+  heads, commits created, `git status`, tracked diff, untracked paths, and any
+  recorded validation results.
+
+The recovery agent is explicitly told that the worktree is existing work to
+inspect and continue. It must not create a replacement, reset it, discard
+uncommitted changes, or repeat a GitHub mutation whose outcome has not been
+reconciled. If the prior provider thread can safely resume, that remains an
+optimization; a fresh agent process must still receive the complete handoff so
+recovery never depends on provider-side session retention.
+
+The successful recovery pass records a new session node linked as the
+interrupted session's continuation, starts the runner, and resumes progression.
+The old node and failure remain immutable history. Pressing the hotkey again
+while recovery is already running is refused rather than starting a duplicate.
 
 ### Failure, security, and upgrade boundaries
 
@@ -669,7 +816,7 @@ A repository mission runner, not the dashboard, owns progression. Closing
 Kanban leaves the runner and its children active, and reopening Kanban attaches
 to their durable state instead of restarting them. Model agents remain bounded
 processes; persistence belongs to the runner and mission records. This resolves
-Q-1 for ordinary dashboard exit. Crash/reboot restart remains Q-8.
+Q-1 for ordinary dashboard exit; D-15 separately governs crash/reboot recovery.
 
 ### D-10. `all` fixes membership while every target's facts stay live
 
@@ -706,12 +853,53 @@ recognizes already-satisfied work, invalidates stale assumptions, attaches to
 compatible managed work when provable, and uses exact-version preconditions to
 avoid overwriting concurrent edits.
 
+### D-14. Session descendants use structured concurrency
+
+Every registered child has one tracked parent. A parent joins its children
+before normal completion, and parent failure, timeout, cancellation, or kill
+recursively terminates and reaps the entire descendant subtree. No child is
+reparented or allowed to become a stray agent. Provider-internal subagents may
+remain opaque within the parent transcript for the first release, resolving
+Q-7; a follow-on design will explore provider-native tracking when stable
+identity, event, and cancellation protocols exist.
+
+### D-15. Runner or host failure requires manual, contextual recovery
+
+An ordinary TUI exit leaves the live runner alone, but runner crash, logout, or
+machine restart marks its nonterminal missions interrupted and starts nothing
+automatically. The normal action hotkey initiates recovery: settle the old
+descendant tree, reconcile outcome-unknown effects, inspect and preserve any
+existing worktree, and give a fresh process the failure and work-in-progress
+handoff. This resolves Q-8.
+
+### D-16. Initial autonomous dispatch is narrow but deliberately extensible
+
+This epic registers review, revision, solve/autosolve, PR, and approval-service
+actions. Testing, free-form code exploration, report/design drafting, and other
+project capabilities are future registry extensions rather than first-release
+requirements. This resolves Q-10 without narrowing the long-term product goal.
+
+### D-17. Direct user steering outranks the current mission plan
+
+An operator may redirect a live agent, including to work outside its current
+step, and the agent obeys within the authority its session actually has. Kanban
+records that trusted override and reconciles or supersedes the plan afterwards.
+Model output and repository content cannot claim this authority, and direct
+steering does not silently override repository-level hard authorities.
+
+### D-18. The first interface is hybrid rather than command-only
+
+Known commands normalize deterministically, broader prose goes through the
+bounded planner, and a selected live session accepts direct conversational
+guidance. This resolves Q-4 and preserves useful operation when the planner is
+unavailable.
+
 ## Open questions
 
 ### Q-1. Must missions keep advancing after Kanban exits?
 
 Resolved by D-9. Ordinary TUI exit never pauses an explicitly dispatched
-mission. Automatic recovery after service or machine restart remains Q-8.
+mission. D-15 resolves recovery after service or machine restart as manual.
 
 ### Q-2. Is `all` a finite snapshot or a live selector?
 
@@ -725,10 +913,8 @@ authority and define when alternatives require a handoff.
 
 ### Q-4. How conversational is the first release?
 
-The proposed hybrid parses known commands deterministically and uses a planner
-only for prose or multi-step goals. A command-only first release would reduce
-risk but would be a durable workflow console rather than the intended
-superagent experience.
+Resolved by D-18. Commands are deterministic, broader requests are planned,
+and live agents accept direct user guidance.
 
 ### Q-5. What is the first concurrency ceiling?
 
@@ -745,20 +931,15 @@ can be audited. “Superagent” is evocative; “Operator,” “Mission Contro
 
 ### Q-7. Which nested agents must be separately reattachable?
 
-Kanban can guarantee a distinct session, lineage, live status, log, and steer
-path for children launched through the mission controller or a supported
-registration protocol. Provider-internal subagents with no exposed stable ID
-can only be preserved inside the parent's raw log. Is that sufficient, or must
-the first release refuse or avoid provider-internal subagents unless they can
-be promoted to registered children?
+Resolved by D-14. Opaque provider-internal subagents are acceptable in the
+parent transcript for now, but every registered child has a tracked parent and
+dies with its parent. The follow-on design seed preserves the desire to expose
+opaque children properly later.
 
 ### Q-8. What resumes automatically after a crash or machine restart?
 
-TUI exit is settled by D-9. A service crash, logout, or reboot destroys the
-live runner too. The runner can either restart and continue every previously
-authorized mission without the TUI, or publish `recovered_paused` and wait for
-an explicit resume. This choice changes the service-manager policy and the
-meaning of long-term authorization.
+Resolved by D-15. Nothing resumes automatically after runner or host failure;
+the ordinary hotkey starts manual contextual recovery.
 
 ### Q-9. How should externally terminal targets affect an ordered batch?
 
@@ -771,14 +952,18 @@ agreement.
 
 ### Q-10. May the superagent invent general project work outside the registry?
 
-The current scope lets workflow agents use their normal tools freely inside an
-approved review, solve, revision, or planning step, but the mission controller
-can dispatch only registered action kinds. “Agents can do whatever they want”
-could instead mean a general managed-agent action that may audit, edit, test,
-create tracker proposals, or decompose novel project work under a declared
-authority budget. Adding that action substantially broadens the security,
-worktree, publication, and completion contract; the intended meaning needs to
-be explicit.
+Resolved by D-16 and D-17. Autonomous first-release dispatch stays narrow and
+future arcs add testing, exploration, and document workflows. A user may still
+redirect an already-running agent beyond its current step.
+
+### Q-11. Does a complete user redirection amend or fork the mission?
+
+When the operator redirects a solver to a completely different task, the agent
+obeys by D-17. The durable hierarchy still needs a product rule: amend the
+current mission and preserve its earlier plan as superseded, or create a new
+sibling mission for the redirected task and leave the original paused. This
+affects history, completion semantics, and which hotkey later resumes the
+original work.
 
 ## Verification strategy
 
@@ -799,12 +984,22 @@ be explicit.
   with unknown outcome, runner restart, and TUI restart. A long-running fixture
   exits the TUI, lets the runner dispatch and complete later children, then
   reopens Kanban and proves the complete tree and logs replay without rerun.
+- Structured-concurrency fixtures build multi-level registered process trees.
+  Normal parent completion waits for children; parent kill, timeout, and crash
+  terminate the whole subtree; an unverifiable survivor blocks settlement and
+  recovery; no child is reparented or left running after verified parent death.
+- Manual-recovery fixtures crash the runner with committed and uncommitted
+  worktree state, prove no login/TUI restart launches work, activate recovery
+  through the action boundary, and show the fresh agent receives the failure,
+  log, branch, commits, status, diff, untracked paths, and live tracker state
+  without resetting or duplicating the prior effect.
 - UI event and golden tests cover hotkey entry, mission navigation, command
   input, attention handoff, child opening/return, small-terminal behavior,
   scroll/follow state, cancellation, and status colors.
 - Security tests ensure untrusted tracker/provider text cannot create an
   unregistered action, alter repository identity, weaken policy, or cross an
-  approval/merge boundary.
+  approval/merge boundary. Only real console input can create a `user_override`;
+  identical text from an issue, file, model, or child session cannot.
 - Interoperability fixtures mutate issue bodies, labels, issue state, PR heads,
   and canonical verdicts between plan, dispatch, and result. They prove current
   satisfaction is not repeated, stale writes do not land, a conflicting worker
@@ -812,6 +1007,9 @@ be explicit.
 - Planner-policy fixtures distinguish ask, constrained judgment, and delegated
   judgment; record alternatives and rationale; and stop constrained judgment
   when more than one reasonable option remains.
+- Steering fixtures forward a trusted redirection to the selected agent,
+  preserve the old plan and exact user message, reconcile its actual effects,
+  and never misclassify the redirected turn as autonomous policy expansion.
 - End-to-end fixtures cover one issue approval, one solve, an explicit
   multi-autosolve batch, stop-on-changes, opt-in issue remediation/rereview,
   repeated-feedback halt, and no merge invocation.
@@ -833,15 +1031,16 @@ be explicit.
 - **Phase:** 1 — durable foundation.
 - **Depends on:** `none`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-1`, `D-2`, `D-5`, `D-11`, `D-12`.
+- **Relevant decisions:** `D-1`, `D-2`, `D-5`, `D-11`, `D-12`, `D-14`,
+  `D-15`.
 - **Acceptance signals:** A mission round-trips across process restart; partial
   journal writes are not consumed; two controllers cannot advance it; private
   modes and repository identity are verified; a child log survives worker-cache
   collection and remains linked to its parent.
 - **Out of scope:** Workflow launch, providers, UI, batch progression, and
   natural-language planning.
-- **Open questions:** `Q-7` affects which provider-internal children can become
-  distinct nodes, not the general tree schema.
+- **Open questions:** `None`; provider-native observability is a follow-on
+  design rather than a blocker to the structured tree.
 
 ### SAG-2. Expose a typed workflow action registry
 
@@ -855,14 +1054,14 @@ be explicit.
 - **Phase:** 2 — authority boundary.
 - **Depends on:** `SAG-1`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-3`, `D-7`, `D-8`, `D-13`.
+- **Relevant decisions:** `D-3`, `D-7`, `D-8`, `D-13`, `D-16`, `D-17`.
 - **Acceptance signals:** Each action reaches its existing authority with exact
   repository/config/target data; incompatible and historical targets refuse;
   no registry path forces approval or merges.
 - **Out of scope:** Mission scheduling, console UI, broad selectors, and
   planner-generated actions.
-- **Open questions:** `Q-10` determines whether the initial registry also needs
-  a policy-bounded general project-agent action.
+- **Open questions:** `None`; general project actions are future extensions by
+  D-16.
 
 ### SAG-10. Make issue review and revision runner-owned
 
@@ -877,15 +1076,16 @@ be explicit.
 - **Phase:** 3 — complete the durable action set.
 - **Depends on:** `SAG-1`, `SAG-2`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-2`, `D-3`, `D-4`, `D-7`, `D-9`, `D-12`, `D-13`.
+- **Relevant decisions:** `D-2`, `D-3`, `D-4`, `D-7`, `D-9`, `D-12`, `D-13`,
+  `D-14`, `D-15`.
 - **Acceptance signals:** Kanban may exit during an issue gate or revision;
   work continues under the runner, a later TUI replays its complete transcript,
   a pending question remains answerable, and canonical comments/labels are
   still mutated only by `approve_issues.py`.
 - **Out of scope:** Multi-target scheduling, natural-language planning, and
   automatic recommendation policy.
-- **Open questions:** `Q-7` only if the revision provider exposes internal
-  subagents.
+- **Open questions:** `None`; provider-internal subagents remain opaque and
+  owned by the parent.
 
 ### SAG-3. Run and recover one mission outside the board selection
 
@@ -899,14 +1099,15 @@ be explicit.
 - **Phase:** 4 — execution and recovery.
 - **Depends on:** `SAG-1`, `SAG-2`, `SAG-10`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-2`, `D-3`, `D-7`, `D-8`, `D-12`, `D-13`.
+- **Relevant decisions:** `D-2`, `D-3`, `D-7`, `D-8`, `D-12`, `D-13`,
+  `D-14`, `D-15`, `D-17`.
 - **Acceptance signals:** A live worker reattaches; a landed result reconciles;
   an indeterminate mutation stops instead of rerunning; guidance can resume
   with the prior provider session or a fresh bounded brief; concurrent target
   drift is reclassified rather than overwritten.
 - **Out of scope:** Service installation and no-TUI progression, multi-target
   scheduling, and UI.
-- **Open questions:** `Q-7`, `Q-9`.
+- **Open questions:** `Q-9`, `Q-11`.
 
 ### SAG-9. Keep active missions advancing without the dashboard
 
@@ -915,20 +1116,25 @@ be explicit.
   dashboard replays the complete durable session tree and follows its live
   tail.
 - **Scope:** Per-repository mission controller service; installer/discovery;
-  service-manager integration; mission arbitration and leases; start/wake,
-  idle/wait, stop, crash, and upgrade behavior; durable status/incidents;
+  service-manager integration and outer containment; lightweight supervisor and
+  scheduler split; mission arbitration and leases; start/wake, idle/wait, stop,
+  crash, and upgrade behavior; structured descendant ownership and cascading
+  termination; interrupted/manual recovery; durable status/incidents;
   event-reader reattachment; session-log sealing; no-TUI and restart fixtures.
 - **Phase:** 5 — persistent execution.
 - **Depends on:** `SAG-1`, `SAG-2`, `SAG-3`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-2`, `D-9`, `D-12`, `D-13`.
+- **Relevant decisions:** `D-2`, `D-9`, `D-12`, `D-13`, `D-14`, `D-15`.
 - **Acceptance signals:** After the TUI exits, the service completes one child,
   dispatches the next authorized child, records both full logs, and exposes the
   same mission when Kanban reopens; two runners cannot advance one mission;
-  waiting for input performs no hidden work.
-- **Out of scope:** Multi-target scheduling policy, console rendering, and
-  automatic post-reboot behavior until Q-8 is resolved.
-- **Open questions:** `Q-7`, `Q-8`.
+  waiting for input performs no hidden work; a runner crash kills or blocks on
+  every descendant and waits for the explicit recovery hotkey; no verified
+  parent death leaves a live child process.
+- **Out of scope:** Multi-target scheduling policy, console rendering,
+  automatic post-crash/reboot mission resume, and provider-native internal
+  subagent presentation.
+- **Open questions:** `None`.
 
 ### SAG-4. Add the persistent console and mission navigation
 
@@ -942,13 +1148,15 @@ be explicit.
 - **Depends on:** `SAG-9`; land after the pending approval-service control
   (#421) or re-audit the whole key/layout surface against it.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-1`, `D-4`, `D-9`, `D-12`.
+- **Relevant decisions:** `D-1`, `D-4`, `D-9`, `D-12`, `D-15`, `D-17`,
+  `D-18`.
 - **Acceptance signals:** TUI restart restores the same missions and selected
   history; a card opens its mission-owned child; attention opens the exact
-  question; no duplicate worker launches.
+  question; `interrupted` is visible and its ordinary action hotkey starts one
+  recovery; direct user steering is recorded; no duplicate worker launches.
 - **Out of scope:** Broad selectors, natural-language planning, and automatic
   remediation.
-- **Open questions:** `Q-6`, `Q-7`.
+- **Open questions:** `Q-6`, `Q-11`.
 
 ### SAG-5. Schedule explicit and selector-based batches
 
@@ -985,12 +1193,14 @@ be explicit.
 - **Depends on:** `SAG-2`, `SAG-4`, `SAG-5`.
 - **Ordering:** `not on the critical path` for deterministic commands, required
   for the full epic experience.
-- **Relevant decisions:** `D-1`, `D-2`, `D-3`, `D-5`, `D-11`, `D-13`.
+- **Relevant decisions:** `D-1`, `D-2`, `D-3`, `D-5`, `D-11`, `D-13`,
+  `D-16`, `D-17`, `D-18`.
 - **Acceptance signals:** Prose creates only registered typed steps; ambiguous
   scope is shown or questioned before dispatch; injected tracker text cannot
   alter policy; planner outage leaves direct commands and history usable.
-- **Out of scope:** Arbitrary shell access or unregistered project work.
-- **Open questions:** `Q-4`, `Q-10`.
+- **Out of scope:** Autonomous general project actions beyond the first
+  registry; direct trusted-user steering remains allowed by D-17.
+- **Open questions:** `Q-11`.
 
 ### SAG-7. Add opt-in recommendation application and rereview loops
 
@@ -1027,7 +1237,7 @@ be explicit.
 - **Depends on:** every implemented slice; documentation for a deferred slice
   remains in this design rather than claiming shipped behavior.
 - **Ordering:** `critical path` for epic completion.
-- **Relevant decisions:** `D-1` through `D-13`.
+- **Relevant decisions:** `D-1` through `D-18`.
 - **Acceptance signals:** Documented commands and paths match tested behavior;
   every executable and durable record has an authority/ownership entry; users
   can distinguish pause, barrier, failure, unknown outcome, and recovery.
