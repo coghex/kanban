@@ -103,9 +103,13 @@ Modules live in `src/Kanban/`; search the group that matches the change.
 
 - `Domain`, `Workflow`, `Card`, `Tracker`, `Filter` — board state, column
   classification, tracker hierarchy, and the composable card filter criteria.
-- `Repository`, `GitHub` with `GitHub.*`, `Cache`, `Config`, `Settings`, `Paths`, `CLI` — repository
-  resolution, GitHub data, the last-good snapshot, configuration, and the private
-  directories under the XDG roots.
+- `Repository`, `GitHub` with `GitHub.*`, `Cache`, `Config`, `Settings`, `Paths`,
+  `ManagedPaths`, `CLI` — repository
+  resolution, GitHub data, the last-good snapshot, configuration, the private
+  directories under the XDG roots, and — the one Haskell resolution point for
+  them, against `tools/kanban_config.py`'s one Python resolution point — where
+  the PR drainer's and the issue-review backend's discovery records are on this
+  platform.
 - `Usage` with `Usage.Render`, `UsageCommand`, `Ping` — provider quota windows, the
   wording the sidebar and `--usage` share, the configured external usage commands,
   and the deliberate window-starting ping.

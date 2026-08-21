@@ -35,11 +35,12 @@ import Kanban.Drainer
   )
 import Kanban.Process (identityForPid, readProcessSnapshot)
 import qualified Spec.Drainer.DirectMerge as DirectMerge
-import Spec.Support.Env (withTemporaryCacheRoot)
+import Spec.Support.Env (withEnvironmentValue, withManagedRecordHome, withTemporaryCacheRoot)
 import Spec.Support.Expect (isLeft, requireLeft, requireRight, shouldMention, shouldNotMention)
 import Spec.Support.Process (fakeController, readRecordedPid, shouldNotHaveSwept, withSurvivingGroupLeader)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath (takeDirectory, (</>))
 import Test.Hspec
 
 spec :: Spec
@@ -212,10 +213,18 @@ spec = do
       let repository = Repository "/tmp/current-project" "Example" "Project"
       normalizedRepositoryIdentity repository `shouldBe` "example/project"
 
-    it "looks for that record where the installer fixes it, not where --install-dir moved" $ do
-      recordPath <- drainerRecordPath
-      Data.Text.pack recordPath
-        `shouldMention` "/Library/Application Support/kanban/pr-drainer/config.json"
+    it "looks for that record where the installer fixes it, not where --install-dir moved" $
+      withTemporaryCacheRoot $ \home -> do
+        -- Stated rather than inherited: the `~/Library` location is the
+        -- occupied one, which is the answer on macOS and on Linux alike, so
+        -- what this asserts about is the override and not the host. Which
+        -- location an empty host answers with is "Spec.ManagedPaths"'s.
+        let recordPath = home <> "/Library/Application Support/kanban/pr-drainer/config.json"
+        createDirectoryIfMissing True (takeDirectory recordPath)
+        ByteString.writeFile recordPath "{}"
+        withManagedRecordHome home $
+          withEnvironmentValue "KANBAN_DRAINER_INSTALL_DIR" (home </> "elsewhere") $
+            drainerRecordPath `shouldReturn` recordPath
 
     it "maps each supported host to the manager that could have installed there" $ do
       -- The only platform question this side asks, and it is about capability:
