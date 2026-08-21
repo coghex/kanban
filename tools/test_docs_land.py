@@ -59,6 +59,11 @@ def _load_paths_module():
 # without the autostash replay then conflicting for unrelated reasons.
 B_SEED = "".join(f"b line {i}\n" for i in range(1, 21))
 
+# What origin/master publishes for docs/b.md once move_b_upstream has run:
+# the same body with its LAST line rewritten, so a local edit to the FIRST
+# line still merges cleanly while the path is genuinely upstream-changed.
+B_UPSTREAM = B_SEED.replace("b line 20", "b upstream 20")
+
 # The classification the sandbox's origin/master publishes. The gated rows
 # mirror the real repository's shape: the root instruction documents carry
 # the coupled reasons the root-contract exception overrides, docs/design.md
@@ -184,6 +189,18 @@ class Sandbox:
         self.write(self.docs, "docs/b.md", body)
         self.git("add", "docs/b.md", cwd=self.docs)
         return body
+
+    def move_b_upstream(self) -> str:
+        """Publish B_UPSTREAM as docs/b.md on origin/master.
+
+        docs/b.md is seeded in both worktrees, so this is the fixture for
+        every case about a path that is dirty in docs/ AND changed upstream.
+        Returns the exact bytes origin/master now holds there."""
+        self.write(self.main, "docs/b.md", B_UPSTREAM)
+        self.git("add", "docs/b.md")
+        self.git("commit", "-q", "-m", "upstream touches b")
+        self.git("push", "-q", "origin", "master")
+        return B_UPSTREAM
 
     def move_master_upstream(self, rel: str = "docs/upstream.md") -> None:
         """Advance origin/master via a path that is NOT dirty in docs/."""
@@ -426,12 +443,10 @@ class RebasePathTests(DocsLandCase):
 
     def test_risk_predictor_and_force_override(self):
         sb = self.sb
-        # docs/b.md dirty here AND changed on master: exactly the
-        # autostash-conflict shape the predictor exists to catch.
-        sb.write(sb.main, "docs/b.md", B_SEED.replace("b line 20", "b upstream 20"))
-        sb.git("add", "docs/b.md")
-        sb.git("commit", "-q", "-m", "upstream touches b")
-        sb.git("push", "-q", "origin", "master")
+        # docs/b.md dirty here AND changed on master, with content that
+        # genuinely differs from upstream's: exactly the autostash-conflict
+        # shape the predictor exists to catch.
+        upstream = sb.move_b_upstream()
 
         sb.write(sb.docs, "docs/a.md", "a landed\n")
         b_body = "b local 1\n" + "".join(f"b line {i}\n" for i in range(2, 21))
@@ -448,12 +463,158 @@ class RebasePathTests(DocsLandCase):
         forced = sb.run_script("-f", "-m", "Land A", "docs/a.md")
         self.assertEqual(forced.returncode, 0, forced.stderr)
         self.assertEqual(sb.commit_files(), {"docs/a.md"})
-        self.assertEqual(
-            sb.blob("origin/master", "docs/b.md"),
-            B_SEED.replace("b line 20", "b upstream 20"))
+        self.assertEqual(sb.blob("origin/master", "docs/b.md"), upstream)
         self.assertEqual(
             (sb.docs / "docs/b.md").read_text(encoding="utf-8"),
             b_body.replace("b line 20", "b upstream 20"))
+
+    def test_dirty_tracked_file_matching_upstream_is_not_a_collision(self):
+        # The reported false refusal (issue #437). A publication helper had
+        # rewritten unselected documents in the docs worktree to exactly what
+        # master already published: dirty against docs-wip's older HEAD, and
+        # named in the upstream-changed set, so the purely positional
+        # predictor refused the landing over files holding nothing.
+        sb = self.sb
+        upstream = sb.move_b_upstream()
+        sb.write(sb.docs, "docs/b.md", upstream)
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        self.assertEqual(sb.porcelain(sb.docs).get("docs/b.md"), " M")
+
+        # The reported reproduction: a dry run naming an unrelated path
+        # prints its plan with no WARNING block.
+        planned = sb.run_script("-n", "-m", "Land A", "docs/a.md")
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        self.assertNotIn("WARNING", planned.stderr)
+        self.assertIn("plan: land docs/a.md (modify)", planned.stdout)
+
+        # A suppressed warning is a prediction, so the prediction is checked
+        # against the real thing: this lands for real, down the rebase path,
+        # and the autostash replays a change both sides already made.
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("WARNING", done.stderr)
+        self.assertIn("rebasing onto the landed master", done.stdout)
+        self.assertEqual(sb.commit_files(), {"docs/a.md"})
+        self.assertEqual(sb.blob("origin/master", "docs/b.md"), upstream)
+        # Content preserved, and the local write has converged with the
+        # published one rather than being stranded as a conflict.
+        self.assertEqual(
+            (sb.docs / "docs/b.md").read_text(encoding="utf-8"), upstream)
+        self.assertNotIn("docs/b.md", sb.porcelain(sb.docs))
+        self.assertEqual(sb.head(), sb.head("origin/master"))
+
+    def test_staged_tracked_file_matching_upstream_is_not_a_collision(self):
+        # The same bytes reached through the index. `git diff --cached` feeds
+        # the dirty list deliberately, so this arm needs its own answer: the
+        # staged payload IS upstream's, so the autostash pop that drops the
+        # index state drops nothing.
+        sb = self.sb
+        upstream = sb.move_b_upstream()
+        sb.write(sb.docs, "docs/b.md", upstream)
+        sb.git("add", "docs/b.md", cwd=sb.docs)
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        self.assertEqual(sb.porcelain(sb.docs).get("docs/b.md"), "M ")
+
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("WARNING", done.stderr)
+        self.assertEqual(sb.commit_files(), {"docs/a.md"})
+        self.assertEqual(
+            (sb.docs / "docs/b.md").read_text(encoding="utf-8"), upstream)
+
+    def test_a_staged_payload_under_a_matching_worktree_still_warns(self):
+        # The exception to the narrowing: the working tree matches upstream
+        # but the index holds a THIRD content. `git rebase --autostash` pops
+        # without --index, so that staged payload is merged away rather than
+        # restored — a real edit the reconciliation would lose, which a
+        # matching working tree does nothing to protect.
+        sb = self.sb
+        upstream = sb.move_b_upstream()
+        staged = "b staged 1\n" + "".join(f"b line {i}\n" for i in range(2, 21))
+        sb.write(sb.docs, "docs/b.md", staged)
+        sb.git("add", "docs/b.md", cwd=sb.docs)
+        sb.write(sb.docs, "docs/b.md", upstream)
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        self.assertEqual(sb.porcelain(sb.docs).get("docs/b.md"), "MM")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stdout)
+        self.assertIn("dirty or untracked here AND changed on master",
+                      blocked.stderr)
+        self.assertIn("docs/b.md", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
+
+    def test_a_byte_level_difference_is_not_a_match(self):
+        # The comparison reads raw bytes, so trailing whitespace is a
+        # difference and not a match.
+        sb = self.sb
+        upstream = sb.move_b_upstream()
+        sb.write(sb.docs, "docs/b.md", upstream + " \n")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stdout)
+        self.assertIn("docs/b.md", blocked.stderr)
+
+        # So is a line ending, even where an attribute would have git
+        # normalize it away: `git hash-object` applies the clean filter and
+        # the end-of-line conversion unless --no-filters is given, so without
+        # that flag this CRLF copy would hash equal to upstream's LF blob and
+        # the warning would be suppressed over a file that does not hold
+        # those bytes at all.
+        (sb.docs / ".gitattributes").write_text("docs/b.md text\n",
+                                                encoding="utf-8")
+        sb.write(sb.docs, "docs/b.md", upstream.replace("\n", "\r\n"))
+        before = sb.snapshot()
+
+        crlf = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(crlf.returncode, 3, crlf.stdout)
+        self.assertIn("docs/b.md", crlf.stderr)
+        self.assertEqual(sb.snapshot(), before)
+
+    def test_a_path_absent_from_both_sides_still_warns(self):
+        # A match has to be against a real upstream BLOB, looked up
+        # fail-closed. Upstream deleted this path and it is gone from the
+        # working tree here too, so neither side has an object to hash — and
+        # an implementation that tolerated those empty results would compare
+        # them equal and suppress the warning on a path with no upstream
+        # bytes at all. The deletion is left UNSTAGED on purpose, so the
+        # distinct-staged-payload guard cannot answer this in the lookup's
+        # place.
+        sb = self.sb
+        sb.git("rm", "-q", "docs/del.md")
+        sb.git("commit", "-q", "-m", "upstream deletes del")
+        sb.git("push", "-q", "origin", "master")
+        (sb.docs / "docs/del.md").unlink()
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        self.assertEqual(sb.porcelain(sb.docs).get("docs/del.md"), " D")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stdout)
+        self.assertIn("docs/del.md", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
+
+    def test_a_symlink_standing_in_for_a_tracked_file_still_warns(self):
+        # Only a regular file has the bytes a checkout would compare. This
+        # one is a symlink onto a copy of upstream's content, and
+        # `git hash-object` follows it — so the hash matches upstream's blob
+        # while what git actually tracks there is a link target string, which
+        # does not. The comparison is refused rather than trusted.
+        sb = self.sb
+        upstream = sb.move_b_upstream()
+        target = sb.root / "b-target.md"
+        target.write_text(upstream, encoding="utf-8")
+        (sb.docs / "docs/b.md").unlink()
+        os.symlink(target, sb.docs / "docs/b.md")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stdout)
+        self.assertIn("docs/b.md", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
 
     def test_untracked_unselected_upstream_collision_is_predicted(self):
         # An unselected path that is untracked here and newly added on
@@ -499,6 +660,25 @@ class RebasePathTests(DocsLandCase):
         self.assertEqual(
             (sb.docs / "docs/new.md").read_text(encoding="utf-8"),
             "ignored local draft\n")
+
+    def test_untracked_file_matching_upstream_still_warns(self):
+        # The tracked narrowing must not leak into the untracked arm. Git's
+        # checkout refuses an untracked occupant without ever comparing
+        # content, and silently overwrites an ignored one, so holding
+        # upstream's exact bytes buys neither hazard anything — the file here
+        # is byte-identical to what master publishes and still stops the run.
+        sb = self.sb
+        sb.move_master_upstream("docs/new.md")
+        self.assertEqual(sb.blob("origin/master", "docs/new.md"), "upstream\n")
+        sb.write(sb.docs, "docs/new.md", "upstream\n")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stdout)
+        self.assertIn("docs/new.md", blocked.stderr)
+        self.assertIn("untracked", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
 
     def test_clean_tracked_file_to_directory_transition_is_not_a_collision(self):
         # The inverse transition must NOT be flagged: master replaces the
