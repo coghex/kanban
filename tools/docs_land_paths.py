@@ -382,6 +382,26 @@ def casefold_collision(worktree: Path, path: str) -> str | None:
     return None
 
 
+def selection_casefold_conflicts(paths: list[str]) -> list[list[str]]:
+    """Groups of distinct spellings among `paths` — or their directory
+    prefixes — that fold to the same name. `casefold_collision` compares a
+    name against what already exists; this compares the selection against
+    itself, because on a case-sensitive filesystem one invocation can name
+    two genuinely distinct new documents whose spellings differ only by
+    case, and a tree carrying both could never check out case-insensitively."""
+    seen: dict[str, set[str]] = {}
+    for path in paths:
+        parts = PurePosixPath(path).parts
+        for depth in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:depth])
+            seen.setdefault(prefix.lower(), set()).add(prefix)
+    return [
+        sorted(variants)
+        for _, variants in sorted(seen.items())
+        if len(variants) > 1
+    ]
+
+
 def verify_names_a_document(worktree: Path, path: str) -> None:
     on_disk = worktree / path
     verify_exact_spelling(worktree, path)
@@ -477,6 +497,12 @@ def gate(worktree: Path, arguments: list[str]) -> int:
             )
         if path not in canonical:
             canonical.append(path)
+    for variants in selection_casefold_conflicts(canonical):
+        refusals.append(
+            f"{' and '.join(variants)}: differ only by case within one "
+            "selection, and a tree carrying both could never check out on a "
+            "case-insensitive filesystem"
+        )
     if refusals:
         for refusal in refusals:
             print(f"refused: {refusal}", file=sys.stderr)

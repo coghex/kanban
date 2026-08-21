@@ -893,6 +893,47 @@ class ClassificationGateTests(DocsLandCase):
         self.assertIn("README.md", done.stderr)
         self.assertEqual(sb.snapshot(), before)
 
+    def test_case_conflicting_selection_is_refused(self):
+        # On a case-sensitive filesystem one invocation can name two
+        # genuinely distinct new documents differing only by case; each
+        # passes individually, and only the selection-level check keeps the
+        # pair out of one published tree. The scenario cannot be constructed
+        # on a case-insensitive filesystem, where the second write would
+        # reopen the first file.
+        sb = self.sb
+        probe = sb.root / "case-probe"
+        probe.write_text("x", encoding="utf-8")
+        insensitive = (sb.root / "CASE-PROBE").exists()
+        probe.unlink()
+        if insensitive:
+            self.skipTest("needs a case-sensitive filesystem (runs in CI)")
+        sb.write(sb.docs, "docs/coordination/Foo.md", "one\n")
+        sb.write(sb.docs, "docs/coordination/foo.md", "two\n")
+        before = sb.snapshot()
+
+        done = sb.run_script(
+            "-m", "Land both",
+            "docs/coordination/Foo.md", "docs/coordination/foo.md")
+        self.assertEqual(done.returncode, 6, done.stdout)
+        self.assertIn("differ only by case within one selection", done.stderr)
+        self.assertEqual(sb.snapshot(), before)
+
+    def test_selection_casefold_conflicts_are_detected(self):
+        # The function-level half runs on every filesystem: leaf conflicts,
+        # directory-prefix conflicts, and the clean case.
+        module = _load_paths_module()
+        self.assertEqual(
+            module.selection_casefold_conflicts(
+                ["docs/coordination/Foo.md", "docs/coordination/foo.md"]),
+            [["docs/coordination/Foo.md", "docs/coordination/foo.md"]])
+        self.assertEqual(
+            module.selection_casefold_conflicts(
+                ["docs/A/x.md", "docs/a/y.md"]),
+            [["docs/A", "docs/a"]])
+        self.assertEqual(
+            module.selection_casefold_conflicts(["docs/a.md", "docs/b.md"]),
+            [])
+
     def test_casefold_collision_names_the_existing_spelling(self):
         # The filesystem-independent half: a genuinely distinct file created
         # on a case-sensitive filesystem must not land beside an entry it
