@@ -2797,6 +2797,33 @@ def sweep_snapshot_anchors(ctx: RepoContext, *, dry_run: bool) -> None:
         _reap_redundant_anchor(ctx, ref, sha, date)
 
 
+def _retirement_git(
+    args: list[str], *, cwd: Path, check: bool = True
+) -> subprocess.CompletedProcess[str]:
+    """`run`, with output that will not decode read as unreadable, not fatal.
+
+    This pass is the first in the autostash lifecycle to read text a person
+    wrote -- a stash entry's own message, and every ref name in the checkout.
+    The anchor sweep never does: it reads `%H` and its own hex-named refs. And
+    `run` decodes as strict UTF-8, so one entry stashed with a message in
+    another encoding raises `UnicodeDecodeError` from inside `subprocess`.
+    That is a `ValueError`, so it would pass straight through every
+    `except (DrainError, OSError)` below and end a polling run over a byte in
+    someone's stash message.
+
+    It is the "could not be read" case and nothing more: the whole read is
+    unusable, so every entry is kept and merging carries on. Narrowed to this
+    pass deliberately -- `run` is shared with the merge path, where what a
+    caller should see for undecodable output is a separate question.
+    """
+    try:
+        return run(args, cwd=cwd, check=check)
+    except UnicodeDecodeError as exc:
+        raise DrainError(
+            f"`{' '.join(args)}` produced output that is not valid UTF-8: {exc}"
+        ) from exc
+
+
 def _stash_entries(ctx: RepoContext) -> list[tuple[str, str, str]]:
     """Every `git stash list` entry as (selector, commit, raw message).
 
@@ -2810,7 +2837,9 @@ def _stash_entries(ctx: RepoContext) -> list[tuple[str, str, str]]:
     deleted, so output the format cannot have produced raises rather than
     yielding a partial list that would read as the whole stash.
     """
-    proc = run(["git", "stash", "list", "-z", "--format=%gd%x1f%H%x1f%gs"], cwd=ctx.path)
+    proc = _retirement_git(
+        ["git", "stash", "list", "-z", "--format=%gd%x1f%H%x1f%gs"], cwd=ctx.path
+    )
     out = proc.stdout or ""
     if out == "":
         # The only empty answer: a stash with no entries prints nothing.
@@ -2868,7 +2897,7 @@ def _qualifying_refs_holding(ctx: RepoContext, sha: str) -> list[str]:
     which under-counts holders, keeps the entry, and is the conservative
     direction.
     """
-    proc = run(
+    proc = _retirement_git(
         ["git", "for-each-ref", "--format=%(refname)", f"--contains={sha}"],
         cwd=ctx.path,
     )
@@ -2917,8 +2946,10 @@ def _restore_stash_entry(ctx: RepoContext, sha: str, message: str) -> str | None
     then says.
     """
     try:
-        proc = run(["git", "stash", "store", "-m", message, sha], cwd=ctx.path, check=False)
-    except OSError as exc:
+        proc = _retirement_git(
+            ["git", "stash", "store", "-m", message, sha], cwd=ctx.path, check=False
+        )
+    except (DrainError, OSError) as exc:
         return str(exc)
     if proc.returncode != 0:
         return (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
@@ -2986,8 +3017,10 @@ def _retire_recovery_stash(
     # A removal that never ran leaves the stash as the read above found it, so
     # the next candidate is still where the enumeration says it is.
     try:
-        proc = run(["git", "stash", "drop", "--quiet", selector], cwd=ctx.path, check=False)
-    except OSError as exc:
+        proc = _retirement_git(
+            ["git", "stash", "drop", "--quiet", selector], cwd=ctx.path, check=False
+        )
+    except (DrainError, OSError) as exc:
         log(f"Could not retire recovery stash entry {selector} (commit {sha}): {exc}")
         return "kept"
     if proc.returncode != 0:

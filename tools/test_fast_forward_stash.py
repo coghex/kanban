@@ -1681,6 +1681,72 @@ class RecoveryStashRetirementFailuresAreNonFatalTest(_RecoveryStashRetirementFix
         self.assertIn("cannot lock", failed[0])
 
 
+class UndecodableGitOutputIsNonFatalTest(_RecoveryStashRetirementFixture):
+    """A stash message is the user's own text and is under no obligation to be
+    UTF-8, and `drain_prs.run` decodes strictly -- so the decode failure is a
+    `UnicodeDecodeError`, a `ValueError` that no `except (DrainError, OSError)`
+    catches. Unreadable is the answer, and the run carries on.
+    """
+
+    def _raw_entries(self):
+        """The stash read as bytes, because the whole point here is output
+        this module's own `%gs` helper could not decode either.
+        """
+        proc = subprocess.run(
+            ["git", "stash", "list", "--format=%H%x1f%gs"],
+            cwd=str(self.main),
+            capture_output=True,
+            check=True,
+        )
+        return [
+            tuple(line.split(b"\x1f", 1)) for line in proc.stdout.splitlines() if line
+        ]
+
+    def test_an_undecodable_stash_message_keeps_every_entry(self):
+        sha = self._recovery_entry("line3-recovered")
+        # Eligible in every other way: only the unreadable neighbour keeps it.
+        self._hold_elsewhere(sha)
+        theirs = self._snapshot_commit("line3-users-own")
+        subprocess.run(
+            ["git", "stash", "store", "-m", os.fsdecode(b"user \xff stash"), theirs],
+            cwd=str(self.main),
+            capture_output=True,
+            check=True,
+        )
+        before = self._raw_entries()
+        self.assertEqual(len(before), 2)
+
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        self.assertEqual(self._raw_entries(), before)
+        unreadable = self._logged_containing("Could not read")
+        self.assertEqual(len(unreadable), 1)
+        self.assertIn("not valid UTF-8", unreadable[0])
+        self.assertEqual(self._logged_containing("Retired recovery stash entry"), [])
+
+    def test_an_undecodable_ref_name_keeps_the_entry(self):
+        # A ref name may hold the same bytes, but a checkout carrying one
+        # cannot be built on every filesystem this suite runs on -- so the
+        # exception is raised at the seam the real one would come from.
+        sha = self._recovery_entry("line3-recovered")
+        self._hold_elsewhere(sha)
+        before = self._entries()
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", "for-each-ref"]:
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            return real_run(args, **kwargs)
+
+        with mock.patch.object(drain_prs, "run", side_effect=fake_run):
+            drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        self.assertEqual(self._entries(), before)
+        kept = self._logged_containing("Keeping recovery stash entry")
+        self.assertEqual(len(kept), 1)
+        self.assertIn("not valid UTF-8", kept[0])
+
+
 class RecoveryStashRetirementDryRunTest(_RecoveryStashRetirementFixture):
     def test_dry_run_reports_the_decision_and_changes_nothing(self):
         sha = self._recovery_entry("line3-recovered")
