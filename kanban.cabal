@@ -24,6 +24,7 @@ extra-source-files:
   test/golden/*.txt
   tools/**/*.md
   tools/**/*.py
+  tools/**/*.sh
   codex-plugin/**/*.json
   codex-plugin/**/*.md
   codex-plugin/**/*.py

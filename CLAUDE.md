@@ -45,9 +45,14 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   primary after every merge and autostashes whatever it finds there, and a restore that
   conflicts wedges post-merge cleanup until a human clears it.
 - Leave a standalone Markdown change committed in that worktree and unpushed. The
-  maintainer batches those to `master` periodically. Do not push one yourself and do not
-  open a pull request for it; the subsection below is the exception, and it needs an
-  explicit request.
+  maintainer batches those to `master` with `/push-docs` (Codex: `$push-docs`), which
+  runs the tracked `tools/docs_land.sh` to land exactly the named paths. That helper
+  refuses a path a test parses or an implementation is coupled to, naming the reason
+  and the gate — `docs/design.md` and the plugin bundles stay in the pull-request
+  lane — with the root instruction documents `CLAUDE.md` and its `AGENTS.md` alias as
+  the sole exception. Do not push one yourself, do not run a landing the user did not
+  explicitly request, and do not open a pull request for it; the subsection below is
+  the exception, and it needs an explicit request.
 - Markdown may still travel inside a pull request, and must when a test parses it or an
   implementation is coupled to it. A plugin command file is held to its bundle version by
   `BundleVersionGateTests`, and `docs/design.md`'s section 7 key table is compared against

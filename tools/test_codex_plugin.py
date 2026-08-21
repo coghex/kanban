@@ -16,15 +16,16 @@ and Haskell name parity are now two separate concepts here, and issue #229
 added four more with the design and report document workflows $design-epic,
 $process-design-doc, $draft-report, and $process-report. Issue #240 added
 $issue-rereview, the drafting contract's repair loop for a changes-requested
-issue.
+issue; issue #328 added $note-problem while transposing /draft-report, closing
+the last Codex-only document gap; and issues #393 and #410 vendored the
+rendered $triage roadmap and $push-docs documentation-landing workflows.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all thirteen); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
-own Haskell code spawns by name (the five above). Both later sets are user- or
-daemon-invoked and are deliberately excluded from that parity pinning; the
+(all sixteen); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
+own Haskell code spawns by name (the five above). Every later set is user- or
+daemon-invoked and deliberately excluded from that parity pinning; the
 breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
-by design, and one of the four document workflows — $draft-report — is
-Codex-only in the opposite direction, since issue #241 gave the design pair
-Claude counterparts. See docs/drafting-workflow-contract.md and
+by design, and no document workflow is Codex-only any more.
+See docs/drafting-workflow-contract.md and
 docs/document-workflow-contract.md. The new skills are still subject to every
 structural policy this module enforces: frontmatter name matching, forbidden
 configuration keys, and no personal paths.
@@ -44,8 +45,8 @@ formed a third, packaged-only category. Issue #127 gave Kanban's own `r` its
 Done-column repair branch, so $repair is now spawned by name from
 src/Kanban/PullRequestFlow.hs and belongs in HASKELL_PARITY_SKILL_NAMES with
 the rest; that third category is gone and discovery-minus-parity is the
-drafting set again. See tools/test_repair_workflow_contract.py for $repair's
-own behavioral contract.
+user-invoked set again. See tools/test_repair_workflow_contract.py for
+$repair's own behavioral contract.
 """
 
 from __future__ import annotations
@@ -135,12 +136,20 @@ DOCUMENT_SKILL_NAMES = {
 # excluded from Haskell name parity like the rest.
 ROADMAP_SKILL_NAMES = {"triage"}
 
+# The documentation-landing workflow vendored by issue #410. Rendered from
+# tools/command_sources/push-docs.md exactly the way the roadmap workflow
+# above is, and like it user-invoked and excluded from Haskell name parity.
+# Its behavioral assertions live in tools/test_docs_land.py beside the
+# tools/docs_land.sh helper both brands' renderings invoke.
+PUBLICATION_SKILL_NAMES = {"push-docs"}
+
 # What a Codex installation must actually discover under skills/.
 EXPECTED_SKILL_NAMES = (
     HASKELL_PARITY_SKILL_NAMES
     | DRAFTING_SKILL_NAMES
     | DOCUMENT_SKILL_NAMES
     | ROADMAP_SKILL_NAMES
+    | PUBLICATION_SKILL_NAMES
 )
 
 # Keys that would let a packaged manifest silently override the model,
@@ -332,11 +341,19 @@ class SkillDiscoveryTests(unittest.TestCase):
         self.assertTrue(HASKELL_PARITY_SKILL_NAMES < EXPECTED_SKILL_NAMES)
         self.assertEqual(
             EXPECTED_SKILL_NAMES - HASKELL_PARITY_SKILL_NAMES,
-            DRAFTING_SKILL_NAMES | DOCUMENT_SKILL_NAMES | ROADMAP_SKILL_NAMES,
+            DRAFTING_SKILL_NAMES
+            | DOCUMENT_SKILL_NAMES
+            | ROADMAP_SKILL_NAMES
+            | PUBLICATION_SKILL_NAMES,
         )
         self.assertEqual(DRAFTING_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
         self.assertEqual(ROADMAP_SKILL_NAMES & DRAFTING_SKILL_NAMES, set())
         self.assertEqual(ROADMAP_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
+        self.assertEqual(
+            PUBLICATION_SKILL_NAMES
+            & (DRAFTING_SKILL_NAMES | DOCUMENT_SKILL_NAMES | ROADMAP_SKILL_NAMES),
+            set(),
+        )
 
     def test_repair_is_a_spawned_workflow_and_not_a_drafting_one(self):
         # Kanban's `r` spawns $repair for a red Done card (issue #127), so it
@@ -1722,7 +1739,7 @@ class ManifestListingParityTests(unittest.TestCase):
     without describing it fails here.
 
     Parity is per field, not pooled: an installation that reads only the
-    short description must see the same thirteen as one that reads only the
+    short description must see the same sixteen as one that reads only the
     keywords. Non-workflow metadata -- the `kanban` keyword, the display
     name, developer, category, and capabilities -- is not a listing and is
     left alone.
