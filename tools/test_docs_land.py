@@ -500,6 +500,34 @@ class RebasePathTests(DocsLandCase):
             (sb.docs / "docs/new.md").read_text(encoding="utf-8"),
             "ignored local draft\n")
 
+    def test_upstream_rename_of_a_selected_path_is_refused_without_force(self):
+        # With rename detection, an upstream rename of docs/a.md to
+        # docs/a-new.md reports only the new name, so the selected-path
+        # check would miss that docs/a.md changed upstream and the landing
+        # would silently reintroduce the old path beside the renamed
+        # document. --no-renames keeps the delete-plus-add reading.
+        sb = self.sb
+        sb.git("config", "diff.renames", "true")
+        sb.git("mv", "docs/a.md", "docs/a-new.md")
+        sb.git("commit", "-q", "-m", "rename a")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/a.md", "a locally edited\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn(
+            "changed on master since this worktree's base", blocked.stderr)
+        self.assertIn("docs/a.md", blocked.stderr)
+        self.assertEqual(sb.head("origin/master"), before["upstream"])
+
+        # -f makes the reintroduction deliberate rather than silent.
+        forced = sb.run_script("-f", "-m", "Land A", "docs/a.md")
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertEqual(
+            sb.blob("origin/master", "docs/a.md"), "a locally edited\n")
+        self.assertIn("docs/a-new.md", sb.tracked("origin/master"))
+
     def test_ignored_dangling_symlink_upstream_collision_is_predicted(self):
         # A dangling symlink fails -e yet still occupies its path, and when
         # it is also ignored nothing else surfaces it — the reconciliation

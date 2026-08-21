@@ -574,7 +574,8 @@ def inventory(worktree: Path) -> int:
     differing = set(
         entry
         for entry in run_git(
-            worktree, "diff", "--name-only", "-z", CONTRACT_REF, "--", "*.md"
+            worktree, "diff", "--name-only", "-z", "--no-renames",
+            CONTRACT_REF, "--", "*.md",
         ).stdout.split("\0")
         if entry
     )

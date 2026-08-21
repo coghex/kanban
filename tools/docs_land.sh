@@ -117,8 +117,15 @@ BASE="$(git merge-base HEAD origin/master)"
 # its own on-disk path — and a shell variable cannot hold a NUL byte.
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/docs-land.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
-git diff --name-only -z "$BASE" origin/master > "$TMP_DIR/changed-upstream"
-{ git diff --name-only -z; git diff --cached --name-only -z; } > "$TMP_DIR/dirty"
+# --no-renames: with rename detection, an upstream rename reports only its
+# NEW name, so the old path — deleted upstream, perhaps edited and selected
+# here — would vanish from this list and the risk checks below would let a
+# landing silently reintroduce it. Every path list wants the plain
+# delete-plus-add reading.
+git diff --name-only -z --no-renames "$BASE" origin/master > "$TMP_DIR/changed-upstream"
+{ git diff --name-only -z --no-renames
+  git diff --cached --name-only -z --no-renames
+} > "$TMP_DIR/dirty"
 
 # Whether path $1 appears in the NUL-delimited list file $2.
 in_nul_list() {
@@ -372,7 +379,7 @@ elif ! git -C "$PRIMARY" merge-base --is-ancestor HEAD origin/master; then
   # included — as a failure it was not.
   echo "note: primary checkout has local commits not on origin/master; not fast-forwarding it"
 else
-  git -C "$PRIMARY" diff --name-only -z HEAD origin/master > "$TMP_DIR/primary-changed"
+  git -C "$PRIMARY" diff --name-only -z --no-renames HEAD origin/master > "$TMP_DIR/primary-changed"
   : > "$TMP_DIR/primary-occupied"
   while IFS= read -r -d '' f; do
     [ -n "$f" ] || continue
