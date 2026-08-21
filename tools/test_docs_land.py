@@ -545,6 +545,49 @@ class RebasePathTests(DocsLandCase):
         self.assertIn("docs/b.md", blocked.stderr)
         self.assertEqual(sb.snapshot(), before)
 
+    def test_a_mode_only_staged_divergence_still_warns(self):
+        # Content equality is not equality. `git update-index --chmod`
+        # stages an executable bit without touching the file, so the index
+        # can hold upstream's exact blob under a different mode while the
+        # working tree matches upstream outright. The autostash pop has no
+        # --index, so it collapses that staged bit away silently — a real
+        # edit lost, which comparing blobs alone would wave through.
+        sb = self.sb
+        upstream = sb.move_b_upstream()
+        sb.write(sb.docs, "docs/b.md", upstream)
+        sb.git("add", "docs/b.md", cwd=sb.docs)
+        sb.git("update-index", "--chmod=+x", "docs/b.md", cwd=sb.docs)
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        entry = sb.git("ls-files", "-s", "--", "docs/b.md", cwd=sb.docs)
+        self.assertTrue(entry.startswith("100755 "), entry)
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stdout)
+        self.assertIn("dirty or untracked here AND changed on master",
+                      blocked.stderr)
+        self.assertIn("docs/b.md", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
+
+    def test_a_mode_only_worktree_divergence_still_warns(self):
+        # The other half of the same rule. Here the INDEX carries upstream's
+        # blob and mode while the working tree has the executable bit, so
+        # the replay resolves to the worktree's mode and the index entry
+        # git restores is not the one that was staged. All three modes have
+        # to agree before the path is waved through.
+        sb = self.sb
+        upstream = sb.move_b_upstream()
+        sb.write(sb.docs, "docs/b.md", upstream)
+        sb.git("add", "docs/b.md", cwd=sb.docs)
+        (sb.docs / "docs/b.md").chmod(0o755)
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stdout)
+        self.assertIn("docs/b.md", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
+
     def test_a_byte_level_difference_is_not_a_match(self):
         # The comparison reads raw bytes, so trailing whitespace is a
         # difference and not a match.

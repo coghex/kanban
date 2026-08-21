@@ -300,17 +300,42 @@ path_action() {
   fi
 }
 
-# Whether the dirty tracked path $1 already holds exactly the bytes the
+# The Git mode recorded at EXACTLY path $1 by the NUL-delimited `ls-tree`
+# or `ls-files -s` listing in file $2 — both put the mode first — or
+# nothing when the listing holds no entry there.
+#
+# Exact-path matching for the same reason tracked_exactly needs it: a bare
+# pathspec probe also matches entries BENEATH a directory. upstream_mode
+# above is the loose sibling and stays that way; it only ever sees a
+# SELECTED path the gate already validated, while this one is asked about
+# arbitrary upstream-changed paths whose names may carry glob metacharacters.
+entry_mode() {
+  while IFS= read -r -d '' _rec; do
+    case "$_rec" in
+      *"$_TAB$1") printf '%s\n' "${_rec%% *}"; return 0 ;;
+    esac
+  done < "$2"
+  return 1
+}
+
+# Whether the dirty tracked path $1 already holds exactly what the
 # reconciliation would check out, so the replay can neither conflict on it
 # nor lose an edit.
 #
 # `git rebase --autostash` stashes the dirty state and pops it WITHOUT
-# --index, so only the WORKING-TREE side of the stash survives. When those
-# bytes already equal origin/master's blob, both sides of the replay merge
-# carry the same content and the merge resolves to it either way. A staged
-# entry holding something ELSE is the exception the pop discards, so a
-# distinct staged payload keeps the path at risk however the working tree
-# looks; a staged entry equal to those same bytes loses nothing.
+# --index, so only the WORKING-TREE side of the stash survives. When that
+# side already equals origin/master's entry, both sides of the replay merge
+# carry the same thing and the merge resolves to it either way.
+#
+# "Equals" is blob AND MODE, for all three of upstream, the working tree,
+# and any staged entry. Content alone is not enough: an index entry can
+# hold upstream's blob under a different mode — `git update-index --chmod`
+# does exactly that without touching the file — and the pop, having no
+# --index, collapses that staged executable bit away silently. Requiring
+# all three modes to agree makes the merge result unambiguous and leaves
+# the index entry equal to it, so nothing is discarded. A staged entry that
+# differs in either respect keeps the path at risk however the working tree
+# looks.
 #
 # Fail-closed everywhere else, because a match has to be against a real
 # upstream file: an upstream deletion leaves nothing to equal, and locally
@@ -328,11 +353,18 @@ path_action() {
 matches_upstream_blob() {
   _upstream="$(git rev-parse --verify --quiet "origin/master:$1")" || return 1
   [ "$(git cat-file -t "$_upstream" 2>/dev/null)" = blob ] || return 1
+  GIT_LITERAL_PATHSPECS=1 git ls-tree -z origin/master -- "$1" \
+    > "$TMP_DIR/upstream-entry"
+  _upstream_mode="$(entry_mode "$1" "$TMP_DIR/upstream-entry")" || return 1
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
   [ "$(git hash-object --no-filters -- "$1" 2>/dev/null)" = "$_upstream" ] || return 1
+  [ "$(path_mode "$1")" = "$_upstream_mode" ] || return 1
   if ! GIT_LITERAL_PATHSPECS=1 git diff --cached --quiet --no-renames -- "$1"; then
     _staged="$(git rev-parse --verify --quiet ":0:$1")" || return 1
     [ "$_staged" = "$_upstream" ] || return 1
+    GIT_LITERAL_PATHSPECS=1 git ls-files -s -z -- "$1" > "$TMP_DIR/index-entry"
+    _staged_mode="$(entry_mode "$1" "$TMP_DIR/index-entry")" || return 1
+    [ "$_staged_mode" = "$_upstream_mode" ] || return 1
   fi
   return 0
 }
@@ -346,10 +378,10 @@ matches_upstream_blob() {
 # also IGNORED is worse — checkout silently overwrites it.
 #
 # The bare intersection overstates the TRACKED hazard, though: a dirty
-# tracked file whose bytes already equal origin/master's blob is what the
-# replay produces anyway, and blocking on it refuses a landing over a file
-# holding nothing. matches_upstream_blob narrows that arm to a content
-# comparison and lets those through. The untracked and ignored arms are
+# tracked file that already holds origin/master's exact blob and mode is
+# what the replay produces anyway, and blocking on it refuses a landing
+# over a file holding nothing. matches_upstream_blob narrows that arm to a
+# content-and-mode comparison and lets those through. The untracked and ignored arms are
 # unnarrowed on purpose — checkout refuses an untracked occupant and
 # silently overwrites an ignored one without ever comparing content, so
 # byte-equality buys them nothing.
