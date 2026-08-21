@@ -505,17 +505,23 @@ Kanban stores local state in the following places:
 The optional issue approval service keeps its own state outside those, under a
 namespace of its own, and leaves it behind when it is uninstalled:
 
-- Install record, script links, runtime state, and locks:
-  `~/Library/Application Support/kanban/issue-approval/`
-- Service and backend logs: `~/Library/Logs/kanban/issue-approval/`
+- Install record, runtime state, and locks:
+  `~/Library/Application Support/kanban/issue-approval/` — fixed, and moved by
+  no option
+- Service and backend logs: `~/Library/Logs/kanban/issue-approval/` — likewise
+- Its script links: the same directory **by default**, but `--install-dir` or
+  `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` puts them wherever you name, and a
+  `~`-spelled value there follows `$HOME`
 - Its job definition: `~/Library/LaunchAgents/` on macOS, or
   `~/.config/systemd/user/` on Linux
 - Its run lock in the repository itself:
   `.git/kanban_issue_approval_run.lock`
 
-Those paths are the same on both platforms except the job definition, and
-[the issue approval guide](issue-approval.md) breaks each of them down. The
-optional PR drainer keeps a separate set of its own; see
+The fixed paths are the same on both platforms; only the job definition
+differs. If you installed with a custom link directory, that one is yours to
+remember — [the issue approval guide](issue-approval.md) breaks all of them
+down and shows how to resolve an installation's real location. The optional PR
+drainer keeps a separate set of its own; see
 [the PR drainer guide](pr-drainer.md).
 
 Use `--no-cache` to stop Kanban from reading or writing board and usage snapshots. It does not disable job logs or settings. A global `cache = false` in `config.toml` has the same effect; `--no-cache` always wins if both are set.
