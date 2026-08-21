@@ -3445,7 +3445,6 @@ refresh key.
 - Automatic refresh intervals, disabled by default if ever added.
 - Multi-repository aggregation.
 - Forge adapters for non-GitHub repositories.
-- A merged-work history view separate from the live Done column.
 
 These are intentionally outside the first release so the core remains a small,
 predictable, read-only dashboard.
