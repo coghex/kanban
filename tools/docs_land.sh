@@ -111,12 +111,16 @@ EOF
 BASE_TIP="$(git rev-parse origin/master)"
 BASE="$(git merge-base HEAD origin/master)"
 
-# Whether an untracked or ignored occupant stands where $1 (repo-relative)
-# would be checked out in worktree $2 — at the leaf, or as a symlink at any
-# ancestor component, which a checkout replaces just the same when it needs
-# that component as a real directory. Prints the occupying path and returns
-# zero when one is found. An untracked real directory ancestor is not an
-# occupant: checkout creates files inside it without clobbering anything.
+# Whether an occupant stands where $1 (repo-relative) would be checked out
+# in worktree $2 — an untracked or ignored file or symlink at the leaf, or a
+# symlink at ANY ancestor component. Prints the occupying path and returns
+# zero when one is found. An ancestor symlink is an occupant whatever the
+# index says about it or its descendants: a checkout needs that component as
+# a real directory, and asking git whether the ancestor is "tracked" answers
+# the wrong question — a tracked directory replaced on disk by a symlink
+# still prefix-matches its tracked descendants. An untracked real directory
+# ancestor is not an occupant: checkout creates files inside it without
+# clobbering anything.
 occupied_untracked() {
   _rest="$1"
   _prefix=""
@@ -126,12 +130,15 @@ occupied_untracked() {
       *) _seg="$_rest"; _rest="" ;;
     esac
     if [ -z "$_prefix" ]; then _prefix="$_seg"; else _prefix="$_prefix/$_seg"; fi
+    if [ "$_prefix" != "$1" ] && [ -L "$2/$_prefix" ]; then
+      printf '%s\n' "$_prefix"
+      return 0
+    fi
     if [ -e "$2/$_prefix" ] || [ -L "$2/$_prefix" ]; then
-      if ! GIT_LITERAL_PATHSPECS=1 git -C "$2" ls-files --error-unmatch -- "$_prefix" >/dev/null 2>&1; then
-        if [ "$_prefix" = "$1" ] || [ -L "$2/$_prefix" ]; then
-          printf '%s\n' "$_prefix"
-          return 0
-        fi
+      if [ "$_prefix" = "$1" ] \
+          && ! GIT_LITERAL_PATHSPECS=1 git -C "$2" ls-files --error-unmatch -- "$_prefix" >/dev/null 2>&1; then
+        printf '%s\n' "$_prefix"
+        return 0
       fi
     else
       # Nothing on disk at this component, so nothing deeper exists either.

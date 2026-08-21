@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -526,6 +527,29 @@ class RebasePathTests(DocsLandCase):
         self.assertEqual(
             os.readlink(sb.docs / "docs/coordination/newdir"),
             "does-not-exist")
+
+    def test_replaced_tracked_directory_symlink_is_predicted(self):
+        # docs-wip replaces the tracked docs/coordination directory with an
+        # untracked symlink while master adds a file beneath the real
+        # directory. The symlink's path still prefix-matches its tracked
+        # descendants, so a tracked-ness test over the prefix calls it safe —
+        # yet the reconciliation checkout needs the real directory there and
+        # would fail (or clobber the symlink) only after publication.
+        sb = self.sb
+        sb.move_master_upstream("docs/coordination/other.md")
+        shutil.rmtree(sb.docs / "docs" / "coordination")
+        os.symlink(
+            "does-not-exist", sb.docs / "docs" / "coordination")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn("docs/coordination", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
+        self.assertTrue((sb.docs / "docs/coordination").is_symlink())
+        self.assertEqual(
+            os.readlink(sb.docs / "docs/coordination"), "does-not-exist")
 
     def test_selected_path_changed_upstream_is_refused_without_force(self):
         # A named path that also moved upstream would be overwritten
