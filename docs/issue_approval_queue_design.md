@@ -19,7 +19,7 @@ concrete precondition
 - [x] IAQ-2. Build the persistent issue approval controller and runtime — [#349]
 - [x] IAQ-3. Install per-repository issue approval LaunchAgents — [#351]
 - [x] IAQ-4. Expose issue approval service status and control to Kanban — [#352]
-- [ ] IAQ-5. Add the approve_issues.py sidebar control
+- [x] IAQ-5. Add the approve_issues.py sidebar control — [#421]
 - [ ] IAQ-6. Document local installation, operation, and recovery
 
 ## Epic contract
