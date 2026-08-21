@@ -111,6 +111,36 @@ EOF
 BASE_TIP="$(git rev-parse origin/master)"
 BASE="$(git merge-base HEAD origin/master)"
 
+# Whether an untracked or ignored occupant stands where $1 (repo-relative)
+# would be checked out in worktree $2 — at the leaf, or as a symlink at any
+# ancestor component, which a checkout replaces just the same when it needs
+# that component as a real directory. Prints the occupying path and returns
+# zero when one is found. An untracked real directory ancestor is not an
+# occupant: checkout creates files inside it without clobbering anything.
+occupied_untracked() {
+  _rest="$1"
+  _prefix=""
+  while [ -n "$_rest" ]; do
+    case "$_rest" in
+      */*) _seg="${_rest%%/*}"; _rest="${_rest#*/}" ;;
+      *) _seg="$_rest"; _rest="" ;;
+    esac
+    if [ -z "$_prefix" ]; then _prefix="$_seg"; else _prefix="$_prefix/$_seg"; fi
+    if [ -e "$2/$_prefix" ] || [ -L "$2/$_prefix" ]; then
+      if ! GIT_LITERAL_PATHSPECS=1 git -C "$2" ls-files --error-unmatch -- "$_prefix" >/dev/null 2>&1; then
+        if [ "$_prefix" = "$1" ] || [ -L "$2/$_prefix" ]; then
+          printf '%s\n' "$_prefix"
+          return 0
+        fi
+      fi
+    else
+      # Nothing on disk at this component, so nothing deeper exists either.
+      return 1
+    fi
+  done
+  return 1
+}
+
 # What landing each path would do to origin/master's tree.
 path_action() {
   # $1: path. Prints add | modify | delete | unchanged.
@@ -155,16 +185,18 @@ while IFS= read -r f; do
   for p in "$@"; do [ "$f" = "$p" ] && landing=1; done
   [ "$landing" = 1 ] && continue
   at_risk=0
+  OCCUPANT="$f"
   if printf '%s\n' "$DIRTY" | grep -qxF -- "$f"; then
     at_risk=1
-  elif { [ -e "$f" ] || [ -L "$f" ]; } \
-      && ! GIT_LITERAL_PATHSPECS=1 git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
-    # -L as well as -e: a dangling symlink fails -e yet still occupies the
-    # path, and the reconciliation checkout would replace it just the same.
+  elif OCCUPANT="$(occupied_untracked "$f" "$DOCS_WT")"; then
+    # occupied_untracked rather than a bare -e test: a dangling symlink
+    # fails -e yet still occupies its path, and an untracked or ignored
+    # symlink at an ANCESTOR component is replaced just the same when the
+    # checkout needs that component as a real directory.
     at_risk=1
   fi
   [ "$at_risk" = 1 ] || continue
-  case "$RISK" in *"|$f|"*) ;; *) RISK="$RISK|$f|" ;; esac
+  case "$RISK" in *"|$OCCUPANT|"*) ;; *) RISK="$RISK|$OCCUPANT|" ;; esac
 done <<EOF
 $CHANGED_UPSTREAM
 EOF
@@ -298,9 +330,8 @@ else
   PRIMARY_OCCUPIED=""
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    if { [ -e "$PRIMARY/$f" ] || [ -L "$PRIMARY/$f" ]; } \
-        && ! GIT_LITERAL_PATHSPECS=1 git -C "$PRIMARY" ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
-      case "$PRIMARY_OCCUPIED" in *"|$f|"*) ;; *) PRIMARY_OCCUPIED="$PRIMARY_OCCUPIED|$f|" ;; esac
+    if OCCUPANT="$(occupied_untracked "$f" "$PRIMARY")"; then
+      case "$PRIMARY_OCCUPIED" in *"|$OCCUPANT|"*) ;; *) PRIMARY_OCCUPIED="$PRIMARY_OCCUPIED|$OCCUPANT|" ;; esac
     fi
   done <<EOF
 $(git -C "$PRIMARY" diff --name-only HEAD origin/master)

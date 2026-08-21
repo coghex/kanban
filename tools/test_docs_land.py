@@ -473,6 +473,29 @@ class RebasePathTests(DocsLandCase):
         self.assertEqual(
             os.readlink(sb.docs / "docs/new.md"), "does-not-exist")
 
+    def test_ancestor_symlink_upstream_collision_is_predicted(self):
+        # The occupant can be an ANCESTOR: an untracked symlink at
+        # docs/coordination/newdir while master newly adds a file beneath
+        # that component. The leaf neither exists nor is a symlink, so a
+        # leaf-only test misses it, yet the reconciliation checkout must
+        # replace the symlink to create the real directory — after the push
+        # already landed.
+        sb = self.sb
+        sb.move_master_upstream("docs/coordination/newdir/foo.md")
+        os.symlink(
+            "does-not-exist", sb.docs / "docs" / "coordination" / "newdir")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn("docs/coordination/newdir", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
+        self.assertTrue((sb.docs / "docs/coordination/newdir").is_symlink())
+        self.assertEqual(
+            os.readlink(sb.docs / "docs/coordination/newdir"),
+            "does-not-exist")
+
     def test_selected_path_changed_upstream_is_refused_without_force(self):
         # A named path that also moved upstream would be overwritten
         # wholesale by the landing; that must be a stop, not a silent loss.
@@ -533,6 +556,36 @@ class PushVerificationTests(DocsLandCase):
         self.assertEqual(
             (sb.main / "docs/new.md").read_text(encoding="utf-8"),
             "primary ignored draft\n")
+
+    def test_ignored_ancestor_symlink_in_the_primary_blocks_the_fast_forward(self):
+        # The primary-checkout probe must walk ancestors too: an ignored
+        # symlink at docs/coordination/newdir is porcelain-invisible and the
+        # landed path beneath it neither exists nor is a symlink there, yet
+        # the fast-forward would replace the symlink to create the real
+        # directory.
+        sb = self.sb
+        exclude = sb.main / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("docs/coordination/newdir\n", encoding="utf-8")
+        os.symlink(
+            "does-not-exist", sb.main / "docs" / "coordination" / "newdir")
+        main_head = sb.git("rev-parse", "HEAD").strip()
+        sb.write(sb.docs, "docs/coordination/newdir/foo.md", "landed content\n")
+
+        done = sb.run_script(
+            "-m", "Land foo", "docs/coordination/newdir/foo.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("landed: origin/master now contains", done.stdout)
+        self.assertIn("not fast-forwarding", done.stdout)
+        self.assertIn("docs/coordination/newdir", done.stdout)
+        self.assertEqual(
+            sb.blob("origin/master", "docs/coordination/newdir/foo.md"),
+            "landed content\n")
+        self.assertEqual(sb.git("rev-parse", "HEAD").strip(), main_head)
+        self.assertTrue((sb.main / "docs/coordination/newdir").is_symlink())
+        self.assertEqual(
+            os.readlink(sb.main / "docs/coordination/newdir"),
+            "does-not-exist")
 
     def test_dirty_primary_checkout_skips_the_fast_forward(self):
         sb = self.sb
