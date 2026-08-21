@@ -21,10 +21,11 @@ with a Claude counterpart, and issue #240 added /issue-rereview, the drafting
 contract's repair loop for a changes-requested issue. Issue #241 added the
 design pair /design-epic and /process-design-doc, transposed from the
 post-#239 tracked Codex skills; issue #328 completed the report side with
-/draft-report and /note-problem; and issues #393 and #410 vendored the
-rendered /triage roadmap and /push-docs documentation-landing workflows.
+/draft-report and /note-problem; and issues #393, #410, and #427 vendored the
+rendered /triage roadmap, its /retriage refresh, and the /push-docs
+documentation-landing workflow.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all seventeen); HASKELL_PARITY_COMMAND_NAMES is the
+commands directory (all eighteen); HASKELL_PARITY_COMMAND_NAMES is the
 strictly smaller set Kanban's own Haskell code spawns by name (the five
 above). The drafting, document, roadmap, and documentation-landing workflows
 are user- or daemon-invoked and are deliberately excluded from that parity
@@ -132,13 +133,17 @@ DOCUMENT_COMMAND_NAMES = {
 }
 CODEX_ONLY_DOCUMENT_WORKFLOWS = ()
 
-# The roadmap workflow vendored by issue #393, slice VEND-1 of
-# docs/workflow_command_vendoring_design.md. Unlike every set above it is not
-# a hand-edited file: it is rendered from tools/command_sources/triage.md by
-# tools/render_command_sources.py, and tools/test_render_command_sources.py
-# byte-compares the tracked output against that source. User-invoked and so
-# excluded from Haskell name parity like the rest.
-ROADMAP_COMMAND_NAMES = {"triage"}
+# The roadmap workflows vendored by issues #393 and #427, slices VEND-1 and
+# VEND-2 of docs/workflow_command_vendoring_design.md. Unlike every set above
+# neither is a hand-edited file: each is rendered from its own source under
+# tools/command_sources/ by tools/render_command_sources.py, and
+# tools/test_render_command_sources.py byte-compares the tracked outputs
+# against those sources. /retriage refreshes a roadmap /triage produced and
+# takes its whole rendering vocabulary from it by reference, so the two are one
+# set rather than two. Both user-invoked and so excluded from Haskell name
+# parity like the rest; /retriage's own behavioral assertions live in
+# tools/test_reconcile_approvals.py beside /triage's.
+ROADMAP_COMMAND_NAMES = {"triage", "retriage"}
 
 # The documentation-landing workflow vendored by issue #410. Rendered from
 # tools/command_sources/push-docs.md exactly the way the roadmap workflow

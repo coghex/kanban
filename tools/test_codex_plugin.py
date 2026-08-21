@@ -17,10 +17,11 @@ added four more with the design and report document workflows $design-epic,
 $process-design-doc, $draft-report, and $process-report. Issue #240 added
 $issue-rereview, the drafting contract's repair loop for a changes-requested
 issue; issue #328 added $note-problem while transposing /draft-report, closing
-the last Codex-only document gap; and issues #393 and #410 vendored the
-rendered $triage roadmap and $push-docs documentation-landing workflows.
+the last Codex-only document gap; and issues #393, #410, and #427 vendored the
+rendered $triage roadmap, its $retriage refresh, and the $push-docs
+documentation-landing workflow.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all sixteen); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
+(all seventeen); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
 own Haskell code spawns by name (the five above). Every later set is user- or
 daemon-invoked and deliberately excluded from that parity pinning; the
 breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
@@ -128,13 +129,17 @@ DOCUMENT_SKILL_NAMES = {
     "process-report",
 }
 
-# The roadmap workflow vendored by issue #393, slice VEND-1 of
-# docs/workflow_command_vendoring_design.md. Unlike every set above it is not a
-# hand-edited file: it is rendered from tools/command_sources/triage.md by
-# tools/render_command_sources.py, and tools/test_render_command_sources.py
-# byte-compares the tracked output against that source. User-invoked and so
-# excluded from Haskell name parity like the rest.
-ROADMAP_SKILL_NAMES = {"triage"}
+# The roadmap workflows vendored by issues #393 and #427, slices VEND-1 and
+# VEND-2 of docs/workflow_command_vendoring_design.md. Unlike every set above
+# neither is a hand-edited file: each is rendered from its own source under
+# tools/command_sources/ by tools/render_command_sources.py, and
+# tools/test_render_command_sources.py byte-compares the tracked outputs
+# against those sources. $retriage refreshes a roadmap $triage produced and
+# takes its whole rendering vocabulary from it by reference, so the two are one
+# set rather than two. Both user-invoked and so excluded from Haskell name
+# parity like the rest; $retriage's own behavioral assertions live in
+# tools/test_reconcile_approvals.py beside $triage's.
+ROADMAP_SKILL_NAMES = {"triage", "retriage"}
 
 # The documentation-landing workflow vendored by issue #410. Rendered from
 # tools/command_sources/push-docs.md exactly the way the roadmap workflow
@@ -1739,7 +1744,7 @@ class ManifestListingParityTests(unittest.TestCase):
     without describing it fails here.
 
     Parity is per field, not pooled: an installation that reads only the
-    short description must see the same sixteen as one that reads only the
+    short description must see the same seventeen as one that reads only the
     keywords. Non-workflow metadata -- the `kanban` keyword, the display
     name, developer, category, and capabilities -- is not a listing and is
     left alone.

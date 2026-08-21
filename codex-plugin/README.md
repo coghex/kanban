@@ -8,9 +8,10 @@ canonical issue-review workflows a user or the review daemon invokes directly:
 #229 it also packages
 the design and report document workflows a user invokes directly — `$design-epic`,
 `$process-design-doc`, `$draft-report`, `$note-problem`, and `$process-report` —
-and since issues #393 and #410 the `$triage` roadmap workflow and the
-`$push-docs` documentation-landing workflow, each rendered into both bundles
-from one authored source by `tools/render_command_sources.py`.
+and since issues #393, #410, and #427 the `$triage` roadmap workflow, its
+`$retriage` refresh, and the `$push-docs` documentation-landing workflow, each
+rendered into both bundles from one authored source by
+`tools/render_command_sources.py`.
 It exists so a
 clean Codex installation can perform these actions without depending on any
 developer's personal skill collection. See
@@ -56,12 +57,12 @@ Verify discovery:
 codex plugin list
 ```
 
-`kanban@kanban` should show as `installed, enabled`, and all sixteen workflow
+`kanban@kanban` should show as `installed, enabled`, and all seventeen workflow
 names should be available as `$solve`, `$pr-review`, `$pr-rereview`,
 `$pr-revise`, `$issue`, `$autoissue`, `$issue-review`, `$issue-rereview`,
 `$repair`, `$design-epic`, `$process-design-doc`, `$draft-report`,
-`$note-problem`, `$process-report`, `$triage`, and `$push-docs` in any Codex
-session run from this checkout.
+`$note-problem`, `$process-report`, `$triage`, `$retriage`, and `$push-docs` in
+any Codex session run from this checkout.
 
 Verified against Codex CLI `codex-cli 0.144.6` (`codex --version`), the
 version that provides the `codex plugin` / `codex plugin marketplace`
@@ -72,12 +73,12 @@ without those subcommands cannot install this plugin.
 
 Kanban's own CLI spawns five of these by name: the first four, plus `$repair`,
 which `r` selects for a Done pull request whose status is a problem (issue
-#127). The other eleven are drafting, readiness-gate, document, roadmap, and
+#127). The other twelve are drafting, readiness-gate, document, roadmap, and
 documentation-landing workflows a user or the review daemon invokes directly;
 see
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md) and
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md).
-`$repair` is not part of either declared surface. Only those eleven are
+`$repair` is not part of either declared surface. Only those twelve are
 excluded from the Haskell invocation-parity pinning in
 `tools/test_codex_plugin.py`, which covers exactly the names Kanban's own
 code spawns.
@@ -100,6 +101,7 @@ code spawns.
 | `skills/process-report/` | `$process-report` | Processes **exactly one** finding per invocation from an existing report: verify, deduplicate, recommend one disposition, stop for approval, then mark the report. Paired with the Claude `/process-report` command. |
 | `skills/triage/` | `$triage` | Orders the repository's open issues into a dependency-aware roadmap — prerequisite-barrier blocks, a priority-ordered Anytime queue, and a tracker list — verifying approval readiness through the canonical backend's one-shot reconciliation. Never claims, edits, or creates an issue itself. Paired with the Claude `/triage` command. |
 | `skills/push-docs/` | `$push-docs` | Lands user-approved documentation from the docs-wip worktree straight onto master through the tracked `tools/docs_land.sh`, which gates every path against the §7 publication classification. Named paths land exactly; with no arguments it presents the helper's inventory and lands only the approved selection. Never lands unprompted, never bypasses a refusal. Paired with the Claude `/push-docs` command. |
+| `skills/retriage/` | `$retriage` | Refreshes a roadmap `$triage` already produced — minimal stable edits that keep its three sections, dependency-barrier blank lines, and marker vocabulary, with every approval marker recomputed through the canonical backend rather than carried forward. Renders no format of its own; reads `$triage`'s **Output Format** and **Approval Readiness** instead. Never claims, edits, or creates an issue itself. Paired with the Claude `/retriage` command. |
 
 The five document workflows are user-invoked only. Kanban's CLI never spawns
 one, because each has a mandatory human approval stop in the middle; see
@@ -222,11 +224,11 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the skills directory contains exactly the sixteen packaged workflows, and
+- the skills directory contains exactly the seventeen packaged workflows, and
   the five Kanban spawns exactly match the `$`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  eleven user-invoked skills;
+  twelve user-invoked skills;
 - `draft-issues` is absent, keeping the Claude-only breadth boundary;
 - no packaged manifest sets model/effort/sandbox/approval/working-directory
   configuration, and every packaged skill — drafting skills included — has a
@@ -255,7 +257,7 @@ resolves from its own installed bundle while the working directory is the
 repository being solved. `$issue-rereview` reads the issue timeline through
 that same copy and adds none of its own.
 
-`tools/test_agent_workflow_contract.py` reconciles all sixteen skills' own bash
+`tools/test_agent_workflow_contract.py` reconciles all seventeen skills' own bash
 surface against the manifest in
 [docs/agent-workflow-contract.md §4](../docs/agent-workflow-contract.md#4-dependency-manifest),
 including the user-scoped backend install path the drafting, issue-review, and
