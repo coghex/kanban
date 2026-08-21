@@ -21,7 +21,7 @@ concrete precondition
 - [x] VEND-1. Vendor triage — [#393]
 - [x] VEND-2. Vendor retriage — [#427]
 - [x] VEND-3. Vendor backlog-review — [#430]
-- [ ] VEND-4. Vendor project-review
+- [ ] VEND-4. Vendor project-review — [deferred]: terminal behavior, the references asset, and cursor-state location undecided
 - [ ] VEND-5. Vendor drain-prs
 - [ ] VEND-6. Vendor janitor
 - [ ] VEND-7. Vendor finalize
@@ -353,6 +353,17 @@ Arc-level signals:
 - **Open questions:** `None`
 
 ### VEND-4. Vendor project-review
+
+> **Deferred:** The two personal copies implement opposite terminal behavior —
+> Claude files approved issues and treats a findings report as an explicit
+> request; Codex forbids tracker writes outright and writes the report
+> unconditionally — and this slice's own acceptance signal describes only the
+> Claude model. The Codex copy also ships `references/review-boundaries.md`,
+> which `render_command_sources.py` cannot produce, which neither bundle has a
+> symmetric home for, and whose content is a consuming repository's mutable
+> review cursor. Clears when `/design-epic` records a decision for each: which
+> terminal behavior survives, whether the boundary asset ships and where, and
+> where its mutable state lives at runtime.
 
 - **Outcome:** `kanban:project-review` ships in both bundles; personal copies retire.
 - **Scope:** reconcile the largest divergence in the set — 223 differing lines,
