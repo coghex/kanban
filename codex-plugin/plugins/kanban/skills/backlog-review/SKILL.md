@@ -32,18 +32,22 @@ REPO="$(git remote get-url origin | sed -E 's#\.git$##; s#.*(/|:)([^/:]+/[^/:]+)
 Either path leaves `$REPO` holding one `owner/name` before the first `gh` call.
 Pass `-R "$REPO"` on every one of them, the four apply-step mutations included.
 
+**Announce, then read:** name the resolved `$REPO` and the batch you are about
+to take before the first `gh` call below. Default is the 15 oldest;
+if the user gave you a count or a label/area, use that instead.
+Reporting what was resolved is what catches a wrong resolution, and it catches
+it only if it lands before anything has been read from the wrong tracker.
+
 **Scope the batch:** list the open issues and sort them oldest-first:
 
 ```bash
 gh issue list -R "$REPO" --state open --limit 500 --json number,title,labels,assignees,body,createdAt,url
 ```
 
-Default is the 15 oldest;
-if the user gave you a count or a label/area, use that instead.
 Skip issues that are in-flight (assignee, `wip` label, or an open PR closing
 them) — changing a spec under an active agent yanks the rug; list them as
-skipped. Announce the resolved repository and the batch (issue number range)
-before starting.
+skipped. Restate the batch as the concrete issue number range the list yields
+before starting the verification below.
 
 **Verify each issue's premise against HEAD:**
 - Bug: does the described defect still exist? Trace the named code path in the current code; re-run the repro if it's cheap.

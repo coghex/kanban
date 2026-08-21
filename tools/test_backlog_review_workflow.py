@@ -15,7 +15,11 @@ consequences follow, and both are asserted here rather than left to review.
   pinned exactly: six of them, six spellings, `-R "$REPO"` on each. The
   resolution that fills `$REPO` reads the remote with `git` and `sed` — an
   initial `gh repo view` would be a GitHub call made before the identity every
-  other call depends on exists, so it is refused by name.
+  other call depends on exists, so it is refused by name. The report that names
+  what was resolved is pinned ahead of the first *read*, not merely ahead of the
+  first write: an echo arriving after the backlog has been pulled from the wrong
+  tracker names the wrong repository too late to stop the batch being scoped
+  against it.
 * **Nothing mutates before the stop.** The workflow's whole safety property is
   that it reports, stops, and waits; the four mutations are pinned to appear
   after that stop in the document an agent reads top to bottom.
@@ -106,9 +110,23 @@ DISPOSITIONS = (
     "**Needs decision**",
 )
 
-# The opening report, which is what catches a wrong resolution before anything
-# irreversible happens.
-OPENING_REPORT = "Announce the resolved repository and the batch (issue number range) before starting."
+# The opening report, which is what catches a wrong resolution. It has to land
+# before the *first read*, not merely before the first mutation: a report that
+# arrived after the backlog had been pulled from the wrong tracker would name
+# the wrong repository too late to stop anything, and a batch already scoped
+# against it is what the dispositions are then drafted from. Round 1's blocker
+# on this pull request was exactly that ordering.
+OPENING_REPORT = (
+    "name the resolved `$REPO` and the batch you are about to take before the "
+    "first `gh` call below."
+)
+
+# The batch's concrete issue-number range, which is only knowable once the list
+# returns, so it is restated rather than guessed before the read.
+BATCH_RANGE_REPORT = (
+    "Restate the batch as the concrete issue number range the list yields "
+    "before starting the verification below."
+)
 
 # The one sentence that differs per brand because the providers really do pass
 # arguments differently (design D-2/D-7 keep this, rather than flattening it).
@@ -231,17 +249,38 @@ class RepositoryScopeTests(unittest.TestCase):
                     "$REPO is resolved",
                 )
 
-    def test_the_opening_report_precedes_every_mutation(self):
-        # The echo is what catches a resolution that was wrong; an echo after
-        # the first close would catch it too late to matter.
+    def test_the_opening_report_precedes_every_tracker_call(self):
+        # Every call, reads included -- an echo that lands after the backlog
+        # has already been pulled from the wrong tracker catches the wrong
+        # resolution too late to stop the batch being scoped against it.
         for relative_path in RENDERED_ASSETS:
             flattened = flat(read(relative_path))
             report = flattened.index(OPENING_REPORT)
+            for leading in TRACKER_READS + TRACKER_MUTATIONS:
+                with self.subTest(asset=relative_path, call=leading):
+                    self.assertLess(
+                        report,
+                        flattened.index(f"gh {leading}"),
+                        f"{relative_path}: gh {leading} runs before the "
+                        "opening report names the repository it targets",
+                    )
+
+    def test_the_batch_range_is_restated_before_the_verification_begins(self):
+        # The other half of the announcement: the issue-number range is not
+        # knowable until the list returns, so it follows the read -- but it
+        # still precedes every disposition and every mutation drafted from it.
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            restatement = flattened.index(BATCH_RANGE_REPORT)
             with self.subTest(asset=relative_path):
-                self.assertLess(report, flattened.index("**Verify each issue's"))
+                self.assertLess(flattened.index(OPENING_REPORT), restatement)
+                self.assertLess(
+                    flattened.index(f"gh {TRACKER_READS[0]}"), restatement
+                )
+                self.assertLess(restatement, flattened.index("**Verify each issue's"))
                 for leading in TRACKER_MUTATIONS:
                     self.assertLess(
-                        report, flattened.index(f"gh {leading}"), leading
+                        restatement, flattened.index(f"gh {leading}"), leading
                     )
 
 
