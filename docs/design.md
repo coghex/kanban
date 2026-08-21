@@ -202,7 +202,6 @@ other explicit mutations.
   own single-pull-request path (`tools/drain_prs.py --pr`), which owns every
   gate, the merge itself, and the post-merge cleanup; Kanban holds no second
   copy of any of that, and merges nothing that path would refuse.
-- A permanent archive of merged or closed work.
 - Multi-repository aggregation in one running board. Each invocation represents
   one repository selected by its path.
 
@@ -3445,7 +3444,6 @@ refresh key.
 - Automatic refresh intervals, disabled by default if ever added.
 - Multi-repository aggregation.
 - Forge adapters for non-GitHub repositories.
-- A merged-work history view separate from the live Done column.
 
 These are intentionally outside the first release so the core remains a small,
 predictable, read-only dashboard.
