@@ -488,7 +488,7 @@ off this root, and a root a process-controlled input could move would let two
 runs both start. Running an installer or a controller under a different `$HOME`
 leaves every one of them exactly where it was.
 
-**The shared script links are the one thing that moves.** They default to that
+**The shared script links move, but only when told to.** They default to that
 same passwd-anchored root, but `--install-dir` and
 `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` place them at any path you name — and a
 leading `~` in either is expanded with `$HOME`, like any path, so a custom

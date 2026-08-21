@@ -1076,11 +1076,15 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   one per canonical GitHub repository, named for the identifier
   `tools/service_manager.py` derives from that repository's normalized identity.
   Those two directories are the *manager's* rather than this service's, and are
-  the one part of its footprint not anchored to the passwd home: that module
+  not anchored to the passwd home at all: that module
   resolves them through `Path.home()`, which honours `$HOME`, and on systemd
-  through `$XDG_CONFIG_HOME` as well. A command run under a redirected `$HOME`
+  through `$XDG_CONFIG_HOME` as well — with no option involved and nothing to
+  opt into. A command run under a redirected `$HOME`
   therefore writes a definition the record — which does not move — could not
-  then name.
+  then name. (The shared script links can also sit off the passwd home, but
+  only because `--install-dir` or `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` was given
+  a path that puts them there; see the Durable state bullet below for the three
+  groups in full.)
   Kanban names none of them: it selects this repository's entry in the discovery
   record, resolves the definition's path from it, and reads the command out of
   the definition itself. That entry is a discriminated union on `backend` in the
@@ -1149,8 +1153,9 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   **Movable by option.** The shared script links, the fifth such row, default
   beside the record and are what `--install-dir` and
   `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` place elsewhere, expanding a leading `~`
-  through `$HOME` as any path does — so a custom link location is the one part
-  of this footprint an operator can make `$HOME`-dependent. Nothing above
+  through `$HOME` as any path does — so a custom link location can be
+  `$HOME`-dependent, where the four above never are and the definition
+  directories always are. Nothing above
   follows them, unlike the drainer, whose runtime tree lives under its install
   directory and moves with it.
 
@@ -1432,8 +1437,8 @@ XDG sibling**: `tools/approve_issues_service.py` resolves each of them from the
 account's passwd home directory with no XDG rule of any kind, so one spelling is
 the complete declaration on macOS and on Linux alike. `issue-approval-install-dir`
 is the service root, which is also the record's directory, the *default*
-install directory — the shared script links are the one part of this footprint
-`--install-dir` and `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` place elsewhere, and a
+install directory — `--install-dir` and `KANBAN_ISSUE_APPROVAL_INSTALL_DIR`
+place the shared script links elsewhere and move nothing else, and a
 `~` in either expands through `$HOME` like any path — and the parent of the
 other two trees;
 `issue-approval-discovery-record` is the record inside it, whose own path
@@ -2046,9 +2051,10 @@ utilities.
   `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` move the script links alone. The
   definition directories are the exception in the other direction: they are the
   service manager's, resolved through `Path.home()` and, on systemd,
-  `$XDG_CONFIG_HOME`, so they are the one part of this footprint a redirected
-  environment relocates on its own. A custom link directory spelled with `~`
-  expands through `$HOME` too, but only because an operator named it that way.
+  `$XDG_CONFIG_HOME`, so a redirected environment relocates them with nothing
+  opted into. A custom link directory spelled with `~`
+  expands through `$HOME` too, but only because an operator named it that way,
+  and the record, runtime tree, locks and log root never do.
   Only the
   systemd unit location is XDG-aware, because that is systemd's own rule about
   where it searches. Bringing those two roots onto this section's per-platform
