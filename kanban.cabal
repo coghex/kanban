@@ -58,6 +58,7 @@ extra-doc-files:
   docs/drafting-workflow-contract.md
   docs/media/README.md
   docs/media/board-wide.png
+  docs/media/board-wide.provenance
   docs/pr-drainer.md
   docs/user-guide.md
   docs/workflow-setup.md
