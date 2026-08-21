@@ -229,6 +229,9 @@ concrete precondition
   attention handoff.
 - Work-conserving round-robin admission across equal-priority autonomous
   missions, with direct operator commands retaining foreground priority.
+- Durable provider-capacity waits that release execution slots and retry at a
+  known reset or with bounded backoff, while authentication and configuration
+  failures stop for the operator.
 - Optional automatic application of canonical issue or PR review
   recommendations followed by canonical rereview, with explicit authority,
   progress detection, and loop bounds.
@@ -248,6 +251,9 @@ concrete precondition
   operator opts in for that repository.
 - A four-hour default deadline for each agent execution, configurable only
   within a finite bound while the durable mission itself remains indefinite.
+- Drain-before-upgrade service handoff and an explicit provider/model boundary:
+  mission planning is configurable, while canonical actions retain their own
+  routing unless their typed contracts permit an override.
 - Indefinite private mission-history retention by default, with explicit
   archive/delete controls and collection eligibility recorded for a later safe
   garbage collector.
@@ -379,6 +385,14 @@ and stable mission/step identifiers. It resolves live state again at dispatch,
 uses the owning workflow adapter, records the invocation before launch, and
 records/reconciles the outcome afterwards. A planner-proposed action outside
 the registry is rejected and returned to the console as a planning error.
+
+Provider/model choice is also typed authority. The general planner uses the
+repository's configured default unless the mission carries a validated,
+versioned planner override. That choice is recorded on every planner/session
+turn. A canonical action continues to use its owning workflow's provider and
+routing rules — including opposite-brand review — unless that action's typed
+contract explicitly exposes and validates an override. Planner prose and a
+mission-level planner override cannot silently rewrite canonical routing.
 
 Known commands do not need a planner turn. Their parser builds the same typed
 plan directly, making `solve 123` fast and deterministic even when no planning
@@ -539,11 +553,11 @@ deletion instead of inventing a retention policy.
 ### Mission lifecycle and reconciliation
 
 At minimum a mission distinguishes `planned`, `running`, `waiting_input`,
-`waiting_barrier`, `paused`, `interrupted`, `recovering`, `completed`, `failed`,
-and `cancelled`. A step
-distinguishes `pending`, `dispatching`, `running`, `outcome_unknown`,
-`interrupted`, `orphaned`, `recovering`, `succeeded`, `needs_changes`,
-`needs_input`, `failed`, and `cancelled`.
+`waiting_barrier`, `waiting_capacity`, `paused`, `interrupted`, `recovering`,
+`completed`, `failed`, and `cancelled`. A step distinguishes `pending`,
+`dispatching`, `running`, `outcome_unknown`, `waiting_capacity`, `interrupted`,
+`orphaned`, `recovering`, `succeeded`, `needs_changes`, `needs_input`, `failed`,
+and `cancelled`.
 
 On normal dashboard attachment, live-runner reconciliation, or an explicitly
 initiated interrupted-work recovery pass, the controller:
@@ -638,6 +652,14 @@ of independence. Known dependencies, the same target, or an existing live
 worker serialize. Provider-capacity or rate-limit observations pause dispatch
 without failing already-running children. Configuration may lower the limit to
 one or raise it deliberately as the host and workflow mature.
+
+A positively classified rate limit or exhausted quota moves the affected step
+to `waiting_capacity`, releases any repository admission slot, and records a
+durable retry time. A provider-supplied reset time is authoritative; otherwise
+the runner uses bounded exponential backoff. The live runner retries when due
+even while the TUI is absent. Invalid credentials, a missing executable,
+unsupported provider/model selection, and rejected configuration are not
+capacity waits: they stop for operator input and are never retried in a loop.
 
 A newly dispatched operator command has admission priority over autonomous
 batch children that have not started. It waits if both slots are already
@@ -796,6 +818,16 @@ already published a verified, idempotent checkpoint and continuation; otherwise
 it stops for the operator with the same logs, external-state reconciliation,
 and worktree handoff used by other interrupted work. An agent may not evade the
 deadline by abandoning an unregistered background descendant.
+
+A normal runner upgrade uses a drain handoff. The installed old runner records
+`draining`, stops admitting planner turns and children, lets every live bounded
+child settle, seals its logs, writes its final compatible snapshot, and releases
+the repository runner lease. Commands accepted during the drain remain durable
+and queued. Only then may the new binary validate the store, acquire the lease,
+and resume admission. If either version is forcibly terminated, cannot finish
+the drain, or cannot prove schema compatibility, the affected missions follow
+the ordinary `interrupted` and manual-recovery contract rather than pretending
+the upgrade was clean.
 
 The TUI never needs to stay alive for progress. On exit it disconnects only its
 event reader; it does not stop the runner or active child processes. On the
@@ -1082,6 +1114,31 @@ ordering and barriers. Blocked missions are skipped, and one mission may reuse
 otherwise idle capacity when no peer can run. Direct operator work still has
 D-22 priority and running work is never preempted. This resolves Q-17.
 
+### D-27. Transient provider capacity retries without occupying a slot
+
+A positively identified rate limit or exhausted quota records
+`waiting_capacity`, releases the repository slot, and retries automatically at
+the provider's reset time or through bounded exponential backoff. This survives
+ordinary TUI absence but not a runner failure, which remains governed by manual
+recovery. Authentication, executable, provider-selection, and configuration
+failures stop for the operator instead of retrying. This resolves Q-18.
+
+### D-28. Normal runner upgrades drain before handoff
+
+The old runner enters a durable drain state, admits no new work, lets its current
+bounded children settle, seals their logs and state, and releases the runner
+lease before the new binary validates and takes ownership. Commands accepted
+during drain stay queued. A forced or incompatible upgrade becomes interrupted
+work and requires normal manual recovery. This resolves Q-19.
+
+### D-29. Planner selection is configurable; canonical actions own their routing
+
+The general planner uses the repository's configured provider/model unless a
+mission records a validated planner override. Canonical workflows retain their
+existing provider and opposite-agent routing unless their typed action contract
+explicitly permits an override. Every actual selection is journaled, and model
+prose cannot alter routing authority. This resolves Q-20.
+
 ## Open questions
 
 ### Q-1. Must missions keep advancing after Kanban exits?
@@ -1182,29 +1239,21 @@ work-conserving round-robin while preserving internal target order.
 
 ### Q-18. What automatically retries after provider capacity is exhausted?
 
-Rate limits and quota windows are expected transient states, unlike invalid
-credentials, missing executables, or rejected configuration. The proposed rule
-is to publish `waiting_capacity`, release the repository slot, and retry
-automatically at a known reset time or with bounded exponential backoff when no
-reset is known. Authentication and configuration failures stop for the
-operator.
+Resolved by D-27. Proven transient capacity waits release their slots and retry
+at a known reset or with bounded backoff; authentication and configuration
+failures stop.
 
 ### Q-19. How does a runner upgrade interact with live children?
 
-Replacing a service binary beneath live work must not turn an ordinary upgrade
-into an avoidable interruption. The proposed rule is a drain: the old runner
-admits no new children, lets its current bounded children settle and seal their
-logs, then hands the durable store to the new version. Forced termination still
-uses the interrupted/manual-recovery contract.
+Resolved by D-28. Normal upgrades drain live bounded children and seal state
+before lease handoff; forced or incompatible upgrades use interrupted/manual
+recovery.
 
 ### Q-20. Who chooses providers and models for plans and canonical actions?
 
-The general planner needs a configured provider/model, while canonical review
-and solve workflows already own routing rules such as opposite-brand review.
-The proposed boundary is that the planner uses the repository's configured
-default (optionally overridden per mission), but canonical actions retain their
-own routing unless their typed action contract explicitly exposes a permitted
-override.
+Resolved by D-29. Planner selection follows repository configuration with an
+optional validated mission override; canonical actions retain their own routing
+unless their typed contract exposes an override.
 
 ## Verification strategy
 
@@ -1269,6 +1318,17 @@ override.
   configuration bounds, graceful checkpoint/yield, full subtree timeout,
   verified continuation, and refusal to continue automatically without a safe
   checkpoint.
+- Capacity fixtures distinguish explicit provider rate-limit/reset evidence from
+  authentication and configuration failures, release the repository slot,
+  persist a known reset or deterministic bounded backoff, and retry while the
+  TUI is absent without spinning.
+- Upgrade fixtures put the old runner into drain, queue a concurrent command,
+  settle and seal live children, transfer the lease exactly once, and prove a
+  forced or incompatible handoff becomes interrupted instead of creating two
+  schedulers.
+- Routing fixtures record repository and per-mission planner selection, preserve
+  every canonical action's owning provider/opposite-agent rule, and reject a
+  planner attempt to smuggle a routing override through prose.
 - End-to-end fixtures cover one issue approval, one solve, an explicit
   multi-autosolve batch, stop-on-changes, opt-in issue remediation/rereview,
   repeated-feedback halt, and no merge invocation.
@@ -1314,13 +1374,14 @@ override.
 - **Phase:** 2 — authority boundary.
 - **Depends on:** `SAG-1`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-3`, `D-7`, `D-8`, `D-13`, `D-16`, `D-17`.
+- **Relevant decisions:** `D-3`, `D-7`, `D-8`, `D-13`, `D-16`, `D-17`,
+  `D-29`.
 - **Acceptance signals:** Each action reaches its existing authority with exact
   repository/config/target data; incompatible and historical targets refuse;
   no registry path forces approval or merges.
 - **Out of scope:** Mission scheduling, console UI, broad selectors, and
   planner-generated actions.
-- **Open questions:** `Q-20`; general project actions are future extensions by
+- **Open questions:** `None`; general project actions are future extensions by
   D-16.
 
 ### SAG-10. Make issue review and revision runner-owned
@@ -1337,7 +1398,7 @@ override.
 - **Depends on:** `SAG-1`, `SAG-2`.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-2`, `D-3`, `D-4`, `D-7`, `D-9`, `D-12`, `D-13`,
-  `D-14`, `D-15`.
+  `D-14`, `D-15`, `D-29`.
 - **Acceptance signals:** Kanban may exit during an issue gate or revision;
   work continues under the runner, a later TUI replays its complete transcript,
   a pending question remains answerable, and canonical comments/labels are
@@ -1360,7 +1421,7 @@ override.
 - **Depends on:** `SAG-1`, `SAG-2`, `SAG-10`.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-2`, `D-3`, `D-7`, `D-8`, `D-12`, `D-13`,
-  `D-14`, `D-15`, `D-17`, `D-20`, `D-21`, `D-25`.
+  `D-14`, `D-15`, `D-17`, `D-20`, `D-21`, `D-25`, `D-27`.
 - **Acceptance signals:** A live worker reattaches; a landed result reconciles;
   an indeterminate mutation stops instead of rerunning; guidance can resume
   with the prior provider session or a fresh bounded brief; concurrent target
@@ -1368,7 +1429,7 @@ override.
   the configured finite deadline and an unsafe timeout stops with its handoff.
 - **Out of scope:** Service installation and no-TUI progression, multi-target
   scheduling, and UI.
-- **Open questions:** `Q-18`.
+- **Open questions:** `None`.
 
 ### SAG-9. Keep active missions advancing without the dashboard
 
@@ -1387,7 +1448,7 @@ override.
 - **Depends on:** `SAG-1`, `SAG-2`, `SAG-3`.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-2`, `D-9`, `D-12`, `D-13`, `D-14`, `D-15`,
-  `D-21`, `D-22`, `D-24`, `D-25`, `D-26`.
+  `D-21`, `D-22`, `D-24`, `D-25`, `D-26`, `D-27`, `D-28`.
 - **Acceptance signals:** After the TUI exits, the service completes one child,
   dispatches the next authorized child, records both full logs, and exposes the
   same mission when Kanban reopens; two runners cannot advance one mission;
@@ -1395,11 +1456,13 @@ override.
   every descendant and waits for the explicit recovery hotkey; no verified
   parent death leaves a live child process; timeout cannot leak descendants;
   one opt-in generic notification is emitted for a new attention identity;
-  runnable missions rotate without preemption or idle capacity.
+  runnable missions rotate without preemption or idle capacity; capacity waits
+  release slots and retry; a normal upgrade transfers one runner lease only
+  after drain.
 - **Out of scope:** Multi-target scheduling policy, console rendering,
   automatic post-crash/reboot mission resume, and provider-native internal
   subagent presentation.
-- **Open questions:** `Q-18`, `Q-19`.
+- **Open questions:** `None`.
 
 ### SAG-4. Add the persistent console and mission navigation
 
@@ -1439,7 +1502,7 @@ override.
   canonical queue/service authority.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-3`, `D-5`, `D-6`, `D-7`, `D-8`, `D-10`,
-  `D-13`, `D-19`, `D-20`, `D-22`, `D-26`.
+  `D-13`, `D-19`, `D-20`, `D-22`, `D-26`, `D-27`.
 - **Acceptance signals:** Explicit targets are never lost or reordered;
   stop-on-changes dispatches nothing past its barrier; parallel failure stops
   new work without killing live siblings; `all` follows the selected finite or
@@ -1448,7 +1511,7 @@ override.
   without leaving an otherwise usable slot idle.
 - **Out of scope:** Planner-generated plans and automatic recommendation
   application.
-- **Open questions:** `Q-18`.
+- **Open questions:** `None`.
 
 ### SAG-6. Add bounded natural-language planning
 
@@ -1464,13 +1527,13 @@ override.
 - **Ordering:** `not on the critical path` for deterministic commands, required
   for the full epic experience.
 - **Relevant decisions:** `D-1`, `D-2`, `D-3`, `D-5`, `D-11`, `D-13`,
-  `D-16`, `D-17`, `D-18`.
+  `D-16`, `D-17`, `D-18`, `D-29`.
 - **Acceptance signals:** Prose creates only registered typed steps; ambiguous
   scope is shown or questioned before dispatch; injected tracker text cannot
   alter policy; planner outage leaves direct commands and history usable.
 - **Out of scope:** Autonomous general project actions beyond the first
   registry; direct trusted-user steering remains allowed by D-17.
-- **Open questions:** `Q-20`.
+- **Open questions:** `None`.
 
 ### SAG-7. Add opt-in recommendation application and rereview loops
 
@@ -1507,11 +1570,10 @@ override.
 - **Depends on:** every implemented slice; documentation for a deferred slice
   remains in this design rather than claiming shipped behavior.
 - **Ordering:** `critical path` for epic completion.
-- **Relevant decisions:** `D-1` through `D-26`.
+- **Relevant decisions:** `D-1` through `D-29`.
 - **Acceptance signals:** Documented commands and paths match tested behavior;
   every executable and durable record has an authority/ownership entry; users
   can distinguish pause, barrier, failure, unknown outcome, and recovery.
 - **Out of scope:** Tracker drafting and implementation of deferred choices.
-- **Open questions:** `Q-6`, `Q-18`, `Q-19`, `Q-20`; all questions affecting
-  implemented behavior must be resolved or explicitly deferred before this
-  slice completes.
+- **Open questions:** `Q-6`; all questions affecting implemented behavior must
+  be resolved or explicitly deferred before this slice completes.
