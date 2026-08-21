@@ -227,6 +227,8 @@ concrete precondition
 - Single targets, explicit ordered lists, target selectors such as `all
   issues`, bounded concurrency, stop/barrier policies, cancellation, and
   attention handoff.
+- Work-conserving round-robin admission across equal-priority autonomous
+  missions, with direct operator commands retaining foreground priority.
 - Optional automatic application of canonical issue or PR review
   recommendations followed by canonical rereview, with explicit authority,
   progress detection, and loop bounds.
@@ -242,6 +244,10 @@ concrete precondition
   the mission's current step, with the plan impact recorded and reconciled.
 - Explicit session termination distinct from UI detachment, and foreground
   priority for newly dispatched operator commands over queued autonomous work.
+- Optional privacy-minimal desktop attention notifications, disabled until the
+  operator opts in for that repository.
+- A four-hour default deadline for each agent execution, configurable only
+  within a finite bound while the durable mission itself remains indefinite.
 - Indefinite private mission-history retention by default, with explicit
   archive/delete controls and collection eligibility recorded for a later safe
   garbage collector.
@@ -637,8 +643,15 @@ A newly dispatched operator command has admission priority over autonomous
 batch children that have not started. It waits if both slots are already
 occupied, then receives the next compatible slot; priority never cancels,
 interrupts, or steals ownership from a running child and never bypasses a
-dependency, target lease, or canonical workflow lock. Queue order among
-otherwise equal autonomous missions remains Q-17.
+dependency, target lease, or canonical workflow lock.
+
+Equal-priority autonomous missions use a durable, work-conserving round-robin
+cursor. Each runnable mission receives at most one admission before another
+runnable mission receives its turn; a mission that is blocked or has no ready
+child is skipped without losing its future place. When no peer can use a slot,
+the same mission may receive another turn so the two-slot budget does not sit
+idle. Each mission's internal target order and barriers remain intact, and a
+runner restart reconstructs the same cursor rather than resetting fairness.
 
 Default batch policy is fail-closed:
 
@@ -737,6 +750,15 @@ The exact hotkey is deliberately unsettled until the key table and the pending
 approval-service control have landed. The help overlay and authoritative key
 contract must be updated with whichever key is chosen.
 
+The board and console always retain a durable attention indicator. In addition,
+an operator may opt one repository into desktop notifications. One notification
+is emitted when a mission newly transitions into operator-required attention;
+reattachment, refresh, and repeated observation of the same attention ID do not
+renotify. Its content is limited to the repository name, typed target, and
+“needs attention” — never issue titles, review text, source excerpts, paths, or
+model output. Missing notification support or denied OS permission is visible
+in settings but never fails or blocks the mission.
+
 The console is the high-level surface. Existing solve/review/PR overlays remain
 the detailed child surfaces, and `p` remains the cross-process inspector. A
 child header should show its parent mission, and a return action should restore
@@ -759,14 +781,21 @@ directly. It maintains the scheduler/descendant census and publishes
 verified. It then stays stopped or waiting for manual resume; it never replaces
 the failed scheduler automatically.
 
-The mission itself has no four-hour lifetime. Individual agent executions
-remain bounded so one lost provider cannot own a target or mission forever. A
-long operation checkpoints its result and yields another registered step or
-continuation. Once that parent and its descendants have settled, the runner may
-spawn the next sequential step under the still-live mission root; the next
-bounded agent receives the durable mission brief and logs. The exact child
-deadline may remain the current four hours or become a mission policy, but an
-agent may not evade it by abandoning an unregistered background descendant.
+The mission itself has no four-hour lifetime. Each individual agent execution
+uses the current four-hour default deadline, configurable to another finite
+value no greater than a documented package hard maximum. Infinite and disabled
+deadlines are rejected. A long operation checkpoints its result and yields
+another registered step or continuation before its deadline. Once that parent
+and its descendants have settled, the runner may spawn the next sequential step
+under the still-live mission root; the next bounded agent receives the durable
+mission brief and logs.
+
+Reaching the hard deadline terminates and reaps the execution tree and records
+`timed_out`. The mission may advance automatically only when the owning action
+already published a verified, idempotent checkpoint and continuation; otherwise
+it stops for the operator with the same logs, external-state reconciliation,
+and worktree handoff used by other interrupted work. An agent may not evade the
+deadline by abandoning an unregistered background descendant.
 
 The TUI never needs to stay alive for progress. On exit it disconnects only its
 event reader; it does not stop the runner or active child processes. On the
@@ -1027,6 +1056,32 @@ canonical history produces user-visible candidates rather than automatic
 deletion. This completes Q-14's retention boundary without pulling the full
 collector into this epic.
 
+### D-24. Desktop attention notifications are opt-in and privacy-minimal
+
+The console always retains durable attention, while each repository may opt
+into one desktop notification when a new operator-required attention ID is
+created. Notification text contains only repository, typed target, and “needs
+attention”; it never includes titles, recommendations, source content, paths,
+or model output. Reobservation does not notify again, and unavailable OS support
+never fails the mission. This resolves Q-15.
+
+### D-25. Agent executions default to four hours while missions remain indefinite
+
+Every agent process has a configurable finite deadline with the current four
+hours as its default and a documented finite package maximum. Long work should
+checkpoint and yield continuations. A hard timeout kills and reaps the process
+tree and stops for the operator unless a verified idempotent continuation was
+already published. The durable mission has no corresponding lifetime limit.
+This resolves Q-16.
+
+### D-26. Equal-priority autonomous missions use work-conserving round-robin
+
+The scheduler durably rotates admissions across runnable autonomous missions,
+one admission per mission per pass, while preserving each mission's internal
+ordering and barriers. Blocked missions are skipped, and one mission may reuse
+otherwise idle capacity when no peer can run. Direct operator work still has
+D-22 priority and running work is never preempted. This resolves Q-17.
+
 ## Open questions
 
 ### Q-1. Must missions keep advancing after Kanban exits?
@@ -1110,26 +1165,46 @@ is limited to sealed redundant or derivable artifacts.
 
 ### Q-15. How should a background attention event notify the operator?
 
-The console and board can show a durable attention badge on the next open, but
-a long-running mission may request a decision while Kanban is absent. Decide
-whether the first arc also sends an optional desktop notification, and whether
-it names repository/mission/target without including potentially sensitive
-review or source content.
+Resolved by D-24. Desktop notification is opt-in per repository, emitted once
+per new attention identity, and limited to repository, target, and a generic
+needs-attention message.
 
 ### Q-16. What is the maximum duration of one agent execution?
 
-Missions themselves are indefinite, but one provider process still needs a
-deadline so a lost turn cannot hold a slot forever. The current worker limit is
-four hours. The proposed first rule is a configurable per-execution deadline
-with four hours as the default and a finite hard maximum; longer missions yield
-checkpointed continuation sessions.
+Resolved by D-25. Each execution defaults to four hours and remains configurable
+within a finite hard maximum; missions continue through bounded checkpointed
+sessions and have no lifetime limit.
 
 ### Q-17. How are equal-priority autonomous missions ordered?
 
-D-22 places direct operator work first but does not order multiple runnable
-autonomous missions. FIFO by ready time is deterministic and simple; explicit
-mission priority or round-robin fairness could prevent one large mission from
-dominating future dispatch.
+Resolved by D-26. Runnable equal-priority autonomous missions use durable,
+work-conserving round-robin while preserving internal target order.
+
+### Q-18. What automatically retries after provider capacity is exhausted?
+
+Rate limits and quota windows are expected transient states, unlike invalid
+credentials, missing executables, or rejected configuration. The proposed rule
+is to publish `waiting_capacity`, release the repository slot, and retry
+automatically at a known reset time or with bounded exponential backoff when no
+reset is known. Authentication and configuration failures stop for the
+operator.
+
+### Q-19. How does a runner upgrade interact with live children?
+
+Replacing a service binary beneath live work must not turn an ordinary upgrade
+into an avoidable interruption. The proposed rule is a drain: the old runner
+admits no new children, lets its current bounded children settle and seal their
+logs, then hands the durable store to the new version. Forced termination still
+uses the interrupted/manual-recovery contract.
+
+### Q-20. Who chooses providers and models for plans and canonical actions?
+
+The general planner needs a configured provider/model, while canonical review
+and solve workflows already own routing rules such as opposite-brand review.
+The proposed boundary is that the planner uses the repository's configured
+default (optionally overridden per mission), but canonical actions retain their
+own routing unless their typed action contract explicitly exposes a permitted
+override.
 
 ## Verification strategy
 
@@ -1164,7 +1239,9 @@ dominating future dispatch.
 - UI event and golden tests cover hotkey entry, mission navigation, command
   input, attention handoff, child opening/return, small-terminal behavior,
   scroll/follow state, detachment versus explicit session termination,
-  archive/delete controls, cancellation, and status colors.
+  archive/delete controls, notification opt-in/error state, cancellation, and
+  status colors. Fake desktop notification adapters prove one generic notice per
+  attention ID and reject sensitive content fields.
 - Security tests ensure untrusted tracker/provider text cannot create an
   unregistered action, alter repository identity, weaken policy, or cross an
   approval/merge boundary. Only real console input can create a `user_override`;
@@ -1186,7 +1263,12 @@ dominating future dispatch.
   concurrent missions in one repository, preserve lower serialized locks, and
   show that configured/provider limits pause only new admission. A new direct
   command receives the next compatible slot without preempting either running
-  child.
+  child. Multi-mission fixtures preserve a durable round-robin cursor across
+  restart, skip blocked missions, and reuse an otherwise idle slot.
+- Deadline fixtures exercise the four-hour default through an injected clock,
+  configuration bounds, graceful checkpoint/yield, full subtree timeout,
+  verified continuation, and refusal to continue automatically without a safe
+  checkpoint.
 - End-to-end fixtures cover one issue approval, one solve, an explicit
   multi-autosolve batch, stop-on-changes, opt-in issue remediation/rereview,
   repeated-feedback halt, and no merge invocation.
@@ -1227,8 +1309,8 @@ dominating future dispatch.
 - **Scope:** Action/target/policy types; live target resolution; capability and
   preflight queries; adapters around the already persistent solve/autosolve and
   PR review/revise workers plus approval-service observation; the issue-action
-  interface SAG-10 will implement; validated result vocabulary; fake-executable
-  tests.
+  interface SAG-10 will implement; provider/model policy boundaries; validated
+  result vocabulary; fake-executable tests.
 - **Phase:** 2 — authority boundary.
 - **Depends on:** `SAG-1`.
 - **Ordering:** `critical path`.
@@ -1238,7 +1320,7 @@ dominating future dispatch.
   no registry path forces approval or merges.
 - **Out of scope:** Mission scheduling, console UI, broad selectors, and
   planner-generated actions.
-- **Open questions:** `None`; general project actions are future extensions by
+- **Open questions:** `Q-20`; general project actions are future extensions by
   D-16.
 
 ### SAG-10. Make issue review and revision runner-owned
@@ -1278,14 +1360,15 @@ dominating future dispatch.
 - **Depends on:** `SAG-1`, `SAG-2`, `SAG-10`.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-2`, `D-3`, `D-7`, `D-8`, `D-12`, `D-13`,
-  `D-14`, `D-15`, `D-17`, `D-20`, `D-21`.
+  `D-14`, `D-15`, `D-17`, `D-20`, `D-21`, `D-25`.
 - **Acceptance signals:** A live worker reattaches; a landed result reconciles;
   an indeterminate mutation stops instead of rerunning; guidance can resume
   with the prior provider session or a fresh bounded brief; concurrent target
-  drift is reclassified rather than overwritten.
+  drift is reclassified rather than overwritten; each agent execution obeys
+  the configured finite deadline and an unsafe timeout stops with its handoff.
 - **Out of scope:** Service installation and no-TUI progression, multi-target
   scheduling, and UI.
-- **Open questions:** `Q-16`.
+- **Open questions:** `Q-18`.
 
 ### SAG-9. Keep active missions advancing without the dashboard
 
@@ -1298,22 +1381,25 @@ dominating future dispatch.
   scheduler split; mission arbitration and leases; start/wake, idle/wait, stop,
   crash, and upgrade behavior; structured descendant ownership and cascading
   termination; interrupted/manual recovery; durable status/incidents;
-  event-reader reattachment; session-log sealing; no-TUI and restart fixtures.
+  event-reader reattachment; session-log sealing; deadline enforcement; desktop
+  notification adapter; no-TUI and restart fixtures.
 - **Phase:** 5 — persistent execution.
 - **Depends on:** `SAG-1`, `SAG-2`, `SAG-3`.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-2`, `D-9`, `D-12`, `D-13`, `D-14`, `D-15`,
-  `D-21`.
+  `D-21`, `D-22`, `D-24`, `D-25`, `D-26`.
 - **Acceptance signals:** After the TUI exits, the service completes one child,
   dispatches the next authorized child, records both full logs, and exposes the
   same mission when Kanban reopens; two runners cannot advance one mission;
   waiting for input performs no hidden work; a runner crash kills or blocks on
   every descendant and waits for the explicit recovery hotkey; no verified
-  parent death leaves a live child process.
+  parent death leaves a live child process; timeout cannot leak descendants;
+  one opt-in generic notification is emitted for a new attention identity;
+  runnable missions rotate without preemption or idle capacity.
 - **Out of scope:** Multi-target scheduling policy, console rendering,
   automatic post-crash/reboot mission resume, and provider-native internal
   subagent presentation.
-- **Open questions:** `Q-15`, `Q-16`.
+- **Open questions:** `Q-18`, `Q-19`.
 
 ### SAG-4. Add the persistent console and mission navigation
 
@@ -1322,14 +1408,14 @@ dominating future dispatch.
   sessions.
 - **Scope:** Overlay layout, history summaries, input state, mission list,
   attention routing, child links/return, detachment and explicit termination,
-  archive/delete controls, board-action reuse, help/key contract, responsive
-  rendering, and golden/event tests.
+  archive/delete controls, notification opt-in/error state, board-action reuse,
+  help/key contract, responsive rendering, and golden/event tests.
 - **Phase:** 6 — operator surface.
 - **Depends on:** `SAG-9`; land after the pending approval-service control
   (#421) or re-audit the whole key/layout surface against it.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-1`, `D-4`, `D-9`, `D-12`, `D-15`, `D-17`,
-  `D-18`, `D-21`, `D-23`.
+  `D-18`, `D-21`, `D-23`, `D-24`.
 - **Acceptance signals:** TUI restart restores the same missions and selected
   history; a card opens its mission-owned child; attention opens the exact
   question; `interrupted` is visible and its ordinary action hotkey starts one
@@ -1338,7 +1424,7 @@ dominating future dispatch.
   duplicate worker launches.
 - **Out of scope:** Broad selectors, natural-language planning, and automatic
   remediation.
-- **Open questions:** `Q-6`, `Q-15`.
+- **Open questions:** `Q-6`.
 
 ### SAG-5. Schedule explicit and selector-based batches
 
@@ -1353,15 +1439,16 @@ dominating future dispatch.
   canonical queue/service authority.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-3`, `D-5`, `D-6`, `D-7`, `D-8`, `D-10`,
-  `D-13`, `D-19`, `D-20`, `D-22`.
+  `D-13`, `D-19`, `D-20`, `D-22`, `D-26`.
 - **Acceptance signals:** Explicit targets are never lost or reordered;
   stop-on-changes dispatches nothing past its barrier; parallel failure stops
   new work without killing live siblings; `all` follows the selected finite or
   finite-membership/live-facts contract; a changed target is reclassified
-  against its current state before any effect.
+  against its current state before any effect; equal-priority missions rotate
+  without leaving an otherwise usable slot idle.
 - **Out of scope:** Planner-generated plans and automatic recommendation
   application.
-- **Open questions:** `Q-17`.
+- **Open questions:** `Q-18`.
 
 ### SAG-6. Add bounded natural-language planning
 
@@ -1370,7 +1457,8 @@ dominating future dispatch.
   without a planner.
 - **Scope:** Planner prompt/schema, bounded mission brief and summaries,
   plan validation, clarification/acceptance flow, policy display, model failure
-  fallback, untrusted-input boundaries, and fixtures.
+  fallback, provider/model selection policy, untrusted-input boundaries, and
+  fixtures.
 - **Phase:** 8 — superagent reasoning.
 - **Depends on:** `SAG-2`, `SAG-4`, `SAG-5`.
 - **Ordering:** `not on the critical path` for deterministic commands, required
@@ -1382,7 +1470,7 @@ dominating future dispatch.
   alter policy; planner outage leaves direct commands and history usable.
 - **Out of scope:** Autonomous general project actions beyond the first
   registry; direct trusted-user steering remains allowed by D-17.
-- **Open questions:** `None`.
+- **Open questions:** `Q-20`.
 
 ### SAG-7. Add opt-in recommendation application and rereview loops
 
@@ -1419,11 +1507,11 @@ dominating future dispatch.
 - **Depends on:** every implemented slice; documentation for a deferred slice
   remains in this design rather than claiming shipped behavior.
 - **Ordering:** `critical path` for epic completion.
-- **Relevant decisions:** `D-1` through `D-23`.
+- **Relevant decisions:** `D-1` through `D-26`.
 - **Acceptance signals:** Documented commands and paths match tested behavior;
   every executable and durable record has an authority/ownership entry; users
   can distinguish pause, barrier, failure, unknown outcome, and recovery.
 - **Out of scope:** Tracker drafting and implementation of deferred choices.
-- **Open questions:** `Q-6`, `Q-15`, `Q-16`, `Q-17`; all questions affecting
+- **Open questions:** `Q-6`, `Q-18`, `Q-19`, `Q-20`; all questions affecting
   implemented behavior must be resolved or explicitly deferred before this
   slice completes.
