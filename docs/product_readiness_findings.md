@@ -51,7 +51,7 @@ issue · `[deferred]` blocked on a concrete precondition
 
 - [x] PROD-1. The README denies the release whose install path it documents — [#401]
 - [x] PROD-2. The board screenshot predates two shipped features — [#417]
-- [ ] PROD-3. The repository describes itself as "my kanban"
+- [x] PROD-3. The repository describes itself as "my kanban" — [no-issue]
 - [ ] PROD-4. The changelog has recorded nothing since the release that opened it
 - [ ] PROD-5. Nothing states when a release is cut, so 34 merges sit unreleased
 - [ ] PROD-6. The screenshot gate is skipped on every CI run by that job's own design
@@ -163,7 +163,16 @@ does not reproduce the checked-in file.
   regenerated image, and update it in the same change if it does not. This
   finding is about the stale artifact; PROD-6 is about why nothing caught it.
 
-### PROD-3. The repository describes itself as "my kanban"
+### [no-issue] PROD-3. The repository describes itself as "my kanban"
+
+> **Disposition:** No issue — the whole fix is one `gh repo edit` against GitHub
+> repository metadata, which is not tracked content and produces no diff, so it
+> cannot travel this tracker's claim → worktree → PR → drainer lane. Recorded
+> here instead: set the description to `kanban.cabal:4`'s synopsis,
+> "Event-driven GitHub workflow dashboard for the terminal", and the topics to
+> `haskell`, `tui`, `brick`, `terminal`, `github`, `kanban`, `dashboard`,
+> `developer-tools`. `homepage` stays unset: `kanban.cabal:8` declares only the
+> repository's own URL, which GitHub already links.
 
 **Verification:** Verified — the repository is public, MIT licensed, carries a
 tagged release and a README written for an outsider, and its GitHub description
