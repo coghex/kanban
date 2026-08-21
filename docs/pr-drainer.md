@@ -400,7 +400,8 @@ makes it the only copy. Its whole life:
   changes back — at that point the anchor has nothing left to protect.
 - **Kept** when that restore conflicts. The same pass also stores the snapshot
   into `git stash list`, so two copies are deliberately left behind rather than
-  one, and neither is removed while the restore is unresolved.
+  one, and the pass that hits the conflict removes neither of them. Retiring
+  either is a later run's decision, never that pass's.
 - **Reaped** by a later run, never the one that created it. Each drainer
   process sweeps the namespace once at startup, before it can merge or
   fast-forward anything, and deletes an anchor only when its exact commit is
@@ -408,8 +409,9 @@ makes it the only copy. Its whole life:
   `stash@{0}`. The stash is yours to drop or clear at any moment, so that
   reading is confirmed again *after* the ref is gone: if the snapshot is not
   still an entry then, or the stash cannot be read to say, the anchor goes
-  straight back. Nothing else about the stash is read, written, or reordered,
-  and a `--dry-run` sweep reports without deleting.
+  straight back. This sweep itself reads the stash and changes nothing in it —
+  no entry of yours is removed, rewritten, or reordered by it — and a
+  `--dry-run` sweep reports without deleting.
 - **Listed** in the log for as long as it is not provably redundant, naming the
   ref, its commit, that commit's date, and the command that restores it. An
   anchor that outlives one startup and is still reported holds work that is in
@@ -427,6 +429,51 @@ makes it the only copy. Its whole life:
   them takes no lock, runs no sweep, and creates, deletes, or reorders no ref
   and no stash entry.
 
+#### Retiring a recovery stash entry
+
+The `drain-prs-autostash-recovery <sha>` entry a conflicted restore stores is
+the other half of that lifecycle, and it is retired by its own startup pass —
+a separate one, run immediately after the anchor sweep and never from inside a
+fast-forward. The order matters: the anchor sweep can only prove an anchor
+redundant while its snapshot is still a stash entry, so retiring the entry
+first would strand the anchor as permanently kept.
+
+Removing a stash entry is destructive and irreversible in a way deleting an
+anchor is not, so the bar is deliberately high. An entry is retired only when
+all of this holds:
+
+- **Its message is the exact reserved form**, `drain-prs-autostash-recovery
+  <sha>`, matched in full against the entry's own raw payload. A prefixed,
+  wrapped, trailing-text, or otherwise near-miss spelling is a different
+  message, and the `drain-prs-autostash-<epoch>-<pid>` form is never retired at
+  all. The `<sha>` must be the entry's own full-length object ID. That form is
+  a reserved convention rather than a record of who wrote the entry: git stores
+  no creator identity for a stash entry, so one you write yourself with that
+  exact message and a matching object ID is eligible, and nothing here claims
+  to tell the two apart.
+- **Its exact commit is in the history of some other ref.** Not `refs/stash`,
+  not a reflog, and not one of the anchors above — an anchor is the drainer's
+  own copy of the same snapshot, and counting it would make the lifecycle
+  circular. Tree or patch similarity, age, and position in the list prove
+  nothing; applying the changes and committing them produces a *different*
+  commit and does not qualify. In practice that means an entry is retired only
+  where someone deliberately pointed a branch, tag, or ref at the snapshot, so
+  the ordinary outcome is that the entry is kept and reported.
+- **Its selector still names it at the moment of removal.** `stash@{n}` is
+  positional, so a fresh full read immediately before the removal has to
+  reproduce every entry seen when the candidate was chosen; anything that moved
+  aborts the retirement without touching the stash. At most one entry is
+  retired per read, each through a read of its own.
+
+Afterwards the removal is proved: the entry is gone, the snapshot is still
+reachable from a qualifying ref, and every other entry is still present in the
+same relative order. If any of that fails, whatever the stash is now missing is
+put back from its recorded object ID and verbatim message — at `stash@{0}`,
+because git has no positional reinsertion — and a restoration that itself fails
+is logged naming the object ID and the command that recovers it. A `--dry-run`
+pass makes the same decisions and reports them without creating, deleting, or
+reordering anything.
+
 Enumerate them yourself with:
 
 ```console
@@ -434,8 +481,9 @@ git for-each-ref refs/drain-prs/autostash
 git stash list
 ```
 
-Every failure of the sweep — enumerating, reading the stash, or deleting a ref
-— is logged and stepped over. Merging never depends on it.
+Every failure of either pass — enumerating anchors, reading the stash, deleting
+a ref, removing an entry, verifying a removal, or restoring an entry — is
+logged and stepped over. Merging never depends on them.
 
 ## Merging one pull request
 

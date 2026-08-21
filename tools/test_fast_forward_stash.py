@@ -5,10 +5,15 @@ that a concurrent `git stash` in another terminal also uses, and the
 unmerged index a conflicted restore leaves behind must stop the next pass
 rather than wedge it -- against a real temporary Git repository.
 
-The startup anchor sweep is here too, because it is the other half of the
-same lifecycle: an anchor a killed or conflicted pass left under
+The two startup passes are here too, because they are the other half of the
+same lifecycle. An anchor a killed or conflicted pass left under
 `refs/drain-prs/autostash/` is reaped by a later run once its snapshot is
-provably in `git stash list`, and reported for recovery while it is not.
+provably in `git stash list`, and reported for recovery while it is not. The
+`drain-prs-autostash-recovery <sha>` entry that same conflicted pass stores is
+then retired by a later run -- after the anchor sweep, never inside a
+fast-forward -- but only while its exact commit stays in the history of some
+ref that is neither `refs/stash` nor one of those anchors; anything else keeps
+it, and every failure of either pass is logged and stepped over.
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
@@ -1172,6 +1177,722 @@ class KeptAnchorsReachDrainerStatusTest(_AnchorSweepFixture):
         self.assertEqual([entry["ref"] for entry in self._kept()], [orphan_ref])
 
 
+class _RecoveryStashRetirementFixture(_AnchorSweepFixture):
+    """The startup retirement pass driven directly, with `log()` captured.
+
+    Everything it says is a log line, exactly as the anchor sweep's is. The
+    entries it decides about are built with the same `git stash store` the
+    conflicted-restore path itself uses, so an eligible entry's message names
+    its own object ID because that is what the drainer really writes.
+    """
+
+    def _recovery_entry(self, line3, *, message=None):
+        """One stash entry in the exact reserved recovery form.
+
+        `message` overrides the payload to build the near misses: the form is
+        a reserved convention rather than creator provenance, so what decides
+        eligibility is the payload and the object ID it names, never who
+        wrote the entry.
+        """
+        sha = self._snapshot_commit(line3)
+        payload = message if message is not None else f"drain-prs-autostash-recovery {sha}"
+        run_git(["stash", "store", "-m", payload, sha], cwd=self.main)
+        return sha
+
+    def _user_entry(self, tag):
+        """One stash entry of the user's own, pushed rather than stored."""
+        (self.main / f"{tag}.txt").write_text(f"{tag}\n", encoding="utf-8")
+        run_git(["add", f"{tag}.txt"], cwd=self.main)
+        run_git(["commit", "-q", "-m", f"add {tag}.txt"], cwd=self.main)
+        (self.main / f"{tag}.txt").write_text(f"{tag}-user-edit\n", encoding="utf-8")
+        run_git(["stash", "push", "-q", "-m", f"user-{tag}"], cwd=self.main)
+        return self._entries()[0]
+
+    def _hold_elsewhere(self, sha, name="refs/snapshots/held"):
+        """A ref outside `refs/stash` and the anchor namespace whose history
+        holds the exact snapshot commit -- the only proof a retirement takes.
+        """
+        run_git(["update-ref", name, sha], cwd=self.main)
+        return name
+
+    def _entries(self):
+        """(commit, raw message) per entry, in `git stash list` order.
+
+        Compared as an ordered sequence of pairs rather than a set of commits:
+        `git stash store` happily records two entries naming one commit, so a
+        set would let a wrong removal pass unnoticed.
+        """
+        proc = run_git(["stash", "list", "--format=%H%x1f%gs"], cwd=self.main)
+        return [
+            tuple(line.split("\x1f", 1)) for line in proc.stdout.splitlines() if line
+        ]
+
+    def _reported(self):
+        return drain_prs_service.autostash_inventory(self.main)["drainer_stashes"]
+
+
+class RecoveryStashRetiredWhenHeldElsewhereTest(_RecoveryStashRetirementFixture):
+    def test_an_entry_a_qualifying_ref_holds_is_removed_and_the_ref_remains(self):
+        sha = self._recovery_entry("line3-recovered")
+        held = self._hold_elsewhere(sha)
+        user = self._user_entry("later")
+
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        self.assertEqual(self._entries(), [user])
+        # The proof itself is untouched: what a retirement removes is the
+        # redundant copy, never the one that made it redundant.
+        self.assertEqual(run_git(["rev-parse", held], cwd=self.main).stdout.strip(), sha)
+        retired = self._logged_containing("Retired recovery stash entry")
+        self.assertEqual(len(retired), 1)
+        self.assertIn(sha, retired[0])
+        self.assertIn(held, retired[0])
+        self.assertEqual(self._reported(), [])
+
+
+class RecoveryStashKeptWithoutIndependentReachabilityTest(_RecoveryStashRetirementFixture):
+    """`refs/stash`, a reflog, and the drainer's own anchor are the three
+    things that prove nothing. Counting the anchor would make the lifecycle
+    circular, since the startup sweep deletes that anchor on the strength of
+    this very entry.
+    """
+
+    def test_a_snapshot_only_the_stash_and_its_anchor_hold_is_kept_and_reported(self):
+        sha = self._recovery_entry("line3-recovered")
+        ref = drain_prs._anchor_snapshot(self.ctx, sha)
+        before = self._entries()
+
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        self.assertEqual(self._entries(), before)
+        self.assertEqual(self._anchor_ref_names(), [ref])
+        kept = self._logged_containing("Keeping recovery stash entry")
+        self.assertEqual(len(kept), 1)
+        self.assertIn(sha, kept[0])
+        self.assertIn(f"git stash apply --index {sha}", kept[0])
+        # Requirement 10: what is not retired is still what status reports.
+        self.assertEqual(
+            [entry["message"] for entry in self._reported()],
+            [f"drain-prs-autostash-recovery {sha}"],
+        )
+
+    def test_a_snapshot_below_the_stash_tip_is_still_not_held_elsewhere(self):
+        # `refs/stash` names only the newest entry, so an older one is in no
+        # ref's history at all -- and must not become eligible for that.
+        sha = self._recovery_entry("line3-recovered")
+        user = self._user_entry("later")
+        before = self._entries()
+        self.assertEqual(before[1][0], sha)
+
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        self.assertEqual(self._entries(), before)
+        self.assertEqual(self._entries()[0], user)
+        self.assertEqual(len(self._logged_containing("Keeping recovery stash entry")), 1)
+
+
+class IneligibleStashEntriesAreNeverRetiredTest(_RecoveryStashRetirementFixture):
+    """The reserved form is matched in full against the raw `%gs` payload.
+
+    Every entry below is held by a qualifying ref, so its message is the only
+    thing standing between it and removal.
+    """
+
+    def _survives(self, name, payload_for):
+        sha = self._snapshot_commit(f"line3-{name}")
+        run_git(["stash", "store", "-m", payload_for(sha), sha], cwd=self.main)
+        self._hold_elsewhere(sha, f"refs/snapshots/{name}")
+        before = self._entries()
+
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        self.assertEqual(self._entries(), before)
+        self.assertEqual(self._logged_containing("Retired recovery stash entry"), [])
+        return sha
+
+    def test_a_message_naming_another_snapshot_is_ineligible(self):
+        other = self._snapshot_commit("line3-other")
+        self._survives("mismatch", lambda _sha: f"drain-prs-autostash-recovery {other}")
+
+    def test_the_unprepared_snapshot_form_is_ineligible(self):
+        self._survives("unprepared", lambda _sha: "drain-prs-autostash-1700000000-4242")
+
+    def test_a_prefixed_message_is_ineligible(self):
+        self._survives("prefixed", lambda sha: f"recovered: drain-prs-autostash-recovery {sha}")
+
+    def test_a_message_with_trailing_text_is_ineligible(self):
+        self._survives("trailing", lambda sha: f"drain-prs-autostash-recovery {sha} (manual)")
+
+    def test_a_similar_message_is_ineligible(self):
+        self._survives("similar", lambda sha: f"drain-prs-autostash-recovered {sha}")
+
+    def test_a_malformed_object_id_is_ineligible(self):
+        self._survives("malformed", lambda _sha: "drain-prs-autostash-recovery " + "z" * 40)
+
+    def test_an_abbreviated_object_id_is_ineligible(self):
+        self._survives("abbreviated", lambda sha: f"drain-prs-autostash-recovery {sha[:12]}")
+
+    def test_an_uppercase_object_id_is_ineligible(self):
+        # The entry's own object ID is lowercase, so an uppercase spelling
+        # names it in no sense this may act on.
+        self._survives("uppercase", lambda sha: f"drain-prs-autostash-recovery {sha.upper()}")
+
+    def test_a_wrapped_message_is_ineligible_although_status_still_claims_it(self):
+        sha = self._survives(
+            "wrapped", lambda sha: f"On master: drain-prs-autostash-recovery {sha}"
+        )
+        # The divergence is deliberate. Reporting unwraps git's `On <branch>: `
+        # display prefix and claims this entry (requirement 10 leaves that
+        # exactly as it was); retirement matches the payload verbatim and
+        # refuses it, because removing an entry is destructive and reporting
+        # one is not.
+        self.assertEqual(
+            [entry["message"] for entry in self._reported()],
+            [f"drain-prs-autostash-recovery {sha}"],
+        )
+        self.assertEqual(len(self._logged_containing("Keeping recovery stash entry")), 0)
+
+
+class RecoveryStashRetirementIsBoundToTheExpectedEntryTest(_RecoveryStashRetirementFixture):
+    """`stash@{n}` is positional and git has no expected-object argument for a
+    stash removal, so the binding is a fresh full read immediately before the
+    removal: anything that moved aborts without mutating anything.
+    """
+
+    def _retire_with(self, at_seam):
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            proc = real_run(args, **kwargs)
+            if args[:2] == ["git", "for-each-ref"]:
+                at_seam()
+            return proc
+
+        with mock.patch.object(drain_prs, "run", side_effect=fake_run):
+            drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+    def test_an_insertion_before_the_removal_aborts_without_touching_the_stash(self):
+        sha = self._recovery_entry("line3-recovered")
+        self._hold_elsewhere(sha)
+        before = self._entries()
+
+        self._retire_with(lambda: self._user_entry("late"))
+
+        # Every selector moved by one; nothing was removed on the old reading.
+        entries = self._entries()
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[1], before[0])
+        aborted = self._logged_containing("the stash changed")
+        self.assertEqual(len(aborted), 1)
+        self.assertIn(sha, aborted[0])
+        self.assertIn(f"git stash apply --index {sha}", aborted[0])
+        self.assertEqual(self._logged_containing("Retired recovery stash entry"), [])
+
+    def test_a_concurrent_drop_before_the_removal_aborts_without_touching_the_stash(self):
+        sha = self._recovery_entry("line3-recovered")
+        self._hold_elsewhere(sha)
+        self._user_entry("doomed")
+
+        self._retire_with(
+            lambda: run_git(["stash", "drop", "-q", "stash@{0}"], cwd=self.main)
+        )
+
+        # Only the user's own drop took effect; the target is where it was.
+        self.assertEqual(
+            self._entries(), [(sha, f"drain-prs-autostash-recovery {sha}")]
+        )
+        self.assertEqual(len(self._logged_containing("the stash changed")), 1)
+        self.assertEqual(self._logged_containing("Retired recovery stash entry"), [])
+
+
+class RecoveryStashRetirementPreservesEveryOtherEntryTest(_RecoveryStashRetirementFixture):
+    def test_non_target_entries_keep_their_contents_and_relative_order(self):
+        self._user_entry("oldest")
+        sha = self._recovery_entry("line3-recovered")
+        self._hold_elsewhere(sha)
+        self._user_entry("newest")
+        before = self._entries()
+        self.assertEqual(before[1][0], sha)
+
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        self.assertEqual(self._entries(), [before[0], before[2]])
+        self.assertEqual(len(self._logged_containing("Retired recovery stash entry")), 1)
+
+
+class RecoveryStashRestoredWhenVerificationFailsTest(_RecoveryStashRetirementFixture):
+    """The window between the binding read and the removal cannot be closed,
+    only covered: whatever the post-removal state is missing goes back.
+    """
+
+    def _retire_with(self, fake_run):
+        with mock.patch.object(drain_prs, "run", side_effect=fake_run):
+            drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+    def test_a_qualifying_ref_lost_after_the_removal_puts_the_entry_back(self):
+        sha = self._recovery_entry("line3-recovered")
+        held = self._hold_elsewhere(sha)
+        user = self._user_entry("later")
+        message = f"drain-prs-autostash-recovery {sha}"
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            proc = real_run(args, **kwargs)
+            if args[:3] == ["git", "stash", "drop"]:
+                # Exactly the losing window: the entry is gone, and the ref
+                # that proved it redundant went with it.
+                run_git(["update-ref", "-d", held], cwd=self.main)
+            return proc
+
+        self._retire_with(fake_run)
+
+        # Back, under its own object ID and verbatim message -- at the top,
+        # because git offers no positional reinsertion.
+        self.assertEqual(self._entries(), [(sha, message), user])
+        restored = self._logged_containing("Restored stash entry")
+        self.assertEqual(len(restored), 1)
+        self.assertIn(sha, restored[0])
+        self.assertIn("stash@{0}", restored[0])
+        self.assertIn("no longer reachable", restored[0])
+        self.assertEqual(self._logged_containing("Retired recovery stash entry"), [])
+        self.assertEqual([entry["message"] for entry in self._reported()], [message])
+
+    def test_a_removal_that_took_a_different_entry_restores_that_entry(self):
+        oldest = self._user_entry("oldest")
+        sha = self._recovery_entry("line3-recovered")
+        self._hold_elsewhere(sha)
+        newest = self._user_entry("newest")
+        message = f"drain-prs-autostash-recovery {sha}"
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            if args[:3] == ["git", "stash", "drop"]:
+                # What a concurrent `git stash push` between the binding read
+                # and this removal does: every selector shifts, and the drop
+                # lands on a neighbour. Putting "the target" back would not
+                # put back the entry that actually went.
+                return real_run(["git", "stash", "drop", "--quiet", "stash@{2}"], **kwargs)
+            return real_run(args, **kwargs)
+
+        self._retire_with(fake_run)
+
+        self.assertEqual(self._entries(), [oldest, newest, (sha, message)])
+        restored = self._logged_containing("Restored stash entry")
+        self.assertEqual(len(restored), 1)
+        self.assertIn(oldest[0], restored[0])
+        self.assertEqual(self._logged_containing("Retired recovery stash entry"), [])
+
+    def test_a_wrong_removal_of_an_entry_naming_the_same_commit_is_caught(self):
+        # `git stash store` records two entries naming one commit, so a
+        # comparison over commits alone cannot tell these two apart and a
+        # wrong removal would pass unnoticed. What verification compares is
+        # the ordered sequence of (commit, message) pairs.
+        sha = self._snapshot_commit("line3-recovered")
+        older = self._snapshot_commit("line3-older")
+        newest = self._snapshot_commit("line3-newest")
+        message = f"drain-prs-autostash-recovery {sha}"
+        for payload, commit in (
+            ("a copy of my own", sha),
+            ("older", older),
+            (message, sha),
+            ("newest", newest),
+        ):
+            run_git(["stash", "store", "-m", payload, commit], cwd=self.main)
+        self._hold_elsewhere(sha)
+        before = self._entries()
+        self.assertEqual(
+            before,
+            [
+                (newest, "newest"),
+                (sha, message),
+                (older, "older"),
+                (sha, "a copy of my own"),
+            ],
+        )
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            if args[:3] == ["git", "stash", "drop"]:
+                # The user's own copy of the same snapshot goes instead of the
+                # drainer's entry: same commit, different entry. Every commit
+                # the stash held is still in it afterwards.
+                return real_run(["git", "stash", "drop", "--quiet", "stash@{3}"], **kwargs)
+            return real_run(args, **kwargs)
+
+        self._retire_with(fake_run)
+
+        self.assertEqual(
+            self._entries(),
+            [
+                (sha, "a copy of my own"),
+                (newest, "newest"),
+                (sha, message),
+                (older, "older"),
+            ],
+        )
+        restored = self._logged_containing("Restored stash entry")
+        self.assertEqual(len(restored), 1)
+        self.assertIn(sha, restored[0])
+        self.assertEqual(self._logged_containing("Retired recovery stash entry"), [])
+
+    def test_a_failed_restoration_names_the_object_id_and_a_recovery_command(self):
+        sha = self._recovery_entry("line3-recovered")
+        held = self._hold_elsewhere(sha)
+        user = self._user_entry("later")
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            if args[:3] == ["git", "stash", "store"]:
+                return subprocess.CompletedProcess(args, 1, "", "fatal: cannot store\n")
+            proc = real_run(args, **kwargs)
+            if args[:3] == ["git", "stash", "drop"]:
+                run_git(["update-ref", "-d", held], cwd=self.main)
+            return proc
+
+        self._retire_with(fake_run)
+
+        # The run continues: the other entry is untouched and nothing raised.
+        self.assertEqual(self._entries(), [user])
+        failed = self._logged_containing("could not put it back")
+        self.assertEqual(len(failed), 1)
+        self.assertIn(sha, failed[0])
+        self.assertIn("cannot store", failed[0])
+        self.assertIn(f"git stash apply --index {sha}", failed[0])
+
+
+class RecoveryStashRetirementFailuresAreNonFatalTest(_RecoveryStashRetirementFixture):
+    """A stash sweep must never be what stops a pull request from merging, so
+    every way it can fail is logged and stepped over.
+    """
+
+    def _retire_with(self, fake_run):
+        with mock.patch.object(drain_prs, "run", side_effect=fake_run):
+            drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+    def _failing_stash_read(self, occurrence):
+        real_run = drain_prs.run
+        reads = []
+
+        def fake_run(args, **kwargs):
+            if args[:3] == ["git", "stash", "list"]:
+                reads.append(args)
+                if len(reads) == occurrence:
+                    raise drain_prs.DrainError("stash list is unavailable")
+            return real_run(args, **kwargs)
+
+        return fake_run
+
+    def test_an_unreadable_stash_keeps_every_entry(self):
+        sha = self._recovery_entry("line3-recovered")
+        self._hold_elsewhere(sha)
+        before = self._entries()
+
+        self._retire_with(self._failing_stash_read(1))
+
+        self.assertEqual(self._entries(), before)
+        self.assertEqual(len(self._logged_containing("Could not read")), 1)
+
+    def test_an_unreadable_stash_before_the_removal_keeps_the_entry(self):
+        sha = self._recovery_entry("line3-recovered")
+        self._hold_elsewhere(sha)
+        before = self._entries()
+
+        self._retire_with(self._failing_stash_read(2))
+
+        self.assertEqual(self._entries(), before)
+        aborted = self._logged_containing("could not be re-read immediately before")
+        self.assertEqual(len(aborted), 1)
+        self.assertIn(sha, aborted[0])
+
+    def test_an_unreadable_stash_after_the_removal_puts_the_entry_back(self):
+        sha = self._recovery_entry("line3-recovered")
+        self._hold_elsewhere(sha)
+        user = self._user_entry("later")
+        message = f"drain-prs-autostash-recovery {sha}"
+
+        self._retire_with(self._failing_stash_read(3))
+
+        self.assertEqual(self._entries(), [(sha, message), user])
+        restored = self._logged_containing("Restored stash entry")
+        self.assertEqual(len(restored), 1)
+        self.assertIn("could not be re-read to confirm the removal", restored[0])
+
+    def test_an_unreadable_ref_state_keeps_the_entry(self):
+        sha = self._recovery_entry("line3-recovered")
+        self._hold_elsewhere(sha)
+        before = self._entries()
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", "for-each-ref"]:
+                raise drain_prs.DrainError("for-each-ref is unavailable")
+            return real_run(args, **kwargs)
+
+        self._retire_with(fake_run)
+
+        self.assertEqual(self._entries(), before)
+        kept = self._logged_containing("could not be read")
+        self.assertEqual(len(kept), 1)
+        self.assertIn(sha, kept[0])
+
+    def test_a_failed_removal_keeps_its_own_entry_and_retires_the_others(self):
+        # A removal that never ran leaves the enumeration describing the stash
+        # exactly as it still is, so the next candidate is still where it says
+        # and does not wait for another startup.
+        first = self._recovery_entry("line3-first")
+        self._hold_elsewhere(first, "refs/snapshots/first")
+        second = self._recovery_entry("line3-second")
+        self._hold_elsewhere(second, "refs/snapshots/second")
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            if args[:5] == ["git", "stash", "drop", "--quiet", "stash@{0}"]:
+                return subprocess.CompletedProcess(args, 1, "", "fatal: cannot lock\n")
+            return real_run(args, **kwargs)
+
+        self._retire_with(fake_run)
+
+        self.assertEqual(
+            self._entries(), [(second, f"drain-prs-autostash-recovery {second}")]
+        )
+        failed = self._logged_containing("Could not retire recovery stash entry")
+        self.assertEqual(len(failed), 1)
+        self.assertIn(second, failed[0])
+        retired = self._logged_containing("Retired recovery stash entry")
+        self.assertEqual(len(retired), 1)
+        self.assertIn(first, retired[0])
+
+    def test_a_failed_removal_keeps_the_entry(self):
+        sha = self._recovery_entry("line3-recovered")
+        self._hold_elsewhere(sha)
+        before = self._entries()
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            if args[:3] == ["git", "stash", "drop"]:
+                return subprocess.CompletedProcess(args, 1, "", "fatal: cannot lock\n")
+            return real_run(args, **kwargs)
+
+        self._retire_with(fake_run)
+
+        self.assertEqual(self._entries(), before)
+        failed = self._logged_containing("Could not retire recovery stash entry")
+        self.assertEqual(len(failed), 1)
+        self.assertIn("cannot lock", failed[0])
+
+
+class UndecodableGitOutputIsNonFatalTest(_RecoveryStashRetirementFixture):
+    """A stash message is the user's own text and is under no obligation to be
+    UTF-8, and `drain_prs.run` decodes strictly -- so the decode failure is a
+    `UnicodeDecodeError`, a `ValueError` that no `except (DrainError, OSError)`
+    catches. Unreadable is the answer, and the run carries on.
+    """
+
+    def _raw_entries(self):
+        """The stash read as bytes, because the whole point here is output
+        this module's own `%gs` helper could not decode either.
+        """
+        proc = subprocess.run(
+            ["git", "stash", "list", "--format=%H%x1f%gs"],
+            cwd=str(self.main),
+            capture_output=True,
+            check=True,
+        )
+        return [
+            tuple(line.split(b"\x1f", 1)) for line in proc.stdout.splitlines() if line
+        ]
+
+    def test_an_undecodable_stash_message_keeps_every_entry(self):
+        sha = self._recovery_entry("line3-recovered")
+        # Eligible in every other way: only the unreadable neighbour keeps it.
+        self._hold_elsewhere(sha)
+        theirs = self._snapshot_commit("line3-users-own")
+        subprocess.run(
+            ["git", "stash", "store", "-m", os.fsdecode(b"user \xff stash"), theirs],
+            cwd=str(self.main),
+            capture_output=True,
+            check=True,
+        )
+        before = self._raw_entries()
+        self.assertEqual(len(before), 2)
+
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        self.assertEqual(self._raw_entries(), before)
+        unreadable = self._logged_containing("Could not read")
+        self.assertEqual(len(unreadable), 1)
+        self.assertIn("not valid UTF-8", unreadable[0])
+        self.assertEqual(self._logged_containing("Retired recovery stash entry"), [])
+
+    def test_an_undecodable_ref_name_keeps_the_entry(self):
+        # A ref name may hold the same bytes, but a checkout carrying one
+        # cannot be built on every filesystem this suite runs on -- so the
+        # exception is raised at the seam the real one would come from.
+        sha = self._recovery_entry("line3-recovered")
+        self._hold_elsewhere(sha)
+        before = self._entries()
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["git", "for-each-ref"]:
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            return real_run(args, **kwargs)
+
+        with mock.patch.object(drain_prs, "run", side_effect=fake_run):
+            drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        self.assertEqual(self._entries(), before)
+        kept = self._logged_containing("Keeping recovery stash entry")
+        self.assertEqual(len(kept), 1)
+        self.assertIn("not valid UTF-8", kept[0])
+
+
+class RecoveryStashRetirementDryRunTest(_RecoveryStashRetirementFixture):
+    def test_dry_run_reports_the_decision_and_changes_nothing(self):
+        sha = self._recovery_entry("line3-recovered")
+        held = self._hold_elsewhere(sha)
+        anchor = drain_prs._anchor_snapshot(self.ctx, sha)
+        self._user_entry("later")
+        before = self._entries()
+
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=True)
+
+        self.assertEqual(self._entries(), before)
+        self.assertEqual(self._anchor_ref_names(), [anchor])
+        self.assertEqual(run_git(["rev-parse", held], cwd=self.main).stdout.strip(), sha)
+        would = self._logged_containing("Would retire recovery stash entry")
+        self.assertEqual(len(would), 1)
+        self.assertIn(sha, would[0])
+        self.assertIn(held, would[0])
+        self.assertEqual(self._logged_containing("Retired recovery stash entry"), [])
+
+    def test_dry_run_reports_why_an_entry_would_be_kept(self):
+        sha = self._recovery_entry("line3-orphaned")
+        before = self._entries()
+
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=True)
+
+        self.assertEqual(self._entries(), before)
+        kept = self._logged_containing("Keeping recovery stash entry")
+        self.assertEqual(len(kept), 1)
+        self.assertIn(sha, kept[0])
+
+
+class TwoEligibleRecoveryStashesTest(_RecoveryStashRetirementFixture):
+    """Each removal invalidates every later selector the same read produced,
+    so at most one entry is retired per read.
+    """
+
+    def test_both_are_retired_each_through_its_own_fresh_read(self):
+        oldest = self._user_entry("oldest")
+        first = self._recovery_entry("line3-first")
+        self._hold_elsewhere(first, "refs/snapshots/first")
+        middle = self._user_entry("middle")
+        second = self._recovery_entry("line3-second")
+        self._hold_elsewhere(second, "refs/snapshots/second")
+        self.assertEqual(
+            [sha for sha, _ in self._entries()], [second, middle[0], first, oldest[0]]
+        )
+        dropped = []
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            if args[:4] == ["git", "stash", "drop", "--quiet"]:
+                dropped.append(args[4])
+            return real_run(args, **kwargs)
+
+        with mock.patch.object(drain_prs, "run", side_effect=fake_run):
+            drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        self.assertEqual(self._entries(), [middle, oldest])
+        # The second removal used a selector from a read taken after the
+        # first: on the enumeration that chose them, `first` was `stash@{2}`.
+        self.assertEqual(dropped, ["stash@{0}", "stash@{1}"])
+        self.assertEqual(len(self._logged_containing("Retired recovery stash entry")), 2)
+        self.assertEqual(self._reported(), [])
+
+
+class KeptAnchorAndRetirementCoexistTest(_RecoveryStashRetirementFixture):
+    """Ordering across the two startup passes is load-bearing, and an anchor
+    that outlived its own reap is neither a blocker nor a proof.
+    """
+
+    def test_an_anchor_that_outlived_its_reap_neither_blocks_nor_qualifies(self):
+        sha = self._recovery_entry("line3-recovered")
+        anchor = drain_prs._anchor_snapshot(self.ctx, sha)
+        self._hold_elsewhere(sha)
+
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        # A kept anchor beside a qualifying ref and no stash entry is a fine
+        # resting state, not a post-removal verification failure.
+        self.assertEqual(self._entries(), [])
+        self.assertEqual(self._anchor_ref_names(), [anchor])
+        self.assertEqual(len(self._logged_containing("Retired recovery stash entry")), 1)
+
+    def test_the_anchor_sweep_first_leaves_neither_artifact_behind(self):
+        sha = self._recovery_entry("line3-recovered")
+        drain_prs._anchor_snapshot(self.ctx, sha)
+        self._hold_elsewhere(sha)
+
+        drain_prs.sweep_snapshot_anchors(self.ctx, dry_run=False)
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        self.assertEqual(self._anchor_ref_names(), [])
+        self.assertEqual(self._entries(), [])
+        self.assertEqual(
+            drain_prs_service.autostash_inventory(self.main),
+            {"kept_autostash_anchors": [], "drainer_stashes": []},
+        )
+
+    def test_the_reverse_order_would_strand_the_anchor(self):
+        sha = self._recovery_entry("line3-recovered")
+        ref = drain_prs._anchor_snapshot(self.ctx, sha)
+        self._hold_elsewhere(sha)
+
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+        drain_prs.sweep_snapshot_anchors(self.ctx, dry_run=False)
+
+        # Why the seam runs the sweep first: the sweep deletes an anchor only
+        # while its snapshot is a `git stash list` entry, so retiring the
+        # entry first trades one permanent artifact for another.
+        self.assertEqual(self._anchor_ref_names(), [ref])
+        self.assertEqual(len(self._logged_containing("Keeping autostash anchor")), 1)
+
+
+class ConflictedRestoreIsRetiredOnlyByALaterRunTest(_RecoveryStashRetirementFixture):
+    def test_the_originating_pass_keeps_both_copies_and_a_later_run_decides(self):
+        (self.main / "shared.txt").write_text(
+            "line1-local\nline2\nline3\n", encoding="utf-8"
+        )
+        self._advance_origin_line1("line1-remote")
+
+        with self.assertRaises(drain_prs.DrainError):
+            drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+
+        entries = self._entries()
+        self.assertEqual(len(entries), 1)
+        sha, message = entries[0]
+        self.assertEqual(message, f"drain-prs-autostash-recovery {sha}")
+        self.assertEqual(
+            self._anchor_ref_names(), [drain_prs._snapshot_anchor_ref(sha)]
+        )
+
+        # A later run, with the snapshot held nowhere else: still both copies.
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+        self.assertEqual(self._entries(), entries)
+        self.assertEqual(len(self._logged_containing("Keeping recovery stash entry")), 1)
+
+        # And once the work is somewhere of the user's own choosing, retired.
+        held = self._hold_elsewhere(sha)
+        drain_prs.sweep_snapshot_anchors(self.ctx, dry_run=False)
+        drain_prs.retire_recovery_stashes(self.ctx, dry_run=False)
+
+        self.assertEqual(self._entries(), [])
+        self.assertEqual(self._anchor_ref_names(), [])
+        self.assertEqual(run_git(["rev-parse", held], cwd=self.main).stdout.strip(), sha)
+
+
 class DrainerStashMessagesReachDrainerStatusTest(_FastForwardStashFixture):
     """The controller restates the drainer's own stash messages rather than
     importing them, exactly as it restates the drainer's cleanup vocabulary.
@@ -1243,9 +1964,10 @@ class UnpreparedSnapshotReachesDrainerStatusTest(_LateTrackedEditFixture):
 
 
 class FastForwardNeverSweepsAnchorsTest(_FastForwardStashFixture):
-    """The sweep is a startup step and nothing else. Running one from inside
-    a fast-forward would put a ref reaper inside the very window where the
-    anchor is the only copy of the user's changes.
+    """Both startup passes are startup steps and nothing else. Running either
+    from inside a fast-forward would put a reaper inside the very window where
+    the anchor and the entry it writes are the only copies of the user's
+    changes -- so neither is called, and neither one's git commands run.
     """
 
     def _fast_forward_recording_git(self):
@@ -1260,12 +1982,19 @@ class FastForwardNeverSweepsAnchorsTest(_FastForwardStashFixture):
             with mock.patch.object(
                 drain_prs, "sweep_snapshot_anchors", side_effect=AssertionError
             ):
-                try:
-                    drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
-                    error = None
-                except drain_prs.DrainError as exc:
-                    error = exc
+                with mock.patch.object(
+                    drain_prs, "retire_recovery_stashes", side_effect=AssertionError
+                ):
+                    try:
+                        drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+                        error = None
+                    except drain_prs.DrainError as exc:
+                        error = exc
         self.assertEqual([c for c in calls if c[:2] == ["git", "for-each-ref"]], [])
+        # The retirement's own reads and its one mutation, named separately:
+        # a pass renamed or inlined elsewhere would otherwise lose this cover.
+        self.assertEqual([c for c in calls if c[:3] == ["git", "stash", "list"]], [])
+        self.assertEqual([c for c in calls if c[:3] == ["git", "stash", "drop"]], [])
         return error
 
     def test_clean_restore_releases_only_its_own_anchor(self):
@@ -1305,8 +2034,10 @@ class FastForwardNeverSweepsAnchorsTest(_FastForwardStashFixture):
 
 
 class StartupSweepSeamTest(_FastForwardStashFixture):
-    """The sweep runs exactly once per process, on the seam both modes pass
-    through, before either can merge or fast-forward anything.
+    """Both startup passes run exactly once per process, on the seam both
+    modes pass through, before either can merge or fast-forward anything --
+    and the anchor sweep runs before the retirement, because it can only reap
+    an anchor while that anchor's snapshot is still a stash entry.
     """
 
     def setUp(self):
@@ -1321,10 +2052,15 @@ class StartupSweepSeamTest(_FastForwardStashFixture):
     def _run_main(self, *mode_argv):
         events = []
         real_sweep = drain_prs.sweep_snapshot_anchors
+        real_retire = drain_prs.retire_recovery_stashes
 
         def fake_sweep(ctx, *, dry_run):
             events.append("sweep")
             return real_sweep(ctx, dry_run=dry_run)
+
+        def fake_retire(ctx, *, dry_run):
+            events.append("retire")
+            return real_retire(ctx, dry_run=dry_run)
 
         def fake_loop(ctx, **kwargs):
             events.append("loop")
@@ -1351,6 +2087,11 @@ class StartupSweepSeamTest(_FastForwardStashFixture):
                     drain_prs, "sweep_snapshot_anchors", side_effect=fake_sweep
                 )
             )
+            stack.enter_context(
+                mock.patch.object(
+                    drain_prs, "retire_recovery_stashes", side_effect=fake_retire
+                )
+            )
             stack.enter_context(mock.patch.object(drain_prs, "loop", side_effect=fake_loop))
             stack.enter_context(
                 mock.patch.object(drain_prs, "drain_one_pr", side_effect=fake_drain_one_pr)
@@ -1370,7 +2111,7 @@ class StartupSweepSeamTest(_FastForwardStashFixture):
 
         events, _stdout = self._run_main("--once")
 
-        self.assertEqual(events, ["sweep", "loop"])
+        self.assertEqual(events, ["sweep", "retire", "loop"])
         # A real sweep ran, not just the seam: the unmatched anchor survives.
         self.assertEqual(self._anchor_ref_names(), [ref])
 
@@ -1380,7 +2121,7 @@ class StartupSweepSeamTest(_FastForwardStashFixture):
 
         events, stdout = self._run_main("--pr", "42")
 
-        self.assertEqual(events, ["sweep", "drain_one_pr"])
+        self.assertEqual(events, ["sweep", "retire", "drain_one_pr"])
         # Everything the sweep reported went to the log; stdout carries the
         # one result document and nothing else.
         documents = [line for line in stdout.splitlines() if line.strip()]
@@ -1394,10 +2135,13 @@ class StartupSweepSeamTest(_FastForwardStashFixture):
             ["stash", "store", "-m", f"drain-prs-autostash-recovery {sha}", sha],
             cwd=self.main,
         )
+        # Eligible for retirement too, so a dry run that mutated would be
+        # visible in the stash below as well as in the anchor.
+        run_git(["update-ref", "refs/snapshots/held", sha], cwd=self.main)
 
         events, _stdout = self._run_main("--once", "--dry-run")
 
-        self.assertEqual(events, ["sweep", "loop"])
+        self.assertEqual(events, ["sweep", "retire", "loop"])
         self.assertEqual(self._anchor_ref_names(), [ref])
         self.assertEqual(stash_shas(self.main), [sha])
 
