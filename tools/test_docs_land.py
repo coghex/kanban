@@ -500,6 +500,34 @@ class RebasePathTests(DocsLandCase):
             (sb.docs / "docs/new.md").read_text(encoding="utf-8"),
             "ignored local draft\n")
 
+    def test_clean_tracked_file_to_directory_transition_is_not_a_collision(self):
+        # The inverse transition must NOT be flagged: master replaces the
+        # clean tracked file docs/del.md with a directory beneath it. That
+        # is git's own tracked transition, so the predictor lets the landing
+        # proceed, the reconciliation converts the docs worktree, and the
+        # primary checkout still fast-forwards — a false occupant here would
+        # exit 3 in the docs worktree and skip the primary update for no
+        # reason.
+        sb = self.sb
+        sb.git("rm", "-q", "docs/del.md")
+        sb.write(sb.main, "docs/del.md/new.md", "now a directory\n")
+        sb.git("add", "docs/del.md")
+        sb.git("commit", "-q", "-m", "deepen del into a directory")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("WARNING", done.stderr)
+        self.assertIn("landed: origin/master now contains", done.stdout)
+        self.assertIn("primary checkout fast-forwarded", done.stdout)
+        self.assertEqual(sb.blob("origin/master", "docs/a.md"), "a landed\n")
+        self.assertTrue((sb.docs / "docs/del.md").is_dir())
+        self.assertTrue((sb.main / "docs/del.md").is_dir())
+        self.assertEqual(
+            (sb.main / "docs/del.md/new.md").read_text(encoding="utf-8"),
+            "now a directory\n")
+
     def test_upstream_directory_to_file_transition_is_predicted(self):
         # master replaces the tracked docs/coordination directory with a
         # file while docs-wip holds an untracked note inside that directory.

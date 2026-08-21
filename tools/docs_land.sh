@@ -181,18 +181,38 @@ in_nul_list() {
   return 1
 }
 
+_TAB="$(printf '\t')"
+# Whether worktree $2's index holds an entry at EXACTLY path $1 — not merely
+# beneath it, which is all a bare ls-files pathspec probe can say. The
+# distinction is what separates a tracked file an upstream transition may
+# replace from a tracked directory replaced on disk by something else.
+tracked_exactly() {
+  GIT_LITERAL_PATHSPECS=1 git -C "$2" ls-files -s -z -- "$1" > "$TMP_DIR/entry-probe"
+  while IFS= read -r -d '' _entry; do
+    case "$_entry" in
+      *"$_TAB$1") return 0 ;;
+    esac
+  done < "$TMP_DIR/entry-probe"
+  return 1
+}
+
 # Whether an occupant stands where $1 (repo-relative) would be checked out
-# in worktree $2 — an untracked or ignored file or symlink at the leaf, or
-# ANYTHING that is not a real directory at an ancestor component. Prints the
-# occupying path and returns zero when one is found. An ancestor occupies
-# the slot whatever the index says about it or its descendants: a checkout
-# needs that component as a real directory, and a symlink (even one
-# resolving to a directory) or a regular file standing there is replaced or
-# refused — while asking git whether the ancestor is "tracked" answers the
-# wrong question, since a tracked directory replaced on disk still
-# prefix-matches its tracked descendants. An untracked real directory
-# ancestor is not an occupant: checkout creates files inside it without
-# clobbering anything.
+# in worktree $2 ($3 is a NUL-delimited dirty list, /dev/null when the
+# worktree is already known clean) — an untracked or ignored file or symlink
+# at the leaf, or a non-directory at an ancestor component that git's own
+# tracked transitions cannot account for. Prints the occupying path and
+# returns zero when one is found.
+#
+# The ancestor rule: a checkout needs each ancestor as a real directory. A
+# non-directory standing there is safe only when the index holds an entry at
+# EXACTLY that path and the entry is clean — that is a tracked file (or
+# symlink) an upstream file-to-directory transition replaces as ordinary
+# tracked history. Anything else — untracked or ignored files and symlinks,
+# a dirty tracked entry, or a tracked DIRECTORY replaced on disk (whose
+# descendants still prefix-match the index while the exact path has no
+# entry) — is replaced or refused by the checkout, so it is an occupant. An
+# untracked real directory ancestor is not: checkout creates files inside it
+# without clobbering anything.
 occupied_untracked() {
   _rest="$1"
   _prefix=""
@@ -205,8 +225,13 @@ occupied_untracked() {
     if [ "$_prefix" != "$1" ]; then
       if [ -L "$2/$_prefix" ] \
           || { [ -e "$2/$_prefix" ] && [ ! -d "$2/$_prefix" ]; }; then
-        printf '%s\n' "$_prefix"
-        return 0
+        if ! tracked_exactly "$_prefix" "$2" || in_nul_list "$_prefix" "$3"; then
+          printf '%s\n' "$_prefix"
+          return 0
+        fi
+        # A clean, exactly-tracked non-directory ancestor is git's own
+        # transition to perform, and nothing exists beneath it locally.
+        return 1
       fi
       # Absent means nothing deeper exists; a real directory means descend.
       [ -d "$2/$_prefix" ] || return 1
@@ -298,7 +323,7 @@ while IFS= read -r -d '' f; do
   OCCUPANT="$f"
   if in_nul_list "$f" "$TMP_DIR/dirty"; then
     at_risk=1
-  elif OCCUPANT="$(occupied_untracked "$f" "$DOCS_WT")"; then
+  elif OCCUPANT="$(occupied_untracked "$f" "$DOCS_WT" "$TMP_DIR/dirty")"; then
     # occupied_untracked rather than a bare -e test: a dangling symlink
     # fails -e yet still occupies its path, and an untracked or ignored
     # symlink at an ANCESTOR component is replaced just the same when the
@@ -446,7 +471,7 @@ else
   : > "$TMP_DIR/primary-occupied"
   while IFS= read -r -d '' f; do
     [ -n "$f" ] || continue
-    if OCCUPANT="$(occupied_untracked "$f" "$PRIMARY")"; then
+    if OCCUPANT="$(occupied_untracked "$f" "$PRIMARY" /dev/null)"; then
       if ! in_nul_list "$OCCUPANT" "$TMP_DIR/primary-occupied"; then
         printf '%s\0' "$OCCUPANT" >> "$TMP_DIR/primary-occupied"
       fi
