@@ -13,8 +13,12 @@
 -- installed — and it leaves the wrappers with only the two things that are not
 -- state: the fork a press hands off, and the board refresh a result requires.
 --
--- Nothing here draws, binds a key, or claims a click. The control that reaches
--- 'toggleApprovalService' is IAQ-5's; this is the seam it will reach through.
+-- Nothing here draws, binds a key, or claims a click: this is the seam the
+-- sidebar's @approve_issues.py@ control reaches through, not the control.
+-- That control is drawn by 'Kanban.UI.Board.drawApprovalButton' and reached
+-- from the two arms "Kanban.UI.Events" gives it -- the @a@ binding and a plain
+-- left press on 'Kanban.UI.Types.ApprovalButton' -- both of which land on
+-- 'toggleApprovalService' rather than on a decision of their own.
 module Kanban.UI.Approval
   ( ApprovalHandoff (..),
     applyApprovalStatus,

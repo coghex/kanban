@@ -31,32 +31,16 @@
 ║┃                          ┃┃  │ currently allow pointer    │ ┃  ╭───────────────────────────╮ ┃                                ┃  ╭───────────────────────────╮ ┃║
 ║┃                          ┃┃  │ events to reach lower…     │ ┃  │ #833 Improve notification │ ┃                                ┃  │ PR #861 Adopt the         │ ┃║
 ║┃                          ┃┃  ╰────────────────────────────╯ ┃  │ category defaults         │ ┃                                ┃  │ envelope in the snapshot… │ ┃║
-║┃                          ┃┃                                 ┃  │  code-health              │ ┃                                ┃  │  reviewed:approve         │ ┃║
-║┃                          ┃┃  ╭────────────────────────────╮ ┃  │ @claude-agent · updated   │ ┃                                ┃  │  feature                  │ ┃║
-║┃                          ┃┃  │ #756 Define the            │ ┃  │ 4h ago                    │ ┃                                ┃  │ #901 · agent-name →       │ ┃║
-║┃                          ┃┃  │ persistence contract       │ ┃  │ Make the fresh-install    │ ┃                                ┃  │ master · updated 3h ago   │ ┃║
-║┃                          ┃┃  │  architecture              │ ┃  │ behavior explicit and     │ ┃                                ┃  │ Reads the cache through   │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4h    │ ┃  │ keep local state outside… │ ┃                                ┃  │ the versioned envelope    │ ┃║
-║┃                          ┃┃  │ ago                        │ ┃  ╰───────────────────────────╯ ┃                                ┃  │ and reports a truncated…  │ ┃║
-║┃                          ┃┃  │ Document root owners,      │ ┃                                ┃                                ┃  │ ◐ CI 9/12 · behind        │ ┃║
-║┃                          ┃┃  │ snapshot barriers, and the │ ┃                                ┃                                ┃  ╰───────────────────────────╯ ┃║
-║┃                          ┃┃  │ versioned envelope before… │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  ╰────────────────────────────╯ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  ╭────────────────────────────╮ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │ #901 Add repository        │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │ snapshot cache             │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │  feature                   │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │ unassigned · updated 4h    │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │ ago                        │ ┃                                ┃                                ┃                                ┃║
-║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ Load the last good GitHub  │ ┃                                ┃                                ┃                                ┃║
-║┃ ┃ approve_issues.py ┃    ┃┃  │ snapshot at startup and    │ ┃                                ┃                                ┃                                ┃║
-║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ replace it atomically…     │ ┃                                ┃                                ┃                                ┃║
-║┃ off                      ┃┃  ╰────────────────────────────╯ ┃                                ┃                                ┃                                ┃║
-║┃ ┏━━━━━━━━━━━━━━┓         ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃ ┃ drain_prs.py ┃         ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃ off                      ┃┃                                 ┃                                ┃                                ┃                                ┃║
+║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃                                 ┃  │  code-health              │ ┃                                ┃  │  reviewed:approve         │ ┃║
+║┃ ┃ approve_issues.py ┃    ┃┃  ╭────────────────────────────╮ ┃  │ @claude-agent · updated   │ ┃                                ┃  │  feature                  │ ┃║
+║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ #756 Define the            │ ┃  │ 4h ago                    │ ┃                                ┃  │ #901 · agent-name →       │ ┃║
+║┃ on · unresolved incident ┃┃  │ persistence contract       │ ┃  │ Make the fresh-install    │ ┃                                ┃  │ master · updated 3h ago   │ ┃║
+║┃ · Issue #812 requests    ┃┃  │  architecture              │ ┃  │ behavior explicit and     │ ┃                                ┃  │ Reads the cache through   │ ┃║
+║┃ changes                  ┃┃  │ unassigned · updated 4h    │ ┃  │ keep local state outside… │ ┃                                ┃  │ the versioned envelope    │ ┃║
+║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  │ ago                        │ ┃  ╰───────────────────────────╯ ┃                                ┃  │ and reports a truncated…  │ ┃║
+║┃ ┃ drain_prs.py ┃         ┃┃  │ Document root owners,      │ ┃                                ┃                                ┃  │ ◐ CI 9/12 · behind        │ ┃║
+║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  │ snapshot barriers, and the │ ┃                                ┃                                ┃  ╰───────────────────────────╯ ┃║
+║┃ off                      ┃┃  │ versioned envelope before… │ ┃                                ┃                                ┃                                ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
 ║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  f filter  e epic  enter details  esc close  r review/revise  S solv ║
 ║ board: updated 3h ago · history: current                                                                                                                         ║

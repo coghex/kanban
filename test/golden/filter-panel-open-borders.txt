@@ -34,10 +34,10 @@
                                 │  ui                       │     │ save reload and exposes   │     │ calculating               │     │ modal-aware ownership…    │
                                 │ unassigned · updated 4h   │     │ old terrain data to the…  │     ╰───────────────────────────╯     │ ✓ CI 14/14 · clean        │
                                 │ ago                       │     ╰───────────────────────────╯                                       ╰───────────────────────────╯
-                                │ Empty modal areas         │
-                                │ currently allow pointer   │     ╭───────────────────────────╮                                       ╭───────────────────────────╮
-                                │ events to reach lower…    │     │ #833 Improve notification │                                       │ PR #861 Adopt the         │
-                                ╰───────────────────────────╯     │ category defaults         │                                       │ envelope in the snapshot… │
+ ┏━━━━━━━━━━━━━━━━━━━┓          │ Empty modal areas         │
+ ┃ approve_issues.py ┃          │ currently allow pointer   │     ╭───────────────────────────╮                                       ╭───────────────────────────╮
+ ┗━━━━━━━━━━━━━━━━━━━┛          │ events to reach lower…    │     │ #833 Improve notification │                                       │ PR #861 Adopt the         │
+ off                            ╰───────────────────────────╯     │ category defaults         │                                       │ envelope in the snapshot… │
  ┏━━━━━━━━━━━━━━┓                                                 │  code-health              │                                       │  reviewed:approve         │
  ┃ drain_prs.py ┃               ╭───────────────────────────╮     │ @claude-agent · updated   │                                       │  feature                  │
  ┗━━━━━━━━━━━━━━┛               │ #756 Define the           │     │ 4h ago                    │                                       │ #901 · agent-name →       │

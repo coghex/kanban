@@ -73,8 +73,9 @@ monitors the local service-managed PR drainer, which runs as a launchd job on
 macOS and a systemd user unit on Linux. The persistent per-repository issue
 approval service now has the same dashboard lifecycle — discovery, status and
 incident decoding, the durable ordered barrier, the start/stop seam, the
-canonical-review interlock, and the board refresh a result requires — while the
-sidebar control that reaches that seam is not yet built. Native GitHub sub-issue membership,
+canonical-review interlock, and the board refresh a result requires — and the
+sidebar reaches that seam through an `approve_issues.py` control drawn directly
+above the drainer's, which `a` and a plain left click both press. Native GitHub sub-issue membership,
 canonical v2 issue-review sessions, embedded revision questions, and
 the first resumable issue-solve flow are implemented. The external
 usage-command escape hatch is also implemented. Broader provider-version
@@ -175,7 +176,7 @@ other explicit mutations.
   usable 256-color fallback.
 - Remain fully keyboard-operable; mouse support is limited to card selection,
   live-session opening, details dismissal, panel/column scrolling, and the
-  sidebar's update and PR drainer buttons.
+  sidebar's update, issue approval, and PR drainer buttons.
 - Perform one asynchronous unified board-and-usage update at startup, then block
   on terminal events while idle and redraw only after input, resize, provider
   completion, or an active review event.
@@ -342,12 +343,19 @@ scrollable four-column board.
 ║ ┃ ↻ ┃                    ║              ║              ║              ║              ║
 ║ ┗━━━┛                    ║              ║              ║              ║              ║
 ║                          ║              ║              ║              ║              ║
+║ ┏━━━━━━━━━━━━━━━━━━━┓    ║              ║              ║              ║              ║
+║ ┃ approve_issues.py ┃    ║              ║              ║              ║              ║
+║ ┗━━━━━━━━━━━━━━━━━━━┛    ║              ║              ║              ║              ║
 ║ ┏━━━━━━━━━━━━━━┓         ║              ║              ║              ║              ║
 ║ ┃ drain_prs.py ┃         ║              ║              ║              ║              ║
 ║ ┗━━━━━━━━━━━━━━┛         ║              ║              ║              ║              ║
 ╚══════════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
- j/Down next  k/Up previous  x kill  h/l column  s search  f filter  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  d drainer  c sidebar  o options  ? help  q/Ctrl-C quit
+ j/Down next  k/Up previous  x kill  h/l column  s search  f filter  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  a approvals  d drainer  c sidebar  o options  ? help  q/Ctrl-C quit
 ```
+
+The two service controls sit at the foot of the sidebar as one stack, the
+issue approval service above the PR drainer, each drawing its own status detail
+line immediately beneath its box.
 
 Responsive behavior:
 
@@ -414,6 +422,7 @@ Initial bindings:
 | `p` | Open the process/session inspector; Enter opens a session and `x` kills its live process tree |
 | `i` | Open the incidents panel listing everything needing attention; Enter goes to that work |
 | `u` or click | Update GitHub board data and both usage providers |
+| `a` or click | Start or stop the service-managed issue approval service |
 | `d` or click | Start or stop the service-managed PR drainer |
 | `m` | Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path |
 | `c` | Collapse or expand the usage sidebar |
@@ -443,8 +452,15 @@ Mouse interaction is intentionally complete but narrow:
 - The mouse wheel scrolls the board column under the pointer by three rows per
   wheel event.
 - The PR drainer button remains directly clickable.
+- Left-clicking the sidebar's `approve_issues.py` button, directly above the
+  drainer's, starts or stops the issue approval service exactly as `a` does.
+- Each of the three sidebar controls answers a plain left click and nothing
+  else: a middle, right, wheel, or modifier-carrying press over one is claimed
+  by nothing, and a live card search never retargets a press that lands on one.
 - Left-clicking the sidebar's `↻` update button starts the same update `u`
   does, and is inert when the sidebar is collapsed because no control is drawn.
+  The same collapse makes the other two controls unclickable for the same
+  reason.
 
 Cards, columns, and overlays do not otherwise acquire hover, drag, context-menu,
 or pointer-only behavior.
@@ -973,11 +989,14 @@ amber `UNLINKED` warning.
   drawing continuously.
 - Cards: rounded, `╭─╮│╰─╯`.
 - Tracker headers: heavy accent, for example `┏━┓┃┗━┛` or a compact `◆` row.
-- A nested sidebar control — the update button, the drainer button — draws with
-  its panel's inner-border style: heavy Unicode (`┏━┓┃┗━┛`) in the default and
-  open-border renderers, ASCII (`+-|`) under `--ascii`. Such a control draws its
-  own box rather than wrapping its label in a border widget, so every glyph
-  keeps the control's status color.
+- A nested sidebar control — the update button, the issue approval button, the
+  drainer button — draws with its panel's inner-border style: heavy Unicode
+  (`┏━┓┃┗━┛`) in the default and open-border renderers, ASCII (`+-|`) under
+  `--ascii`. Such a control draws its own box rather than wrapping its label in
+  a border widget, so every glyph keeps the control's status color. A control
+  that carries a service status takes its color from that service's own state:
+  neutral when off, green when on, amber while starting, stopping, or holding
+  at a warning, and red on error.
 - Avoid emoji and ambiguous-width decorative characters. Prefer stable
   single-cell symbols such as `✓`, `×`, `!`, `●`, `◐`, and `◆`.
 

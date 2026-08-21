@@ -33,10 +33,10 @@
 ║┃                          ┃┃  │ #756 Define the persis┃                                                                                      ┃            ┃  │ updated 3h ago                     │ ┃║
 ║┃                          ┃┃  │ contract              ┃                                                                                      ┃            ┃  │ Reads the cache through the        │ ┃║
 ║┃                          ┃┃  │  architecture         ┃                                                                                      ┃            ┃  │ versioned envelope and reports a   │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4┃                                                                                      ┃            ┃  │ truncated payload.                 │ ┃║
-║┃                          ┃┃  │ Document root owners, ┃                                                                                      ┃            ┃  │ ◐ CI 9/12 · behind                 │ ┃║
-║┃                          ┃┃  │ barriers, and the vers┃                                                                                      ┃            ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ envelope before implem┃                                                                                      ┃            ┃                                         ┃║
+║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ unassigned · updated 4┃                                                                                      ┃            ┃  │ truncated payload.                 │ ┃║
+║┃ ┃ approve_issues.py ┃    ┃┃  │ Document root owners, ┃                                                                                      ┃            ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ barriers, and the vers┃                                                                                      ┃            ┃  ╰────────────────────────────────────╯ ┃║
+║┃ off                      ┃┃  │ envelope before implem┃                                                                                      ┃            ┃                                         ┃║
 ║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  ╰───────────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛            ┃                                         ┃║
 ║┃ ┃ drain_prs.py ┃         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
