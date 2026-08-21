@@ -10,9 +10,11 @@ one place rather than inside shell text:
 * A path must be a literal, repository-relative Markdown file inside the docs
   worktree — no absolute paths, no traversal, no directories, no Git pathspec
   magic, no glob metacharacters (ordinary Git pathspecs glob by default, so a
-  `*` would otherwise expand), and no symlinks — leaf or ancestor, since a
-  symlinked directory resolves the leaf outside the worktree — other than the
-  verified `AGENTS.md` alias.
+  `*` would otherwise expand), no control characters (the canonical-path
+  handoff below is line-delimited, so an embedded newline would split one
+  name into two), and no symlinks — leaf or ancestor, since a symlinked
+  directory resolves the leaf outside the worktree — other than the verified
+  `AGENTS.md` alias.
 * `AGENTS.md` is a tracked symlink to `CLAUDE.md`, so a selection of the alias
   is canonicalized to `CLAUDE.md` and reported; an alias object that has been
   changed or replaced is refused, because editing through the alias changes
@@ -204,6 +206,16 @@ def validate_shape(argument: str) -> str:
     """`argument` as a clean repository-relative Markdown path, or Refusal."""
     if not argument or argument.strip() != argument:
         raise Refusal(f"{argument!r}: not a repository-relative path")
+    if any(ord(character) < 0x20 or character == "\x7f" for character in argument):
+        # The canonical-path handoff to tools/docs_land.sh is line-delimited,
+        # so an embedded newline would split one validated name into two and
+        # hand the second past validation and classification entirely. No
+        # document here carries a control character, so all of them are
+        # refused rather than escaped.
+        raise Refusal(
+            f"{argument!r}: control characters are refused; name each "
+            "document by its plain repository-relative path"
+        )
     if argument.startswith("/") or argument.startswith("~"):
         raise Refusal(
             f"{argument}: absolute and home-relative paths are refused; name "

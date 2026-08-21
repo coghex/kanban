@@ -579,6 +579,11 @@ class ClassificationGateTests(DocsLandCase):
             "docs/coordination/*.md": "glob metacharacters",
             "docs/?.md": "glob metacharacters",
             "docs/[ab].md": "glob metacharacters",
+            # The gate's canonical-path handoff is line-delimited, so an
+            # embedded newline would split one validated argument into two
+            # paths, the second never validated or classified at all.
+            "docs/coordination/x\nCLAUDE.md": "control characters",
+            "docs/a\tb.md": "control characters",
         }
         for argument, needle in cases.items():
             with self.subTest(argument=argument):
