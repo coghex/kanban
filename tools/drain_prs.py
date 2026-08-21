@@ -89,6 +89,34 @@ MAX_CONSECUTIVE_GLOBAL_FAILURES = 3
 FINALIZE_MODEL = "gpt-5.6-terra"
 FINALIZE_EFFORT = "medium"
 NTFY_URL = os.environ.get("KANBAN_DRAINER_NTFY_URL")
+# The private namespace an autostash snapshot is anchored under, written down
+# once: the ref every anchor is created at, the pattern the startup sweep
+# enumerates, and the namespace the recovery-stash retirement below refuses to
+# count as independent recovery are all this one string.
+SNAPSHOT_ANCHOR_NAMESPACE = "refs/drain-prs/autostash"
+# The exact reserved message a conflicted restore stores its snapshot under,
+# and the only stash payload the retirement pass will ever consider. Matched in
+# full against an entry's raw `%gs` payload, so a prefixed, wrapped
+# (`On master: ...`), trailing-text, or otherwise near-miss spelling is a
+# different message and stays ineligible -- as does the distinct
+# `drain-prs-autostash-<epoch>-<pid>` form a failed preparation writes, which
+# this pass never retires. The object ID is full-length lowercase hex in the
+# repository's own object format, because that is what `git stash store` was
+# handed; an abbreviated or uppercase spelling names no entry this may remove.
+#
+# This is a reserved convention and not creator provenance: git records no
+# creator identity for a stash entry, so an entry a user deliberately wrote
+# with this exact message and a matching object ID is eligible, and nothing
+# here can or does claim to tell the two apart.
+RECOVERY_STASH_MESSAGE_RE = re.compile(
+    r"drain-prs-autostash-recovery ([0-9a-f]{40}|[0-9a-f]{64})"
+)
+# The fixed fields of a `git stash list` record, checked rather than assumed:
+# this pass deletes on what it reads, so output the format cannot have produced
+# makes the whole read unusable rather than a partial list that reads as a
+# whole stash.
+STASH_SELECTOR_RE = re.compile(r"stash@\{[0-9]+\}")
+STASH_OBJECT_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 PR_REVIEW_V1_RE = re.compile(
     r"<!--\s*pr-review:v1\s+reviewer=(claude|codex)\s+"
     r"head=([0-9a-fA-F]{40})\s+"
@@ -2602,7 +2630,7 @@ def _restore_untracked_files(ctx: RepoContext, holding: Path, paths: list[str]) 
 
 
 def _snapshot_anchor_ref(tracked_sha: str) -> str:
-    return f"refs/drain-prs/autostash/{tracked_sha}"
+    return f"{SNAPSHOT_ANCHOR_NAMESPACE}/{tracked_sha}"
 
 
 def _anchor_snapshot(ctx: RepoContext, tracked_sha: str) -> str:
@@ -2633,7 +2661,7 @@ def _list_snapshot_anchors(ctx: RepoContext) -> list[tuple[str, str, str]]:
             "git",
             "for-each-ref",
             "--format=%(refname) %(objectname) %(committerdate:iso-strict)",
-            "refs/drain-prs/autostash",
+            SNAPSHOT_ANCHOR_NAMESPACE,
         ],
         cwd=ctx.path,
     )
@@ -2767,6 +2795,352 @@ def sweep_snapshot_anchors(ctx: RepoContext, *, dry_run: bool) -> None:
             )
             continue
         _reap_redundant_anchor(ctx, ref, sha, date)
+
+
+def _stash_entries(ctx: RepoContext) -> list[tuple[str, str, str]]:
+    """Every `git stash list` entry as (selector, commit, raw message).
+
+    The message is the entry's own `%gs` payload, verbatim and unwrapped: what
+    the retirement predicate matches is what git recorded, not a normalized
+    reading of it. `%gd` renders the `stash@{n}` selector only while no
+    `--date` is in force, and records are NUL-separated with unit-separated
+    fields, so no entry's own text can be read as a boundary.
+
+    Every field the format fixes is checked. This read decides what gets
+    deleted, so output the format cannot have produced raises rather than
+    yielding a partial list that would read as the whole stash.
+    """
+    proc = run(["git", "stash", "list", "-z", "--format=%gd%x1f%H%x1f%gs"], cwd=ctx.path)
+    out = proc.stdout or ""
+    if out == "":
+        # The only empty answer: a stash with no entries prints nothing.
+        return []
+    records = out.split("\0")
+    # `-z` terminates every record, so exactly one trailing empty is expected.
+    if records.pop() != "":
+        raise DrainError("`git stash list` output ended mid-record")
+    entries: list[tuple[str, str, str]] = []
+    for record in records:
+        fields = record.split("\x1f", 2)
+        if len(fields) != 3:
+            raise DrainError("`git stash list` produced a record this format cannot produce")
+        selector, sha, message = fields
+        if not STASH_SELECTOR_RE.fullmatch(selector) or not STASH_OBJECT_ID_RE.fullmatch(sha):
+            raise DrainError(
+                f"`git stash list` produced an unreadable selector or object ID: {record!r}"
+            )
+        entries.append((selector, sha, message))
+    return entries
+
+
+def _recovery_stash_candidates(entries: list[tuple[str, str, str]]) -> list[int]:
+    """The positions of the entries eligible for retirement, in stash order.
+
+    Eligibility is the reserved recovery message matched in full against the
+    raw payload, *and* the object ID it embeds being the entry's own. A
+    mismatched pair names a snapshot this entry does not hold, so removing it
+    would not be the removal the message describes.
+    """
+    positions: list[int] = []
+    for index, (_selector, sha, message) in enumerate(entries):
+        match = RECOVERY_STASH_MESSAGE_RE.fullmatch(message)
+        if match is not None and match.group(1) == sha:
+            positions.append(index)
+    return positions
+
+
+def _qualifying_refs_holding(ctx: RepoContext, sha: str) -> list[str]:
+    """Every Git ref whose history holds this exact commit and that counts as
+    independent recovery.
+
+    Three sources are excluded and the exclusions are what make the proof
+    meaningful. `refs/stash` is the thing being removed from. A reflog is not a
+    ref at all and is never enumerated here, so a commit that only a reflog
+    mentions produces no holder. And `refs/drain-prs/autostash/**` is the
+    drainer's own anchor for this same snapshot -- counting it would make the
+    lifecycle circular, since the startup anchor sweep deletes that anchor on
+    the strength of this very stash entry.
+
+    Ancestry, never similarity: `--contains` asks whether the exact commit is
+    in the ref's history, so a tree- or patch-identical commit somewhere else
+    is not a holder. `git for-each-ref` does not enumerate another linked
+    worktree's per-worktree refs, so a holder living only there is missed --
+    which under-counts holders, keeps the entry, and is the conservative
+    direction.
+    """
+    proc = run(
+        ["git", "for-each-ref", "--format=%(refname)", f"--contains={sha}"],
+        cwd=ctx.path,
+    )
+    holders: list[str] = []
+    for line in (proc.stdout or "").splitlines():
+        ref = line.strip()
+        if not ref or ref == "refs/stash":
+            continue
+        if ref == SNAPSHOT_ANCHOR_NAMESPACE or ref.startswith(SNAPSHOT_ANCHOR_NAMESPACE + "/"):
+            continue
+        holders.append(ref)
+    return holders
+
+
+def _missing_entries(
+    required: list[tuple[str, str]], actual: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """The (commit, message) pairs `required` holds that `actual` does not,
+    counting duplicates: `git stash store` happily records two entries naming
+    one commit, so this is a multiset difference rather than a set one.
+    """
+    remaining = list(actual)
+    missing: list[tuple[str, str]] = []
+    for entry in required:
+        if entry in remaining:
+            remaining.remove(entry)
+        else:
+            missing.append(entry)
+    return missing
+
+
+def _restore_stash_entry(ctx: RepoContext, sha: str, message: str) -> str | None:
+    """Put one entry back, and prove it: the failure detail, or None on success.
+
+    git offers no positional reinsertion, so the entry returns to `stash@{0}`
+    rather than to the position it held. What restoration guarantees is that
+    the snapshot is a `git stash list` entry again, under its verbatim message
+    and its own object ID; where it sits in the list is not recoverable and is
+    not claimed.
+
+    The read afterwards is why this reports rather than assumes: `git stash
+    store` is a no-op when `refs/stash` already names the commit being stored,
+    so an entry whose commit another surviving entry put at the tip cannot be
+    added back at all. The snapshot is still reachable in that case -- it is
+    the tip -- but the entry is gone, which is what the caller's failure log
+    then says.
+    """
+    try:
+        proc = run(["git", "stash", "store", "-m", message, sha], cwd=ctx.path, check=False)
+    except OSError as exc:
+        return str(exc)
+    if proc.returncode != 0:
+        return (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+    try:
+        entries = _stash_entries(ctx)
+    except (DrainError, OSError) as exc:
+        return f"`git stash list` could not be read to confirm it ({exc})"
+    if (sha, message) not in [(entry_sha, text) for _, entry_sha, text in entries]:
+        return "`git stash list` does not report it"
+    return None
+
+
+def _retire_recovery_stash(
+    ctx: RepoContext,
+    entries: list[tuple[str, str, str]],
+    index: int,
+    holders: list[str],
+) -> str:
+    """Remove one eligible recovery entry, and prove the removal afterwards.
+
+    Returns what the caller should do next: `"retired"` for a removal this
+    proved, `"kept"` for a refusal that mutated nothing and left `entries`
+    describing the stash exactly as it still is, and `"stop"` for a stash that
+    moved under this pass or a removal that did not do what it was supposed
+    to. Only `"stop"` ends the pass, because only there is the enumeration the
+    caller holds no longer a description of anything.
+
+    `stash@{n}` is positional and git has no expected-object argument for a
+    stash removal the way `git update-ref -d <ref> <sha>` has one for a ref, so
+    the compare-and-swap is built: immediately before the removal a fresh full
+    read must reproduce the selector, commit, and message of *every* entry seen
+    at enumeration, and any difference aborts without mutating anything. The
+    residual window between that read and the removal is what the verification
+    below covers.
+
+    The pre-removal read captures every entry rather than only the target
+    because that is what the verification needs. A concurrent mutation can make
+    the removal take a *different* entry, and putting "the target" back would
+    not restore the one that actually went; what is restored is whatever the
+    post-removal state is missing, from its own recorded object ID and verbatim
+    message.
+    """
+    selector, sha, message = entries[index]
+    restore = f"git stash apply --index {sha}"
+    before = [(entry_sha, text) for _, entry_sha, text in entries]
+
+    try:
+        current = _stash_entries(ctx)
+    except (DrainError, OSError) as exc:
+        log(
+            f"Keeping recovery stash entry {selector} (commit {sha}): `git stash list` "
+            f"could not be re-read immediately before removing it ({exc}), so that "
+            f"selector could not be shown to still name that commit. Restore it with "
+            f"`{restore}`."
+        )
+        return "stop"
+    if current != entries:
+        log(
+            f"Keeping recovery stash entry {selector} (commit {sha}): the stash changed "
+            "between reading it and removing that entry, so the selector may no longer "
+            f"name the same commit. Nothing was removed. Restore it with `{restore}`."
+        )
+        return "stop"
+
+    # A removal that never ran leaves the stash as the read above found it, so
+    # the next candidate is still where the enumeration says it is.
+    try:
+        proc = run(["git", "stash", "drop", "--quiet", selector], cwd=ctx.path, check=False)
+    except OSError as exc:
+        log(f"Could not retire recovery stash entry {selector} (commit {sha}): {exc}")
+        return "kept"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        log(f"Could not retire recovery stash entry {selector} (commit {sha}): {detail}")
+        return "kept"
+
+    problems: list[str] = []
+    try:
+        still_held = bool(_qualifying_refs_holding(ctx, sha))
+    except (DrainError, OSError) as exc:
+        still_held = False
+        problems.append(f"its reachability could not be re-read after the removal ({exc})")
+    else:
+        if not still_held:
+            problems.append("its snapshot is no longer reachable from a qualifying ref")
+
+    # What should be there now. When the snapshot is still held elsewhere the
+    # target is the one entry that should be gone; when it is not, the target
+    # is owed its place back too, and falls out of this comparison as missing.
+    required = before[:index] + before[index + 1 :] if still_held else before
+    try:
+        after = _stash_entries(ctx)
+    except (DrainError, OSError) as exc:
+        problems.append(f"`git stash list` could not be re-read to confirm the removal ({exc})")
+        # Nothing to compare against, so the conservative reading is that the
+        # entry is owed its place back.
+        to_restore = [(sha, message)]
+    else:
+        actual = [(entry_sha, text) for _, entry_sha, text in after]
+        if actual != required:
+            problems.append(
+                "the entries left behind are not the ones that were there before it, in order"
+            )
+        to_restore = _missing_entries(required, actual)
+
+    if not problems:
+        log(
+            f"Retired recovery stash entry {selector} (commit {sha}): its snapshot stays "
+            f"reachable from {', '.join(holders)}, so `{restore}` still recovers it"
+        )
+        return "retired"
+
+    why = "; ".join(problems)
+    if not to_restore:
+        log(
+            f"Removed recovery stash entry {selector} (commit {sha}) and could not verify "
+            f"the removal ({why}), but no entry is missing, so nothing was put back."
+        )
+        return "stop"
+    for entry_sha, entry_message in to_restore:
+        detail = _restore_stash_entry(ctx, entry_sha, entry_message)
+        if detail is None:
+            log(
+                f"Restored stash entry (commit {entry_sha}) immediately after removing "
+                f"recovery stash entry {selector} (commit {sha}): {why}. It is back at "
+                "`stash@{0}` rather than its previous position, which git cannot restore."
+            )
+            continue
+        log(
+            f"Removed stash entry (commit {entry_sha}) while retiring recovery stash "
+            f"entry {selector} and could not put it back ({detail}): {why}. That "
+            "snapshot may now be referenced by nothing -- recover it immediately with "
+            f"`git stash apply --index {entry_sha}`."
+        )
+    return "stop"
+
+
+def retire_recovery_stashes(ctx: RepoContext, *, dry_run: bool) -> None:
+    """Retire recovery stash entries whose snapshot is held elsewhere; report the rest.
+
+    Called once per process at startup, after `sweep_snapshot_anchors` and
+    never from inside `fast_forward_default_branch` -- so it cannot run while a
+    fast-forward's own autostash window is open, and the pass that hits a
+    conflicted restore still leaves both copies behind. Only a later run
+    retires. It runs *after* the anchor sweep because that sweep deletes an
+    anchor only while its snapshot is still a `git stash list` entry: retiring
+    the entry first would leave that anchor permanently kept and reported as a
+    possibly-sole copy, trading one permanent artifact for another.
+
+    Removing a stash entry is destructive, so the bar is the snapshot's exact
+    commit remaining in some other ref's history -- not an applied copy, a
+    similar tree, an age, or a position. An anchor that survived its own reap
+    neither blocks a retirement nor counts as that other ref; a kept anchor
+    beside a qualifying ref and no stash entry is a fine resting state.
+
+    Every failure mode is non-fatal and only logged. A stash sweep must never
+    be what stops a pull request from merging.
+    """
+    try:
+        entries = _stash_entries(ctx)
+    except (DrainError, OSError) as exc:
+        log(f"Could not read `git stash list`; keeping every recovery stash entry: {exc}")
+        return
+    # Each retirement removes one entry, so the stash's own length bounds how
+    # many this pass can do however the stash moves underneath it.
+    budget = len(entries)
+    # Candidates this pass has already decided to keep. They stay in the list
+    # and keep their relative order, so skipping that many candidates is what
+    # advances past them.
+    kept = 0
+    while True:
+        candidates = _recovery_stash_candidates(entries)
+        if kept >= len(candidates):
+            return
+        index = candidates[kept]
+        selector, sha, _message = entries[index]
+        restore = f"git stash apply --index {sha}"
+        try:
+            holders = _qualifying_refs_holding(ctx, sha)
+        except (DrainError, OSError) as exc:
+            log(
+                f"Keeping recovery stash entry {selector} (commit {sha}): whether its "
+                f"snapshot is reachable from another ref could not be read ({exc}). "
+                f"Restore it with `{restore}`."
+            )
+            kept += 1
+            continue
+        if not holders:
+            log(
+                f"Keeping recovery stash entry {selector} (commit {sha}): its snapshot is "
+                "in the history of no ref outside `refs/stash` and the drainer's own "
+                "autostash anchors, so this entry may hold the only copy of local "
+                f"changes. Restore it with `{restore}`."
+            )
+            kept += 1
+            continue
+        if dry_run:
+            log(
+                f"Would retire recovery stash entry {selector} (commit {sha}): its "
+                f"snapshot stays reachable from {', '.join(holders)}"
+            )
+            kept += 1
+            continue
+        outcome = _retire_recovery_stash(ctx, entries, index, holders)
+        if outcome == "kept":
+            # Nothing was removed, so this enumeration still describes the
+            # stash and the next candidate is still where it says.
+            kept += 1
+            continue
+        if outcome != "retired":
+            return
+        budget -= 1
+        if budget <= 0:
+            return
+        try:
+            entries = _stash_entries(ctx)
+        except (DrainError, OSError) as exc:
+            log(
+                "Could not re-read `git stash list` after retiring an entry; keeping "
+                f"every remaining recovery stash entry: {exc}"
+            )
+            return
 
 
 def _preserve_unreachable_snapshot(ctx: RepoContext, tracked_sha: str, message: str) -> str:
@@ -4798,9 +5172,13 @@ def main() -> None:
             if args.dry_run:
                 log("Dry-run mode enabled; no changes will be made")
             # Once per process, on the seam both modes pass through, and
-            # before either can merge or fast-forward: the sweep must never
-            # run while a fast-forward's own autostash window is open.
+            # before either can merge or fast-forward: neither pass may run
+            # while a fast-forward's own autostash window is open. The
+            # retirement follows the anchor sweep rather than preceding it,
+            # because that sweep reaps an anchor only while its snapshot is
+            # still a `git stash list` entry.
             sweep_snapshot_anchors(ctx, dry_run=args.dry_run)
+            retire_recovery_stashes(ctx, dry_run=args.dry_run)
             if single:
                 result = drain_one_pr(
                     ctx,
