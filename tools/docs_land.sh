@@ -347,6 +347,13 @@ fi
 # occupants too, with the same presence test the pre-flight predictor uses.
 if [ -n "$(git -C "$PRIMARY" status --porcelain)" ]; then
   echo "note: primary checkout is dirty; not fast-forwarding it"
+elif [ "$(git -C "$PRIMARY" rev-parse HEAD)" = "$(git -C "$PRIMARY" rev-parse origin/master)" ]; then
+  echo "primary checkout already at origin/master"
+elif ! git -C "$PRIMARY" merge-base --is-ancestor HEAD origin/master; then
+  # A clean checkout with local commits is not fast-forwardable, and letting
+  # merge --ff-only fail here would report the whole run — publication
+  # included — as a failure it was not.
+  echo "note: primary checkout has local commits not on origin/master; not fast-forwarding it"
 else
   PRIMARY_OCCUPIED=""
   while IFS= read -r f; do

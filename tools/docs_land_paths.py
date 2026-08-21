@@ -146,10 +146,13 @@ def run_git(
         # would let a name reach git as a pattern, which the validation above
         # already refuses — this keeps the two readings from ever diverging.
         env["GIT_LITERAL_PATHSPECS"] = "1"
+    # utf-8 with surrogateescape rather than the locale's codec: filenames
+    # are bytes, and a C locale must not make a café.md unreadable.
     proc = subprocess.run(
         ["git", "-C", str(worktree), *args],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env=env,
     )
     if check and proc.returncode != 0:
@@ -351,12 +354,18 @@ def casefold_collision(worktree: Path, path: str) -> str | None:
     key = str(worktree)
     known = _CASEFOLD_KNOWN.get(key)
     if known is None:
-        entries = set(run_git(worktree, "ls-files").stdout.splitlines())
-        entries |= set(
-            run_git(
-                worktree, "ls-tree", "-r", "--name-only", CONTRACT_REF
-            ).stdout.splitlines()
-        )
+        entries = {
+            entry
+            for entry in run_git(worktree, "ls-files", "-z").stdout.split("\0")
+            if entry
+        }
+        entries |= {
+            entry
+            for entry in run_git(
+                worktree, "ls-tree", "-r", "-z", "--name-only", CONTRACT_REF
+            ).stdout.split("\0")
+            if entry
+        }
         known = {}
         for entry in entries:
             parts = PurePosixPath(entry).parts
@@ -481,15 +490,27 @@ def gate(worktree: Path, arguments: list[str]) -> int:
 
 
 def worktree_states(worktree: Path) -> dict[str, str]:
-    """Two-letter porcelain codes for every changed or untracked path."""
+    """Two-letter porcelain codes for every changed or untracked path.
+
+    NUL-delimited (`-z`) rather than line-based: Git C-quotes filenames
+    containing quotes or non-ASCII bytes in newline output, and a parser
+    stripping quotes would report `caf\\303\\251.md` for a document really
+    named `café.md`. With `-z` every path arrives verbatim; a rename or copy
+    record is followed by its source path as its own NUL-delimited field."""
     states: dict[str, str] = {}
-    out = run_git(worktree, "status", "--porcelain", "--", "*.md").stdout
-    for line in out.splitlines():
-        if len(line) > 3:
-            path = line[3:]
-            if " -> " in path:
-                path = path.split(" -> ", 1)[1]
-            states[path.strip('"')] = line[:2]
+    records = run_git(
+        worktree, "status", "--porcelain", "-z", "--", "*.md"
+    ).stdout.split("\0")
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if len(record) < 4:
+            continue
+        code, path = record[:2], record[3:]
+        states[path] = code
+        if code[0] in ("R", "C"):
+            index += 1
     return states
 
 
@@ -514,22 +535,33 @@ def describe_state(code: str | None) -> str:
 def inventory(worktree: Path) -> int:
     rows = contract_rows(worktree)
     states = worktree_states(worktree)
+    # Every listing is NUL-delimited for the same reason worktree_states is:
+    # newline output C-quotes unusual filenames, and the inventory must show
+    # every document by its real name.
     tracked = set(
-        run_git(worktree, "ls-files", "--", "*.md").stdout.splitlines()
+        entry
+        for entry in run_git(
+            worktree, "ls-files", "-z", "--", "*.md"
+        ).stdout.split("\0")
+        if entry
     )
     differing = set(
-        run_git(
-            worktree, "diff", "--name-only", CONTRACT_REF, "--", "*.md"
-        ).stdout.splitlines()
+        entry
+        for entry in run_git(
+            worktree, "diff", "--name-only", "-z", CONTRACT_REF, "--", "*.md"
+        ).stdout.split("\0")
+        if entry
     )
     # Ignored untracked documents are invisible to `status --porcelain`, but
     # an ignored file under a classified directory is still a landable
     # document the no-argument workflow must be able to offer.
     ignored = set(
-        run_git(
-            worktree, "ls-files", "--others", "--ignored",
+        entry
+        for entry in run_git(
+            worktree, "ls-files", "-z", "--others", "--ignored",
             "--exclude-standard", "--", "*.md",
-        ).stdout.splitlines()
+        ).stdout.split("\0")
+        if entry
     )
     universe = sorted(tracked | differing | set(states) | ignored)
     print("path | tracked | state | vs origin/master | §7 row | lane | landable")
@@ -558,6 +590,10 @@ def inventory(worktree: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Emit utf-8 whatever the locale says: the inventory prints filenames,
+    # and a C locale must not turn café.md into an encoding error.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--worktree", required=True, type=Path)
     mode = parser.add_mutually_exclusive_group(required=True)

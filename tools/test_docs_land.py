@@ -194,10 +194,13 @@ class Sandbox:
 
     # --- observations -------------------------------------------------
     def run_script(self, *args: str) -> subprocess.CompletedProcess:
-        """Invoke the real script from the PRIMARY checkout, as documented."""
+        """Invoke the real script from the PRIMARY checkout, as documented.
+
+        Decoded as utf-8 explicitly: the inventory emits filenames in utf-8
+        whatever the locale, and these assertions read them back verbatim."""
         return subprocess.run(
             ["bash", str(SCRIPT), *args], cwd=str(self.main), env=self.env,
-            capture_output=True, text=True)
+            capture_output=True, encoding="utf-8")
 
     def head(self, ref: str = "HEAD") -> str:
         return self.git("rev-parse", ref, cwd=self.docs).strip()
@@ -657,6 +660,27 @@ class PushVerificationTests(DocsLandCase):
             os.readlink(sb.main / "docs/coordination/newdir"),
             "does-not-exist")
 
+    def test_clean_primary_with_local_commits_skips_the_fast_forward(self):
+        # A clean checkout is not necessarily fast-forwardable: with local
+        # commits, merge --ff-only exits nonzero, and under set -e that
+        # would report the whole run — verified publication included — as a
+        # failure it was not.
+        sb = self.sb
+        sb.write(sb.main, "docs/keep.md", "primary local work\n")
+        sb.git("add", "docs/keep.md")
+        sb.git("commit", "-q", "-m", "local primary commit")
+        main_head = sb.git("rev-parse", "HEAD").strip()
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("landed: origin/master now contains", done.stdout)
+        self.assertIn(
+            "local commits not on origin/master; not fast-forwarding",
+            done.stdout)
+        self.assertEqual(sb.blob("origin/master", "docs/a.md"), "a landed\n")
+        self.assertEqual(sb.git("rev-parse", "HEAD").strip(), main_head)
+
     def test_dirty_primary_checkout_skips_the_fast_forward(self):
         sb = self.sb
         sb.write(sb.main, "docs/keep.md", "primary wip\n")
@@ -910,6 +934,31 @@ class InventoryTests(DocsLandCase):
         self.assertIn("ignored", row)
         self.assertIn("docs/coordination/", row)
         self.assertIn("| yes", row)
+
+    def test_inventory_shows_a_non_ascii_document_verbatim_and_it_lands(self):
+        # Git C-quotes unusual filenames in newline output, so a line-based
+        # parser would show café.md as caf\303\251.md and refuse it for its
+        # backslashes; the NUL-delimited listings must carry the real name,
+        # and the named path must land.
+        sb = self.sb
+        sb.write(sb.docs, "docs/coordination/café.md", "accent\n")
+
+        done = sb.run_script("-l")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("\\303", done.stdout)
+        rows = {
+            line.split(" | ")[0]: line
+            for line in done.stdout.splitlines()
+            if " | " in line
+        }
+        row = rows["docs/coordination/café.md"]
+        self.assertIn("untracked", row)
+        self.assertIn("| yes", row)
+
+        landed = sb.run_script("-m", "Land café", "docs/coordination/café.md")
+        self.assertEqual(landed.returncode, 0, landed.stderr)
+        self.assertEqual(
+            sb.blob("origin/master", "docs/coordination/café.md"), "accent\n")
 
     def test_inventory_applies_the_same_validation_as_the_gate(self):
         # A replaced alias object and an untracked symlink both pass
