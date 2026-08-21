@@ -2377,6 +2377,35 @@ above are unchanged, and persistence the user switched off is not a failure.
   malformed, or of an unsupported version. Reading it is strictly read-only —
   no lock, no migration, no repair — and can never fail a status call, which is
   the diagnostic used when the repository is already in a bad state.
+- A fast-forward blocked by local changes snapshots them, and a restore that
+  conflicts afterwards deliberately leaves two copies behind: the private
+  anchor under `refs/drain-prs/autostash/` and a `git stash list` entry under
+  the reserved message `drain-prs-autostash-recovery <sha>`. The pass that hits
+  the conflict removes neither. Each drainer process runs two cleanup passes
+  once at startup, on the seam both modes pass through and before either can
+  merge or fast-forward: the anchor sweep, then the recovery-entry retirement.
+  That order is load-bearing, because the sweep can only prove an anchor
+  redundant while its snapshot is still a stash entry. Removing a stash entry
+  is the destructive one, so it happens only when the entry's raw message is
+  the reserved form matched in full, the object ID that message names is the
+  entry's own, and that exact commit is in the history of some ref that is
+  neither `refs/stash` nor one of those anchors — an anchor is the drainer's
+  own second copy, and counting it would make the lifecycle circular, while
+  tree similarity, patch similarity, age, and stash position prove nothing.
+  The reserved message is a convention and not creator provenance: Git records
+  no creator for a stash entry, so an exact match a person wrote is eligible
+  and is not claimed to be distinguishable. Because `stash@{n}` is positional,
+  the entry's identity is rebound by a fresh full read immediately before the
+  removal and any movement aborts it untouched, at most one entry is retired
+  per read, and the removal is then proved: the entry gone, the snapshot still
+  reachable from a qualifying ref, and every other entry still present in the
+  same relative order. Whatever a failed proof finds missing is restored from
+  its recorded object ID and verbatim message — at the top of the stash, since
+  Git offers no positional reinsertion — and a restoration that fails is logged
+  naming the object ID and a recovery command. A dry run decides and reports
+  identically while creating, deleting, and reordering nothing. Every failure
+  of either pass is logged and stepped over; neither may be what stops a pull
+  request from merging.
 - The status response also names the local copies of work the drainer's
   autostash lifecycle left behind in the checkout, which are otherwise visible
   only in one log line per startup sweep — a line that repeats identically
