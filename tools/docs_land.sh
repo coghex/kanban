@@ -131,11 +131,15 @@ path_action() {
   fi
 }
 
-# --- Pre-flight: predict an autostash conflict before touching anything ----
-# Files that are dirty, NOT being landed, and ALSO changed on master since
-# our merge base are exactly the ones the reconciliation rebase's autostash
-# could conflict on. Written for bash 3.2 (macOS /bin/bash): no mapfile, no
-# bare expansion of a possibly-empty array under `set -u`.
+# --- Pre-flight: predict a reconciliation conflict before touching anything -
+# Files that are dirty or untracked here, NOT being landed, and ALSO changed
+# on master since our merge base are exactly the ones the reconciliation
+# rebase stumbles on: a tracked dirty file is autostashed and can conflict on
+# replay, and an untracked file that master newly adds is never stashed at
+# all, so the rebase's checkout refuses it outright — after the push already
+# landed. Both are detected here, before anything is published. Written for
+# bash 3.2 (macOS /bin/bash): no mapfile, no bare expansion of a
+# possibly-empty array under `set -u`.
 RISK=""
 while IFS= read -r f; do
   [ -n "$f" ] || continue
@@ -145,11 +149,13 @@ while IFS= read -r f; do
   if git diff --name-only "$BASE" origin/master | grep -qxF -- "$f"; then
     case "$RISK" in *"|$f|"*) ;; *) RISK="$RISK|$f|" ;; esac
   fi
-done < <( { git diff --name-only; git diff --cached --name-only; } | sort -u )
+done < <( { git diff --name-only; git diff --cached --name-only; \
+            git ls-files --others --exclude-standard; } | sort -u )
 if [ -n "$RISK" ]; then
-  echo "WARNING: these files are dirty here AND changed on master:" >&2
+  echo "WARNING: these files are dirty or untracked here AND changed on master:" >&2
   printf '%s\n' "$RISK" | tr '|' '\n' | grep -v '^$' | sed 's/^/  /' >&2
-  echo "The reconciliation rebase would stash and replay them, which can conflict." >&2
+  echo "The reconciliation rebase would stash and replay the tracked ones, which" >&2
+  echo "can conflict, and an untracked one blocks its checkout outright." >&2
   echo "Land or commit them first, or accept the risk and re-run with -f." >&2
   [ "$FORCE" = 1 ] || [ "$DRY" = 1 ] || exit 3
 fi

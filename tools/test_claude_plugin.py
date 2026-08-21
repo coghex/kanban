@@ -289,11 +289,19 @@ class CommandDiscoveryTests(unittest.TestCase):
         self.assertTrue(HASKELL_PARITY_COMMAND_NAMES < EXPECTED_COMMAND_NAMES)
         self.assertEqual(
             EXPECTED_COMMAND_NAMES - HASKELL_PARITY_COMMAND_NAMES,
-            DRAFTING_COMMAND_NAMES | DOCUMENT_COMMAND_NAMES | ROADMAP_COMMAND_NAMES,
+            DRAFTING_COMMAND_NAMES
+            | DOCUMENT_COMMAND_NAMES
+            | ROADMAP_COMMAND_NAMES
+            | PUBLICATION_COMMAND_NAMES,
         )
         self.assertEqual(DRAFTING_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
         self.assertEqual(ROADMAP_COMMAND_NAMES & DRAFTING_COMMAND_NAMES, set())
         self.assertEqual(ROADMAP_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
+        self.assertEqual(
+            PUBLICATION_COMMAND_NAMES
+            & (DRAFTING_COMMAND_NAMES | DOCUMENT_COMMAND_NAMES | ROADMAP_COMMAND_NAMES),
+            set(),
+        )
 
     def test_the_remaining_codex_only_document_workflow_is_not_packaged_here(self):
         for name in CODEX_ONLY_DOCUMENT_WORKFLOWS:

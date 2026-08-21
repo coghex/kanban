@@ -391,7 +391,7 @@ class RebasePathTests(DocsLandCase):
 
         blocked = sb.run_script("-m", "Land A", "docs/a.md")
         self.assertEqual(blocked.returncode, 3, blocked.stderr)
-        self.assertIn("dirty here AND changed on master", blocked.stderr)
+        self.assertIn("dirty or untracked here AND changed on master", blocked.stderr)
         self.assertEqual(sb.head(), before["head"])
         self.assertEqual(sb.head("origin/master"), before["upstream"])
 
@@ -404,6 +404,26 @@ class RebasePathTests(DocsLandCase):
         self.assertEqual(
             (sb.docs / "docs/b.md").read_text(encoding="utf-8"),
             b_body.replace("b line 20", "b upstream 20"))
+
+    def test_untracked_unselected_upstream_collision_is_predicted(self):
+        # An unselected path that is untracked here and newly added on
+        # master is never autostashed, so the reconciliation rebase's
+        # checkout would refuse it outright — after the push had already
+        # landed. The predictor must stop before anything is published.
+        sb = self.sb
+        sb.move_master_upstream("docs/new.md")
+        sb.write(sb.docs, "docs/new.md", "local untracked draft\n")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn("docs/new.md", blocked.stderr)
+        self.assertIn("untracked", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
+        self.assertEqual(
+            (sb.docs / "docs/new.md").read_text(encoding="utf-8"),
+            "local untracked draft\n")
 
     def test_selected_path_changed_upstream_is_refused_without_force(self):
         # A named path that also moved upstream would be overwritten

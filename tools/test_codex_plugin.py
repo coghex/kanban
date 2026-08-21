@@ -340,11 +340,19 @@ class SkillDiscoveryTests(unittest.TestCase):
         self.assertTrue(HASKELL_PARITY_SKILL_NAMES < EXPECTED_SKILL_NAMES)
         self.assertEqual(
             EXPECTED_SKILL_NAMES - HASKELL_PARITY_SKILL_NAMES,
-            DRAFTING_SKILL_NAMES | DOCUMENT_SKILL_NAMES | ROADMAP_SKILL_NAMES,
+            DRAFTING_SKILL_NAMES
+            | DOCUMENT_SKILL_NAMES
+            | ROADMAP_SKILL_NAMES
+            | PUBLICATION_SKILL_NAMES,
         )
         self.assertEqual(DRAFTING_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
         self.assertEqual(ROADMAP_SKILL_NAMES & DRAFTING_SKILL_NAMES, set())
         self.assertEqual(ROADMAP_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
+        self.assertEqual(
+            PUBLICATION_SKILL_NAMES
+            & (DRAFTING_SKILL_NAMES | DOCUMENT_SKILL_NAMES | ROADMAP_SKILL_NAMES),
+            set(),
+        )
 
     def test_repair_is_a_spawned_workflow_and_not_a_drafting_one(self):
         # Kanban's `r` spawns $repair for a red Done card (issue #127), so it
