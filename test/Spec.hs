@@ -27,6 +27,7 @@ import qualified Spec.Board.Tracker as Tracker
 import qualified Spec.Board.Workflow as Workflow
 import qualified Spec.Config.Consumers as ConfigConsumers
 import qualified Spec.Config.Loading as ConfigLoading
+import qualified Spec.Config.Models as Models
 import qualified Spec.Config.Settings as Settings
 import qualified Spec.Drainer as Drainer
 import qualified Spec.GitHub.BoardRefresh as BoardRefresh
@@ -88,6 +89,7 @@ suiteGroups =
     SuiteGroup "Spec.Agent.Protocol" LifecycleLane Protocol.spec, -- 8.5s
     SuiteGroup "Spec.Agent.Solve" LifecycleLane Solve.spec, -- 2.8s
     SuiteGroup "Spec.Config.Settings" PingLane Settings.spec,
+    SuiteGroup "Spec.Config.Models" PingLane Models.spec,
     SuiteGroup "Spec.Agent.Transcript" PingLane Transcript.spec,
     SuiteGroup "Spec.Agent.PullRequestFlow" PingLane PullRequestFlow.spec, -- 1.9s
     SuiteGroup "Spec.UI.ReviewSession" PingLane ReviewSession.spec,
