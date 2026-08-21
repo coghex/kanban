@@ -7,18 +7,24 @@ The screenshot's value is that it is derived, not captured: `docs/media`'s
 procedure has to produce the checked-in bytes again from the golden frame. Only
 part of that is checkable everywhere. Turning the frame into cells and colours
 is pure text handling and is tested here in full; turning cells into pixels
-needs Pillow and the pinned DejaVu files, which the CI job that runs this suite
-installs neither of, so those cases state the missing prerequisite and skip
-rather than pretending to cover it or failing the build.
+needs Pillow and the pinned DejaVu files, which the toolchain-free CI job that
+runs this suite installs neither of -- and installing them would not be enough:
+issue #422's evidence run did exactly that on the CI runner, and the runner's
+Pillow build rendered the same pinned inputs to different bytes than the
+checked-in asset. So the pixel cases state the missing prerequisite and skip
+rather than pretending to cover it or failing the build, and the byte
+comparison stays a local check.
 
-What the skipping cases would catch is still worth stating: the twice-run
-acceptance check in the procedure is a manual gate, so the deterministic half
-below is what stands between a frame change and a stale screenshot.
+What stands between a frame change and a stale screenshot in required CI is
+`ProvenanceTests`: `docs/media/board-wide.provenance` binds the two golden
+files and the image by SHA-256, every regeneration run rewrites it, and
+verifying it needs no rasteriser, so it runs everywhere this suite does.
 """
 
 import importlib.util
 import re
 import struct
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -65,7 +71,9 @@ def _rendering_gap():
     except ImportError:
         return (
             "Pillow is not installed, so the golden frame cannot be "
-            "rasterised; the required CI job installs GHC and Cabal only."
+            "rasterised; the toolchain-free required CI job installs no "
+            "Python packages, and the stale-screenshot gate there is the "
+            "provenance record instead."
         )
     try:
         renderer.load_fonts()
@@ -222,6 +230,99 @@ class CheckedInScreenshotTests(unittest.TestCase):
         self.assertEqual(present[-1], "IEND")
 
 
+class ProvenanceTests(unittest.TestCase):
+    """The record that keeps the screenshot fresh in required CI, held with no
+    rasteriser. The first case is the gate itself; the rest hold the verifier
+    fail-closed against every way the record can be absent or unusable, since
+    a check that shrugs off a broken record gates nothing."""
+
+    def tree(self, drop=()):
+        """A repository-shaped copy of the bound files and their record."""
+        root = tempfile.TemporaryDirectory(prefix="kanban-provenance-")
+        self.addCleanup(root.cleanup)
+        copy_root = Path(root.name)
+        for relative in (*renderer.PROVENANCE_SUBJECTS, renderer.PROVENANCE):
+            if relative in drop:
+                continue
+            target = copy_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((REPO_ROOT / relative).read_bytes())
+        return copy_root
+
+    def refusal(self, copy_root):
+        with self.assertRaises(renderer.RenderError) as caught:
+            renderer.verify_provenance(copy_root)
+        return str(caught.exception)
+
+    def test_the_tracked_record_matches_the_frame_and_the_screenshot(self):
+        # The gate: this is the case whose failure turns required CI red when
+        # a golden frame changes without the screenshot being regenerated.
+        renderer.verify_provenance()
+
+    def test_a_frame_change_without_regeneration_is_refused(self):
+        copy_root = self.tree()
+        frame = copy_root / renderer.FRAME_CHARACTERS
+        frame.write_bytes(frame.read_bytes().replace(b"Codex", b"Codey", 1))
+        message = self.refusal(copy_root)
+        self.assertIn(renderer.FRAME_CHARACTERS, message)
+        self.assertIn("render_board_screenshot.py", message)
+
+    def test_an_edited_screenshot_without_regeneration_is_refused(self):
+        copy_root = self.tree()
+        image = copy_root / renderer.SCREENSHOT
+        image.write_bytes(image.read_bytes() + b"\x00")
+        self.assertIn(renderer.SCREENSHOT, self.refusal(copy_root))
+
+    def test_a_missing_record_is_refused_rather_than_passed_over(self):
+        message = self.refusal(self.tree(drop=(renderer.PROVENANCE,)))
+        self.assertIn("missing", message)
+        self.assertIn("render_board_screenshot.py", message)
+
+    def test_a_missing_bound_file_is_refused(self):
+        message = self.refusal(self.tree(drop=(renderer.SCREENSHOT,)))
+        self.assertIn(renderer.SCREENSHOT, message)
+
+    def test_a_malformed_record_line_is_refused(self):
+        copy_root = self.tree()
+        record = copy_root / renderer.PROVENANCE
+        record.write_text(
+            "# a comment no regeneration run writes\n"
+            + record.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        self.assertIn("not a sha256sum-format entry", self.refusal(copy_root))
+
+    def test_a_record_naming_a_path_twice_is_refused(self):
+        copy_root = self.tree()
+        record = copy_root / renderer.PROVENANCE
+        content = record.read_text(encoding="utf-8")
+        record.write_text(content + content.splitlines()[0] + "\n", encoding="utf-8")
+        self.assertIn("twice", self.refusal(copy_root))
+
+    def test_a_record_binding_the_wrong_paths_is_refused(self):
+        copy_root = self.tree()
+        record = copy_root / renderer.PROVENANCE
+        record.write_text(
+            record.read_text(encoding="utf-8").replace(
+                renderer.FRAME_ATTRIBUTES, "test/golden/board-wide.colors"
+            ),
+            encoding="utf-8",
+        )
+        message = self.refusal(copy_root)
+        self.assertIn(renderer.FRAME_ATTRIBUTES, message)
+        self.assertIn("board-wide.colors", message)
+
+    def test_regenerating_rewrites_a_record_that_verifies(self):
+        # The writer and the verifier meet in the middle: after a frame
+        # change, the regeneration run's own write is what turns the record
+        # green again, so the two halves have to agree on the format.
+        copy_root = self.tree()
+        frame = copy_root / renderer.FRAME_CHARACTERS
+        frame.write_bytes(frame.read_bytes().replace(b"Codex", b"Codey", 1))
+        renderer.write_provenance(copy_root)
+        renderer.verify_provenance(copy_root)
+
+
 class ReadmeReferenceTests(unittest.TestCase):
     """The media slot, filled. `tools/test_source_distribution.py` checks that
     the target resolves inside the archive; what it cannot check is that the
@@ -281,6 +382,7 @@ class RegenerationProcedureTests(unittest.TestCase):
             renderer.FRAME_CHARACTERS,
             renderer.FRAME_ATTRIBUTES,
             renderer.SCREENSHOT,
+            renderer.PROVENANCE,
             "tools/render_board_screenshot.py",
             f"{frame.width}x{frame.height}",
             f"{frame.width * renderer.CELL_WIDTH}x"

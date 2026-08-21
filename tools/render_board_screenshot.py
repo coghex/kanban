@@ -42,7 +42,21 @@ one, so every input is pinned and every unpinned one is refused:
 The rasteriser itself is the one input that cannot be pinned from here: Pillow
 and its bundled FreeType decide how an outline becomes pixels. `docs/media`'s
 procedure records the versions the checked-in asset was produced with, and the
-comparison step is what reports a rasteriser that disagrees.
+comparison step is what reports a rasteriser that disagrees. That divergence
+is real -- issue #422's evidence run rendered different bytes on the CI runner
+from the same pinned inputs -- which is why the pixel comparison cannot be the
+gate that keeps the image fresh in required CI.
+
+What can is the provenance record beside the image:
+`docs/media/board-wide.provenance` holds the SHA-256 of both golden files and
+of the image itself, one `sha256sum`-format line per file, and every
+regeneration run rewrites it. Verifying the record needs no rasteriser, so
+`tools/test_board_screenshot.py` holds it against the tracked files everywhere
+the suite runs -- the required CI job included -- and a golden-frame change
+that does not regenerate the screenshot fails the build instead of going
+stale. What the record cannot prove is that the image's pixels are what this
+module produces; only a rasteriser can, which is what the local rendering
+cases and the comparison step remain for.
 """
 
 import argparse
@@ -64,6 +78,14 @@ FRAME_CHARACTERS = "test/golden/board-wide.txt"
 FRAME_ATTRIBUTES = "test/golden/board-wide.attrs"
 
 SCREENSHOT = "docs/media/board-wide.png"
+
+# The record binding the image to what it was rendered from: the two golden
+# files and the image itself, each by SHA-256. Rewritten by every regeneration
+# run, verified with no rasteriser, so required CI can hold the image fresh
+# even though it cannot reproduce the pixels (see the module docstring).
+PROVENANCE = "docs/media/board-wide.provenance"
+PROVENANCE_SUBJECTS = (FRAME_CHARACTERS, FRAME_ATTRIBUTES, SCREENSHOT)
+PROVENANCE_LINE = re.compile(r"^(?P<digest>[0-9a-f]{64})  (?P<path>\S.*)$")
 
 # One character cell, in pixels, and the baseline inside it. See the module
 # docstring: these three are a single choice, and `verify_cell_geometry`
@@ -605,6 +627,105 @@ def png_dimensions(data):
     return struct.unpack(">II", data[16:24])
 
 
+def _subject_digest(repo_root, relative):
+    """One bound file's SHA-256, or a refusal naming the file that is gone."""
+    source = repo_root / relative
+    if not source.is_file():
+        raise RenderError(
+            f"{source} is missing, so the provenance record has nothing to "
+            "hold it against. Restore the file or regenerate with "
+            "python3 tools/render_board_screenshot.py."
+        )
+    return hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def provenance_content(repo_root=REPO_ROOT):
+    """The record for the bound files as they are on disk, in `sha256sum`
+    format so a reader needs nothing beyond the coreutils convention."""
+    return "".join(
+        f"{_subject_digest(repo_root, relative)}  {relative}\n"
+        for relative in PROVENANCE_SUBJECTS
+    )
+
+
+def write_provenance(repo_root=REPO_ROOT):
+    """Rewrite the tracked record from the files on disk, returning its path."""
+    record = repo_root / PROVENANCE
+    record.write_text(provenance_content(repo_root), encoding="utf-8")
+    return record
+
+
+def parse_provenance(text):
+    """The record's `{path: digest}` entries.
+
+    Exact by design: the record is three generated lines, so anything else in
+    it -- a comment, a reformatted line, a duplicate -- is evidence it was not
+    written by a regeneration run, and is refused rather than read around.
+    """
+    entries = {}
+    for number, line in enumerate(text.splitlines(), start=1):
+        match = PROVENANCE_LINE.match(line)
+        if match is None:
+            raise RenderError(
+                f"provenance line {number} is not a sha256sum-format entry: "
+                f"{line!r}. Regenerate the record with "
+                "python3 tools/render_board_screenshot.py."
+            )
+        path = match.group("path")
+        if path in entries:
+            raise RenderError(
+                f"the provenance record names {path} twice. Regenerate it "
+                "with python3 tools/render_board_screenshot.py."
+            )
+        entries[path] = match.group("digest")
+    return entries
+
+
+def verify_provenance(repo_root=REPO_ROOT):
+    """Hold the tracked record against the files it binds.
+
+    This is the check that runs where no rasteriser does, so every way the
+    record can be missing or unusable fails here rather than passing as
+    vacuously fresh.
+    """
+    record = repo_root / PROVENANCE
+    if not record.is_file():
+        raise RenderError(
+            f"{record} is missing, so nothing ties {SCREENSHOT} to the golden "
+            "frame it was rendered from. Regenerate with "
+            "python3 tools/render_board_screenshot.py and commit the record "
+            "with the image."
+        )
+    entries = parse_provenance(record.read_text(encoding="utf-8"))
+    expected = set(PROVENANCE_SUBJECTS)
+    if set(entries) != expected:
+        unexpected = sorted(set(entries) - expected)
+        missing = sorted(expected - set(entries))
+        detail = []
+        if missing:
+            detail.append(f"omits {', '.join(missing)}")
+        if unexpected:
+            detail.append(f"names {', '.join(unexpected)}")
+        raise RenderError(
+            f"the provenance record {' and '.join(detail)}, so it does not "
+            "bind the files it exists for. Regenerate it with "
+            "python3 tools/render_board_screenshot.py."
+        )
+    stale = [
+        relative
+        for relative in PROVENANCE_SUBJECTS
+        if _subject_digest(repo_root, relative) != entries[relative]
+    ]
+    if stale:
+        raise RenderError(
+            f"{', '.join(stale)} changed after {PROVENANCE} was last "
+            f"written, so {SCREENSHOT} no longer matches the golden frame it "
+            "claims to depict. Regenerate with "
+            "python3 tools/render_board_screenshot.py and commit the image "
+            "and its record together with the frame."
+        )
+
+
 def render_screenshot(repo_root=REPO_ROOT, font_dir=None):
     """The checked-in screenshot's bytes, rendered from the golden frame."""
     frame = read_frame(repo_root)
@@ -644,7 +765,12 @@ def main(argv=None):
     parser.add_argument(
         "--output",
         default=None,
-        help=f"where to write the image (default: {SCREENSHOT} in the checkout)",
+        help=(
+            f"where to write the image (default: {SCREENSHOT} in the "
+            f"checkout). The tracked {PROVENANCE} is rewritten or verified "
+            "only when this is left at the default, so a scratch render "
+            "cannot desynchronize the record from the tracked image."
+        ),
     )
     parser.add_argument(
         "--font-dir",
@@ -658,8 +784,9 @@ def main(argv=None):
         "--check",
         action="store_true",
         help=(
-            "render and compare with the existing image without writing it; "
-            "exit 1 when they differ"
+            "render and compare with the existing image, and verify the "
+            "provenance record, without writing anything; exit 1 when "
+            "either differs"
         ),
     )
     parser.add_argument(
@@ -686,22 +813,40 @@ def main(argv=None):
         if not output.is_file():
             print(f"error: {output} does not exist", file=sys.stderr)
             return 1
+        verdict = 0
         existing = output.read_bytes()
         if existing == rendered:
             print(f"{output} matches the golden frame ({len(rendered)} bytes)")
-            return 0
-        print(
-            f"{output} differs from the frame rendered now: "
-            f"{len(existing)} bytes on disk against {len(rendered)} rendered.\n"
-            f"{describe_environment()}",
-            file=sys.stderr,
-        )
-        return 1
+        else:
+            print(
+                f"{output} differs from the frame rendered now: "
+                f"{len(existing)} bytes on disk against "
+                f"{len(rendered)} rendered.\n"
+                f"{describe_environment()}",
+                file=sys.stderr,
+            )
+            verdict = 1
+        if arguments.output is None:
+            try:
+                verify_provenance()
+            except RenderError as error:
+                print(f"error: {error}", file=sys.stderr)
+                verdict = 1
+            else:
+                print(f"{REPO_ROOT / PROVENANCE} matches the files it binds")
+        return verdict
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(rendered)
     width, height = png_dimensions(rendered)
     print(f"wrote {output} ({width}x{height}, {len(rendered)} bytes)")
+    if arguments.output is None:
+        try:
+            record = write_provenance()
+        except RenderError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        print(f"wrote {record} ({len(PROVENANCE_SUBJECTS)} digests)")
     return 0
 
 

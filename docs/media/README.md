@@ -1,6 +1,7 @@
 # Media
 
-One tracked asset lives here, and this is the procedure that produces it.
+One tracked asset lives here — beside the provenance record that binds it to
+its source — and this is the procedure that produces both.
 
 | Asset | What it shows |
 | --- | --- |
@@ -20,6 +21,7 @@ provider login, and no board cache.
 | Vty attribute, one per cell | `test/golden/board-wide.attrs` |
 | Renderer | `tools/render_board_screenshot.py` |
 | Output | `docs/media/board-wide.png` |
+| Provenance record | `docs/media/board-wide.provenance` |
 
 Both inputs are written by the golden-frame suite's `board-wide` case
 (`test/Spec/UI/Golden.hs`), which draws the whole application at a fixed
@@ -34,6 +36,28 @@ Those three numbers are one choice, not three. At size 26 the pinned font draws
 cell, so a rule drawn in adjacent cells meets rather than breaking. The
 renderer re-derives both properties from the font it loaded on every run and
 refuses to write an image if they no longer hold.
+
+## The provenance record
+
+`docs/media/board-wide.provenance` holds the SHA-256 of the two golden files
+and of the image, one `sha256sum`-format line per file. Every regeneration run
+rewrites it, and `--check` verifies it, so the ordinary commands below
+maintain it without a separate step; commit it together with the image and the
+frame.
+
+It exists because the byte comparison cannot be the gate that keeps the image
+fresh in required CI. Issue #422's evidence run installed the pinned Pillow
+and fonts on the CI runner, and the runner's Pillow build rendered the same
+pinned inputs to different bytes than the checked-in asset — the legitimate
+rasteriser divergence described under Prerequisites. Verifying digests needs
+no rasteriser, so `tools/test_board_screenshot.py`'s provenance cases hold the
+record against the three files everywhere the suite runs, required CI
+included, and a golden-frame change that does not regenerate the screenshot
+fails the required `build-test` aggregate on the pull request that makes it.
+
+What the record cannot prove is that the image's pixels are what the procedure
+produces — only a rasteriser can, which is what the rendering cases and the
+comparison below remain for, in the documented environment.
 
 ## Prerequisites
 
@@ -98,14 +122,15 @@ checkout — from an unpacked release, for instance — compare without writing:
 python3 tools/render_board_screenshot.py --check
 ```
 
-`--check` exits 0 when the rendered bytes match the tracked file, and 1 with
-the pinned environment printed when they do not.
+`--check` exits 0 when the rendered bytes match the tracked file and the
+provenance record matches the files it binds, and 1 with the divergence
+printed when either does not.
 
 `python3 -m unittest tools.test_board_screenshot` covers the same ground as
-part of the ordinary test run. Its frame-parsing and asset cases run
-everywhere; its rendering cases name the missing prerequisite and skip when
-Pillow or the pinned fonts are absent, which is the case in the required CI
-job.
+part of the ordinary test run. Its frame-parsing, asset, and provenance cases
+run everywhere, the required CI job included; its rendering cases name the
+missing prerequisite and skip when Pillow or the pinned fonts are absent,
+which is the case in the required CI job.
 
 ## Reviewing an intentional change
 
@@ -122,7 +147,7 @@ order:
    ```
 
 2. Regenerate the image from the refreshed frame and confirm the diff is only
-   the image and only where the frame changed:
+   the image and its provenance record, and only where the frame changed:
 
    ```console
    python3 tools/render_board_screenshot.py
