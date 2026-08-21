@@ -141,15 +141,29 @@ occupied_untracked() {
   return 1
 }
 
+# The Git mode a selected path lands with, and the mode it has upstream.
+# Only regular files reach these — the gate refuses symlinks — so the whole
+# mode question is the executable bit.
+path_mode() {
+  if [ -x "$1" ]; then echo 100755; else echo 100644; fi
+}
+upstream_mode() {
+  git ls-tree origin/master -- "$1" | { IFS=' ' read -r _mode _rest; echo "$_mode"; }
+}
+
 # What landing each path would do to origin/master's tree.
 path_action() {
-  # $1: path. Prints add | modify | delete | unchanged.
+  # $1: path. Prints add | modify | mode | delete | unchanged. `mode` is an
+  # executable-bit-only change: same content, different Git mode — a real
+  # difference the landing must carry rather than report as unchanged.
   if [ -e "$1" ]; then
     if git cat-file -e "origin/master:$1" 2>/dev/null; then
-      if [ "$(git hash-object -- "$1")" = "$(git rev-parse "origin/master:$1")" ]; then
-        echo unchanged
-      else
+      if [ "$(git hash-object -- "$1")" != "$(git rev-parse "origin/master:$1")" ]; then
         echo modify
+      elif [ "$(path_mode "$1")" != "$(upstream_mode "$1")" ]; then
+        echo mode
+      else
+        echo unchanged
       fi
     else
       echo add
@@ -261,7 +275,7 @@ GIT_INDEX_FILE="$TMP_INDEX" git read-tree origin/master
 for p in "$@"; do
   if [ -e "$p" ]; then
     BLOB="$(git hash-object -w -- "$p")"
-    GIT_INDEX_FILE="$TMP_INDEX" git update-index --add --cacheinfo 100644 "$BLOB" "$p"
+    GIT_INDEX_FILE="$TMP_INDEX" git update-index --add --cacheinfo "$(path_mode "$p")" "$BLOB" "$p"
   else
     GIT_INDEX_FILE="$TMP_INDEX" git update-index --force-remove -- "$p"
   fi

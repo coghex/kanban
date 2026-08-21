@@ -298,6 +298,37 @@ class NamedPathIsolationTests(DocsLandCase):
         self.assertEqual(sb.porcelain(sb.docs).get("docs/b.md"), "M ")
 
 
+class FileModeTests(DocsLandCase):
+    def test_executable_bit_changes_land_and_survive_content_updates(self):
+        # An executable-bit-only change is a real difference: with a
+        # hard-coded landing mode it would report as unchanged and never
+        # land, and a later content update would silently strip the bit.
+        sb = self.sb
+        (sb.docs / "docs/a.md").chmod(0o755)
+
+        plan = sb.run_script("-n", "-m", "Make A executable", "docs/a.md")
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertIn("plan: land docs/a.md (mode)", plan.stdout)
+
+        done = sb.run_script("-m", "Make A executable", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("landed: origin/master now contains", done.stdout)
+        listed = sb.git(
+            "ls-tree", "origin/master", "--", "docs/a.md", cwd=sb.docs)
+        self.assertEqual(listed.split()[0], "100755")
+        self.assertEqual(sb.blob("origin/master", "docs/a.md"), "a seed\n")
+
+        sb.write(sb.docs, "docs/a.md", "a executable landed\n")
+        (sb.docs / "docs/a.md").chmod(0o755)
+        done = sb.run_script("-m", "Update A", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(
+            sb.blob("origin/master", "docs/a.md"), "a executable landed\n")
+        listed = sb.git(
+            "ls-tree", "origin/master", "--", "docs/a.md", cwd=sb.docs)
+        self.assertEqual(listed.split()[0], "100755")
+
+
 class CommittedWorkTests(DocsLandCase):
     def test_committed_unselected_work_survives_locally_and_never_lands(self):
         # CLAUDE.md directs agents to leave standalone changes committed and
