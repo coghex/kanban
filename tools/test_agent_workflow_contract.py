@@ -279,6 +279,44 @@ DOCUMENT_SURFACE_EXPECTED_COMMANDS = {
 TOOLS_DIR = REPO_ROOT / "tools"
 TOOL_SURFACE_EXCLUDED_PATHS = {"fake_cli.py"}
 
+# The repository's shell helpers (issue #410): tools/ modules that are shell
+# scripts rather than Python, so the discovered .py walk above never scans
+# them. Enumerated like the plugin surfaces, with what the extractor recovers
+# from each pinned below so the scan cannot silently shrink to nothing.
+TOOL_SHELL_SURFACE_FILES = [
+    "tools/docs_land.sh",
+]
+
+TOOL_SHELL_SURFACE_EXPECTED_COMMANDS = {
+    "tools/docs_land.sh": {
+        "awk", "dirname", "git", "grep", "mktemp", "python3", "sed", "tr",
+    },
+}
+
+# Shell reserved words and builtins are not external dependencies; every
+# other recovered name must carry an `executable` manifest row.
+SHELL_RESERVED_AND_BUILTINS = {
+    "if", "then", "else", "elif", "fi", "case", "esac", "for", "while",
+    "until", "do", "done", "in", "break", "continue", "return", "exit",
+    "shift", "trap", "set", "cd", "echo", "printf", "read", "local", "exec",
+    "eval", "true", "false", "wait", "export", "unset",
+}
+
+# A shell function defined in the script itself, whose invocations are not
+# external commands.
+SHELL_FUNCTION_DEF_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{", re.MULTILINE
+)
+
+# Heredoc bodies in a raw script are input, not commands — including the
+# unquoted-delimiter form the markdown extractor deliberately ignores,
+# because packaged assets never use it while this script does.
+SHELL_HEREDOC_BODY_RE = re.compile(
+    r"(<<-?\s*(?P<quote>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)[^\n]*\n)"
+    r".*?^[ \t]*(?P=tag)[ \t]*$\n?",
+    re.DOTALL | re.MULTILINE,
+)
+
 MANIFEST_ROW_RE = re.compile(
     r"^(?P<id>[\w-]+)\s*\|\s*(?P<kind>[\w-]+)\s*\|\s*(?P<token>[^|]+?)\s*\|"
     r"\s*(?P<files>[^|]*?)\s*\|\s*(?P<owner>[\w-]+)\s*\|\s*(?P<status>[\w-]+)\s*\|"
@@ -574,6 +612,35 @@ SYSTEMD_ARTIFACTS = (
     ("a systemd user-manager target", re.compile(r"""["']user@""")),
 )
 SERVICE_MANAGER_ARTIFACTS = LAUNCHD_ARTIFACTS + SYSTEMD_ARTIFACTS
+
+
+def discovered_shell_script_commands(content):
+    """Every external command a raw tools/ shell script invokes, recognized
+    with the same leading-word and subshell/pipe machinery as the packaged
+    workflows' bash fences, after dropping comment lines, heredoc bodies,
+    reserved words and builtins, and the script's own function names."""
+    body = SHELL_HEREDOC_BODY_RE.sub(lambda match: match.group(1), content)
+    lines = [
+        line for line in body.splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    scannable = "\n".join(lines)
+    names = {
+        match.group(1)
+        for match in SUBSHELL_OR_PIPE_COMMAND_RE.finditer(scannable)
+    }
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or ASSIGNMENT_RE.match(stripped):
+            continue
+        leading = LEADING_COMMAND_RE.match(stripped)
+        if leading:
+            names.add(leading.group(1))
+    return (
+        names
+        - SHELL_RESERVED_AND_BUILTINS
+        - set(SHELL_FUNCTION_DEF_RE.findall(content))
+    )
 
 
 def tool_surface_files(tools_dir=TOOLS_DIR):
@@ -963,6 +1030,29 @@ class AgentWorkflowContractTests(unittest.TestCase):
             found = discovered_commands_for_plugin_file(relative_path, content)
             self.assertEqual(found, expected, relative_path)
             for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+
+    def test_every_tool_shell_script_command_is_documented(self):
+        # The tools/ walk above scans Python modules only, so a shell helper
+        # reaches the reconciliation solely by being enumerated — and what
+        # the extractor recovers from each is pinned, so the scan cannot
+        # pass by discovering nothing.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path in TOOL_SHELL_SURFACE_FILES:
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_shell_script_commands(content)
+            self.assertEqual(
+                found,
+                TOOL_SHELL_SURFACE_EXPECTED_COMMANDS[relative_path],
+                relative_path,
+            )
+            for name in sorted(found):
                 self.assertIn(
                     name,
                     executable_tokens,

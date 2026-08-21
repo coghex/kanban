@@ -487,6 +487,15 @@ def verify_names_a_document(worktree: Path, path: str) -> None:
             f"{path}: symlinks other than the verified {ROOT_CONTRACT_ALIAS} "
             "alias are refused"
         )
+    if on_disk.exists() and not on_disk.is_file():
+        # A FIFO, socket, or device where the document should be: reading it
+        # to hash could block indefinitely, so it never reaches
+        # `git hash-object` — not even for a dry-run plan. A genuinely
+        # absent path remains the deletion case below.
+        raise Refusal(
+            f"{path}: is not a regular file on disk; only regular Markdown "
+            "documents land"
+        )
     tracked = run_git(worktree, "ls-files", "--", path, literal=True).stdout.strip()
     upstream = run_git(
         worktree, "cat-file", "-e", f"{CONTRACT_REF}:{path}", check=False

@@ -1063,6 +1063,23 @@ class ClassificationGateTests(DocsLandCase):
         self.assertNotIn(
             "docs/coordination/escape/note.md", sb.tracked("origin/master"))
 
+    def test_a_non_regular_file_is_refused(self):
+        # A tracked path replaced on disk by a FIFO passes tracked-ness, and
+        # hashing it — even for a dry-run plan — would block reading a pipe
+        # nothing writes. The gate refuses before anything reads content.
+        sb = self.sb
+        (sb.docs / "docs/b.md").unlink()
+        os.mkfifo(sb.docs / "docs/b.md")
+        before = sb.head("origin/master")
+
+        done = sb.run_script("-m", "Land B", "docs/b.md")
+        self.assertEqual(done.returncode, 6, done.stdout)
+        self.assertIn("not a regular file", done.stderr)
+        self.assertEqual(sb.head("origin/master"), before)
+
+        planned = sb.run_script("-n", "-m", "Land B", "docs/b.md")
+        self.assertEqual(planned.returncode, 6, planned.stdout)
+
     def test_case_mismatched_spelling_is_refused(self):
         # On a case-insensitive filesystem is_file() answers yes for the
         # folded spelling while every exact Git lookup answers no, and the
