@@ -1594,6 +1594,202 @@ class InventoryTests(DocsLandCase):
         self.assertIn("symlink", rows["docs/coordination/alias-note.md"])
 
 
+class InventoryDivergenceTests(DocsLandCase):
+    """Issue #438. `differs` used to answer only *whether* a document differs
+    from origin/master, collapsing work waiting to land together with text
+    master has since moved past and with documents master added that this
+    worktree has never held. Landing the first is the point of the helper;
+    landing either of the others reverts or deletes upstream's document. Each
+    state below is built from a fixture worktree and read back whole, because
+    the operator's selection is made from these rows alone."""
+
+    # The header verbatim, beside the keys these tests read it by: the
+    # column order is the contract the push-docs asset and every operator
+    # read the inventory through.
+    HEADER = (
+        "path | tracked | state | vs origin/master | §7 row | lane | "
+        "readiness | landable"
+    )
+    COLUMNS = (
+        "path", "tracked", "state", "direction", "row", "lane",
+        "readiness", "landable",
+    )
+
+    def inventory(self):
+        """Every inventory row as a field dict, keyed by path.
+
+        `landable` is split last and unbounded: it is the one free-text column
+        and a refusal reason may hold anything."""
+        done = self.sb.run_script("-l")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        lines = done.stdout.splitlines()
+        self.assertEqual(lines[0], self.HEADER)
+        rows = {}
+        for line in lines[1:]:
+            fields = line.split(" | ", len(self.COLUMNS) - 1)
+            self.assertEqual(len(fields), len(self.COLUMNS), line)
+            rows[fields[0]] = dict(zip(self.COLUMNS, fields))
+        return rows
+
+    def upstream_delete(self, rel: str) -> None:
+        """Publish a deletion of `rel` on origin/master."""
+        sb = self.sb
+        sb.git("rm", "-q", rel)
+        sb.git("commit", "-q", "-m", f"upstream deletes {rel}")
+        sb.git("push", "-q", "origin", "master")
+
+    def test_every_direction_is_named_and_carries_its_readiness(self):
+        # One worktree holding all five states at once, which is how the
+        # operator actually meets them: the inventory is read whole and the
+        # selection is made from it without running git.
+        sb = self.sb
+        sb.move_b_upstream()                    # upstream edits docs/b.md
+        sb.move_master_upstream()               # upstream adds docs/upstream.md
+        sb.write(sb.main, "docs/del.md", "del upstream\n")
+        sb.git("add", "docs/del.md")
+        sb.git("commit", "-q", "-m", "upstream touches del")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/a.md", "a wip\n")        # ahead
+        sb.write(sb.docs, "docs/del.md", "del wip\n")    # both sides moved
+
+        rows = self.inventory()
+
+        # Ahead: the only state that still reads `differs`, because the
+        # push-docs asset selects landing candidates by exactly that word.
+        self.assertEqual(rows["docs/a.md"]["direction"], "differs")
+        self.assertEqual(rows["docs/a.md"]["readiness"], "ready")
+        self.assertEqual(rows["docs/a.md"]["landable"], "yes")
+
+        # Unchanged on both sides: the pre-existing result, untouched.
+        self.assertEqual(rows["docs/keep.md"]["direction"], "same")
+        self.assertEqual(rows["docs/keep.md"]["readiness"], "nothing to land")
+
+        behind = rows["docs/b.md"]
+        self.assertEqual(behind["direction"], "behind")
+        self.assertIn("only origin/master moved", behind["readiness"])
+        self.assertIn("rebase docs-wip onto origin/master", behind["readiness"])
+        self.assertTrue(behind["readiness"].startswith("not ready"),
+                        behind["readiness"])
+        # Policy eligibility is a separate question and still answered: the
+        # path may land under §7, it is simply not ready to.
+        self.assertEqual(behind["landable"], "yes")
+
+        diverged = rows["docs/del.md"]
+        self.assertEqual(diverged["direction"], "diverged")
+        self.assertIn("both sides changed", diverged["readiness"])
+        self.assertIn("rebase docs-wip or resolve this path",
+                      diverged["readiness"])
+
+        absent = rows["docs/upstream.md"]
+        self.assertEqual(absent["direction"], "absent-here")
+        self.assertEqual(absent["tracked"], "no")
+        # `clean` would be a plain lie about a document that is not here.
+        self.assertEqual(absent["state"], "absent")
+        self.assertIn("would delete it", absent["readiness"])
+        self.assertIn("rebase docs-wip onto origin/master", absent["readiness"])
+
+        # Not one of the three unready rows may read like a candidate.
+        for path in ("docs/b.md", "docs/del.md", "docs/upstream.md"):
+            self.assertNotEqual(rows[path]["direction"], "differs", path)
+            self.assertNotEqual(rows[path]["readiness"], "ready", path)
+
+    def test_a_deliberate_local_deletion_stays_ahead(self):
+        # A committed local deletion of a document upstream has not touched
+        # is landing work — tools/docs_land.sh publishes deletions — so it
+        # must keep reading as an ordinary candidate.
+        sb = self.sb
+        sb.git("rm", "-q", "docs/keep.md", cwd=sb.docs)
+        sb.git("commit", "-q", "-m", "retire keep", cwd=sb.docs)
+        sb.move_master_upstream()  # master moves, but not under this path
+
+        row = self.inventory()["docs/keep.md"]
+        self.assertEqual(row["direction"], "differs")
+        self.assertEqual(row["readiness"], "ready")
+        self.assertEqual(row["landable"], "yes")
+
+    def test_a_local_deletion_meeting_an_upstream_edit_reports_diverged(self):
+        # Both sides moved, so neither text is simply newer: landing the
+        # deletion would discard upstream's edit.
+        sb = self.sb
+        sb.move_b_upstream()
+        (sb.docs / "docs/b.md").unlink()
+
+        row = self.inventory()["docs/b.md"]
+        self.assertEqual(row["direction"], "diverged")
+        self.assertIn("deleted", row["state"])
+        self.assertIn("rebase docs-wip or resolve this path", row["readiness"])
+
+    def test_an_upstream_deletion_of_an_untouched_document_reports_behind(self):
+        # Only upstream moved, so this worktree holds the older state even
+        # though its copy is the one that still exists.
+        sb = self.sb
+        self.upstream_delete("docs/del.md")
+
+        row = self.inventory()["docs/del.md"]
+        self.assertEqual(row["direction"], "behind")
+        self.assertEqual(row["state"], "clean")
+        self.assertIn("only origin/master moved", row["readiness"])
+
+    def test_an_untracked_copy_of_an_upstream_addition_is_not_same(self):
+        # Trackedness stays significant. An untracked document whose bytes
+        # happen to equal an upstream addition is not `same`, and it is not a
+        # ready candidate either: upstream added this path too, so the
+        # worktree is stale whatever the bytes say.
+        sb = self.sb
+        sb.move_master_upstream()
+        sb.write(sb.docs, "docs/upstream.md", "upstream\n")
+
+        row = self.inventory()["docs/upstream.md"]
+        self.assertEqual(row["tracked"], "no")
+        self.assertEqual(row["state"], "untracked")
+        self.assertNotEqual(row["direction"], "same")
+        self.assertEqual(row["direction"], "diverged")
+        self.assertTrue(row["readiness"].startswith("not ready"),
+                        row["readiness"])
+
+    def test_an_executable_bit_only_local_change_is_ahead(self):
+        # The landing helper carries a mode-only change as real work
+        # (path_action's `mode` arm), so the direction must see it too rather
+        # than collapse a same-content document to `same`.
+        sb = self.sb
+        os.chmod(sb.docs / "docs/a.md", 0o755)
+        if not sb.git("status", "--porcelain", "--", "docs/a.md",
+                      cwd=sb.docs).strip():
+            self.skipTest("this filesystem does not record the executable bit")
+
+        row = self.inventory()["docs/a.md"]
+        self.assertEqual(row["direction"], "differs")
+        self.assertEqual(row["readiness"], "ready")
+
+    def test_direction_is_read_against_the_merge_base_not_the_tip(self):
+        # The whole point of the merge base: a document changed on BOTH sides
+        # differs from the tip exactly as an ahead document does, and only the
+        # ancestor separates them.
+        sb = self.sb
+        sb.write(sb.docs, "docs/b.md", "b wip\n" + B_SEED)
+        sb.git("add", "docs/b.md", cwd=sb.docs)
+        sb.git("commit", "-q", "-m", "local b", cwd=sb.docs)
+        ahead = self.inventory()["docs/b.md"]
+        self.assertEqual(ahead["direction"], "differs")
+
+        sb.move_b_upstream()
+        after = self.inventory()["docs/b.md"]
+        self.assertEqual(after["direction"], "diverged")
+
+    def test_a_worktree_sharing_no_history_refuses_to_guess_a_direction(self):
+        # Fail closed: with no common ancestor there is no side to call
+        # older, and reporting every document as ahead would invite exactly
+        # the reverting landing this issue exists to prevent.
+        sb = self.sb
+        module = _load_paths_module()
+        sb.git("checkout", "-q", "--orphan", "unrelated", cwd=sb.docs)
+        sb.git("commit", "-q", "--allow-empty", "-m", "orphan", cwd=sb.docs)
+
+        with self.assertRaises(SystemExit) as caught:
+            module.merge_base(sb.docs)
+        self.assertIn("shares no history with origin/master", str(caught.exception))
+
+
 class WorktreeResolutionTests(DocsLandCase):
     def test_a_missing_docs_worktree_fails_before_any_mutation(self):
         sb = self.sb
