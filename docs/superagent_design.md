@@ -47,7 +47,10 @@ concrete precondition
   relevant retained history; parent death leaves no surviving descendants;
   runner/host failure stays interrupted until the ordinary action hotkey starts
   worktree-aware recovery; direct user steering is recorded and obeyed; and the
-  superagent never bypasses the repository's drainer-only merge authority.
+  superagent never bypasses the repository's drainer-only merge authority;
+  detachment leaves sessions running while explicit termination stops their
+  trees; foreground commands outrank queued autonomous work; and terminal
+  history remains available without retaining terminal agent processes.
 - **Users and operators:** A maintainer using Kanban as the control surface for
   long-running, agent-assisted work on one repository.
 - **Arc label:** `agent-workflows` proposed.
@@ -196,6 +199,10 @@ concrete precondition
   the immediate task. The session records the redirection and obeys it; model
   planners, child agents, and hotkey-dispatched workflows do not receive the
   same power merely by repeating user-like language from repository content.
+- Closing a child overlay or Kanban only detaches. An explicit
+  **terminate session** control journals the request, stops and reaps that
+  session's complete descendant tree, then reconciles any effects already made;
+  it never silently starts a replacement agent.
 
 ## Scope
 
@@ -233,6 +240,11 @@ concrete precondition
   before a fresh agent continues.
 - Direct trusted-user steering of an active agent, including redirection beyond
   the mission's current step, with the plan impact recorded and reconciled.
+- Explicit session termination distinct from UI detachment, and foreground
+  priority for newly dispatched operator commands over queued autonomous work.
+- Indefinite private mission-history retention by default, with explicit
+  archive/delete controls and collection eligibility recorded for a later safe
+  garbage collector.
 - Repository identity, locking, private file modes, schema migration, tests,
   documentation, and preflight integration.
 
@@ -251,6 +263,9 @@ concrete precondition
 - A first-release promise that provider-internal subagents with no stable
   identity/event/cancellation protocol are separately visible or steerable;
   their output remains preserved within the parent session.
+- Automatic garbage collection of mission-owned durable history; the initial
+  arc records safe eligibility and supports explicit archive/delete, while an
+  automatic collector is a follow-on capability.
 - Cross-repository missions before the multi-repository board contract is
   implemented. Durable mission identity is nevertheless repository-qualified
   so that later support does not require a migration.
@@ -392,6 +407,26 @@ the PR drainer merges, remain in force unless the user deliberately changes
 that authoritative contract rather than merely asking a workflow agent to
 ignore it.
 
+### Detachment, explicit termination, and terminal records
+
+Closing a child overlay, returning to the mission console, or quitting Kanban
+only detaches the display and input client. The owned session and its
+descendants continue under the repository runner exactly as before. None of
+those navigation actions means “stop the agent.”
+
+Stopping requires an explicit **terminate session** action against the selected
+session. The controller journals the request, prevents new descendants, asks
+the owning supervisor to terminate and reap the complete subtree, verifies the
+recorded identities are absent, and records `cancelled` with reason
+`user_terminated`. Effects already made are not rolled back. The controller
+reconciles them against the mission; if the requested outcome remains unmet,
+the mission waits for the operator rather than automatically launching a fresh
+agent after an intentional termination.
+
+A terminal session is retained history, not a sleeping process. It owns no
+concurrency slot and cannot spontaneously resume. This distinction keeps a
+large durable history from becoming a large population of live agents.
+
 ### Workflow action registry
 
 The registry should expose capabilities rather than UI keystrokes. Initial
@@ -469,9 +504,31 @@ A live child may write to the provider's existing private log while the mission
 records its path and consumes its events. Before that path becomes eligible for
 worker-cache collection, the runner seals the complete stream into the durable
 mission archive and records its digest and byte length. Mission history is not
-removed by the worker cache's fourteen-day collection. It remains until an
-explicit mission archive/deletion policy removes it; summaries may compact the
-planner's context, but never substitute for or rewrite the retained raw log.
+removed by the worker cache's fourteen-day collection and is retained
+indefinitely by default. Explicit archive moves a terminal mission out of the
+active/recent presentation while keeping it readable; explicit delete removes
+it only after confirming it is terminal, owns no live or unverifiable process,
+and is not the sole recovery record for a retained worktree or unknown outcome.
+Summaries may compact the planner's context, but never substitute for or rewrite
+the retained raw log.
+
+#### Follow-on design seed: mission garbage collection
+
+Long-lived use will accumulate sealed logs, provider caches, leases, status
+snapshots, and worktrees even though terminal sessions no longer have processes.
+The durable schemas should therefore record terminality, archive state, sealed
+log digests, worktree disposition, last access, and collection evidence so a
+later collector can make decisions without guessing.
+
+That collector may automatically remove redundant worker/provider cache copies,
+expired leases, rebuildable indexes, and other derived execution debris after
+the canonical mission copy is sealed. It may losslessly compact or move archived
+history. It must never kill a session, delete the sole journal/transcript copy,
+or collect a mission that is live, queued, waiting, paused, interrupted,
+recovering, orphaned, outcome-unknown, or linked to dirty, unpushed, unmerged, or
+otherwise recovery-relevant worktree state. When storage pressure reaches the
+durable history itself, it reports candidates and asks for explicit archive or
+deletion instead of inventing a retention policy.
 
 ### Mission lifecycle and reconciliation
 
@@ -575,6 +632,13 @@ of independence. Known dependencies, the same target, or an existing live
 worker serialize. Provider-capacity or rate-limit observations pause dispatch
 without failing already-running children. Configuration may lower the limit to
 one or raise it deliberately as the host and workflow mature.
+
+A newly dispatched operator command has admission priority over autonomous
+batch children that have not started. It waits if both slots are already
+occupied, then receives the next compatible slot; priority never cancels,
+interrupts, or steals ownership from a running child and never bypasses a
+dependency, target lease, or canonical workflow lock. Queue order among
+otherwise equal autonomous missions remains Q-17.
 
 Default batch policy is fail-closed:
 
@@ -858,9 +922,12 @@ the product-policy level; exact planner schemas belong to SAG-6 and SAG-7.
 Reattachment after a long absence includes the full durable mission history
 and every managed child log, including sessions completed while Kanban was
 closed. The mission archive is not subject to the current worker cache's
-fourteen-day collection and is removed only through an explicit archive or
-deletion policy. Provider session expiration may prevent literal thread resume
-but never erases the transcript or mission continuity.
+fourteen-day collection and is retained indefinitely by default. Explicit
+archive changes presentation/storage tier without erasing history; explicit
+delete is the only normal path that removes it. Provider session expiration may
+prevent literal thread resume but never erases the transcript or mission
+continuity. D-23 defines the automatic-collection boundary, and together they
+resolve Q-14.
 
 ### D-13. Compatibility with external work is a first-class invariant
 
@@ -934,6 +1001,32 @@ the requested outcome, or cannot be classified confidently. This resolves Q-9
 and makes finite batches tolerant of the repository's moving state without
 inventing success.
 
+### D-21. Only explicit session termination stops directly steered work
+
+Closing an overlay, navigating elsewhere, or quitting Kanban detaches without
+stopping the selected session. An explicit terminate-session action stops and
+reaps that session's full descendant tree, records `user_terminated`, and
+reconciles completed effects. It never automatically replaces an intentionally
+terminated agent; an unmet mission waits for the operator. This resolves Q-12.
+
+### D-22. New operator commands outrank queued autonomous children
+
+A newly dispatched direct command receives the next compatible repository slot
+before autonomous batch work that has not started. Work already running is not
+preempted or cancelled, and priority never bypasses dependencies or lower-level
+authority locks. This resolves Q-13.
+
+### D-23. Garbage collection may remove execution debris, not durable history
+
+Terminal sessions cease to be processes but remain durable records. The first
+arc records collection evidence and provides explicit archive/delete; a later
+collector may automatically remove only sealed redundant caches and derivable
+artifacts. It never kills work, deletes the sole history copy, or collects
+nonterminal, uncertain, or recovery-relevant state. Storage pressure on
+canonical history produces user-visible candidates rather than automatic
+deletion. This completes Q-14's retention boundary without pulling the full
+collector into this epic.
+
 ## Open questions
 
 ### Q-1. Must missions keep advancing after Kanban exits?
@@ -1000,26 +1093,43 @@ history records the redirection without transferring ownership.
 
 ### Q-12. What exactly ends directly redirected session work?
 
-Closing the overlay and closing Kanban already leave ordinary authorized work
-running, so “until the user quits” needs one precise control. The proposed
-distinction is that navigation away or TUI exit only detaches, while an explicit
-terminate-session action ends the agent and its descendants. The mission then
-reconciles what actually happened and stops for the operator if its original
-outcome remains unmet.
+Resolved by D-21. Navigation and TUI exit only detach; explicit session
+termination ends the agent and its descendants, reconciles prior effects, and
+does not start a replacement automatically.
 
 ### Q-13. Do new direct commands outrank queued autonomous batch work?
 
-With two repository slots, a fresh operator command may otherwise sit behind a
-large mission's queued children. The proposed rule is to prioritize newly
-dispatched direct work over not-yet-started autonomous children without killing
-or preempting anything already running.
+Resolved by D-22. Direct operator commands receive the next compatible slot
+before queued autonomous children but never preempt running work.
 
 ### Q-14. Is durable mission history retained indefinitely by default?
 
-The design requires history to outlive the fourteen-day worker cache but leaves
-its archive/deletion default unsettled. Indefinite private retention with an
-explicit archive/delete control best matches long-gap reattachment, while a
-configurable retention policy would limit disk and sensitive-data growth.
+Resolved by D-12 and D-23. Canonical mission history is private and indefinite
+by default; archive retains it, deletion is explicit, and automatic collection
+is limited to sealed redundant or derivable artifacts.
+
+### Q-15. How should a background attention event notify the operator?
+
+The console and board can show a durable attention badge on the next open, but
+a long-running mission may request a decision while Kanban is absent. Decide
+whether the first arc also sends an optional desktop notification, and whether
+it names repository/mission/target without including potentially sensitive
+review or source content.
+
+### Q-16. What is the maximum duration of one agent execution?
+
+Missions themselves are indefinite, but one provider process still needs a
+deadline so a lost turn cannot hold a slot forever. The current worker limit is
+four hours. The proposed first rule is a configurable per-execution deadline
+with four hours as the default and a finite hard maximum; longer missions yield
+checkpointed continuation sessions.
+
+### Q-17. How are equal-priority autonomous missions ordered?
+
+D-22 places direct operator work first but does not order multiple runnable
+autonomous missions. FIFO by ready time is deterministic and simple; explicit
+mission priority or round-robin fairness could prevent one large mission from
+dominating future dispatch.
 
 ## Verification strategy
 
@@ -1034,7 +1144,9 @@ configurable retention policy would limit disk and sensitive-data growth.
 - Durable-state tests cover whole JSONL appends, partial trailing records,
   atomic snapshots, user-only permissions, schema evolution, competing mission
   leases, child lineage, sealed full-log archives, explicit deletion, corrupt
-  records, and repository identity mismatch.
+  records, repository identity mismatch, indefinite-retention defaults,
+  archive presentation, collection evidence, and refusal to delete live,
+  uncertain, or recovery-relevant state.
 - Crash fixtures cover before-dispatch, after-dispatch/before-record,
   live-worker reattachment, dead worker with a landed GitHub result, dead worker
   with unknown outcome, runner restart, and TUI restart. A long-running fixture
@@ -1051,7 +1163,8 @@ configurable retention policy would limit disk and sensitive-data growth.
   without resetting or duplicating the prior effect.
 - UI event and golden tests cover hotkey entry, mission navigation, command
   input, attention handoff, child opening/return, small-terminal behavior,
-  scroll/follow state, cancellation, and status colors.
+  scroll/follow state, detachment versus explicit session termination,
+  archive/delete controls, cancellation, and status colors.
 - Security tests ensure untrusted tracker/provider text cannot create an
   unregistered action, alter repository identity, weaken policy, or cross an
   approval/merge boundary. Only real console input can create a `user_override`;
@@ -1071,7 +1184,9 @@ configurable retention policy would limit disk and sensitive-data growth.
   redirected turn as autonomous policy expansion.
 - Scheduler fixtures enforce two mutation-capable agent children across
   concurrent missions in one repository, preserve lower serialized locks, and
-  show that configured/provider limits pause only new admission.
+  show that configured/provider limits pause only new admission. A new direct
+  command receives the next compatible slot without preempting either running
+  child.
 - End-to-end fixtures cover one issue approval, one solve, an explicit
   multi-autosolve batch, stop-on-changes, opt-in issue remediation/rereview,
   repeated-feedback halt, and no merge invocation.
@@ -1087,21 +1202,22 @@ configurable retention policy would limit disk and sensitive-data growth.
   private repository-qualified mission without launching an agent.
 - **Scope:** Mission/step/action identifiers and lifecycles; versioned spec,
   snapshot, and JSONL event schemas; parent/child lineage; decision policies;
-  mission-owned sealed log archives; private/atomic persistence; leases;
-  explicit archive/deletion; corruption and schema diagnostics; pure and
-  filesystem tests.
+  mission-owned sealed log archives; archive state and collection evidence;
+  private/atomic persistence; leases; explicit archive/deletion; corruption and
+  schema diagnostics; pure and filesystem tests.
 - **Phase:** 1 — durable foundation.
 - **Depends on:** `none`.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-1`, `D-2`, `D-5`, `D-11`, `D-12`, `D-14`,
-  `D-15`, `D-17`.
+  `D-15`, `D-17`, `D-23`.
 - **Acceptance signals:** A mission round-trips across process restart; partial
   journal writes are not consumed; two controllers cannot advance it; private
   modes and repository identity are verified; a child log survives worker-cache
-  collection and remains linked to its parent.
+  collection and remains linked to its parent; archive retains history; delete
+  refuses live, uncertain, or recovery-relevant missions.
 - **Out of scope:** Workflow launch, providers, UI, batch progression, and
   natural-language planning.
-- **Open questions:** `Q-14`; provider-native observability is a follow-on
+- **Open questions:** `None`; provider-native observability is a follow-on
   design rather than a blocker to the structured tree.
 
 ### SAG-2. Expose a typed workflow action registry
@@ -1162,14 +1278,14 @@ configurable retention policy would limit disk and sensitive-data growth.
 - **Depends on:** `SAG-1`, `SAG-2`, `SAG-10`.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-2`, `D-3`, `D-7`, `D-8`, `D-12`, `D-13`,
-  `D-14`, `D-15`, `D-17`, `D-20`.
+  `D-14`, `D-15`, `D-17`, `D-20`, `D-21`.
 - **Acceptance signals:** A live worker reattaches; a landed result reconciles;
   an indeterminate mutation stops instead of rerunning; guidance can resume
   with the prior provider session or a fresh bounded brief; concurrent target
   drift is reclassified rather than overwritten.
 - **Out of scope:** Service installation and no-TUI progression, multi-target
   scheduling, and UI.
-- **Open questions:** `Q-12`.
+- **Open questions:** `Q-16`.
 
 ### SAG-9. Keep active missions advancing without the dashboard
 
@@ -1186,7 +1302,8 @@ configurable retention policy would limit disk and sensitive-data growth.
 - **Phase:** 5 — persistent execution.
 - **Depends on:** `SAG-1`, `SAG-2`, `SAG-3`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-2`, `D-9`, `D-12`, `D-13`, `D-14`, `D-15`.
+- **Relevant decisions:** `D-2`, `D-9`, `D-12`, `D-13`, `D-14`, `D-15`,
+  `D-21`.
 - **Acceptance signals:** After the TUI exits, the service completes one child,
   dispatches the next authorized child, records both full logs, and exposes the
   same mission when Kanban reopens; two runners cannot advance one mission;
@@ -1196,7 +1313,7 @@ configurable retention policy would limit disk and sensitive-data growth.
 - **Out of scope:** Multi-target scheduling policy, console rendering,
   automatic post-crash/reboot mission resume, and provider-native internal
   subagent presentation.
-- **Open questions:** `Q-12`.
+- **Open questions:** `Q-15`, `Q-16`.
 
 ### SAG-4. Add the persistent console and mission navigation
 
@@ -1204,21 +1321,24 @@ configurable retention policy would limit disk and sensitive-data growth.
   select, guide, pause, cancel, and navigate between missions and child
   sessions.
 - **Scope:** Overlay layout, history summaries, input state, mission list,
-  attention routing, child links/return, board-action reuse, help/key contract,
-  responsive rendering, and golden/event tests.
+  attention routing, child links/return, detachment and explicit termination,
+  archive/delete controls, board-action reuse, help/key contract, responsive
+  rendering, and golden/event tests.
 - **Phase:** 6 — operator surface.
 - **Depends on:** `SAG-9`; land after the pending approval-service control
   (#421) or re-audit the whole key/layout surface against it.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-1`, `D-4`, `D-9`, `D-12`, `D-15`, `D-17`,
-  `D-18`.
+  `D-18`, `D-21`, `D-23`.
 - **Acceptance signals:** TUI restart restores the same missions and selected
   history; a card opens its mission-owned child; attention opens the exact
   question; `interrupted` is visible and its ordinary action hotkey starts one
-  recovery; direct user steering is recorded; no duplicate worker launches.
+  recovery; direct user steering is recorded; closing the UI leaves a session
+  running; explicit termination settles its tree without replacement; no
+  duplicate worker launches.
 - **Out of scope:** Broad selectors, natural-language planning, and automatic
   remediation.
-- **Open questions:** `Q-6`, `Q-12`.
+- **Open questions:** `Q-6`, `Q-15`.
 
 ### SAG-5. Schedule explicit and selector-based batches
 
@@ -1233,7 +1353,7 @@ configurable retention policy would limit disk and sensitive-data growth.
   canonical queue/service authority.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-3`, `D-5`, `D-6`, `D-7`, `D-8`, `D-10`,
-  `D-13`, `D-19`, `D-20`.
+  `D-13`, `D-19`, `D-20`, `D-22`.
 - **Acceptance signals:** Explicit targets are never lost or reordered;
   stop-on-changes dispatches nothing past its barrier; parallel failure stops
   new work without killing live siblings; `all` follows the selected finite or
@@ -1241,7 +1361,7 @@ configurable retention policy would limit disk and sensitive-data growth.
   against its current state before any effect.
 - **Out of scope:** Planner-generated plans and automatic recommendation
   application.
-- **Open questions:** `Q-13`.
+- **Open questions:** `Q-17`.
 
 ### SAG-6. Add bounded natural-language planning
 
@@ -1299,10 +1419,11 @@ configurable retention policy would limit disk and sensitive-data growth.
 - **Depends on:** every implemented slice; documentation for a deferred slice
   remains in this design rather than claiming shipped behavior.
 - **Ordering:** `critical path` for epic completion.
-- **Relevant decisions:** `D-1` through `D-20`.
+- **Relevant decisions:** `D-1` through `D-23`.
 - **Acceptance signals:** Documented commands and paths match tested behavior;
   every executable and durable record has an authority/ownership entry; users
   can distinguish pause, barrier, failure, unknown outcome, and recovery.
 - **Out of scope:** Tracker drafting and implementation of deferred choices.
-- **Open questions:** `Q-14`; all questions affecting implemented behavior
-  must be resolved or explicitly deferred before this slice completes.
+- **Open questions:** `Q-6`, `Q-15`, `Q-16`, `Q-17`; all questions affecting
+  implemented behavior must be resolved or explicitly deferred before this
+  slice completes.
