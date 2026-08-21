@@ -1042,8 +1042,11 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
 - **Invocation:** the controller never imports the reviewer. Every pass is a
   child process running the *installed* canonical backend — resolved through the
   §2.3 record, in the §3 precedence — as
-  `python3 <backend> --path <root> --repo OWNER/NAME --legacy-policy <policy>
-  --log-dir <job log dir> --json --review-queue [--config <path>]`, and a
+  `<interpreter> <backend> --path <root> --repo OWNER/NAME --legacy-policy <policy>
+  --log-dir <job log dir> --json --review-queue [--config <path>]`, where the
+  interpreter is the controller's own `sys.executable` rather than whatever
+  `python3` the manager's `PATH` resolves — falling back to that spelling only
+  for an embedded interpreter reporting none — and a
   barrier poll is the same vector with `--check <issue>` instead. Each is
   spawned in a new session so the whole process group can be signalled, since
   the backend spawns `gh` and a reviewer model of its own. Exactly one bounded
@@ -1169,7 +1172,11 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   Per checkout, in the repository's shared Git
   directory: `.git/kanban_issue_approval_run.lock`, this checkout's own run
   lock, beside the backend's `.git/approve_issues.lock`, which the controller
-  **reads and never takes**. Two run locks rather than one, because neither
+  **probes but never holds**: `approval_lock_owner` tries the same non-blocking
+  exclusive `flock` the backend takes and releases it again immediately when it
+  succeeds, reading the owner's metadata without truncating it when it does
+  not — so asking who holds that lock never becomes holding it. The backend
+  takes it for real, for one issue's review. Two run locks rather than one, because neither
   location sees both ways a second run arrives: the identity lock catches two
   clones of one repository, which share no Git directory, and the checkout lock
   catches one checkout started twice under identities that do not match. Every
