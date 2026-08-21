@@ -69,6 +69,7 @@ import Kanban.Domain
     Repository (..),
     WorkflowConfig,
   )
+import Kanban.ManagedPaths (ManagedComponent (..), managedRecordPath)
 import Kanban.ServiceProcess
   ( InvocationFailure (..),
     diagnosticMessage,
@@ -78,7 +79,7 @@ import Kanban.ServiceProcess
   )
 import Kanban.Text (sanitizeText, withoutJsonPath)
 import Kanban.Workflow (classifyPullRequest, itemCompleted, readOnlyHistoryNotice)
-import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
+import System.Directory (doesFileExist, findExecutable)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, takeDirectory, (</>))
@@ -461,14 +462,17 @@ normalizedRepositoryIdentity :: Repository -> Text
 normalizedRepositoryIdentity repository =
   Text.toLower repository.repositoryOwner <> "/" <> Text.toLower repository.repositoryName
 
--- | The fixed location the installer writes that document to. Deliberately not
+-- | The location the installer writes that document to. Deliberately not
 -- derived from @KANBAN_DRAINER_INSTALL_DIR@: an install made with
 -- @--install-dir@ still has to be discoverable by a dashboard that never saw
 -- that option, so the document's own path is the one thing that cannot move.
+--
+-- Which of the two managed locations that is, is "Kanban.ManagedPaths"'s
+-- answer rather than one spelled here, so this reader and the Python
+-- components probe the same pair in the same order and a host discovers one
+-- installation rather than two.
 drainerRecordPath :: IO FilePath
-drainerRecordPath = do
-  home <- getHomeDirectory
-  pure (home <> "/Library/Application Support/kanban/pr-drainer/config.json")
+drainerRecordPath = managedRecordPath DrainerComponent
 
 -- | Selects this repository's record, rejecting a document that cannot name a
 -- job for it. A missing entry is reported separately from a malformed one: the
@@ -548,10 +552,17 @@ resolveDrainerDefinition hostOperatingSystem identity recordPath =
                   pure (Left (foreignBackend record.drainerRecordBackend hostBackend))
               | otherwise -> definitionOf record
   where
+    -- Names the record that was actually consulted, because which of the two
+    -- managed locations that is depends on this host and on what is already
+    -- installed on it: a fixed `~/Library` string here would send a Linux
+    -- operator to look at a path nothing on their machine writes.
     notInstalled =
       "the PR drainer is not installed for "
         <> identity
-        <> ", or predates its per-repository install record; "
+        <> ", or predates its per-repository install record; no entry for it \
+           \was found at "
+        <> Text.pack recordPath
+        <> "; "
         <> reinstallHint
 
     foreignBackend recorded hostBackend =

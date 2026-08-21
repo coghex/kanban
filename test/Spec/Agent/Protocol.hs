@@ -59,7 +59,12 @@ import Kanban.UI.Review (applyUndeliveredSteer)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.SessionCore (newAgentSession)
 import Kanban.UI.Types (AgentSession (..), ChatTranscript (..), ReviewDetail (..), ReviewPhase (..), ReviewSession)
-import Spec.Support.Env (createTemporaryDirectory, withEnvironmentValue)
+import Spec.Support.Env
+  ( createTemporaryDirectory,
+    withEnvironmentValue,
+    withManagedRecordHome,
+    withTemporaryCacheRoot,
+  )
 import Spec.Support.Expect (isRight, shouldMention, shouldNotMention)
 import Spec.Support.Fixtures (baseIssue, testOptions)
 import Spec.Support.Process
@@ -76,7 +81,7 @@ import Spec.Support.Process
 import Spec.Support.Render (renderWidgetLines)
 import System.Directory (createDirectoryIfMissing)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import System.IO (hClose)
 import System.Process
   ( CreateProcess (..),
@@ -213,11 +218,20 @@ spec = do
       -- A trailing separator on the install directory must not double up.
       canonicalIssueReviewerPath "/opt/kanban-review/" `shouldBe` "/opt/kanban-review/approve_issues.py"
 
-    it "looks for the install record where the installer fixes it, not where --install-dir moved" $ do
-      recordPath <- issueReviewerRecordPath
-      Data.Text.pack recordPath
-        `shouldMention` "/Library/Application Support/kanban/issue-review/config.json"
-      Data.Text.pack recordPath `shouldNotMention` "/work/approve-issues.py"
+    it "looks for the install record where the installer fixes it, not where --install-dir moved" $
+      withTemporaryCacheRoot $ \home -> do
+        -- Stated rather than inherited: the `~/Library` location is the
+        -- occupied one, which is the answer on macOS and on Linux alike, so
+        -- what this asserts about is the override and not the host. Which
+        -- location an empty host answers with is "Spec.ManagedPaths"'s.
+        let recordPath = home <> "/Library/Application Support/kanban/issue-review/config.json"
+        createDirectoryIfMissing True (takeDirectory recordPath)
+        ByteString.writeFile recordPath "{}"
+        withManagedRecordHome home $
+          withEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" (home </> "elsewhere") $ do
+            resolved <- issueReviewerRecordPath
+            resolved `shouldBe` recordPath
+            Data.Text.pack resolved `shouldNotMention` "/work/approve-issues.py"
 
     -- The environment-driven entry point, end to end: with the override set
     -- it never reads the real record, so this stays hermetic while still

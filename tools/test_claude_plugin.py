@@ -98,6 +98,11 @@ SOLVE_HS = REPO_ROOT / "src" / "Kanban" / "Solve.hs"
 PR_FLOW_HS = REPO_ROOT / "src" / "Kanban" / "PullRequestFlow.hs"
 UI_HS = REPO_ROOT / "src" / "Kanban" / "UI.hs"
 REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review" / "Canonical.hs"
+# Since issue #444 the record's own location is resolved for both managed
+# installations by one module, and Review/Canonical.hs asks it rather than
+# spelling a path -- so the location and the record's field are pinned against
+# two files below rather than one.
+MANAGED_PATHS_HS = REPO_ROOT / "src" / "Kanban" / "ManagedPaths.hs"
 
 # The workflows Kanban's own Haskell code spawns by name. WorkflowNameParityTests
 # pins this set — and only this set — against src/Kanban/Solve.hs and
@@ -421,14 +426,25 @@ class IssueReviewBackendResolutionTests(unittest.TestCase):
         # Both sides read one document rather than each rebuilding a default,
         # so what has to match is the record's location and the field in it.
         review_hs_source = REVIEW_HS.read_text(encoding="utf-8")
+        managed_paths_source = MANAGED_PATHS_HS.read_text(encoding="utf-8")
         self.assertIn('lookupEnv "KANBAN_ISSUE_REVIEW_INSTALL_DIR"', review_hs_source)
-        self.assertIn("Library/Application Support/kanban/issue-review/config.json", review_hs_source)
+        self.assertIn(
+            "Library/Application Support/kanban/issue-review/config.json",
+            managed_paths_source,
+        )
         self.assertIn('"backend_path"', review_hs_source)
         # The default install directory is Python's to own now; Haskell
         # derives it from the record's own path instead of respelling it.
-        self.assertNotIn(
-            "Library/Application Support/kanban/issue-review/approve_issues.py",
-            review_hs_source,
+        for source in (review_hs_source, managed_paths_source):
+            self.assertNotIn(
+                "Library/Application Support/kanban/issue-review/approve_issues.py",
+                source,
+            )
+        # The coordinator still resolves the macOS location alone, which is a
+        # later slice of the portability arc; the board already probes the XDG
+        # one first, so what the two must agree on is where a macOS record is.
+        self.assertIn(
+            "/.local/share/kanban/issue-review/config.json", managed_paths_source
         )
 
         coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")

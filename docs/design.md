@@ -732,16 +732,19 @@ Initial review and rereview synchronously invoke the vendored
 [the agent-workflow contract](agent-workflow-contract.md)) as the canonical
 `issue-review:v2` fingerprint publisher so the existing solve gate accepts
 Kanban-reviewed issues. Kanban does not reconstruct where that backend was
-installed: it reads the absolute path out of the record the installer writes
-at `~/Library/Application Support/kanban/issue-review/config.json`, whose own
-location `--install-dir` cannot move, so an installation made anywhere is
-found by a dashboard launched with no special environment. That record's
-directory is macOS's; the Python installer and backend also default to
-`$XDG_DATA_HOME/kanban/issue-review` (`~/.local/share` when unset) on other
-platforms, and resolve an installation made under either convention on either
-platform, while this Haskell reader still names the macOS location alone.
-Closing that is the remaining work of the portability arc, not a licence to
-spell the location a second time here. A non-empty
+installed: it reads the absolute path out of the record the installer writes,
+whose own location `--install-dir` cannot move, so an installation made
+anywhere is found by a dashboard launched with no special environment. Which
+location that record is at is `Kanban.ManagedPaths`'s answer, the Haskell
+counterpart of `tools/kanban_config.py` and the one place either managed
+record's path is written down on this side: the XDG location
+(`$XDG_DATA_HOME/kanban/issue-review`, `~/.local/share` when that variable is
+unset or empty) first and
+`~/Library/Application Support/kanban/issue-review` second, on both
+platforms, taking the first that is occupied, and this platform's own write
+default — macOS's `~/Library`, the XDG one everywhere else — when neither is.
+That is what the Python installer and backend do, so the board and they
+resolve one installation rather than two. A non-empty
 `KANBAN_ISSUE_REVIEW_INSTALL_DIR` still wins, and a record carrying no
 recorded path — an installation predating the record — falls back to the
 directory holding it. Each way that lookup can fail — an override or recorded
@@ -2292,10 +2295,11 @@ above are unchanged, and persistence the user switched off is not a failure.
   `$XDG_DATA_HOME/kanban/pr-drainer` (`~/.local/share` when that variable is
   unset, empty, or not absolute) on every other platform, resolved for every
   Python component by one module and probed XDG-first so an installation made
-  under either spelling is found where it already is. The dashboard is not yet
-  one of them: `src/Kanban/Drainer.hs` still spells the macOS location itself,
-  so on a Linux host an XDG-installed drainer is discovered by the controller
-  and not by the board until that resolver joins the arc. Its
+  under either spelling is found where it already is. The dashboard resolves
+  it the same way, through `Kanban.ManagedPaths`, which is that module's
+  Haskell counterpart and probes the same two locations in the same order for
+  both managed records, so a Linux host discovers an XDG-installed drainer
+  from the board exactly as the controller does. Its
   `repositories` table holds one entry per installed repository naming the
   backend that wrote it, that job's identifier, the definition's absolute path,
   and the installed checkout.

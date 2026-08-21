@@ -51,8 +51,8 @@ import Kanban.Solve (SolverBrand (..))
 import Spec.Support.Env
   ( installFakeExecutable,
     withEnvironmentValue,
+    withManagedRecordHome,
     withTemporaryCacheRoot,
-    withoutEnvironmentValue,
   )
 import System.Directory (createDirectoryIfMissing, createFileLink, doesFileExist, listDirectory)
 import System.FilePath (takeDirectory, (</>))
@@ -204,8 +204,7 @@ withPreflightMachine executables backend action =
         viaRecord document continue = do
           createDirectoryIfMissing True (takeDirectory recordPath)
           ByteString.writeFile recordPath document
-          withEnvironmentValue "HOME" (temporaryRoot </> "home") $
-            withoutEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" continue
+          withManagedRecordHome (temporaryRoot </> "home") continue
     withEnvironmentValue "PATH" binaryRoot $
       withDiscovery $
         withEnvironmentValue "KANBAN_TEST_PROBE_LOG" probeLog $
