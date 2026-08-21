@@ -53,7 +53,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-2. The board screenshot predates two shipped features — [#417]
 - [x] PROD-3. The repository describes itself as "my kanban" — [no-issue]
 - [x] PROD-4. The changelog has recorded nothing since the release that opened it — [#418]
-- [ ] PROD-5. Nothing states when a release is cut, so 34 merges sit unreleased
+- [x] PROD-5. Nothing states when a release is cut, so 34 merges sit unreleased — [no-issue]
 - [ ] PROD-6. The screenshot gate is skipped on every CI run by that job's own design
 - [ ] PROD-7. The approval-relocation example passes alone and fails in the full suite
 - [ ] PROD-8. Section 3 forbids the completed-work archive section 16 specifies
@@ -245,7 +245,18 @@ touched since. Thirty-four merges have landed behind it.
   leaving it to whoever picks the work up. Landing this without PROD-5 leaves a
   log that accrues forever and never cuts.
 
-### PROD-5. Nothing states when a release is cut, so 34 merges sit unreleased
+### [no-issue] PROD-5. Nothing states when a release is cut, so 34 merges sit unreleased
+
+> **Disposition:** No issue — the mechanism is complete and self-consistent
+> (`release.yml` derives the version from `kanban.cabal`, requires the tag to be
+> `v<version>`, and requires `CHANGELOG.md`'s first `##` heading to match it), and
+> `docs/development.md`'s "Changing the version" section already documents the bump
+> itself. What remains is policy prose — what triggers a release, which component of
+> the four-part version moves for which kind of change, and what evidence a release
+> needs beyond required CI — belonging in that same section. `docs/development.md`
+> carries only the `release-document` reason, which `tools/docs_land_paths.py`'s
+> `GATING_REASONS` deliberately does not gate, so a documentation-only change to it
+> lands with `/push-docs` rather than through the tracker's claim → worktree → PR lane.
 
 **Verification:** Verified — the release *mechanism* is complete and tested, but
 no document says what triggers it, so it has run exactly once.
