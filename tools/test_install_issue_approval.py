@@ -1476,10 +1476,22 @@ class RelocationTests(InstallerFixture):
         # wrote, and the one that wrote second would leave the other's links
         # behind with nothing able to find them. The location a record write
         # replaced is read by that write itself, so exactly one directory
-        # survives and it is the one the record names.
+        # remains a populated installation and it is the one the record names.
+        #
+        # Which interleaving happens is not this example's to choose, and the
+        # race has two legitimate endings because the running-owner guard is
+        # advisory by contract (`require_no_live_run`): a contender whose plan
+        # probes while its sibling holds the run lock for its own transition is
+        # refused rather than queued. This example accepts that refusal as one
+        # outcome instead of serializing the installs, which would trade the
+        # guard's documented non-blocking semantics for the example's comfort.
+        # So: either both installs succeed -- both plans can pass before either
+        # transition takes the run lock -- or exactly one is refused naming the
+        # sibling's transition-mode hold. A refusal with any other wording, any
+        # other exception, or two refusals is a real failure.
         first = self.root / "installation-a"
         second = self.root / "installation-b"
-        failures = []
+        outcomes = {}
         ready = threading.Barrier(2)
 
         def install_into(directory):
@@ -1488,8 +1500,10 @@ class RelocationTests(InstallerFixture):
                 installer.install(
                     self.repo, directory, config_path=None, dry_run=False
                 )
-            except Exception as error:  # pragma: no cover - reported below
-                failures.append(error)
+            except BaseException as error:
+                outcomes[directory] = error
+            else:
+                outcomes[directory] = None
 
         threads = [
             threading.Thread(target=install_into, args=(directory,))
@@ -1500,12 +1514,39 @@ class RelocationTests(InstallerFixture):
         for thread in threads:
             thread.join(timeout=60)
 
-        self.assertEqual(failures, [])
+        # Both threads must have reached a terminal outcome: a thread still
+        # alive after the join timeout never returned from `install`, and an
+        # empty error list alone would read that as success.
+        for thread in threads:
+            self.assertFalse(thread.is_alive(), "an install call never returned")
+        self.assertEqual(set(outcomes), {first, second})
+        refused = {
+            directory: error
+            for directory, error in outcomes.items()
+            if error is not None
+        }
+        for directory, error in refused.items():
+            self.assertIsInstance(error, installer.InstallError, repr(error))
+            self.assertIn(
+                "which is installing or removing this job",
+                str(error),
+                f"the install into {directory} failed outside the advisory "
+                f"running-owner refusal: {error!r}",
+            )
+        self.assertLessEqual(
+            len(refused), 1, f"both installs were refused: {refused!r}"
+        )
+
         recorded = Path(
             self.record()["repositories"]["acme/widgets"]["install_dir"]
         ).resolve()
         self.assertIn(recorded, {first.resolve(), second.resolve()})
         abandoned = second if recorded == first.resolve() else first
+        if refused:
+            # A refused contender wrote nothing, so the record can only name
+            # the directory whose install succeeded.
+            (refused_directory,) = refused
+            self.assertEqual(refused_directory.resolve(), abandoned.resolve())
         for name in installer.LINKED_MODULES:
             with self.subTest(module=name):
                 self.assertTrue(
