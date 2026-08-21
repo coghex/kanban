@@ -8,6 +8,19 @@ the tracked Codex and Claude plugins' own packaged-workflow bash surfaces,
 and against every non-test Python module under tools/, so a new external
 command or home-relative path cannot land undocumented.
 
+Home-relative paths are reconciled over two surfaces with two extractors, since
+the same managed location is spelled differently in each. The Haskell modules
+build one as a single literal hung off `home`; the three issue-approval modules
+of docs/agent-workflow-contract.md §2.8 (issue #425) compose one from `pathlib`
+segments, often across a bound name or a nullary helper, so they are scanned
+separately for that shape — the way the bundled coordinator is scanned
+separately from the `.md` surfaces — by resolving the parsed module rather than
+by matching text. What the extractor recovers from each of the three is pinned,
+and fixture regressions prove that an undeclared segment is reported, that a
+tail hung off a binding or a helper is recovered whole rather than only to its
+prefix, and that a module which cannot be parsed fails rather than reporting
+nothing.
+
 Since issue #118 that plugin surface also covers the vendored drafting and
 canonical issue-review assets (docs/drafting-workflow-contract.md §2) — nine of
 them since issue #240 added the issue-rereview repair loop — including a
@@ -26,6 +39,7 @@ pinned, so neither list can drift away from the other and neither can shrink to
 covering nothing.
 """
 
+import ast
 import re
 import tempfile
 import unittest
@@ -78,6 +92,63 @@ MANAGED_RECORD_TOKENS = {
     "/Library/Application Support/kanban/pr-drainer/config.json",
     "/.local/share/kanban/issue-review/config.json",
     "/.local/share/kanban/pr-drainer/config.json",
+}
+
+# The issue approval service's own owning sources
+# (docs/agent-workflow-contract.md §2.8), scanned for the home-relative paths
+# they build rather than for the external commands they spawn — those are
+# already covered by the discovered tools/ surface below. They need an
+# extractor of their own because they are Python: none of them spells a managed
+# location as one literal the way the Haskell surface does, and none of them is
+# markdown, so neither existing extractor recovers anything from them.
+# `tools/service_manager.py` is here because it is where both definition
+# directories are built, so scanning only the controller and the installer
+# would leave service-written paths outside the gate. An enumerated list rather
+# than every module under tools/: extending the home-path gate to another
+# module is a deliberate edit, exactly as adding a packaged asset to a plugin
+# surface list is.
+APPROVAL_SERVICE_SURFACE_FILES = [
+    "tools/approve_issues_service.py",
+    "tools/install_issue_approval.py",
+    "tools/service_manager.py",
+]
+
+# What the Python extractor actually recovers from each of the three, pinned
+# the way the plugin surfaces' command sets are: the completeness loop below
+# reports no undeclared segment for a module the extractor recovers nothing
+# from, for the same reason it reports none for a module it never opened. The
+# installer's empty set is a pin rather than an omission — it expands whatever
+# `--install-dir` or `--config` it is given and builds no managed location of
+# its own — so a future edit that made it construct one would have to declare
+# it here as well as in the manifest.
+APPROVAL_SERVICE_EXPECTED_HOME_SEGMENTS = {
+    "tools/approve_issues_service.py": {
+        # The service root, and each tree the controller composes from it
+        # through a nullary helper: `runtime_root()`, `discovery_record_path()`
+        # and the two lock paths are all `service_root() / ...`, so recovering
+        # them is what makes those four manifest rows load-bearing rather than
+        # decorative.
+        "/Library/Application Support/kanban/issue-approval",
+        "/Library/Application Support/kanban/issue-approval/config.json",
+        "/Library/Application Support/kanban/issue-approval/locks",
+        "/Library/Application Support/kanban/issue-approval/runtime",
+        "/Library/Logs/kanban/issue-approval",
+        # The one home-relative entry of the fixed PATH an installed job runs
+        # with.
+        "/.local/bin",
+    },
+    "tools/install_issue_approval.py": set(),
+    "tools/service_manager.py": {
+        "/Library/LaunchAgents",
+        # Both halves of the systemd unit directory: the `~/.config` its local
+        # `root` binding reaches when `$XDG_CONFIG_HOME` names no absolute
+        # directory, and the whole location that binding is then extended into.
+        # The second is the one a declared row has to be held to — an
+        # undeclared tail is contained in neither token, which the regression
+        # below drives.
+        "/.config",
+        "/.config/systemd/user",
+    },
 }
 
 # The tracked Codex plugin's own packaged workflows (issue #76): a separate,
@@ -481,6 +552,304 @@ def home_relative_segments(content):
         for quoted in QUOTED_RE.finditer(expr_match.group(0)):
             segments.add(quoted.group(1))
     return segments
+
+
+# A home-anchored path a Python module builds — the counterpart of
+# HOME_PATH_EXPR_RE above for the surface that composes one from `pathlib`
+# segments instead of spelling it as a single literal.
+#
+# Resolved from the parsed module rather than by regex, because the shape that
+# has to be recovered is not local to one expression. `tools/service_manager.py`
+# writes the systemd unit directory as `root / "systemd" / "user"`, where `root`
+# is bound a line earlier and only that binding reaches a home root; a pattern
+# that could see only the binding would recover `~/.config` and let an
+# undeclared tail past, which is precisely the hole a declared row exists to
+# close. `tools/approve_issues_service.py` composes the same way through
+# nullary helpers — `runtime_root()` is `service_root() / "runtime"` — so the
+# resolution has to follow a name to whatever it was bound to, an assignment or
+# a function's own return, before any of these locations is recovered at all.
+#
+# Working from the syntax tree also settles a family of spellings by
+# construction rather than one alternative at a time: quote style, line
+# wrapping, and the parentheses around `Path(os.environ["HOME"])` are simply
+# not distinctions the tree makes.
+
+# What denotes this account's home directory. `account_home()` is the approval
+# controller's passwd-anchored root; `Path.home()`, a `HOME` name, and an
+# `os.environ` read of one are the same statement written differently, and a
+# gate a second spelling walks through is not a gate.
+PYTHON_HOME_ROOT_FUNCTIONS = frozenset({"account_home"})
+PYTHON_HOME_NAMES = frozenset({"HOME"})
+PYTHON_HOME_ENVIRONMENT_KEYS = frozenset({"HOME"})
+# Calls that pass a path through unchanged, so the receiver decides.
+PYTHON_PATH_PASSTHROUGH_ATTRIBUTES = frozenset(
+    {"expanduser", "resolve", "absolute"}
+)
+# How a whole home-relative path is written as one literal, for a module that
+# hands it to `expanduser` or to a shell instead of composing it.
+PYTHON_HOME_LITERAL_PREFIXES = ("~", "$HOME")
+# A bound name resolving through others cannot recurse forever, but a module
+# may legitimately bind one name from another; this bounds the walk rather
+# than describing any real depth.
+PYTHON_RESOLUTION_DEPTH = 12
+
+
+class _PythonHomePaths:
+    """Every home-relative location one parsed module builds.
+
+    Two passes over one tree: collect what each module-level or local name and
+    each nullary function is bound to, then resolve every `/`-chain against
+    those bindings. A name is kept as a list of candidate values rather than
+    one, because a rebound name whose *later* binding is the home-rooted one
+    must still resolve — missing a location is the failure direction that
+    matters here, and a spurious extra one only ever asks for a row.
+    """
+
+    def __init__(self, tree):
+        self.bindings = {}
+        self.returns = {}
+        self._resolving = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        self.bindings.setdefault(target.id, []).append(node.value)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                if node.value is not None:
+                    self.bindings.setdefault(node.target.id, []).append(node.value)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for statement in ast.walk(node):
+                    if isinstance(statement, ast.Return) and statement.value is not None:
+                        self.returns.setdefault(node.name, []).append(statement.value)
+
+    # -- resolution --------------------------------------------------------
+
+    def resolve(self, node, depth=0):
+        """The home-relative prefix `node` denotes, or None.
+
+        `""` is the home directory itself and is deliberately distinct from
+        None: it is what makes `account_home() / "Library"` resolve while
+        `some_path / "Library"` does not.
+        """
+        if depth > PYTHON_RESOLUTION_DEPTH:
+            return None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            left = self.resolve(node.left, depth + 1)
+            if left is None:
+                return None
+            if isinstance(node.right, ast.Constant) and isinstance(node.right.value, str):
+                part = node.right.value.strip("/")
+                return f"{left}/{part}" if part else left
+            # A computed segment ends the literal chain: what follows is not a
+            # location this manifest could name.
+            return None
+        if isinstance(node, ast.Call):
+            return self._resolve_call(node, depth)
+        if isinstance(node, ast.Subscript):
+            if self._is_environment(node.value) and self._is_home_key(node.slice):
+                return ""
+            return None
+        if isinstance(node, ast.Name):
+            return self._resolve_name(node.id, depth)
+        if isinstance(node, ast.IfExp):
+            # Either branch may be the home-rooted one; `service_manager`'s
+            # unit directory is the `else` of an `$XDG_CONFIG_HOME` test.
+            for branch in (node.body, node.orelse):
+                resolved = self.resolve(branch, depth + 1)
+                if resolved is not None:
+                    return resolved
+            return None
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return self._resolve_literal(node.value)
+        return None
+
+    def _resolve_call(self, node, depth):
+        function = node.func
+        if isinstance(function, ast.Name):
+            if function.id in PYTHON_HOME_ROOT_FUNCTIONS:
+                return ""
+            if function.id == "Path" and node.args:
+                return self.resolve(node.args[0], depth + 1)
+            return self._resolve_returns(function.id, depth)
+        if isinstance(function, ast.Attribute):
+            if function.attr == "home" and isinstance(function.value, ast.Name):
+                if function.value.id == "Path":
+                    return ""
+                return None
+            if function.attr in PYTHON_PATH_PASSTHROUGH_ATTRIBUTES:
+                return self.resolve(function.value, depth + 1)
+            if (
+                function.attr == "get"
+                and self._is_environment(function.value)
+                and node.args
+                and self._is_home_key(node.args[0])
+            ):
+                return ""
+        return None
+
+    def _resolve_name(self, name, depth):
+        if name in PYTHON_HOME_NAMES:
+            # A bound `HOME` resolves through its binding; an unbound one is
+            # read as the home directory anyway, since that is the only thing
+            # a name spelled this way means on this surface.
+            return self._resolve_bindings(name, depth) or ""
+        return self._resolve_bindings(name, depth)
+
+    def _resolve_bindings(self, name, depth):
+        return self._resolve_candidates(("binding", name), self.bindings.get(name), depth)
+
+    def _resolve_returns(self, name, depth):
+        return self._resolve_candidates(("return", name), self.returns.get(name), depth)
+
+    def _resolve_candidates(self, key, candidates, depth):
+        if not candidates or key in self._resolving:
+            return None
+        self._resolving.add(key)
+        try:
+            for candidate in candidates:
+                resolved = self.resolve(candidate, depth + 1)
+                if resolved is not None:
+                    return resolved
+        finally:
+            self._resolving.discard(key)
+        return None
+
+    @staticmethod
+    def _resolve_literal(text):
+        for prefix in PYTHON_HOME_LITERAL_PREFIXES:
+            if text.startswith(prefix + "/"):
+                return text[len(prefix) :].rstrip("/")
+        return None
+
+    @staticmethod
+    def _is_environment(node):
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr == "environ"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "os"
+        )
+
+    @staticmethod
+    def _is_home_key(node):
+        return (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value in PYTHON_HOME_ENVIRONMENT_KEYS
+        )
+
+    # -- collection --------------------------------------------------------
+
+    def collect(self, node, found):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            resolved = self.resolve(node)
+            if resolved:
+                found.add(resolved)
+                # Not the left spine: that is this chain's own prefix, and
+                # recording it would report every intermediate directory as a
+                # location of its own. Anything nested on the right is still
+                # reached.
+                self.collect(node.right, found)
+                return
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            literal = self._resolve_literal(node.value)
+            if literal:
+                found.add(literal)
+            return
+        for child in ast.iter_child_nodes(node):
+            self.collect(child, found)
+
+
+def python_home_relative_segments(content):
+    """Every home-relative path a tools/ module builds.
+
+    Returned in the same slash-prefixed form the Haskell and markdown
+    extractors produce, so all three reconcile against one `personal-path`
+    token set rather than against three spellings of it.
+
+    Raises `SyntaxError` for a module that will not parse. That is deliberate:
+    answering "nothing here" for a file this check could not read is exactly
+    how a completeness gate stops checking, so the caller turns it into a
+    failure naming the file rather than an empty result.
+    """
+    tree = ast.parse(content)
+    paths = _PythonHomePaths(tree)
+    found = set()
+    paths.collect(tree, found)
+    return found
+
+
+def home_relative_segments_for_surface_file(relative_path, content):
+    """The home-relative paths one surface file builds, by its own extractor.
+
+    Dispatched on extension the way `discovered_commands_for_plugin_file`
+    dispatches the command extractors: the two surfaces spell a managed
+    location differently, and one reconciliation covers both.
+    """
+    if relative_path.endswith(".py"):
+        return python_home_relative_segments(content)
+    return home_relative_segments(content)
+
+
+def segment_is_declared(segment, personal_tokens, *, resolved_surface):
+    """Whether one `personal-path` row covers this discovered segment.
+
+    Two rules, because the two extractors recover different things.
+
+    A literal one — the Haskell and markdown surfaces — is whatever the source
+    happened to write down, which is routinely a file *inside* a declared
+    directory (`~/Library/Application Support/kanban/issue-review/config.json`
+    against the install-directory row). So containment holds in both
+    directions there, and has since that check existed.
+
+    A resolved one is a maximal chain: the extractor already walked to the end
+    of every `/`-application, so each segment it yields is a location in its
+    own right rather than something inside one. Absorbing it into an ancestor's
+    row would make every row below a declared directory decorative — renaming
+    `runtime/` to anything at all would still be covered by the service root.
+    So an exact row is required, with one direction of containment kept: a
+    segment a *longer* declared location is built through — the `~/.config`
+    half of the systemd unit directory — is covered by that location's row,
+    since the complete location still has to match on its own.
+    """
+    if segment in personal_tokens:
+        return True
+    if resolved_surface:
+        return any(
+            token.startswith(segment + "/") for token in personal_tokens
+        )
+    return any(
+        segment in token or token in segment for token in personal_tokens
+    )
+
+
+def undeclared_home_segments(relative_path, content, personal_tokens):
+    """Every home-relative path `content` builds that no manifest row declares.
+
+    The one reconciliation both the tracked-tree check and its fixture
+    regressions drive, so what the regressions prove is what the tree is held
+    to rather than a second implementation of it.
+
+    A file that cannot be read at all is reported rather than passed over: an
+    extractor that answers "no undeclared paths" for a module it never parsed
+    is a gate that has silently stopped gating.
+    """
+    try:
+        segments = home_relative_segments_for_surface_file(relative_path, content)
+    except SyntaxError as error:
+        raise AssertionError(
+            f"{relative_path} could not be parsed, so the home-relative paths "
+            f"it builds could not be checked: {error}"
+        ) from error
+    resolved_surface = relative_path.endswith(".py")
+    return sorted(
+        segment
+        for segment in segments
+        if looks_like_path_segment(segment)
+        and not segment_is_declared(
+            segment, personal_tokens, resolved_surface=resolved_surface
+        )
+    )
 
 
 # A fenced ```bash ... ``` block in a packaged SKILL.md. The closing fence
@@ -985,21 +1354,205 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertEqual(indirect_executable_names(if_snippet), {"codex", "claude"})
 
     def test_every_home_relative_path_segment_is_documented(self):
+        # Two surfaces, one reconciliation. The Haskell modules spell a managed
+        # location as one literal and the three approval-service modules
+        # compose one from path segments, so each gets its own extractor and
+        # both answer to the same `personal-path` rows.
         personal_tokens = [
             row["token"]
             for row in self.manifest
             if row["kind"] == "personal-path"
         ]
-        for relative_path in SURFACE_FILES:
+        for relative_path in SURFACE_FILES + APPROVAL_SERVICE_SURFACE_FILES:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            for segment in home_relative_segments(content):
-                if not looks_like_path_segment(segment):
-                    continue
-                self.assertTrue(
-                    any(segment in token or token in segment for token in personal_tokens),
-                    f"{relative_path} builds an undocumented home-relative path "
-                    f"segment {segment!r}; declare it in the manifest",
+            undeclared = undeclared_home_segments(
+                relative_path, content, personal_tokens
+            )
+            self.assertEqual(
+                [],
+                undeclared,
+                f"{relative_path} builds undocumented home-relative path "
+                f"segment(s) {undeclared}; declare each one in the manifest "
+                "in docs/agent-workflow-contract.md",
+            )
+
+    def test_approval_service_home_path_discovery_is_not_vacuous(self):
+        # The three modules reach the loop above by being listed, and a loop
+        # over a module the extractor recovers nothing from reports no
+        # undeclared segment for the same reason a loop over nothing does. Pin
+        # what each one actually builds so a refactor that stops matching —
+        # or a surface list that loses a member — fails here.
+        for relative_path in APPROVAL_SERVICE_SURFACE_FILES:
+            with self.subTest(surface=relative_path):
+                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                self.assertEqual(
+                    home_relative_segments_for_surface_file(relative_path, content),
+                    APPROVAL_SERVICE_EXPECTED_HOME_SEGMENTS[relative_path],
                 )
+        self.assertEqual(
+            sorted(APPROVAL_SERVICE_EXPECTED_HOME_SEGMENTS),
+            sorted(APPROVAL_SERVICE_SURFACE_FILES),
+            "every scanned approval-service module needs a pinned expectation",
+        )
+
+    def test_an_undeclared_python_home_path_is_reported(self):
+        # The negative control the pin above cannot be: it proves the scan
+        # *fails* on a segment no row declares. Every way of reaching a home
+        # root the extractor claims to cover is exercised, because a gate a
+        # second spelling walks through is not a gate.
+        personal_tokens = [
+            row["token"]
+            for row in self.manifest
+            if row["kind"] == "personal-path"
+        ]
+        for label, snippet, expected in (
+            (
+                "segment chain",
+                'def root():\n'
+                '    return account_home() / "Library" / "Application Support" '
+                '/ "kanban" / "undeclared-service"\n',
+                ["/Library/Application Support/kanban/undeclared-service"],
+            ),
+            (
+                "single quotes",
+                "ROOT = Path.home() / 'Library' / 'Undeclared Place'\n",
+                ["/Library/Undeclared Place"],
+            ),
+            (
+                "environment root",
+                'ROOT = Path(os.environ["HOME"]) / "Library" / "Undeclared Place"\n',
+                ["/Library/Undeclared Place"],
+            ),
+            (
+                "environment get",
+                'ROOT = Path(os.environ.get("HOME")) / "Library" / "Undeclared Place"\n',
+                ["/Library/Undeclared Place"],
+            ),
+            (
+                "expanded literal",
+                'ROOT = Path("~/Library/Undeclared Place").expanduser()\n',
+                ["/Library/Undeclared Place"],
+            ),
+            (
+                "wrapped across lines",
+                'ROOT = (\n'
+                '    account_home()\n'
+                '    / "Library"\n'
+                '    / "Undeclared Place"\n'
+                ')\n',
+                ["/Library/Undeclared Place"],
+            ),
+            # The two shapes Codex's round-1 review named: a tail hung off a
+            # name bound elsewhere, and one hung off a nullary helper. Both are
+            # how the tracked modules actually spell the locations these rows
+            # declare — `tools/service_manager.py`'s unit directory and
+            # `tools/approve_issues_service.py`'s runtime tree — so an
+            # extractor that stopped at the binding would leave the tail
+            # undeclarable and the row decorative.
+            (
+                "tail on a bound name",
+                'HOME = Path.home()\n'
+                'root = HOME / ".config"\n'
+                'UNIT_DIR = root / "systemd" / "undeclared"\n',
+                ["/.config/systemd/undeclared"],
+            ),
+            (
+                "tail through the conditional binding service_manager uses",
+                'HOME = Path.home()\n'
+                'def _unit_dir():\n'
+                '    configured = os.environ.get("XDG_CONFIG_HOME", "")\n'
+                '    root = Path(configured) if configured else HOME / ".config"\n'
+                '    return root / "systemd" / "undeclared"\n',
+                ["/.config/systemd/undeclared"],
+            ),
+            (
+                "tail on a nullary helper",
+                'def service_root():\n'
+                '    return account_home() / "Library" / "Undeclared Root"\n'
+                'def runtime_root():\n'
+                '    return service_root() / "runtime"\n',
+                [
+                    "/Library/Undeclared Root",
+                    "/Library/Undeclared Root/runtime",
+                ],
+            ),
+        ):
+            with self.subTest(shape=label):
+                self.assertEqual(
+                    undeclared_home_segments(
+                        "tools/approve_issues_service.py", snippet, personal_tokens
+                    ),
+                    expected,
+                )
+        # ...and that a declared one is not reported, so the check above is
+        # discriminating rather than merely noisy.
+        self.assertEqual(
+            undeclared_home_segments(
+                "tools/approve_issues_service.py",
+                'def service_root():\n'
+                '    return account_home() / "Library" / "Application Support" '
+                '/ "kanban" / "issue-approval"\n'
+                'def runtime_root():\n'
+                '    return service_root() / "runtime"\n',
+                personal_tokens,
+            ),
+            [],
+        )
+
+    def test_a_location_beneath_a_declared_root_is_not_absorbed_by_it(self):
+        # What makes the four rows *under* the service root load-bearing
+        # rather than decorative. Every one of those locations is composed
+        # through its own nullary helper, so the extractor yields it whole;
+        # if an ancestor's row covered it, renaming `runtime/` to anything at
+        # all would still pass while the row went on naming a directory that
+        # no longer exists.
+        personal_tokens = [
+            row["token"]
+            for row in self.manifest
+            if row["kind"] == "personal-path"
+        ]
+        declared_root = "/Library/Application Support/kanban/issue-approval"
+        self.assertIn(declared_root, personal_tokens)
+        for renamed in ("undeclared-runtime", "undeclared-locks", "other.json"):
+            with self.subTest(renamed=renamed):
+                self.assertEqual(
+                    undeclared_home_segments(
+                        "tools/approve_issues_service.py",
+                        'def service_root():\n'
+                        '    return account_home() / "Library" '
+                        '/ "Application Support" / "kanban" / "issue-approval"\n'
+                        'def moved():\n'
+                        f'    return service_root() / "{renamed}"\n',
+                        personal_tokens,
+                    ),
+                    [f"{declared_root}/{renamed}"],
+                )
+        # The literal surfaces keep the older, looser rule, which is
+        # load-bearing there for the opposite reason: what those extractors
+        # recover is whatever the source wrote, routinely a file inside a
+        # declared directory.
+        self.assertTrue(
+            segment_is_declared(
+                f"{declared_root}/anything", personal_tokens, resolved_surface=False
+            )
+        )
+        self.assertFalse(
+            segment_is_declared(
+                f"{declared_root}/anything", personal_tokens, resolved_surface=True
+            )
+        )
+
+    def test_an_unparseable_scanned_module_is_reported(self):
+        # The other way a completeness check stops checking: answering
+        # "nothing undeclared here" for a file it could not read at all. The
+        # extractor raises and the reconciliation turns that into a failure
+        # naming the file, rather than an empty result.
+        with self.assertRaises(AssertionError) as raised:
+            undeclared_home_segments(
+                "tools/approve_issues_service.py", "def broken(:\n", []
+            )
+        self.assertIn("could not be parsed", str(raised.exception))
+        self.assertIn("tools/approve_issues_service.py", str(raised.exception))
 
     def test_managed_record_locations_reach_the_home_path_scan(self):
         # Requirement 8 of issue #444: the reconciliation above has to see

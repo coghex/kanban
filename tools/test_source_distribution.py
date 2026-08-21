@@ -38,7 +38,7 @@ tracked file has none:
 * In, individually: `README.md`, `CLAUDE.md` and its `AGENTS.md` alias --
   the one session contract under the two names Claude and Codex each read
   it by -- `LICENSE`, `kanban.cabal`, the `config.toml.example` and
-  `models.toml.example` configuration templates, the ten user
+  `models.toml.example` configuration templates, the eleven user
   and workflow-contract documents under `docs/`, `cabal.project` -- that
   one because the packaged `CLAUDE.md` describes it as what applies the
   mandatory `-Werror` gate to the `cabal build all` and `cabal test all`
@@ -117,6 +117,7 @@ RELEASE_DOCUMENTS = (
     "docs/development.md",
     "docs/document-workflow-contract.md",
     "docs/drafting-workflow-contract.md",
+    "docs/issue-approval.md",
     # Also reached by the `docs/media` tree above. Named here as well because
     # this is the tuple §7's `release-document` reason is reconciled against,
     # so a media document's publication lane stays stated where the other

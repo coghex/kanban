@@ -100,6 +100,7 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `p` | Open the jobs and processes list |
 | `i` | Open the list of everything needing attention |
 | `x` | Stop the selected running job |
+| `a` | Start or stop the optional issue approval service |
 | `d` | Start or stop the optional PR drainer |
 | `m` | Merge the selected approved pull request in Done |
 | `?` | Open built-in help |
@@ -270,6 +271,49 @@ Agent work runs separately from the board. Press `Esc` to hide its window and `p
 Most issue and pull-request jobs continue if Kanban is closed. Opening Kanban again for the same repository reconnects to them. Kanban blocks quitting only when an older review type cannot safely continue on its own.
 
 Use `x` to stop a selected job. Inside an open job window, Ctrl-C interrupts the current turn so you can provide new guidance.
+
+## The issue approval service
+
+Press `a`, or click the `approve_issues.py` control at the foot of the sidebar
+directly above the drainer's, to start or stop the optional issue approval
+service for this repository. It reviews the repository's open issues in
+ascending number order, one issue at a time, publishing the same canonical
+verdicts `r` publishes on a single issue.
+
+**Starting it is not a preview.** A running service posts real review comments
+and moves real `reviewed:approve` and `reviewed:changes` labels, on its own,
+until you stop it. Installation never starts it — see
+[the issue approval guide](issue-approval.md) for installing it with
+`python3 tools/install_issue_approval.py`, and for everything the service writes
+and how to recover it.
+
+The control's own line below the button says what the service is doing:
+
+| Line | What it means |
+| --- | --- |
+| `off` | Installed and stopped. |
+| `starting…` / `stopping…` | Your press is in flight. A second press is refused until an authoritative answer arrives. |
+| `on` | Running: reviewing, or waiting between passes. |
+| `on · unresolved incident · Issue #N requests changes` | **The barrier warning**, in yellow. |
+| `stopped · unresolved incident · Issue #N requests changes` | The same barrier, in red, because a stopped service is not working through it. |
+| `stopped · <what went wrong>` | The run ended on a failure, in red. |
+| anything else, in red | The service could not be read, is not installed for this repository, or this host has no service manager to run it. The line says which. |
+
+The barrier warning is not a fault. The service reviews issues in number order,
+and an issue whose review requested changes stops the queue at that issue rather
+than being skipped: nothing with a higher number is reviewed while it stands.
+The service stays on and healthy, doing only a read-only check of that one
+issue, so **repair the named issue with `r` while the service keeps running**.
+The barrier clears itself once that issue holds a current approval. There is no
+way to dismiss it from the board, and acknowledging it from the controller
+clears only the warning, not the barrier.
+
+While the service has a review actually in flight, starting a competing review
+from a card is refused with a notice telling you to wait for it or stop the
+service — including for the same issue, since the service reviews in order and
+cannot be asked to skip ahead. An enabled but idle service refuses nothing, and
+neither does a barriered one: at a barrier its only child is that read-only
+check, so the barrier issue's own revision and rereview stay available.
 
 ## What needs attention
 
@@ -457,5 +501,27 @@ Kanban stores local state in the following places:
 - Background job records: `~/.cache/kanban/workers/`
 - Display settings: `~/.config/kanban/settings.json`
 - Workflow and provider configuration: `~/.config/kanban/config.toml`
+
+The optional issue approval service keeps its own state outside those, under a
+namespace of its own, and leaves it behind when it is uninstalled:
+
+- Install record, runtime state, and locks:
+  `~/Library/Application Support/kanban/issue-approval/` — fixed, and moved by
+  no option
+- Service and backend logs: `~/Library/Logs/kanban/issue-approval/` — likewise
+- Its script links: the same directory **by default**, but `--install-dir` or
+  `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` puts them wherever you name, and a
+  `~`-spelled value there follows `$HOME`
+- Its job definition: `~/Library/LaunchAgents/` on macOS, or
+  `~/.config/systemd/user/` on Linux
+- Its run lock in the repository itself:
+  `.git/kanban_issue_approval_run.lock`
+
+The fixed paths are the same on both platforms; only the job definition
+differs. If you installed with a custom link directory, that one is yours to
+remember — [the issue approval guide](issue-approval.md) breaks all of them
+down and shows how to resolve an installation's real location. The optional PR
+drainer keeps a separate set of its own; see
+[the PR drainer guide](pr-drainer.md).
 
 Use `--no-cache` to stop Kanban from reading or writing board and usage snapshots. It does not disable job logs or settings. A global `cache = false` in `config.toml` has the same effect; `--no-cache` always wins if both are set.

@@ -43,7 +43,8 @@ cabal run kanban -- --doctor
 ```
 
 Nothing above copies a personal skill, command, or script by hand, and
-nothing starts the PR drainer, an approval daemon, or an agent session.
+nothing starts the PR drainer, the issue approval service, an approval daemon,
+or an agent session.
 
 ## Components
 
@@ -56,6 +57,14 @@ four with `--all`.
 | `codex-plugin` | `kanban@kanban` from `codex-plugin/`, through `codex plugin marketplace add` and `codex plugin add` | `$solve`, `$pr-review`, `$pr-rereview`, `$pr-revise`, `$repair` |
 | `claude-plugin` | `kanban@kanban` from `claude-plugin/`, through `claude plugin marketplace add` and `claude plugin install` | `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/repair` |
 | `legacy-launcher` | A symlink at `~/work/approve-issues.py` pointing at the installed backend | Nothing in Kanban. Purely a compatibility shim for pre-migration automation that still invokes that path directly — see [agent-workflow-contract §3](agent-workflow-contract.md#3-migration-boundary) |
+
+There is deliberately no component here for the optional issue approval
+service, which reviews a repository's open issues in ascending order as a
+managed background job. It has its own installer and its own per-repository
+job — `python3 tools/install_issue_approval.py`, described in
+[the issue approval guide](issue-approval.md) — and it *resolves* the
+`issue-review` backend below rather than installing one, so setup remains the
+command that installs shared components and starts no service.
 
 A plugin component alone is not enough for the PR flows: they call the
 `issue-review` backend too, so install it as well (`--all` covers this).
@@ -252,8 +261,8 @@ nothing else. It does not:
 - change your model, reasoning-effort, sandbox, or approval defaults, or
   disable any provider safety control;
 - copy opaque files into an undocumented global directory;
-- install, start, or configure the PR drainer, an approval daemon, or any
-  agent session.
+- install, start, or configure the PR drainer, the issue approval service, an
+  approval daemon, or any agent session.
 
 The authority the *actions* need is unchanged and still yours: your
 existing `gh auth login` for every GitHub write, and your own provider
@@ -296,7 +305,11 @@ Removing an installation never deletes the other platform's location, and
 nothing migrates one to the other.
 
 Removing the PR drainer is separate and unchanged; see
-[the PR drainer guide](pr-drainer.md).
+[the PR drainer guide](pr-drainer.md). Removing the issue approval service is
+separate too — `python3 tools/install_issue_approval.py --uninstall`, per
+repository; see [the issue approval guide](issue-approval.md). Removing the
+`issue-review` backend above while an approval job is still installed leaves
+that job with no reviewer to run, so uninstall the service first.
 
 ## Verification
 

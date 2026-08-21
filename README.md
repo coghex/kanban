@@ -118,15 +118,18 @@ code on the current branch.
 ## Platform and component support
 
 macOS is Kanban's supported platform for the first release. The table records
-what that means per component. The PR drainer is the one component with a
-supported Linux path so far; nothing here promises Linux support for the rest.
+what that means per component. The two managed background services — the PR
+drainer and the issue approval service — are the components with a supported
+Linux path so far, because each is run by whichever service manager the host
+has; nothing here promises Linux support for the rest.
 
 | Component | macOS | Linux | Notes |
 | --- | --- | --- | --- |
 | Core board | Supported | Built and tested in CI, not a supported user path | The required CI job builds the application and runs both test suites on Linux. Interactive board operation there has not been manually verified. |
 | Optional AI actions | Supported | Not a documented setup path | [Workflow setup and preflight](docs/workflow-setup.md) describes a macOS setup path, not a cross-platform port. |
 | Codex / Claude usage sidebar | Supported | Not verified | Kanban spawns the provider's own CLI and applies no platform check of its own. macOS is simply the only platform where the sidebar is verified. |
-| PR drainer | Supported | Supported on a host with a systemd user session | The drainer is managed by whichever service manager the host has — launchd on macOS, a systemd user unit on Linux — and refuses only where neither is reachable. A dedicated CI job runs the whole install, start, status, stop, and uninstall lifecycle against a real systemd user session. Its install record, runtime state, and logs still sit under macOS-shaped `~/Library` paths on both platforms. |
+| PR drainer | Supported | Supported on a host with a systemd user session | The drainer is managed by whichever service manager the host has — launchd on macOS, a systemd user unit on Linux — and refuses only where neither is reachable. A dedicated CI job runs the whole install, start, status, stop, and uninstall lifecycle against a real systemd user session. Its install record, runtime state, and logs take each platform's own convention: `~/Library` on macOS, and `$XDG_DATA_HOME` and `$XDG_STATE_HOME` (`~/.local/share` and `~/.local/state` by default) on Linux, where an installation predating that is relocated once by the next default installer run. The board resolves that record the same way the Python side does — `src/Kanban/ManagedPaths.hs` probes the XDG location and then `~/Library` on both platforms — so an XDG-installed drainer is discovered from the board too. |
+| Issue approval service | Supported | Supported on a host with a systemd user session | Managed through the same service-manager boundary as the drainer, so installing and controlling it needs launchd or a reachable `systemctl --user`, and refuses only where neither is. Its unit location is XDG-aware, but — unlike the drainer's — its record, runtime state, and logs stay under macOS-shaped `~/Library` paths on both platforms. Interactive operation on Linux has not been manually verified. |
 
 Only the core board row is needed to use Kanban. Every other row is an optional
 feature you can leave uninstalled.
@@ -179,6 +182,23 @@ python3 tools/install_drainer.py
 Installation does not start the drainer. Press `d` in Kanban when you are ready
 to run it.
 
+## Optional issue approval service
+
+The issue approval service reviews one repository's open issues in ascending
+number order, and stops at the first issue whose review requested changes. It
+installs the same way, through its own installer and its own job:
+
+```console
+python3 tools/install_issue_approval.py --dry-run --json
+python3 tools/install_issue_approval.py
+```
+
+Installation starts nothing. Press `a` in Kanban when you are ready to run it —
+and mean it: a running service publishes real review verdicts and moves real
+labels. It needs the canonical issue-review backend from
+[optional AI actions](#optional-ai-actions) above, which it resolves rather than
+installs. See [the issue approval guide](docs/issue-approval.md).
+
 ## Documentation
 
 Start here:
@@ -189,6 +209,8 @@ Start here:
   optional AI-action components, and diagnosing why one is not ready.
 - [PR drainer](docs/pr-drainer.md) — installation, configuration, operation,
   and logs.
+- [Issue approval service](docs/issue-approval.md) — installing, operating, and
+  recovering the persistent per-repository issue reviewer.
 
 For contributors:
 
