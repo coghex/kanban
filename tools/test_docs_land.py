@@ -551,6 +551,12 @@ class ClassificationGateTests(DocsLandCase):
             "docs/": "directory",
             "docs/a.txt": "Markdown",
             ":(glob)docs/*.md": "pathspec magic",
+            # Ordinary pathspecs glob by default, so without an explicit
+            # refusal `git ls-files -- <path>` would expand these into
+            # documents the argument never literally named.
+            "docs/coordination/*.md": "glob metacharacters",
+            "docs/?.md": "glob metacharacters",
+            "docs/[ab].md": "glob metacharacters",
         }
         for argument, needle in cases.items():
             with self.subTest(argument=argument):

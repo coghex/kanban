@@ -9,7 +9,9 @@ one place rather than inside shell text:
 
 * A path must be a literal, repository-relative Markdown file inside the docs
   worktree — no absolute paths, no traversal, no directories, no Git pathspec
-  magic, and no symlinks other than the verified `AGENTS.md` alias.
+  magic, no glob metacharacters (ordinary Git pathspecs glob by default, so a
+  `*` would otherwise expand), and no symlinks other than the verified
+  `AGENTS.md` alias.
 * `AGENTS.md` is a tracked symlink to `CLAUDE.md`, so a selection of the alias
   is canonicalized to `CLAUDE.md` and reported; an alias object that has been
   changed or replaced is refused, because editing through the alias changes
@@ -113,7 +115,9 @@ class Refusal(Exception):
     """One named path cannot land, with the reason the user needs."""
 
 
-def run_git(worktree: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+def run_git(
+    worktree: Path, *args: str, check: bool = True, literal: bool = False
+) -> subprocess.CompletedProcess:
     # Pathspec-mode variables are scrubbed so the caller's environment cannot
     # change what `ls-files -- '*.md'` below means; the landing script sets
     # GIT_LITERAL_PATHSPECS for its own scoped calls, and inheriting it here
@@ -132,6 +136,11 @@ def run_git(worktree: Path, *args: str, check: bool = True) -> subprocess.Comple
             "GIT_INDEX_FILE",
         )
     }
+    if literal:
+        # For a call whose pathspec is one user-named path: expansion there
+        # would let a name reach git as a pattern, which the validation above
+        # already refuses — this keeps the two readings from ever diverging.
+        env["GIT_LITERAL_PATHSPECS"] = "1"
     proc = subprocess.run(
         ["git", "-C", str(worktree), *args],
         capture_output=True,
@@ -205,6 +214,16 @@ def validate_shape(argument: str) -> str:
         )
     if "\\" in argument:
         raise Refusal(f"{argument}: backslashes are refused; use `/` separators")
+    if any(character in argument for character in "*?[]"):
+        # Leading `:` covers pathspec magic, but ordinary Git pathspecs glob
+        # by default — `docs/coordination/*.md` would otherwise reach
+        # `git ls-files -- <path>` and expand. The exact-named-path contract
+        # means one argument names one document, so the metacharacters are
+        # refused rather than expanded.
+        raise Refusal(
+            f"{argument}: glob metacharacters are refused; name each literal "
+            "path, one document per argument"
+        )
     if argument.endswith("/"):
         raise Refusal(
             f"{argument}: names a directory; land documents one file at a time"
@@ -272,7 +291,7 @@ def verify_names_a_document(worktree: Path, path: str) -> None:
             f"{path}: symlinks other than the verified {ROOT_CONTRACT_ALIAS} "
             "alias are refused"
         )
-    tracked = run_git(worktree, "ls-files", "--", path).stdout.strip()
+    tracked = run_git(worktree, "ls-files", "--", path, literal=True).stdout.strip()
     upstream = run_git(
         worktree, "cat-file", "-e", f"{CONTRACT_REF}:{path}", check=False
     )
