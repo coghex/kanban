@@ -50,7 +50,7 @@ issue · `[deferred]` blocked on a concrete precondition
 ## Status
 
 - [x] PROD-1. The README denies the release whose install path it documents — [#401]
-- [ ] PROD-2. The board screenshot predates two shipped features
+- [x] PROD-2. The board screenshot predates two shipped features — [#417]
 - [ ] PROD-3. The repository describes itself as "my kanban"
 - [ ] PROD-4. The changelog has recorded nothing since the release that opened it
 - [ ] PROD-5. Nothing states when a release is cut, so 34 merges sit unreleased
@@ -120,7 +120,7 @@ the asset the section describes.
   and that property is what keeps the block from going stale again. Whatever
   wording replaces the claim must not need editing at the next release either.
 
-### PROD-2. The board screenshot predates two shipped features
+### [#417] PROD-2. The board screenshot predates two shipped features
 
 **Verification:** Verified and reproduced — `docs/media/board-wide.png` is the
 image at the top of the README, it is rendered from a tracked golden frame, and
