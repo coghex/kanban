@@ -61,7 +61,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-10. Section 3 forbids the multi-repository board epic #354 plans — [no-issue]
 - [x] PROD-11. Section 20 still defers multi-repository aggregation — [no-issue]
 - [ ] PROD-12. Nothing holds sections 3 and 20 against the rest of the document — [deferred]: #423 and #424 must land first
-- [ ] PROD-13. The contract opens with a finished epic's processing ledger
+- [x] PROD-13. The contract opens with a finished epic's processing ledger — [#428]
 - [ ] PROD-14. The contract closes with that epic's decisions and delivery plan
 - [ ] PROD-15. Nothing states when an arc's scaffolding leaves the document it was added to
 - [ ] PROD-16. A conflicted autostash restore preserves a stash nothing ever reaps
@@ -620,7 +620,7 @@ findings remove it, from the front and the back of the document, and a third
 states the rule that stops the next arc doing the same thing. The removals are
 mechanical; the rule is the one that has to be thought about.
 
-### PROD-13. The contract opens with a finished epic's processing ledger
+### [#428] PROD-13. The contract opens with a finished epic's processing ledger
 
 **Verification:** Verified — 133 lines of epic-processing apparatus for a closed
 epic sit ahead of section 1, so the authoritative contract opens with a
