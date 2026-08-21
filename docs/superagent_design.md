@@ -377,8 +377,10 @@ Before delivery, Kanban appends a `user_override` event containing the exact
 message, target session, prior step/plan version, and timestamp. After the turn,
 the controller reconciles actual effects and marks the prior plan satisfied,
 superseded, divergent, or still pending rather than pretending the redirection
-was part of the original autonomous plan. Whether a completely different task
-amends the current mission or becomes a new sibling mission remains Q-11.
+was part of the original autonomous plan. A completely different task does not
+fork, transfer, or reparent the mission: it remains direct guidance inside the
+original selected session for that session's lifetime. This keeps user control
+simple and preserves the structured ownership tree.
 
 Only authenticated console input receives this status. Issue bodies, comments,
 repository files, provider output, and one agent instructing another remain
@@ -526,18 +528,23 @@ principles:
   ownership and intent can be proven; a conflicting or opaque live action is
   waited on or handed to the operator rather than duplicated;
 - an issue or PR that became terminal is classified from live state instead of
-  reopened or mutated; whether a merely closed/merged target counts as
-  externally satisfied or as a mission-level stop remains Q-9; and
+  reopened or mutated; a satisfied target becomes `satisfied_externally`, while
+  a target made inapplicable for another authoritative reason becomes
+  `skipped_external` and the batch continues unless that change invalidates a
+  dependency, conflicts with the mission goal, or cannot be classified
+  confidently; and
 - every write based on a prior issue body, review record, branch head, or PR
   state uses that exact version as a precondition. A concurrent edit or push
   causes a fresh read and replan, never a blind overwrite.
 
 The finite target set changes only through an explicit operator amendment,
-which is another versioned mission event. The operator may add or remove
-targets, change policy, pause dispatch, or redirect the goal while work runs;
-the controller recomputes only not-yet-committed steps and preserves the
-history of the superseded plan. Newly created repository items never enter the
-mission merely because they match its original selector.
+which is another versioned mission event. Through the mission-level console the
+operator may add or remove targets, change policy, pause dispatch, or redirect
+the durable goal while work runs; the controller recomputes only
+not-yet-committed steps and preserves the history of the superseded plan. This
+explicit amendment is distinct from D-17's direct guidance inside one live
+session, which never transfers the mission. Newly created repository items
+never enter the mission merely because they match its original selector.
 
 ### Batch selection, ordering, and concurrency
 
@@ -553,19 +560,29 @@ include newly opened issues. This prevents an apparently finite chat command
 from silently becoming a daemon while still leaving live queue behavior
 available by name.
 
-The first concurrency policy should be conservative and configurable. Issue
-approval remains serialized by its canonical lock and ordered barrier. Several
-solve/autosolve children may run in isolated worktrees up to a small ceiling,
-but a planner may not assume they are logically independent merely because the
-filesystem permits parallel work. Known dependencies, the same target, or an
-existing live worker serialize. Provider-capacity or rate-limit observations
-pause dispatch without failing already-running children.
+The first concurrency policy is a configurable default of two simultaneously
+running mutation-capable agent children per canonical repository, counted
+across all missions. Two permits useful parallel autosolve without allowing one
+broad command to create an unbounded number of providers, worktrees, CPU-heavy
+processes, or likely-conflicting branches. It is a repository coordination
+ceiling, not a claim that two is an intrinsic provider limit; host- or
+provider-wide budgets may impose a separate lower ceiling.
+
+Issue approval remains serialized by its canonical lock and ordered barrier.
+Solve/autosolve children may use the two slots only when their worktrees and
+logical dependencies are independent; filesystem isolation alone is not proof
+of independence. Known dependencies, the same target, or an existing live
+worker serialize. Provider-capacity or rate-limit observations pause dispatch
+without failing already-running children. Configuration may lower the limit to
+one or raise it deliberately as the host and workflow mature.
 
 Default batch policy is fail-closed:
 
 - changes requested stops the ordered batch at that target;
 - needs input opens an attention item and stops later ordered work;
 - an outcome-unknown, invalid, or failed child stops later work;
+- `satisfied_externally` and confidently classified `skipped_external` consume
+  their positions and advance the batch;
 - approval or another explicitly successful terminal state advances; and
 - cancellation never counts as success.
 
@@ -885,7 +902,10 @@ An operator may redirect a live agent, including to work outside its current
 step, and the agent obeys within the authority its session actually has. Kanban
 records that trusted override and reconciles or supersedes the plan afterwards.
 Model output and repository content cannot claim this authority, and direct
-steering does not silently override repository-level hard authorities.
+steering does not silently override repository-level hard authorities. Even a
+completely unrelated redirection stays in the original selected session and
+mission for that session's lifetime; Kanban does not transfer or reparent it.
+This resolves Q-11.
 
 ### D-18. The first interface is hybrid rather than command-only
 
@@ -893,6 +913,26 @@ Known commands normalize deterministically, broader prose goes through the
 bounded planner, and a selected live session accepts direct conversational
 guidance. This resolves Q-4 and preserves useful operation when the planner is
 unavailable.
+
+### D-19. Two mutation-capable agent children may run per repository by default
+
+The initial configurable admission ceiling is two simultaneously running
+mutation-capable agent children across all missions for one canonical
+repository. This provides real parallel autosolve while bounding worktree,
+provider, host-resource, and conflict pressure. Dependencies and lower-level
+authorities may serialize further; explicit configuration may lower or raise
+the ceiling. This resolves Q-5. A future multi-repository deployment may also
+need a host- or provider-wide budget above the repository controllers.
+
+### D-20. Externally inapplicable batch targets are skipped when classification is certain
+
+If current state proves a target already satisfies the requested outcome, the
+mission records `satisfied_externally`. If outside work instead made it
+inapplicable, the mission records `skipped_external` and continues. It stops
+only when the change invalidates a dependency or mission goal, conflicts with
+the requested outcome, or cannot be classified confidently. This resolves Q-9
+and makes finite batches tolerant of the repository's moving state without
+inventing success.
 
 ## Open questions
 
@@ -918,10 +958,8 @@ and live agents accept direct user guidance.
 
 ### Q-5. What is the first concurrency ceiling?
 
-The scheduler needs a conservative default for independent solve/autosolve
-children and a way to pause on provider limits. Issue approval remains
-serialized regardless. This can be configuration rather than a product-level
-blocker once the intended host budget is known.
+Resolved by D-19. Two mutation-capable agent children may run per repository by
+default, with configuration and stricter dependency/authority/provider limits.
 
 ### Q-6. Which key and product name should the console use?
 
@@ -943,12 +981,10 @@ the ordinary hotkey starts manual contextual recovery.
 
 ### Q-9. How should externally terminal targets affect an ordered batch?
 
-A target may be closed, merged, deleted, or made otherwise irrelevant by
-manual or unrelated agent work after the finite snapshot. The proposed rule is
-to continue automatically when live state proves the requested outcome already
-satisfied, but stop when the target merely disappeared or became terminal for
-a different reason. The exact satisfied/skipped/conflicted matrix still needs
-agreement.
+Resolved by D-20. A proven satisfied target advances as
+`satisfied_externally`; a confidently classified no-longer-applicable target
+advances as `skipped_external`; dependency, goal, conflict, and ambiguity cases
+stop.
 
 ### Q-10. May the superagent invent general project work outside the registry?
 
@@ -958,12 +994,32 @@ redirect an already-running agent beyond its current step.
 
 ### Q-11. Does a complete user redirection amend or fork the mission?
 
-When the operator redirects a solver to a completely different task, the agent
-obeys by D-17. The durable hierarchy still needs a product rule: amend the
-current mission and preserve its earlier plan as superseded, or create a new
-sibling mission for the redirected task and leave the original paused. This
-affects history, completion semantics, and which hotkey later resumes the
-original work.
+Resolved by D-17. It does neither: the instruction and resulting work remain in
+the original selected session and mission until that session ends. The durable
+history records the redirection without transferring ownership.
+
+### Q-12. What exactly ends directly redirected session work?
+
+Closing the overlay and closing Kanban already leave ordinary authorized work
+running, so “until the user quits” needs one precise control. The proposed
+distinction is that navigation away or TUI exit only detaches, while an explicit
+terminate-session action ends the agent and its descendants. The mission then
+reconciles what actually happened and stops for the operator if its original
+outcome remains unmet.
+
+### Q-13. Do new direct commands outrank queued autonomous batch work?
+
+With two repository slots, a fresh operator command may otherwise sit behind a
+large mission's queued children. The proposed rule is to prioritize newly
+dispatched direct work over not-yet-started autonomous children without killing
+or preempting anything already running.
+
+### Q-14. Is durable mission history retained indefinitely by default?
+
+The design requires history to outlive the fourteen-day worker cache but leaves
+its archive/deletion default unsettled. Indefinite private retention with an
+explicit archive/delete control best matches long-gap reattachment, while a
+configurable retention policy would limit disk and sensitive-data growth.
 
 ## Verification strategy
 
@@ -1003,13 +1059,19 @@ original work.
 - Interoperability fixtures mutate issue bodies, labels, issue state, PR heads,
   and canonical verdicts between plan, dispatch, and result. They prove current
   satisfaction is not repeated, stale writes do not land, a conflicting worker
-  is not duplicated, and fixed `all` membership never absorbs a new item.
+  is not duplicated, externally inapplicable targets skip only after certain
+  classification, dependency/conflict/ambiguity cases stop, and fixed `all`
+  membership never absorbs a new item.
 - Planner-policy fixtures distinguish ask, constrained judgment, and delegated
   judgment; record alternatives and rationale; and stop constrained judgment
   when more than one reasonable option remains.
 - Steering fixtures forward a trusted redirection to the selected agent,
   preserve the old plan and exact user message, reconcile its actual effects,
-  and never misclassify the redirected turn as autonomous policy expansion.
+  keep it in the original session without reparenting, and never misclassify the
+  redirected turn as autonomous policy expansion.
+- Scheduler fixtures enforce two mutation-capable agent children across
+  concurrent missions in one repository, preserve lower serialized locks, and
+  show that configured/provider limits pause only new admission.
 - End-to-end fixtures cover one issue approval, one solve, an explicit
   multi-autosolve batch, stop-on-changes, opt-in issue remediation/rereview,
   repeated-feedback halt, and no merge invocation.
@@ -1032,14 +1094,14 @@ original work.
 - **Depends on:** `none`.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-1`, `D-2`, `D-5`, `D-11`, `D-12`, `D-14`,
-  `D-15`.
+  `D-15`, `D-17`.
 - **Acceptance signals:** A mission round-trips across process restart; partial
   journal writes are not consumed; two controllers cannot advance it; private
   modes and repository identity are verified; a child log survives worker-cache
   collection and remains linked to its parent.
 - **Out of scope:** Workflow launch, providers, UI, batch progression, and
   natural-language planning.
-- **Open questions:** `None`; provider-native observability is a follow-on
+- **Open questions:** `Q-14`; provider-native observability is a follow-on
   design rather than a blocker to the structured tree.
 
 ### SAG-2. Expose a typed workflow action registry
@@ -1100,14 +1162,14 @@ original work.
 - **Depends on:** `SAG-1`, `SAG-2`, `SAG-10`.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-2`, `D-3`, `D-7`, `D-8`, `D-12`, `D-13`,
-  `D-14`, `D-15`, `D-17`.
+  `D-14`, `D-15`, `D-17`, `D-20`.
 - **Acceptance signals:** A live worker reattaches; a landed result reconciles;
   an indeterminate mutation stops instead of rerunning; guidance can resume
   with the prior provider session or a fresh bounded brief; concurrent target
   drift is reclassified rather than overwritten.
 - **Out of scope:** Service installation and no-TUI progression, multi-target
   scheduling, and UI.
-- **Open questions:** `Q-9`, `Q-11`.
+- **Open questions:** `Q-12`.
 
 ### SAG-9. Keep active missions advancing without the dashboard
 
@@ -1134,7 +1196,7 @@ original work.
 - **Out of scope:** Multi-target scheduling policy, console rendering,
   automatic post-crash/reboot mission resume, and provider-native internal
   subagent presentation.
-- **Open questions:** `None`.
+- **Open questions:** `Q-12`.
 
 ### SAG-4. Add the persistent console and mission navigation
 
@@ -1156,7 +1218,7 @@ original work.
   recovery; direct user steering is recorded; no duplicate worker launches.
 - **Out of scope:** Broad selectors, natural-language planning, and automatic
   remediation.
-- **Open questions:** `Q-6`, `Q-11`.
+- **Open questions:** `Q-6`, `Q-12`.
 
 ### SAG-5. Schedule explicit and selector-based batches
 
@@ -1171,7 +1233,7 @@ original work.
   canonical queue/service authority.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-3`, `D-5`, `D-6`, `D-7`, `D-8`, `D-10`,
-  `D-13`.
+  `D-13`, `D-19`, `D-20`.
 - **Acceptance signals:** Explicit targets are never lost or reordered;
   stop-on-changes dispatches nothing past its barrier; parallel failure stops
   new work without killing live siblings; `all` follows the selected finite or
@@ -1179,7 +1241,7 @@ original work.
   against its current state before any effect.
 - **Out of scope:** Planner-generated plans and automatic recommendation
   application.
-- **Open questions:** `Q-5`, `Q-9`.
+- **Open questions:** `Q-13`.
 
 ### SAG-6. Add bounded natural-language planning
 
@@ -1200,7 +1262,7 @@ original work.
   alter policy; planner outage leaves direct commands and history usable.
 - **Out of scope:** Autonomous general project actions beyond the first
   registry; direct trusted-user steering remains allowed by D-17.
-- **Open questions:** `Q-11`.
+- **Open questions:** `None`.
 
 ### SAG-7. Add opt-in recommendation application and rereview loops
 
@@ -1237,10 +1299,10 @@ original work.
 - **Depends on:** every implemented slice; documentation for a deferred slice
   remains in this design rather than claiming shipped behavior.
 - **Ordering:** `critical path` for epic completion.
-- **Relevant decisions:** `D-1` through `D-18`.
+- **Relevant decisions:** `D-1` through `D-20`.
 - **Acceptance signals:** Documented commands and paths match tested behavior;
   every executable and durable record has an authority/ownership entry; users
   can distinguish pause, barrier, failure, unknown outcome, and recovery.
 - **Out of scope:** Tracker drafting and implementation of deferred choices.
-- **Open questions:** All questions affecting implemented behavior must be
-  resolved or explicitly deferred before this slice completes.
+- **Open questions:** `Q-14`; all questions affecting implemented behavior
+  must be resolved or explicitly deferred before this slice completes.
