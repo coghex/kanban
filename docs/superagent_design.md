@@ -104,14 +104,15 @@ concrete precondition
   as a barrier.
 - The persistent issue-approval arc is partly landed: issues #320, #349, #351,
   and #352 are closed and their backend, controller, installer, and Haskell
-  lifecycle surfaces are on the current branch. Its sidebar control (#421) and
-  operating documentation (#425) remain open as of 2026-08-21. The superagent
-  console should consume that authority rather than create a competing
-  approve-all implementation.
-- A tracker search on 2026-08-21 found no existing issue or epic whose scope is
-  a durable general agent console or mission orchestrator. Epic #318 overlaps
-  only the ordered issue-approval command and is a dependency/integration
-  point, not a duplicate of this arc.
+  lifecycle surfaces are on the current branch. Its sidebar control (#421)
+  closed on 2026-08-21 and now owns lowercase `a`; operating documentation
+  (#425) remains open. The superagent console should consume that authority
+  rather than create a competing approve-all implementation.
+- A repository-scoped tracker search was repeated for readiness on 2026-08-21
+  and found no existing issue or epic whose scope is a durable general agent
+  console or mission orchestrator. Epic #318 overlaps only the ordered
+  issue-approval command and is a dependency/integration point, not a duplicate
+  of this arc.
 - `docs/superagent_design.md` is not currently named by the publication table in
   `docs/agent-workflow-contract.md` section 7. Until a later contract change
   classifies it, the repository's fail-closed rule treats it as pr-atomic even
@@ -768,9 +769,11 @@ The overlay should have three stable regions at supported terminal sizes:
 - one input line that clearly says whether it is sending guidance, accepting a
   plan, or starting a new command.
 
-The exact hotkey is deliberately unsettled until the key table and the pending
-approval-service control have landed. The help overlay and authoritative key
-contract must be updated with whichever key is chosen.
+The approval-service control has landed and the complete `Kanban.UI.Keys` table
+was re-audited on 2026-08-21. Lowercase `a` now controls approvals, lowercase
+`m` controls merge, and uppercase `M` is unclaimed. Q-6 makes the final product
+name/key choice. The help overlay and authoritative key contract must be updated
+with whichever key is chosen.
 
 The board and console always retain a durable attention indicator. In addition,
 an operator may opt one repository into desktop notifications. One notification
@@ -1168,9 +1171,12 @@ default, with configuration and stricter dependency/authority/provider limits.
 
 ### Q-6. Which key and product name should the console use?
 
-Choose after the pending approval-service UI lands and the complete key table
-can be audited. “Superagent” is evocative; “Operator,” “Mission Control,” or
-“Steward” may communicate bounded orchestration more accurately in the UI.
+The approval-service UI has landed and the complete key table is now audited.
+Uppercase `M` is available while lowercase `m` remains merge. The recommended
+contract is **Mission Control** opened with uppercase `M`: it describes the
+durable orchestration surface without implying one immortal model and gives the
+binding a direct mnemonic. **Agent Console** on uppercase `C` and **Operator**
+on uppercase `O` remain viable alternatives.
 
 ### Q-7. Which nested agents must be separately reattachable?
 
@@ -1474,8 +1480,8 @@ unless their typed contract exposes an override.
   archive/delete controls, notification opt-in/error state, board-action reuse,
   help/key contract, responsive rendering, and golden/event tests.
 - **Phase:** 6 — operator surface.
-- **Depends on:** `SAG-9`; land after the pending approval-service control
-  (#421) or re-audit the whole key/layout surface against it.
+- **Depends on:** `SAG-9`; issue #421 is closed and the complete key/layout
+  surface was re-audited on 2026-08-21.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-1`, `D-4`, `D-9`, `D-12`, `D-15`, `D-17`,
   `D-18`, `D-21`, `D-23`, `D-24`.
