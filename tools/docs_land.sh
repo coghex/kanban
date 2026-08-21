@@ -19,8 +19,8 @@
 # origin/master so no unselected committed work can ride along; gates every
 # path against docs/agent-workflow-contract.md §7 as published on
 # origin/master (via tools/docs_land_paths.py beside this script); warns
-# BEFORE doing anything when a dirty or untracked file — ignored included —
-# that you are NOT landing also changed upstream; judges success by rev-list
+# BEFORE doing anything when an unselected file collides with an upstream
+# change — untracked, ignored, or dirty and unequal; judges success by rev-list
 # reachability, never by push output; and fast-forwards the primary checkout
 # only when it is clean and no untracked or ignored file occupies a path the
 # update would touch.
@@ -300,19 +300,98 @@ path_action() {
   fi
 }
 
+# The Git mode recorded at EXACTLY path $1 by the NUL-delimited `ls-tree`
+# or `ls-files -s` listing in file $2 — both put the mode first — or
+# nothing when the listing holds no entry there.
+#
+# Exact-path matching for the same reason tracked_exactly needs it: a bare
+# pathspec probe also matches entries BENEATH a directory. upstream_mode
+# above is the loose sibling and stays that way; it only ever sees a
+# SELECTED path the gate already validated, while this one is asked about
+# arbitrary upstream-changed paths whose names may carry glob metacharacters.
+entry_mode() {
+  while IFS= read -r -d '' _rec; do
+    case "$_rec" in
+      *"$_TAB$1") printf '%s\n' "${_rec%% *}"; return 0 ;;
+    esac
+  done < "$2"
+  return 1
+}
+
+# Whether the dirty tracked path $1 already holds exactly what the
+# reconciliation would check out, so the replay can neither conflict on it
+# nor lose an edit.
+#
+# `git rebase --autostash` stashes the dirty state and pops it WITHOUT
+# --index, so only the WORKING-TREE side of the stash survives. When that
+# side already equals origin/master's entry, both sides of the replay merge
+# carry the same thing and the merge resolves to it either way.
+#
+# "Equals" is blob AND MODE, for all three of upstream, the working tree,
+# and any staged entry. Content alone is not enough: an index entry can
+# hold upstream's blob under a different mode — `git update-index --chmod`
+# does exactly that without touching the file — and the pop, having no
+# --index, collapses that staged executable bit away silently. Requiring
+# all three modes to agree makes the merge result unambiguous and leaves
+# the index entry equal to it, so nothing is discarded. A staged entry that
+# differs in either respect keeps the path at risk however the working tree
+# looks.
+#
+# Fail-closed everywhere else, because a match has to be against a real
+# upstream file: an upstream deletion leaves nothing to equal, and locally
+# only a regular file has the bytes a checkout would compare — git
+# hash-object FOLLOWS a symlink, so a link onto a copy of upstream's content
+# hashes equal while what git tracks there is a target string that does not.
+# The `cat-file -t` type check is deliberately explicit rather than left to
+# the sha comparison: it says outright that a file-to-directory transition
+# offers no blob to match, instead of relying on a tree's object name never
+# colliding with a blob's.
+#
+# --no-filters: raw working-tree bytes, never a filtered hash. A clean
+# filter or an end-of-line conversion would report a file differing only in
+# trailing whitespace or CRLF/LF as a match, which it is not.
+matches_upstream_blob() {
+  _upstream="$(git rev-parse --verify --quiet "origin/master:$1")" || return 1
+  [ "$(git cat-file -t "$_upstream" 2>/dev/null)" = blob ] || return 1
+  GIT_LITERAL_PATHSPECS=1 git ls-tree -z origin/master -- "$1" \
+    > "$TMP_DIR/upstream-entry"
+  _upstream_mode="$(entry_mode "$1" "$TMP_DIR/upstream-entry")" || return 1
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  [ "$(git hash-object --no-filters -- "$1" 2>/dev/null)" = "$_upstream" ] || return 1
+  [ "$(path_mode "$1")" = "$_upstream_mode" ] || return 1
+  if ! GIT_LITERAL_PATHSPECS=1 git diff --cached --quiet --no-renames -- "$1"; then
+    _staged="$(git rev-parse --verify --quiet ":0:$1")" || return 1
+    [ "$_staged" = "$_upstream" ] || return 1
+    GIT_LITERAL_PATHSPECS=1 git ls-files -s -z -- "$1" > "$TMP_DIR/index-entry"
+    _staged_mode="$(entry_mode "$1" "$TMP_DIR/index-entry")" || return 1
+    [ "$_staged_mode" = "$_upstream_mode" ] || return 1
+  fi
+  return 0
+}
+
 # --- Pre-flight: predict a reconciliation conflict before touching anything -
 # Files that are dirty or untracked here, NOT being landed, and ALSO changed
-# on master since our merge base are exactly the ones the reconciliation
-# rebase stumbles on: a tracked dirty file is autostashed and can conflict on
+# on master since our merge base are the ones the reconciliation rebase
+# stumbles on: a tracked dirty file is autostashed and can conflict on
 # replay, an untracked file that master newly adds is never stashed at all so
 # the rebase's checkout refuses it outright, and an untracked file that is
-# also IGNORED is worse — checkout silently overwrites it. All three are
-# detected here, before anything is published, by walking the (small)
-# upstream-changed set and asking about each path's local state — presence on
-# disk without an index entry covers untracked and ignored alike, which an
-# --exclude-standard listing would not. Written for bash 3.2 (macOS
-# /bin/bash): no mapfile, no bare expansion of a possibly-empty array under
-# `set -u`.
+# also IGNORED is worse — checkout silently overwrites it.
+#
+# The bare intersection overstates the TRACKED hazard, though: a dirty
+# tracked file that already holds origin/master's exact blob and mode is
+# what the replay produces anyway, and blocking on it refuses a landing
+# over a file holding nothing. matches_upstream_blob narrows that arm to a
+# content-and-mode comparison and lets those through. The untracked and ignored arms are
+# unnarrowed on purpose — checkout refuses an untracked occupant and
+# silently overwrites an ignored one without ever comparing content, so
+# byte-equality buys them nothing.
+#
+# It is all detected here, before anything is published, by walking the
+# (small) upstream-changed set and asking about each path's local state —
+# presence on disk without an index entry covers untracked and ignored
+# alike, which an --exclude-standard listing would not. Written for bash 3.2
+# (macOS /bin/bash): no mapfile, no bare expansion of a possibly-empty array
+# under `set -u`.
 : > "$TMP_DIR/risk"
 while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
@@ -321,7 +400,7 @@ while IFS= read -r -d '' f; do
   [ "$landing" = 1 ] && continue
   at_risk=0
   OCCUPANT="$f"
-  if in_nul_list "$f" "$TMP_DIR/dirty"; then
+  if in_nul_list "$f" "$TMP_DIR/dirty" && ! matches_upstream_blob "$f"; then
     at_risk=1
   elif OCCUPANT="$(occupied_untracked "$f" "$DOCS_WT" "$TMP_DIR/dirty")"; then
     # occupied_untracked rather than a bare -e test: a dangling symlink

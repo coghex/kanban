@@ -10,10 +10,10 @@ import Kanban.Review
     selectCanonicalIssueReviewerAt,
     resolveCanonicalIssueReviewer
   )
-import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot, withoutEnvironmentValue)
+import Spec.Support.Env (withManagedRecordHome, withTemporaryCacheRoot)
 import Spec.Support.Expect (shouldMention, shouldNotMention)
 import System.Directory (createDirectoryIfMissing, createFileLink)
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import Test.Hspec
 
 spec :: Spec
@@ -163,18 +163,23 @@ spec = do
         failureFor outcome `shouldNotMention` Data.Text.pack installed
 
     -- The environment entry point for the no-override path, kept hermetic by
-    -- redirecting HOME: it must reach the installer's record rather than the
-    -- pre-migration ~/work launcher the vendoring migration removed.
+    -- redirecting HOME and clearing $XDG_DATA_HOME: it must reach the
+    -- installer's record rather than the pre-migration ~/work launcher the
+    -- vendoring migration removed. The record seeded under `~/Library` is the
+    -- only occupied location, so this is what macOS and Linux both answer;
+    -- an empty host's platform-dependent answer is "Spec.ManagedPaths"'s.
     it "consults the installer's record, not ~/work, when no override is set" $
       withTemporaryCacheRoot $ \root ->
-        withEnvironmentValue "HOME" root $
-          withoutEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" $ do
-            recordPath <- issueReviewerRecordPath
-            recordPath `shouldBe` root </> "Library/Application Support/kanban/issue-review/config.json"
-            outcome <- resolveCanonicalIssueReviewer
-            failureFor outcome `shouldMention` "was not found at"
-            failureFor outcome `shouldMention` Data.Text.pack recordPath
-            failureFor outcome `shouldNotMention` "/work/approve-issues.py"
+        withManagedRecordHome root $ do
+          let recordPath = root </> "Library/Application Support/kanban/issue-review/config.json"
+          createDirectoryIfMissing True (takeDirectory recordPath)
+          ByteString.writeFile recordPath "{}"
+          resolved <- issueReviewerRecordPath
+          resolved `shouldBe` recordPath
+          outcome <- resolveCanonicalIssueReviewer
+          failureFor outcome `shouldMention` "was not found at"
+          failureFor outcome `shouldMention` Data.Text.pack recordPath
+          failureFor outcome `shouldNotMention` "/work/approve-issues.py"
 
     it "selects without asking whether the backend is there, so preflight can classify it" $
       withTemporaryCacheRoot $ \root -> do

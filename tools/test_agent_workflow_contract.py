@@ -55,8 +55,16 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 # getHomeDirectory. The review surface is spread over three modules since
 # issue #164 split Kanban.Review: the app-server spawn stayed in Review.hs,
 # the gh/claude tool runners moved to Review/Tools.hs, and the canonical
-# backend's python3 invocation and discovery record moved to
-# Review/Canonical.hs.
+# backend's python3 invocation moved to Review/Canonical.hs.
+#
+# Issue #444 moved both managed discovery records' locations out of
+# Drainer.hs and Review/Canonical.hs into Kanban.ManagedPaths, which is the
+# only module under src/ that spells either of them now. It is listed for
+# the home-relative reconciliation below rather than for an executable it
+# invokes -- it invokes none -- and a rewrite that took it back off this
+# list would leave four `personal-path` tokens scanned in no file at all,
+# which is what test_managed_record_locations_reach_the_home_path_scan
+# refuses.
 SURFACE_FILES = [
     "src/Kanban/Solve.hs",
     "src/Kanban/PullRequestFlow.hs",
@@ -69,8 +77,22 @@ SURFACE_FILES = [
     "src/Kanban/GitHub/Run.hs",
     "src/Kanban/Repository.hs",
     "src/Kanban/Drainer.hs",
+    "src/Kanban/ManagedPaths.hs",
     "src/Kanban/Process.hs",
 ]
+
+# The four locations Kanban.ManagedPaths spells, and the manifest rows they
+# are the tokens of. Stated here so the control below asserts the exact set
+# rather than merely a non-empty one: a scan that recovered three of them,
+# or that recovered them from some other file, would pass an "each is
+# documented" check while leaving one spelling reconciled against nothing.
+MANAGED_RECORD_SURFACE_FILE = "src/Kanban/ManagedPaths.hs"
+MANAGED_RECORD_TOKENS = {
+    "/Library/Application Support/kanban/issue-review/config.json",
+    "/Library/Application Support/kanban/pr-drainer/config.json",
+    "/.local/share/kanban/issue-review/config.json",
+    "/.local/share/kanban/pr-drainer/config.json",
+}
 
 # The issue approval service's own owning sources
 # (docs/agent-workflow-contract.md §2.8), scanned for the home-relative paths
@@ -1532,6 +1554,42 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertIn("could not be parsed", str(raised.exception))
         self.assertIn("tools/approve_issues_service.py", str(raised.exception))
 
+    def test_managed_record_locations_reach_the_home_path_scan(self):
+        # Requirement 8 of issue #444: the reconciliation above has to see
+        # the spellings that moved into Kanban.ManagedPaths, and an
+        # extractor that recovers nothing from a file passes every loop it
+        # feeds. Both halves are pinned here -- that the file is scanned at
+        # all, and that the scan recovers exactly the four record locations
+        # -- so a later rewrite that changes the idiom, or that drops the
+        # file from SURFACE_FILES, fails here instead of quietly reducing
+        # the home-relative check to a loop over an empty set. Removing
+        # MANAGED_RECORD_SURFACE_FILE from SURFACE_FILES fails the first
+        # assertion; rewriting the resolver to build its paths from a
+        # binding HOME_PATH_EXPR_RE does not recognise fails the second.
+        self.assertIn(
+            MANAGED_RECORD_SURFACE_FILE,
+            SURFACE_FILES,
+            f"{MANAGED_RECORD_SURFACE_FILE} carries both managed records' "
+            "locations and must be scanned for home-relative paths",
+        )
+        content = (REPO_ROOT / MANAGED_RECORD_SURFACE_FILE).read_text(encoding="utf-8")
+        self.assertEqual(
+            home_relative_segments(content),
+            MANAGED_RECORD_TOKENS,
+            f"the home-relative extractor no longer recovers exactly the four "
+            f"managed record locations from {MANAGED_RECORD_SURFACE_FILE}",
+        )
+        personal_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "personal-path"
+        }
+        for token in MANAGED_RECORD_TOKENS:
+            self.assertIn(
+                token,
+                personal_tokens,
+                f"{token} is spelled in {MANAGED_RECORD_SURFACE_FILE} but has no "
+                "personal-path row in docs/agent-workflow-contract.md",
+            )
+
     def test_every_drafting_asset_bash_command_is_documented(self):
         # Requirement 8 of issue #118, extended by issue #240: the check must
         # scan all nine vendored drafting, issue-review, and issue-rereview
@@ -2090,7 +2148,11 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # `tools/kanban_config.py` rather than the controller: that is the one
         # module installed beside the controller, so it is the only one both
         # the installer and the installed copy can import, and therefore the
-        # only place the location is written down.
+        # only place the location is written down. The reader is
+        # src/Kanban/ManagedPaths.hs rather than src/Kanban/Drainer.hs since
+        # issue #444: the dashboard resolves both managed records through one
+        # module of its own, so that is where the Haskell literal is, and the
+        # reader Drainer.hs asks it rather than spelling a location.
         by_id = {row["id"]: row for row in self.manifest}
         self.assertIn("drainer-discovery-record", by_id)
         entry = by_id["drainer-discovery-record"]
@@ -2098,11 +2160,21 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertEqual(entry["owner"], "kanban")
         self.assertEqual(entry["status"], "supported")
         self.assertEqual(
-            entry["files"], ["tools/kanban_config.py", "src/Kanban/Drainer.hs"]
+            entry["files"], ["tools/kanban_config.py", "src/Kanban/ManagedPaths.hs"]
         )
         for relative_path in entry["files"]:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             self.assertIn(entry["token"], content, relative_path)
+        # Both platforms' spellings are that one module's, so the XDG sibling
+        # declares it too: a Linux host discovers the record the board reads
+        # from the same pair of literals the Python side probes.
+        xdg_entry = by_id["drainer-discovery-record-xdg"]
+        self.assertEqual(
+            xdg_entry["files"], ["tools/kanban_config.py", "src/Kanban/ManagedPaths.hs"]
+        )
+        for relative_path in xdg_entry["files"]:
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn(xdg_entry["token"], content, relative_path)
 
     def test_every_managed_drainer_location_declares_both_platforms(self):
         # Issue #358: three locations times two platform conventions. A
@@ -2136,7 +2208,10 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # three languages read it, none of which can see each other's
         # constants. The manifest names every side that spells the path, and
         # the writer is absent on purpose -- it imports the location from
-        # tools/kanban_config.py instead of restating it.
+        # tools/kanban_config.py instead of restating it. Since issue #444 the
+        # Haskell reader is src/Kanban/ManagedPaths.hs, which resolves this
+        # record and the drainer's alike; src/Kanban/Review/Canonical.hs asks
+        # it rather than spelling a location, so the count is unchanged.
         by_id = {row["id"]: row for row in self.manifest}
         self.assertIn("issue-review-discovery-record", by_id)
         entry = by_id["issue-review-discovery-record"]
@@ -2146,7 +2221,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertEqual(
             entry["files"],
             [
-                "src/Kanban/Review/Canonical.hs",
+                "src/Kanban/ManagedPaths.hs",
                 "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
                 "claude-plugin/plugins/kanban/scripts/review_pr.py",
                 "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
@@ -2180,21 +2255,56 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # test above then proves each token still appears in the module that
         # spells it.
         by_id = {row["id"]: row for row in self.manifest}
-        for macos_id, xdg_id, macos_token, xdg_token in (
+        # Each pair is (id, token, declared files). `None` for the files means
+        # the row carries readers beyond its declaring module, whose full list
+        # test_issue_review_discovery_record_grounds_every_reader pins; every
+        # other row here is single-file, which is
+        # tools/test_install_issue_review.py's SingleSourceInstallPathTests
+        # holding the tree to one spelling.
+        for pair in (
             (
-                "approve-issues-backend",
-                "approve-issues-backend-xdg",
-                "/Library/Application Support/kanban/issue-review",
-                "/.local/share/kanban/issue-review",
+                (
+                    "approve-issues-backend",
+                    "/Library/Application Support/kanban/issue-review",
+                    ["tools/kanban_config.py"],
+                ),
+                (
+                    "approve-issues-backend-xdg",
+                    "/.local/share/kanban/issue-review",
+                    ["tools/kanban_config.py"],
+                ),
             ),
             (
-                "issue-review-log-dir",
-                "issue-review-log-dir-xdg",
-                "/Library/Logs/kanban/issue-review",
-                "/.local/state/kanban/issue-review",
+                (
+                    "issue-review-log-dir",
+                    "/Library/Logs/kanban/issue-review",
+                    ["tools/kanban_config.py"],
+                ),
+                (
+                    "issue-review-log-dir-xdg",
+                    "/.local/state/kanban/issue-review",
+                    ["tools/kanban_config.py"],
+                ),
+            ),
+            (
+                # Issue #444 gave the record its XDG sibling. Both spellings
+                # are src/Kanban/ManagedPaths.hs's rather than
+                # tools/kanban_config.py's: that module composes the record
+                # path from the install directory above and a separate file
+                # name, so it carries neither literal whole.
+                (
+                    "issue-review-discovery-record",
+                    "/Library/Application Support/kanban/issue-review/config.json",
+                    None,
+                ),
+                (
+                    "issue-review-discovery-record-xdg",
+                    "/.local/share/kanban/issue-review/config.json",
+                    ["src/Kanban/ManagedPaths.hs"],
+                ),
             ),
         ):
-            for row_id, token in ((macos_id, macos_token), (xdg_id, xdg_token)):
+            for row_id, token, files in pair:
                 with self.subTest(row=row_id):
                     self.assertIn(row_id, by_id)
                     entry = by_id[row_id]
@@ -2203,11 +2313,10 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     self.assertEqual(entry["owner"], "kanban")
                     self.assertEqual(entry["status"], "supported")
                     self.assertEqual(entry["mandatory"], "no")
-                    # One declared file each: the resolver is the only place
-                    # any of these is spelled, which is what
-                    # tools/test_install_issue_review.py's
-                    # SingleSourceInstallPathTests holds the tree to.
-                    self.assertEqual(entry["files"], ["tools/kanban_config.py"])
+                    if files is None:
+                        self.assertEqual(entry["files"][0], "src/Kanban/ManagedPaths.hs")
+                    else:
+                        self.assertEqual(entry["files"], files)
 
 
 if __name__ == "__main__":

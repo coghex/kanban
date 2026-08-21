@@ -711,12 +711,18 @@ class SingleSourceInstallPathTests(unittest.TestCase):
         "Library/Logs/kanban/issue-review",
         ".local/state/kanban/issue-review",
     )
-    DEFAULT_PATH = MANAGED_PATHS[0]
+    # The record's own path is the fixed rendezvous each side is allowed to
+    # name, in either platform's spelling: it is what a consumer that
+    # inherits no environment finds an installation by, so naming it is the
+    # opposite of rebuilding the installer's default. Issue #444 added the
+    # XDG spelling, because the Haskell resolver probes both.
+    RECORD_PATHS = tuple(f"{directory}/config.json" for directory in MANAGED_PATHS[:2])
     CONSUMERS = (
         "tools/approve_issues.py",
         "tools/install_issue_review.py",
         "tools/setup_workflows.py",
         "tools/approve_issues_service.py",
+        "src/Kanban/ManagedPaths.hs",
         "src/Kanban/Review/Canonical.hs",
         "src/Kanban/Preflight.hs",
     )
@@ -727,10 +733,16 @@ class SingleSourceInstallPathTests(unittest.TestCase):
         offenders = []
         for relative_path in self.CONSUMERS:
             content = (self.REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            # The record path contains the install directory as a prefix; it
-            # is the fixed rendezvous each side is allowed to name, not a
-            # reconstruction of the installer's default.
-            without_record = content.replace(self.DEFAULT_PATH + "/config.json", "")
+            # Each record path contains its install directory as a prefix, so
+            # the record spellings come out before the directories are looked
+            # for; what is left is a genuine reconstruction of a managed
+            # location. src/Kanban/ManagedPaths.hs is the one consumer that
+            # spells both records, and this is what holds it to spelling only
+            # those -- a log directory or a bare install directory appearing
+            # there would be a second definition of a Python-owned path.
+            without_record = content
+            for record_path in self.RECORD_PATHS:
+                without_record = without_record.replace(record_path, "")
             offenders.extend(
                 f"{relative_path}: {token}"
                 for token in self.MANAGED_PATHS

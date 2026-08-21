@@ -569,12 +569,13 @@ reimplement the removal, and `--check` remains read-only.
   definition itself — `ProgramArguments` from the plist through
   `/usr/bin/plutil`, `ExecStart` from the unit file read directly — which stays
   authoritative for what the service manager will actually run. Which location
-  that is, is the controller's answer and not yet the dashboard's:
-  `src/Kanban/Drainer.hs` still spells the macOS one itself, so until PATH-3
-  gives it the same resolver a Linux host discovers an XDG-installed drainer
-  from the Python side and not from the board. That window is deliberate and
-  bounded — `docs/managed_paths_design.md` accepts it — rather than a
-  disagreement about where the record is. That entry is a
+  that is, the dashboard answers the same way the controller does:
+  `src/Kanban/ManagedPaths.hs` probes the XDG location and then the
+  `~/Library` one, on both platforms, exactly as `tools/kanban_config.py`
+  does, so a Linux host discovers an XDG-installed drainer from the board and
+  from the Python side alike. `src/Kanban/Drainer.hs` spells neither location:
+  it asks that resolver, which is the one place either is written down on this
+  side of the boundary. That entry is a
   discriminated union: it names the `backend` that wrote it, and carries that
   backend's own `launchd_label`/`plist_path` or `systemd_unit`/`unit_path`.
   An entry naming no backend at all is the shape written before that field
@@ -778,9 +779,10 @@ reimplement the removal, and `--check` remains read-only.
   is `<record-dir>` itself unless an override moved it.
 
   `<record-dir>` and `<log-root>` are this platform's own conventions,
-  resolved for every Python component by `tools/kanban_config.py` — the
-  dashboard's own resolver has not joined them yet, which is the bounded
-  window §4's input contract describes above — and declared as
+  resolved for every Python component by `tools/kanban_config.py` and, for
+  the record the dashboard reads, by that module's Haskell counterpart
+  `src/Kanban/ManagedPaths.hs` — the two agree by construction, each spelling
+  both platforms' locations once — and declared as
   `personal-path` rows in §4: on macOS
   `~/Library/Application Support/kanban/pr-drainer` and
   `~/Library/Logs/kanban/pr-drainer`, and on Linux `$XDG_DATA_HOME` and
@@ -1353,12 +1355,13 @@ approve-issues-backend | personal-path | /Library/Application Support/kanban/iss
 approve-issues-backend-xdg | personal-path | /.local/share/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir | personal-path | /Library/Logs/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir-xdg | personal-path | /.local/state/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
-issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/Review/Canonical.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md | kanban | supported | no
+issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md | kanban | supported | no
+issue-review-discovery-record-xdg | personal-path | /.local/share/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/service_manager.py | kanban | supported | no
-drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/Drainer.hs | kanban | supported | no
-drainer-discovery-record-xdg | personal-path | /.local/share/kanban/pr-drainer/config.json | tools/kanban_config.py | kanban | supported | no
-drainer-install-dir | personal-path | /Library/Application Support/kanban/pr-drainer | tools/kanban_config.py;src/Kanban/Drainer.hs | kanban | supported | no
-drainer-install-dir-xdg | personal-path | /.local/share/kanban/pr-drainer | tools/kanban_config.py | kanban | supported | no
+drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/ManagedPaths.hs | kanban | supported | no
+drainer-discovery-record-xdg | personal-path | /.local/share/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/ManagedPaths.hs | kanban | supported | no
+drainer-install-dir | personal-path | /Library/Application Support/kanban/pr-drainer | tools/kanban_config.py;src/Kanban/ManagedPaths.hs | kanban | supported | no
+drainer-install-dir-xdg | personal-path | /.local/share/kanban/pr-drainer | tools/kanban_config.py;src/Kanban/ManagedPaths.hs | kanban | supported | no
 drainer-log-dir | personal-path | /Library/Logs/kanban/pr-drainer | tools/kanban_config.py | kanban | supported | no
 drainer-log-dir-xdg | personal-path | /.local/state/kanban/pr-drainer | tools/kanban_config.py | kanban | supported | no
 issue-approval-job-label | personal-path | com.coghex.issue-approval | tools/service_manager.py | kanban | supported | no
@@ -1382,18 +1385,30 @@ mktemp-cli | executable | mktemp | tools/docs_land.sh | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
 ```
 
-The four issue-review `personal-path` rows are two locations times two
-platform conventions, not four locations. `approve-issues-backend` and
+The six issue-review `personal-path` rows are three locations times two
+platform conventions, not six locations. `approve-issues-backend` and
 `approve-issues-backend-xdg` are the install directory as macOS and the XDG
 data directory spell it; `issue-review-log-dir` and
 `issue-review-log-dir-xdg` are the log directory as macOS and the XDG state
-directory spell it. A row's `token` is one exact literal, which is the shape
+directory spell it; `issue-review-discovery-record` and
+`issue-review-discovery-record-xdg` are the record inside each install
+directory. A row's `token` is one exact literal, which is the shape
 both reconciliations here rely on, so a location with two spellings needs two
 rows rather than one row naming a choice — and adding a managed path with only
-one platform's row leaves the other's spelling undeclared. All four declare
-`tools/kanban_config.py` because that module is where each is written down,
-once: §5 describes which of them is a fresh install's write default on a given
-host, and which existing installation a probe prefers. The log directory moves
+one platform's row leaves the other's spelling undeclared. The four install
+and log rows declare `tools/kanban_config.py` because that module is where
+each is written down, once: §5 describes which of them is a fresh install's
+write default on a given host, and which existing installation a probe
+prefers. The two record rows declare `src/Kanban/ManagedPaths.hs` instead,
+because that is where the record's own path is spelled whole:
+`tools/kanban_config.py` composes it from the install directory above and a
+separate file name, so it carries neither literal, while the Haskell resolver
+spells each one for the same reason this manifest needs it spelled — a
+reconciliation matches a literal, not an expression. The macOS row also carries the twelve
+packaged assets that still resolve that location themselves; repointing those
+at the probe is a later slice of the portability arc, and until it lands they
+are the reason that row is declared on both platforms while its sibling names
+the resolver alone. The log directory moves
 only with `approve_issues.py --log-dir`, never with `--install-dir` or
 `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, so it needs no relocation rule of the kind
 `drainer-install-dir` documents below.
@@ -1424,11 +1439,14 @@ Every one of the six declares `tools/kanban_config.py`, because that module is
 where each is written down, once, for both platforms — the controller, the
 installer and the drainer all resolve through it rather than spelling a path of
 their own. §5 describes which of them is a fresh install's write default on a
-given host and which existing installation the probe prefers. The two `~/Library`
-rows also declare `src/Kanban/Drainer.hs`, which still spells that location
-itself: the dashboard's own resolver joins this arc separately, so until it does
-a Linux host discovers an XDG-installed drainer from the Python side and not yet
-from the board.
+given host and which existing installation the probe prefers. The four record
+and install-directory rows also declare `src/Kanban/ManagedPaths.hs`, which is
+`tools/kanban_config.py`'s Haskell counterpart: the dashboard resolves the record through
+one resolver of its own rather than spelling a location in each reader, and
+that resolver probes the same two locations in the same order, so a Linux host
+discovers an XDG-installed drainer from the board and from the Python side
+alike. Both platforms' rows name it, because both spellings live there. The two
+log rows do not, and need not: no Haskell consumer reads a drainer log.
 
 `drainer-launchagent-label`'s token is the shared prefix, which is all a single
 token can be: an installed job's identifier appends the repository's own slug
@@ -2041,13 +2059,15 @@ utilities.
   installation the user did not choose is worse than not reviewing; a record
   that will not parse, or whose `backend_path` is wrong-typed or relative,
   is its own failure naming that document. The per-platform defaults above
-  are so far the Python side's alone: `tools/kanban_config.py` and every
-  component that imports it — `tools/approve_issues.py`,
+  are resolved by both native resolution points: `tools/kanban_config.py` and
+  every component that imports it — `tools/approve_issues.py`,
   `tools/install_issue_review.py`, `tools/setup_workflows.py`, and
-  `tools/approve_issues_service.py` — resolve both conventions, while the
-  Haskell resolution point and the vendored plugin assets listed above still
-  name the `~/Library` record location only and therefore do not yet discover
-  an XDG-defaulted install on a non-macOS host. Closing that is the remaining
+  `tools/approve_issues_service.py` — and `src/Kanban/ManagedPaths.hs`, which
+  is where the Haskell side's record location is now resolved and the only
+  place either platform's spelling of it is written down on that side. The
+  vendored plugin assets listed above are the remainder: each still names the
+  `~/Library` record location alone and therefore does not yet discover an
+  XDG-defaulted install on a non-macOS host. Closing that is the remaining
   work of the portability arc (#347), not a licence for a second spelling in
   the meantime.
 - **The issue approval service follows the same policy with one deliberate
@@ -2122,11 +2142,15 @@ runs) parses the manifest in §4 and:
 - fails if the solve, PR-flow, canonical-review, or shared provider/process
   source files (`src/Kanban/Solve.hs`, `PullRequestFlow.hs`, `Review.hs`,
   `Codex.hs`, `Claude.hs`, `GitHub/Run.hs`, `Repository.hs`, `Drainer.hs`,
-  `Process.hs`) invoke a literal external command that has no matching
-  `executable` manifest entry — `GitHub/Run.hs` rather than `GitHub.hs`
+  `ManagedPaths.hs`, `Process.hs`) invoke a literal external command that has
+  no matching `executable` manifest entry — `GitHub/Run.hs` rather than
+  `GitHub.hs`
   because the split in #160 left `Kanban.GitHub` a re-export façade and moved
   the `gh` spawn into `Kanban.GitHub.Run`, which is the only module under
-  `src/Kanban/GitHub/` that resolves or starts an executable;
+  `src/Kanban/GitHub/` that resolves or starts an executable, and
+  `ManagedPaths.hs` because the two managed discovery records' locations moved
+  there out of `Drainer.hs` and `Review/Canonical.hs`, which is what the
+  bullet below has to see them in;
 - fails if any of the tracked Codex plugin's packaged `SKILL.md` files or the
   tracked Claude plugin's packaged `commands/*.md` files invoke a command,
   inside a fenced ```` ```bash ```` block, that has no matching `executable`
