@@ -1,14 +1,14 @@
-# Durable superagent console design
+# Durable Mission Control design
 
 Kanban already launches and recovers individual solve and pull-request workers,
 retains interactive transcripts while it is open, and has canonical review
-backends. This design explores a project-scoped console that feels like one
-long-lived agent while using durable missions, short-lived planner turns, and
-the existing workflow authorities underneath. The operator can give it one
-target, an explicit batch, or a broad instruction, leave, return later, and see
-what ran, what stopped, and what needs a decision.
+backends. This design defines **Mission Control**, a project-scoped console that
+feels like one long-lived agent while using durable missions, short-lived
+planner turns, and the existing workflow authorities underneath. The operator
+can give it one target, an explicit batch, or a broad instruction, leave,
+return later, and see what ran, what stopped, and what needs a decision.
 
-Design state: `exploring`
+Design state: `ready for issue processing`
 
 Status legend: `[ ]` unprocessed · `[#N]` linked to issue N · `[no-issue]`
 reviewed and deliberately not tracked separately · `[deferred]` blocked on a
@@ -16,7 +16,7 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Add a durable project superagent console
+- [ ] EPIC. Add durable Mission Control for project agents
 - [ ] SAG-1. Define the durable mission model and store
 - [ ] SAG-2. Expose a typed workflow action registry
 - [ ] SAG-10. Make issue review and revision runner-owned
@@ -47,7 +47,7 @@ concrete precondition
   relevant retained history; parent death leaves no surviving descendants;
   runner/host failure stays interrupted until the ordinary action hotkey starts
   worktree-aware recovery; direct user steering is recorded and obeyed; and the
-  superagent never bypasses the repository's drainer-only merge authority;
+  Mission Control never bypasses the repository's drainer-only merge authority;
   detachment leaves sessions running while explicit termination stops their
   trees; foreground commands outrank queued autonomous work; and terminal
   history remains available without retaining terminal agent processes.
@@ -106,7 +106,7 @@ concrete precondition
   and #352 are closed and their backend, controller, installer, and Haskell
   lifecycle surfaces are on the current branch. Its sidebar control (#421)
   closed on 2026-08-21 and now owns lowercase `a`; operating documentation
-  (#425) remains open. The superagent console should consume that authority
+  (#425) remains open. Mission Control should consume that authority
   rather than create a competing approve-all implementation.
 - A repository-scoped tracker search was repeated for readiness on 2026-08-21
   and found no existing issue or epic whose scope is a durable general agent
@@ -481,7 +481,7 @@ exploration, audits/findings capture, issue drafting, design-document sessions,
 report processing, backlog work, release operations, or other Kanban-owned
 project workflows. Each addition names its own authority, durable state,
 completion evidence, mutation budget, interruption behavior, and child-session
-contract rather than widening one permanent superagent prompt invisibly.
+contract rather than widening one permanent omnipotent prompt invisibly.
 
 Those capabilities are not first-release requirements. Direct user steering of
 a live agent remains broader than autonomous registry dispatch, so the narrow
@@ -770,10 +770,10 @@ The overlay should have three stable regions at supported terminal sizes:
   plan, or starting a new command.
 
 The approval-service control has landed and the complete `Kanban.UI.Keys` table
-was re-audited on 2026-08-21. Lowercase `a` now controls approvals, lowercase
-`m` controls merge, and uppercase `M` is unclaimed. Q-6 makes the final product
-name/key choice. The help overlay and authoritative key contract must be updated
-with whichever key is chosen.
+was re-audited on 2026-08-21. Lowercase `a` controls approvals, lowercase `m`
+controls merge, and D-30 assigns the previously unclaimed uppercase `M` to
+Mission Control. The help overlay and authoritative key contract must be
+updated with that binding.
 
 The board and console always retain a durable attention indicator. In addition,
 an operator may opt one repository into desktop notifications. One notification
@@ -924,7 +924,7 @@ of truth.
 
 The console orchestrates review, revision, solve, autosolve, PR workflows, and
 the approval service through typed adapters. It does not reproduce their
-prompts or mutations in a general superagent thread.
+prompts or mutations in a general Mission Control planner thread.
 
 ### D-4. A board action reopens mission-owned work
 
@@ -950,7 +950,7 @@ The `approve` verb invokes the appropriate canonical review. It cannot add an
 approval label directly, suppress a changes-requested result, or call an
 indeterminate result successful.
 
-### D-8. The superagent never merges
+### D-8. Mission Control never merges
 
 Approval, solve, autosolve, and remediation all stop before merge. The existing
 PR drainer remains the only component that merges eligible pull requests.
@@ -1142,6 +1142,14 @@ existing provider and opposite-agent routing unless their typed action contract
 explicitly permits an override. Every actual selection is journaled, and model
 prose cannot alter routing authority. This resolves Q-20.
 
+### D-30. The product is Mission Control, opened with uppercase M
+
+The user-facing project console is named **Mission Control** and opens from the
+board with uppercase `M`. Lowercase `m` remains the selected-PR merge action,
+and “manager” is a useful secondary mnemonic for the uppercase binding rather
+than a second product label. This resolves Q-6 and closes the final product
+choice after the complete key-table audit.
+
 ## Open questions
 
 ### Q-1. Must missions keep advancing after Kanban exits?
@@ -1171,12 +1179,9 @@ default, with configuration and stricter dependency/authority/provider limits.
 
 ### Q-6. Which key and product name should the console use?
 
-The approval-service UI has landed and the complete key table is now audited.
-Uppercase `M` is available while lowercase `m` remains merge. The recommended
-contract is **Mission Control** opened with uppercase `M`: it describes the
-durable orchestration surface without implying one immortal model and gives the
-binding a direct mnemonic. **Agent Console** on uppercase `C` and **Operator**
-on uppercase `O` remain viable alternatives.
+Resolved by D-30. The product is **Mission Control**, opened from the board with
+uppercase `M`; lowercase `m` remains merge, and “manager” is also a useful
+mnemonic for the chosen key.
 
 ### Q-7. Which nested agents must be separately reattachable?
 
@@ -1197,7 +1202,7 @@ Resolved by D-20. A proven satisfied target advances as
 advances as `skipped_external`; dependency, goal, conflict, and ambiguity cases
 stop.
 
-### Q-10. May the superagent invent general project work outside the registry?
+### Q-10. May Mission Control invent general project work outside the registry?
 
 Resolved by D-16 and D-17. Autonomous first-release dispatch stays narrow and
 future arcs add testing, exploration, and document workflows. A user may still
@@ -1484,7 +1489,7 @@ unless their typed contract exposes an override.
   surface was re-audited on 2026-08-21.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-1`, `D-4`, `D-9`, `D-12`, `D-15`, `D-17`,
-  `D-18`, `D-21`, `D-23`, `D-24`.
+  `D-18`, `D-21`, `D-23`, `D-24`, `D-30`.
 - **Acceptance signals:** TUI restart restores the same missions and selected
   history; a card opens its mission-owned child; attention opens the exact
   question; `interrupted` is visible and its ordinary action hotkey starts one
@@ -1493,7 +1498,7 @@ unless their typed contract exposes an override.
   duplicate worker launches.
 - **Out of scope:** Broad selectors, natural-language planning, and automatic
   remediation.
-- **Open questions:** `Q-6`.
+- **Open questions:** `None`.
 
 ### SAG-5. Schedule explicit and selector-based batches
 
@@ -1528,7 +1533,7 @@ unless their typed contract exposes an override.
   plan validation, clarification/acceptance flow, policy display, model failure
   fallback, provider/model selection policy, untrusted-input boundaries, and
   fixtures.
-- **Phase:** 8 — superagent reasoning.
+- **Phase:** 8 — Mission Control reasoning.
 - **Depends on:** `SAG-2`, `SAG-4`, `SAG-5`.
 - **Ordering:** `not on the critical path` for deterministic commands, required
   for the full epic experience.
@@ -1576,10 +1581,10 @@ unless their typed contract exposes an override.
 - **Depends on:** every implemented slice; documentation for a deferred slice
   remains in this design rather than claiming shipped behavior.
 - **Ordering:** `critical path` for epic completion.
-- **Relevant decisions:** `D-1` through `D-29`.
+- **Relevant decisions:** `D-1` through `D-30`.
 - **Acceptance signals:** Documented commands and paths match tested behavior;
   every executable and durable record has an authority/ownership entry; users
   can distinguish pause, barrier, failure, unknown outcome, and recovery.
 - **Out of scope:** Tracker drafting and implementation of deferred choices.
-- **Open questions:** `Q-6`; all questions affecting implemented behavior must
-  be resolved or explicitly deferred before this slice completes.
+- **Open questions:** `None`; all questions affecting implemented behavior have
+  been resolved for this design.
