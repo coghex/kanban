@@ -1033,7 +1033,10 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   two services' identifiers, definitions and legacy questions from ever
   colliding: neither can name, load, unload, or acknowledge the other's job,
   and this one reports no machine-wide singleton at all, because its jobs have
-  always been per-repository. `sys.platform` decides nothing here either, so a
+  always been per-repository. `tools/install_issue_approval.py` consults
+  `sys.platform` no more than `tools/install_drainer.py` does — its only
+  platform refusal is the selection's — and within that selection the platform
+  name gates the launchd branch alone and is not sufficient even there, so a
   Linux host with a live `systemctl --user` session installs exactly as a macOS
   host does.
 - **Invocation:** the controller never imports the reviewer. Every pass is a

@@ -1,10 +1,11 @@
 # Issue approval service
 
 The issue approval service walks one repository's open issue backlog in
-ascending number order and runs the canonical issue review on the first issue
-that does not already hold a current approval. It advances at most one issue per
-pass, and it stops at the first issue whose canonical state is
-changes-requested rather than reviewing past it.
+ascending number order and runs the canonical issue review on the lowest-numbered
+issue that does not already hold a current approval — passing over any the
+legacy policy leaves ungated, which under the default `dual` policy is none. It
+advances at most one issue per pass, and it stops at the first issue whose
+canonical state is changes-requested rather than reviewing past it.
 
 The service is optional. Kanban works without it, and installing it starts
 nothing.
@@ -30,8 +31,8 @@ service is for. Point the dashboard and the service at one repository by setting
 
 Both are non-resident per-repository jobs installed by their own installer,
 driven through their own controller, and started and stopped from the sidebar.
-Beyond that they have nothing in common, and the differences are the ones that
-matter when something goes wrong.
+The similarity mostly ends there, and the differences are the ones that matter
+when something goes wrong.
 
 | | Issue approval service | PR drainer |
 | --- | --- | --- |
@@ -61,12 +62,17 @@ Three questions are answered separately here, and conflating them is the usual
 source of confusion on a host that is not macOS.
 
 - **Installation and lifecycle control** — `install`, `start`, `stop`, and
-  `uninstall` — need a service manager. `tools/service_manager.select_backend`
-  probes for one rather than reading a platform name: launchd on a macOS host
-  that has `launchctl`, systemd on a host whose `systemctl --user` reaches a
-  live user manager. A host that is neither is refused, and the refusal names
-  that condition. `sys.platform` decides nothing, so a Linux host with a
-  reachable user session installs exactly as a macOS host does.
+  `uninstall` — need a service manager, and
+  `tools/service_manager.select_backend` is the one place that decides which:
+  launchd on a macOS host that also has `launchctl`, and otherwise systemd on
+  any host whose `systemctl --user` reaches a live user manager. Only the
+  launchd branch consults the platform name at all, and even there it is not
+  sufficient — a macOS host without `launchctl` falls through to the same
+  systemd probe every other host gets. So the refusal a host with neither
+  receives names that condition rather than an operating system, and a Linux
+  host with a reachable user session installs exactly as a macOS host does.
+  `tools/install_issue_approval.py` itself never reads a platform name; its
+  only platform refusal is this selection's.
 - **A foreground `run`** needs no service manager at all, but it does need
   POSIX: an advisory `flock`, a passwd database, `os.killpg`, and a new session
   per backend invocation. A host missing any of them is refused by name, because
@@ -80,7 +86,8 @@ source of confusion on a host that is not macOS.
 What the manager reads differs — a LaunchAgent plist under
 `~/Library/LaunchAgents`, or a user unit under `~/.config/systemd/user`
 (`$XDG_CONFIG_HOME/systemd/user` when that variable names an absolute
-directory) — and everything else in this document is the same on both.
+directory). Where this document spells a `launchctl` command it is macOS's and
+says so; every path and every controller command below reads the same on both.
 
 **The service's own state and logs stay macOS-shaped on every platform.** The
 runtime tree under `~/Library/Application Support/kanban/issue-approval` and the
@@ -258,14 +265,61 @@ Normal control should happen through Kanban. For diagnosis, drive the
 *installed* controller — the copy the job actually runs — rather than the
 checkout's:
 
+Finding it takes the same three steps the controller itself uses, because
+`--install-dir` may have put the links somewhere only the record knows about:
+the environment override, then the directory recorded for this checkout, then
+the default beside the record. Guessing the default would target a path with no
+controller in it on exactly the installations that need diagnosing.
+
 ```console
-APPROVAL="$KANBAN_ISSUE_APPROVAL_INSTALL_DIR"
-[ -n "$APPROVAL" ] || APPROVAL="$HOME/Library/Application Support/kanban/issue-approval"
-CONTROL="$APPROVAL/approve_issues_service.py"
-python3 "$CONTROL" --path /path/to/project --json status
-python3 "$CONTROL" --path /path/to/project --json start
-python3 "$CONTROL" --path /path/to/project --json stop
+PROJECT=/path/to/project
+CONTROL="$(python3 - "$PROJECT" <<'PY'
+import json, os, pwd, sys
+from pathlib import Path
+
+# The record's own location is fixed and passwd-anchored, which is what makes
+# it findable without inheriting anyone's environment.
+record_dir = (
+    Path(pwd.getpwuid(os.getuid()).pw_dir)
+    / "Library" / "Application Support" / "kanban" / "issue-approval"
+)
+override = os.environ.get("KANBAN_ISSUE_APPROVAL_INSTALL_DIR", "").strip()
+install_dir = Path(override).expanduser() if override else None
+if install_dir is None:
+    checkout = os.path.realpath(sys.argv[1])
+    try:
+        document = json.loads((record_dir / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        document = {}
+    for entry in (document.get("repositories") or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        recorded_checkout = entry.get("repository")
+        if not isinstance(recorded_checkout, str):
+            continue
+        if os.path.realpath(recorded_checkout) != checkout:
+            continue
+        recorded_dir = entry.get("install_dir")
+        if isinstance(recorded_dir, str) and recorded_dir:
+            install_dir = Path(recorded_dir)
+        break
+if install_dir is None:
+    install_dir = record_dir
+print(install_dir / "approve_issues_service.py")
+PY
+)"
+python3 "$CONTROL" --path "$PROJECT" --json status
+python3 "$CONTROL" --path "$PROJECT" --json start
+python3 "$CONTROL" --path "$PROJECT" --json stop
 ```
+
+That selects the record entry by the checkout it was installed for, which is
+what you have in hand when you are driving this by `--path`. The controller
+itself selects the same entry by canonical identity instead, and the two agree
+except when you run this from a *different* clone of the same repository: that
+checkout is in no entry, so this falls back to the default. Export
+`KANBAN_ISSUE_APPROVAL_INSTALL_DIR` yourself in that case, or run it from the
+checkout the job was installed for.
 
 Add `--repo OWNER/NAME` to assert which repository you expect; the controller
 resolves the checkout's own remote and refuses any other identity, including
@@ -493,7 +547,10 @@ mean exactly that.
 - Per checkout, in the repository's shared Git directory:
   `.git/kanban_issue_approval_run.lock`, this checkout's own run lock, beside the
   canonical backend's own `.git/approve_issues.lock`, which the controller
-  **reads and never takes**.
+  **probes but never holds**: it tries the same non-blocking exclusive `flock`
+  the backend takes and drops it again immediately, so reading who owns the
+  lock never becomes owning it. The backend takes that one for real, for the
+  length of one issue's review.
 
 Two run locks are taken, not one, because no single location sees both ways a
 second run arrives. The identity lock under `locks/` catches two *clones* of one
@@ -509,12 +566,17 @@ refuses when it disagrees. A linked worktree resolves the primary checkout's
 file, so the pair holds for the worktrees solve and review agents actually work
 in.
 
-The installed job runs with a fixed environment rather than your shell's: `HOME`
-set to the account's passwd home, `PYTHONUNBUFFERED=1`,
-`KANBAN_ISSUE_APPROVAL_INSTALL_DIR` naming its own installation, and a `PATH` of
-`~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`,
-`/usr/sbin`, and `/sbin`. A `gh`, `codex`, or `claude` reachable only from
-somewhere else on your interactive `PATH` is not reachable from the job.
+The installed job runs with a fixed environment rather than your shell's, and
+these are all of it: `HOME` set to the account's passwd home,
+`PYTHONUNBUFFERED=1`, `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` naming its own
+installation, a `PATH` of `~/.local/bin`, `/opt/homebrew/bin`,
+`/usr/local/bin`, `/usr/bin`, `/bin`, `/usr/sbin`, and `/sbin`, and — only when
+the install selected one — `KANBAN_ISSUE_REVIEW_INSTALL_DIR` naming the
+canonical reviewer installation that install verified against. That last one is
+what keeps a start issued from an empty environment running the reviewer the
+job was installed for rather than whatever the fixed record happens to resolve.
+A `gh`, `codex`, or `claude` reachable only from somewhere else on your
+interactive `PATH` is not reachable from the job.
 
 ## Recovery
 
