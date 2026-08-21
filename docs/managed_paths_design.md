@@ -27,8 +27,8 @@ concrete precondition
 - [x] PATH-1. Make one platform-aware resolver own the issue-review paths — [#357]
 - [x] PATH-2. Route the drainer's install, record, runtime, and log paths — [#358]
 - [ ] PATH-3. Resolve the Haskell consumers' managed paths per platform
-- [ ] PATH-4. Repoint the packaged plugin assets at the resolved record
 - [x] PATH-5. Relocate a pre-XDG `~/Library` installation on a non-macOS host — [#367]
+- [ ] PATH-4. Repoint the packaged plugin assets at the resolved record
 
 ## Epic contract
 
