@@ -10,8 +10,9 @@ one place rather than inside shell text:
 * A path must be a literal, repository-relative Markdown file inside the docs
   worktree — no absolute paths, no traversal, no directories, no Git pathspec
   magic, no glob metacharacters (ordinary Git pathspecs glob by default, so a
-  `*` would otherwise expand), and no symlinks other than the verified
-  `AGENTS.md` alias.
+  `*` would otherwise expand), and no symlinks — leaf or ancestor, since a
+  symlinked directory resolves the leaf outside the worktree — other than the
+  verified `AGENTS.md` alias.
 * `AGENTS.md` is a tracked symlink to `CLAUDE.md`, so a selection of the alias
   is canonicalized to `CLAUDE.md` and reported; an alias object that has been
   changed or replaced is refused, because editing through the alias changes
@@ -284,6 +285,21 @@ def canonicalize(worktree: Path, path: str) -> str:
 
 def verify_names_a_document(worktree: Path, path: str) -> None:
     on_disk = worktree / path
+    # A symlinked ancestor would resolve the leaf outside the worktree (or to
+    # a different tracked location), so `is_file()` and the classification
+    # would both be judging a path the landing does not actually name —
+    # publishing external content under a docs path. Refused component by
+    # component; the root AGENTS.md alias is a leaf, never an ancestor, so it
+    # needs no exemption here.
+    ancestor = worktree
+    for part in PurePosixPath(path).parts[:-1]:
+        ancestor = ancestor / part
+        if ancestor.is_symlink():
+            raise Refusal(
+                f"{path}: ancestor {ancestor.relative_to(worktree)} is a "
+                "symlink, so the named path can escape the docs worktree; "
+                "symlinked ancestors are refused"
+            )
     if on_disk.is_dir():
         raise Refusal(f"{path}: names a directory, not a document")
     if on_disk.is_symlink():

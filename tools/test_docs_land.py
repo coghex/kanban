@@ -542,6 +542,28 @@ class ClassificationGateTests(DocsLandCase):
         self.assertIn("changed or replaced", done.stderr)
         self.assertEqual(sb.head("origin/master"), before["upstream"])
 
+    def test_a_symlinked_ancestor_cannot_smuggle_an_external_file(self):
+        # An untracked directory symlink under a classified directory row
+        # resolves the leaf outside the worktree: the file exists, the leaf
+        # is not itself a symlink, and the directory row matches — so without
+        # the ancestor walk the script would hash and publish the external
+        # file under a docs path.
+        sb = self.sb
+        outside = sb.root / "outside"
+        outside.mkdir()
+        (outside / "note.md").write_text("external content\n", encoding="utf-8")
+        os.symlink(outside, sb.docs / "docs" / "coordination" / "escape")
+        before = sb.snapshot()
+
+        done = sb.run_script(
+            "-m", "Land note", "docs/coordination/escape/note.md")
+        self.assertEqual(done.returncode, 6, done.stdout)
+        self.assertIn("symlink", done.stderr)
+        self.assertIn("docs/coordination/escape", done.stderr)
+        self.assertEqual(sb.snapshot(), before)
+        self.assertNotIn(
+            "docs/coordination/escape/note.md", sb.tracked("origin/master"))
+
     def test_invalid_path_shapes_are_refused(self):
         sb = self.sb
         before = sb.snapshot()
