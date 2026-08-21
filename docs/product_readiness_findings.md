@@ -64,7 +64,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-13. The contract opens with a finished epic's processing ledger — [#428]
 - [x] PROD-14. The contract closes with that epic's decisions and delivery plan — [#429]
 - [ ] PROD-15. Nothing states when an arc's scaffolding leaves the document it was added to — [deferred]: #428 and #429 must land first
-- [ ] PROD-16. A conflicted autostash restore preserves a stash nothing ever reaps
+- [x] PROD-16. A conflicted autostash restore preserves a stash nothing ever reaps — [#431]
 - [ ] PROD-17. Five stale recovery stashes sit on the primary checkout now
 - [ ] PROD-18. The contribution protocol is recorded only in agent-facing instructions
 - [ ] PROD-19. No issue template encodes the tracker's required body shape
@@ -758,7 +758,7 @@ recovery path deliberately preserves got no equivalent treatment, so they
 accumulate. One finding is the missing reaper; the other is the accumulation
 already present.
 
-### PROD-16. A conflicted autostash restore preserves a stash nothing ever reaps
+### [#431] PROD-16. A conflicted autostash restore preserves a stash nothing ever reaps
 
 **Verification:** Verified as a real gap with a correct premise — the
 preservation is deliberate and should stay; what is missing is any path that
