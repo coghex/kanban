@@ -681,6 +681,31 @@ class InventoryTests(DocsLandCase):
         # A clean, eligible, unmodified document still appears.
         self.assertIn("clean", rows["docs/del.md"])
         self.assertIn("same", rows["docs/del.md"])
+        # The intact alias is landable, reported under its canonical name.
+        self.assertIn("yes (as CLAUDE.md)", rows["AGENTS.md"])
+
+    def test_inventory_applies_the_same_validation_as_the_gate(self):
+        # A replaced alias object and an untracked symlink both pass
+        # classification alone; the gate refuses them, so an inventory that
+        # judged classification alone would advertise them as landable and
+        # mislead the no-argument workflow's approved selection.
+        sb = self.sb
+        (sb.docs / "AGENTS.md").unlink()
+        sb.write(sb.docs, "AGENTS.md", "no longer a symlink\n")
+        os.symlink(
+            "README.md", sb.docs / "docs" / "coordination" / "alias-note.md")
+
+        done = sb.run_script("-l")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        rows = {
+            line.split(" | ")[0]: line
+            for line in done.stdout.splitlines()
+            if " | " in line
+        }
+        self.assertIn("no (", rows["AGENTS.md"])
+        self.assertIn("changed or replaced", rows["AGENTS.md"])
+        self.assertIn("no (", rows["docs/coordination/alias-note.md"])
+        self.assertIn("symlink", rows["docs/coordination/alias-note.md"])
 
 
 class WorktreeResolutionTests(DocsLandCase):

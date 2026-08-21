@@ -282,17 +282,27 @@ def verify_alias(worktree: Path) -> None:
         )
 
 
-def canonicalize(worktree: Path, path: str) -> str:
-    """`path` with the AGENTS.md alias resolved to CLAUDE.md, reported."""
-    if path != ROOT_CONTRACT_ALIAS:
-        return path
-    verify_alias(worktree)
-    print(
-        f"note: {ROOT_CONTRACT_ALIAS} is the {ROOT_CONTRACT_CANONICAL} alias; "
-        f"landing {ROOT_CONTRACT_CANONICAL}",
-        file=sys.stderr,
-    )
-    return ROOT_CONTRACT_CANONICAL
+def assess(
+    worktree: Path, rows: dict[str, dict], argument: str
+) -> tuple[str | None, str | None]:
+    """`(canonical path, refusal)` — exactly one of the two is set.
+
+    The one landability decision, shared by `--gate` and `--inventory` so the
+    inventory can never advertise a path the gate would then refuse: shape
+    validation, alias canonicalization, symlink and existence checks, and §7
+    classification, in that order."""
+    try:
+        path = validate_shape(argument)
+        if path == ROOT_CONTRACT_ALIAS:
+            verify_alias(worktree)
+            path = ROOT_CONTRACT_CANONICAL
+        verify_names_a_document(worktree, path)
+    except Refusal as refusal:
+        return None, str(refusal)
+    refusal_text = classification_refusal(rows, path)
+    if refusal_text is not None:
+        return None, refusal_text
+    return path, None
 
 
 def verify_names_a_document(worktree: Path, path: str) -> None:
@@ -346,10 +356,10 @@ def classification_refusal(rows: dict[str, dict], path: str) -> str | None:
             "repaired"
         )
     row = rows[matched[0]]
-    if path in (ROOT_CONTRACT_CANONICAL, ROOT_CONTRACT_ALIAS):
+    if path == ROOT_CONTRACT_CANONICAL:
         # The root instruction documents are the sole exception to the gated
-        # reasons; the alias is listed here only for the inventory, since the
-        # gate canonicalizes it to CLAUDE.md before classification.
+        # reasons. assess() canonicalizes the AGENTS.md alias to CLAUDE.md
+        # before classification, so exempting the canonical name covers both.
         return None
     gating = [reason for reason in row["reasons"] if reason in GATING_REASONS]
     if gating:
@@ -371,16 +381,16 @@ def gate(worktree: Path, arguments: list[str]) -> int:
     canonical: list[str] = []
     refusals: list[str] = []
     for argument in arguments:
-        try:
-            path = canonicalize(worktree, validate_shape(argument))
-            verify_names_a_document(worktree, path)
-        except Refusal as refusal:
-            refusals.append(str(refusal))
-            continue
-        refusal_text = classification_refusal(rows, path)
+        path, refusal_text = assess(worktree, rows, argument)
         if refusal_text is not None:
             refusals.append(refusal_text)
-        elif path not in canonical:
+            continue
+        if path != argument:
+            print(
+                f"note: {argument} is the {path} alias; landing {path}",
+                file=sys.stderr,
+            )
+        if path not in canonical:
             canonical.append(path)
     if refusals:
         for refusal in refusals:
@@ -416,6 +426,8 @@ def describe_state(code: str | None) -> str:
     described = []
     if index == "D" or work == "D":
         described.append("deleted")
+    if index == "T" or work == "T":
+        described.append("typechange")
     if index not in (" ", "?", "D"):
         described.append("staged")
     if work == "M":
@@ -443,8 +455,13 @@ def inventory(worktree: Path) -> int:
         matched = matching_rows(rows, path)
         row_name = matched[0] if len(matched) == 1 else ("none" if not matched else "multiple")
         lane = rows[matched[0]]["klass"] if len(matched) == 1 else "-"
-        refusal_text = classification_refusal(rows, path)
-        landable = "yes" if refusal_text is None else f"no ({refusal_text})"
+        canonical_path, refusal_text = assess(worktree, rows, path)
+        if refusal_text is not None:
+            landable = f"no ({refusal_text})"
+        elif canonical_path != path:
+            landable = f"yes (as {canonical_path})"
+        else:
+            landable = "yes"
         print(
             f"{path} | {is_tracked} | {state} | {differs} | {row_name} | "
             f"{lane} | {landable}"
