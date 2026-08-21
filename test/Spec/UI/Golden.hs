@@ -53,6 +53,7 @@ import Kanban.Filter
   )
 import Kanban.Fixture (fixtureBoard, fixtureCompletedHistory, fixtureSnapshot, fixtureUsage)
 import Kanban.GitHub (HistoryTraversal, RefreshCoordinator, newHistoryTraversal)
+import Kanban.Models (defaultRoster)
 import Kanban.Settings (defaultSettings)
 import Kanban.UI (drawApplication)
 import Kanban.UI.Board
@@ -826,6 +827,9 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       appSearch = Nothing,
       appSidebarVisible = True,
       appSettings = defaultSettings,
+      -- The pure compiled value, not a load: a golden frame must not read
+      -- the developer's real XDG configuration.
+      appModelRoster = Right defaultRoster,
       appLogRoot = "/fixture/logs",
       appProcessSelection = ProcessSelection Nothing 0,
       appIncidentSelection = IncidentSelection Nothing 0,

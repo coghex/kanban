@@ -62,6 +62,7 @@ import Kanban.Process (killManagedProcess, managedProcessStopsWithDashboard)
 import Kanban.Review
   ( stopReviewClient
   )
+import Kanban.Models (loadModelRoster)
 import Kanban.Settings
   ( loadSettings
     )
@@ -92,6 +93,10 @@ runDashboard options config repository = do
   approvalController <- discoverApprovalController repository
   approvalEpoch <- newIORef 0
   (initialSettings, settingsNotice) <- loadSettings
+  -- Loaded once beside the resolved configuration and retained as-is:
+  -- nothing reads it yet, and a Left must survive to the slices that
+  -- refuse agent spawns with it (D-3).
+  modelRoster <- loadModelRoster
   logRoot <- transcriptRoot repository
   eventChannel <- newBChan 256
   historyTraversal <- newHistoryTraversal
@@ -130,6 +135,7 @@ runDashboard options config repository = do
             appSearch = Nothing,
             appSidebarVisible = True,
             appSettings = initialSettings,
+            appModelRoster = modelRoster,
             appLogRoot = logRoot,
             appProcessSelection = ProcessSelection Nothing 0,
             appIncidentSelection = IncidentSelection Nothing 0,

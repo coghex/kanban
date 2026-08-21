@@ -1,0 +1,92 @@
+# Kanban model roster. Copy to ~/.config/kanban/models.toml (or under
+# $XDG_CONFIG_HOME) and edit; with no file present the compiled defaults —
+# exactly this file — apply. A present file is a complete roster, not a
+# patch: every loaded provider a role applies to must be assigned here.
+# A present file that does not validate refuses agent spawns until it is
+# repaired; it is never silently replaced by the defaults.
+
+schema_version = 1
+
+# The loaded provider set — and therefore the operating mode.
+# Two entries: dual. One: single-agent. Empty: no-agent, board only.
+# Only this list changes what is loaded; editing a [providers.X] table
+# never does.
+agents = ["codex", "claude"]
+
+[providers.codex]
+models = ["gpt-5.4", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol"]
+efforts = ["minimal", "low", "medium", "high", "xhigh"]
+
+[providers.claude]
+models = ["claude-sonnet-5", "claude-opus-5", "claude-fable-5"]
+efforts = ["low", "medium", "high", "xhigh"]
+
+# One table per (role, provider) pair. issue_revise carries no codex table:
+# the role is Claude-only by construction — a Codex-only install revises
+# inside the review thread itself — and the roster refuses an assignment
+# for a provider a role cannot run on.
+
+[roles.solve.codex]
+model = "gpt-5.4"
+effort = "high"
+display = "gpt-5.4 high"
+
+[roles.solve.claude]
+model = "claude-sonnet-5"
+effort = "high"
+display = "Sonnet 5 high"
+
+[roles.pr_review.codex]
+model = "gpt-5.6-terra"
+effort = "xhigh"
+display = "GPT-5.6-Terra xhigh"
+
+[roles.pr_review.claude]
+model = "claude-opus-5"
+effort = "xhigh"
+display = "Opus 5 xhigh"
+
+[roles.pr_revise.codex]
+model = "gpt-5.4"
+effort = "high"
+display = "gpt-5.4 high"
+
+[roles.pr_revise.claude]
+model = "claude-sonnet-5"
+effort = "xhigh"
+display = "Sonnet 5 xhigh"
+
+[roles.issue_review.codex]
+model = "gpt-5.4"
+effort = "high"
+display = "gpt-5.4 high"
+
+[roles.issue_review.claude]
+model = "claude-opus-5"
+effort = "xhigh"
+display = "Opus 5 xhigh"
+
+[roles.issue_revise.claude]
+model = "claude-sonnet-5"
+effort = "high"
+display = "Sonnet 5 high"
+
+[roles.issue_gate.codex]
+model = "gpt-5.6-sol"
+effort = "xhigh"
+display = "GPT-5.6-Sol xhigh"
+
+[roles.issue_gate.claude]
+model = "claude-opus-5"
+effort = "xhigh"
+display = "Opus 5 xhigh"
+
+[roles.drain_rereview.codex]
+model = "gpt-5.6-terra"
+effort = "medium"
+display = "GPT-5.6-Terra medium"
+
+[roles.drain_rereview.claude]
+model = "claude-opus-5"
+effort = "medium"
+display = "Opus 5 medium"

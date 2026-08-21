@@ -31,6 +31,7 @@ import Kanban.ApprovalService
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Filter (defaultFilterCriteria)
 import Kanban.GitHub (newHistoryTraversal)
+import Kanban.Models (defaultRoster)
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Settings (defaultSettings)
@@ -82,6 +83,9 @@ testAppState board = do
         appSearch = Nothing,
         appSidebarVisible = True,
         appSettings = defaultSettings,
+        -- The pure compiled value, not a load: a test state must not read
+        -- the developer's real XDG configuration.
+        appModelRoster = Right defaultRoster,
         appLogRoot = "/tmp/example-project/logs",
         appProcessSelection = ProcessSelection Nothing 0,
         appIncidentSelection = IncidentSelection Nothing 0,

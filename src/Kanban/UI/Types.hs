@@ -97,6 +97,7 @@ import Kanban.Solve
     SolveWorkflow (..),
     SolverBrand (..)
     )
+import Kanban.Models (ModelRoster, RosterLoadError)
 import Kanban.Settings
   ( Settings (..)
     )
@@ -603,6 +604,13 @@ data AppState = AppState
     appSearch :: Maybe ColumnSearch,
     appSidebarVisible :: Bool,
     appSettings :: Settings,
+    -- | The startup model-roster load, retained as the typed
+    -- success-or-error value 'Kanban.Models.loadModelRoster' produced.
+    -- Nothing consumes it yet (MODEL-1): later slices resolve agent spawns
+    -- from the 'Right' and refuse them with the 'Left' (D-3), which is why
+    -- an unusable file must stay an error here rather than collapse into
+    -- the compiled defaults.
+    appModelRoster :: Either RosterLoadError ModelRoster,
     appLogRoot :: FilePath,
     appProcessSelection :: ProcessSelection,
     appIncidentSelection :: IncidentSelection,

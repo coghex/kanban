@@ -37,7 +37,8 @@ tracked file has none:
   reconciled against.
 * In, individually: `README.md`, `CLAUDE.md` and its `AGENTS.md` alias --
   the one session contract under the two names Claude and Codex each read
-  it by -- `LICENSE`, `kanban.cabal`, `config.toml.example`, the ten user
+  it by -- `LICENSE`, `kanban.cabal`, the `config.toml.example` and
+  `models.toml.example` configuration templates, the ten user
   and workflow-contract documents under `docs/`, `cabal.project` -- that
   one because the packaged `CLAUDE.md` describes it as what applies the
   mandatory `-Werror` gate to the `cabal build all` and `cabal test all`
@@ -105,6 +106,7 @@ RELEASE_ROOT_FILES = (
     "cabal.project",
     "config.toml.example",
     "kanban.cabal",
+    "models.toml.example",
 )
 
 RELEASE_DOCUMENTS = (
