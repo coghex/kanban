@@ -55,7 +55,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-4. The changelog has recorded nothing since the release that opened it — [#418]
 - [x] PROD-5. Nothing states when a release is cut, so 34 merges sit unreleased — [no-issue]
 - [ ] PROD-6. The screenshot gate is skipped on every CI run by that job's own design — [deferred]: #417 must land first
-- [ ] PROD-7. The approval-relocation example passes alone and fails in the full suite
+- [x] PROD-7. The approval-relocation example passes alone and fails in the full suite — [#420]
 - [ ] PROD-8. Section 3 forbids the completed-work archive section 16 specifies
 - [ ] PROD-9. Section 20 still defers the merged-work history view that shipped
 - [ ] PROD-10. Section 3 forbids the multi-repository board epic #354 plans
@@ -358,7 +358,7 @@ in CI.
   (`.github/workflows/ci.yml:162-168`); adding a job means adding it to that
   aggregate's `needs`, never to branch protection.
 
-### PROD-7. The approval-relocation example passes alone and fails in the full suite
+### [#420] PROD-7. The approval-relocation example passes alone and fails in the full suite
 
 **Verification:** Verified as a genuine order- or leftover-process dependency,
 not a defect in the code under test — the example fails in a full-suite run and
