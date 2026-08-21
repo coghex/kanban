@@ -1091,6 +1091,34 @@ class ClassificationGateTests(DocsLandCase):
             module.selection_casefold_conflicts(["docs/a.md", "docs/b.md"]),
             [])
 
+    def test_unicode_casefold_collision_is_refused(self):
+        # Σ and ς fold to the same letter under Unicode case folding but not
+        # under lower(), so after Σ.md exists upstream a landing of ς.md
+        # would publish two spellings a case-insensitive checkout cannot
+        # separate. The collision comes from the publication tip, so this
+        # runs identically on both filesystem kinds.
+        sb = self.sb
+        sb.write(sb.main, "docs/coordination/Σ.md", "sigma\n")
+        sb.git("add", "docs/coordination/Σ.md")
+        sb.git("commit", "-q", "-m", "upstream sigma")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/coordination/ς.md", "final sigma\n")
+        before = sb.snapshot()
+
+        done = sb.run_script("-m", "Land sigma", "docs/coordination/ς.md")
+        self.assertEqual(done.returncode, 6, done.stdout)
+        self.assertIn("differs only by case", done.stderr)
+        self.assertEqual(sb.head("origin/master"), before["upstream"])
+
+        module = _load_paths_module()
+        self.assertEqual(
+            module.casefold_collision(sb.docs, "docs/coordination/ς.md"),
+            "docs/coordination/Σ.md")
+        self.assertEqual(
+            module.selection_casefold_conflicts(
+                ["docs/coordination/Σ.md", "docs/coordination/ς.md"]),
+            [["docs/coordination/Σ.md", "docs/coordination/ς.md"]])
+
     def test_casefold_collision_names_the_existing_spelling(self):
         # The filesystem-independent half: a genuinely distinct file created
         # on a case-sensitive filesystem must not land beside an entry it
@@ -1123,6 +1151,11 @@ class ClassificationGateTests(DocsLandCase):
             "docs/coordination/*.md": "glob metacharacters",
             "docs/?.md": "glob metacharacters",
             "docs/[ab].md": "glob metacharacters",
+            # PurePosixPath silently normalizes these spellings, so the raw
+            # components must be validated or they reach git plumbing as
+            # invalid paths after the gate said yes.
+            "docs/./a.md": "components are refused",
+            "docs//a.md": "components are refused",
             # The gate's canonical-path handoff is line-delimited, so an
             # embedded newline would split one validated argument into two
             # paths, the second never validated or classified at all.
@@ -1249,6 +1282,25 @@ class InventoryTests(DocsLandCase):
         self.assertEqual(landed.returncode, 0, landed.stderr)
         self.assertEqual(
             sb.blob("origin/master", "docs/coordination/café.md"), "accent\n")
+
+    def test_inventory_reports_both_ends_of_a_staged_rename(self):
+        # A staged rename's porcelain record carries the destination and
+        # then the source as its own field; dropping the source would show
+        # the renamed-away document as clean, inviting a selection that
+        # omits the necessary deletion.
+        sb = self.sb
+        sb.git("mv", "docs/keep.md", "docs/kept.md", cwd=sb.docs)
+
+        done = sb.run_script("-l")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        rows = {
+            line.split(" | ")[0]: line
+            for line in done.stdout.splitlines()
+            if " | " in line
+        }
+        self.assertIn("renamed", rows["docs/kept.md"])
+        self.assertIn("deleted", rows["docs/keep.md"])
+        self.assertIn("differs", rows["docs/keep.md"])
 
     def test_inventory_applies_the_same_validation_as_the_gate(self):
         # A replaced alias object and an untracked symlink both pass

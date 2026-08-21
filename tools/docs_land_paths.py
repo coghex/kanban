@@ -45,7 +45,16 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path, PurePosixPath
+
+
+def fold_key(text: str) -> str:
+    """The comparison key for filesystem-collision checks: NFC-normalized,
+    Unicode-case-folded. `lower()` misses fold pairs such as Σ/ς, and macOS
+    filesystems treat NFC and NFD spellings of one name as the same file, so
+    both normalizations belong in the key."""
+    return unicodedata.normalize("NFC", text).casefold()
 
 CONTRACT_PATH = "docs/agent-workflow-contract.md"
 CONTRACT_REF = "origin/master"
@@ -246,11 +255,14 @@ def validate_shape(argument: str) -> str:
         raise Refusal(
             f"{argument}: names a directory; land documents one file at a time"
         )
-    parts = PurePosixPath(argument).parts
-    if any(part in (".", "..") for part in parts) or "" in parts:
+    # Split on the raw string, not PurePosixPath: the latter silently
+    # normalizes `.` components and repeated slashes away, so a
+    # non-canonical spelling would pass here and then fail deep inside
+    # `git update-index` as an invalid path.
+    if any(part in ("", ".", "..") for part in argument.split("/")):
         raise Refusal(
-            f"{argument}: `.`/`..` components are refused; name the literal "
-            "repository-relative path"
+            f"{argument}: `.`/`..`/empty components are refused; name the "
+            "canonical repository-relative path"
         )
     if not argument.endswith(".md"):
         raise Refusal(
@@ -329,7 +341,7 @@ def verify_exact_spelling(worktree: Path, path: str) -> None:
             return
         if part not in entries:
             folded = sorted(
-                entry for entry in entries if entry.lower() == part.lower()
+                entry for entry in entries if fold_key(entry) == fold_key(part)
             )
             if folded:
                 raise Refusal(
@@ -371,12 +383,12 @@ def casefold_collision(worktree: Path, path: str) -> str | None:
             parts = PurePosixPath(entry).parts
             for depth in range(1, len(parts) + 1):
                 prefix = "/".join(parts[:depth])
-                known.setdefault(prefix.lower(), set()).add(prefix)
+                known.setdefault(fold_key(prefix), set()).add(prefix)
         _CASEFOLD_KNOWN[key] = known
     parts = PurePosixPath(path).parts
     for depth in range(1, len(parts) + 1):
         prefix = "/".join(parts[:depth])
-        spellings = known.get(prefix.lower())
+        spellings = known.get(fold_key(prefix))
         if spellings and prefix not in spellings:
             return sorted(spellings)[0]
     return None
@@ -418,7 +430,7 @@ def selection_casefold_conflicts(paths: list[str]) -> list[list[str]]:
         parts = PurePosixPath(path).parts
         for depth in range(1, len(parts) + 1):
             prefix = "/".join(parts[:depth])
-            seen.setdefault(prefix.lower(), set()).add(prefix)
+            seen.setdefault(fold_key(prefix), set()).add(prefix)
     return [
         sorted(variants)
         for _, variants in sorted(seen.items())
@@ -582,6 +594,13 @@ def worktree_states(worktree: Path) -> dict[str, str]:
         code, path = record[:2], record[3:]
         states[path] = code
         if code[0] in ("R", "C"):
+            # The record after a rename or copy is the SOURCE path. A rename
+            # leaves its source staged for deletion, and dropping it here
+            # would show the renamed-away document as clean — inviting a
+            # selection that omits the necessary deletion.
+            if index < len(records) and records[index]:
+                if code[0] == "R":
+                    states.setdefault(records[index], "D ")
             index += 1
     return states
 
@@ -595,6 +614,8 @@ def describe_state(code: str | None) -> str:
     described = []
     if index == "D" or work == "D":
         described.append("deleted")
+    if index == "R" or work == "R":
+        described.append("renamed")
     if index == "T" or work == "T":
         described.append("typechange")
     if index not in (" ", "?", "D"):
