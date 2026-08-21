@@ -1107,7 +1107,7 @@ surface is an enumerated list in that module rather than a glob, so a packaged
 asset reaches the scan only by being listed: the nine drafting, canonical
 issue-review, and issue-rereview assets declared in
 [drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)
-and the seven design and report document workflows declared in
+and the ten design and report document workflows declared in
 [document-workflow-contract.md §2](document-workflow-contract.md#2-declared-assets)
 are all members, and the check reconciles both declared sets against those
 lists so a vendored asset cannot be declared without being scanned. Their
@@ -1840,11 +1840,11 @@ runs) parses the manifest in §4 and:
   manifest entry. All nine are scanned for external commands too; the bash
   fence extractor simply yields nothing for a prose-only contract, so an asset
   with no executable surface is covered rather than exempted;
-- fails, identically, for the seven design and report document workflows
+- fails, identically, for the ten design and report document workflows
   declared in
   [document-workflow-contract.md §2](document-workflow-contract.md#2-declared-assets),
   and additionally fails if that document declares an asset no plugin surface
-  list scans, or if the commands recovered from one of those seven stop matching
+  list scans, or if the commands recovered from one of those ten stop matching
   what this manifest declares for it — so the scan cannot silently narrow to
   nothing while still reporting no undocumented command;
 - fails if a manifest entry's declared `files` no longer contain its token,

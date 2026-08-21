@@ -20,15 +20,18 @@ issue #229 added /process-report, then the one design/report document workflow
 with a Claude counterpart, and issue #240 added /issue-rereview, the drafting
 contract's repair loop for a changes-requested issue. Issue #241 added the
 design pair /design-epic and /process-design-doc, transposed from the
-post-#239 tracked Codex skills.
+post-#239 tracked Codex skills; issue #328 completed the report side with
+/draft-report and /note-problem; and issues #393 and #410 vendored the
+rendered /triage roadmap and /push-docs documentation-landing workflows.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all thirteen); HASKELL_PARITY_COMMAND_NAMES is the strictly
-smaller set Kanban's own Haskell code spawns by name (the five above). The
-drafting and document workflows are user- or daemon-invoked and are
-deliberately excluded from that parity pinning; see
+commands directory (all seventeen); HASKELL_PARITY_COMMAND_NAMES is the
+strictly smaller set Kanban's own Haskell code spawns by name (the five
+above). The drafting, document, roadmap, and documentation-landing workflows
+are user- or daemon-invoked and are deliberately excluded from that parity
+pinning; see
 docs/drafting-workflow-contract.md and docs/document-workflow-contract.md,
-whose §3.5 records why /draft-report is now the one document workflow with no
-Claude counterpart here. They are still subject to every structural
+whose §3.5 records that its once-declared Codex-only document set is now
+closed. They are still subject to every structural
 policy this module enforces: frontmatter description, forbidden configuration
 keys, and no personal paths.
 
@@ -45,8 +48,8 @@ formed a third, packaged-only category. Issue #127 gave Kanban's own `r` its
 Done-column repair branch, so /repair is now spawned by name from
 src/Kanban/PullRequestFlow.hs and belongs in HASKELL_PARITY_COMMAND_NAMES with
 the rest; that third category is gone and discovery-minus-parity is the
-drafting set again. See tools/test_repair_workflow_contract.py for /repair's
-own behavioral contract.
+user-invoked set again. See tools/test_repair_workflow_contract.py for
+/repair's own behavioral contract.
 """
 
 from __future__ import annotations
