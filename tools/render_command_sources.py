@@ -191,6 +191,17 @@ COMMAND_SOURCES = (
             "and tools/plugin_bundle_gate.py sees it as shipped."
         ),
     ),
+    CommandSource(
+        name="push-docs",
+        source="tools/command_sources/push-docs.md",
+        claude_commands_dir=CLAUDE_COMMANDS_DIR,
+        codex_skills_dir=CODEX_SKILLS_DIR,
+        note=(
+            "Issue #410's documentation-landing workflow. Both brands invoke "
+            "the tracked tools/docs_land.sh identically, so the two rendered "
+            "assets differ only in argument conventions and sigils."
+        ),
+    ),
 )
 
 

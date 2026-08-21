@@ -135,12 +135,20 @@ DOCUMENT_SKILL_NAMES = {
 # excluded from Haskell name parity like the rest.
 ROADMAP_SKILL_NAMES = {"triage"}
 
+# The documentation-landing workflow vendored by issue #410. Rendered from
+# tools/command_sources/push-docs.md exactly the way the roadmap workflow
+# above is, and like it user-invoked and excluded from Haskell name parity.
+# Its behavioral assertions live in tools/test_docs_land.py beside the
+# tools/docs_land.sh helper both brands' renderings invoke.
+PUBLICATION_SKILL_NAMES = {"push-docs"}
+
 # What a Codex installation must actually discover under skills/.
 EXPECTED_SKILL_NAMES = (
     HASKELL_PARITY_SKILL_NAMES
     | DRAFTING_SKILL_NAMES
     | DOCUMENT_SKILL_NAMES
     | ROADMAP_SKILL_NAMES
+    | PUBLICATION_SKILL_NAMES
 )
 
 # Keys that would let a packaged manifest silently override the model,

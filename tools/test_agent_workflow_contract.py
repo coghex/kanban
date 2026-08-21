@@ -79,6 +79,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
     "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/push-docs/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
@@ -108,6 +109,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/note-problem.md",
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "claude-plugin/plugins/kanban/commands/triage.md",
+    "claude-plugin/plugins/kanban/commands/push-docs.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
@@ -178,6 +180,17 @@ REREVIEW_SURFACE_EXPECTED_COMMANDS = {
         "find",
         "head",
     },
+}
+
+# Issue #410's documentation-landing pair, pinned the same way. Both brands'
+# fences resolve the repository root with `git` and then invoke the worked
+# repository's own tools/docs_land.sh by path — a repository tool rather than
+# an external command, which is why nothing further is discovered. The Codex
+# skill needs no find/head lookup because the helper ships with the
+# repository being worked, not with the bundle.
+PUSH_DOCS_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/push-docs.md": {"git"},
+    "codex-plugin/plugins/kanban/skills/push-docs/SKILL.md": {"git"},
 }
 
 # The ten design and report document-workflow assets declared in
@@ -946,6 +959,33 @@ class AgentWorkflowContractTests(unittest.TestCase):
         }
         for relative_path, expected in sorted(REREVIEW_SURFACE_EXPECTED_COMMANDS.items()):
             self.assertIn(relative_path, DRAFTING_SURFACE_FILES)
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+
+    def test_push_docs_asset_command_discovery_is_not_vacuous(self):
+        # The two documentation-landing assets reach the completeness loops
+        # above by being listed, and a loop over an asset the extractor
+        # recovers nothing from reports no undocumented command for the same
+        # reason a loop over nothing does. Pin what each actually invokes so
+        # a rewrite that stops resolving the repository root fails here.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path, expected in sorted(
+            PUSH_DOCS_SURFACE_EXPECTED_COMMANDS.items()
+        ):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
             self.assertEqual(found, expected, relative_path)

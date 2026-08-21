@@ -137,12 +137,20 @@ CODEX_ONLY_DOCUMENT_WORKFLOWS = ()
 # excluded from Haskell name parity like the rest.
 ROADMAP_COMMAND_NAMES = {"triage"}
 
+# The documentation-landing workflow vendored by issue #410. Rendered from
+# tools/command_sources/push-docs.md exactly the way the roadmap workflow
+# above is, and like it user-invoked and excluded from Haskell name parity.
+# Its behavioral assertions live in tools/test_docs_land.py beside the
+# tools/docs_land.sh helper both brands' renderings invoke.
+PUBLICATION_COMMAND_NAMES = {"push-docs"}
+
 # What a Claude Code installation must actually discover in commands/.
 EXPECTED_COMMAND_NAMES = (
     HASKELL_PARITY_COMMAND_NAMES
     | DRAFTING_COMMAND_NAMES
     | DOCUMENT_COMMAND_NAMES
     | ROADMAP_COMMAND_NAMES
+    | PUBLICATION_COMMAND_NAMES
 )
 
 # Keys that would let a packaged command's frontmatter or manifest silently
