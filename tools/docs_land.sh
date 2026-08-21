@@ -129,13 +129,15 @@ in_nul_list() {
 }
 
 # Whether an occupant stands where $1 (repo-relative) would be checked out
-# in worktree $2 — an untracked or ignored file or symlink at the leaf, or a
-# symlink at ANY ancestor component. Prints the occupying path and returns
-# zero when one is found. An ancestor symlink is an occupant whatever the
-# index says about it or its descendants: a checkout needs that component as
-# a real directory, and asking git whether the ancestor is "tracked" answers
-# the wrong question — a tracked directory replaced on disk by a symlink
-# still prefix-matches its tracked descendants. An untracked real directory
+# in worktree $2 — an untracked or ignored file or symlink at the leaf, or
+# ANYTHING that is not a real directory at an ancestor component. Prints the
+# occupying path and returns zero when one is found. An ancestor occupies
+# the slot whatever the index says about it or its descendants: a checkout
+# needs that component as a real directory, and a symlink (even one
+# resolving to a directory) or a regular file standing there is replaced or
+# refused — while asking git whether the ancestor is "tracked" answers the
+# wrong question, since a tracked directory replaced on disk still
+# prefix-matches its tracked descendants. An untracked real directory
 # ancestor is not an occupant: checkout creates files inside it without
 # clobbering anything.
 occupied_untracked() {
@@ -147,18 +149,20 @@ occupied_untracked() {
       *) _seg="$_rest"; _rest="" ;;
     esac
     if [ -z "$_prefix" ]; then _prefix="$_seg"; else _prefix="$_prefix/$_seg"; fi
-    if [ "$_prefix" != "$1" ] && [ -L "$2/$_prefix" ]; then
-      printf '%s\n' "$_prefix"
-      return 0
-    fi
-    if [ -e "$2/$_prefix" ] || [ -L "$2/$_prefix" ]; then
-      if [ "$_prefix" = "$1" ] \
+    if [ "$_prefix" != "$1" ]; then
+      if [ -L "$2/$_prefix" ] \
+          || { [ -e "$2/$_prefix" ] && [ ! -d "$2/$_prefix" ]; }; then
+        printf '%s\n' "$_prefix"
+        return 0
+      fi
+      # Absent means nothing deeper exists; a real directory means descend.
+      [ -d "$2/$_prefix" ] || return 1
+    else
+      if { [ -e "$2/$_prefix" ] || [ -L "$2/$_prefix" ]; } \
           && ! GIT_LITERAL_PATHSPECS=1 git -C "$2" ls-files --error-unmatch -- "$_prefix" >/dev/null 2>&1; then
         printf '%s\n' "$_prefix"
         return 0
       fi
-    else
-      # Nothing on disk at this component, so nothing deeper exists either.
       return 1
     fi
   done

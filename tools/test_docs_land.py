@@ -565,6 +565,26 @@ class RebasePathTests(DocsLandCase):
             (sb.docs / "docs/coordination/café.md").read_text(encoding="utf-8"),
             "local draft\n")
 
+    def test_ancestor_regular_file_upstream_collision_is_predicted(self):
+        # The occupant at an ancestor slot can be a plain untracked FILE:
+        # docs/coordination/newdir as a regular file while master adds
+        # newdir/foo.md. Nothing exists at the leaf and no symlink is
+        # involved, yet the reconciliation checkout needs that component as
+        # a real directory — after the push already landed.
+        sb = self.sb
+        sb.move_master_upstream("docs/coordination/newdir/foo.md")
+        sb.write(sb.docs, "docs/coordination/newdir", "a plain file\n")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn("docs/coordination/newdir", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
+        self.assertEqual(
+            (sb.docs / "docs/coordination/newdir").read_text(encoding="utf-8"),
+            "a plain file\n")
+
     def test_replaced_tracked_directory_symlink_is_predicted(self):
         # docs-wip replaces the tracked docs/coordination directory with an
         # untracked symlink while master adds a file beneath the real
@@ -674,6 +694,33 @@ class PushVerificationTests(DocsLandCase):
         self.assertEqual(
             (sb.main / "docs/coordination/café.md").read_text(encoding="utf-8"),
             "primary ignored\n")
+
+    def test_ignored_ancestor_file_in_the_primary_blocks_the_fast_forward(self):
+        # An ignored regular FILE at the ancestor slot in the primary
+        # checkout: porcelain-invisible, no symlink involved, and the
+        # fast-forward would replace it to create the real directory the
+        # landed path needs.
+        sb = self.sb
+        exclude = sb.main / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("docs/coordination/newdir\n", encoding="utf-8")
+        sb.write(sb.main, "docs/coordination/newdir", "primary plain file\n")
+        main_head = sb.git("rev-parse", "HEAD").strip()
+        sb.write(sb.docs, "docs/coordination/newdir/foo.md", "landed content\n")
+
+        done = sb.run_script(
+            "-m", "Land foo", "docs/coordination/newdir/foo.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("landed: origin/master now contains", done.stdout)
+        self.assertIn("not fast-forwarding", done.stdout)
+        self.assertIn("docs/coordination/newdir", done.stdout)
+        self.assertEqual(
+            sb.blob("origin/master", "docs/coordination/newdir/foo.md"),
+            "landed content\n")
+        self.assertEqual(sb.git("rev-parse", "HEAD").strip(), main_head)
+        self.assertEqual(
+            (sb.main / "docs/coordination/newdir").read_text(encoding="utf-8"),
+            "primary plain file\n")
 
     def test_ignored_ancestor_symlink_in_the_primary_blocks_the_fast_forward(self):
         # The primary-checkout probe must walk ancestors too: an ignored
