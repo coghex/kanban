@@ -38,6 +38,21 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "tools" / "docs_land.sh"
 
+
+def _load_paths_module():
+    """tools/docs_land_paths.py loaded by path under a private name, so the
+    function-level assertions work whether this module was discovered with
+    `-s tools` or imported as `tools.test_docs_land`, and a fresh load per
+    call keeps the module's per-worktree cache from crossing sandboxes."""
+    import importlib.util
+
+    source = REPO_ROOT / "tools" / "docs_land_paths.py"
+    spec = importlib.util.spec_from_file_location(
+        "_docs_land_paths_under_test", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 # A 20-line body so an upstream edit to the LAST line and a local edit to
 # the FIRST line merge cleanly. The force-override case needs a file that
 # is dirty here and also changed upstream (to trip the risk predictor)
@@ -746,6 +761,38 @@ class ClassificationGateTests(DocsLandCase):
         self.assertEqual(sb.snapshot(), before)
         self.assertNotIn(
             "docs/coordination/escape/note.md", sb.tracked("origin/master"))
+
+    def test_case_mismatched_spelling_is_refused(self):
+        # On a case-insensitive filesystem is_file() answers yes for the
+        # folded spelling while every exact Git lookup answers no, and the
+        # landing would publish a case-conflicting second tree entry. The
+        # textual directory-listing walk refuses it identically on both
+        # filesystem kinds.
+        sb = self.sb
+        before = sb.snapshot()
+        done = sb.run_script(
+            "-m", "Land readme", "docs/coordination/readme.md")
+        self.assertEqual(done.returncode, 6, done.stdout)
+        self.assertIn("case", done.stderr)
+        self.assertIn("README.md", done.stderr)
+        self.assertEqual(sb.snapshot(), before)
+
+    def test_casefold_collision_names_the_existing_spelling(self):
+        # The filesystem-independent half: a genuinely distinct file created
+        # on a case-sensitive filesystem must not land beside an entry it
+        # case-collides with. Driven at the function level because the
+        # colliding file itself cannot exist on a case-insensitive
+        # development machine.
+        sb = self.sb
+        module = _load_paths_module()
+        self.assertEqual(
+            module.casefold_collision(sb.docs, "docs/coordination/readme.md"),
+            "docs/coordination/README.md")
+        self.assertEqual(
+            module.casefold_collision(sb.docs, "Docs/a.md"), "docs")
+        self.assertIsNone(module.casefold_collision(sb.docs, "docs/a.md"))
+        self.assertIsNone(
+            module.casefold_collision(sb.docs, "docs/coordination/new-note.md"))
 
     def test_invalid_path_shapes_are_refused(self):
         sb = self.sb

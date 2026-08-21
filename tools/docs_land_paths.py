@@ -12,9 +12,11 @@ one place rather than inside shell text:
   magic, no glob metacharacters (ordinary Git pathspecs glob by default, so a
   `*` would otherwise expand), no control characters (the canonical-path
   handoff below is line-delimited, so an embedded newline would split one
-  name into two), and no symlinks — leaf or ancestor, since a symlinked
-  directory resolves the leaf outside the worktree — other than the verified
-  `AGENTS.md` alias.
+  name into two), the exact spelling of what is on disk and tracked (a name
+  differing only by case would publish a case-conflicting tree entry through
+  a case-insensitive filesystem), and no symlinks — leaf or ancestor, since a
+  symlinked directory resolves the leaf outside the worktree — other than the
+  verified `AGENTS.md` alias.
 * `AGENTS.md` is a tracked symlink to `CLAUDE.md`, so a selection of the alias
   is canonicalized to `CLAUDE.md` and reported; an alias object that has been
   changed or replaced is refused, because editing through the alias changes
@@ -305,8 +307,82 @@ def assess(
     return path, None
 
 
+def verify_exact_spelling(worktree: Path, path: str) -> None:
+    """Refuse a name that reaches a document only through case folding.
+
+    On a case-insensitive filesystem `is_file()` answers yes for
+    `docs/coordination/readme.md` when the document is `README.md`, while
+    every exact Git lookup answers no — and landing the folded spelling would
+    publish a second, case-conflicting tree entry. The walk compares each
+    component against the parent directory's actual entries textually, so it
+    behaves identically on case-sensitive and case-insensitive filesystems."""
+    parent = worktree
+    for part in PurePosixPath(path).parts:
+        try:
+            entries = os.listdir(parent)
+        except OSError:
+            # The parent is gone (a deletion); the exact Git lookups below
+            # decide whether the name still names anything.
+            return
+        if part not in entries:
+            folded = sorted(
+                entry for entry in entries if entry.lower() == part.lower()
+            )
+            if folded:
+                raise Refusal(
+                    f"{path}: case-mismatched spelling — this component is "
+                    f"{folded[0]!r} on disk; name the exact spelling, or the "
+                    "landing would publish a case-conflicting second entry"
+                )
+            return
+        parent = parent / part
+
+
+_CASEFOLD_KNOWN: dict[str, dict[str, set[str]]] = {}
+
+
+def casefold_collision(worktree: Path, path: str) -> str | None:
+    """An existing tracked or upstream spelling that `path` (or one of its
+    directory prefixes) equals under case folding without equalling exactly,
+    or None. This is the filesystem-independent half of the exact-spelling
+    guarantee: a genuinely distinct file created on a case-sensitive
+    filesystem must not land beside an entry it case-collides with, because
+    the published tree could then never check out case-insensitively."""
+    key = str(worktree)
+    known = _CASEFOLD_KNOWN.get(key)
+    if known is None:
+        entries = set(run_git(worktree, "ls-files").stdout.splitlines())
+        entries |= set(
+            run_git(
+                worktree, "ls-tree", "-r", "--name-only", CONTRACT_REF
+            ).stdout.splitlines()
+        )
+        known = {}
+        for entry in entries:
+            parts = PurePosixPath(entry).parts
+            for depth in range(1, len(parts) + 1):
+                prefix = "/".join(parts[:depth])
+                known.setdefault(prefix.lower(), set()).add(prefix)
+        _CASEFOLD_KNOWN[key] = known
+    parts = PurePosixPath(path).parts
+    for depth in range(1, len(parts) + 1):
+        prefix = "/".join(parts[:depth])
+        spellings = known.get(prefix.lower())
+        if spellings and prefix not in spellings:
+            return sorted(spellings)[0]
+    return None
+
+
 def verify_names_a_document(worktree: Path, path: str) -> None:
     on_disk = worktree / path
+    verify_exact_spelling(worktree, path)
+    collision = casefold_collision(worktree, path)
+    if collision is not None:
+        raise Refusal(
+            f"{path}: differs only by case from the existing {collision!r}; "
+            "name the exact spelling — a second entry differing only by case "
+            "cannot be checked out on a case-insensitive filesystem"
+        )
     # A symlinked ancestor would resolve the leaf outside the worktree (or to
     # a different tracked location), so `is_file()` and the classification
     # would both be judging a path the landing does not actually name —
