@@ -66,7 +66,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [ ] PROD-15. Nothing states when an arc's scaffolding leaves the document it was added to — [deferred]: #428 and #429 must land first
 - [x] PROD-16. A conflicted autostash restore preserves a stash nothing ever reaps — [#431]
 - [x] PROD-17. Five stale recovery stashes sit on the primary checkout now — [no-issue]
-- [ ] PROD-18. The contribution protocol is recorded only in agent-facing instructions
+- [x] PROD-18. The contribution protocol is recorded only in agent-facing instructions — [#432]
 - [ ] PROD-19. No issue template encodes the tracker's required body shape
 - [ ] PROD-20. No pull-request template encodes the origin marker the router parses
 - [ ] PROD-21. No security policy, though the project installs services and runs agents
@@ -864,7 +864,7 @@ publication lane per document, a no-merge rule. All of them are recorded in
 them are visible to anyone arriving through GitHub. Five findings, each a
 standard file this project has a specific reason to want.
 
-### PROD-18. The contribution protocol is recorded only in agent-facing instructions
+### [#432] PROD-18. The contribution protocol is recorded only in agent-facing instructions
 
 **Verification:** Verified — no `CONTRIBUTING.md` exists, and the rules a
 contributor would need are in a file written to instruct agents operating in a
