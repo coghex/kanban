@@ -62,7 +62,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-11. Section 20 still defers multi-repository aggregation — [no-issue]
 - [ ] PROD-12. Nothing holds sections 3 and 20 against the rest of the document — [deferred]: #423 and #424 must land first
 - [x] PROD-13. The contract opens with a finished epic's processing ledger — [#428]
-- [ ] PROD-14. The contract closes with that epic's decisions and delivery plan
+- [x] PROD-14. The contract closes with that epic's decisions and delivery plan — [#429]
 - [ ] PROD-15. Nothing states when an arc's scaffolding leaves the document it was added to
 - [ ] PROD-16. A conflicted autostash restore preserves a stash nothing ever reaps
 - [ ] PROD-17. Five stale recovery stashes sit on the primary checkout now
@@ -656,7 +656,7 @@ completed checklist rather than its purpose.
   `CLAUDE.md` itself may need a matching edit if it points at a paragraph that
   stops existing. Documentation only.
 
-### PROD-14. The contract closes with that epic's decisions and delivery plan
+### [#429] PROD-14. The contract closes with that epic's decisions and delivery plan
 
 **Verification:** Verified — 456 lines of the same epic's apparatus sit after
 section 21, past the end of the numbered contract.
