@@ -862,9 +862,13 @@ def checkout_lock_path(repo_path: Path) -> Path:
     Complementary to the identity lock rather than redundant, and `run_lock`
     takes both, because one location cannot see both ways a second run
     arrives. This one catches one checkout started twice under identities that
-    do not match -- two `--config` files naming different remotes resolve one
-    checkout to two identities, which would never meet at the identity lock.
-    That one catches two *clones* of one GitHub repository, which have two Git
+    do not match -- the *shared* configuration's `remote_name` edited, or that
+    remote repointed, between the two starts -- which would never meet at the
+    identity lock, since each run named its lock after the identity it
+    resolved. A repository's own `--config` cannot produce that: since
+    `discovery_remote_name` the identity comes from the shared configuration
+    alone, which is what breaks the circularity described there. That one
+    catches two *clones* of one GitHub repository, which have two Git
     directories and would never meet here.
 
     A linked worktree resolves the primary checkout's file, which is what makes

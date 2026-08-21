@@ -1087,11 +1087,16 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   not written by it.
 - **Outputs:** canonical review verdicts, published entirely by the backend —
   review comments, `reviewed:approve`/`reviewed:changes` labels, and the
-  versioned review marker §2.3 defines. The controller itself writes only its
-  own runtime documents and log lines, and mutates nothing on GitHub. `status`
-  writes a document to stdout under `--json` and is otherwise read-only:
+  versioned review marker §2.3 defines. Nothing the controller writes is on
+  GitHub, and what it writes locally depends on which operation it is running.
+  A `run` writes its own runtime documents and log lines and nothing else.
+  `install`, `start` — which refreshes the installation before it kicks the
+  job — and `uninstall` additionally write, rewrite or remove the service
+  definition and this repository's entry in the discovery record, which is the
+  whole of what "loads a stopped job" means here. `status` writes a document to
+  stdout under `--json` and is otherwise read-only:
   it creates no directory, rewrites no document, and opens or resolves no
-  incident.
+  incident. `ack` rewrites one incident record and nothing else.
 - **Failure semantics:** two incident kinds, both attributed to the canonical
   repository rather than to the checkout that raised them. An
   `issue-changes-requested` incident is **warning** severity: the ordered

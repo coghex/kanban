@@ -484,11 +484,17 @@ mean exactly that.
 
 Two run locks are taken, not one, because no single location sees both ways a
 second run arrives. The identity lock under `locks/` catches two *clones* of one
-GitHub repository, which have two Git directories. The checkout lock in the Git
-directory catches one checkout started twice under identities that do not match —
-two `--config` files naming different remotes — which would never meet at the
-identity lock. A linked worktree resolves the primary checkout's file, so the
-pair holds for the worktrees solve and review agents actually work in.
+GitHub repository, which have two Git directories and so never meet in one. The
+checkout lock in the Git directory catches the other case: one checkout started
+twice under identities that do not match, which would never meet at the identity
+lock because each run took a lock of its own name. That takes a change to what
+the **shared** configuration resolves between the two starts — `remote_name`
+edited to name another remote, or that remote's URL repointed. A `--config`
+cannot do it, and neither can `--repo`: the identity always comes from the
+shared configuration's remote, and `--repo` is only an assertion the controller
+refuses when it disagrees. A linked worktree resolves the primary checkout's
+file, so the pair holds for the worktrees solve and review agents actually work
+in.
 
 The installed job runs with a fixed environment rather than your shell's: `HOME`
 set to the account's passwd home, `PYTHONUNBUFFERED=1`,
