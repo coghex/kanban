@@ -15,7 +15,8 @@ mechanics: it resolves both worktrees by branch, gates every path against
 `docs/agent-workflow-contract.md` §7 as published on `origin/master`, builds
 a landing commit carrying only the named paths, judges push success by
 rev-list reachability rather than push output, and fast-forwards the primary
-checkout only when it is clean. This workflow's job is to choose the paths,
+checkout only when it is clean and unobstructed. This workflow's job is to
+choose the paths,
 write the commit subject, and relay the helper's answers faithfully.
 
 This lane is user-directed publication. Never run a landing the user did not

@@ -22,7 +22,8 @@
 # BEFORE doing anything when a dirty or untracked file — ignored included —
 # that you are NOT landing also changed upstream; judges success by rev-list
 # reachability, never by push output; and fast-forwards the primary checkout
-# only when it is clean.
+# only when it is clean and no untracked or ignored file occupies a path the
+# update would touch.
 #
 # Usage:
 #   tools/docs_land.sh -m "Commit subject" docs/foo.md [docs/bar.md ...]
@@ -285,10 +286,30 @@ else
   echo "docs-wip still carries $AHEAD unpushed local commit(s), preserved for a later landing"
 fi
 
-# --- Fast-forward the primary checkout, but only if it is clean ------------
+# --- Fast-forward the primary checkout, but only if it is safe -------------
+# `status --porcelain` alone is not enough: it omits ignored untracked
+# files, and a fast-forward checkout silently overwrites an ignored file at
+# a path the update touches — including one this very landing added. So the
+# paths the fast-forward would change are probed for untracked or ignored
+# occupants too, with the same presence test the pre-flight predictor uses.
 if [ -n "$(git -C "$PRIMARY" status --porcelain)" ]; then
   echo "note: primary checkout is dirty; not fast-forwarding it"
 else
-  git -C "$PRIMARY" merge --ff-only -q origin/master
-  echo "primary checkout fast-forwarded"
+  PRIMARY_OCCUPIED=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if { [ -e "$PRIMARY/$f" ] || [ -L "$PRIMARY/$f" ]; } \
+        && ! GIT_LITERAL_PATHSPECS=1 git -C "$PRIMARY" ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+      case "$PRIMARY_OCCUPIED" in *"|$f|"*) ;; *) PRIMARY_OCCUPIED="$PRIMARY_OCCUPIED|$f|" ;; esac
+    fi
+  done <<EOF
+$(git -C "$PRIMARY" diff --name-only HEAD origin/master)
+EOF
+  if [ -n "$PRIMARY_OCCUPIED" ]; then
+    echo "note: primary checkout has untracked or ignored files at paths the update touches; not fast-forwarding it:"
+    printf '%s\n' "$PRIMARY_OCCUPIED" | tr '|' '\n' | grep -v '^$' | sed 's/^/  /'
+  else
+    git -C "$PRIMARY" merge --ff-only -q origin/master
+    echo "primary checkout fast-forwarded"
+  fi
 fi

@@ -507,6 +507,33 @@ class PushVerificationTests(DocsLandCase):
         self.assertIn("landed: origin/master now contains", done.stdout)
         self.assertEqual(sb.blob("origin/master", "docs/a.md"), "a landed\n")
 
+    def test_ignored_file_in_the_primary_checkout_blocks_the_fast_forward(self):
+        # `status --porcelain` omits ignored files, so the clean check alone
+        # would let the fast-forward silently overwrite an ignored file in
+        # the primary checkout at the very path this landing added. The
+        # publication itself still succeeds; only the convenience
+        # fast-forward is skipped, and it says which path is occupied.
+        sb = self.sb
+        exclude = sb.main / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("docs/new.md\n", encoding="utf-8")
+        sb.write(sb.main, "docs/new.md", "primary ignored draft\n")
+        main_head = sb.git("rev-parse", "HEAD").strip()
+        sb.write(sb.docs, "docs/new.md", "landed content\n")
+
+        done = sb.run_script("-m", "Land new", "docs/new.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("landed: origin/master now contains", done.stdout)
+        self.assertIn("untracked or ignored files", done.stdout)
+        self.assertIn("not fast-forwarding", done.stdout)
+        self.assertIn("docs/new.md", done.stdout)
+        self.assertEqual(
+            sb.blob("origin/master", "docs/new.md"), "landed content\n")
+        self.assertEqual(sb.git("rev-parse", "HEAD").strip(), main_head)
+        self.assertEqual(
+            (sb.main / "docs/new.md").read_text(encoding="utf-8"),
+            "primary ignored draft\n")
+
     def test_dirty_primary_checkout_skips_the_fast_forward(self):
         sb = self.sb
         sb.write(sb.main, "docs/keep.md", "primary wip\n")
