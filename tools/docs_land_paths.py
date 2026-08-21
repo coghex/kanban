@@ -32,8 +32,8 @@ one place rather than inside shell text:
 `--gate` prints the canonical path list on stdout (one per line) and notes on
 stderr, exiting nonzero with every refusal when any named path is refused.
 `--inventory` prints one row per known Markdown document — tracked, untracked,
-or deleted — with its state, its §7 row and lane, and whether it differs from
-the fetched `origin/master`. Both modes are read-only.
+ignored, or deleted — with its state, its §7 row and lane, and whether it
+differs from the fetched `origin/master`. Both modes are read-only.
 """
 
 from __future__ import annotations
@@ -446,10 +446,22 @@ def inventory(worktree: Path) -> int:
             worktree, "diff", "--name-only", CONTRACT_REF, "--", "*.md"
         ).stdout.splitlines()
     )
-    universe = sorted(tracked | differing | set(states))
+    # Ignored untracked documents are invisible to `status --porcelain`, but
+    # an ignored file under a classified directory is still a landable
+    # document the no-argument workflow must be able to offer.
+    ignored = set(
+        run_git(
+            worktree, "ls-files", "--others", "--ignored",
+            "--exclude-standard", "--", "*.md",
+        ).stdout.splitlines()
+    )
+    universe = sorted(tracked | differing | set(states) | ignored)
     print("path | tracked | state | vs origin/master | §7 row | lane | landable")
     for path in universe:
-        state = describe_state(states.get(path))
+        if path in ignored and path not in states:
+            state = "ignored"
+        else:
+            state = describe_state(states.get(path))
         is_tracked = "yes" if path in tracked else "no"
         differs = "differs" if path in differing or path not in tracked else "same"
         matched = matching_rows(rows, path)

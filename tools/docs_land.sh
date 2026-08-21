@@ -156,7 +156,10 @@ while IFS= read -r f; do
   at_risk=0
   if printf '%s\n' "$DIRTY" | grep -qxF -- "$f"; then
     at_risk=1
-  elif [ -e "$f" ] && ! GIT_LITERAL_PATHSPECS=1 git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+  elif { [ -e "$f" ] || [ -L "$f" ]; } \
+      && ! GIT_LITERAL_PATHSPECS=1 git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+    # -L as well as -e: a dangling symlink fails -e yet still occupies the
+    # path, and the reconciliation checkout would replace it just the same.
     at_risk=1
   fi
   [ "$at_risk" = 1 ] || continue

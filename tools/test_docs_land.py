@@ -450,6 +450,29 @@ class RebasePathTests(DocsLandCase):
             (sb.docs / "docs/new.md").read_text(encoding="utf-8"),
             "ignored local draft\n")
 
+    def test_ignored_dangling_symlink_upstream_collision_is_predicted(self):
+        # A dangling symlink fails -e yet still occupies its path, and when
+        # it is also ignored nothing else surfaces it — the reconciliation
+        # checkout would silently replace it after the push landed. The
+        # predictor must treat any on-disk presence at an upstream-changed
+        # path as a collision.
+        sb = self.sb
+        sb.move_master_upstream("docs/new.md")
+        exclude = sb.main / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("docs/new.md\n", encoding="utf-8")
+        os.symlink("does-not-exist", sb.docs / "docs" / "new.md")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn("docs/new.md", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
+        self.assertTrue((sb.docs / "docs/new.md").is_symlink())
+        self.assertEqual(
+            os.readlink(sb.docs / "docs/new.md"), "does-not-exist")
+
     def test_selected_path_changed_upstream_is_refused_without_force(self):
         # A named path that also moved upstream would be overwritten
         # wholesale by the landing; that must be a stop, not a silent loss.
@@ -683,6 +706,28 @@ class InventoryTests(DocsLandCase):
         self.assertIn("same", rows["docs/del.md"])
         # The intact alias is landable, reported under its canonical name.
         self.assertIn("yes (as CLAUDE.md)", rows["AGENTS.md"])
+
+    def test_inventory_includes_an_ignored_landable_document(self):
+        # `status --porcelain` never shows an ignored untracked file, but an
+        # ignored document under a classified directory row is still landable
+        # and the no-argument workflow must be able to offer it.
+        sb = self.sb
+        exclude = sb.main / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("docs/coordination/local-note.md\n", encoding="utf-8")
+        sb.write(sb.docs, "docs/coordination/local-note.md", "ignored note\n")
+
+        done = sb.run_script("-l")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        rows = {
+            line.split(" | ")[0]: line
+            for line in done.stdout.splitlines()
+            if " | " in line
+        }
+        row = rows["docs/coordination/local-note.md"]
+        self.assertIn("ignored", row)
+        self.assertIn("docs/coordination/", row)
+        self.assertIn("| yes", row)
 
     def test_inventory_applies_the_same_validation_as_the_gate(self):
         # A replaced alias object and an untracked symlink both pass
