@@ -20,7 +20,7 @@ concrete precondition
 - [x] VEND-0. Establish the shared-source mechanism for vendored commands — [#375]
 - [x] VEND-1. Vendor triage — [#393]
 - [x] VEND-2. Vendor retriage — [#427]
-- [ ] VEND-3. Vendor backlog-review
+- [x] VEND-3. Vendor backlog-review — [#430]
 - [ ] VEND-4. Vendor project-review
 - [ ] VEND-5. Vendor drain-prs
 - [ ] VEND-6. Vendor janitor
