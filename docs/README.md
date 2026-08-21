@@ -7,6 +7,8 @@
 - [User guide](user-guide.md) — board layout, controls, reviews, and background jobs.
 - [Workflow setup and preflight](workflow-setup.md) — installing the optional AI-action components from a fresh clone, and diagnosing why one is not ready.
 - [PR drainer](pr-drainer.md) — installation, configuration, operation, and logs.
+- [Issue approval service](issue-approval.md) — installing, operating, and
+  recovering the persistent per-repository issue reviewer.
 
 ## For contributors
 

@@ -7,18 +7,19 @@ Contract version: 2
 Kanban's board is fully usable without any AI provider. A smaller set of
 explicit actions — issue solve, PR review/rereview/revise/repair, canonical
 issue
-review/rereview, the solve readiness gate, and the optional PR drainer — call
-out to external executables, a canonical review backend, and (for the
-drainer) a user-scoped launchd service. This document is the single
+review/rereview, the solve readiness gate, and the two optional background
+services, the PR drainer and the issue approval service — call
+out to external executables, a canonical review backend, and (for the two
+services) a user-scoped launchd job or systemd user unit. This document is the single
 authoritative list of those external dependencies: what owns them, how
 Kanban invokes them, what they return or fail with, what authority they
 need, where their durable state lives, and whether they are mandatory for
 Kanban to run at all or optional AI/automation add-ons.
 
 It also declares the boundary between what Kanban owns and tracks in this
-repository and what remains explicit, opt-in user-machine state (the PR
-drainer's LaunchAgent; the compatibility launcher described in §3), and the
-policy any installer for that state must follow.
+repository and what remains explicit, opt-in user-machine state (each managed
+service's own job definition; the compatibility launcher described in §3), and
+the policy any installer for that state must follow.
 
 A fresh checkout can use this document to answer: "why did action X fail,"
 "what do I need to install before X works," and "is path Y something Kanban
@@ -509,12 +510,17 @@ reimplement the removal, and `--check` remains read-only.
   scanned surface, so `launchctl` and `systemctl` each carry both a manifest
   row and a §2.6
   host-prerequisite entry. That surface is executable-only. The home-relative
-  paths these modules build are neither asserted nor scanned from here: some
-  have `personal-path` rows (the drainer's install directory, its discovery
-  record, its log root, its LaunchAgent label), others deliberately have none
-  yet (`~/Library/LaunchAgents`, `~/.config/systemd/user`, the legacy
-  `~/work/approve-issues.py` launcher), and reconciling them is #146's work,
-  not this surface's. Their behavior stays covered by
+  paths these modules build are mostly neither asserted nor scanned from here:
+  some have `personal-path` rows (the drainer's install directory, its discovery
+  record, its log root, its LaunchAgent label, and — since the approval
+  service's own scan below — the two directories
+  `tools/service_manager.py` writes definitions into,
+  `~/Library/LaunchAgents` and `~/.config/systemd/user`), while others
+  deliberately still have none (the legacy `~/work/approve-issues.py`
+  launcher), and reconciling the remainder is #146's work, not this surface's.
+  The one Python surface that *is* scanned for home-relative paths is §2.8's
+  three approval-service modules, `tools/service_manager.py` among them.
+  Their behavior stays covered by
   `tools/test_pure_logic.py`, `tools/test_drain_prs_service.py`,
   `tools/test_service_manager.py`, and `tools/test_install_drainer.py`.
   `tools/drain_prs.py --pr <number>` is the same merge path driven for one
@@ -926,9 +932,9 @@ reimplement the removal, and `--check` remains read-only.
 | `git` | Yes | Repository identity, worktree creation, and status. |
 | `python3` | No | Only needed for the canonical issue-review backend and the Python tool suite. |
 | `ps` | Yes | Kanban's own worker/job-liveness snapshot (`src/Kanban/Process.hs`, which `src/Kanban/Worker.hs` consumes rather than spawns) runs it unconditionally. |
-| `launchctl` | No | Only needed to install and control the optional drainer's LaunchAgent on macOS; `/usr/bin/plutil` below only reads the job it installs. |
-| `/usr/bin/plutil` | No | Only needed to read the drainer's LaunchAgent status on macOS. |
-| `systemctl`, with a live `systemctl --user` session | No | The Linux counterpart of the two rows above: only needed to install and control the optional drainer's user unit. Kanban reads that unit's own file directly, so Linux needs no reader alongside it. |
+| `launchctl` | No | Only needed to install and control an optional service's LaunchAgent on macOS — the PR drainer's (§2.4) or the issue approval service's (§2.8); `/usr/bin/plutil` below only reads the jobs it installs. |
+| `/usr/bin/plutil` | No | Only needed to read those two services' LaunchAgent definitions on macOS. |
+| `systemctl`, with a live `systemctl --user` session | No | The Linux counterpart of the two rows above: only needed to install and control either optional service's user unit. Kanban reads that unit's own file directly, so Linux needs no reader alongside it. |
 | GHC + Cabal | Build-time only | Not invoked by any runtime workflow. |
 
 ### 2.7 Pull-request repair (`$repair` / `/repair`)
@@ -1005,6 +1011,137 @@ reimplement the removal, and `--check` remains read-only.
 - **Mandatory/optional:** optional — like every other AI action, it is only
   reached by selecting it, and preflight reports its readiness per pull-request
   origin (§2.5).
+
+### 2.8 Incident/controller capability — the issue approval service
+
+Operator documentation: [docs/issue-approval.md](issue-approval.md).
+
+- **Owning source:** `tools/approve_issues_service.py` (the foreground `run`
+  that supervises repeated backend passes, the durable status, barrier and
+  incident documents, and the `install`/`start`/`stop`/`uninstall` job
+  operations), `tools/install_issue_approval.py` (installation safety — the
+  managed links, the controller-copy match, and the canonical backend it
+  resolves but never installs), and `tools/service_manager.py` (the same one
+  service-manager boundary §2.4 names), surfaced in-app by
+  `src/Kanban/ApprovalService.hs`. Kanban's in-app surface is read-only for
+  everything the service owns — status, the barrier, incidents — and adds
+  exactly one mutation: starting or stopping the installed job through the
+  controller. It owns no review policy whatever.
+- **Backend selection:** the same `tools/service_manager.select_backend`
+  probe §2.4 describes, constructed for the `issue-approval`
+  `ServiceNamespace` instead of the drainer's. That namespace is what keeps the
+  two services' identifiers, definitions and legacy questions from ever
+  colliding: neither can name, load, unload, or acknowledge the other's job,
+  and this one reports no machine-wide singleton at all, because its jobs have
+  always been per-repository. `sys.platform` decides nothing here either, so a
+  Linux host with a live `systemctl --user` session installs exactly as a macOS
+  host does.
+- **Invocation:** the controller never imports the reviewer. Every pass is a
+  child process running the *installed* canonical backend — resolved through the
+  §2.3 record, in the §3 precedence — as
+  `python3 <backend> --path <root> --repo OWNER/NAME --legacy-policy <policy>
+  --log-dir <job log dir> --json --review-queue [--config <path>]`, and a
+  barrier poll is the same vector with `--check <issue>` instead. Each is
+  spawned in a new session so the whole process group can be signalled, since
+  the backend spawns `gh` and a reviewer model of its own. Exactly one bounded
+  JSON document crosses back, and the schema and version it must carry are
+  mirrored in the controller rather than imported, held equal to the backend's
+  by `tools/test_approve_issues_service.py`. `launchctl` and `systemctl --user`
+  are spawned only by `tools/service_manager.py`, exactly as in §2.4. Unlike
+  §2.4, the home-relative paths these three modules build *are* reconciled from
+  here: `tools/test_agent_workflow_contract.py` scans each of them for a chain
+  of literal path segments hung off a home root and requires a `personal-path`
+  row in §4 for every one it finds, with what it recovers from each module
+  pinned so the scan cannot pass by discovering nothing.
+- **Inputs:** repository path and repository identity, resolved exactly as §2.4
+  resolves the drainer's — through the remote the *shared* Kanban configuration
+  names, never through the repository's own `--config`, which would otherwise
+  decide the identity that was used to find it. The repository's own `--config`
+  is persisted in its record entry and carried into the definition, so a start
+  from an empty environment still runs with it. Kanban passes its own identity
+  as `--repo OWNER/NAME` beside `--path`, and the controller refuses any
+  identity but the checkout's own. The installed definition carries the same
+  `--repo`, so a shared `remote_name` changed after installation stops that job
+  rather than re-pointing it. The service definition is a LaunchAgent plist
+  under `~/Library/LaunchAgents` or a unit file under `~/.config/systemd/user`,
+  one per canonical GitHub repository, named for the identifier
+  `tools/service_manager.py` derives from that repository's normalized identity.
+  Kanban names none of them: it selects this repository's entry in the discovery
+  record, resolves the definition's path from it, and reads the command out of
+  the definition itself. That entry is a discriminated union on `backend` in the
+  shape §2.4 describes, with one difference: an entry naming **no** backend is
+  refused rather than read as launchd, because this service's installer has
+  written the discriminator since its first release, so an entry without one was
+  not written by it.
+- **Outputs:** canonical review verdicts, published entirely by the backend —
+  review comments, `reviewed:approve`/`reviewed:changes` labels, and the
+  versioned review marker §2.3 defines. The controller itself writes only its
+  own runtime documents and log lines, and mutates nothing on GitHub. `status`
+  writes a document to stdout under `--json` and is otherwise read-only:
+  it creates no directory, rewrites no document, and opens or resolves no
+  incident.
+- **Failure semantics:** two incident kinds, both attributed to the canonical
+  repository rather than to the checkout that raised them. An
+  `issue-changes-requested` incident is **warning** severity: the ordered
+  barrier, a healthy service waiting for a specification repair it must not
+  perform, unique per open (repository, issue). An `approval-error` incident is
+  **error** severity: a run that ended on a backend pass it could not act on, or
+  on a controller fault. The barrier's authority is its own `barrier.json`
+  record rather than that warning, so an acknowledgement resolves the incident
+  for bookkeeping and leaves the queue barriered — only a current canonical
+  approval of that issue removes the record. Ordinary contention for the
+  canonical approval lock is not a failure at all: it is the backend's fifth
+  normal `busy` outcome, which the controller backs off on. The one refusal that
+  is deliberately never automated is the untracked background approval daemon:
+  if it holds the canonical lock, install and start refuse with a diagnostic
+  naming it, and this service never adopts, migrates, or terminates it.
+- **Required authority:** the same GitHub write scope the canonical review needs
+  and the provider sign-in it calls models with, plus local control of the
+  signed-in user's own service manager — launchd's GUI domain on macOS, that
+  user's systemd manager on Linux. Neither requires root, and nothing is
+  installed system-wide. The controller takes no authority of its own: every
+  GitHub mutation is the backend's, made under the operator's own `gh` login.
+- **Durable state:** per account, under one root resolved from the **passwd**
+  home directory rather than from `$HOME`, and itself deliberately immovable by
+  any option or environment variable — the identity lock that keeps two clones
+  of one repository from both running hangs off it, and a root a
+  process-controlled input could move would let two runs both start. Those locations are the
+  `issue-approval` `personal-path` rows in §4, and none of them has an XDG
+  spelling on any platform: the discovery record at
+  `~/Library/Application Support/kanban/issue-approval/config.json`, whose
+  `repositories` table carries one entry per installed repository; the shared
+  script links beside it, which are the one thing `--install-dir` and
+  `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` move — everything else here stays where it
+  is, unlike the drainer, whose runtime tree lives under its install directory
+  and moves with it; a runtime directory per identity
+  under `runtime/<slug>` holding `status.json`, an `incidents/` directory, and —
+  only while the queue is barriered — `barrier.json`, whose absence is what an
+  unbarriered queue *is*; the lock directory holding each identity's run lock
+  and transition lock and each installation's link lock; and a log directory per
+  identity under `~/Library/Logs/kanban/issue-approval`, holding the
+  controller's `service.log`, the manager's `service.out`/`service.err`, and the
+  backend's own dated logs, which the controller redirects there so two
+  repositories' logs stay apart. Per checkout, in the repository's shared Git
+  directory: `.git/kanban_issue_approval_run.lock`, this checkout's own run
+  lock, beside the backend's `.git/approve_issues.lock`, which the controller
+  **reads and never takes**. Two run locks rather than one, because neither
+  location sees both ways a second run arrives: the identity lock catches two
+  clones of one repository, which share no Git directory, and the checkout lock
+  catches one checkout started twice under identities that do not match. Every
+  read-modify-write of the discovery record happens under an exclusive `flock`
+  on a sibling lock file, and every job transition holds that installation's
+  link lock before this identity's transition lock — always in that order, so
+  two transitions can never deadlock. An uninstall removes the definition, the
+  manager's hold on it, and that one record entry, and deliberately leaves the
+  runtime state, logs, and open incidents behind: they are the record of what
+  the service did, and an uninstall is not an acknowledgement.
+- **Mandatory/optional:** fully optional. The board's `a` key starts or stops
+  it, `tools/setup_workflows.py` has no component for it by design, and nothing
+  in Kanban's build or normal startup path installs or runs it. Installation
+  loads a stopped job and starts nothing, at install or at login. With nothing
+  installed the key reports the installer rather than failing opaquely, and a
+  host with no supported service manager is reported as its own condition rather
+  than as a missing installation.
 
 ## 3. Migration boundary
 
@@ -1119,7 +1256,8 @@ Columns: `id | kind | token | files | owner | status | mandatory`.
 - `kind`: `executable` (a literal command Kanban's Haskell source, the tracked
   Codex or Claude plugin's packaged workflows, or a non-test module under
   `tools/` spawns or resolves) or `personal-path` (a home-relative path
-  Kanban's Haskell source builds or depends on).
+  Kanban's Haskell source, a packaged markdown workflow, or one of the
+  issue-approval modules scanned below builds or depends on).
 - `token`: the exact literal string the check searches for.
 - `files`: `;`-separated repository-relative paths where the token is
   expected to appear (empty when nothing in this repository references it).
@@ -1150,7 +1288,7 @@ gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;s
 git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py | kanban | supported | yes
 python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
-plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
+plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs;src/Kanban/ApprovalService.hs | kanban | supported | no
 launchctl-cli | executable | launchctl | tools/service_manager.py | kanban | supported | no
 systemctl-cli | executable | systemctl | tools/service_manager.py | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
@@ -1165,6 +1303,15 @@ drainer-install-dir | personal-path | /Library/Application Support/kanban/pr-dra
 drainer-install-dir-xdg | personal-path | /.local/share/kanban/pr-drainer | tools/kanban_config.py | kanban | supported | no
 drainer-log-dir | personal-path | /Library/Logs/kanban/pr-drainer | tools/kanban_config.py | kanban | supported | no
 drainer-log-dir-xdg | personal-path | /.local/state/kanban/pr-drainer | tools/kanban_config.py | kanban | supported | no
+issue-approval-job-label | personal-path | com.coghex.issue-approval | tools/service_manager.py | kanban | supported | no
+issue-approval-install-dir | personal-path | /Library/Application Support/kanban/issue-approval | docs/issue-approval.md | kanban | supported | no
+issue-approval-discovery-record | personal-path | /Library/Application Support/kanban/issue-approval/config.json | docs/issue-approval.md | kanban | supported | no
+issue-approval-runtime-dir | personal-path | /Library/Application Support/kanban/issue-approval/runtime | docs/issue-approval.md | kanban | supported | no
+issue-approval-lock-dir | personal-path | /Library/Application Support/kanban/issue-approval/locks | docs/issue-approval.md | kanban | supported | no
+issue-approval-log-dir | personal-path | /Library/Logs/kanban/issue-approval | docs/issue-approval.md | kanban | supported | no
+managed-job-path-entry | personal-path | /.local/bin | docs/issue-approval.md | kanban | supported | no
+launchagents-dir | personal-path | /Library/LaunchAgents | tools/service_manager.py | kanban | supported | no
+systemd-user-unit-dir | personal-path | /.config/systemd/user | tools/service_manager.py | kanban | supported | no
 find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md | kanban | supported | no
 head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md | kanban | supported | no
 codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md | external | supported | no
@@ -1236,6 +1383,60 @@ existed under launchd. The identifier belongs to
 that module because it is the service manager's: it is the backend
 that names, writes, and targets a job, and every other component reads the
 identifier from it or out of the discovery record rather than restating it.
+
+The five issue-approval `personal-path` rows and `issue-approval-job-label` are
+that service's whole durable footprint, and unlike the drainer's they have **no
+XDG sibling**: `tools/approve_issues_service.py` resolves all five from the
+account's passwd home directory with no XDG rule of any kind, so one spelling is
+the complete declaration on macOS and on Linux alike. `issue-approval-install-dir`
+is the service root, which is also the record's directory, the default
+`--install-dir`, and the parent of the other two trees;
+`issue-approval-discovery-record` is the record inside it, whose own path
+`--install-dir` deliberately cannot move; `issue-approval-runtime-dir` is the
+runtime root, one directory per identity beneath it holding that identity's
+status document, barrier record, and incident directory;
+`issue-approval-lock-dir` holds the per-identity run and transition locks and
+the per-installation link lock; and `issue-approval-log-dir` is the log root,
+which no option moves. Migrating the two `~/Library` roots to XDG data and state
+locations remains future work, which is why no `-xdg` row exists to pair with
+them yet.
+
+`managed-job-path-entry` is not state at all: it is the one home-relative entry
+of the fixed `PATH` both managed services' job definitions carry, declared
+because a job's ability to find `gh`, `codex`, and `claude` depends on it, and
+found by the scan below in `tools/approve_issues_service.py`.
+`tools/drain_prs_service.py` builds the same entry for the drainer's own
+definitions and is not on that scan's surface, so this one row covers a location
+two modules write and one of them is policed for.
+
+Those five declare `docs/issue-approval.md` rather than the controller, and that
+is a statement about how the controller spells them rather than about who owns
+them. It composes each location segment by segment —
+`account_home() / "Library" / "Application Support" / "kanban" / "issue-approval"`
+— so no tracked source carries the composed literal for a `files` entry to be
+grounded in, and the guide is the one place in this repository where the
+composed location is written down. What holds the composition to these rows is
+the Python home-relative-path scan in `tools/test_agent_workflow_contract.py`,
+which reconciles every segment chain `tools/approve_issues_service.py`,
+`tools/install_issue_approval.py`, and `tools/service_manager.py` hang off a
+home root against the `personal-path` tokens here — the counterpart of the
+Haskell and markdown scans above, over a third surface that spells its paths in
+neither of their shapes.
+
+`launchagents-dir` and `systemd-user-unit-dir` are the manager-owned locations
+both services' definitions are written into: a LaunchAgent plist under
+`~/Library/LaunchAgents`, a user unit under `~/.config/systemd/user`
+(`$XDG_CONFIG_HOME/systemd/user` when that variable names an absolute
+directory). Both carry `owner: kanban`, on the same footing as
+`drainer-launchagent-label`: what lives there is a Kanban-owned convention in
+the §5 sense, even though the directory itself is the service manager's rather
+than Kanban's. They are declared now because `tools/service_manager.py` builds
+both and the scan above reads that module — which is what §2.4 said was still
+outstanding. The systemd row's token is the `~/.config` spelling because
+that is the one a row's single exact literal can be; the XDG branch resolves to
+whatever `$XDG_CONFIG_HOME` names, which no literal can declare. Both are
+`tools/service_manager.py`'s alone: it is the only module that may name a
+service-manager artifact at all.
 
 `codex-plugin-cache-root` is the only user-scoped path this repository declares
 that Kanban does not own: `$CODEX_HOME` (default `~/.codex`) is Codex's own
@@ -1769,14 +1970,35 @@ utilities.
   an XDG-defaulted install on a non-macOS host. Closing that is the remaining
   work of the portability arc (#347), not a licence for a second spelling in
   the meantime.
+- **The issue approval service follows the same policy with one deliberate
+  difference.** Its footprint is the `kanban/issue-approval` namespace, its job
+  identifiers and definition paths are derived through the same
+  `tools/service_manager.py` boundary from the same normalized canonical
+  identity, and its record is likewise a fixed location `--install-dir` cannot
+  move. What differs is the per-platform half: the drainer's three managed
+  locations take each platform's own convention, while this service's take
+  macOS's on every platform — `tools/approve_issues_service.py` resolves its
+  service root and log root from the account's passwd home directory with no
+  XDG rule at all, and its runtime root and locks are siblings of the record
+  rather than living under the install directory, so `--install-dir` and
+  `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` move the script links alone. Only the
+  systemd unit location is XDG-aware, because that is systemd's own rule about
+  where it searches. Bringing those two roots onto this section's per-platform
+  convention is outstanding work of the same portability arc, and until then
+  one spelling is the whole declaration — see §2.8 and the `issue-approval`
+  rows in §4.
 - **User-scoped installation is explicit and opt-in.** Nothing in Kanban's
-  build (`cabal build all`) or normal startup path installs the drainer's job
-  or the issue-review backend's stable link; the installed definition is
+  build (`cabal build all`) or normal startup path installs either managed
+  service's job or the issue-review backend's stable link; each installed
+  definition is
   loaded but never started, never enabled, and carries no `[Install]` section
-  on systemd, so no login brings a drainer up on its own; the latter is only
+  on systemd, so no login brings a drainer or an approval service up on its
+  own; the backend is only
   installed by running `tools/install_issue_review.py`, or
   `tools/setup_workflows.py --component issue-review --apply`, directly,
-  and neither starts a daemon.
+  and neither starts a daemon. The approval service has no
+  `tools/setup_workflows.py` component at all, by design: it is installed only
+  by running `tools/install_issue_approval.py` for one repository.
 - **The workflow-setup command is dry-run first and component-selected.**
   `tools/setup_workflows.py` (§2.5) inspects and prints its plan unless
   `--apply` is passed, requires an explicit `--component`/`--all`
@@ -1847,9 +2069,25 @@ runs) parses the manifest in §4 and:
   module added later is scanned as soon as it lands; `test_*.py` modules and
   `tools/fake_cli.py` — that one path, not every module sharing its name —
   are excluded because they construct fake executables rather than depend on
-  real ones. It is executable-only: the home-relative
-  paths these modules build are not scanned, so the bullet above does not
-  extend to `tools/`;
+  real ones. That discovered surface is executable-only; the home-relative
+  paths a `tools/` module builds are reconciled only for the three named in
+  the next bullet;
+- fails if `tools/approve_issues_service.py`,
+  `tools/install_issue_approval.py`, or `tools/service_manager.py` — §2.8's
+  owning sources — builds a home-relative path that has no matching
+  `personal-path` manifest entry. These are Python, so they need an extractor
+  of their own beside the Haskell one: it recovers a chain of literal path
+  segments hung off a home root (`account_home()`, `Path.home()`, a `HOME`
+  constant, an `os.environ` read of one, or an `expanduser()` call), in either
+  quote style, together with a `~/`- or `$HOME/`-prefixed literal, and joins
+  the segments into the same slash-prefixed shape the Haskell and markdown
+  scans compare. What it recovers from each of the three is pinned, so a
+  refactor that stops matching fails here rather than passing with an empty
+  discovered set — including the pin that the installer builds none of its own
+  — and a fixture regression proves an undeclared segment is reported rather
+  than passed over. This surface is an enumerated list rather than every
+  module under `tools/`, so extending it to another module is a deliberate
+  edit;
 - fails if any of the nine drafting, canonical issue-review, and
   issue-rereview assets declared in
   [drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)
@@ -1873,9 +2111,11 @@ runs) parses the manifest in §4 and:
 - fails if the drainer LaunchAgent label entry (`drainer-launchagent-label`)
   is missing from the manifest or is marked anything other than a
   `kanban`-owned `supported` `personal-path`. What that entry declares is the
-  shared label prefix described above, not the plist file: the plist's own
-  directory has no manifest row, because §5 keeps its paths and labels as a
-  Kanban-owned convention rather than a personal path.
+  shared label prefix described above, not the plist file. The plist's own
+  directory now has a row of its own — `launchagents-dir`, beside
+  `systemd-user-unit-dir` — added when the scan above reached
+  `tools/service_manager.py`; both stay `kanban`-owned, because §5 keeps what
+  Kanban writes there a Kanban-owned convention rather than a personal path.
 
 Both machine-readable fences in this document are parsed anchored to their own
 heading — §4's to `## 4. Dependency manifest` and §7's to
@@ -2004,6 +2244,7 @@ docs/document-workflow-contract.md | pr-atomic | test-parsed;release-document
 docs/document_workflow_findings.md | coordination | audit-report
 docs/drafting-workflow-contract.md | pr-atomic | test-parsed;release-document
 docs/drainer-bugs.md | coordination | audit-report
+docs/issue-approval.md | pr-atomic | release-document
 docs/issue_approval_queue_design.md | coordination | audit-report
 docs/issue_search_design.md | coordination | audit-report
 docs/linux_portability_design.md | coordination | audit-report

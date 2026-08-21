@@ -181,7 +181,8 @@ proved. A command rendered into `claude-plugin/.../commands/` or
 - `app/` — executable entry point.
 - `src/Kanban/` — board, GitHub, terminal interface, worker, review, and settings code.
 - `test/` — Haskell tests.
-- `tools/` — PR drainer, controller, installers, workflow setup, and Python tests.
+- `tools/` — PR drainer, issue approval service, both of their controllers,
+  installers, workflow setup, and Python tests.
 - `codex-plugin/`, `claude-plugin/` — the tracked workflow bundles, in two halves: the solve, PR-review, PR-rereview, PR-revise, and repair workflows Kanban's AI actions spawn by name, and the drafting and document workflows you invoke yourself in a Codex or Claude session, which no Kanban action spawns.
 - `.github/workflows/` — continuous integration.
 

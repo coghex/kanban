@@ -8,6 +8,15 @@ the tracked Codex and Claude plugins' own packaged-workflow bash surfaces,
 and against every non-test Python module under tools/, so a new external
 command or home-relative path cannot land undocumented.
 
+Home-relative paths are reconciled over two surfaces with two extractors, since
+the same managed location is spelled differently in each. The Haskell modules
+build one as a single literal hung off `home`; the three issue-approval modules
+of docs/agent-workflow-contract.md §2.8 (issue #425) compose one from `pathlib`
+segments, so they are scanned separately for that shape — the way the bundled
+coordinator is scanned separately from the `.md` surfaces — and what the
+extractor recovers from each of the three is pinned, with a fixture regression
+proving an undeclared segment is reported rather than passed over.
+
 Since issue #118 that plugin surface also covers the vendored drafting and
 canonical issue-review assets (docs/drafting-workflow-contract.md §2) — nine of
 them since issue #240 added the issue-rereview repair loop — including a
@@ -57,6 +66,51 @@ SURFACE_FILES = [
     "src/Kanban/Drainer.hs",
     "src/Kanban/Process.hs",
 ]
+
+# The issue approval service's own owning sources
+# (docs/agent-workflow-contract.md §2.8), scanned for the home-relative paths
+# they build rather than for the external commands they spawn — those are
+# already covered by the discovered tools/ surface below. They need an
+# extractor of their own because they are Python: none of them spells a managed
+# location as one literal the way the Haskell surface does, and none of them is
+# markdown, so neither existing extractor recovers anything from them.
+# `tools/service_manager.py` is here because it is where both definition
+# directories are built, so scanning only the controller and the installer
+# would leave service-written paths outside the gate. An enumerated list rather
+# than every module under tools/: extending the home-path gate to another
+# module is a deliberate edit, exactly as adding a packaged asset to a plugin
+# surface list is.
+APPROVAL_SERVICE_SURFACE_FILES = [
+    "tools/approve_issues_service.py",
+    "tools/install_issue_approval.py",
+    "tools/service_manager.py",
+]
+
+# What the Python extractor actually recovers from each of the three, pinned
+# the way the plugin surfaces' command sets are: the completeness loop below
+# reports no undeclared segment for a module the extractor recovers nothing
+# from, for the same reason it reports none for a module it never opened. The
+# installer's empty set is a pin rather than an omission — it expands whatever
+# `--install-dir` or `--config` it is given and builds no managed location of
+# its own — so a future edit that made it construct one would have to declare
+# it here as well as in the manifest.
+APPROVAL_SERVICE_EXPECTED_HOME_SEGMENTS = {
+    "tools/approve_issues_service.py": {
+        "/Library/Application Support/kanban/issue-approval",
+        "/Library/Logs/kanban/issue-approval",
+        "/.local/bin",
+    },
+    "tools/install_issue_approval.py": set(),
+    "tools/service_manager.py": {
+        "/Library/LaunchAgents",
+        # The systemd unit directory's `~/.config` half. Its `systemd/user`
+        # tail hangs off a local binding rather than off the home root, so this
+        # is what the extractor recovers; the manifest's own
+        # `systemd-user-unit-dir` row states the whole location, and the
+        # containment rule below is what relates the two.
+        "/.config",
+    },
+}
 
 # The tracked Codex plugin's own packaged workflows (issue #76): a separate,
 # non-Haskell invocation surface reconciled against the same manifest. The
@@ -457,6 +511,96 @@ def home_relative_segments(content):
         for quoted in QUOTED_RE.finditer(expr_match.group(0)):
             segments.add(quoted.group(1))
     return segments
+
+
+# A home-anchored path a Python module builds, the counterpart of
+# HOME_PATH_EXPR_RE above for the surface that spells one as a chain of
+# `pathlib` segments rather than as a single literal.
+#
+# The root is matched as a family rather than as the one spelling the approval
+# controller happens to use, on the same reasoning TOOL_COMMAND_CALL_RE matches
+# a wrapper family: `account_home()` is this service's passwd-anchored root
+# today, but `Path.home()`, a module-level `HOME` constant, and an `os.environ`
+# read of one are the same statement written differently, and a gate a second
+# spelling walks through is not a gate. `.expanduser()` joins them because a
+# `~`-prefixed value expanded at runtime anchors the same way.
+PYTHON_HOME_ROOT = (
+    r'(?:\baccount_home\(\)'
+    r'|\bPath\.home\(\)'
+    r'|\bos\.environ(?:\.get)?\s*[\[(]\s*["\'][A-Za-z_]*HOME["\']\s*[\])]'
+    r'|\bHOME\b'
+    r'|\.expanduser\(\))'
+)
+# The closing delimiters of whatever wrapped the root — `Path(os.environ["HOME"])`
+# closes with `)` before the first `/`. Deliberately excludes newlines: a `/`
+# on a later line belongs to something else.
+PYTHON_HOME_ROOT_GAP = r'[ \t)\]]*'
+# One or more `/ "segment"` steps in either quote style. A check a
+# single-quoted literal walks through is not a check, and `\s*` inside the
+# chain covers a chain wrapped across lines.
+PYTHON_PATH_STEP = r'(?:/\s*(?:"[^"\n]*"|\'[^\'\n]*\')\s*)'
+PYTHON_HOME_PATH_EXPR_RE = re.compile(
+    PYTHON_HOME_ROOT + PYTHON_HOME_ROOT_GAP + r'(' + PYTHON_PATH_STEP + r'+)'
+)
+PYTHON_QUOTED_RE = re.compile(r'"([^"\n]*)"|\'([^\'\n]*)\'')
+# The other shape: a whole home-relative path written as one string literal,
+# which `expanduser` or a shell would resolve. Recovered too, so a module that
+# stopped composing segments and started spelling `"~/Library/..."` would not
+# thereby leave the gate.
+PYTHON_HOME_LITERAL_RE = re.compile(
+    r'(?P<quote>["\'])(?:~|\$HOME)(?P<path>/[^"\'\n]*)(?P=quote)'
+)
+
+
+def python_home_relative_segments(content):
+    """Every home-relative path a tools/ module builds, in either shape.
+
+    Returned in the same slash-prefixed form the Haskell and markdown
+    extractors produce, so all three reconcile against one `personal-path`
+    token set rather than against three spellings of it.
+    """
+    segments = set()
+    for expr_match in PYTHON_HOME_PATH_EXPR_RE.finditer(content):
+        parts = []
+        for quoted in PYTHON_QUOTED_RE.finditer(expr_match.group(1)):
+            value = quoted.group(1) if quoted.group(1) is not None else quoted.group(2)
+            value = value.strip("/")
+            if value:
+                parts.append(value)
+        if parts:
+            segments.add("/" + "/".join(parts))
+    for literal_match in PYTHON_HOME_LITERAL_RE.finditer(content):
+        segment = literal_match.group("path").rstrip("/.,;:")
+        if segment and segment != "/":
+            segments.add(segment)
+    return segments
+
+
+def home_relative_segments_for_surface_file(relative_path, content):
+    """The home-relative paths one surface file builds, by its own extractor.
+
+    Dispatched on extension the way `discovered_commands_for_plugin_file`
+    dispatches the command extractors: the two surfaces spell a managed
+    location differently, and one reconciliation covers both.
+    """
+    if relative_path.endswith(".py"):
+        return python_home_relative_segments(content)
+    return home_relative_segments(content)
+
+
+def undeclared_home_segments(relative_path, content, personal_tokens):
+    """Every home-relative path `content` builds that no manifest row declares.
+
+    The one reconciliation both the tracked-tree check and its fixture
+    regression drive, so what the regression proves is what the tree is held
+    to rather than a second implementation of it.
+    """
+    return sorted(
+        segment
+        for segment in home_relative_segments_for_surface_file(relative_path, content)
+        if looks_like_path_segment(segment)
+        and not any(segment in token or token in segment for token in personal_tokens)
+    )
 
 
 # A fenced ```bash ... ``` block in a packaged SKILL.md. The closing fence
@@ -961,21 +1105,101 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertEqual(indirect_executable_names(if_snippet), {"codex", "claude"})
 
     def test_every_home_relative_path_segment_is_documented(self):
+        # Two surfaces, one reconciliation. The Haskell modules spell a managed
+        # location as one literal and the three approval-service modules
+        # compose one from path segments, so each gets its own extractor and
+        # both answer to the same `personal-path` rows.
         personal_tokens = [
             row["token"]
             for row in self.manifest
             if row["kind"] == "personal-path"
         ]
-        for relative_path in SURFACE_FILES:
+        for relative_path in SURFACE_FILES + APPROVAL_SERVICE_SURFACE_FILES:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            for segment in home_relative_segments(content):
-                if not looks_like_path_segment(segment):
-                    continue
-                self.assertTrue(
-                    any(segment in token or token in segment for token in personal_tokens),
-                    f"{relative_path} builds an undocumented home-relative path "
-                    f"segment {segment!r}; declare it in the manifest",
+            undeclared = undeclared_home_segments(
+                relative_path, content, personal_tokens
+            )
+            self.assertEqual(
+                [],
+                undeclared,
+                f"{relative_path} builds undocumented home-relative path "
+                f"segment(s) {undeclared}; declare each one in the manifest "
+                "in docs/agent-workflow-contract.md",
+            )
+
+    def test_approval_service_home_path_discovery_is_not_vacuous(self):
+        # The three modules reach the loop above by being listed, and a loop
+        # over a module the extractor recovers nothing from reports no
+        # undeclared segment for the same reason a loop over nothing does. Pin
+        # what each one actually builds so a refactor that stops matching —
+        # or a surface list that loses a member — fails here.
+        for relative_path in APPROVAL_SERVICE_SURFACE_FILES:
+            with self.subTest(surface=relative_path):
+                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                self.assertEqual(
+                    home_relative_segments_for_surface_file(relative_path, content),
+                    APPROVAL_SERVICE_EXPECTED_HOME_SEGMENTS[relative_path],
                 )
+        self.assertEqual(
+            sorted(APPROVAL_SERVICE_EXPECTED_HOME_SEGMENTS),
+            sorted(APPROVAL_SERVICE_SURFACE_FILES),
+            "every scanned approval-service module needs a pinned expectation",
+        )
+
+    def test_an_undeclared_python_home_path_is_reported(self):
+        # The negative control the pin above cannot be: it proves the scan
+        # *fails* on a segment no row declares rather than passing over a file
+        # it could not parse. Every spelling of a home root the extractor
+        # claims to cover is exercised, because a gate a second spelling walks
+        # through is not a gate.
+        personal_tokens = [
+            row["token"]
+            for row in self.manifest
+            if row["kind"] == "personal-path"
+        ]
+        for label, snippet, expected in (
+            (
+                "segment chain",
+                'def root():\n'
+                '    return account_home() / "Library" / "Application Support" '
+                '/ "kanban" / "undeclared-service"\n',
+                "/Library/Application Support/kanban/undeclared-service",
+            ),
+            (
+                "single quotes",
+                "ROOT = Path.home() / 'Library' / 'Undeclared Place'\n",
+                "/Library/Undeclared Place",
+            ),
+            (
+                "environment root",
+                'ROOT = Path(os.environ["HOME"]) / "Library" / "Undeclared Place"\n',
+                "/Library/Undeclared Place",
+            ),
+            (
+                "expanded literal",
+                'ROOT = Path("~/Library/Undeclared Place").expanduser()\n',
+                "/Library/Undeclared Place",
+            ),
+        ):
+            with self.subTest(shape=label):
+                self.assertEqual(
+                    undeclared_home_segments(
+                        "tools/approve_issues_service.py", snippet, personal_tokens
+                    ),
+                    [expected],
+                )
+        # ...and that a declared one is not reported, so the check above is
+        # discriminating rather than merely noisy.
+        self.assertEqual(
+            undeclared_home_segments(
+                "tools/approve_issues_service.py",
+                'def log_root():\n'
+                '    return account_home() / "Library" / "Logs" / "kanban" '
+                '/ "issue-approval"\n',
+                personal_tokens,
+            ),
+            [],
+        )
 
     def test_every_drafting_asset_bash_command_is_documented(self):
         # Requirement 8 of issue #118, extended by issue #240: the check must

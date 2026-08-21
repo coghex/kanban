@@ -56,6 +56,7 @@ extra-doc-files:
   docs/design.md
   docs/document-workflow-contract.md
   docs/drafting-workflow-contract.md
+  docs/issue-approval.md
   docs/media/README.md
   docs/media/board-wide.png
   docs/media/board-wide.provenance
