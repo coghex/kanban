@@ -44,11 +44,14 @@ matter when something goes wrong.
 | Controller | `approve_issues_service.py` | `drain_prs_service.py` |
 | Stops for | A changes-requested issue (the ordered barrier) | Nothing; a conflicted pull request is reported and skipped |
 | Model calls | Yes — every review is model work | Only for automated stale-head rereview rounds |
+| State and log roots | macOS-shaped `~/Library` on both platforms | Each platform's own — `~/Library` on macOS, `$XDG_DATA_HOME` and `$XDG_STATE_HOME` on Linux |
 
-The one thing they do share is the account: both reach this host's service
-manager through the same `tools/service_manager.py` boundary, and both write
-under `~/Library`. Neither can name, load, unload, or acknowledge the other's
-job, because each is constructed for its own namespace.
+What they do share is the account and one seam: both reach this host's service
+manager through `tools/service_manager.py`, and each does so for its own
+`ServiceNamespace`, so neither can name, load, unload, or acknowledge the
+other's job. They do not share a storage convention — see the last row above,
+and [Where it runs](#where-it-runs) for why this one keeps the macOS shapes
+everywhere.
 
 The service never merges anything, and it never touches a pull request.
 
@@ -176,10 +179,9 @@ Where a run's links go is decided in this order: `--install-dir`, then
 `KANBAN_ISSUE_APPROVAL_INSTALL_DIR`, then the directory this repository's job is
 already recorded in, then
 `~/Library/Application Support/kanban/issue-approval`. **The environment
-variable therefore moves an install here**, which is the one place this
-installer differs from the PR drainer's — that one ignores its own variable at
-install time and takes `--install-dir` alone. So unset it before re-running if
-you mean the recorded installation.
+variable therefore moves an install here**, where the PR drainer's installer
+ignores its own variable at install time and takes `--install-dir` alone. So
+unset it before re-running if you mean the recorded installation.
 
 Either of the first two can disagree with where the job is recorded, and an
 uninstall pointed at a directory this repository's job is not recorded in is
@@ -425,10 +427,11 @@ same passwd-anchored root, but `--install-dir` and
 leading `~` in either is expanded with `$HOME`, like any path, so a custom
 location can depend on `$HOME` even though nothing else here does. They are also
 all that moves: the record, the runtime tree, the locks, and the logs stay put.
-This is where the layout differs from the PR drainer's, whose runtime tree sits
-*inside* its install directory and moves with it; here the runtime root is a
-sibling of the record, so a dashboard that inherits no environment can find both
-without being told where the links went.
+The layout differs from the PR drainer's here as well as in the roots the table
+above compares: the drainer's runtime tree sits *inside* its install directory
+and moves with it, while here the runtime root is a sibling of the record, so a
+dashboard that inherits no environment can find both without being told where
+the links went.
 
 **The service definition is the service manager's, not the controller's.**
 `tools/service_manager.py` resolves its directory with `Path.home()` — which
