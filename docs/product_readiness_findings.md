@@ -56,7 +56,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-5. Nothing states when a release is cut, so 34 merges sit unreleased — [no-issue]
 - [x] PROD-6. The screenshot gate is skipped on every CI run by that job's own design — [#422]
 - [x] PROD-7. The approval-relocation example passes alone and fails in the full suite — [#420]
-- [ ] PROD-8. Section 3 forbids the completed-work archive section 16 specifies
+- [x] PROD-8. Section 3 forbids the completed-work archive section 16 specifies — [#423]
 - [ ] PROD-9. Section 20 still defers the merged-work history view that shipped
 - [ ] PROD-10. Section 3 forbids the multi-repository board epic #354 plans
 - [ ] PROD-11. Section 20 still defers multi-repository aggregation
@@ -405,7 +405,7 @@ they touch adjacent lines in two places; landing them in listed order avoids
 gratuitous conflicts. PROD-12 is the preventive counterpart and is specified
 against the other four.
 
-### PROD-8. Section 3 forbids the completed-work archive section 16 specifies
+### [#423] PROD-8. Section 3 forbids the completed-work archive section 16 specifies
 
 **Verification:** Verified — the non-goal and the specification are in the same
 document, and the specification is what shipped.
