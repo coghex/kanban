@@ -67,7 +67,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-16. A conflicted autostash restore preserves a stash nothing ever reaps — [#431]
 - [x] PROD-17. Five stale recovery stashes sit on the primary checkout now — [no-issue]
 - [x] PROD-18. The contribution protocol is recorded only in agent-facing instructions — [#432]
-- [ ] PROD-19. No issue template encodes the tracker's required body shape
+- [x] PROD-19. No issue template encodes the tracker's required body shape — [#434]
 - [ ] PROD-20. No pull-request template encodes the origin marker the router parses
 - [ ] PROD-21. No security policy, though the project installs services and runs agents
 - [ ] PROD-22. No code of conduct
@@ -904,7 +904,7 @@ local checkout.
   protected; "this project does not currently accept outside pull requests" is a
   legitimate and useful thing for the file to say if it is true.
 
-### PROD-19. No issue template encodes the tracker's required body shape
+### [#434] PROD-19. No issue template encodes the tracker's required body shape
 
 **Verification:** Verified — issue bodies must follow a fixed five-heading shape
 and carry an origin marker, and both requirements live only in prose.
