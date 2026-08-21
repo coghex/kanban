@@ -65,7 +65,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-14. The contract closes with that epic's decisions and delivery plan — [#429]
 - [ ] PROD-15. Nothing states when an arc's scaffolding leaves the document it was added to — [deferred]: #428 and #429 must land first
 - [x] PROD-16. A conflicted autostash restore preserves a stash nothing ever reaps — [#431]
-- [ ] PROD-17. Five stale recovery stashes sit on the primary checkout now
+- [x] PROD-17. Five stale recovery stashes sit on the primary checkout now — [no-issue]
 - [ ] PROD-18. The contribution protocol is recorded only in agent-facing instructions
 - [ ] PROD-19. No issue template encodes the tracker's required body shape
 - [ ] PROD-20. No pull-request template encodes the origin marker the router parses
@@ -803,7 +803,17 @@ superseded.
   reaping criterion. Reuse #202's established shape for deciding recoverability
   rather than inventing a second one.
 
-### PROD-17. Five stale recovery stashes sit on the primary checkout now
+### [no-issue] PROD-17. Five stale recovery stashes sit on the primary checkout now
+
+> **Disposition:** No issue — the five snapshots this finding enumerated are gone from
+> `/Users/vincentcoghlan/work/kanban`, cleared by hand after the 2026-08-19 audit, which
+> is the cleanup it asked for. One stash remains and it is **not** cleanup material:
+> `stash@{0}`, taken 2026-08-20 against `da51d50`, holds 15 files implementing the
+> `coordination_paths` / `direct_publication_paths` split, and
+> `git log --all -S'direct_publication_paths'` finds that identifier on no commit and no
+> branch in this repository. That stash is the only copy of the work, so it must not be
+> dropped. #431's requirement 2 — recoverability established, never inferred from age —
+> is exactly what would stop an automated reaper taking it.
 
 **Verification:** Verified — five stashes are present on
 `/Users/vincentcoghlan/work/kanban`, the newest 8 days old at the time of the
