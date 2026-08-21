@@ -80,6 +80,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
     "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
     "codex-plugin/plugins/kanban/skills/push-docs/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
@@ -110,6 +111,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "claude-plugin/plugins/kanban/commands/triage.md",
     "claude-plugin/plugins/kanban/commands/push-docs.md",
+    "claude-plugin/plugins/kanban/commands/retriage.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
@@ -1577,7 +1579,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
     def test_issue_review_discovery_record_grounds_every_reader(self):
         # Same coupling as the drainer's record, for the canonical reviewer:
-        # tools/install_issue_review.py writes it and seven consumers across
+        # tools/install_issue_review.py writes it and thirteen consumers across
         # three languages read it, none of which can see each other's
         # constants. The manifest names every side that spells the path, and
         # the writer is absent on purpose -- it imports the location from
@@ -1602,6 +1604,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 "claude-plugin/plugins/kanban/commands/issue-rereview.md",
                 "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
                 "claude-plugin/plugins/kanban/commands/triage.md",
+                "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
+                "claude-plugin/plugins/kanban/commands/retriage.md",
             ],
         )
         for relative_path in entry["files"]:

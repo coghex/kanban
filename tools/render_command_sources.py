@@ -202,6 +202,18 @@ COMMAND_SOURCES = (
             "assets differ only in argument conventions and sigils."
         ),
     ),
+    CommandSource(
+        name="retriage",
+        source="tools/command_sources/retriage.md",
+        claude_commands_dir=CLAUDE_COMMANDS_DIR,
+        codex_skills_dir=CODEX_SKILLS_DIR,
+        note=(
+            "VEND-2, the roadmap refresh that reads triage's own sections "
+            "back. It names triage through {{cmd:triage}} rather than a "
+            "literal sigil, which is the case the token was built for: the "
+            "one command in the registry whose body references another."
+        ),
+    ),
 )
 
 

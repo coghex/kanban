@@ -1,10 +1,14 @@
-"""Hermetic tests for `--reconcile-approvals` and the triage readiness rule.
+"""Hermetic tests for `--reconcile-approvals` and the roadmap readiness rule.
 
 Issue #391. A raw `reviewed:approve` label is not evidence of a current
 approval, and until an issue enters `process_issue` nothing removes a stale one
 -- so a label-only reader advertises readiness against a specification no
 reviewer saw. These cover the bounded backend operation that corrects it and the
-rendered triage contract that consumes it.
+two rendered roadmap contracts that consume it: triage, and since issue #427
+the retriage refresh that re-renders triage's output. Retriage is the harder
+consumer of the two and gets its own class below, because a refresh starts from
+a document that already carries markers, so "do not mark an unverified issue"
+is not enough on its own -- it must also unmark one it can no longer verify.
 
 No GitHub account and no model invocation: `get_issue`, `get_comments`, the
 label mutation, and the lock are patched, while the decision itself -- the real
@@ -33,6 +37,30 @@ TRIAGE_SOURCE = REPO_ROOT / "tools" / "command_sources" / "triage.md"
 RENDERED_TRIAGE = (
     REPO_ROOT / "claude-plugin/plugins/kanban/commands/triage.md",
     REPO_ROOT / "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
+)
+RETRIAGE_SOURCE = REPO_ROOT / "tools" / "command_sources" / "retriage.md"
+RENDERED_RETRIAGE = (
+    REPO_ROOT / "claude-plugin/plugins/kanban/commands/retriage.md",
+    REPO_ROOT / "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
+)
+
+# The one authored token every cross-command reference is written as, and the
+# sigil each brand renders it to. Issue #427 requirement 7: the source names
+# triage through the token so neither rendered file tells its reader to type
+# the other provider's spelling.
+TRIAGE_REFERENCE_TOKEN = "{{cmd:triage}}"
+BRAND_SIGILS = {
+    REPO_ROOT / "claude-plugin/plugins/kanban/commands/retriage.md": "/",
+    REPO_ROOT / "codex-plugin/plugins/kanban/skills/retriage/SKILL.md": "$",
+}
+
+# The readiness rule the retired personal copies stated and the vendored
+# command must not: a raw approval label rendering a marker on its own. Held as
+# the retired sentences plus the shape of the claim, so a reworded revival
+# fails too.
+RETIRED_RAW_LABEL_RULES = (
+    "every issue carrying the exact `reviewed:approve` label gets `✓`",
+    "Confirm every `reviewed:approve` issue has exactly one `✓`",
 )
 
 ORIGIN_BODY = "Background\n\n<!-- issue-origin:claude -->\n"
@@ -874,9 +902,195 @@ class TriageAssetTests(unittest.TestCase):
                 self.assertFalse(lines[0].rstrip().endswith("\\"))
 
 
+class RetriageAssetTests(unittest.TestCase):
+    """Issue #427's behavioral contract for the vendored retriage, held on the
+    authored source and both rendered outputs.
+
+    `render_command_sources.py --check` already proves the two outputs are that
+    source's, so most assertions run over all three; the two that are *about*
+    the rendering — the sigil and the brand-neutral token — necessarily run per
+    output, since that is the only place the brands differ."""
+
+    def assets(self):
+        return [RETRIAGE_SOURCE, *RENDERED_RETRIAGE]
+
+    def test_the_assets_this_class_pins_are_the_real_tracked_files(self):
+        # Non-vacuity for every loop below: each reads a file, so a renamed or
+        # unrendered asset would make them all pass over an empty list.
+        self.assertEqual(len(self.assets()), 3)
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                self.assertTrue(path.is_file(), path)
+                self.assertGreater(len(path.read_text(encoding="utf-8")), 2000, path)
+
+    def test_the_source_names_triage_through_the_neutral_token(self):
+        # Requirement 7. The source must carry no literal sigil spelling of
+        # triage at all; the renderer refuses one, and this pins the reason
+        # rather than relying on that refusal staying enabled.
+        text = RETRIAGE_SOURCE.read_text(encoding="utf-8")
+        self.assertIn(TRIAGE_REFERENCE_TOKEN, text)
+        for literal in ("/triage", "$triage"):
+            self.assertNotIn(literal, text)
+
+    def test_each_rendered_file_names_triage_with_its_own_brand_sigil(self):
+        # The point of the token: the Codex skill must never tell its reader to
+        # type a Claude invocation, or the reverse.
+        for path, sigil in BRAND_SIGILS.items():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                other = "$" if sigil == "/" else "/"
+                self.assertNotIn(TRIAGE_REFERENCE_TOKEN, text)
+                self.assertIn(f"{sigil}triage", text)
+                self.assertNotIn(f"{other}triage", text)
+
+    def test_every_asset_scopes_every_github_call_to_the_resolved_repository(self):
+        # Requirement 4. Checked as a property of every `gh` line rather than
+        # as the presence of one scoped call, so adding an unscoped read later
+        # fails here.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                lines = [
+                    line
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.startswith("gh ")
+                ]
+                self.assertTrue(lines, path)
+                for line in lines:
+                    self.assertIn('-R "$REPO"', line, line)
+
+    def test_no_asset_resolves_the_repository_through_an_unscoped_call(self):
+        # The review's amendment: triage's `gh repo view "$REPO_REMOTE"` is
+        # precedent, not a compliant implementation here, because requirement 4
+        # admits no `gh` invocation that precedes the resolution.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("gh repo view", text)
+                self.assertIn("git remote get-url origin", text)
+
+    def test_every_asset_reports_the_repository_before_and_after_mutating(self):
+        # The review's correction to requirement 4: reconciliation can remove a
+        # label, so the resolved identity is echoed before it runs as well as
+        # named in the answer's first line.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("Echo it to the user before step 5 runs", text)
+                self.assertIn("name it again in the answer's first", text)
+
+    def test_every_asset_verifies_readiness_through_one_canonical_call(self):
+        # Requirement 6, and the same one-invocation shape triage is held to:
+        # one plain `python3` line, no issue numbers, no candidate label named.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("KANBAN_ISSUE_REVIEW_INSTALL_DIR", text)
+                self.assertIn("kanban/issue-review/config.json", text)
+                lines = [
+                    line
+                    for line in text.splitlines()
+                    if "--reconcile-approvals" in line and line.startswith("python3")
+                ]
+                self.assertEqual(len(lines), 1, path)
+                invocation = lines[0]
+                self.assertFalse(invocation.rstrip().endswith("\\"))
+                self.assertIn('--repo "$REPO"', invocation)
+                self.assertIn("--reconcile-approvals --legacy-policy dual", invocation)
+                self.assertNotIn("reviewed:approve", invocation)
+
+    def test_every_asset_defers_the_readiness_rules_to_triage(self):
+        # Requirement 5. Retriage states the obligation and points at triage's
+        # two sections for the rules, so the vocabulary cannot drift; the
+        # section names are asserted because a bare mention of triage would
+        # satisfy a looser check while pointing nowhere.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("**Output Format**", text)
+                self.assertIn("**Approval Readiness**", text)
+                self.assertIn("renders nothing of its own", text)
+
+    def test_no_asset_restates_the_rules_it_defers(self):
+        # The other half of requirement 5: deferring in one paragraph while
+        # keeping a second copy elsewhere in the file is the drift this slice
+        # exists to remove. The difficulty rubric and the roadmap example the
+        # retired copies carried are the two concrete copies.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("## Difficulty Estimates", text)
+                self.assertNotIn("**Main Sequence**", text)
+                self.assertNotIn("**Anytime List**", text)
+                self.assertNotIn("**Tracker Issues**", text)
+
+    def test_no_asset_lets_a_raw_label_earn_a_marker(self):
+        # Requirement 6's live regression: the retired copies said so twice,
+        # and a refresh that revived either would re-add the markers issue #391
+        # removed. Nothing in these files may name a candidate label at all.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                for retired in RETIRED_RAW_LABEL_RULES:
+                    self.assertNotIn(retired, text)
+                self.assertNotIn("reviewed:approve", text)
+
+    def test_the_retired_rules_are_still_the_ones_the_personal_copies_stated(self):
+        # Negative control for the assertion above. It compares against
+        # constants, so a typo in one would make it pass against a file that
+        # still carried the rule; triage's own retired-rule pin has the same
+        # shape and the same risk. Both retired sentences are quoted from the
+        # personal copies, and both are still absent from the whole tree.
+        tracked = [
+            *self.assets(),
+            TRIAGE_SOURCE,
+            *RENDERED_TRIAGE,
+        ]
+        for retired in RETIRED_RAW_LABEL_RULES:
+            with self.subTest(rule=retired[:40]):
+                self.assertIn("reviewed:approve", retired)
+                self.assertIn("✓", retired)
+                for path in tracked:
+                    self.assertNotIn(retired, path.read_text(encoding="utf-8"))
+
+    def test_every_asset_fails_closed_and_drops_an_unverifiable_marker(self):
+        # Requirement 6's fail-closed list, plus the consequence unique to a
+        # refresh: the previous roadmap's marker is not a fallback.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("**Fail closed.**", text)
+                for cause in (
+                    "missing or unresolvable backend",
+                    '`"busy"` document from',
+                    "lock contention",
+                    "GitHub read or write failure",
+                    "malformed document",
+                    "unverifiable post-mutation state",
+                ):
+                    self.assertIn(cause, text)
+                self.assertIn("[approval unverified]", text)
+                self.assertIn("[needs canonical review]", text)
+                self.assertIn("is not a fallback", text)
+                self.assertIn("ready to solve", text)
+
+    def test_every_asset_recomputes_rather_than_carries_a_marker_forward(self):
+        # The refresh-specific rule requirement 6 forces once readiness stops
+        # coming from a label: the roadmap being edited already has markers.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("recomputed on this run", text)
+                self.assertIn("None is copied", text)
+                self.assertIn("none is read off an issue's labels", text)
+                self.assertIn("no approval marker was carried over", text)
+
+
 class ManifestCoverageTests(unittest.TestCase):
-    """The two rows this change adds to. The surface lists are enumerated, so
-    an asset absent from a row is simply never reconciled against it."""
+    """The two rows these changes add to. The surface lists are enumerated, so
+    an asset absent from a row is simply never reconciled against it — which is
+    why the retriage assets are pinned into the same two rows rather than left
+    to the generic grounding check in
+    tools/test_agent_workflow_contract.py."""
 
     def rows(self):
         text = (REPO_ROOT / "docs/agent-workflow-contract.md").read_text(encoding="utf-8")
@@ -894,6 +1108,18 @@ class ManifestCoverageTests(unittest.TestCase):
             with self.subTest(row=row):
                 self.assertIn(row, rows)
                 for asset in RENDERED_TRIAGE:
+                    self.assertIn(
+                        asset.relative_to(REPO_ROOT).as_posix(), rows[row]
+                    )
+
+    def test_both_rendered_retriage_paths_are_declared(self):
+        # Issue #427 requirement 8. Retriage resolves the discovery record and
+        # runs the backend exactly as triage does, so it owes the same two rows.
+        rows = self.rows()
+        for row in ("python3-cli", "issue-review-discovery-record"):
+            with self.subTest(row=row):
+                self.assertIn(row, rows)
+                for asset in RENDERED_RETRIAGE:
                     self.assertIn(
                         asset.relative_to(REPO_ROOT).as_posix(), rows[row]
                     )

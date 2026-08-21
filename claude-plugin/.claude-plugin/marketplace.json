@@ -7,8 +7,8 @@
   "plugins": [
     {
       "name": "kanban",
-      "version": "1.6.0",
-      "description": "Kanban's Claude-side workflow bundle: the Kanban-invoked /solve, /pr-review, /pr-rereview, /pr-revise, /repair, plus the user-invoked drafting, canonical issue-review, design/report document, roadmap, and documentation-landing workflows /issue, /draft-issues, /autoissue, /issue-review, /issue-rereview, /design-epic, /process-design-doc, /draft-report, /note-problem, /process-report, /triage, /push-docs.",
+      "version": "1.7.0",
+      "description": "Kanban's Claude-side workflow bundle: the Kanban-invoked /solve, /pr-review, /pr-rereview, /pr-revise, /repair, plus the user-invoked drafting, canonical issue-review, design/report document, roadmap, and documentation-landing workflows /issue, /draft-issues, /autoissue, /issue-review, /issue-rereview, /design-epic, /process-design-doc, /draft-report, /note-problem, /process-report, /triage, /retriage, /push-docs.",
       "author": {
         "name": "Kanban"
       },
