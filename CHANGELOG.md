@@ -6,6 +6,49 @@ heading to the next `##` heading or the end of the file. That is the whole
 boundary rule: a release section can be extracted by its version string alone,
 with no trailing marker and no other convention to remember.
 
+A change that has merged but not yet shipped gets its entry in the
+`### Unreleased` section above the newest release. Its level-three heading
+keeps it invisible to the release machinery, which reads only `##` headings.
+Cutting a release is what promotes it: the `### Unreleased` heading is
+replaced by `## <version>`, and a fresh empty `### Unreleased` section is
+created above it.
+
+### Unreleased
+
+- Press `f` for a card filter panel. `j`/`k` or `Up`/`Down` move between its
+  boxes, `Left`/`Right` between groups, `Space` toggles the focused box, and
+  `d` restores the defaults. Its criteria combine with the `s` column search
+  rather than replacing it.
+- Each usage window in the sidebar now shows how long until it resets and the
+  wall-clock time it resets at, and each provider's name carries the age of
+  the numbers under it, so a snapshot restored from a previous session is
+  distinguishable from a fresh one.
+- A clickable `↻` control in the sidebar starts the same board-and-usage
+  update `u` does.
+- Tell Kanban roughly what one solve round costs a provider — the
+  `estimated_percent_per_solve_round` key in `config.toml` — and the sidebar
+  converts each usage window's percentage left into the number of solve
+  rounds it still buys.
+- `kanban --ping codex` (or `claude`) deliberately starts that provider's
+  usage window with one minimal paid request, so a window you are about to
+  spend has its full duration ahead of it. Nothing else ever starts a ping,
+  and a failed ping is not retried.
+- The Claude usage probe and the process census are now correct with the
+  util-linux `script` and procps `ps` that Linux ships as well as the BSD
+  flavors on macOS, so the usage sidebar reads right on both platforms.
+- The PR drainer runs on Linux: a systemd user-unit backend joins the macOS
+  launchd one. Its install directory, discovery record, runtime state, and
+  logs follow each platform's own convention — `~/Library` on macOS, the XDG
+  data and state directories on Linux — and an older Linux installation made
+  under the `~/Library` shape is relocated to the XDG locations by the next
+  default operation.
+- An issue approval service keeps the canonical issue reviews moving without
+  a terminal left open: installed per repository with
+  `python3 tools/install_issue_approval.py` as its own managed job — launchd
+  on macOS, a systemd user unit on Linux — it repeatedly advances the open
+  backlog one bounded pass at a time, and Kanban discovers and monitors the
+  installation beside the drainer's.
+
 ## 1.0.0.0
 
 Kanban is a terminal board for a GitHub repository. It sorts that repository's

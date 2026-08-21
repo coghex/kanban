@@ -15,6 +15,9 @@ What that covers, in the order the workflow would meet it:
 * the dry-run path refuses an empty, production-style, misprefixed, or
   already-used tag input;
 * the release notes are the first `CHANGELOG.md` release section alone;
+* a `### Unreleased` section accruing above the newest release -- in the
+  changelog fixture and in the tracked `CHANGELOG.md` both -- changes neither
+  the version the gate resolves nor the notes it extracts;
 * the production publisher refuses a tag the remote does not already carry, so
   it cannot stand in for the authorization that creates one; and
 * the asset checks are re-run in the job that actually attaches the asset.
@@ -94,6 +97,15 @@ EXPECTED_NOTES = """Kanban's first release.
 
 - Four columns.
 """
+
+# The accruing section: a level-three heading above the newest release, so
+# `grep -m1 '^## '` never selects it and the notes extraction never enters it.
+UNRELEASED_ENTRY = "- A distinctive unreleased entry that must never ship in these notes."
+CHANGELOG_WITH_UNRELEASED = CHANGELOG.replace(
+    "## 1.0.0.0",
+    f"### Unreleased\n\n{UNRELEASED_ENTRY}\n\n## 1.0.0.0",
+    1,
+)
 
 
 def setUpModule():
@@ -656,6 +668,90 @@ class ReleaseNotesTests(ReleaseScriptTestCase):
         self.write("CHANGELOG.md", "# Changelog\n\n## 1.0.0.0\n\n## 0.9.0.0\n\nOld.\n")
         output = self.gate(expect_exit=1)
         self.assertIn("section is empty", output)
+
+    def test_an_unreleased_section_is_invisible_to_the_version_and_the_notes(self):
+        # The accrual convention this pins: `### Unreleased` above the newest
+        # release must change nothing about what the gate resolves or extracts.
+        self.write("CHANGELOG.md", CHANGELOG_WITH_UNRELEASED)
+        self.gate()
+        self.assertEqual(self.outputs(), {"version": VERSION, "tag": f"v{VERSION}"})
+        body = self.notes.read_text(encoding="utf-8")
+        self.assertNotIn("### Unreleased", body)
+        self.assertNotIn(UNRELEASED_ENTRY, body)
+        self.assertEqual(body, EXPECTED_NOTES)
+
+
+class TrackedChangelogTests(ReleaseScriptTestCase):
+    """The gate against the repository's own changelog, not a fixture.
+
+    The fixture case above proves what the gate does with an unreleased
+    section; only the tracked file can prove the repository actually keeps
+    one in the shape the gate ignores. Respelling its heading as
+    `## Unreleased` would make the gate read "Unreleased" as the version and
+    refuse to publish, with nothing red until a release was attempted --
+    these cases are what turns red at edit time instead.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.tracked = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.tracked_lines = self.tracked.splitlines()
+        first = next(
+            (
+                index
+                for index, line in enumerate(self.tracked_lines)
+                if line.startswith("## ")
+            ),
+            None,
+        )
+        self.assertIsNotNone(
+            first, "the tracked CHANGELOG.md has no '## ' release section"
+        )
+        self.first_release_index = first
+        self.version = self.tracked_lines[first][len("## ") :].strip()
+
+    def test_the_unreleased_section_sits_above_the_newest_release(self):
+        self.assertIn(
+            "### Unreleased",
+            self.tracked_lines[: self.first_release_index],
+            "the tracked CHANGELOG.md must accrue unreleased entries in a "
+            "'### Unreleased' section above its newest release section",
+        )
+
+    def test_the_first_release_heading_is_a_version_the_gate_can_read(self):
+        self.assertRegex(
+            self.version,
+            r"^\d+(\.\d+)+$",
+            "the tracked CHANGELOG.md's first '## ' heading must name a dotted "
+            "numeric version; spelling the unreleased section '## Unreleased' "
+            "would make the release gate read it as the version and refuse to "
+            "publish",
+        )
+
+    def test_the_gate_reads_the_tracked_changelog_past_its_unreleased_section(self):
+        self.write("CHANGELOG.md", self.tracked)
+        self.write("kanban.cabal", CABAL_FILE.replace(VERSION, self.version))
+        notes_file = self.root / "payload" / "release-notes.md"
+        self.run_script(
+            step_run_script(BUILD_JOB, GATE_STEP),
+            {
+                "EVENT_NAME": "push",
+                "PUSH_TAG": f"v{self.version}",
+                "DRY_RUN_TAG": "",
+                "NOTES_FILE": str(notes_file),
+            },
+            expect_exit=0,
+        )
+        self.assertEqual(self.outputs().get("version"), self.version)
+        notes = notes_file.read_text(encoding="utf-8")
+        unreleased_start = self.tracked_lines.index("### Unreleased")
+        for line in self.tracked_lines[unreleased_start : self.first_release_index]:
+            if line.strip():
+                self.assertNotIn(
+                    line,
+                    notes,
+                    f"the unreleased line {line!r} leaked into the release notes",
+                )
 
 
 class SdistVerificationTests(ReleaseScriptTestCase):
