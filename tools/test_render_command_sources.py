@@ -22,10 +22,10 @@ The mechanism's own subject is a fixture, deliberately.
 rendered into either bundle directory becomes an invokable command; VEND-0
 vendored none, and `FixtureIsNotShippedTests` still holds `fixture-command` to
 that. Since VEND-1 (issue #393) the registry also holds `triage`, since
-issue #410 `push-docs`, and since VEND-2 (issue #427) `retriage`, all three
-of which do render into both bundles, so the same class pins the shipped
-sets at eighteen and seventeen and pins which registered source belongs to
-which kind.
+issue #410 `push-docs`, since VEND-2 (issue #427) `retriage`, and since
+VEND-3 (issue #430) `backlog-review`, all four of which do render into both
+bundles, so the same class pins the shipped sets at nineteen and eighteen and
+pins which registered source belongs to which kind.
 """
 
 from __future__ import annotations
@@ -44,21 +44,22 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_COMMANDS_PREFIX = "claude-plugin/plugins/kanban/commands"
 CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 
-# The shipped sets: Claude's eighteen names, and Codex's the same set minus
+# The shipped sets: Claude's nineteen names, and Codex's the same set minus
 # Claude-only `draft-issues`. Pinned as counts and as the one documented
 # difference rather than as a third copy of the name list, which
 # tools/test_claude_plugin.py and tools/test_codex_plugin.py already assert.
 # Both grew by one in VEND-1, which added the first source that ships, by
-# one more when issue #410 vendored `push-docs`, and by one more again in
-# VEND-2, which vendored `retriage`.
-SHIPPED_CLAUDE_COUNT = 18
-SHIPPED_CODEX_COUNT = 17
+# one more when issue #410 vendored `push-docs`, by one more again in
+# VEND-2, which vendored `retriage`, and by one more in VEND-3, which
+# vendored `backlog-review`.
+SHIPPED_CLAUDE_COUNT = 19
+SHIPPED_CODEX_COUNT = 18
 CLAUDE_ONLY_WORKFLOW = "draft-issues"
 
 # The registered sources that render into the two bundles rather than under
 # tools/. Stated here so the fixture's unshippedness stays an assertion about
 # the fixture, not a blanket rule the first vendored workflow had to relax.
-SHIPPING_SOURCE_NAMES = {"triage", "push-docs", "retriage"}
+SHIPPING_SOURCE_NAMES = {"triage", "push-docs", "retriage", "backlog-review"}
 
 FIXTURE_SOURCE = "tools/command_sources/fixture-command.md"
 FIXTURE_CLAUDE_OUTPUT = "tools/command_render_fixture/claude/commands/fixture-command.md"

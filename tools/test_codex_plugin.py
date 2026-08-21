@@ -17,11 +17,11 @@ added four more with the design and report document workflows $design-epic,
 $process-design-doc, $draft-report, and $process-report. Issue #240 added
 $issue-rereview, the drafting contract's repair loop for a changes-requested
 issue; issue #328 added $note-problem while transposing /draft-report, closing
-the last Codex-only document gap; and issues #393, #410, and #427 vendored the
-rendered $triage roadmap, its $retriage refresh, and the $push-docs
-documentation-landing workflow.
+the last Codex-only document gap; and issues #393, #410, #427, and #430
+vendored the rendered $triage roadmap, its $retriage refresh, the $push-docs
+documentation-landing workflow, and the $backlog-review backlog audit.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all seventeen); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
+(all eighteen); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
 own Haskell code spawns by name (the five above). Every later set is user- or
 daemon-invoked and deliberately excluded from that parity pinning; the
 breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
@@ -153,6 +153,15 @@ ROADMAP_SKILL_NAMES = {"triage", "retriage"}
 # tools/docs_land.sh helper both brands' renderings invoke.
 PUBLICATION_SKILL_NAMES = {"push-docs"}
 
+# The backlog audit vendored by issue #430, slice VEND-3. Rendered from
+# tools/command_sources/backlog-review.md the way the two sets above are, and
+# like them user-invoked and excluded from Haskell name parity. It is its own
+# category rather than a third roadmap name because it is the first vendored
+# workflow that mutates the tracker — it closes issues and rewrites their
+# bodies, where $triage and $retriage only read and render. Its behavioral
+# assertions live in tools/test_backlog_review_workflow.py.
+BACKLOG_SKILL_NAMES = {"backlog-review"}
+
 # What a Codex installation must actually discover under skills/.
 EXPECTED_SKILL_NAMES = (
     HASKELL_PARITY_SKILL_NAMES
@@ -160,6 +169,7 @@ EXPECTED_SKILL_NAMES = (
     | DOCUMENT_SKILL_NAMES
     | ROADMAP_SKILL_NAMES
     | PUBLICATION_SKILL_NAMES
+    | BACKLOG_SKILL_NAMES
 )
 
 # Keys that would let a packaged manifest silently override the model,
@@ -354,7 +364,8 @@ class SkillDiscoveryTests(unittest.TestCase):
             DRAFTING_SKILL_NAMES
             | DOCUMENT_SKILL_NAMES
             | ROADMAP_SKILL_NAMES
-            | PUBLICATION_SKILL_NAMES,
+            | PUBLICATION_SKILL_NAMES
+            | BACKLOG_SKILL_NAMES,
         )
         self.assertEqual(DRAFTING_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
         self.assertEqual(ROADMAP_SKILL_NAMES & DRAFTING_SKILL_NAMES, set())
@@ -362,6 +373,16 @@ class SkillDiscoveryTests(unittest.TestCase):
         self.assertEqual(
             PUBLICATION_SKILL_NAMES
             & (DRAFTING_SKILL_NAMES | DOCUMENT_SKILL_NAMES | ROADMAP_SKILL_NAMES),
+            set(),
+        )
+        self.assertEqual(
+            BACKLOG_SKILL_NAMES
+            & (
+                DRAFTING_SKILL_NAMES
+                | DOCUMENT_SKILL_NAMES
+                | ROADMAP_SKILL_NAMES
+                | PUBLICATION_SKILL_NAMES
+            ),
             set(),
         )
 
@@ -1760,7 +1781,7 @@ class ManifestListingParityTests(unittest.TestCase):
     without describing it fails here.
 
     Parity is per field, not pooled: an installation that reads only the
-    short description must see the same seventeen as one that reads only the
+    short description must see the same eighteen as one that reads only the
     keywords. Non-workflow metadata -- the `kanban` keyword, the display
     name, developer, category, and capabilities -- is not a listing and is
     left alone.
