@@ -59,7 +59,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-8. Section 3 forbids the completed-work archive section 16 specifies — [#423]
 - [x] PROD-9. Section 20 still defers the merged-work history view that shipped — [#424]
 - [x] PROD-10. Section 3 forbids the multi-repository board epic #354 plans — [no-issue]
-- [ ] PROD-11. Section 20 still defers multi-repository aggregation
+- [x] PROD-11. Section 20 still defers multi-repository aggregation — [no-issue]
 - [ ] PROD-12. Nothing holds sections 3 and 20 against the rest of the document
 - [ ] PROD-13. The contract opens with a finished epic's processing ledger
 - [ ] PROD-14. The contract closes with that epic's decisions and delivery plan
@@ -524,7 +524,16 @@ this contradiction is ahead of the work rather than behind it.
   half that actually changes; decide its replacement explicitly rather than
   deleting the bullet whole.
 
-### PROD-11. Section 20 still defers multi-repository aggregation
+### [no-issue] PROD-11. Section 20 still defers multi-repository aggregation
+
+> **Disposition:** No issue — the same planned child of epic #354 that carries §3's
+> amendment carries this one. `docs/multi_repo_boards_design.md` decision D-4 (user
+> signoff 2026-08-10) states that "§20's 'Multi-repository aggregation' deferral is
+> removed"; MRB-3's outcome is "design.md §3/§20 amended"; and the arc's in-scope list
+> names "the design.md §3/§20 amendment" as one item, so §3 and §20 are a single
+> amendment rather than two. §20 keeps its remaining entries — forge adapters
+> explicitly "stays deferred, §20". As with PROD-10, it lands in MRB-3's PR beside the
+> first visible multi-repo behavior rather than ahead of it.
 
 **Verification:** Verified — the same capability appears in both lists, so
 correcting section 3 alone leaves the contradiction half-fixed.
