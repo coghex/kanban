@@ -68,7 +68,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-17. Five stale recovery stashes sit on the primary checkout now — [no-issue]
 - [x] PROD-18. The contribution protocol is recorded only in agent-facing instructions — [#432]
 - [x] PROD-19. No issue template encodes the tracker's required body shape — [#434]
-- [ ] PROD-20. No pull-request template encodes the origin marker the router parses
+- [x] PROD-20. No pull-request template encodes the origin marker the router parses — [#435]
 - [ ] PROD-21. No security policy, though the project installs services and runs agents
 - [ ] PROD-22. No code of conduct
 
@@ -941,7 +941,7 @@ and carry an origin marker, and both requirements live only in prose.
   own template, since epics carry a children or phase checklist that ordinary
   issues do not.
 
-### PROD-20. No pull-request template encodes the origin marker the router parses
+### [#435] PROD-20. No pull-request template encodes the origin marker the router parses
 
 **Verification:** Verified — pull request bodies must end with exactly one origin
 marker, a parser rejects every malformed spelling, and nothing at composition
