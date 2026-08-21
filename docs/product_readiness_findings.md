@@ -54,7 +54,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-3. The repository describes itself as "my kanban" — [no-issue]
 - [x] PROD-4. The changelog has recorded nothing since the release that opened it — [#418]
 - [x] PROD-5. Nothing states when a release is cut, so 34 merges sit unreleased — [no-issue]
-- [ ] PROD-6. The screenshot gate is skipped on every CI run by that job's own design
+- [ ] PROD-6. The screenshot gate is skipped on every CI run by that job's own design — [deferred]: #417 must land first
 - [ ] PROD-7. The approval-relocation example passes alone and fails in the full suite
 - [ ] PROD-8. Section 3 forbids the completed-work archive section 16 specifies
 - [ ] PROD-9. Section 20 still defers the merged-work history view that shipped
@@ -303,7 +303,18 @@ The first is skipped everywhere it would matter; the second fails only where
 nobody looks. Both are independently landable, and neither changes application
 behavior.
 
-### PROD-6. The screenshot gate is skipped on every CI run by that job's own design
+### [deferred] PROD-6. The screenshot gate is skipped on every CI run by that job's own design
+
+> **Deferred:** The gate's central assertion — that re-rendering the golden frame
+> reproduces `docs/media/board-wide.png` — fails on master today for a reason #417
+> already owns, so an issue filed now would hand a solver a red check outside its own
+> change and invite a duplicate regeneration. **Precondition:** #417 merges and
+> `python3 tools/render_board_screenshot.py --check` exits 0 on a clean master. Note
+> for whoever writes the issue then: the tracked image was rasterised by Pillow
+> 12.2.0's macOS wheel while CI would use the manylinux one, so whether the bytes
+> reproduce on `ubuntu-latest` is an open question a branch CI run settles — and if
+> they do not, the alternative is a hermetic gate over the golden frames' digests
+> rather than a pixel comparison.
 
 **Verification:** Verified — the pixel-level cases skip when Pillow or the
 pinned fonts are absent, the CI job that runs the Python suite installs neither,
