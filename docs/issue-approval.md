@@ -408,18 +408,32 @@ one repository all carry the same name. An identity whose encoded slug would
 outgrow what a service manager can carry falls back to a hash of the whole
 identity instead, in all three places at once.
 
-Everything below is resolved from the account's **passwd** home directory rather
-than from `$HOME`. That is deliberate: the identity lock that keeps two clones of
-one repository from both running hangs off this root, and a root a
-process-controlled input could move would let two runs both start.
+Two different home directories are in play below, and the difference is worth
+knowing before you go looking for a file.
 
-Only the shared script links move. `--install-dir` and
-`KANBAN_ISSUE_APPROVAL_INSTALL_DIR` relocate those and nothing else — the
-record, the runtime tree, the locks, and the logs stay where they are. This is
-the one place the layout differs from the PR drainer's, whose runtime tree sits
-*inside* its install directory and moves with it; here the runtime root is a
-sibling of the record, so a dashboard that inherits no environment can find both
-without being told where the links went.
+**Everything the controller owns** — the record, the script links, the runtime
+tree, the locks, and the logs — is resolved from the account's **passwd** home
+directory, never from `$HOME`. That is deliberate: the identity lock that keeps
+two clones of one repository from both running hangs off this root, and a root a
+process-controlled input could move would let two runs both start. Running an
+installer or a controller with a different `$HOME` does not move any of it.
+
+**The service definition is the service manager's, not the controller's**, and
+`tools/service_manager.py` resolves its directory with `Path.home()` — which
+*does* honour `$HOME` — plus, on systemd, `$XDG_CONFIG_HOME`. So a command run
+with a different `$HOME` writes and reads the plist or unit somewhere else,
+while the record that is supposed to name it stays under the passwd home. That
+combination leaves a job the record points at and the manager has never heard
+of. Do not install or control this service under a redirected `$HOME` unless you
+mean exactly that.
+
+Of everything the controller owns, only the shared script links move.
+`--install-dir` and `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` relocate those and
+nothing else — the record, the runtime tree, the locks, and the logs stay where
+they are. This is the one place the layout differs from the PR drainer's, whose
+runtime tree sits *inside* its install directory and moves with it; here the
+runtime root is a sibling of the record, so a dashboard that inherits no
+environment can find both without being told where the links went.
 
 - Install record Kanban discovers each job through:
   `~/Library/Application Support/kanban/issue-approval/config.json`. Its
@@ -449,7 +463,9 @@ without being told where the links went.
 - Service definition: `~/Library/LaunchAgents/com.coghex.issue-approval.<slug>.plist`
   under launchd, or
   `~/.config/systemd/user/com.coghex.issue-approval.<slug>.service` under
-  systemd.
+  systemd. This is the one entry above whose `~` is `$HOME`'s rather than the
+  passwd home's, per the note at the top of this section, and whose systemd
+  spelling `$XDG_CONFIG_HOME` also moves.
 - Discovery-record lock: `config.json.lock` beside the record, taken for every
   read-modify-write of that document so one repository's install cannot drop
   another's entry.

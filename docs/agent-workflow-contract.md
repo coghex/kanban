@@ -1049,10 +1049,16 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   by `tools/test_approve_issues_service.py`. `launchctl` and `systemctl --user`
   are spawned only by `tools/service_manager.py`, exactly as in §2.4. Unlike
   §2.4, the home-relative paths these three modules build *are* reconciled from
-  here: `tools/test_agent_workflow_contract.py` scans each of them for a chain
-  of literal path segments hung off a home root and requires a `personal-path`
-  row in §4 for every one it finds, with what it recovers from each module
-  pinned so the scan cannot pass by discovering nothing.
+  here: `tools/test_agent_workflow_contract.py` resolves each parsed module for
+  every chain of literal path segments reaching a home root — following a name
+  to whatever it was bound to, and a nullary helper to what it returns, because
+  that is how both `root / "systemd" / "user"` and
+  `service_root() / "runtime"` are actually written — and requires a
+  `personal-path` row in §4 for each one, matched exactly rather than by
+  containment so a location beneath a declared root is not absorbed into that
+  root's row. What it recovers from each module is
+  pinned, so the scan cannot pass by discovering nothing, and a module it cannot
+  parse fails rather than reporting none.
 - **Inputs:** repository path and repository identity, resolved exactly as §2.4
   resolves the drainer's — through the remote the *shared* Kanban configuration
   names, never through the repository's own `--config`, which would otherwise
@@ -1066,6 +1072,12 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   under `~/Library/LaunchAgents` or a unit file under `~/.config/systemd/user`,
   one per canonical GitHub repository, named for the identifier
   `tools/service_manager.py` derives from that repository's normalized identity.
+  Those two directories are the *manager's* rather than this service's, and are
+  the one part of its footprint not anchored to the passwd home: that module
+  resolves them through `Path.home()`, which honours `$HOME`, and on systemd
+  through `$XDG_CONFIG_HOME` as well. A command run under a redirected `$HOME`
+  therefore writes a definition the record — which does not move — could not
+  then name.
   Kanban names none of them: it selects this repository's entry in the discovery
   record, resolves the definition's path from it, and reads the command out of
   the definition itself. That entry is a discriminated union on `backend` in the
@@ -1412,16 +1424,33 @@ two modules write and one of them is policed for.
 Those five declare `docs/issue-approval.md` rather than the controller, and that
 is a statement about how the controller spells them rather than about who owns
 them. It composes each location segment by segment —
-`account_home() / "Library" / "Application Support" / "kanban" / "issue-approval"`
-— so no tracked source carries the composed literal for a `files` entry to be
-grounded in, and the guide is the one place in this repository where the
-composed location is written down. What holds the composition to these rows is
-the Python home-relative-path scan in `tools/test_agent_workflow_contract.py`,
-which reconciles every segment chain `tools/approve_issues_service.py`,
-`tools/install_issue_approval.py`, and `tools/service_manager.py` hang off a
-home root against the `personal-path` tokens here — the counterpart of the
-Haskell and markdown scans above, over a third surface that spells its paths in
-neither of their shapes.
+`account_home() / "Library" / "Application Support" / "kanban" / "issue-approval"`,
+and the four beneath it through a nullary helper each, as
+`service_root() / "runtime"` and its siblings — so no tracked source carries any
+of the composed literals for a `files` entry to be grounded in, and the guide is
+the one place in this repository where they are written down. What holds the
+composition to these rows is the Python home-relative-path scan in
+`tools/test_agent_workflow_contract.py`, which resolves
+`tools/approve_issues_service.py`, `tools/install_issue_approval.py`, and
+`tools/service_manager.py` as parsed modules — following a name to its binding
+and a helper to its return — and reconciles every chain that reaches a home root
+against the `personal-path` tokens here. It is the counterpart of the Haskell and
+markdown scans above, over a third surface that spells its paths in neither of
+their shapes, and it is what makes each of these five rows load-bearing: change
+any one of these locations without changing its row and the scan reports the new
+one.
+
+That last property needs one rule the literal scans do not have. Those recover
+whatever the source wrote down, which is routinely a file *inside* a declared
+directory, so a token containing the segment or contained by it both count. The
+resolved scan recovers a maximal chain, so every segment it yields is a location
+in its own right — and absorbing one into an ancestor's row would make every row
+below a declared directory decorative, since renaming `runtime/` to anything at
+all would still sit under the service root. So it requires an exact row, keeping
+containment in one direction only: a segment a *longer* declared location is
+built through — the `~/.config` half of `systemd-user-unit-dir` — is covered by
+that location's row, because the complete location still has to match on its
+own.
 
 `launchagents-dir` and `systemd-user-unit-dir` are the manager-owned locations
 both services' definitions are written into: a LaunchAgent plist under
@@ -1981,7 +2010,10 @@ utilities.
   service root and log root from the account's passwd home directory with no
   XDG rule at all, and its runtime root and locks are siblings of the record
   rather than living under the install directory, so `--install-dir` and
-  `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` move the script links alone. Only the
+  `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` move the script links alone. The
+  definition directories are the exception in the other direction: they are the
+  service manager's, resolved through `Path.home()` and, on systemd,
+  `$XDG_CONFIG_HOME`, so those alone follow `$HOME`. Only the
   systemd unit location is XDG-aware, because that is systemd's own rule about
   where it searches. Bringing those two roots onto this section's per-platform
   convention is outstanding work of the same portability arc, and until then
@@ -2076,16 +2108,27 @@ runs) parses the manifest in §4 and:
   `tools/install_issue_approval.py`, or `tools/service_manager.py` — §2.8's
   owning sources — builds a home-relative path that has no matching
   `personal-path` manifest entry. These are Python, so they need an extractor
-  of their own beside the Haskell one: it recovers a chain of literal path
-  segments hung off a home root (`account_home()`, `Path.home()`, a `HOME`
-  constant, an `os.environ` read of one, or an `expanduser()` call), in either
-  quote style, together with a `~/`- or `$HOME/`-prefixed literal, and joins
-  the segments into the same slash-prefixed shape the Haskell and markdown
-  scans compare. What it recovers from each of the three is pinned, so a
-  refactor that stops matching fails here rather than passing with an empty
-  discovered set — including the pin that the installer builds none of its own
-  — and a fixture regression proves an undeclared segment is reported rather
-  than passed over. This surface is an enumerated list rather than every
+  of their own beside the Haskell one, and it resolves the parsed module rather
+  than matching text, because the shape it has to recover is not local to one
+  expression: `root / "systemd" / "user"` reaches a home root only through a
+  binding a line earlier, and `service_root() / "runtime"` only through a
+  nullary helper, so an extractor that stopped at either would recover a
+  prefix and let an undeclared tail past. It follows both, recognizes a home
+  root as `account_home()`, `Path.home()`, a `HOME` name, an `os.environ` read
+  of one, or an `expanduser()` call, and also recovers a `~/`- or
+  `$HOME/`-prefixed literal, joining the result into the same slash-prefixed
+  shape the Haskell and markdown scans compare. Quote style and line wrapping
+  are not distinctions the parsed tree makes. What it recovers from each of the
+  three is pinned, so a refactor that stops matching fails here rather than
+  passing with an empty discovered set — including the pin that the installer
+  builds none of its own — and fixture regressions prove that an undeclared
+  segment is reported, that a tail hung off a binding or a helper is recovered
+  whole, that a location beneath a declared root is not absorbed into that
+  root's row, and that a module which cannot be parsed fails rather than
+  reporting nothing. Because what it recovers is a maximal chain rather than
+  whatever a source happened to write, it reconciles more strictly than the two
+  scans above: an exact row, or a row whose location this segment is built
+  through. This surface is an enumerated list rather than every
   module under `tools/`, so extending it to another module is a deliberate
   edit;
 - fails if any of the nine drafting, canonical issue-review, and
