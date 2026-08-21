@@ -468,9 +468,9 @@ mean exactly that.
 - Service definition: `~/Library/LaunchAgents/com.coghex.issue-approval.<slug>.plist`
   under launchd, or
   `~/.config/systemd/user/com.coghex.issue-approval.<slug>.service` under
-  systemd. This is the one entry above whose `~` is `$HOME`'s rather than the
-  passwd home's, per the note at the top of this section, and whose systemd
-  spelling `$XDG_CONFIG_HOME` also moves.
+  systemd. This is the third group above: its `~` is `$HOME`'s rather than the
+  passwd home's without anyone asking, and its systemd spelling moves with
+  `$XDG_CONFIG_HOME` as well.
 - Discovery-record lock: `config.json.lock` beside the record, taken for every
   read-modify-write of that document so one repository's install cannot drop
   another's entry.

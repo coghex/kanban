@@ -1113,30 +1113,47 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   user's systemd manager on Linux. Neither requires root, and nothing is
   installed system-wide. The controller takes no authority of its own: every
   GitHub mutation is the backend's, made under the operator's own `gh` login.
-- **Durable state:** per account, under one root resolved from the **passwd**
-  home directory rather than from `$HOME`. Everything but the shared script
-  links is anchored there and deliberately immovable by any option or
-  environment variable — the identity lock that keeps two clones
-  of one repository from both running hangs off it, and a root a
-  process-controlled input could move would let two runs both start. Those locations are the
-  `issue-approval` `personal-path` rows in §4, and none of them has an XDG
-  spelling on any platform: the discovery record at
+- **Durable state:** per account, in three groups that answer "what moves this?"
+  differently. Enumerated rather than quantified, because the answer is not the
+  same for all of them and a blanket statement would be wrong for two.
+
+  **Anchored and immovable.** Four locations — the discovery record, the runtime
+  tree, the lock directory, and the log root — hang off one root resolved from
+  the **passwd** home directory rather than from `$HOME`, and no option and no
+  environment variable moves any of them. That is what the identity lock keeping
+  two clones of one repository from both running depends on: a root a
+  process-controlled input could move would let two runs both start. They are
+  four of the `issue-approval` `personal-path` rows in §4, and none of the four
+  has an XDG spelling on any platform. The discovery record is at
   `~/Library/Application Support/kanban/issue-approval/config.json`, whose
-  `repositories` table carries one entry per installed repository; the shared
-  script links, which default beside it and are the one thing `--install-dir`
-  and `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` place elsewhere — expanding a leading
-  `~` through `$HOME` as any path does, so a custom link location is the one
-  part of this footprint an operator can make `$HOME`-dependent; everything else
-  stays where it is, unlike the drainer, whose runtime tree lives under its
-  install directory and moves with it; a runtime directory per identity
+  `repositories` table carries one entry per installed repository; the runtime
+  tree is one directory per identity
   under `runtime/<slug>` holding `status.json`, an `incidents/` directory, and —
   only while the queue is barriered — `barrier.json`, whose absence is what an
-  unbarriered queue *is*; the lock directory holding each identity's run lock
-  and transition lock and each installation's link lock; and a log directory per
-  identity under `~/Library/Logs/kanban/issue-approval`, holding the
+  unbarriered queue *is*; the lock directory holds each identity's run lock
+  and transition lock and each installation's link lock; and the log root holds
+  one directory per
+  identity under `~/Library/Logs/kanban/issue-approval` carrying the
   controller's `service.log`, the manager's `service.out`/`service.err`, and the
   backend's own dated logs, which the controller redirects there so two
-  repositories' logs stay apart. Per checkout, in the repository's shared Git
+  repositories' logs stay apart.
+
+  **Movable by option.** The shared script links, the fifth such row, default
+  beside the record and are what `--install-dir` and
+  `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` place elsewhere, expanding a leading `~`
+  through `$HOME` as any path does — so a custom link location is the one part
+  of this footprint an operator can make `$HOME`-dependent. Nothing above
+  follows them, unlike the drainer, whose runtime tree lives under its install
+  directory and moves with it.
+
+  **Not this service's to anchor.** The installed service definition is durable
+  state too, and it is the *manager's*: `tools/service_manager.py` resolves its
+  directory through `Path.home()` and, on systemd, `$XDG_CONFIG_HOME`, as the
+  Inputs bullet above describes. A redirected environment moves it while the
+  record that names it stays put, which is why that bullet says not to run a
+  transition under one.
+
+  Per checkout, in the repository's shared Git
   directory: `.git/kanban_issue_approval_run.lock`, this checkout's own run
   lock, beside the backend's `.git/approve_issues.lock`, which the controller
   **reads and never takes**. Two run locks rather than one, because neither
@@ -1400,8 +1417,10 @@ that names, writes, and targets a job, and every other component reads the
 identifier from it or out of the discovery record rather than restating it.
 
 The five issue-approval `personal-path` rows and `issue-approval-job-label` are
-that service's whole durable footprint, and unlike the drainer's they have **no
-XDG sibling**: `tools/approve_issues_service.py` resolves all five from the
+what this service's own controller owns; the definition directories it also
+writes into are the manager's and carry their own rows below. Unlike the
+drainer's, these five have **no
+XDG sibling**: `tools/approve_issues_service.py` resolves each of them from the
 account's passwd home directory with no XDG rule of any kind, so one spelling is
 the complete declaration on macOS and on Linux alike. `issue-approval-install-dir`
 is the service root, which is also the record's directory, the *default*
@@ -2019,7 +2038,10 @@ utilities.
   `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` move the script links alone. The
   definition directories are the exception in the other direction: they are the
   service manager's, resolved through `Path.home()` and, on systemd,
-  `$XDG_CONFIG_HOME`, so those alone follow `$HOME`. Only the
+  `$XDG_CONFIG_HOME`, so they are the one part of this footprint a redirected
+  environment relocates on its own. A custom link directory spelled with `~`
+  expands through `$HOME` too, but only because an operator named it that way.
+  Only the
   systemd unit location is XDG-aware, because that is systemd's own rule about
   where it searches. Bringing those two roots onto this section's per-platform
   convention is outstanding work of the same portability arc, and until then
