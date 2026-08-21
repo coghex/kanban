@@ -58,7 +58,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-7. The approval-relocation example passes alone and fails in the full suite — [#420]
 - [x] PROD-8. Section 3 forbids the completed-work archive section 16 specifies — [#423]
 - [x] PROD-9. Section 20 still defers the merged-work history view that shipped — [#424]
-- [ ] PROD-10. Section 3 forbids the multi-repository board epic #354 plans
+- [x] PROD-10. Section 3 forbids the multi-repository board epic #354 plans — [no-issue]
 - [ ] PROD-11. Section 20 still defers multi-repository aggregation
 - [ ] PROD-12. Nothing holds sections 3 and 20 against the rest of the document
 - [ ] PROD-13. The contract opens with a finished epic's processing ledger
@@ -473,7 +473,19 @@ release a feature that landed before the first release was published.
   section 20's closing sentence about the first release no longer describes the
   surviving list, fix it in the same change. Documentation only.
 
-### PROD-10. Section 3 forbids the multi-repository board epic #354 plans
+### [no-issue] PROD-10. Section 3 forbids the multi-repository board epic #354 plans
+
+> **Disposition:** No issue — the amendment is already a planned child of epic #354,
+> "MRB-3. Add the repository tab bar and amend the design contract".
+> `docs/multi_repo_boards_design.md` decision D-4 (user signoff 2026-08-10) settles
+> both what it says — §3's non-goal is *narrowed*, keeping merged interleaved boards,
+> automatic background refresh, and forge adapters excluded — and when it lands: "in
+> MRB-3's PR with the first visible multi-repo behavior." Landing it earlier is also
+> wrong on the merits: MRB-1 ships "no new UI surface" and is out of scope for "any
+> rendering or switching", so it never aggregates repositories in one running board,
+> and `CLAUDE.md` requires a contract update to accompany its behavior change rather
+> than precede it — amending §3 first would make design.md describe behavior the tree
+> does not have, which is this chapter's own defect inverted.
 
 **Verification:** Verified — an open epic with a complete design document plans
 the exact capability section 3 names as a non-goal. Unlike PROD-8 and PROD-9,
