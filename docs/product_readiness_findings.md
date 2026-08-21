@@ -57,7 +57,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-6. The screenshot gate is skipped on every CI run by that job's own design — [#422]
 - [x] PROD-7. The approval-relocation example passes alone and fails in the full suite — [#420]
 - [x] PROD-8. Section 3 forbids the completed-work archive section 16 specifies — [#423]
-- [ ] PROD-9. Section 20 still defers the merged-work history view that shipped
+- [x] PROD-9. Section 20 still defers the merged-work history view that shipped — [#424]
 - [ ] PROD-10. Section 3 forbids the multi-repository board epic #354 plans
 - [ ] PROD-11. Section 20 still defers multi-repository aggregation
 - [ ] PROD-12. Nothing holds sections 3 and 20 against the rest of the document
@@ -441,7 +441,7 @@ document, and the specification is what shipped.
   correct, so the replacement should preserve it rather than losing it along with
   the obsolete half. Documentation only; no behavior changes.
 
-### PROD-9. Section 20 still defers the merged-work history view that shipped
+### [#424] PROD-9. Section 20 still defers the merged-work history view that shipped
 
 **Verification:** Verified — section 20 lists as intentionally out of the first
 release a feature that landed before the first release was published.
