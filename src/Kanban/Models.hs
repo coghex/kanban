@@ -69,7 +69,7 @@ import System.Directory (XdgDirectory (XdgConfig), getXdgDirectory, removeFile, 
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (Handle, hClose, openBinaryTempFile)
 import System.IO.Error (isDoesNotExistError)
-import System.Posix.Files (getSymbolicLinkStatus, setFileMode)
+import System.Posix.Files (getFileStatus, getSymbolicLinkStatus, isRegularFile, setFileMode)
 import qualified Toml
 import Toml (Table' (..), Value' (..))
 import Toml.Schema ((.=), table)
@@ -259,9 +259,9 @@ data RosterDefect
 
 -- | Why a present file yielded no roster.
 data RosterFailure
-  = -- | The path exists but could not be read: a directory, a dangling
-    -- link, a permission refusal, or bytes that are not UTF-8's close kin —
-    -- present-but-unusable, never silently the defaults.
+  = -- | The path exists but is not a readable regular file: a directory, a
+    -- FIFO or other special file, a dangling link, or a permission
+    -- refusal — present-but-unusable, never silently the defaults.
     RosterUnreadable Text
   | -- | Not decodable as TOML (or not UTF-8), with the parser's message.
     RosterUnparseable Text
@@ -605,24 +605,36 @@ rosterPath = do
 -- Absence is judged by @lstat@ rather than a file-existence probe: a
 -- dangling symbolic link or a directory at the path is present but
 -- unusable, and D-3 requires that to be a typed refusal, never a silent
--- fall-through to the defaults an existence probe would produce.
+-- fall-through to the defaults an existence probe would produce. Once
+-- something is present, the resolved target must additionally be a regular
+-- file /before/ any open: opening is not a safe probe here, because a FIFO
+-- blocks the reader until a writer connects, which would hang startup
+-- rather than refuse. A symbolic link to a regular file resolves through
+-- the same @stat@ and stays loadable.
 loadModelRoster :: IO (Either RosterLoadError ModelRoster)
 loadModelRoster = do
   path <- rosterPath
+  let unreadable message = pure (Left (RosterLoadError path (RosterUnreadable message)))
   presence <- try @IOException (getSymbolicLinkStatus path)
   case presence of
     Left exception
       | isDoesNotExistError exception -> pure (Right defaultRoster)
-      | otherwise -> pure (Left (RosterLoadError path (RosterUnreadable (Text.pack (show exception)))))
+      | otherwise -> unreadable (Text.pack (show exception))
     Right _ -> do
-      readResult <- try @IOException (ByteString.readFile path)
-      pure $ case readResult of
-        Left exception -> Left (RosterLoadError path (RosterUnreadable (Text.pack (show exception))))
-        Right bytes -> case Encoding.decodeUtf8' bytes of
-          Left unicodeError ->
-            Left (RosterLoadError path (RosterUnparseable ("not UTF-8: " <> Text.pack (show unicodeError))))
-          Right contents ->
-            either (Left . RosterLoadError path) Right (decodeRoster contents)
+      resolved <- try @IOException (getFileStatus path)
+      case resolved of
+        Left exception -> unreadable (Text.pack (show exception))
+        Right status
+          | not (isRegularFile status) -> unreadable "not a regular file"
+          | otherwise -> do
+              readResult <- try @IOException (ByteString.readFile path)
+              pure $ case readResult of
+                Left exception -> Left (RosterLoadError path (RosterUnreadable (Text.pack (show exception))))
+                Right bytes -> case Encoding.decodeUtf8' bytes of
+                  Left unicodeError ->
+                    Left (RosterLoadError path (RosterUnparseable ("not UTF-8: " <> Text.pack (show unicodeError))))
+                  Right contents ->
+                    either (Left . RosterLoadError path) Right (decodeRoster contents)
 
 -- | Atomic save with the same private-directory, temporary-file, @0600@,
 -- rename discipline 'Kanban.Settings.saveSettings' established.

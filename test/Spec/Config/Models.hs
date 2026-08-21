@@ -31,7 +31,7 @@ import Kanban.Models
 import Spec.Support.Env (permissionsOf, withEnvironmentValue, withTemporaryCacheRoot)
 import System.Directory (createDirectory, createDirectoryIfMissing)
 import System.FilePath ((</>), takeDirectory)
-import System.Posix.Files (createSymbolicLink)
+import System.Posix.Files (createNamedPipe, createSymbolicLink)
 import Test.Hspec
 
 spec :: Spec
@@ -305,6 +305,28 @@ spec = do
         result `shouldSatisfy` \answer -> case answer of
           Left (RosterLoadError errorPath (RosterUnreadable _)) -> errorPath == path
           _ -> False
+
+    -- Refused before any open: a FIFO blocks its reader until a writer
+    -- connects, so probing it by reading would hang startup rather than
+    -- produce the typed refusal.
+    it "treats a FIFO at the path as unreadable, without opening it" $
+      withRosterEnvironment $ \_ -> do
+        path <- rosterPath
+        createDirectoryIfMissing True (takeDirectory path)
+        createNamedPipe path 0o600
+        result <- loadModelRoster
+        result `shouldSatisfy` \answer -> case answer of
+          Left (RosterLoadError errorPath (RosterUnreadable _)) -> errorPath == path
+          _ -> False
+
+    it "still loads a symbolic link that resolves to a regular file" $
+      withRosterEnvironment $ \configRoot -> do
+        path <- rosterPath
+        createDirectoryIfMissing True (takeDirectory path)
+        let target = configRoot </> "real-models.toml"
+        TextIO.writeFile target (encodeRoster singleClaudeRoster)
+        createSymbolicLink target path
+        loadModelRoster `shouldReturn` Right singleClaudeRoster
 
 -- | A valid roster loading Claude alone: claude declared, the seven cells
 -- Claude-applicable roles need, and no Codex anywhere.
