@@ -546,6 +546,25 @@ class RebasePathTests(DocsLandCase):
             os.readlink(sb.docs / "docs/coordination/newdir"),
             "does-not-exist")
 
+    def test_non_ascii_untracked_upstream_collision_is_predicted(self):
+        # `git diff --name-only` C-quotes a non-ASCII filename, so a
+        # line-based upstream-changed list would carry
+        # "docs/coordination/caf\\303\\251.md" and never match the on-disk
+        # café.md occupying that path. The NUL-delimited list must.
+        sb = self.sb
+        sb.move_master_upstream("docs/coordination/café.md")
+        sb.write(sb.docs, "docs/coordination/café.md", "local draft\n")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn("café.md", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
+        self.assertEqual(
+            (sb.docs / "docs/coordination/café.md").read_text(encoding="utf-8"),
+            "local draft\n")
+
     def test_replaced_tracked_directory_symlink_is_predicted(self):
         # docs-wip replaces the tracked docs/coordination directory with an
         # untracked symlink while master adds a file beneath the real
@@ -629,6 +648,32 @@ class PushVerificationTests(DocsLandCase):
         self.assertEqual(
             (sb.main / "docs/new.md").read_text(encoding="utf-8"),
             "primary ignored draft\n")
+
+    def test_ignored_non_ascii_file_in_the_primary_blocks_the_fast_forward(self):
+        # The primary probe walks the same C-quoting hazard: an ignored
+        # café.md in the primary checkout at the landed path must be
+        # recognized from the NUL-delimited update list, or the fast-forward
+        # silently overwrites it.
+        sb = self.sb
+        exclude = sb.main / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("docs/coordination/café.md\n", encoding="utf-8")
+        sb.write(sb.main, "docs/coordination/café.md", "primary ignored\n")
+        main_head = sb.git("rev-parse", "HEAD").strip()
+        sb.write(sb.docs, "docs/coordination/café.md", "landed content\n")
+
+        done = sb.run_script("-m", "Land café", "docs/coordination/café.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("landed: origin/master now contains", done.stdout)
+        self.assertIn("not fast-forwarding", done.stdout)
+        self.assertIn("café.md", done.stdout)
+        self.assertEqual(
+            sb.blob("origin/master", "docs/coordination/café.md"),
+            "landed content\n")
+        self.assertEqual(sb.git("rev-parse", "HEAD").strip(), main_head)
+        self.assertEqual(
+            (sb.main / "docs/coordination/café.md").read_text(encoding="utf-8"),
+            "primary ignored\n")
 
     def test_ignored_ancestor_symlink_in_the_primary_blocks_the_fast_forward(self):
         # The primary-checkout probe must walk ancestors too: an ignored

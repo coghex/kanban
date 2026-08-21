@@ -111,6 +111,23 @@ EOF
 BASE_TIP="$(git rev-parse origin/master)"
 BASE="$(git merge-base HEAD origin/master)"
 
+# Path lists live in NUL-delimited temp files, never in shell variables:
+# newline-delimited `git diff --name-only` C-quotes filenames containing
+# quotes or non-ASCII bytes, so a `café.md` in such a list would never match
+# its own on-disk path — and a shell variable cannot hold a NUL byte.
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/docs-land.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+git diff --name-only -z "$BASE" origin/master > "$TMP_DIR/changed-upstream"
+{ git diff --name-only -z; git diff --cached --name-only -z; } > "$TMP_DIR/dirty"
+
+# Whether path $1 appears in the NUL-delimited list file $2.
+in_nul_list() {
+  while IFS= read -r -d '' _entry; do
+    [ "$_entry" = "$1" ] && return 0
+  done < "$2"
+  return 1
+}
+
 # Whether an occupant stands where $1 (repo-relative) would be checked out
 # in worktree $2 — an untracked or ignored file or symlink at the leaf, or a
 # symlink at ANY ancestor component. Prints the occupying path and returns
@@ -197,17 +214,15 @@ path_action() {
 # --exclude-standard listing would not. Written for bash 3.2 (macOS
 # /bin/bash): no mapfile, no bare expansion of a possibly-empty array under
 # `set -u`.
-CHANGED_UPSTREAM="$(git diff --name-only "$BASE" origin/master)"
-DIRTY="$( { git diff --name-only; git diff --cached --name-only; } | sort -u )"
-RISK=""
-while IFS= read -r f; do
+: > "$TMP_DIR/risk"
+while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
   landing=0
   for p in "$@"; do [ "$f" = "$p" ] && landing=1; done
   [ "$landing" = 1 ] && continue
   at_risk=0
   OCCUPANT="$f"
-  if printf '%s\n' "$DIRTY" | grep -qxF -- "$f"; then
+  if in_nul_list "$f" "$TMP_DIR/dirty"; then
     at_risk=1
   elif OCCUPANT="$(occupied_untracked "$f" "$DOCS_WT")"; then
     # occupied_untracked rather than a bare -e test: a dangling symlink
@@ -217,13 +232,13 @@ while IFS= read -r f; do
     at_risk=1
   fi
   [ "$at_risk" = 1 ] || continue
-  case "$RISK" in *"|$OCCUPANT|"*) ;; *) RISK="$RISK|$OCCUPANT|" ;; esac
-done <<EOF
-$CHANGED_UPSTREAM
-EOF
-if [ -n "$RISK" ]; then
+  if ! in_nul_list "$OCCUPANT" "$TMP_DIR/risk"; then
+    printf '%s\0' "$OCCUPANT" >> "$TMP_DIR/risk"
+  fi
+done < "$TMP_DIR/changed-upstream"
+if [ -s "$TMP_DIR/risk" ]; then
   echo "WARNING: these files are dirty or untracked here AND changed on master:" >&2
-  printf '%s\n' "$RISK" | tr '|' '\n' | grep -v '^$' | sed 's/^/  /' >&2
+  tr '\0' '\n' < "$TMP_DIR/risk" | sed 's/^/  /' >&2
   echo "The reconciliation rebase would stash and replay the tracked ones, which" >&2
   echo "can conflict; an untracked one blocks its checkout outright, and an" >&2
   echo "ignored one would be silently overwritten." >&2
@@ -236,7 +251,7 @@ fi
 # edit. That is sometimes wanted (-f), never silent.
 SELRISK=""
 for p in "$@"; do
-  if printf '%s\n' "$CHANGED_UPSTREAM" | grep -qxF -- "$p"; then
+  if in_nul_list "$p" "$TMP_DIR/changed-upstream"; then
     [ "$(path_action "$p")" = unchanged ] && continue
     case "$SELRISK" in *"|$p|"*) ;; *) SELRISK="$SELRISK|$p|" ;; esac
   fi
@@ -275,8 +290,6 @@ fi
 # worktree content (or their deletion) and nothing else, so neither the real
 # index nor any commit already on docs-wip can leak an unselected change into
 # what is pushed.
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/docs-land.XXXXXX")"
-trap 'rm -rf "$TMP_DIR"' EXIT
 TMP_INDEX="$TMP_DIR/index"
 GIT_INDEX_FILE="$TMP_INDEX" git read-tree origin/master
 for p in "$@"; do
@@ -355,18 +368,19 @@ elif ! git -C "$PRIMARY" merge-base --is-ancestor HEAD origin/master; then
   # included — as a failure it was not.
   echo "note: primary checkout has local commits not on origin/master; not fast-forwarding it"
 else
-  PRIMARY_OCCUPIED=""
-  while IFS= read -r f; do
+  git -C "$PRIMARY" diff --name-only -z HEAD origin/master > "$TMP_DIR/primary-changed"
+  : > "$TMP_DIR/primary-occupied"
+  while IFS= read -r -d '' f; do
     [ -n "$f" ] || continue
     if OCCUPANT="$(occupied_untracked "$f" "$PRIMARY")"; then
-      case "$PRIMARY_OCCUPIED" in *"|$OCCUPANT|"*) ;; *) PRIMARY_OCCUPIED="$PRIMARY_OCCUPIED|$OCCUPANT|" ;; esac
+      if ! in_nul_list "$OCCUPANT" "$TMP_DIR/primary-occupied"; then
+        printf '%s\0' "$OCCUPANT" >> "$TMP_DIR/primary-occupied"
+      fi
     fi
-  done <<EOF
-$(git -C "$PRIMARY" diff --name-only HEAD origin/master)
-EOF
-  if [ -n "$PRIMARY_OCCUPIED" ]; then
+  done < "$TMP_DIR/primary-changed"
+  if [ -s "$TMP_DIR/primary-occupied" ]; then
     echo "note: primary checkout has untracked or ignored files at paths the update touches; not fast-forwarding it:"
-    printf '%s\n' "$PRIMARY_OCCUPIED" | tr '|' '\n' | grep -v '^$' | sed 's/^/  /'
+    tr '\0' '\n' < "$TMP_DIR/primary-occupied" | sed 's/^/  /'
   else
     git -C "$PRIMARY" merge --ff-only -q origin/master
     echo "primary checkout fast-forwarded"
