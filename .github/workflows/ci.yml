@@ -180,6 +180,25 @@ jobs:
           # baseline is missing, so the history has to actually be here.
           fetch-depth: 0
 
+      - name: Install the pinned rasteriser
+        run: python3 -m pip install --user Pillow==12.2.0
+
+      - name: Install the pinned fonts
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/dejavu-fonts-ttf-2.37.tar.bz2" \
+            https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2
+          mkdir -p "$HOME/.local/share/fonts/dejavu"
+          tar --extract --bzip2 \
+            --file "$RUNNER_TEMP/dejavu-fonts-ttf-2.37.tar.bz2" \
+            --directory "$HOME/.local/share/fonts/dejavu" --strip-components=2 \
+            dejavu-fonts-ttf-2.37/ttf/DejaVuSansMono.ttf \
+            dejavu-fonts-ttf-2.37/ttf/DejaVuSansMono-Bold.ttf
+
+      - name: Rendering probe for issue 422 evidence
+        run: python3 -m unittest -v tools.test_board_screenshot
+
       - name: Tooling tests
         run: python3 -m unittest discover -s tools -p 'test_*.py'
 
