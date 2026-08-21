@@ -165,6 +165,23 @@ occupied_untracked() {
       # Absent means nothing deeper exists; a real directory means descend.
       [ -d "$2/$_prefix" ] || return 1
     else
+      if [ -d "$2/$_prefix" ] && [ ! -L "$2/$_prefix" ]; then
+        # Upstream wants a FILE at this path but a directory stands on
+        # disk. Git replaces a directory only when nothing untracked lives
+        # inside it, so any untracked or ignored child — --others without
+        # --exclude-standard includes the ignored ones — is the occupant
+        # the reconciliation would abort on or lose, after publication.
+        # Tracked children are their own upstream-change entries and are
+        # handled as ordinary tracked transitions.
+        _child=""
+        while IFS= read -r -d '' _c; do _child="$_c"; break; done \
+          < <(GIT_LITERAL_PATHSPECS=1 git -C "$2" ls-files --others -z -- "$_prefix")
+        if [ -n "$_child" ]; then
+          printf '%s\n' "$_child"
+          return 0
+        fi
+        return 1
+      fi
       if { [ -e "$2/$_prefix" ] || [ -L "$2/$_prefix" ]; } \
           && ! GIT_LITERAL_PATHSPECS=1 git -C "$2" ls-files --error-unmatch -- "$_prefix" >/dev/null 2>&1; then
         printf '%s\n' "$_prefix"

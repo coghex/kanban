@@ -500,6 +500,32 @@ class RebasePathTests(DocsLandCase):
             (sb.docs / "docs/new.md").read_text(encoding="utf-8"),
             "ignored local draft\n")
 
+    def test_upstream_directory_to_file_transition_is_predicted(self):
+        # master replaces the tracked docs/coordination directory with a
+        # file while docs-wip holds an untracked note inside that directory.
+        # The leaf path prefix-matches tracked descendants so a tracked-ness
+        # test calls it safe, yet the reconciliation must remove the
+        # directory and would abort on (or lose) the untracked child —
+        # after publication.
+        sb = self.sb
+        sb.git("rm", "-r", "-q", "docs/coordination")
+        sb.write(sb.main, "docs/coordination", "now a file\n")
+        sb.git("add", "docs/coordination")
+        sb.git("commit", "-q", "-m", "flatten coordination")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/coordination/scratch.md", "untracked note\n")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn("docs/coordination/scratch.md", blocked.stderr)
+        self.assertEqual(sb.snapshot(), before)
+        self.assertEqual(
+            (sb.docs / "docs/coordination/scratch.md").read_text(
+                encoding="utf-8"),
+            "untracked note\n")
+
     def test_upstream_rename_of_a_selected_path_is_refused_without_force(self):
         # With rename detection, an upstream rename of docs/a.md to
         # docs/a-new.md reports only the new name, so the selected-path
