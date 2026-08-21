@@ -408,32 +408,36 @@ one repository all carry the same name. An identity whose encoded slug would
 outgrow what a service manager can carry falls back to a hash of the whole
 identity instead, in all three places at once.
 
-Two different home directories are in play below, and the difference is worth
-knowing before you go looking for a file.
+The paths below fall into three groups, and which group a file is in decides
+where it actually turns up.
 
-**Everything the controller owns** — the record, the script links, the runtime
-tree, the locks, and the logs — is resolved from the account's **passwd** home
-directory, never from `$HOME`. That is deliberate: the identity lock that keeps
-two clones of one repository from both running hangs off this root, and a root a
-process-controlled input could move would let two runs both start. Running an
-installer or a controller with a different `$HOME` does not move any of it.
+**Fixed, and immovable.** The record, the runtime tree, the locks, and the logs
+are resolved from the account's **passwd** home directory, never from `$HOME`,
+and no option or environment variable moves them. That is deliberate: the
+identity lock that keeps two clones of one repository from both running hangs
+off this root, and a root a process-controlled input could move would let two
+runs both start. Running an installer or a controller under a different `$HOME`
+leaves every one of them exactly where it was.
 
-**The service definition is the service manager's, not the controller's**, and
+**The shared script links are the one thing that moves.** They default to that
+same passwd-anchored root, but `--install-dir` and
+`KANBAN_ISSUE_APPROVAL_INSTALL_DIR` place them at any path you name — and a
+leading `~` in either is expanded with `$HOME`, like any path, so a custom
+location can depend on `$HOME` even though nothing else here does. They are also
+all that moves: the record, the runtime tree, the locks, and the logs stay put.
+This is where the layout differs from the PR drainer's, whose runtime tree sits
+*inside* its install directory and moves with it; here the runtime root is a
+sibling of the record, so a dashboard that inherits no environment can find both
+without being told where the links went.
+
+**The service definition is the service manager's, not the controller's.**
 `tools/service_manager.py` resolves its directory with `Path.home()` — which
 *does* honour `$HOME` — plus, on systemd, `$XDG_CONFIG_HOME`. So a command run
-with a different `$HOME` writes and reads the plist or unit somewhere else,
+under a different `$HOME` writes and reads the plist or unit somewhere else,
 while the record that is supposed to name it stays under the passwd home. That
 combination leaves a job the record points at and the manager has never heard
 of. Do not install or control this service under a redirected `$HOME` unless you
 mean exactly that.
-
-Of everything the controller owns, only the shared script links move.
-`--install-dir` and `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` relocate those and
-nothing else — the record, the runtime tree, the locks, and the logs stay where
-they are. This is the one place the layout differs from the PR drainer's, whose
-runtime tree sits *inside* its install directory and moves with it; here the
-runtime root is a sibling of the record, so a dashboard that inherits no
-environment can find both without being told where the links went.
 
 - Install record Kanban discovers each job through:
   `~/Library/Application Support/kanban/issue-approval/config.json`. Its
@@ -444,8 +448,9 @@ environment can find both without being told where the links went.
   it — a dashboard that inherits no environment still has to find an install made
   anywhere.
 - Installed script links, shared by every repository installed there:
-  `~/Library/Application Support/kanban/issue-approval/`, or wherever
-  `--install-dir` put them.
+  `~/Library/Application Support/kanban/issue-approval/` — the passwd home's,
+  by default — or wherever `--install-dir` or
+  `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` put them, per the second group above.
 - Runtime state, one directory per identity:
   `~/Library/Application Support/kanban/issue-approval/runtime/<slug>/`, holding
   `status.json`, an `incidents/` directory of `incident-*.json` documents, and —

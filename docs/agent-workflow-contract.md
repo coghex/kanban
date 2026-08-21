@@ -1114,18 +1114,21 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   installed system-wide. The controller takes no authority of its own: every
   GitHub mutation is the backend's, made under the operator's own `gh` login.
 - **Durable state:** per account, under one root resolved from the **passwd**
-  home directory rather than from `$HOME`, and itself deliberately immovable by
-  any option or environment variable — the identity lock that keeps two clones
+  home directory rather than from `$HOME`. Everything but the shared script
+  links is anchored there and deliberately immovable by any option or
+  environment variable — the identity lock that keeps two clones
   of one repository from both running hangs off it, and a root a
   process-controlled input could move would let two runs both start. Those locations are the
   `issue-approval` `personal-path` rows in §4, and none of them has an XDG
   spelling on any platform: the discovery record at
   `~/Library/Application Support/kanban/issue-approval/config.json`, whose
   `repositories` table carries one entry per installed repository; the shared
-  script links beside it, which are the one thing `--install-dir` and
-  `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` move — everything else here stays where it
-  is, unlike the drainer, whose runtime tree lives under its install directory
-  and moves with it; a runtime directory per identity
+  script links, which default beside it and are the one thing `--install-dir`
+  and `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` place elsewhere — expanding a leading
+  `~` through `$HOME` as any path does, so a custom link location is the one
+  part of this footprint an operator can make `$HOME`-dependent; everything else
+  stays where it is, unlike the drainer, whose runtime tree lives under its
+  install directory and moves with it; a runtime directory per identity
   under `runtime/<slug>` holding `status.json`, an `incidents/` directory, and —
   only while the queue is barriered — `barrier.json`, whose absence is what an
   unbarriered queue *is*; the lock directory holding each identity's run lock
@@ -1401,8 +1404,11 @@ that service's whole durable footprint, and unlike the drainer's they have **no
 XDG sibling**: `tools/approve_issues_service.py` resolves all five from the
 account's passwd home directory with no XDG rule of any kind, so one spelling is
 the complete declaration on macOS and on Linux alike. `issue-approval-install-dir`
-is the service root, which is also the record's directory, the default
-`--install-dir`, and the parent of the other two trees;
+is the service root, which is also the record's directory, the *default*
+install directory — the shared script links are the one part of this footprint
+`--install-dir` and `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` place elsewhere, and a
+`~` in either expands through `$HOME` like any path — and the parent of the
+other two trees;
 `issue-approval-discovery-record` is the record inside it, whose own path
 `--install-dir` deliberately cannot move; `issue-approval-runtime-dir` is the
 runtime root, one directory per identity beneath it holding that identity's
