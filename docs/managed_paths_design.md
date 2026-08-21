@@ -26,7 +26,7 @@ concrete precondition
 - [x] EPIC. Resolve Kanban's managed installs, records, and logs per platform — [#347]
 - [x] PATH-1. Make one platform-aware resolver own the issue-review paths — [#357]
 - [x] PATH-2. Route the drainer's install, record, runtime, and log paths — [#358]
-- [ ] PATH-3. Resolve the Haskell consumers' managed paths per platform
+- [x] PATH-3. Resolve the Haskell consumers' managed paths per platform — [#444]
 - [x] PATH-5. Relocate a pre-XDG `~/Library` installation on a non-macOS host — [#367]
 - [ ] PATH-4. Repoint the packaged plugin assets at the resolved record
 
@@ -513,6 +513,8 @@ reconciliation fails closed on a spelling whose row is missing.
 - **Open questions:** None
 
 ### PATH-3. Resolve the Haskell consumers' managed paths per platform
+
+> Processed as #444.
 
 - **Outcome:** `Drainer.hs` and `Review/Canonical.hs` discover their records
   through the same probe order from one Haskell resolution point, with
