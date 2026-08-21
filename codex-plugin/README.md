@@ -4,9 +4,13 @@ This directory is a Codex marketplace, tracked in this repository, that
 packages the Codex-side workflows Kanban invokes by name — `$solve`,
 `$pr-review`, `$pr-rereview`, `$pr-revise`, and `$repair` — plus the issue-drafting and
 canonical issue-review workflows a user or the review daemon invokes directly:
-`$issue`, `$autoissue`, and `$issue-review`. Since issue #229 it also packages
+`$issue`, `$autoissue`, `$issue-review`, and `$issue-rereview`. Since issue
+#229 it also packages
 the design and report document workflows a user invokes directly — `$design-epic`,
-`$process-design-doc`, `$draft-report`, `$note-problem`, and `$process-report`.
+`$process-design-doc`, `$draft-report`, `$note-problem`, and `$process-report` —
+and since issues #393 and #410 the `$triage` roadmap workflow and the
+`$push-docs` documentation-landing workflow, each rendered into both bundles
+from one authored source by `tools/render_command_sources.py`.
 It exists so a
 clean Codex installation can perform these actions without depending on any
 developer's personal skill collection. See
@@ -52,12 +56,12 @@ Verify discovery:
 codex plugin list
 ```
 
-`kanban@kanban` should show as `installed, enabled`, and all fourteen workflow
+`kanban@kanban` should show as `installed, enabled`, and all sixteen workflow
 names should be available as `$solve`, `$pr-review`, `$pr-rereview`,
 `$pr-revise`, `$issue`, `$autoissue`, `$issue-review`, `$issue-rereview`,
 `$repair`, `$design-epic`, `$process-design-doc`, `$draft-report`,
-`$note-problem`, and `$process-report` in any Codex session run from this
-checkout.
+`$note-problem`, `$process-report`, `$triage`, and `$push-docs` in any Codex
+session run from this checkout.
 
 Verified against Codex CLI `codex-cli 0.144.6` (`codex --version`), the
 version that provides the `codex plugin` / `codex plugin marketplace`
@@ -68,13 +72,15 @@ without those subcommands cannot install this plugin.
 
 Kanban's own CLI spawns five of these by name: the first four, plus `$repair`,
 which `r` selects for a Done pull request whose status is a problem (issue
-#127). The other eight are drafting, readiness-gate, repair, and document
-workflows a user or the review daemon invokes directly; see
+#127). The other eleven are drafting, readiness-gate, document, roadmap, and
+documentation-landing workflows a user or the review daemon invokes directly;
+see
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md) and
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md).
-`$repair` is not part of either declared surface. Only those eight are excluded
-from the Haskell invocation-parity pinning in `tools/test_codex_plugin.py`,
-which covers exactly the names Kanban's own code spawns.
+`$repair` is not part of either declared surface. Only those eleven are
+excluded from the Haskell invocation-parity pinning in
+`tools/test_codex_plugin.py`, which covers exactly the names Kanban's own
+code spawns.
 
 | Skill | Codex command | Boundary |
 | --- | --- | --- |
@@ -92,6 +98,8 @@ which covers exactly the names Kanban's own code spawns.
 | `skills/draft-report/` | `$draft-report` | Turns free-form notes or an audit request into one evidence-backed `*_findings.md` report, presented in full and written only after explicit approval. Files no issues and chooses no dispositions. Paired with the Claude `/draft-report` command. |
 | `skills/note-problem/` | `$note-problem` | Appends **exactly one** verified observation to an existing findings report: preserve the user's wording as a claim, investigate only that claim, classify the result, and record evidence and handoff context. Stops for approval before touching the report, applies no disposition, and creates no tracker item. Paired with the Claude `/note-problem` command. |
 | `skills/process-report/` | `$process-report` | Processes **exactly one** finding per invocation from an existing report: verify, deduplicate, recommend one disposition, stop for approval, then mark the report. Paired with the Claude `/process-report` command. |
+| `skills/triage/` | `$triage` | Orders the repository's open issues into a dependency-aware roadmap — prerequisite-barrier blocks, a priority-ordered Anytime queue, and a tracker list — verifying approval readiness through the canonical backend's one-shot reconciliation. Never claims, edits, or creates an issue itself. Paired with the Claude `/triage` command. |
+| `skills/push-docs/` | `$push-docs` | Lands user-approved documentation from the docs-wip worktree straight onto master through the tracked `tools/docs_land.sh`, which gates every path against the §7 publication classification. Named paths land exactly; with no arguments it presents the helper's inventory and lands only the approved selection. Never lands unprompted, never bypasses a refusal. Paired with the Claude `/push-docs` command. |
 
 The five document workflows are user-invoked only. Kanban's CLI never spawns
 one, because each has a mandatory human approval stop in the middle; see
@@ -214,11 +222,11 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the skills directory contains exactly the thirteen packaged workflows, and
+- the skills directory contains exactly the sixteen packaged workflows, and
   the five Kanban spawns exactly match the `$`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  four drafting or four document skills;
+  eleven user-invoked skills;
 - `draft-issues` is absent, keeping the Claude-only breadth boundary;
 - no packaged manifest sets model/effort/sandbox/approval/working-directory
   configuration, and every packaged skill — drafting skills included — has a
@@ -247,7 +255,7 @@ resolves from its own installed bundle while the working directory is the
 repository being solved. `$issue-rereview` reads the issue timeline through
 that same copy and adds none of its own.
 
-`tools/test_agent_workflow_contract.py` reconciles all thirteen skills' own bash
+`tools/test_agent_workflow_contract.py` reconciles all sixteen skills' own bash
 surface against the manifest in
 [docs/agent-workflow-contract.md §4](../docs/agent-workflow-contract.md#4-dependency-manifest),
 including the user-scoped backend install path the drafting, issue-review, and
@@ -263,7 +271,7 @@ the never-merge/never-label authority limits, and the exactly-one-rereview
 handoff — against both this skill and its Claude counterpart, so the two
 brands' copies cannot diverge.
 
-`tools/test_drafting_workflow_contract.py` reconciles the three drafting skills
+`tools/test_drafting_workflow_contract.py` reconciles the four drafting skills
 against the responsibility matrix in
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md):
 every declared asset must exist, no undeclared drafting skill may appear, the
@@ -277,7 +285,7 @@ document, each gate instruction must follow the guard that makes it apply only
 when the consuming repo declares a gate, and `$issue-review` must stay free of
 gate language.
 
-`tools/test_document_workflow_contract.py` does the same for the four document
+`tools/test_document_workflow_contract.py` does the same for the five document
 skills against
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md):
 every declared asset must exist, no undeclared design or report workflow may
