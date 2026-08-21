@@ -202,7 +202,6 @@ other explicit mutations.
   own single-pull-request path (`tools/drain_prs.py --pr`), which owns every
   gate, the merge itself, and the post-merge cleanup; Kanban holds no second
   copy of any of that, and merges nothing that path would refuse.
-- A permanent archive of merged or closed work.
 - Multi-repository aggregation in one running board. Each invocation represents
   one repository selected by its path.
 
