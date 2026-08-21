@@ -71,9 +71,11 @@ source of confusion on a host that is not macOS.
   POSIX: an advisory `flock`, a passwd database, `os.killpg`, and a new session
   per backend invocation. A host missing any of them is refused by name, because
   a run that cannot terminate its own child has no safe degraded mode.
-- **A read-only `status`** needs neither. It reads what the last run left behind
-  and consults no manager, which is why it answers on a host where nothing can
-  be installed.
+- **A read-only `status`** needs no service manager. It reads what the last run
+  left behind and asks no manager anything, which is why it still answers on a
+  host where nothing can be installed. It is not POSIX-independent, though:
+  naming the runtime directory it reads goes through the passwd database, so a
+  host without one cannot answer even this.
 
 What the manager reads differs — a LaunchAgent plist under
 `~/Library/LaunchAgents`, or a user unit under `~/.config/systemd/user`
@@ -101,9 +103,20 @@ python3 tools/approve_issues_service.py --path /path/to/project --json status
 The natural ordering is the one that fails. `status --json` is rejected by the
 argument parser with `unrecognized arguments: --json`, because `--json`,
 `--path`, `--repo`, and `--config` belong to the parser rather than to any
-subcommand. Only `run` has options of its own — `--interval` and
-`--legacy-policy` — and only `install` and `uninstall` take `--dry-run`; those
-four do follow their subcommand.
+subcommand.
+
+A subcommand's *own* arguments go after it, as usual. Three subcommands have
+some:
+
+| Subcommand | Its own arguments |
+| --- | --- |
+| `run` | `--interval SECONDS`, `--legacy-policy dual\|hold` |
+| `install`, `uninstall` | `--dry-run` |
+| `ack` | an optional incident id, and `--note TEXT` |
+
+`status`, `start`, and `stop` take none at all. So
+`… --json ack incident-… --note "repaired by hand"` is right, and the `--json`
+is the only part of it that has to come first.
 
 `tools/install_issue_approval.py` has no subcommands, so its options may appear
 in any order.
@@ -629,8 +642,16 @@ The issue approval controller runs only on POSIX hosts; this one provides no
 <missing facilities>. Run it on macOS or Linux.
 ```
 
-`status` still answers on both, because reading what a run left behind needs
-neither a manager nor a process group.
+`status` still answers on the first of those, because reading what a run left
+behind asks no manager anything. It does **not** answer on the second: naming
+its own runtime directory goes through the passwd database before it reads a
+byte, so a host without one fails there instead — and with that failure's own
+wording, not the refusal above, since `status` never reaches the POSIX check:
+
+```text
+This host has no passwd database, so the issue approval controller cannot
+resolve the account its state belongs to.
+```
 
 ## What this guide does not cover
 
