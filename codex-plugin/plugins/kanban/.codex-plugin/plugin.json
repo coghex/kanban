@@ -1,7 +1,7 @@
 {
   "name": "kanban",
-  "version": "1.9.0",
-  "description": "Kanban's tracked Codex workflows: the Kanban-invoked $solve, $pr-review, $pr-rereview, $pr-revise, and $repair, plus the user-invoked $issue, $autoissue, $issue-review, $issue-rereview, $design-epic, $process-design-doc, $draft-report, $note-problem, $process-report, $triage, $retriage, $push-docs, and $backlog-review drafting, readiness-gate, document, roadmap, documentation-landing, and backlog-audit workflows.",
+  "version": "1.10.0",
+  "description": "Kanban's tracked Codex workflows: the Kanban-invoked $solve, $pr-review, $pr-rereview, $pr-revise, and $repair, plus the user-invoked $issue, $autoissue, $issue-review, $issue-rereview, $design-epic, $process-design-doc, $draft-report, $note-problem, $process-report, $triage, $retriage, $push-docs, $backlog-review, and $project-review drafting, readiness-gate, document, roadmap, documentation-landing, backlog-audit, and history-audit workflows.",
   "author": {
     "name": "Terry"
   },
@@ -27,13 +27,14 @@
     "triage",
     "retriage",
     "push-docs",
-    "backlog-review"
+    "backlog-review",
+    "project-review"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Kanban Workflows",
-    "shortDescription": "Kanban's $solve, $pr-review, $pr-rereview, $pr-revise, $repair, $issue, $autoissue, $issue-review, $issue-rereview, $design-epic, $process-design-doc, $draft-report, $note-problem, $process-report, $triage, $retriage, $push-docs, and $backlog-review workflows",
-    "longDescription": "Packages the Codex-side workflows the Kanban board invokes by name: $solve claims and implements a GitHub issue through PR creation, $pr-review and $pr-rereview run the canonical opposite-brand pull request review, $pr-revise repairs a changes-requested pull request and hands off to a fresh canonical rereview, and $repair unblocks a pull request that cannot merge and hands off to exactly one rereview. It also packages the drafting, readiness-gate, and document workflows a user or the review daemon invokes directly rather than Kanban's CLI: $issue drafts exactly one verified, deduplicated issue and stops for signoff, $autoissue delegates that drafting and then immediately runs the canonical review of the created issue, $issue-review runs the canonical opposite-agent readiness gate for one numbered issue, $issue-rereview repairs a changes-requested issue with explicit signoff and resubmits it to that gate, $design-epic captures an epic-sized feature arc in a durable Markdown design document before any tracker item exists, $process-design-doc turns one entry of such a document into one approved tracker artifact, $draft-report turns notes or an audit request into an evidence-backed findings report, $note-problem appends one verified observation to an existing report after explicit approval, $process-report processes one concern of such a report at a time, $triage orders a repository's open issues into a dependency-aware roadmap, $retriage refreshes a roadmap $triage already produced without rebuilding it, $push-docs lands user-approved documentation from the docs-wip worktree straight onto master through the repository's tracked landing helper, and $backlog-review audits the open issue backlog oldest-first and applies only the dispositions the user approves. Each workflow preserves Kanban's existing solver, reviewer, and revision authority boundaries described in docs/agent-workflow-contract.md, docs/drafting-workflow-contract.md, and docs/document-workflow-contract.md.",
+    "shortDescription": "Kanban's $solve, $pr-review, $pr-rereview, $pr-revise, $repair, $issue, $autoissue, $issue-review, $issue-rereview, $design-epic, $process-design-doc, $draft-report, $note-problem, $process-report, $triage, $retriage, $push-docs, $backlog-review, and $project-review workflows",
+    "longDescription": "Packages the Codex-side workflows the Kanban board invokes by name: $solve claims and implements a GitHub issue through PR creation, $pr-review and $pr-rereview run the canonical opposite-brand pull request review, $pr-revise repairs a changes-requested pull request and hands off to a fresh canonical rereview, and $repair unblocks a pull request that cannot merge and hands off to exactly one rereview. It also packages the drafting, readiness-gate, and document workflows a user or the review daemon invokes directly rather than Kanban's CLI: $issue drafts exactly one verified, deduplicated issue and stops for signoff, $autoissue delegates that drafting and then immediately runs the canonical review of the created issue, $issue-review runs the canonical opposite-agent readiness gate for one numbered issue, $issue-rereview repairs a changes-requested issue with explicit signoff and resubmits it to that gate, $design-epic captures an epic-sized feature arc in a durable Markdown design document before any tracker item exists, $process-design-doc turns one entry of such a document into one approved tracker artifact, $draft-report turns notes or an audit request into an evidence-backed findings report, $note-problem appends one verified observation to an existing report after explicit approval, $process-report processes one concern of such a report at a time, $triage orders a repository's open issues into a dependency-aware roadmap, $retriage refreshes a roadmap $triage already produced without rebuilding it, $push-docs lands user-approved documentation from the docs-wip worktree straight onto master through the repository's tracked landing helper, $backlog-review audits the open issue backlog oldest-first and applies only the dispositions the user approves, and $project-review audits merged pull requests and older direct commits into a canonical docs-worktree findings report without ever creating or editing a tracker issue. Each workflow preserves Kanban's existing solver, reviewer, and revision authority boundaries described in docs/agent-workflow-contract.md, docs/drafting-workflow-contract.md, and docs/document-workflow-contract.md.",
     "developerName": "Terry",
     "category": "Engineering",
     "capabilities": [
@@ -59,7 +60,8 @@
       "Use $triage to order this repository's open issues into a dependency-aware roadmap.",
       "Use $retriage to update my existing issue roadmap after merges, closures, or newly opened issues.",
       "Use $push-docs to land the documentation I approve from the docs worktree onto master.",
-      "Use $backlog-review to audit the oldest open issues against the current code and propose which to update, close, or escalate."
+      "Use $backlog-review to audit the oldest open issues against the current code and propose which to update, close, or escalate.",
+      "Use $project-review to audit the next historical batch and record confirmed mistakes in a canonical docs-worktree findings report."
     ]
   }
 }

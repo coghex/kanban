@@ -226,6 +226,23 @@ COMMAND_SOURCES = (
             "Claude counterpart — rather than two spellings of one sentence."
         ),
     ),
+    CommandSource(
+        name="project-review",
+        source="tools/command_sources/project-review.md",
+        claude_commands_dir=CLAUDE_COMMANDS_DIR,
+        codex_skills_dir=CODEX_SKILLS_DIR,
+        note=(
+            "VEND-4, the heaviest reconciliation in the arc: 223 differing "
+            "lines between a 79-line Claude copy that drafted and filed issue "
+            "bodies and a 220-line Codex copy that forbids tracker writes and "
+            "writes a findings report instead. Design D-9 resolved the two "
+            "opposite terminal behaviors in favour of the Codex copy, so the "
+            "rendered command is report-only for both brands. D-10 keeps its "
+            "boundary rule as body prose and ships no auxiliary asset, which "
+            "is why this entry needs nothing from the renderer that the four "
+            "above did not."
+        ),
+    ),
 )
 
 

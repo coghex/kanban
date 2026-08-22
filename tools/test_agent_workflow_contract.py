@@ -193,6 +193,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/push-docs/SKILL.md",
     "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
     "codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/project-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
@@ -225,6 +226,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/push-docs.md",
     "claude-plugin/plugins/kanban/commands/retriage.md",
     "claude-plugin/plugins/kanban/commands/backlog-review.md",
+    "claude-plugin/plugins/kanban/commands/project-review.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
@@ -327,6 +329,33 @@ BACKLOG_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "awk",
     },
     "codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md": {
+        "gh",
+        "git",
+        "sed",
+        "awk",
+    },
+}
+
+# Issue #462's history audit, pinned the same way and for the mirrored reason:
+# design D-9 made it report-only, so its `gh` surface is the whole of its
+# GitHub reach, and an extractor that stopped recovering that surface would
+# leave requirement 7's scoping rule -- `-R "$REPO"` on every call -- resting
+# on nothing discovered. The same four commands appear as backlog-review's,
+# and each is load-bearing for a different rule: `gh` reads the merged pull
+# requests and deduplicates against the tracker, `sed` fills `$REPO` from the
+# remote without a GitHub call of its own, `awk` resolves the docs worktree
+# that holds both the sweep cursor and the report, and `git` walks
+# `--first-parent` history in direct mode. The two files are rendered from one
+# source, so they are pinned to the same set: a brand block that leaked a
+# command into one and not the other fails here.
+PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/project-review.md": {
+        "gh",
+        "git",
+        "sed",
+        "awk",
+    },
+    "codex-plugin/plugins/kanban/skills/project-review/SKILL.md": {
         "gh",
         "git",
         "sed",
@@ -1760,6 +1789,50 @@ class AgentWorkflowContractTests(unittest.TestCase):
         }
         for relative_path, expected in sorted(
             BACKLOG_REVIEW_SURFACE_EXPECTED_COMMANDS.items()
+        ):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+            # Grounded in the manifest from the other side too: being scanned
+            # is not the same as being declared, and the four rows above are
+            # where a reader looks to find out which assets speak each tool.
+            for name in sorted(expected):
+                row = next(
+                    row
+                    for row in self.manifest
+                    if row["kind"] == "executable" and row["token"] == name
+                )
+                self.assertIn(row["id"], {"gh-cli", "git-cli", "sed-cli", "awk-cli"})
+                self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_project_review_asset_command_discovery_is_not_vacuous(self):
+        # The counterpart of the two pins above for the one vendored workflow
+        # that is report-only. Requirement 7 of issue #462 is that no `gh`
+        # call in either rendered file omits `-R "$REPO"`, and
+        # tools/test_project_review_workflow.py asserts exactly that -- but
+        # only while `gh` is really discoverable in the asset, so what each
+        # file invokes is pinned exactly rather than merely checked for
+        # undocumented names. `sed` and `awk` are pinned with it because they
+        # are what the repository and docs-worktree resolutions are built
+        # from, and `git` because direct-commit mode walks first-parent
+        # history with it -- a rewrite that reached for `gh repo view` instead
+        # would drop `sed` here rather than passing quietly.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path, expected in sorted(
+            PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS.items()
         ):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
