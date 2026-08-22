@@ -63,7 +63,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-12. Nothing holds sections 3 and 20 against the rest of the document — [#457]
 - [x] PROD-13. The contract opens with a finished epic's processing ledger — [#428]
 - [x] PROD-14. The contract closes with that epic's decisions and delivery plan — [#429]
-- [ ] PROD-15. Nothing states when an arc's scaffolding leaves the document it was added to — [deferred]: #428 and #429 must land first
+- [x] PROD-15. Nothing states when an arc's scaffolding leaves the document it was added to — [#458]
 - [x] PROD-16. A conflicted autostash restore preserves a stash nothing ever reaps — [#431]
 - [x] PROD-17. Five stale recovery stashes sit on the primary checkout now — [no-issue]
 - [x] PROD-18. The contribution protocol is recorded only in agent-facing instructions — [#432]
@@ -679,20 +679,7 @@ section 21, past the end of the numbered contract.
   PROD-13; they are two halves of one cleanup and splitting them across releases
   leaves the document lopsided. Documentation only.
 
-### [deferred] PROD-15. Nothing states when an arc's scaffolding leaves the document it was added to
-
-> **Deferred:** The rule is supposed to describe what #428 and #429 do, and both are
-> still open. #429's constraint in particular — section 21 cites 13 of the 14 decisions
-> 43 times — forces the answer to the rule's hardest clause, what becomes of a closed
-> arc's decisions, and that answer is undetermined until it lands. Writing the rule now
-> is the retrofit this finding warns against. **Precondition:** #428 and #429 merge,
-> after which the rule states what they did. One sharpening for whoever writes it: the
-> mechanism is that the state machine has no terminal state — `design-epic.md:303`
-> defines `exploring` and `ready for issue processing` and no third value, and
-> `process-design-doc.md:206` reports completion and stops — so all seven design
-> documents sit at `ready for issue processing`, including the five already complete and
-> `docs/multi_repo_boards_design.md` (1/6) and `docs/model_settings_design.md` (2/14)
-> still in flight. That state machine is where a rule would attach.
+### [#458] PROD-15. Nothing states when an arc's scaffolding leaves the document it was added to
 
 **Verification:** Verified — `process-design-doc` and the design-epic workflow
 add processing apparatus to durable documents, and no contract says when it
