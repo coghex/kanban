@@ -70,7 +70,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-19. No issue template encodes the tracker's required body shape — [#434]
 - [x] PROD-20. No pull-request template encodes the origin marker the router parses — [#435]
 - [x] PROD-21. No security policy, though the project installs services and runs agents — [#459]
-- [ ] PROD-22. No code of conduct
+- [x] PROD-22. No code of conduct — [no-issue]
 
 ---
 
@@ -995,7 +995,17 @@ ceremonial.
   the board alone and the board plus installed services have very different
   surfaces.
 
-### PROD-22. No code of conduct
+### [no-issue] PROD-22. No code of conduct
+
+> **Disposition:** No issue — there is no community to govern and no enforcement
+> contact to name. Five weeks public with 0 forks, 0 watchers, 0 stars, and all
+> 229 issues and 229 pull requests authored by `coghex`; `codeOfConduct` is
+> null, so nothing is inherited. A Contributor Covenant needs a real enforcement
+> address, and #459 left publishing one to the maintainer, so adopting it now
+> would be decoration pointing at nobody. This is the recorded decision the
+> finding's expected behavior offers as its second acceptable outcome, and it is
+> bound to that premise: the first outside issue, pull request, or fork reopens
+> it.
 
 **Verification:** Verified — no `CODE_OF_CONDUCT.md` exists. Recorded for
 completeness of the community-health set; it is the weakest finding in this
