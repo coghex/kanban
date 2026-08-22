@@ -21,13 +21,14 @@ with a Claude counterpart, and issue #240 added /issue-rereview, the drafting
 contract's repair loop for a changes-requested issue. Issue #241 added the
 design pair /design-epic and /process-design-doc, transposed from the
 post-#239 tracked Codex skills; issue #328 completed the report side with
-/draft-report and /note-problem; and issues #393, #410, and #427 vendored the
-rendered /triage roadmap, its /retriage refresh, and the /push-docs
-documentation-landing workflow.
+/draft-report and /note-problem; and issues #393, #410, #427, and #430 vendored
+the rendered /triage roadmap, its /retriage refresh, the /push-docs
+documentation-landing workflow, and the /backlog-review backlog audit.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all eighteen); HASKELL_PARITY_COMMAND_NAMES is the
+commands directory (all nineteen); HASKELL_PARITY_COMMAND_NAMES is the
 strictly smaller set Kanban's own Haskell code spawns by name (the five
-above). The drafting, document, roadmap, and documentation-landing workflows
+above). The drafting, document, roadmap, documentation-landing, and
+backlog-audit workflows
 are user- or daemon-invoked and are deliberately excluded from that parity
 pinning; see
 docs/drafting-workflow-contract.md and docs/document-workflow-contract.md,
@@ -157,6 +158,15 @@ ROADMAP_COMMAND_NAMES = {"triage", "retriage"}
 # tools/docs_land.sh helper both brands' renderings invoke.
 PUBLICATION_COMMAND_NAMES = {"push-docs"}
 
+# The backlog audit vendored by issue #430, slice VEND-3. Rendered from
+# tools/command_sources/backlog-review.md the way the two sets above are, and
+# like them user-invoked and excluded from Haskell name parity. It is its own
+# category rather than a third roadmap name because it is the first vendored
+# workflow that mutates the tracker — it closes issues and rewrites their
+# bodies, where /triage and /retriage only read and render. Its behavioral
+# assertions live in tools/test_backlog_review_workflow.py.
+BACKLOG_COMMAND_NAMES = {"backlog-review"}
+
 # What a Claude Code installation must actually discover in commands/.
 EXPECTED_COMMAND_NAMES = (
     HASKELL_PARITY_COMMAND_NAMES
@@ -164,6 +174,7 @@ EXPECTED_COMMAND_NAMES = (
     | DOCUMENT_COMMAND_NAMES
     | ROADMAP_COMMAND_NAMES
     | PUBLICATION_COMMAND_NAMES
+    | BACKLOG_COMMAND_NAMES
 )
 
 # Keys that would let a packaged command's frontmatter or manifest silently
@@ -305,7 +316,8 @@ class CommandDiscoveryTests(unittest.TestCase):
             DRAFTING_COMMAND_NAMES
             | DOCUMENT_COMMAND_NAMES
             | ROADMAP_COMMAND_NAMES
-            | PUBLICATION_COMMAND_NAMES,
+            | PUBLICATION_COMMAND_NAMES
+            | BACKLOG_COMMAND_NAMES,
         )
         self.assertEqual(DRAFTING_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
         self.assertEqual(ROADMAP_COMMAND_NAMES & DRAFTING_COMMAND_NAMES, set())
@@ -313,6 +325,16 @@ class CommandDiscoveryTests(unittest.TestCase):
         self.assertEqual(
             PUBLICATION_COMMAND_NAMES
             & (DRAFTING_COMMAND_NAMES | DOCUMENT_COMMAND_NAMES | ROADMAP_COMMAND_NAMES),
+            set(),
+        )
+        self.assertEqual(
+            BACKLOG_COMMAND_NAMES
+            & (
+                DRAFTING_COMMAND_NAMES
+                | DOCUMENT_COMMAND_NAMES
+                | ROADMAP_COMMAND_NAMES
+                | PUBLICATION_COMMAND_NAMES
+            ),
             set(),
         )
 

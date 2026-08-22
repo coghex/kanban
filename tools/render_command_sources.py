@@ -214,6 +214,18 @@ COMMAND_SOURCES = (
             "one command in the registry whose body references another."
         ),
     ),
+    CommandSource(
+        name="backlog-review",
+        source="tools/command_sources/backlog-review.md",
+        claude_commands_dir=CLAUDE_COMMANDS_DIR,
+        codex_skills_dir=CODEX_SKILLS_DIR,
+        note=(
+            "VEND-3, the first vendored workflow that closes issues and "
+            "rewrites their bodies. Its brand blocks carry text one provider "
+            "has and the other does not — two Codex sandbox caveats with no "
+            "Claude counterpart — rather than two spellings of one sentence."
+        ),
+    ),
 )
 
 

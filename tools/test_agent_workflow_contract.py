@@ -174,6 +174,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
     "codex-plugin/plugins/kanban/skills/push-docs/SKILL.md",
     "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
@@ -205,6 +206,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/triage.md",
     "claude-plugin/plugins/kanban/commands/push-docs.md",
     "claude-plugin/plugins/kanban/commands/retriage.md",
+    "claude-plugin/plugins/kanban/commands/backlog-review.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
@@ -286,6 +288,32 @@ REREVIEW_SURFACE_EXPECTED_COMMANDS = {
 PUSH_DOCS_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/push-docs.md": {"git"},
     "codex-plugin/plugins/kanban/skills/push-docs/SKILL.md": {"git"},
+}
+
+# Issue #430's backlog audit, pinned the same way and for a sharper reason: it
+# is the first vendored workflow that closes issues and rewrites their bodies,
+# so an extractor that stopped recovering its `gh` would leave the
+# repository-scoping requirement for the one asset whose mutations are
+# irreversible resting on nothing discovered. Both brands resolve `$REPO` from
+# the remote with `git` and `sed` -- deliberately not with an unscoped
+# `gh repo view`, which would be a GitHub call preceding the resolution every
+# other call depends on -- read the backlog with `gh`, and resolve the docs
+# worktree with `git` and `awk`. The two files are rendered from one source, so
+# they are pinned to the same set: a brand block that leaked a command into one
+# and not the other fails here.
+BACKLOG_REVIEW_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/backlog-review.md": {
+        "gh",
+        "git",
+        "sed",
+        "awk",
+    },
+    "codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md": {
+        "gh",
+        "git",
+        "sed",
+        "awk",
+    },
 }
 
 # The ten design and report document-workflow assets declared in
@@ -1698,6 +1726,48 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     executable_tokens,
                     undocumented_command_message(relative_path, name),
                 )
+
+    def test_backlog_review_asset_command_discovery_is_not_vacuous(self):
+        # The counterpart of the push-docs pin above for the one vendored
+        # workflow that mutates a tracker. Requirement 5 of issue #430 is that
+        # no `gh` call in either rendered file omits `-R "$REPO"`; that rule is
+        # only meaningful while `gh` is really discoverable in the asset, so
+        # what each file invokes is pinned exactly rather than merely checked
+        # for undocumented names. `sed` and `awk` are pinned with it because
+        # they are what the repository and docs-worktree resolutions are built
+        # from -- a rewrite that reached for `gh repo view` instead would drop
+        # `sed` here rather than passing quietly.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path, expected in sorted(
+            BACKLOG_REVIEW_SURFACE_EXPECTED_COMMANDS.items()
+        ):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+            # Grounded in the manifest from the other side too: being scanned
+            # is not the same as being declared, and the four rows above are
+            # where a reader looks to find out which assets speak each tool.
+            for name in sorted(expected):
+                row = next(
+                    row
+                    for row in self.manifest
+                    if row["kind"] == "executable" and row["token"] == name
+                )
+                self.assertIn(row["id"], {"gh-cli", "git-cli", "sed-cli", "awk-cli"})
+                self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
 
     def test_the_codex_plugin_cache_root_is_declared_for_the_rereview_skill(self):
         # The Codex rereview skill is the first declared drafting asset to
