@@ -162,18 +162,19 @@ CROSS_BRAND_PAIRS = {
 
 PROCESS_REPORT_ASSETS = CROSS_BRAND_PAIRS["process-report"]
 
-# The closing report separates two counts rather than reporting one. A finding
-# held behind a stated precondition has been processed, so counting it as
-# outstanding made a fully-deferred report read as a run that achieved nothing
-# -- while collapsing it into a bare "zero outstanding" would have read as
-# finished. Both halves are pinned, because either alone is the failure it
-# replaced. The third is pinned with them: this moved the count, not the
-# marker. Terminality is what authorizes apparatus removal (SS8) and what a
-# tracker transaction resolves against, and neither may loosen because the
-# reporting did.
+# The closing report separates two counts rather than reporting one. Deferred
+# work with an unmet precondition is distinguished from work the next run can
+# select, while a cleared deferral remains actionable even before that next run
+# removes its marker. The multiple-cleared-deferral example pins the
+# one-at-a-time edge: processing the first must not make the second disappear
+# behind a zero-actionable summary. The terminality rule is pinned with them,
+# because changing the report must not loosen what authorizes apparatus removal
+# (§10) or what a tracker transaction resolves against.
 DEFERRED_COUNTING_RULES = (
     "the findings still actionable, then the findings still deferred",
-    "it never counts as actionable",
+    "recheck every remaining [deferred] precondition",
+    "deferred finding whose precondition now holds as actionable",
+    "two deferred findings' preconditions have both cleared",
     "[deferred] still stays - [ ] and still is not terminal",
 )
 
