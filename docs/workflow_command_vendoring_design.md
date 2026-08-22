@@ -21,7 +21,7 @@ concrete precondition
 - [x] VEND-1. Vendor triage — [#393]
 - [x] VEND-2. Vendor retriage — [#427]
 - [x] VEND-3. Vendor backlog-review — [#430]
-- [ ] VEND-4. Vendor project-review
+- [x] VEND-4. Vendor project-review — [#462]
 - [ ] VEND-5. Vendor drain-prs
 - [ ] VEND-6. Vendor janitor
 - [ ] VEND-7. Vendor finalize
