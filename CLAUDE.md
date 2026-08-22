@@ -147,8 +147,12 @@ This repository is developed by agents, and the board reads their state off GitH
 
 - Workflow labels: `reviewed:approve` for approved work, `reviewed:changes` for changes
   requested, `reviewed:revised` for a revision handed back for rereview.
-- Origin markers route work to an opposite-brand reviewer. Issue bodies carry
-  `<!-- issue-origin:codex -->` or `<!-- issue-origin:claude -->`. A pull request body
+- Origin markers route work to an opposite-brand reviewer. An agent-filed issue body
+  carries `<!-- issue-origin:codex -->` or `<!-- issue-origin:claude -->`. An issue
+  filed through GitHub's web UI carries neither by design — the templates under
+  `.github/ISSUE_TEMPLATE/` add no marker — and `tools/approve_issues.py` reads that
+  absence as legacy provenance, routing it to both reviewers under the default
+  `--legacy-policy dual` rather than to one. A pull request body
   carries exactly one of `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->` as its
   final non-whitespace content — `Kanban.PullRequestFlow.originFromBody` rejects a
   duplicated, mixed, or trailing-text marker.
