@@ -23,7 +23,7 @@ concrete precondition
 - [x] LNX-2. Add the systemd user-unit backend and lift the darwin gate — [#329]
 - [x] LNX-3. Make the Claude probe and process snapshot Linux-correct — [#331]
 - [x] LNX-4. Resolve managed install and log paths per platform — [no-issue]: split into the managed-paths arc (`docs/managed_paths_design.md`)
-- [ ] LNX-5. State the new platform support in the docs and contracts
+- [x] LNX-5. State the new platform support in the docs and contracts — [#460]
 
 ## Epic contract
 
