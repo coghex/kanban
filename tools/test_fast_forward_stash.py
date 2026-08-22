@@ -1535,6 +1535,52 @@ class RecoveryStashRestoredWhenVerificationFailsTest(_RecoveryStashRetirementFix
         self.assertIn(sha, restored[0])
         self.assertEqual(self._logged_containing("Retired recovery stash entry"), [])
 
+    def test_an_entry_indistinguishable_from_a_survivor_is_reported_not_claimed(self):
+        # The selector-shift race onto a duplicate. Two entries of the user's
+        # own share one commit *and* one verbatim message, so the surviving
+        # twin answers "is that pair present?" for the one that went -- and
+        # `git stash store` adds nothing while `refs/stash` already names that
+        # commit, so git cannot put the missing occurrence back at all. What
+        # the pass owes here is the failure, not a restoration line.
+        duplicate = self._snapshot_commit("line3-duplicated")
+        payload = "a copy of my own"
+        run_git(["stash", "store", "-m", payload, duplicate], cwd=self.main)
+        sha = self._recovery_entry("line3-recovered")
+        run_git(["stash", "store", "-m", payload, duplicate], cwd=self.main)
+        message = f"drain-prs-autostash-recovery {sha}"
+        self._hold_elsewhere(sha)
+        before = self._entries()
+        self.assertEqual(
+            before, [(duplicate, payload), (sha, message), (duplicate, payload)]
+        )
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            if args[:3] == ["git", "stash", "drop"]:
+                # The older of the two identical user entries goes instead of
+                # the drainer's own, leaving its twin at `stash@{0}`.
+                return real_run(["git", "stash", "drop", "--quiet", "stash@{2}"], **kwargs)
+            return real_run(args, **kwargs)
+
+        self._retire_with(fake_run)
+
+        # Still short by one, and said so: the pair's count never rose.
+        after = self._entries()
+        self.assertEqual(after, [(duplicate, payload), (sha, message)])
+        self.assertEqual(after.count((duplicate, payload)), 1)
+        self.assertEqual(before.count((duplicate, payload)), 2)
+        self.assertEqual(self._logged_containing("Restored stash entry"), [])
+        failed = self._logged_containing("could not put it back")
+        self.assertEqual(len(failed), 1)
+        self.assertIn(duplicate, failed[0])
+        self.assertIn(f"git stash apply --index {duplicate}", failed[0])
+        # Why it could not be put back, rather than an unread or rejected store.
+        self.assertIn("added nothing", failed[0])
+        self.assertIn("already named", failed[0])
+        self.assertIn("indistinguishable", failed[0])
+        # Nothing was retired, and the drainer's own entry is still there.
+        self.assertEqual(self._logged_containing("Retired recovery stash entry"), [])
+
     def test_a_failed_restoration_names_the_object_id_and_a_recovery_command(self):
         sha = self._recovery_entry("line3-recovered")
         held = self._hold_elsewhere(sha)
@@ -1616,6 +1662,40 @@ class RecoveryStashRetirementFailuresAreNonFatalTest(_RecoveryStashRetirementFix
         restored = self._logged_containing("Restored stash entry")
         self.assertEqual(len(restored), 1)
         self.assertIn("could not be re-read to confirm the removal", restored[0])
+
+    def test_an_unreadable_stash_before_the_restoration_claims_nothing(self):
+        # The count a restoration is proved by needs a baseline, and the read
+        # that establishes it can fail like any other. Without it the store is
+        # not attempted, nothing is claimed, and the snapshot is named with the
+        # command that recovers it.
+        sha = self._recovery_entry("line3-recovered")
+        held = self._hold_elsewhere(sha)
+        user = self._user_entry("later")
+        real_run = drain_prs.run
+        reads = []
+
+        def fake_run(args, **kwargs):
+            if args[:3] == ["git", "stash", "list"]:
+                reads.append(args)
+                # The fourth read is the one taken to count the pair before
+                # storing it: enumerate, bind, confirm the removal, then this.
+                if len(reads) == 4:
+                    raise drain_prs.DrainError("stash list is unavailable")
+            proc = real_run(args, **kwargs)
+            if args[:3] == ["git", "stash", "drop"]:
+                run_git(["update-ref", "-d", held], cwd=self.main)
+            return proc
+
+        self._retire_with(fake_run)
+
+        self.assertEqual(self._entries(), [user])
+        self.assertEqual(self._logged_containing("Restored stash entry"), [])
+        failed = self._logged_containing("could not put it back")
+        self.assertEqual(len(failed), 1)
+        self.assertIn(sha, failed[0])
+        self.assertIn("count it beforehand", failed[0])
+        self.assertIn(f"git stash apply --index {sha}", failed[0])
+        self.assertEqual(self._logged_containing("Retired recovery stash entry"), [])
 
     def test_an_unreadable_ref_state_keeps_the_entry(self):
         sha = self._recovery_entry("line3-recovered")

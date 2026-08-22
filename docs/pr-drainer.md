@@ -469,10 +469,23 @@ Afterwards the removal is proved: the entry is gone, the snapshot is still
 reachable from a qualifying ref, and every other entry is still present in the
 same relative order. If any of that fails, whatever the stash is now missing is
 put back from its recorded object ID and verbatim message — at `stash@{0}`,
-because git has no positional reinsertion — and a restoration that itself fails
-is logged naming the object ID and the command that recovers it. A `--dry-run`
-pass makes the same decisions and reports them without creating, deleting, or
-reordering anything.
+because git has no positional reinsertion.
+
+A restoration is proved by counting, not by looking. What it has to show is
+that the number of entries carrying that exact object ID and verbatim message
+is one greater after the store than immediately before it; finding such an
+entry present proves nothing, because the entry being put back can be
+indistinguishable from one that is still there. That case is real rather than
+theoretical: `git stash store` adds nothing at all when `refs/stash` already
+names the commit being stored, so the occurrence that went cannot be
+reinserted while its twin holds the top of the list. The snapshot itself stays
+reachable through that twin, but one list entry is gone, and it is reported as
+a failed restoration naming the object ID, the command that recovers it, and
+that reason — a store git accepted and acted on in no way, rather than one it
+rejected. A stash list that could not be read on either side of the store
+establishes no count either, so it too is a failed restoration and never a
+claimed one. A `--dry-run` pass makes the same decisions and reports them
+without creating, deleting, or reordering anything.
 
 Enumerate them yourself with:
 
