@@ -24,7 +24,7 @@ concrete precondition
 - [x] MODEL-2. Resolve the Haskell spawn sites from the roster — [#461]
 - [x] MODEL-7. Record spawn-time assignments in worker specs and replay them on resume — [#480]
 - [x] MODEL-3. Derive display labels and prompt prose from the roster — [#482]
-- [ ] MODEL-4. Resolve the Python and plugin spawn sites from the roster
+- [x] MODEL-4. Resolve the Python and plugin spawn sites from the roster — [#483]
 - [ ] MODEL-5. Extend the settings screen to edit role assignments
 - [ ] MODEL-8. Derive the operating mode from the loaded provider set
 - [ ] MODEL-9. Implement no-agent mode: board-only UI and spawn refusal
