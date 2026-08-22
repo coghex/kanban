@@ -1356,7 +1356,7 @@ approve-issues-backend-xdg | personal-path | /.local/share/kanban/issue-review |
 issue-review-log-dir | personal-path | /Library/Logs/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir-xdg | personal-path | /.local/state/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md | kanban | supported | no
-issue-review-discovery-record-xdg | personal-path | /.local/share/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs | kanban | supported | no
+issue-review-discovery-record-xdg | personal-path | /.local/share/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/service_manager.py | kanban | supported | no
 drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/ManagedPaths.hs | kanban | supported | no
 drainer-discovery-record-xdg | personal-path | /.local/share/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/ManagedPaths.hs | kanban | supported | no
@@ -1404,11 +1404,13 @@ because that is where the record's own path is spelled whole:
 `tools/kanban_config.py` composes it from the install directory above and a
 separate file name, so it carries neither literal, while the Haskell resolver
 spells each one for the same reason this manifest needs it spelled — a
-reconciliation matches a literal, not an expression. The macOS row also carries the twelve
-packaged assets that still resolve that location themselves; repointing those
-at the probe is a later slice of the portability arc, and until it lands they
-are the reason that row is declared on both platforms while its sibling names
-the resolver alone. The log directory moves
+reconciliation matches a literal, not an expression. Both record rows also
+carry the same twelve packaged assets, because since issue #445 each of them
+resolves the record by probing the two locations in that one order rather than
+naming the macOS one: the ten Markdown workflow assets whose `bash` fence
+resolves the backend, and both pull-request coordinators. An asset that spells
+both literals is declared against both rows, so neither spelling can be
+reverted in one asset while the other row still passes. The log directory moves
 only with `approve_issues.py --log-dir`, never with `--install-dir` or
 `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, so it needs no relocation rule of the kind
 `drainer-install-dir` documents below.
@@ -2065,11 +2067,16 @@ utilities.
   `tools/approve_issues_service.py` — and `src/Kanban/ManagedPaths.hs`, which
   is where the Haskell side's record location is now resolved and the only
   place either platform's spelling of it is written down on that side. The
-  vendored plugin assets listed above are the remainder: each still names the
-  `~/Library` record location alone and therefore does not yet discover an
-  XDG-defaulted install on a non-macOS host. Closing that is the remaining
-  work of the portability arc (#347), not a licence for a second spelling in
-  the meantime.
+  twelve vendored plugin assets listed above probe the same two record
+  locations in the same order since issue #445, so an XDG-defaulted install is
+  discovered on every host, but they reach that answer without importing
+  either resolution point: neither a `bash` fence nor the Codex bundle's
+  per-skill vendoring can, so each spells the two literals itself and §4's two
+  record rows declare all twelve against both. One difference from the
+  resolvers is deliberate: with *neither* record occupied a packaged asset
+  resolves the XDG candidate on every platform and reports both locations as
+  consulted, rather than branching to this platform's write default, because
+  nothing it can execute should have to decide which platform it is on.
 - **The issue approval service follows the same policy with one deliberate
   difference.** Its footprint is the `kanban/issue-approval` namespace, its job
   identifiers and definition paths are derived through the same

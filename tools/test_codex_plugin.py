@@ -505,18 +505,23 @@ class IssueReviewBackendResolutionTests(unittest.TestCase):
                 "Library/Application Support/kanban/issue-review/approve_issues.py",
                 source,
             )
-        # The coordinator still resolves the macOS location alone, which is a
-        # later slice of the portability arc; the board already probes the XDG
-        # one first, so what the two must agree on is where a macOS record is.
         self.assertIn(
             "/.local/share/kanban/issue-review/config.json", managed_paths_source
         )
 
+        # Since issue #445 the coordinator probes both locations too, in the
+        # same order Haskell does, so both spellings must be present in it.
+        # Asserting only the macOS one would pass against a coordinator that
+        # had lost half the probe, which is the half-blind gate that issue's
+        # requirement 10 forbids.
         coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn('os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")', coordinator_source)
-        self.assertIn(
-            "Library/Application Support/kanban/issue-review/config.json", coordinator_source
-        )
+        for token in (
+            "Library/Application Support/kanban/issue-review/config.json",
+            "/.local/share/kanban/issue-review/config.json",
+        ):
+            self.assertIn(token, coordinator_source)
+        self.assertIn('os.environ.get("XDG_DATA_HOME")', coordinator_source)
         self.assertIn('"backend_path"', coordinator_source)
         self.assertIn("approve_issues.py", coordinator_source)
         self.assertNotIn('"work" / "approve-issues.py"', coordinator_source)
@@ -529,7 +534,15 @@ class IssueReviewBackendResolutionTests(unittest.TestCase):
         # tools/approve_issues.py itself.
         solve_source = (SKILLS_ROOT / "solve" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("KANBAN_ISSUE_REVIEW_INSTALL_DIR", solve_source)
-        self.assertIn("Library/Application Support/kanban/issue-review/config.json", solve_source)
+        # Both record spellings, for the same reason the coordinator owes
+        # both: the fence probes the XDG location and then the `~/Library`
+        # one, and a pin on one of them alone cannot see the other reverted.
+        for token in (
+            "Library/Application Support/kanban/issue-review/config.json",
+            "/.local/share/kanban/issue-review/config.json",
+        ):
+            self.assertIn(token, solve_source)
+        self.assertIn("XDG_DATA_HOME", solve_source)
         self.assertIn("backend_path", solve_source)
         self.assertIn("python3 tools/install_issue_review.py", solve_source)
 
@@ -1295,7 +1308,14 @@ class ApproverPathResolutionTests(unittest.TestCase):
     """The coordinator's own resolution behaviour, not just its source text:
     the same override/record/fallback precedence Kanban.Review uses, so a
     custom installation cannot pass the dashboard's gate and fail this one
-    (issue #155)."""
+    (issue #155).
+
+    These drive the `~/Library` record, which is one of the two locations
+    issue #445 made this coordinator probe. Which of the two it selects, and
+    what it reports when neither is occupied, is
+    `tools/test_packaged_issue_review_probe.py`'s -- it asserts that against
+    both coordinators and the markdown fences together, because all twelve
+    owe the same answers."""
 
     def setUp(self):
         self.module = load_review_pr_module()
@@ -1307,12 +1327,18 @@ class ApproverPathResolutionTests(unittest.TestCase):
             self.home / "Library" / "Application Support" / "kanban" / "issue-review" / "config.json"
         )
         self.record_path.parent.mkdir(parents=True)
-        # $HOME redirected so the fixed record path lands inside this
-        # temporary machine; the developer's own record is never read.
+        self.xdg_record_path = (
+            self.home / ".local" / "share" / "kanban" / "issue-review" / "config.json"
+        )
+        # $HOME redirected so both record paths land inside this temporary
+        # machine; the developer's own records are never read. $XDG_DATA_HOME
+        # is dropped for the same reason: it would move the first candidate
+        # out of this fixture and make the result depend on the host.
         patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
         patcher.start()
         self.addCleanup(patcher.stop)
         os.environ.pop("KANBAN_ISSUE_REVIEW_INSTALL_DIR", None)
+        os.environ.pop("XDG_DATA_HOME", None)
 
     def install_backend(self, directory):
         directory.mkdir(parents=True, exist_ok=True)
@@ -1329,7 +1355,10 @@ class ApproverPathResolutionTests(unittest.TestCase):
         self.assertEqual(self.module.approver_path(), backend)
 
     def test_falls_back_to_the_records_own_directory_when_no_record_exists(self):
-        backend = self.install_backend(self.record_path.parent)
+        # With neither location occupied the XDG candidate is the record's own
+        # directory, on every platform: issue #445's requirement 4 makes that
+        # the answer no packaged asset has to pick a platform to reach.
+        backend = self.install_backend(self.xdg_record_path.parent)
         self.assertEqual(self.module.approver_path(), backend)
 
     def test_falls_back_for_a_legacy_document_with_only_a_config_reference(self):
