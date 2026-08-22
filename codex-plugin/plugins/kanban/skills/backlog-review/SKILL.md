@@ -82,14 +82,27 @@ issues in age order).
 
 ## Where files go
 
-This workflow files and edits through `gh` and drafts in chat; it should not
-write into the repository at all. If a step ever does need to write a file, put
-it in the `docs-wip` worktree, never the primary checkout — uncommitted files
-there are autostashed by the PR drainer's post-merge fast-forward and wedge it
-when the restore conflicts. Resolve it by branch:
+This workflow files and edits through `gh` and drafts in chat, and it writes
+nothing into any repository. Its only filesystem writes are the Apply phase's
+two transient `--body-file` payloads — the rewritten issue body and the
+needs-decision comment. Put each under the system temporary directory, outside
+every repository worktree: never in the `docs-wip` worktree, and never in the
+primary checkout. Remove each one as soon as the `gh` call that consumes it
+returns, whether it succeeded or failed, and clean up whatever is left behind on
+an ordinary interruption or cancellation, so a finished or abandoned Apply
+leaves none behind.
+
+If a step ever does need a file inside the repository, and that repository keeps
+a `docs-wip` worktree, write it there rather than the primary checkout — the PR
+drainer fast-forwards the primary after every merge and autostashes whatever it
+finds there, and a restore that conflicts wedges post-merge cleanup until a
+human clears it. Resolve it by branch, never a hard-coded path:
 
 ```bash
 DOCS_WT="$(git worktree list --porcelain \
   | awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/docs-wip$/{print p; exit}')"
 [ -n "$DOCS_WT" ] || DOCS_WT="$(git rev-parse --show-toplevel)"
 ```
+
+A repository with no `docs-wip` worktree does not use this convention — the
+fallback returns its own primary checkout and you proceed normally.
