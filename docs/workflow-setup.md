@@ -14,8 +14,11 @@ Two commands cover that whole surface:
 - `cabal run kanban -- --doctor` reports, read-only, why an action is not
   ready yet.
 
-macOS is Kanban's supported platform, and remains so here: this document
-describes a macOS setup path, not a cross-platform port.
+This is not a macOS-only procedure. Every location named below under
+`~/Library` gives its Linux counterpart beside it, and the commands are the
+same on both. What has not been done is a live Linux run: no end-to-end
+installation followed by an AI action on a Linux host is recorded anywhere, so
+the Linux paths here are documented rather than exercised.
 
 ## Fresh clone
 
