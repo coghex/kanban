@@ -34,8 +34,22 @@ one place rather than inside shell text:
 `--gate` prints the canonical path list on stdout (one per line) and notes on
 stderr, exiting nonzero with every refusal when any named path is refused.
 `--inventory` prints one row per known Markdown document — tracked, untracked,
-ignored, or deleted — with its state, its §7 row and lane, and whether it
-differs from the fetched `origin/master`. Both modes are read-only.
+ignored, deleted, or present only on the publication tip — with its state, its
+§7 row and lane, how it stands against the fetched `origin/master`, and whether
+it is a ready landing candidate. Both modes are read-only.
+
+Issue #438. That `origin/master` comparison names a DIRECTION rather than a
+bare difference, because documents reach master through two lanes that never
+touch this worktree — pull requests carrying pr-atomic documents, and
+`tools/publish_coordination_doc.py` — so a differing document is as likely to
+be upstream's newer text as it is to be work waiting to land. Direction is
+read against the merge base of `HEAD` and the publication tip: only the local
+side moved is `differs` (ahead, the landing candidate), only upstream moved is
+`behind`, both moved is `diverged`, and an upstream-only addition — absent at
+the merge base and here, present upstream — is `absent-here`. The `landable`
+column keeps answering the §7/path POLICY question alone; `readiness` is the
+separate operational one, so a behind, diverged, or absent-here row states
+that it is not a candidate and names its remedy.
 """
 
 from __future__ import annotations
@@ -634,47 +648,178 @@ def describe_state(code: str | None) -> str:
     return "+".join(described) if described else code.strip() or "clean"
 
 
+# How each `vs origin/master` value reads in the `readiness` column: whether
+# the row is an ordinary landing candidate, and when it is not, the state and
+# the remedy. Landing a behind or absent-here path would replace upstream's
+# newer text with this worktree's older copy — or delete the document
+# outright — so those rows must never read like the ahead ones.
+READINESS = {
+    "same": "nothing to land",
+    "differs": "ready",
+    "behind": (
+        "not ready: only origin/master moved since the merge base, so this "
+        "copy is the older one; rebase docs-wip onto origin/master, then "
+        "rerun -l"
+    ),
+    "absent-here": (
+        "not ready: origin/master added this document and this worktree has "
+        "no copy, so landing it would delete it; rebase docs-wip onto "
+        "origin/master, then rerun -l"
+    ),
+    "diverged": (
+        "not ready: both sides changed since the merge base; rebase docs-wip "
+        "or resolve this path, then rerun -l"
+    ),
+}
+
+
+def merge_base(worktree: Path) -> str:
+    """The merge base of the docs worktree's HEAD and the publication tip.
+
+    Every direction below is read against this commit rather than against the
+    tip: comparing with the tip alone answers only *whether* two texts differ,
+    which is precisely the conflation this exists to end. A worktree with no
+    common ancestor cannot be landed from either — tools/docs_land.sh builds
+    its own risk checks on the same merge base — so the inventory stops with
+    the reason rather than guessing a direction."""
+    proc = run_git(worktree, "merge-base", "HEAD", CONTRACT_REF, check=False)
+    base = proc.stdout.strip()
+    if proc.returncode != 0 or not base:
+        raise SystemExit(
+            f"{worktree} shares no history with {CONTRACT_REF}, so no "
+            "document's direction can be read; nothing lands from a worktree "
+            f"that is not descended from {CONTRACT_REF}"
+        )
+    return base
+
+
+def name_set(worktree: Path, *args: str) -> set[str]:
+    """A NUL-delimited `git` name listing as a set, empty entries dropped.
+
+    NUL-delimited for the same reason every other listing here is: newline
+    output C-quotes a filename carrying quotes or non-ASCII bytes, and a
+    direction keyed by `caf\\303\\251.md` would silently never match the
+    document really named `café.md`."""
+    return {
+        entry
+        for entry in run_git(worktree, *args).stdout.split("\0")
+        if entry
+    }
+
+
+def local_change_set(
+    worktree: Path, base: str, states: dict[str, str], ignored: set[str]
+) -> set[str]:
+    """Documents whose LOCAL side moved since `base`.
+
+    `git diff <base>` against the working tree covers the committed, staged,
+    unstaged, deleted, and executable-mode changes of tracked documents in one
+    reading. It says nothing about untracked or ignored files, though — they
+    are not in the index for it to compare — so both are added here: a
+    document that exists only in this worktree is local work whatever its
+    bytes happen to equal upstream, and trackedness stays significant."""
+    changed = name_set(
+        worktree, "diff", "--name-only", "-z", "--no-renames", base, "--", "*.md"
+    )
+    changed |= {path for path, code in states.items() if code == "??"}
+    changed |= ignored
+    return changed
+
+
+def divergence(
+    worktree: Path,
+    path: str,
+    differs: bool,
+    local_changed: bool,
+    upstream_changed: bool,
+    base_paths: set[str],
+    upstream_paths: set[str],
+    tracked: set[str],
+) -> str:
+    """One document's direction against `origin/master`.
+
+    `differs` is the inventory's existing local-versus-tip answer and is
+    preserved exactly: a document that already read `same` still does, and a
+    direction is only ever named for one that already read `differs`. Within
+    that, the three-way split is by which side moved from the merge base, with
+    the upstream-only addition broken out as its own subtype — the state that
+    looks most like a landing candidate and is in fact a deletion."""
+    if not differs:
+        return "same"
+    if upstream_changed and not local_changed:
+        if (
+            path not in base_paths
+            and path in upstream_paths
+            and path not in tracked
+            and not os.path.lexists(worktree / path)
+        ):
+            return "absent-here"
+        return "behind"
+    if upstream_changed and local_changed:
+        return "diverged"
+    # Only the local side moved — or neither did, which an untracked document
+    # holding upstream's exact bytes reaches. Both are ahead: landing either
+    # replaces nothing upstream that this worktree has not already seen.
+    return "differs"
+
+
 def inventory(worktree: Path) -> int:
     rows = contract_rows(worktree)
     states = worktree_states(worktree)
     # Every listing is NUL-delimited for the same reason worktree_states is:
     # newline output C-quotes unusual filenames, and the inventory must show
     # every document by its real name.
-    tracked = set(
-        entry
-        for entry in run_git(
-            worktree, "ls-files", "-z", "--", "*.md"
-        ).stdout.split("\0")
-        if entry
-    )
-    differing = set(
-        entry
-        for entry in run_git(
-            worktree, "diff", "--name-only", "-z", "--no-renames",
-            CONTRACT_REF, "--", "*.md",
-        ).stdout.split("\0")
-        if entry
+    tracked = name_set(worktree, "ls-files", "-z", "--", "*.md")
+    differing = name_set(
+        worktree, "diff", "--name-only", "-z", "--no-renames",
+        CONTRACT_REF, "--", "*.md",
     )
     # Ignored untracked documents are invisible to `status --porcelain`, but
     # an ignored file under a classified directory is still a landable
     # document the no-argument workflow must be able to offer.
-    ignored = set(
-        entry
-        for entry in run_git(
-            worktree, "ls-files", "-z", "--others", "--ignored",
-            "--exclude-standard", "--", "*.md",
-        ).stdout.split("\0")
-        if entry
+    ignored = name_set(
+        worktree, "ls-files", "-z", "--others", "--ignored",
+        "--exclude-standard", "--", "*.md",
+    )
+    # The merge base and the two trees around it: which side of it a document
+    # moved on is what separates a landing candidate from a revert.
+    base = merge_base(worktree)
+    local_changed = local_change_set(worktree, base, states, ignored)
+    upstream_changed = name_set(
+        worktree, "diff", "--name-only", "-z", "--no-renames",
+        base, CONTRACT_REF, "--", "*.md",
+    )
+    # Whole-tree name listings rather than a `*.md` pathspec, matching
+    # casefold_collision's reading: these answer only membership questions.
+    base_paths = name_set(worktree, "ls-tree", "-r", "-z", "--name-only", base)
+    upstream_paths = name_set(
+        worktree, "ls-tree", "-r", "-z", "--name-only", CONTRACT_REF
     )
     universe = sorted(tracked | differing | set(states) | ignored)
-    print("path | tracked | state | vs origin/master | §7 row | lane | landable")
+    print(
+        "path | tracked | state | vs origin/master | §7 row | lane | "
+        "readiness | landable"
+    )
     for path in universe:
         if path in ignored and path not in states:
             state = "ignored"
+        elif (
+            path not in tracked
+            and path not in states
+            and not os.path.lexists(worktree / path)
+        ):
+            # An upstream-only addition reaches the universe through the
+            # comparison with the tip while having no local presence at all.
+            # `clean` would be a plain lie about a document that is not here.
+            state = "absent"
         else:
             state = describe_state(states.get(path))
         is_tracked = "yes" if path in tracked else "no"
-        differs = "differs" if path in differing or path not in tracked else "same"
+        differs = path in differing or path not in tracked
+        direction = divergence(
+            worktree, path, differs, path in local_changed,
+            path in upstream_changed, base_paths, upstream_paths, tracked,
+        )
         matched = matching_rows(rows, path)
         row_name = matched[0] if len(matched) == 1 else ("none" if not matched else "multiple")
         lane = rows[matched[0]]["klass"] if len(matched) == 1 else "-"
@@ -686,8 +831,8 @@ def inventory(worktree: Path) -> int:
         else:
             landable = "yes"
         print(
-            f"{path} | {is_tracked} | {state} | {differs} | {row_name} | "
-            f"{lane} | {landable}"
+            f"{path} | {is_tracked} | {state} | {direction} | {row_name} | "
+            f"{lane} | {READINESS[direction]} | {landable}"
         )
     return 0
 
