@@ -25,16 +25,27 @@ consequences follow, and both are asserted here rather than left to review.
   after that stop in the document an agent reads top to bottom.
 
 The rest is D-2's preserved behavior: the disposition vocabulary, the batch
-default, the oldest-first order, the in-flight skip, the evidence bar, the
-no-code prohibition, and the file-location rules are vendored as the personal
-copies read them, so each is pinned rather than merely rendered.
+default, the oldest-first order, the in-flight skip, the evidence bar, and the
+no-code prohibition are vendored as the personal copies read them, so each is
+pinned rather than merely rendered.
+
+The file-location rules are the one exception. They were vendored verbatim too,
+and issue #470 found that what they said contradicted the Apply phase they
+shipped beside: the workflow "should not write into the repository at all",
+while its own approved updates and needs-decision comments go through two
+`--body-file` payloads, and the unscoped rule that followed put any file the
+workflow did write inside a repository worktree. `WriteLocationTests` pins the
+corrected rule instead — the system temp directory, outside every checkout, and
+removal of each payload afterwards — and asserts that neither superseded phrase
+came back.
 
 Both rendered assets are checked, because both are what an agent executes, and
 a rule that held for one brand and not the other is exactly what the shared
-source exists to prevent. The negative control is the brand boundary itself:
-`BrandBoundaryTests` asserts that stripping the three declared brand-specific
-lines leaves two byte-identical bodies, so a rule that quietly matched
-everything could not also pass there.
+source exists to prevent. Two negative controls keep the assertions from
+matching everything: the brand boundary itself, where `BrandBoundaryTests`
+asserts that stripping the three declared brand-specific lines leaves two
+byte-identical bodies, and the retriage and triage assets, which write no file
+and must state none of the write-location rules.
 """
 
 from __future__ import annotations
@@ -96,9 +107,61 @@ PRESERVED_BEHAVIOR = {
     "report before applying": "show the full drafted body or comment for anything that would change the tracker",
     "nothing is written until told": "Do NOT edit, close, label, or comment until told.",
     "clean-batch report": "If everything came back Valid, say so",
-    "file-location rule": "it should not write into the repository at all",
-    "docs-wip is the write root": "put it in the `docs-wip` worktree, never the primary checkout",
+    "file-location rule": "Put each under the system temporary directory, outside every repository worktree",
+    "docs-wip is the in-repository write root": "write it there rather than the primary checkout",
 }
+
+# Issue #470's corrected write-location contract, one phrase per rule. The two
+# `--body-file` payloads the Apply phase writes are the workflow's only
+# filesystem writes, so the rule has to say where they go *and* that they are
+# removed again; the older text said the workflow wrote nothing and routed any
+# file it did write into a repository worktree, which is the contradiction
+# these phrases replace.
+#
+# Matched case-sensitively against `flat()` output, like PRESERVED_BEHAVIOR
+# above: re-wrapping a paragraph does not fail the assertion, while deleting a
+# rule or rewording it does.
+WRITE_LOCATION_RULES = (
+    # What the writes are, so "it writes nothing" cannot come back.
+    "Its only filesystem writes are the Apply phase's two transient "
+    "`--body-file` payloads",
+    # Where they go.
+    "Put each under the system temporary directory, outside every repository "
+    "worktree",
+    # And the two places they must never go, named rather than implied.
+    "never in the `docs-wip` worktree, and never in the primary checkout",
+    # Cleanup on the consuming call, whichever way it ended.
+    "Remove each one as soon as the `gh` call that consumes it returns, "
+    "whether it succeeded or failed",
+    # Best-effort cleanup on ordinary interruption. A hard kill cannot run
+    # cleanup and is deliberately not claimed.
+    "clean up whatever is left behind on an ordinary interruption or "
+    "cancellation",
+    # The retained docs-wip guidance, now scoped to a genuine in-repository
+    # write and resolved by branch.
+    "write it there rather than the primary checkout",
+    "Resolve it by branch, never a hard-coded path",
+    # And the repositories that do not use the convention at all.
+    "A repository with no `docs-wip` worktree does not use this convention",
+)
+
+# The negative control for WRITE_LOCATION_RULES. Both retriage assets and both
+# triage assets read the tracker and write no file at all, so they owe none of
+# these rules; a rule that matched every rendered asset in the bundles would
+# pass the check above while asserting nothing.
+# The two phrases that stated the contradiction before issue #470, kept only so
+# the regression can assert their absence.
+SUPERSEDED_WRITE_LOCATION_PHRASES = (
+    "it should not write into the repository at all",
+    "put it in the `docs-wip` worktree, never the primary checkout",
+)
+
+NON_WRITING_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/retriage.md",
+    "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
+    "claude-plugin/plugins/kanban/commands/triage.md",
+    "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
+)
 
 # The disposition vocabulary, which is out of scope to change (issue #430) and
 # therefore pinned as the exact five bold labels.
@@ -335,6 +398,104 @@ class PreservedBehaviorTests(unittest.TestCase):
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 self.assertIn("## Where files go", read(relative_path))
+
+
+class WriteLocationTests(unittest.TestCase):
+    """Issue #470: where this workflow's transient tracker payloads go, and
+    that they are removed again.
+
+    The Apply phase feeds two `--body-file` payloads to the tracker, so the
+    section's opening claim that the workflow "should not write into the
+    repository at all" was false of its own documented behavior, and the
+    unscoped rule that followed sent any file it did write into the `docs-wip`
+    worktree — or, in a repository without one, into the primary checkout the
+    PR drainer fast-forwards and autostashes after every merge. Neither branch
+    said the file was ever removed.
+
+    There is no behavioral prompt-testing harness here, so the reviewable
+    property is the asset text itself, exactly as `WriteLocationTests` in
+    tools/test_drafting_workflow_contract.py treats the issue-drafting
+    workflows' equivalent rules.
+    """
+
+    def setUp(self):
+        self.assets = {path: flat(read(path)) for path in RENDERED_ASSETS}
+
+    @staticmethod
+    def missing_rules(asset: str, text: str) -> list[str]:
+        """The write-location rules `text` fails to state, as report lines.
+
+        The one place a rule is looked for, so the mutation check below drives
+        the same code path the real assertion does rather than re-implementing
+        it and drifting from it.
+        """
+        return [
+            f"{asset}: missing write-location rule {rule!r}"
+            for rule in WRITE_LOCATION_RULES
+            if flat(rule) not in text
+        ]
+
+    def test_both_renderings_state_every_write_location_rule(self):
+        missing = []
+        for path in RENDERED_ASSETS:
+            missing.extend(self.missing_rules(path, self.assets[path]))
+        self.assertEqual(missing, [], "\n".join(missing))
+
+    def test_dropping_a_rule_from_a_rendering_is_reported(self):
+        # The property under test is that removal *is reported*, not merely
+        # that the text happens to be present today. Each rule is deleted in
+        # turn from a copy of each asset and `missing_rules` -- the same
+        # function the assertion above runs -- must name exactly that rule and
+        # no other, so a later edit cannot quietly drop the temp-directory rule
+        # or the cleanup rule and stay green.
+        for path in RENDERED_ASSETS:
+            for rule in WRITE_LOCATION_RULES:
+                with self.subTest(asset=path, rule=rule):
+                    mutated = self.assets[path].replace(flat(rule), "")
+                    self.assertEqual(
+                        self.missing_rules(path, mutated),
+                        [f"{path}: missing write-location rule {rule!r}"],
+                        f"{path}: deleting {rule!r} was not reported as "
+                        "exactly that one missing rule",
+                    )
+
+    def test_the_rules_are_not_vacuous(self):
+        # A rule that matched every rendered asset would pass the check above
+        # while asserting nothing. The retriage and triage assets read the
+        # tracker and write no file, so they owe none of these rules and are
+        # the negative control that keeps the tuple meaningful.
+        #
+        # Reported as a plain list rather than through assertNotIn: these
+        # assets flatten to thousands of characters, and a membership assertion
+        # dumps the whole text into the report, burying the one line that says
+        # what to do about it.
+        offenders = []
+        for path in NON_WRITING_ASSETS:
+            text = flat(read(path))
+            for rule in WRITE_LOCATION_RULES:
+                if flat(rule) in text:
+                    offenders.append(
+                        f"{path} now states {rule!r}; add it to the asserted "
+                        "assets so the rule is enforced there rather than "
+                        "silently exempt"
+                    )
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_the_superseded_contradiction_is_gone_from_both_renderings(self):
+        # The two phrases this module used to pin as preserved behavior.
+        # Restoring either one re-opens the defect: the first denies the writes
+        # the Apply phase makes, the second routes them into a repository
+        # worktree. Reported as a plain list for the same reason as above.
+        offenders = []
+        for path in RENDERED_ASSETS:
+            for phrase in SUPERSEDED_WRITE_LOCATION_PHRASES:
+                if flat(phrase) in self.assets[path]:
+                    offenders.append(
+                        f"{path} states {phrase!r} again; the Apply phase "
+                        "writes two --body-file payloads, so this text "
+                        "contradicts the workflow it ships beside"
+                    )
+        self.assertEqual(offenders, [], "\n".join(offenders))
 
 
 class BrandBoundaryTests(unittest.TestCase):
