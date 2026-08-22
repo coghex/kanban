@@ -117,17 +117,23 @@ code on the current branch.
 
 ## Platform and component support
 
-macOS is Kanban's supported platform for the first release. The table records
-what that means per component. The two managed background services — the PR
-drainer and the issue approval service — are the components with a supported
-Linux path so far, because each is run by whichever service manager the host
-has; nothing here promises Linux support for the rest.
+Kanban does not declare one supported platform. Support is recorded per
+component in the table below, and each row's note names the verification its
+verdicts rest on, so a cell can be checked rather than taken on trust.
+
+The macOS column rests on use rather than automation: there is no macOS CI job,
+and a `Supported` verdict there records that the component is run on the
+maintainer's own macOS host. The Linux column carries two kinds of evidence and
+each row names which of them it has: what CI exercises — the `ubuntu-latest`
+build and test jobs, and a job that boots real systemd in a container — and
+what is written down but has never been run. No Linux hardware is committed to
+this project, so nothing in this section claims verification on a Linux host.
 
 | Component | macOS | Linux | Notes |
 | --- | --- | --- | --- |
-| Core board | Supported | Built and tested in CI, not a supported user path | The required CI job builds the application and runs both test suites on Linux. Interactive board operation there has not been manually verified. |
-| Optional AI actions | Supported | Not a documented setup path | [Workflow setup and preflight](docs/workflow-setup.md) describes a macOS setup path, not a cross-platform port. |
-| Codex / Claude usage sidebar | Supported | Not verified | Kanban spawns the provider's own CLI and applies no platform check of its own. macOS is simply the only platform where the sidebar is verified. |
+| Core board | Supported | Built and tested in CI, not a supported user path | The required `build-test` check aggregates the `haskell` and `python` jobs, both on `ubuntu-latest`: `haskell` runs the warning-clean build — `cabal.project` applies `-Werror` — and the whole Haskell suite, the golden Brick frames included, while `python` runs the tool suite. No interactive board session on a Linux host has been manually verified. |
+| Optional AI actions | Supported | Setup documented, not verified end to end | [Workflow setup and preflight](docs/workflow-setup.md) documents the setup path for both platforms: the components, the discovery record, removal, and the logs each name their Linux location beside their macOS one. What is not recorded anywhere is a live Linux run — no end-to-end installation followed by an AI action on Linux has been performed. |
+| Codex / Claude usage sidebar | Supported | Not verified | Kanban spawns the provider's own CLI and applies no platform check of its own. The Claude probe composes the util-linux `script` form on every non-darwin host, and the suite asserts the composed operands for both that dialect and the BSD one. No live usage refresh on Linux has been recorded. |
 | PR drainer | Supported | Supported on a host with a systemd user session | The drainer is managed by whichever service manager the host has — launchd on macOS, a systemd user unit on Linux — and refuses only where neither is reachable. A dedicated CI job runs the whole install, start, status, stop, and uninstall lifecycle against a real systemd user session. Its install record, runtime state, and logs take each platform's own convention: `~/Library` on macOS, and `$XDG_DATA_HOME` and `$XDG_STATE_HOME` (`~/.local/share` and `~/.local/state` by default) on Linux, where an installation predating that is relocated once by the next default installer run. The board resolves that record the same way the Python side does — `src/Kanban/ManagedPaths.hs` probes the XDG location and then `~/Library` on both platforms — so an XDG-installed drainer is discovered from the board too. |
 | Issue approval service | Supported | Supported on a host with a systemd user session | Managed through the same service-manager boundary as the drainer, so installing and controlling it needs launchd or a reachable `systemctl --user`, and refuses only where neither is. Its unit location is XDG-aware, but — unlike the drainer's — its record, runtime state, and logs stay under macOS-shaped `~/Library` paths on both platforms. Interactive operation on Linux has not been manually verified. |
 

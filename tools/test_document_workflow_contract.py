@@ -35,6 +35,15 @@ disposition, but it appends to a report that already exists and may already be
 classified `coordination`, so it publishes in the same run without ever
 acquiring a tracker transaction.
 
+Issue #458 added §10, the one part of this contract about what happens after an
+arc ends. §3.1's state machine has a single transition and no third value, so a
+closed arc leaves its processing apparatus in place; that is right for an arc
+document, whose apparatus is its record, and wrong for a specification document
+that merely hosted the apparatus. ArcApparatusRemovalTests pins each of §10's
+substantive clauses on its own key and pins §10.4's completion-report clause on
+the two process-design-doc assets, with the other eight declared assets as the
+negative control.
+
 Discovery, frontmatter, and no-personal-path coverage for the same assets lives
 in tools/test_claude_plugin.py and tools/test_codex_plugin.py; their
 external-command surface is reconciled against the §4 dependency manifest by
@@ -434,6 +443,66 @@ CONTRACT_STATEMENTS = {
     ),
     "transaction-failure-report-adds-tracker-state": (
         "Tracker state is reported beside those three, never instead of them"
+    ),
+    # Issue #458: §10's arc-apparatus lifecycle. Every substantive clause is
+    # pinned on its own key rather than as one paragraph-sized fragment,
+    # because a §10 that still discusses the apparatus somewhere proves
+    # nothing about the clause that left — and the clause that leaves decides
+    # whether a removal deletes an arc document's ledger or leaves a
+    # specification document carrying finished scaffolding forever.
+    "apparatus-trigger-has-two-conditions": (
+        "becomes removable only once both of these hold: the arc's umbrella "
+        "epic is closed, and every entry in the document's processing ledger "
+        "is terminal"
+    ),
+    "apparatus-terminal-is-section-4s-vocabulary": (
+        "an entry is terminal when it carries [#N] or [no-issue]"
+    ),
+    "apparatus-deferred-and-unmarked-are-not-terminal": (
+        "A [deferred] entry and an unmarked entry are both non-terminal"
+    ),
+    "apparatus-neither-condition-implies-the-other": (
+        "Neither condition implies the other, and neither alone authorizes the "
+        "removal"
+    ),
+    "apparatus-arc-document-is-defined-by-role": (
+        "An arc document is identified by role rather than by path"
+    ),
+    "apparatus-arc-document-keeps-its-apparatus": (
+        "An arc document keeps its apparatus, permanently and in place"
+    ),
+    "apparatus-arc-ledger-is-never-deleted": (
+        "Nothing in this section deletes, truncates, or archives an arc "
+        "document's ledger"
+    ),
+    "apparatus-specification-host-loses-it": (
+        "A specification document that merely hosted the apparatus loses it"
+    ),
+    "apparatus-outliving-content-is-relocated": (
+        "Content that outlives the arc is relocated to the numbered section "
+        "that owns it rather than deleted with its wrapper"
+    ),
+    "apparatus-historical-bookkeeping-is-dropped": (
+        "Purely historical bookkeeping already held by CHANGELOG.md or the "
+        "GitHub Release is dropped rather than relocated"
+    ),
+    "apparatus-stranded-references-are-repaired": (
+        "Every reference the removal would strand — inside the host document "
+        "and outside it — is repaired in the same change"
+    ),
+    "apparatus-removal-is-an-ordinary-issue": (
+        "The removal is separate follow-up work, authorized by an ordinary "
+        "issue and delivered through the host document's own publication lane"
+    ),
+    "apparatus-processing-assets-never-perform-it": (
+        "Neither /process-design-doc nor $process-design-doc removes, "
+        "rewrites, files, or publishes it during a one-artifact invocation"
+    ),
+    "apparatus-completion-report-is-conditional": (
+        "processing completion is observed from the ledger alone and may "
+        "precede the umbrella epic's closure, the report states the "
+        "disposition conditionally and never asserts the removal is already "
+        "owed"
     ),
 }
 
@@ -1089,6 +1158,52 @@ DESIGN_EPIC_ASSETS = (
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
 )
 
+# Issue #458, requirement 4 as the canonical review amended it. §10.4 makes the
+# completion report carry the disposition the host document then owes. Four
+# clauses, because dropping any one of them turns a correct report into a wrong
+# one: without the first the rule is unnamed at the only moment it becomes
+# relevant; without the second the report reads as licence to strip an arc
+# document's own ledger; without the third it asserts a removal is owed when
+# only the ledger — not the umbrella epic — has finished; and without the
+# fourth a processing run looks entitled to perform the removal itself, against
+# §5's one-artifact boundary.
+#
+# Compared against canonical() output, like every other cross-asset clause
+# here: the same rule may start a sentence in one brand's text and sit
+# mid-sentence in the other's.
+APPARATUS_COMPLETION_CLAUSES = {
+    "names-the-rule": (
+        "name the disposition the host document then owes under "
+        "docs/document-workflow-contract.md §10"
+    ),
+    "specification-host-owes-the-removal": (
+        "a specification document that merely hosted this arc's processing "
+        "apparatus owes that apparatus's removal"
+    ),
+    "arc-document-keeps-its-apparatus": (
+        "an arc document keeps its apparatus as the record"
+    ),
+    "conditional-on-epic-closure": (
+        "do not assert the removal is already owed unless that closure is "
+        "verified"
+    ),
+    "removal-is-separate-follow-up-work": (
+        "removal is separate follow-up work authorized by an ordinary issue"
+    ),
+    "this-run-does-not-perform-it": (
+        "this run does not perform, file, or publish it"
+    ),
+}
+
+# The negative control for the clause above. Derived from the declared set
+# rather than listed, so an eleventh asset joins the control set by being
+# declared: an assertion loose enough to match every declared asset, or a
+# selection that silently matched none, fails here rather than passing while
+# asserting nothing.
+APPARATUS_NEGATIVE_CONTROL_ASSETS = tuple(
+    sorted(EXPECTED_DECLARED_PATHS - set(DESIGN_PROCESSING_ASSETS))
+)
+
 DECLARED_ASSET_ROW_RE = re.compile(
     r"^(?P<brand>claude|codex)\s*\|\s*(?P<invocation>[/$][\w-]+)\s*\|\s*(?P<path>\S+)$"
 )
@@ -1360,6 +1475,16 @@ def unbound_gh_invocations(text):
     return unbound
 
 
+def missing_apparatus_completion_clauses(text):
+    """The §10.4 completion-report clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key
+        for key, clause in APPARATUS_COMPLETION_CLAUSES.items()
+        if clause not in asset
+    )
+
+
 def missing_marker_literals(text):
     """The exact §4 status literals `text` no longer states."""
     return [
@@ -1617,6 +1742,128 @@ class DesignDecisionAuthorityTests(unittest.TestCase):
                         "document in place of asking; it contradicts the "
                         f"ambiguity-is-never-minor clause (§5.1): {phrase!r}",
                     )
+
+
+class ArcApparatusRemovalTests(unittest.TestCase):
+    """Issue #458: §3.1 gives the design state machine one transition and no
+    third value, so every arc that ends leaves its processing apparatus exactly
+    where it was. On an arc document that is correct -- there the apparatus IS
+    the record. On a specification document that merely hosted it, it is
+    finished scaffolding wrapped around a live behavior contract:
+    docs/design.md carried epic #268's for five days after that epic closed,
+    and issues #428 and #429 took it out by hand as two separately reasoned
+    changes with no stated rule to follow.
+
+    §10 states that rule. Pinned here: each of its substantive clauses on its
+    own key, the completion-report clause §10.4 puts on the two
+    process-design-doc assets, and the negative control that keeps the asset
+    assertion from passing vacuously.
+    """
+
+    def asset_text(self, path):
+        return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+    def apparatus_keys(self):
+        return sorted(
+            key for key in CONTRACT_STATEMENTS if key.startswith("apparatus-")
+        )
+
+    def test_the_contract_states_every_apparatus_clause(self):
+        keys = self.apparatus_keys()
+        self.assertNotEqual(
+            keys,
+            [],
+            "no §10 clause is pinned at all; the rule could be deleted "
+            "outright and this module would stay green",
+        )
+        document = normalized(contract_text())
+        for key in keys:
+            with self.subTest(clause=key):
+                self.assertIn(
+                    CONTRACT_STATEMENTS[key],
+                    document,
+                    f"docs/document-workflow-contract.md §10 no longer states "
+                    f"{key}",
+                )
+
+    def test_removing_any_single_apparatus_clause_is_reported(self):
+        # Per clause, not per section: a §10 that still discusses the
+        # apparatus somewhere proves nothing about the clause that left, and
+        # the clause that leaves is what decides whether a removal strips an
+        # arc document's ledger or abandons a specification document to
+        # finished scaffolding.
+        document = normalized(contract_text())
+        for key in self.apparatus_keys():
+            with self.subTest(clause=key):
+                mutated = document.replace(CONTRACT_STATEMENTS[key], "")
+                self.assertEqual(missing_contract_statements(mutated), [key])
+
+    def test_both_process_design_doc_assets_state_the_completion_clause(self):
+        for path in DESIGN_PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_apparatus_completion_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer names the disposition its completion "
+                    "report owes under docs/document-workflow-contract.md "
+                    f"§10.4: {missing}",
+                )
+
+    def test_removing_a_completion_clause_from_an_asset_is_reported(self):
+        for path in DESIGN_PROCESSING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in APPARATUS_COMPLETION_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    mutated = asset.replace(clause, "")
+                    self.assertEqual(
+                        missing_apparatus_completion_clauses(mutated), [key]
+                    )
+
+    def test_no_other_declared_asset_states_the_completion_clause(self):
+        # The negative control. §10.4 puts the completion report on the design
+        # processing pair alone, so a clause the other eight declared assets
+        # also carry is one matching something other than what it names --
+        # and an assertion that matched every asset would pass while asserting
+        # nothing about either process-design-doc file.
+        self.assertNotEqual(APPARATUS_NEGATIVE_CONTROL_ASSETS, ())
+        for path in APPARATUS_NEGATIVE_CONTROL_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in APPARATUS_COMPLETION_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertNotIn(
+                        clause,
+                        asset,
+                        f"{path} states the §10.4 completion-report clause "
+                        f"{key}, which belongs to /process-design-doc and "
+                        "$process-design-doc alone; either the clause is too "
+                        "loose to identify them or this asset took on a "
+                        "report it does not make",
+                    )
+
+    def test_the_control_set_is_exactly_the_rest_of_the_declared_set(self):
+        # Keeps the control honest in the other direction: it is derived from
+        # §2's declared paths, so it cannot quietly shrink to a set the clause
+        # was chosen to avoid.
+        self.assertEqual(
+            set(APPARATUS_NEGATIVE_CONTROL_ASSETS) | set(DESIGN_PROCESSING_ASSETS),
+            EXPECTED_DECLARED_PATHS,
+        )
+        self.assertEqual(
+            set(APPARATUS_NEGATIVE_CONTROL_ASSETS) & set(DESIGN_PROCESSING_ASSETS),
+            set(),
+        )
+        self.assertEqual(set(parse_declared_assets()), EXPECTED_DECLARED_PATHS)
+
+    def test_neither_design_capture_asset_takes_on_the_removal(self):
+        # §10.4 gives the removal to an ordinary issue, not to any declared
+        # asset. process-design-doc is covered by the clause above; this is the
+        # other pair that edits a design document and could plausibly grow it.
+        for path in DESIGN_EPIC_ASSETS:
+            with self.subTest(path=path):
+                self.assertNotIn(
+                    "processing apparatus", canonical(self.asset_text(path)), path
+                )
 
 
 class OwningRepositoryTests(unittest.TestCase):

@@ -376,7 +376,24 @@ parses §2 and fails if:
   clearing is bound to the published entry rather than to reachability, its
   manual ambiguity reconciliation, its no-transaction rule for dispositions that
   mutate nothing, or its fail-closed rule; or §9.5 stops requiring tracker state
-  beside its three document states.
+  beside its three document states;
+- this document drops one of §10's substantive clauses — the two-part trigger,
+  §4's definition of terminal that trigger rests on, the arc document's
+  retention of its apparatus, the arc document's definition by role rather than
+  by path, the specification host's loss of it, the relocation of content that
+  outlives the arc, the repair of every stranded reference inside and outside
+  the host document, the deletion of historical bookkeeping a released artifact
+  already holds, or the ordinary-issue ownership of the removal — each pinned
+  on its own, since a section that still mentions the apparatus somewhere
+  proves nothing about the clause that left; or
+- either `process-design-doc` variant drops the completion-report clause §10.4
+  requires: naming the rule, giving the specification host and the arc document
+  their opposite outcomes, stating the disposition conditionally on the
+  umbrella epic's closure, and leaving the removal to separate follow-up work
+  it does not perform. The other eight
+  declared assets are the negative control for that clause, so a check broad
+  enough to match every asset — or narrow enough to match none — fails rather
+  than passing while asserting nothing.
 
 The mechanism's own behavior is not this module's subject:
 `tools/test_publish_coordination_doc.py` executes it against temporary
@@ -1041,3 +1058,112 @@ module.
 **It fails closed.** A record that cannot be created, read, or updated stops the
 run before its first irreversible action. There is no path on which an
 unreadable transaction reads as no transaction.
+
+## 10. The end of an arc: removing the processing apparatus
+
+An arc's **processing apparatus** is the machinery §3.1 and §3.2 add to a
+document so the arc can be captured and then processed: the `Design state:`
+line and its status legend, `## Processing status`, `## Epic contract`, the
+arc's scope section, `## Current state and evidence`, `## Open questions`,
+`## Verification strategy`, and `## Delivery plan`.
+
+§3.1 gives the design state machine one transition and no third value, and §5
+stops each processing run after one artifact, so no declared asset ever takes
+that apparatus back out. This section states what becomes of it once the arc it
+served is over, which document kinds that outcome differs between, and who
+performs it.
+
+### 10.1 The trigger
+
+The apparatus becomes removable only once both of these hold: the arc's
+umbrella epic is closed, and every entry in the document's processing ledger is
+terminal.
+
+Terminal is exactly §4's vocabulary — an entry is terminal when it carries
+`[#N]` or `[no-issue]`. A `[deferred]` entry and an unmarked entry are both
+non-terminal, so a ledger holding either is not all-terminal however close to
+finished it looks.
+
+Both conditions are load-bearing because they are observed from different
+places. A ledger with no outstanding entry is *processing* completion, readable
+from the document alone, and it may precede the umbrella epic's closure by any
+amount of time; the epic's closure is readable only from the tracker. Neither
+condition implies the other, and neither alone authorizes the removal.
+
+### 10.2 Two document kinds, opposite outcomes
+
+The removal applies to one kind of document and never to the other.
+
+An **arc document** is one whose whole subject is the arc: the document
+`/design-epic` or `$design-epic` created and `/process-design-doc` or
+`$process-design-doc` processed. An arc document is identified by role rather
+than by path. `docs/<subject>_design.md` is its ordinary location, but the
+design pair also creates `<subject>_design.md` at the repository root when no
+`docs/` directory exists and accepts an explicit Markdown host named in its
+arguments, so the path is evidence of the role and never the definition of it.
+
+**An arc document keeps its apparatus**, permanently and in place. There the
+apparatus *is* the record: the ledger, the decisions, and the delivery plan are
+what the document exists to hold, and a closed arc's document is the durable
+account of how that arc was decomposed. Nothing in this section deletes,
+truncates, or archives an arc document's ledger, and no reading of it that ends
+in an emptied `*_design.md` is the rule this section states.
+
+A **specification document** is one that describes the current state of a
+system and merely hosted an arc's apparatus for the arc's duration — it existed
+before the arc and outlives it, and its readers consult it for behavior rather
+than for history. **A specification document that merely hosted the apparatus
+loses it** once §10.1's trigger is satisfied, because from that moment the
+apparatus describes finished work to every reader who opens the document for
+its actual subject. `docs/design.md` is the case that occurred: epic #268
+closed 2026-08-16 and its scaffolding still opened and closed the behavior
+contract until issues #428 and #429 removed it by hand five days later.
+
+### 10.3 What is preserved, what is dropped, and what is repaired
+
+**Content that outlives the arc is relocated to the numbered section that owns
+it rather than deleted with its wrapper.** The apparatus is a wrapper, not a
+container of exclusively disposable text, so removal is a relocation pass first
+and a deletion second. Issue #428 moved `docs/design.md`'s implementation-state
+paragraph to §19's `### Implementation state`, the 2026-08-12 measurement audit
+to §21, and two still-true statements to §18. Issue #429 retained
+`## Decisions` as a `### Decisions` subsection of §21, demoted to `####`,
+because §21's records cite those decisions 47 times and §14 cites D-2; deleting
+it would have orphaned every citation.
+
+**Purely historical bookkeeping already held by `CHANGELOG.md` or the GitHub
+Release is dropped rather than relocated.** A second copy of what a released
+artifact already records is the part of the apparatus that has no owning
+section, and preserving it inside a specification document is how a behavior
+contract silently becomes a changelog.
+
+**Every reference the removal would strand — inside the host document and
+outside it — is repaired in the same change.** Inside means a cross-reference,
+citation, or anchor pointing at a heading that is leaving; outside means any
+tracked file that pointed into the apparatus. Issue #428 also repointed
+`CLAUDE.md`'s "opening status paragraph" at §19. A removal that leaves a
+dangling reference anywhere in the tree is incomplete, not merely untidy.
+
+### 10.4 Who performs the removal
+
+**The removal is separate follow-up work, authorized by an ordinary issue and
+delivered through the host document's own publication lane.** In this
+repository that lane is the one
+[agent-workflow-contract.md §7](agent-workflow-contract.md#7-document-publication-classification)
+assigns the host document; in a consuming repository it is that owner's
+declared lane under §9.2. The removal is a judged editorial pass over a
+document the arc did not own, so it takes the same review a change to that
+document ordinarily takes.
+
+**Neither `/process-design-doc` nor `$process-design-doc` removes, rewrites,
+files, or publishes it during a one-artifact invocation.** §5's boundary is one
+tracker artifact per run, and this removal is neither a tracker artifact nor a
+disposition; performing it inside a processing run would rewrite a document the
+run never selected.
+
+What those two assets do owe is the *statement*: when either reports an arc's
+processing complete, it names this rule so the disposition the host document
+then owes is stated at the moment it becomes owed. Because **processing
+completion is observed from the ledger alone and may precede the umbrella
+epic's closure, the report states the disposition conditionally and never
+asserts the removal is already owed** unless that closure has been verified.

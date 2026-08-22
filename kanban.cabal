@@ -49,6 +49,7 @@ extra-doc-files:
   CLAUDE.md
   CONTRIBUTING.md
   README.md
+  SECURITY.md
   config.toml.example
   models.toml.example
   docs/README.md

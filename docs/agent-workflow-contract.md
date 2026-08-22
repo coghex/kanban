@@ -2361,6 +2361,7 @@ CHANGELOG.md | pr-atomic | release-document
 CLAUDE.md | pr-atomic | release-document;implementation-coupled
 CONTRIBUTING.md | pr-atomic | release-document
 README.md | pr-atomic | release-document
+SECURITY.md | pr-atomic | release-document
 claude-plugin/ | pr-atomic | test-parsed;release-document
 codex-plugin/ | pr-atomic | test-parsed;release-document
 docs/README.md | pr-atomic | release-document
