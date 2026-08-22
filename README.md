@@ -123,10 +123,11 @@ verdicts rest on, so a cell can be checked rather than taken on trust.
 
 The macOS column rests on use rather than automation: there is no macOS CI job,
 and a `Supported` verdict there records that the component is run on the
-maintainer's own macOS host. Where a Linux verdict rests on evidence at all,
-that evidence is CI — the `ubuntu-latest` build and test jobs, and a job that
-boots real systemd in a container. No Linux hardware is committed to this
-project, so nothing in this section claims verification on a Linux host.
+maintainer's own macOS host. The Linux column carries two kinds of evidence and
+each row names which of them it has: what CI exercises — the `ubuntu-latest`
+build and test jobs, and a job that boots real systemd in a container — and
+what is written down but has never been run. No Linux hardware is committed to
+this project, so nothing in this section claims verification on a Linux host.
 
 | Component | macOS | Linux | Notes |
 | --- | --- | --- | --- |
