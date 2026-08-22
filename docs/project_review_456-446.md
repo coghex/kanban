@@ -17,13 +17,13 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. Wrong-removal recovery can silently lose an identical stash entry
+- [x] PRR-1. Wrong-removal recovery can silently lose an identical stash entry — [#469]
 - [ ] PRR-2. Backlog review routes transient tracker bodies into repository worktrees
 - [ ] PRR-3. The issue-approval dashboard path is outside the manifest's Haskell scan
 
 ## 1. Recovery stash retirement
 
-### PRR-1. Wrong-removal recovery can silently lose an identical stash entry
+### [#469] PRR-1. Wrong-removal recovery can silently lose an identical stash entry
 
 > **Captured note:** Make PR #447's wrong-removal recovery prove that the
 > pre-existing stash-entry multiset was restored, including two entries with
