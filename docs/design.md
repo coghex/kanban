@@ -3021,10 +3021,18 @@ resolve.
 ### What parses this document
 
 `test/Spec/UI/Keys.hs` reads only the table rows between `## 7. Keyboard
-interaction` and `## 8.`, and `tools/test_document_classification.py` asserts on
-this file's row inside `docs/agent-workflow-contract.md` section 7 rather than
-on its body. Adding, renaming, or removing any other section of this document is
-therefore parser-safe.
+interaction` and `## 8.`. `test/Spec/Design/Witnesses.hs` reads the list items
+of `## 3. Non-goals` and of `## 20. Deferred ideas`, each up to the next `## `
+heading, and holds every one of them against a declared machine fact whose
+truth is what that entry asserts — a *witness* — reconciled in both directions
+so that neither an entry nor a declaration can go uncovered.
+`tools/test_document_classification.py` asserts on this file's row inside
+`docs/agent-workflow-contract.md` section 7 rather than on its body.
+
+Adding, renaming, or removing any other section of this document is therefore
+parser-safe. Those three sections are not: an edit to §7's table, to §3's list,
+or to §20's list lands in the same pull request as the suite that reads it,
+because splitting the two leaves `master` red between the landings.
 
 ### Manual checks
 

@@ -29,6 +29,7 @@ import qualified Spec.Config.Consumers as ConfigConsumers
 import qualified Spec.Config.Loading as ConfigLoading
 import qualified Spec.Config.Models as Models
 import qualified Spec.Config.Settings as Settings
+import qualified Spec.Design.Witnesses as DesignWitnesses
 import qualified Spec.Drainer as Drainer
 import qualified Spec.GitHub.BoardRefresh as BoardRefresh
 import qualified Spec.GitHub.Decoding as GitHubDecoding
@@ -126,6 +127,7 @@ suiteGroups =
     SuiteGroup "Spec.UI.Incidents" PingLane Incidents.spec,
     SuiteGroup "Spec.UI.Usage" PingLane UIUsage.spec,
     SuiteGroup "Spec.UI.Keys" PingLane Keys.spec,
+    SuiteGroup "Spec.Design.Witnesses" PingLane DesignWitnesses.spec,
     SuiteGroup "Spec.UI.Search" PingLane Search.spec,
     SuiteGroup "Spec.Agent.Ping" PingLane Ping.spec, -- 46.1s
     SuiteGroup "Spec.Agent.Preflight" SupervisionLane Preflight.spec -- 5.8s

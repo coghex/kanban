@@ -236,6 +236,8 @@ test-suite kanban-test
     Spec.Config.Loading
     Spec.Config.Models
     Spec.Config.Settings
+    Spec.Design.Entries
+    Spec.Design.Witnesses
     Spec.Drainer
     Spec.Drainer.DirectMerge
     Spec.GitHub.BoardRefresh
