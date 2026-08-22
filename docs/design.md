@@ -3364,8 +3364,8 @@ integration coverage. Installation instructions and a clean temporary
 `cabal install exe:kanban` exercise are complete.
 
 The remaining manual checks and release publication are now the canonical
-`REL-1` through `REL-4` slices in the delivery plan. This milestone is
-implementation history rather than a second status checklist.
+`REL-1` through `REL-4` slices, whose records section 21 holds. This milestone
+is implementation history rather than a second status checklist.
 
 Exit criteria: the application is warning-clean, fixture/integration tests pass,
 idle CPU is effectively zero apart from the inexpensive local service status
@@ -3388,9 +3388,10 @@ predictable, read-only dashboard.
 ## 21. Release evidence
 
 Permanent records of the manual release gates D-1 requires, one subsection per
-gate (D-13), preceded by the audit that specified what those gates measure.
-These are permanent contract content and outlive the arc's remaining
-`Decisions` through `Delivery plan` scaffolding below.
+gate (D-13), preceded by the audit that specified what those gates measure and
+closed by the decisions those records cite. All of it is permanent contract
+content; the first-release arc's remaining processing apparatus came out when
+the arc closed.
 
 ### Measurement-surface audit, 2026-08-12
 
@@ -3412,8 +3413,8 @@ every manual slice installs first, and the repository documents two different
 installs: `cabal install exe:kanban` from the checkout (`README.md`'s "Install
 from a source checkout") and the clean sdist unpack exercise
 (`docs/development.md:52-58`), which `README.md`'s quickstart now leads with as
-the release install path. `Q-4` through
-`Q-8` raised these; D-9 through D-13 settle them.
+the release install path. The arc's open questions raised these; D-9 through
+D-13 settle them.
 
 ### REL-1. Installed performance calibration, macOS, 2026-08-13
 
@@ -3434,7 +3435,7 @@ tightening can start from evidence rather than from the estimate.
 
 #### Scope reconciliation: process group versus process tree
 
-D-10 and the Verification strategy above both say "process group". This record
+Both D-10 and the arc's verification strategy said "process group". This record
 samples the **PPID process tree** rooted at the Kanban PID instead. The two are
 not the same here: Kanban spawns its managed children as their own process
 group leaders (`src/Kanban/Drainer.hs`, `src/Kanban/Process.hs`), so a
@@ -6996,9 +6997,12 @@ Python suite's stdin is redirected for the same reason REL-3's was. The build
 emitted no GHC warning, which `-Werror` on package `kanban` would have turned
 into a failure anyway.
 
-## Decisions
+### Decisions
 
-### D-1. First-release evidence includes a real installed-terminal run
+The first-release arc's decisions, retained because the records above and
+section 14 cite them.
+
+#### D-1. First-release evidence includes a real installed-terminal run
 
 Fixture and integration coverage do not replace the release-gate checks that
 depend on an actual terminal, process table, authenticated provider clients, and
@@ -7010,7 +7014,7 @@ and narrows the redraw clause above to observable content churn. D-12 names the
 sdist-built install as the measured artifact, and D-13 puts the results in a new
 section 21.
 
-### D-2. Live usage verification must not consume a model prompt
+#### D-2. Live usage verification must not consume a model prompt
 
 The Codex app-server rate-limit request and Claude `/usage` interaction are
 account-status probes. A release check that submits an ordinary prompt would
@@ -7022,13 +7026,13 @@ probes and release verification, which still submit no prompt; a ping is a
 separate action the user invokes by name, and no probe or release-verification
 path may launch one.
 
-### D-3. Publication follows every manual gate and required CI
+#### D-3. Publication follows every manual gate and required CI
 
 The release tag is a final operation. It must identify a commit containing the
 accepted manual evidence, and that commit must pass the repository's required
 build and test checks.
 
-### D-4. First-release performance gates are generous smoke limits
+#### D-4. First-release performance gates are generous smoke limits
 
 `REL-1` uses thresholds intended to catch a runaway process or unusable startup,
 not to demand optimization before there is field evidence. Test three
@@ -7050,7 +7054,7 @@ Amended 2026-08-12. The thresholds above stand unchanged; D-10 and D-11 supply
 what the decision never said. Samples cover Kanban's process group with the
 drainer loaded, and "usable first frame" means the GitHub-populated board.
 
-### D-5. The first release is version 1.0.0.0 and GitHub-only
+#### D-5. The first release is version 1.0.0.0 and GitHub-only
 
 Kanban's first release is package version `1.0.0.0`. Since 2026-08-13 that
 version is established ahead of publication — #283, under packaging epic #282,
@@ -7062,7 +7066,7 @@ favor of that conventional distinction. Hackage or another
 package registry, binary installers, and distribution through any channel other
 than GitHub are outside the first-release arc.
 
-### D-6. Use a ten-minute installed-terminal exercise
+#### D-6. Use a ten-minute installed-terminal exercise
 
 `REL-3` uses a deliberately conservative ten-minute script. It is longer than
 the expected time needed to expose obvious terminal churn, but remains a short
@@ -7085,28 +7089,28 @@ release smoke check rather than endurance testing:
 The record may mark a tracker or an overlay unavailable when the live fixture
 contains no applicable item, but it must say what could not be exercised.
 
-### D-7. Track the four remaining outcomes as separate delivery slices
+#### D-7. Track the four remaining outcomes as separate delivery slices
 
 Performance calibration, authenticated usage-provider verification, sustained
 terminal exercise, and release publication have different evidence and failure
 modes. Keeping them separate makes a failed gate independently repeatable while
 preserving `REL-4` as the single dependency join.
 
-### D-8. Record reproducible summaries rather than sensitive raw transcripts
+#### D-8. Record reproducible summaries rather than sensitive raw transcripts
 
 Each manual slice should record the environment, client versions, commands or
 interactions, elapsed observation window, and pass/fail result. It should omit
 account identifiers, usage balances, access tokens, and raw provider output not
 needed to reproduce the conclusion.
 
-### D-9. The manual gates run under tmux, executed by the agent pipeline
+#### D-9. The manual gates run under tmux, executed by the agent pipeline
 
-User signoff 2026-08-12, resolving `Q-4`. `REL-1`, `REL-2`, and `REL-3` are
-ordinary solvable issues carrying runnable acceptance commands: a detached tmux
-session of a fixed size runs the installed executable, `send-keys` drives it,
-`capture-pane` reads the screen back, and the process table is sampled from
-outside. This keeps every gate repeatable by whoever reruns it and keeps a
-failed gate cheap to repeat.
+User signoff 2026-08-12. `REL-1`, `REL-2`, and `REL-3` are ordinary solvable
+issues carrying runnable acceptance commands: a detached tmux session of a
+fixed size runs the installed executable, `send-keys` drives it, `capture-pane`
+reads the screen back, and the process table is sampled from outside. This
+keeps every gate repeatable by whoever reruns it and keeps a failed gate cheap
+to repeat.
 
 The cost is deliberate and must not be papered over. A tmux pane is a real PTY,
 but `capture-pane` returns content, not repaints, so a redraw that rewrites
@@ -7118,13 +7122,13 @@ at 1.0. The records must say so in those words rather than implying a human
 watched the frame. Each record still names the host terminal and tmux versions
 and the pane geometry, because they bound what was observed.
 
-### D-10. CPU and memory samples cover the process group with the drainer loaded
+#### D-10. CPU and memory samples cover the process group with the drainer loaded
 
-User signoff 2026-08-12, resolving `Q-5`. D-4's ceilings apply to Kanban **and
-its children**, sampled once per second, with the drainer's launchd job loaded
-as in normal operation. Single-PID sampling was rejected: the ten-second
-controller poll would vanish from the measurement, and a runaway child — close
-to the failure D-4 exists to catch — would pass.
+User signoff 2026-08-12. D-4's ceilings apply to Kanban **and its children**,
+sampled once per second, with the drainer's launchd job loaded as in normal
+operation. Single-PID sampling was rejected: the ten-second controller poll
+would vanish from the measurement, and a runaway child — close to the failure
+D-4 exists to catch — would pass.
 
 Consequence to carry into `REL-1`: the poll alone costs about 0.07 s of CPU
 every ten seconds, roughly 0.7% of a core, so the board's own steady-state
@@ -7135,13 +7139,13 @@ scoped out under the epic's `Done when`, not an automatic veto on the release.
 The record states the group total, and states the poll's contribution separately
 so a later release can tighten either number.
 
-### D-11. The startup clock stops at the GitHub-populated board
+#### D-11. The startup clock stops at the GitHub-populated board
 
-User signoff 2026-08-12, resolving `Q-6`. D-4's "usable first frame within 10
-seconds" means the frame showing real cards from the completed startup board
-refresh, not the cache-backed frame that paints before any network work. The
-weaker reading was rejected as measuring almost nothing: that frame appears in
-well under a second regardless of how the application behaves afterwards.
+User signoff 2026-08-12. D-4's "usable first frame within 10 seconds" means the
+frame showing real cards from the completed startup board refresh, not the
+cache-backed frame that paints before any network work. The weaker reading was
+rejected as measuring almost nothing: that frame appears in well under a second
+regardless of how the application behaves afterwards.
 
 Consequence: all three launches are network-bound against a 10 s ceiling, and
 prior observation of this board put the populated frame near 8 s. The margin is
@@ -7150,12 +7154,12 @@ launches and enough network context to tell a slow GitHub day from a regression;
 a failure attributable to GitHub latency rather than to Kanban is re-run and
 noted, not treated as a silent pass.
 
-### D-12. The gates measure an install built from the sdist archive
+#### D-12. The gates measure an install built from the sdist archive
 
-User signoff 2026-08-12, resolving `Q-7`. Every recorded pass or fail comes from
-an executable installed out of a `cabal sdist` archive unpacked into a clean
-temporary directory — the artifact a release consumer actually receives, and the
-same archive `tools/test_source_distribution.py` already proves is a complete
+User signoff 2026-08-12. Every recorded pass or fail comes from an executable
+installed out of a `cabal sdist` archive unpacked into a clean temporary
+directory — the artifact a release consumer actually receives, and the same
+archive `tools/test_source_distribution.py` already proves is a complete
 checkout. Installing from the working tree was rejected for the record: it
 cannot show that the released archive behaves the same, and deferring that risk
 to `REL-4` would discover a packaging fault after the manual gates had already
@@ -7168,13 +7172,12 @@ used. A gate that fails because of an sdist packaging fault rather than runtime
 behavior is still a release-blocking defect under the epic's `Done when`, and is
 recorded as such rather than retried against the checkout.
 
-### D-13. Release evidence lives in a new numbered section 21
+#### D-13. Release evidence lives in a new numbered section 21
 
-User signoff 2026-08-12, resolving `Q-8`. `REL-1` creates `## 21. Release
-evidence` between section 20 and the arc scaffolding, with one subsection per
-gate; `REL-2` and `REL-3` append their own subsections to it. The records are
-permanent contract content and outlive the `Epic contract` through `Delivery
-plan` scaffolding, which comes out when the arc closes.
+User signoff 2026-08-12. `REL-1` creates `## 21. Release evidence` after
+section 20, with one subsection per gate; `REL-2` and `REL-3` append their own
+subsections to it. The records are permanent contract content and outlive the
+arc's processing apparatus, which comes out when the arc closes.
 
 Verified safe: `test/Spec/UI/Keys.hs:198-207` parses only the rows between
 `## 7. Keyboard interaction` and `## 8.`, and
@@ -7182,7 +7185,7 @@ Verified safe: `test/Spec/UI/Keys.hs:198-207` parses only the rows between
 `docs/agent-workflow-contract.md` section 7, not on its body. A new section
 therefore breaks no parser, but `REL-1` still runs both suites to prove it.
 
-### D-14. A solver agent performs the publication under the issue's authority
+#### D-14. A solver agent performs the publication under the issue's authority
 
 User signoff 2026-08-15. `REL-4`'s tag is pushed by the agent pipeline rather
 than by hand: the REL-4 issue is the authorization, and a solver agent may
@@ -7213,242 +7216,3 @@ precede the review of the record that documents them. Writing the record first
 would assert an event that had not happened, which the pipeline's provenance
 checks exist to refuse. The order is fixed: verify, tag, observe, then record
 through a pull request.
-
-## Open questions
-
-### Q-1. Which numeric performance limits block the first release?
-
-Resolved by D-4. The first release uses generous smoke limits and records the
-actual measurements for later calibration.
-
-### Q-2. How long must the installed-terminal exercise run?
-
-Resolved by D-6. The deliberately conservative ten-minute script is accepted as
-the first-release terminal exercise.
-
-### Q-3. What tag spelling identifies the first release?
-
-Resolved by D-5. The first release uses tag `v1.0.0.0` and a GitHub Release.
-
-### Q-4. Does a tmux pane satisfy D-1's "actual terminal"?
-
-Resolved by D-9. The gates run under tmux as agent-solvable issues, and D-1's
-redraw clause is narrowed to observable content churn for the first release.
-
-Affects `REL-1`, `REL-2`, and `REL-3`, and decided whether they are solvable by
-the agent pipeline at all. The repository's only non-interactive way to drive
-the live TUI is tmux — `tmux new-session -d -x 200 -y 50 …`, `send-keys`,
-`capture-pane` — and the canonical PR reviewer has previously returned
-CHANGES_REQUESTED on a correct PR solely because its body said the live-TUI
-checks were skipped. A tmux pane is a real PTY with a real process table, so the
-CPU, memory, refresh-count, and interaction gates are all mechanizable there,
-and screen churn is measurable by diffing successive captures. What tmux cannot
-show is flicker: a repaint that rewrites identical content is invisible to
-`capture-pane`. Options: agent-executed under tmux with the host terminal
-recorded; operator-executed in a real emulator with the issue supplying a
-procedure and a record template; or a split where the mechanical samples are
-agent-run and only the flicker verdict is the operator's. Resolving this fixes
-whether these issues carry runnable acceptance commands.
-
-### Q-5. Which process do D-4's CPU and memory samples cover, and what is the drainer doing?
-
-Resolved by D-10. The ceilings apply to the process group with the drainer
-loaded.
-
-Affects `REL-1`. `ps -o %cpu,rss -p <kanban-pid>` reports that PID alone; the
-ten-second controller poll runs in a child costing about 0.07 s of CPU each
-time, so process-group sampling and single-PID sampling can differ by roughly a
-third of the 2% budget. Separately, the drainer being loaded, unloaded, or
-merely recorded gives three different idle profiles, and D-4 names none of them.
-A 2% mean ceiling is not checkable until both are stated.
-
-### Q-6. Which frame is D-4's "usable first frame"?
-
-Resolved by D-11. The clock stops at the GitHub-populated board.
-
-Affects `REL-1`. A cache-backed frame paints almost immediately, before any
-network work; the GitHub-populated frame lands seconds later, and prior
-observation of this board put that near 8 s against a 10 s ceiling. The first
-reading passes trivially and measures little; the second measures something real
-but is network-dependent with roughly 2 s of margin. A third reading — all
-startup refreshes settled, including both usage providers — is stricter again
-and overlaps `REL-2`.
-
-### Q-7. Which installed artifact does "a clean source-install exercise" mean?
-
-Resolved by D-12. The gates measure an install built from the sdist archive.
-
-Affects all four slices. Neither `~/.local/bin/kanban` nor `~/.cabal/bin/kanban`
-exists today. `README.md`'s "Install from a source checkout" documents
-`cabal install exe:kanban` from the checkout, which measures the code on the
-branch under test.
-`docs/development.md:52-58` and milestone 9 describe a clean sdist unpack, which
-measures what a release consumer actually receives and matches `REL-4`'s
-concern. The two differ, and "the record names the build commit" reads
-differently for each.
-
-### Q-8. Where in this document do the evidence records live?
-
-Resolved by D-13. A new `## 21. Release evidence` section, created by `REL-1`.
-
-Affects `REL-1`, `REL-2`, and `REL-3`; whichever slice lands first binds the
-others. The numbered contract ends at section 20, and the arc scaffolding —
-`Epic contract` through `Delivery plan` — is temporary processing apparatus that
-presumably comes out when the arc closes. Options: a new permanent numbered
-section holding one subsection per gate; a block under the scaffolding that is
-folded away later; or entries in milestone 9 as implementation history. D-1 says
-only that results "must be recorded in this design".
-
-## Verification strategy
-
-Run the installed executable, not `cabal run`, installed from a `cabal sdist`
-archive unpacked into a clean temporary directory (D-12). Drive it in a detached
-tmux session of a stated geometry, reading the screen back with `capture-pane`
-(D-9). Record the macOS, terminal, and tmux versions, the pane geometry, the
-Kanban version and the commit the archive was built from, the Codex and Claude
-client versions, the observation window, and the commands or key sequences used.
-
-Attribute network activity to startup or to an explicit refresh. Apply D-4's
-settling period and one-second samples to Kanban's process group with the
-drainer's launchd job loaded, reporting the group total and the controller
-poll's contribution separately (D-10). Stop the startup clock at the
-GitHub-populated board, not the cache-backed frame (D-11). Report redraw
-behavior as observable content churn measured by diffing successive captures,
-and say plainly that true flicker is not measured at 1.0 (D-9).
-
-Every record lands in section 21 (D-13) and omits account identifiers, usage
-balances, and credentials (D-8). Rerun required CI on the exact commit selected
-for release, push the authorized annotated tag under D-14, and verify that the
-tag's peeled ref and the Release `.github/workflows/release.yml` creates from it
-both resolve to that commit.
-
-## Delivery plan
-
-### REL-1. Record real-terminal performance measurements
-
-- **Outcome:** A committed, reproducible calibration records installed Kanban's
-  startup time, settled idle CPU, resident memory, refresh count, and redraw
-  behavior against agreed release limits.
-- **Scope:** Define the observation environment and sampling method, run the
-  installed executable in a real terminal, record summarized measurements, and
-  identify any missed threshold as release-blocking evidence.
-- **Phase:** 1 — independent manual gates.
-- **Depends on:** `none`.
-- **Ordering:** `can land first`.
-- **Relevant decisions:** `D-1`, `D-4`, `D-7`, `D-8`, `D-9`, `D-10`, `D-11`,
-  `D-12`, `D-13`.
-- **Acceptance signals:** Section 21 exists and holds this gate's record, naming
-  the sdist commit, host/terminal/tmux context and pane geometry, observation
-  window, measurement commands, observed values, and a pass/fail conclusion for
-  D-4's startup, CPU, memory, refresh, and content-churn gates. The record
-  reports the process-group total and the drainer poll's share separately, and
-  states that true flicker is unmeasured. Both test suites still pass, showing
-  the new section broke no parser.
-- **Out of scope:** Optimizing code or changing the runtime architecture in the
-  same slice. Measuring repaint volume rather than content churn.
-- **Open questions:** `None`. This slice also owns creating section 21, which
-  `REL-2` and `REL-3` then append to.
-
-### REL-2. Verify live Codex and Claude usage refreshes
-
-- **Outcome:** A committed manual record confirms both built-in usage providers
-  return current account windows through installed Kanban without submitting a
-  model prompt.
-- **Scope:** Exercise one authenticated live refresh per provider, record client
-  versions and bounded lifecycle behavior, and redact account-specific values.
-- **Phase:** 1 — independent manual gates.
-- **Depends on:** `REL-1`.
-- **Ordering:** `critical path`.
-- **Relevant decisions:** `D-1`, `D-2`, `D-7`, `D-8`, `D-9`, `D-12`, `D-13`.
-- **Acceptance signals:** Both sidebar providers reach a successful fresh state,
-  no ordinary model prompt is submitted, provider processes exit, and one
-  provider's behavior does not hide the other's result. The record appends to
-  section 21 and names both client versions.
-- **Out of scope:** Broad historical client-version compatibility matrices and
-  changes to authenticated provider accounts.
-- **Open questions:** `None`. The slice must state whether it observes the
-  startup refresh — `startAllRefreshes` already dispatches both providers
-  (`src/Kanban/UI/Refresh.hs:43-51`) — or a later explicit one; either is
-  acceptable, and the record says which.
-
-### REL-3. Exercise the installed terminal application
-
-- **Outcome:** A committed smoke-test record confirms installed Kanban remains
-  responsive and visually stable through its agreed real-terminal observation
-  path.
-- **Scope:** Cover startup, explicit refresh, card and column navigation,
-  overlays used without external mutation, resize behavior, and clean shutdown;
-  record any visible redraw churn or lifecycle failure through D-6's concrete
-  interaction script.
-- **Phase:** 1 — independent manual gates.
-- **Depends on:** `REL-1`, `REL-2`.
-- **Ordering:** `critical path`.
-- **Relevant decisions:** `D-1`, `D-6`, `D-7`, `D-8`, `D-9`, `D-12`, `D-13`.
-- **Acceptance signals:** Every required interaction succeeds for the agreed
-  duration and refresh count, shutdown restores the terminal, and the record
-  appends to section 21 identifying whether observable content churn occurred.
-- **Out of scope:** Starting reviews, solves, merges, or other workflows that
-  mutate GitHub or launch long-running agent work.
-- **Open questions:** `None`. D-6 step 6 asks whether the frame flickers; under
-  D-9 this slice answers the content-churn question by diffing captures and
-  records that true flicker is unmeasured at 1.0.
-
-### REL-4. Publish the first Kanban release
-
-> **Ready 2026-08-15.** The 2026-08-12 deferral is discharged: #269, #270, and
-> #273 have all merged, section 21 records a pass for each gate, and no
-> release-blocking defect was found. Packaging epic #282 closed in the same
-> window — #283 established version `1.0.0.0` and `CHANGELOG.md`, #287 and #288
-> the outsider documentation and screenshot, and #289 the tag-triggered
-> `.github/workflows/release.yml` — so this slice's shape changed and the
-> bullets below are its rewritten form. D-14 settles who performs the
-> publication; nothing about it is open.
-
-- **Outcome:** Kanban version `1.0.0.0` has a GitHub Release, created by
-  `.github/workflows/release.yml` from an authorized `v1.0.0.0` tag, whose tag
-  points to the exact required-CI-passing commit containing accepted evidence
-  for every manual gate.
-- **Scope:** Select the release commit and verify that its successful
-  `build-test` is `ci.yml`'s own, for the `push` event at exactly that commit —
-  `release.yml` defines a job of the same name, so an unqualified check-run
-  match proves nothing. Confirm on that commit the preconditions the workflow
-  enforces: `kanban.cabal` declares exactly one line-anchored `version:` field
-  agreeing with `src/Kanban/CLI.hs`'s hard-coded `"kanban 1.0.0.0"`, which #283
-  set and `tools/test_version_consistency.py` holds to, and `CHANGELOG.md`'s
-  first `## ` section is exactly `1.0.0.0`, which the workflow extracts whole as
-  the release notes. Push the annotated tag under D-14, correlate the triggered
-  run by workflow, event, ref, and commit rather than by recency, and verify the
-  published artifacts: the tag's peeled ref, the Release's target, its complete
-  notes against the complete extracted changelog section, and its sole
-  `kanban-1.0.0.0.tar.gz` asset. Verify that asset as a consumer would —
-  `docs/public_release_design.md` D-7 assigns consumer-side sdist verification
-  here — by unpacking it in a clean directory, building and testing it, and
-  confirming the executable it produces prints `kanban 1.0.0.0`. Record the
-  publication in section 21. No source change remains, so the pull request this
-  slice produces carries that record and nothing else.
-- **Failure contract:** Any failure after the tag reaches the remote — the
-  workflow, the peeled-tag comparison, the full release-note comparison, or the
-  downloaded-asset build, test, or version check — is a stop-and-report state
-  under D-14. The published tag and Release are never deleted, moved, retagged,
-  or hand-created to repair it.
-- **Phase:** 2 — publication.
-- **Depends on:** `REL-1`, `REL-2`, `REL-3`, and packaging epic #282's #283
-  through #289, all closed as of 2026-08-15.
-- **Ordering:** `critical path`.
-- **Relevant decisions:** `D-3`, `D-5`, `D-7`, `D-8`, `D-12`, `D-13`, `D-14`.
-- **Acceptance signals:** Every prerequisite slice is terminal, section 21 holds
-  all three accepted records, `ci.yml`'s `build-test` is green for the `push` at
-  the selected commit, and the peeled `refs/tags/v1.0.0.0^{}` and the GitHub
-  Release's target both resolve to it. The Release is neither draft nor
-  prerelease, its complete notes equal the complete `1.0.0.0` changelog section,
-  and its only asset is `kanban-1.0.0.0.tar.gz`, which unpacks, builds, passes
-  both suites, and yields an executable reporting `kanban 1.0.0.0`. Section 21
-  gains a publication record naming the released commit, the correlated workflow
-  run and its jobs' conclusions, the Release, and those verification results.
-- **Out of scope:** Package-registry publication, binary installers, and
-  non-GitHub distribution. Establishing the package version, the changelog, or
-  the release workflow, all of which #282's children delivered ahead of this
-  slice; deduplicating the two version literals into one source, which #283 left
-  undone. Changing `release.yml`: this slice authorizes a tag and verifies what
-  the workflow does with it.
-- **Open questions:** `None`.
