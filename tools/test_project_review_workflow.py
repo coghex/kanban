@@ -108,19 +108,44 @@ LISTING_REACH = {
     "the boundary is covered": (
         "- a boundary endpoint from the cursor is at or above its oldest entry."
     ),
-    "raise and re-list": (
-        "Raise `$LIMIT` and list again until all three hold; `--limit` "
-        "paginates for you, so a larger number is the whole remedy."
+    "raise and re-list until exhausted": (
+        "Raise `$LIMIT` and list again until each one holds, or until the "
+        "listing is **exhausted** — a listing that came back with fewer rows "
+        "than `$LIMIT` is the whole of the repository's merged history, and "
+        "raising the limit again changes nothing."
     ),
     "truncation is inherited": (
         "A batch selected from a listing that stopped short of its own boundary "
         "is silently truncated to whatever happened to fit, and every later "
         "`continue` inherits the gap."
     ),
-    "an unreachable request stops": (
-        "If the listing cannot reach the request — a starting PR that does not "
-        "exist, a count larger than the repository's merged history — say so "
-        "and stop rather than reviewing the nearest thing that fits."
+}
+
+# What an exhausted listing that still fails a condition means. The three do
+# not share an answer, and collapsing them was round 2's blocker: a single
+# "stop when the request cannot be reached" rule refuses the ordinary tail
+# batch, so a sweep with fewer PRs left than the batch size never finishes PR
+# history and direct mode is never entered.
+EXHAUSTION_DISPOSITIONS = {
+    "an absent starting PR is invalid": (
+        "**A supplied starting PR that is absent** is an invalid request: that "
+        "PR is not in this repository's merged history at all. Say so and "
+        "stop; do not review the nearest number that exists."
+    ),
+    "an absent boundary is a foreign cursor": (
+        "**A boundary endpoint that is absent** is a cursor that does not "
+        "belong to this repository. Say so and stop rather than sweeping past "
+        "it."
+    ),
+    "a short count is the tail, not an error": (
+        "**A count larger than what remains is not an error at all.** It is "
+        "the tail of the sweep. Review every PR that does remain, say the "
+        "batch was short and why, and treat PR history as exhausted so the "
+        "next `continue` enters direct mode."
+    ),
+    "a small repository is the same case": (
+        "A repository with fewer merged PRs than the batch size meets this on "
+        "its first batch, and is reviewed the same way."
     ),
 }
 
@@ -135,19 +160,65 @@ LINKED_ISSUE_READ = (
 REPOSITORY_SCOPE = '-R "$REPO"'
 
 # How `$REPO` is filled: from the remote, with no GitHub call of its own.
-REPOSITORY_RESOLUTION = 'REPO="$(git remote get-url origin'
+REPOSITORY_RESOLUTION = 'REPO="$(git -C "$ROOT" remote get-url origin'
+
+# `$REPO` names the tracker; `$ROOT` names the checkout. Most of this workflow
+# never touches GitHub -- direct mode walks first-parent history, the
+# surviving-behavior trace reads the code at HEAD, and the docs worktree holds
+# both the cursor and the report -- so a `$REPO` the session's own checkout is
+# not a checkout of would audit one repository's pull requests against
+# another's code and write its report into another's docs worktree. Neither is
+# undone by moving a file afterwards, so the two are required to agree before
+# the first call.
+CHECKOUT_RESOLUTION = 'ROOT="$(git rev-parse --show-toplevel)"'
+CHECKOUT_TARGET = {
+    "both are resolved, and neither substitutes": (
+        "`$REPO` is the `owner/name` every `gh` call names; `$ROOT` is the "
+        "local checkout every other step runs in, and neither substitutes for "
+        "the other."
+    ),
+    "the git steps run under the checkout": (
+        'Run them all under `$ROOT` with `git -C "$ROOT"`, never in whatever '
+        "directory the session happens to be sitting in."
+    ),
+    "a named repository does not adopt this checkout": (
+        "When the user named a repository, `$ROOT` is a checkout **of that "
+        "repository**, and the session's own is not it unless it proves to be."
+    ),
+    "the two must agree": (
+        'run that same `git -C "$ROOT" remote get-url` and **require the two '
+        "to agree**. They must name one `owner/name` between them."
+    ),
+    "a mismatch stops the run": (
+        "A mismatch, or no available checkout of `$REPO`, stops the run before "
+        "the first `gh` call"
+    ),
+    "the working directory is never the repair": (
+        "Falling back to the working directory is never the repair."
+    ),
+}
+
+# Every git invocation that reads the repository under review, which is every
+# one of them except the `rev-parse` that establishes `$ROOT` itself.
+CHECKOUT_SCOPED_GIT = (
+    'git -C "$ROOT" remote get-url origin',
+    'git -C "$ROOT" worktree list --porcelain',
+    'git -C "$ROOT" log --first-parent',
+    'git -C "$ROOT" show --stat --summary',
+    'git -C "$ROOT" diff',
+)
 
 # How `$DOCS_WT` is filled: by branch, never by a hard-coded path. It is
 # resolved once and used twice — the sweep cursor is read from it before a
 # range is selected, and the finished report is written into it.
-DOCS_WORKTREE_RESOLUTION = 'DOCS_WT="$(git worktree list --porcelain'
+DOCS_WORKTREE_RESOLUTION = 'DOCS_WT="$(git -C "$ROOT" worktree list --porcelain'
 
 # The opening report, which is what catches a wrong resolution — and only if it
 # lands before the first *read*. A run scoped against the wrong repository has
 # already spent itself by the time anything is written.
 OPENING_REPORT = (
-    "name the resolved `$REPO` and the batch you are about to take before the "
-    "first `gh` call below."
+    "name the resolved `$REPO`, the `$ROOT` it was matched against, and the "
+    "batch you are about to take before the first `gh` call below."
 )
 
 # The concrete range, which is not knowable until the listing returns, so it is
@@ -298,8 +369,8 @@ PRESERVED_BEHAVIOR = {
         "ordering is not merge order"
     ),
     "direct commits inside the interval": (
-        "Check `git log --first-parent` for direct-to-default-branch commits "
-        "inside that landing interval and review them as bare commits."
+        'Check `git -C "$ROOT" log --first-parent` for direct-to-default-branch '
+        "commits inside that landing interval and review them as bare commits."
     ),
     "a rebased PR's commits are not direct": (
         "Do not mislabel a rebased PR's individual commits as direct when "
@@ -519,6 +590,30 @@ class RepositoryScopeTests(unittest.TestCase):
                 with self.subTest(asset=relative_path, rule=rule):
                     self.assertIn(flat(phrase), flattened)
 
+    def test_an_exhausted_listing_is_dispositioned_per_condition(self):
+        # Blocker from round 2. Refusal is preserved for the two requests that
+        # really are invalid, and the tail batch -- the one case that is not --
+        # is reviewed rather than refused, which is what lets PR history
+        # actually exhaust and direct mode be reached.
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            for rule, phrase in sorted(EXHAUSTION_DISPOSITIONS.items()):
+                with self.subTest(asset=relative_path, rule=rule):
+                    self.assertIn(flat(phrase), flattened)
+
+    def test_the_tail_batch_is_never_refused(self):
+        # The negative control for the rule above: the round 2 spelling refused
+        # every unreachable request alike, so the phrase that did it must be
+        # gone rather than merely supplemented.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            with self.subTest(asset=relative_path):
+                self.assertNotIn(
+                    "a count larger than the repository's merged history — say "
+                    "so and stop",
+                    flat(content),
+                )
+
     def test_the_reach_check_precedes_the_review_of_the_batch(self):
         for relative_path in RENDERED_ASSETS:
             flattened = flat(read(relative_path))
@@ -527,6 +622,50 @@ class RepositoryScopeTests(unittest.TestCase):
                     flattened.index(flat(LISTING_REACH["verified before selecting"])),
                     flattened.index("## Review PRs newest-first"),
                 )
+
+    def test_the_checkout_is_resolved_and_required_to_match_the_repository(self):
+        # Blocker from round 2. `$REPO` scoped the `gh` calls and nothing else,
+        # so a user-named repository left every git read, the cursor and the
+        # report in whatever checkout the session was sitting in.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            flattened = flat(content)
+            with self.subTest(asset=relative_path):
+                self.assertIn(CHECKOUT_RESOLUTION, content)
+                for rule, phrase in sorted(CHECKOUT_TARGET.items()):
+                    with self.subTest(rule=rule):
+                        self.assertIn(flat(phrase), flattened)
+
+    def test_every_repository_read_runs_under_the_resolved_checkout(self):
+        # Non-vacuity for the rule above: requiring the two to agree is worth
+        # nothing if the git steps still run in the working directory. Every
+        # `git` invocation is pinned as `-C "$ROOT"` except the one that
+        # establishes `$ROOT` itself, and the exception is pinned as the only
+        # one rather than left implicit.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            with self.subTest(asset=relative_path):
+                for invocation in CHECKOUT_SCOPED_GIT:
+                    self.assertIn(invocation, content, invocation)
+                unscoped = [
+                    line
+                    for line in content.splitlines()
+                    if re.search(r'(?<![\w-])git (?!-C "\$ROOT")', line)
+                ]
+                self.assertEqual(
+                    unscoped,
+                    [CHECKOUT_RESOLUTION],
+                    f"{relative_path}: a git invocation reads a checkout other "
+                    "than the one $REPO was matched against",
+                )
+
+    def test_the_announcement_names_the_checkout_as_well(self):
+        # The opening report catches a wrong resolution, and after round 2
+        # there are two things to get wrong rather than one.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertIn("`$ROOT` it was matched against", OPENING_REPORT)
+                self.assertIn(flat(OPENING_REPORT), flat(read(relative_path)))
 
     def test_the_linked_issue_has_a_read_of_its_own(self):
         # Blocker from round 1 of this pull request's review. The workflow's

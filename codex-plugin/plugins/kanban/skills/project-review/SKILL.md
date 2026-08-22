@@ -17,26 +17,47 @@ durable handoff to $process-report, which turns one finding at a time
 into an approved tracker artifact — so filing is not lost here, only deferred
 one step, and it passes through the readiness gate on the way.
 
-**Resolve the repository:** Set `REPO` once, before the first GitHub read below,
-and use that one identity for every `gh` call in this workflow. A `gh` call
-without `-R` reads whatever repository the session's working directory happens
-to be in, and a batch scoped against the wrong tracker spends the whole run
-producing a report about code nobody asked you to review.
+**Resolve the target — a repository *and* a checkout of it.** Set both `REPO`
+and `ROOT` once, before the first GitHub read below. `$REPO` is the
+`owner/name` every `gh` call names; `$ROOT` is the local checkout every other
+step runs in, and neither substitutes for the other. A `gh` call without `-R`
+reads whatever repository the session's working directory happens to be in, and
+a batch scoped against the wrong tracker spends the whole run producing a report
+about code nobody asked you to review.
 
-When the user named a repository in their request, that identity is the target.
-Otherwise resolve it from the session's own checkout. Resolution reads the
-remote and needs no GitHub call of its own, so there is no point in this
-workflow at which an unscoped `gh` invocation is correct:
+`$REPO` alone is not the target, because most of this workflow never touches
+GitHub: direct mode walks first-parent history, the surviving-behavior trace
+reads the code at HEAD, and the docs worktree holds both the sweep cursor and
+the finished report. Every one of those reads a checkout. Run them all under
+`$ROOT` with `git -C "$ROOT"`, never in whatever directory the session happens
+to be sitting in.
+
+When the user named a repository, `$ROOT` is a checkout **of that repository**,
+and the session's own is not it unless it proves to be. Otherwise both come from
+the session's checkout. Resolution reads the remote and needs no GitHub call of
+its own, so there is no point in this workflow at which an unscoped `gh`
+invocation is correct:
 
 ```bash
-REPO="$(git remote get-url origin | sed -E 's#\.git$##; s#.*(/|:)([^/:]+/[^/:]+)$#\2#')"
+ROOT="$(git rev-parse --show-toplevel)"
+REPO="$(git -C "$ROOT" remote get-url origin | sed -E 's#\.git$##; s#.*(/|:)([^/:]+/[^/:]+)$#\2#')"
 ```
 
-Either path leaves `$REPO` holding one `owner/name` before the first `gh` call.
-Pass `-R "$REPO"` on every one of them.
+When the user named a repository, set `REPO` to the name they gave and `ROOT`
+to a checkout of it, then run that same `git -C "$ROOT" remote get-url` and
+**require the two to agree**. They must name one `owner/name` between them. A
+mismatch, or no available checkout of `$REPO`, stops the run before the first
+`gh` call: auditing one repository's pull requests against another's code, or
+writing its report and cursor into another's docs worktree, is exactly the
+failure this check exists to prevent, and neither is undone by moving a file
+afterwards. Say which of the two could not be established and ask for a local
+path. Falling back to the working directory is never the repair.
 
-**Announce, then read:** name the resolved `$REPO` and the batch you are about
-to take before the first `gh` call below. Reporting what was resolved is what
+Either path leaves `$REPO` holding one `owner/name` and `$ROOT` a checkout of
+it, before the first `gh` call. Pass `-R "$REPO"` on every one of them.
+
+**Announce, then read:** name the resolved `$REPO`, the `$ROOT` it was matched
+against, and the batch you are about to take before the first `gh` call below. Reporting what was resolved is what
 catches a wrong resolution, and it catches it only if it lands before anything
 has been read from the wrong repository.
 
@@ -50,9 +71,9 @@ hard-coded path. It is both where the sweep cursor is read and where a finished
 report is written:
 
 ```bash
-DOCS_WT="$(git worktree list --porcelain \
+DOCS_WT="$(git -C "$ROOT" worktree list --porcelain \
   | awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/docs-wip$/{print p; exit}')"
-[ -n "$DOCS_WT" ] || DOCS_WT="$(git rev-parse --show-toplevel)"
+[ -n "$DOCS_WT" ] || DOCS_WT="$ROOT"
 ```
 
 **The boundary rule.** Before selecting a range, read
@@ -85,16 +106,30 @@ from it. Three conditions, all of them:
 - a supplied starting PR appears in it;
 - a boundary endpoint from the cursor is at or above its oldest entry.
 
-Raise `$LIMIT` and list again until all three hold; `--limit` paginates for
-you, so a larger number is the whole remedy. A batch selected from a listing
-that stopped short of its own boundary is silently truncated to whatever
-happened to fit, and every later `continue` inherits the gap. If the listing
-cannot reach the request — a starting PR that does not exist, a count larger
-than the repository's merged history — say so and stop rather than reviewing
-the nearest thing that fits.
+Raise `$LIMIT` and list again until each one holds, or until the listing is
+**exhausted** — a listing that came back with fewer rows than `$LIMIT` is the
+whole of the repository's merged history, and raising the limit again changes
+nothing. `--limit` paginates for you, so a larger number is the only remedy a
+short listing needs. A batch selected from a listing that stopped short of its
+own boundary is silently truncated to whatever happened to fit, and every later
+`continue` inherits the gap.
 
-Check `git log --first-parent` for direct-to-default-branch commits inside
-that landing interval and review them as bare commits. Do not mislabel a
+What an exhausted listing that still fails a condition means depends on which
+condition, and the three do not share an answer:
+
+- **A supplied starting PR that is absent** is an invalid request: that PR is
+  not in this repository's merged history at all. Say so and stop; do not
+  review the nearest number that exists.
+- **A boundary endpoint that is absent** is a cursor that does not belong to
+  this repository. Say so and stop rather than sweeping past it.
+- **A count larger than what remains is not an error at all.** It is the tail
+  of the sweep. Review every PR that does remain, say the batch was short and
+  why, and treat PR history as exhausted so the next `continue` enters direct
+  mode. A repository with fewer merged PRs than the batch size meets this on
+  its first batch, and is reviewed the same way.
+
+Check `git -C "$ROOT" log --first-parent` for direct-to-default-branch commits
+inside that landing interval and review them as bare commits. Do not mislabel a
 rebased PR's individual commits as direct when GitHub associates them with the
 PR.
 
@@ -151,8 +186,8 @@ not findings; a finding must require a real correction.
 Read each first-parent patch and metadata:
 
 ```bash
-git show --stat --summary <sha>
-git diff <sha>^1 <sha>
+git -C "$ROOT" show --stat --summary <sha>
+git -C "$ROOT" diff <sha>^1 <sha>
 ```
 
 Use an empty-tree diff for the initial commit, which has no first parent to
