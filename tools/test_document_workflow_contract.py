@@ -162,6 +162,22 @@ CROSS_BRAND_PAIRS = {
 
 PROCESS_REPORT_ASSETS = CROSS_BRAND_PAIRS["process-report"]
 
+# The closing report separates two counts rather than reporting one. Deferred
+# work with an unmet precondition is distinguished from work the next run can
+# select, while a cleared deferral remains actionable even before that next run
+# removes its marker. The multiple-cleared-deferral example pins the
+# one-at-a-time edge: processing the first must not make the second disappear
+# behind a zero-actionable summary. The terminality rule is pinned with them,
+# because changing the report must not loosen what authorizes apparatus removal
+# (§10) or what a tracker transaction resolves against.
+DEFERRED_COUNTING_RULES = (
+    "the findings still actionable, then the findings still deferred",
+    "recheck every remaining [deferred] precondition",
+    "deferred finding whose precondition now holds as actionable",
+    "two deferred findings' preconditions have both cleared",
+    "[deferred] still stays - [ ] and still is not terminal",
+)
+
 # §5's boundaries, asserted against both process-report variants as well as the
 # document. Lowercase: compared against canonical() output, because the same
 # rule legitimately starts a sentence in one variant and appears mid-sentence
@@ -177,6 +193,7 @@ PROCESS_REPORT_SHARED_BOUNDARIES = (
     "only after explicit approval",
     "stop after this one finding",
     "the one-at-a-time rule is what keeps each disposition individually approved",
+    *DEFERRED_COUNTING_RULES,
 )
 
 # Boundaries and asymmetries the document itself must keep stating. Compared
@@ -2501,6 +2518,38 @@ class SharedStatusVocabularyTests(unittest.TestCase):
             "the surface docs/document-workflow-contract.md §4-§5 pins:\n"
             + "\n".join(differences),
         )
+
+    def test_only_the_processing_pair_states_the_deferred_counting_rule(self):
+        # The other half of DEFERRED_COUNTING_RULES, on the pattern the
+        # checked-form control above follows. A capture asset creates or
+        # appends to a document and applies no disposition, so it reports no
+        # dispositions and owes no counts; the rule appearing there would mean
+        # a capture asset had started claiming to process. Without this, a
+        # rule that spread to every asset would still satisfy the assertion
+        # above while asserting nothing about who owes it.
+        for path in CAPTURE_ASSETS:
+            asset = canonical((REPO_ROOT / path).read_text(encoding="utf-8"))
+            for rule in DEFERRED_COUNTING_RULES:
+                self.assertNotIn(
+                    rule,
+                    asset,
+                    f"{path} creates a document rather than processing one; it "
+                    "must not state how a processing run counts its findings",
+                )
+
+    def test_removing_any_single_deferred_counting_rule_is_reported(self):
+        # Each pin is load-bearing on its own: deleting one from a variant
+        # must fail, so a regression names the half that was lost rather than
+        # reporting that the file changed.
+        for path in PROCESS_REPORT_ASSETS:
+            asset = canonical((REPO_ROOT / path).read_text(encoding="utf-8"))
+            for rule in DEFERRED_COUNTING_RULES:
+                with self.subTest(path=path, rule=rule):
+                    without = asset.replace(rule, "")
+                    self.assertEqual(
+                        [r for r in DEFERRED_COUNTING_RULES if r not in without],
+                        [rule],
+                    )
 
     def test_every_cross_brand_pair_states_the_same_marker_vocabulary(self):
         # §4 after issue #241: the portability surface is per pair, not per

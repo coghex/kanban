@@ -742,8 +742,22 @@ published while its mutation is absent from the document.
 Publication ends this finding. Do not select another.
 
 Report, in this order: the disposition and its tracker link if any; the report
-line as it now reads; and the number of findings still unchecked, so the next run
-starts from a known position.
+line as it now reads; and the work the report still owes as two counts — the
+findings still actionable, then the findings still deferred, each named with the
+precondition that would clear it. Before counting, recheck every remaining
+`[deferred]` precondition. Count each unmarked finding and each deferred finding
+whose precondition now holds as actionable; count only deferred findings whose
+preconditions remain unmet as deferred. If two deferred findings' preconditions
+have both cleared and this one-at-a-time run processes the first, the second is
+reported as actionable even though its marker remains until the next run selects
+it. A report whose every remaining finding carries `[deferred]` reports zero
+actionable only when every listed precondition remains unmet.
+
+That is a reporting rule and nothing more. `[deferred]` still stays `- [ ]` and
+still is not terminal until a later run selects it and clears the marker, so the
+count of unchecked boxes is still the count of entries the document owes.
+Counting a cleared deferral as actionable neither checks its box nor satisfies
+anything that requires a terminal entry.
 
 Stop after this one finding. Advance to the next only when the user explicitly
 asks or invokes `process-report` again. Never batch a second finding into the
