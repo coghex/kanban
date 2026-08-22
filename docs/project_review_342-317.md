@@ -24,7 +24,7 @@ concrete precondition
 ## Status
 
 - [x] PRR-1. Concurrent usage refreshes can erase each other's cached provider snapshots — [#477]
-- [ ] PRR-2. The fixed usage sidebar clips 100%-remaining and long-label rows
+- [x] PRR-2. The fixed usage sidebar clips 100%-remaining and long-label rows — [#478]
 
 ## 1. Usage-cache transaction boundary
 
@@ -107,7 +107,7 @@ caller says it merged rather than replaced provider state.
 
 ## 2. Usage-sidebar width budget
 
-### PRR-2. The fixed usage sidebar clips 100%-remaining and long-label rows
+### [#478] PRR-2. The fixed usage sidebar clips 100%-remaining and long-label rows
 
 > **Captured note:** Budget the usage percentage row against the sidebar's
 > actual 24-cell interior for every legal percentage and arbitrary sanitized

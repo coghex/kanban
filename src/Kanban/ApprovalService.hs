@@ -248,6 +248,15 @@ instance FromJSON ApprovalRecordDocument where
 approvalRecordPath :: IO FilePath
 approvalRecordPath = do
   home <- getHomeDirectory
+  -- The composed location is
+  -- ~/Library/Application Support/kanban/issue-approval/config.json.
+  -- Written out because this module is the `files` entry of the
+  -- `issue-approval-discovery-record` row in docs/agent-workflow-contract.md
+  -- §4, and that row is grounded by finding its token verbatim in every file
+  -- it names. The literal below is joined to the home directory and so omits
+  -- the leading separator the row's token carries; this line is where the two
+  -- spellings are reconciled, and deleting it fails the grounding check rather
+  -- than silently unhooking the row from its consumer.
   pure (home </> "Library/Application Support/kanban/issue-approval/config.json")
 
 -- | Selects this repository's entry, rejecting a document that cannot name a

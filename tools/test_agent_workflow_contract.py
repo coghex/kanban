@@ -48,14 +48,43 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 
-# The solve, PR-flow, and canonical issue-review invocation surface, plus
-# the shared provider/process helpers they call into. This list is
-# exhaustive for src/: nothing else under src/ matches
-# findExecutable/proc/readProcessWithExitCode/readCreateProcessWithExitCode/
-# getHomeDirectory. The review surface is spread over three modules since
-# issue #164 split Kanban.Review: the app-server spawn stayed in Review.hs,
-# the gh/claude tool runners moved to Review/Tools.hs, and the canonical
-# backend's python3 invocation moved to Review/Canonical.hs.
+# The solve, PR-flow, and canonical issue-review invocation surface, the
+# shared provider/process helpers they call into, and the issue-approval
+# dashboard of docs/agent-workflow-contract.md §2.8. The review surface is
+# spread over three modules since issue #164 split Kanban.Review: the
+# app-server spawn stayed in Review.hs, the gh/claude tool runners moved to
+# Review/Tools.hs, and the canonical backend's python3 invocation moved to
+# Review/Canonical.hs.
+#
+# This list is exhaustive for src/ over the call shapes the extractors below
+# actually recognise, which is the only claim it can honestly make: a literal
+# name passed to proc/findExecutable/readProcessWithExitCode
+# (EXECUTABLE_CALL_RE), a literal name passed to Kanban.Drainer's timed
+# runProcess helper (TIMED_PROCESS_CALL_RE), a findExecutable argument bound by
+# a `case` or `if` to string literals (indirect_executable_names), and a
+# managed location spelled as one literal hung off a getHomeDirectory result
+# (HOME_PATH_EXPR_RE). Nothing else under src/ writes one of those shapes.
+#
+# Four modules under src/ do call one of those functions and are deliberately
+# out, each for a concrete reason rather than by oversight:
+#
+#   src/Kanban/ServiceProcess.hs, src/Kanban/UsageCommand.hs, and
+#   src/Kanban/Worker.hs are spawn helpers that hand `proc` an executable
+#   *value* their caller computed, so there is no literal for any extractor to
+#   recover; and
+#
+#   src/Kanban/Ping.hs resolves `findExecutable (pingExecutableName brand)`,
+#   whose argument is a two-equation top-level function rather than the
+#   case/if binding indirect_executable_names reads, and builds its scratch
+#   directory with getXdgDirectory rather than getHomeDirectory, so both
+#   extractors recover nothing from it -- which
+#   test_unscanned_src_modules_would_contribute_nothing pins.
+#
+# Listing any of the four would add a member the extractors recover nothing
+# from: a surface entry that scans nothing reads as coverage while asserting
+# less than an empty loop does. The `codex` and `claude` that Ping.hs and
+# Worker.hs ultimately run carry `executable` rows grounded in Codex.hs and
+# Claude.hs, which are scanned.
 #
 # Issue #444 moved both managed discovery records' locations out of
 # Drainer.hs and Review/Canonical.hs into Kanban.ManagedPaths, which is the
@@ -65,6 +94,12 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 # list would leave four `personal-path` tokens scanned in no file at all,
 # which is what test_managed_record_locations_reach_the_home_path_scan
 # refuses.
+#
+# Issue #471 added Kanban.ApprovalService, the in-app consumer §2.8 names. It
+# is here for both reconciliations at once: it spells the issue-approval
+# discovery record's location, and it resolves `launchctl` and `systemctl` for
+# its host-backend detection. What it contributes to each is pinned by
+# test_approval_service_dashboard_reaches_the_haskell_scans.
 SURFACE_FILES = [
     "src/Kanban/Solve.hs",
     "src/Kanban/PullRequestFlow.hs",
@@ -78,8 +113,39 @@ SURFACE_FILES = [
     "src/Kanban/Repository.hs",
     "src/Kanban/Drainer.hs",
     "src/Kanban/ManagedPaths.hs",
+    "src/Kanban/ApprovalService.hs",
     "src/Kanban/Process.hs",
 ]
+
+# The in-app issue-approval dashboard (docs/agent-workflow-contract.md §2.8)
+# and what the two Haskell extractors recover from it. Stated here for the
+# same reason MANAGED_RECORD_TOKENS is: a scan that recovered nothing, or
+# recovered it from some other file, would pass every "each is documented"
+# loop above while reconciling this module against nothing.
+#
+# The discovery record's row token carries a leading separator and the
+# runtime literal does not, because approvalRecordPath joins the tail to the
+# account's home directory. The row is grounded by the comment beside that
+# literal, which writes the row's own spelling out; the segment pinned here is
+# what the extractor recovers from the code.
+APPROVAL_SERVICE_DASHBOARD_FILE = "src/Kanban/ApprovalService.hs"
+APPROVAL_SERVICE_DASHBOARD_SEGMENTS = {
+    "Library/Application Support/kanban/issue-approval/config.json",
+}
+APPROVAL_SERVICE_DASHBOARD_EXECUTABLES = {"launchctl", "systemctl"}
+APPROVAL_SERVICE_DASHBOARD_RECORD_ROW = "issue-approval-discovery-record"
+
+# The modules under src/ that call one of the functions the surface comment
+# above enumerates and are deliberately not scanned. Pinned so the comment's
+# claim is held to the tree: each has to go on recovering nothing, and a
+# refactor that gave one of them a shape an extractor reads has to either join
+# SURFACE_FILES or move off this list with a new reason.
+UNSCANNED_SRC_MODULES = (
+    "src/Kanban/ServiceProcess.hs",
+    "src/Kanban/UsageCommand.hs",
+    "src/Kanban/Worker.hs",
+    "src/Kanban/Ping.hs",
+)
 
 # The four locations Kanban.ManagedPaths spells, and the manifest rows they
 # are the tokens of. Stated here so the control below asserts the exact set
@@ -1665,6 +1731,162 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 "personal-path row in docs/agent-workflow-contract.md",
             )
 
+    def test_approval_service_dashboard_reaches_the_haskell_scans(self):
+        # Requirement 1 of issue #471. The §2.8 dashboard is the in-app
+        # consumer of the issue-approval discovery record, and until now it sat
+        # outside every reconciliation: the completeness loop never opened it,
+        # so it could have been moved to an undeclared record path with both
+        # gates green. Being listed is what puts it in the loop; what it
+        # contributes to each scan is pinned here, because a loop over a module
+        # the extractors recover nothing from reports no undeclared segment and
+        # no undocumented command for the same reason a loop over nothing does.
+        self.assertIn(
+            APPROVAL_SERVICE_DASHBOARD_FILE,
+            SURFACE_FILES,
+            f"{APPROVAL_SERVICE_DASHBOARD_FILE} builds the issue-approval "
+            "discovery record's location and resolves both service managers, "
+            "so it must be scanned",
+        )
+        content = (REPO_ROOT / APPROVAL_SERVICE_DASHBOARD_FILE).read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            home_relative_segments(content),
+            APPROVAL_SERVICE_DASHBOARD_SEGMENTS,
+            "the home-relative extractor no longer recovers exactly the "
+            f"issue-approval record location from {APPROVAL_SERVICE_DASHBOARD_FILE}",
+        )
+        self.assertEqual(
+            discovered_executables(content),
+            APPROVAL_SERVICE_DASHBOARD_EXECUTABLES,
+            "the executable extractor no longer recovers exactly the two "
+            f"service managers from {APPROVAL_SERVICE_DASHBOARD_FILE}",
+        )
+        personal_tokens = [
+            row["token"] for row in self.manifest if row["kind"] == "personal-path"
+        ]
+        self.assertEqual(
+            [],
+            undeclared_home_segments(
+                APPROVAL_SERVICE_DASHBOARD_FILE, content, personal_tokens
+            ),
+        )
+
+    def test_the_dashboard_is_declared_by_every_row_it_grounds(self):
+        # Requirements 3 and 5. Being scanned documents what the module uses;
+        # these rows are the other direction — the manifest naming the module
+        # as a file its token is grounded in, which is what
+        # test_manifest_entries_are_grounded_in_their_declared_files then holds
+        # the module to. Without this pin a later edit could drop the module
+        # from a files column and every other check here would still pass.
+        rows = {row["id"]: row for row in self.manifest}
+        for row_id in (
+            APPROVAL_SERVICE_DASHBOARD_RECORD_ROW,
+            "launchctl-cli",
+            "systemctl-cli",
+        ):
+            with self.subTest(row=row_id):
+                self.assertIn(
+                    APPROVAL_SERVICE_DASHBOARD_FILE,
+                    rows[row_id]["files"],
+                    f"{row_id} is grounded in {APPROVAL_SERVICE_DASHBOARD_FILE} "
+                    "and must declare it",
+                )
+
+    def test_the_dashboard_record_row_is_grounded_by_its_written_spelling(self):
+        # Requirement 3's non-vacuity control. The row's token carries a
+        # leading separator and `approvalRecordPath` joins its tail to the home
+        # directory, so the exact token reaches the file only through the
+        # comment written beside that literal. Prove the declaration is what
+        # grounds the row rather than an accident of the code: strip the
+        # comment lines and the token is gone, which is the grounding check
+        # failing.
+        row = next(
+            row
+            for row in self.manifest
+            if row["id"] == APPROVAL_SERVICE_DASHBOARD_RECORD_ROW
+        )
+        content = (REPO_ROOT / APPROVAL_SERVICE_DASHBOARD_FILE).read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(row["token"], content)
+        without_comments = "\n".join(
+            line for line in content.splitlines() if not line.lstrip().startswith("--")
+        )
+        self.assertNotIn(
+            row["token"],
+            without_comments,
+            "the code now spells the row's token itself; the reconciling "
+            "comment in approvalRecordPath is no longer what grounds the row, "
+            "so update it or this control",
+        )
+        # ...and the code still builds the location the row declares, joined
+        # to the home directory rather than spelled absolute. Requirement 7:
+        # nothing here moves the record.
+        self.assertIn(
+            row["token"].lstrip("/"),
+            without_comments,
+            "approvalRecordPath no longer builds the declared record location",
+        )
+
+    def test_an_undeclared_dashboard_record_path_is_reported(self):
+        # Requirement 2 of issue #471, and the control the pins above cannot
+        # be: that the scan *fails* when this module builds a record path no
+        # row declares. Driven against the tracked content mutated in memory,
+        # so what is proven is that the real module's real shape is reachable
+        # by the gate, not that some fixture is.
+        personal_tokens = [
+            row["token"] for row in self.manifest if row["kind"] == "personal-path"
+        ]
+        content = (REPO_ROOT / APPROVAL_SERVICE_DASHBOARD_FILE).read_text(
+            encoding="utf-8"
+        )
+        declared = "Library/Application Support/kanban/issue-approval/config.json"
+        undeclared = (
+            "Library/Application Support/kanban/unmanifested-approval/config.json"
+        )
+        mutated = content.replace(f'home </> "{declared}"', f'home </> "{undeclared}"')
+        self.assertNotEqual(
+            mutated, content, "the mutation matched nothing, so it proves nothing"
+        )
+        self.assertEqual(
+            undeclared_home_segments(
+                APPROVAL_SERVICE_DASHBOARD_FILE, mutated, personal_tokens
+            ),
+            [undeclared],
+        )
+
+    def test_unscanned_src_modules_would_contribute_nothing(self):
+        # Requirement 6. The surface comment above claims the list is
+        # exhaustive for src/ over the shapes these extractors read, and names
+        # four modules that call one of the enumerated functions and are out
+        # anyway. That claim is only worth making if it is held to the tree:
+        # each of the four has to go on recovering nothing, so a refactor that
+        # gave one of them a literal spawn or a home-relative location fails
+        # here rather than passing unscanned.
+        for relative_path in UNSCANNED_SRC_MODULES:
+            with self.subTest(module=relative_path):
+                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                self.assertEqual(
+                    discovered_executables(content),
+                    set(),
+                    f"{relative_path} now writes an executable name the "
+                    "extractors recover; add it to SURFACE_FILES or give the "
+                    "surface comment a new reason it is out",
+                )
+                self.assertEqual(
+                    home_relative_segments(content),
+                    set(),
+                    f"{relative_path} now builds a home-relative location the "
+                    "extractor recovers; add it to SURFACE_FILES or give the "
+                    "surface comment a new reason it is out",
+                )
+        self.assertEqual(
+            [],
+            [name for name in UNSCANNED_SRC_MODULES if name in SURFACE_FILES],
+            "a module cannot be both scanned and excused from scanning",
+        )
+
     def test_every_drafting_asset_bash_command_is_documented(self):
         # Requirement 8 of issue #118, extended by issue #240: the check must
         # scan all nine vendored drafting, issue-review, and issue-rereview
@@ -2122,13 +2344,26 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 entry = by_id[row_id]
                 self.assertEqual(entry["kind"], "executable")
                 self.assertEqual(entry["token"], token)
-                self.assertEqual(entry["files"], [SERVICE_MANAGER_BACKEND_PATH])
+                # Two files since issue #471, and pinned as the exact list so
+                # a third cannot be added without saying so here: the backend
+                # is the only tracked component that manages a job with either
+                # command, and the §2.8 dashboard resolves both with
+                # `findExecutable` to detect the host's manager (spawning only
+                # `systemctl`, for a version read). Both spellings are
+                # recovered from it by the Haskell extractor, so both rows owe
+                # it a files entry the way `plutil-cli` already does.
+                self.assertEqual(
+                    entry["files"],
+                    [SERVICE_MANAGER_BACKEND_PATH, APPROVAL_SERVICE_DASHBOARD_FILE],
+                )
                 # mandatory: no, matching §2.6 — the drainer is an optional
                 # component, and each manager is needed only on its own host.
                 self.assertEqual(entry["mandatory"], "no")
                 # And each row is load-bearing rather than decorative: drop it
-                # while the invocations remain and the invoking module is
-                # reported.
+                # while the invocations remain and both invoking modules are
+                # reported — the tools/ surface by its own scan, and the
+                # dashboard by the Haskell one, which is the half that would
+                # have found nothing before this module was scanned.
                 without = {
                     row["token"]
                     for row in self.manifest
@@ -2137,6 +2372,13 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 self.assertEqual(
                     tool_surface_findings(without),
                     [(SERVICE_MANAGER_BACKEND_PATH, token)],
+                )
+                dashboard = (
+                    REPO_ROOT / APPROVAL_SERVICE_DASHBOARD_FILE
+                ).read_text(encoding="utf-8")
+                self.assertEqual(
+                    sorted(discovered_executables(dashboard) - without),
+                    [token],
                 )
 
     def test_service_manager_artifacts_are_confined_to_the_backend(self):
