@@ -19,7 +19,7 @@ concrete precondition
 
 - [x] PRR-1. Wrong-removal recovery can silently lose an identical stash entry — [#469]
 - [x] PRR-2. Backlog review routes transient tracker bodies into repository worktrees — [#470]
-- [ ] PRR-3. The issue-approval dashboard path is outside the manifest's Haskell scan
+- [x] PRR-3. The issue-approval dashboard path is outside the manifest's Haskell scan — [#471]
 
 ## 1. Recovery stash retirement
 
@@ -142,7 +142,7 @@ confirms that this is the current shipped behavior.
 
 ## 3. Issue-approval manifest coverage
 
-### PRR-3. The issue-approval dashboard path is outside the manifest's Haskell scan
+### [#471] PRR-3. The issue-approval dashboard path is outside the manifest's Haskell scan
 
 > **Captured note:** Extend PR #443's load-bearing issue-approval discovery-path
 > contract to the Haskell dashboard consumer. `ApprovalService.hs` constructs
