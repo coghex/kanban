@@ -1,5 +1,6 @@
 module Kanban.UI.Solve
-  ( applySolveEvent,
+  ( SolveStartDecision (..),
+    applySolveEvent,
     failSolveLaunch,
     interruptSolveSession,
     issueFromBoard,
@@ -8,6 +9,7 @@ module Kanban.UI.Solve
     openSelectedSolveChooser,
     preflightBlocker,
     pullRequestFromBoard,
+    solveStartDecision,
     startIssueSolve,
     submitSolveInput,
     suppressIfResolvedPullRequest,
@@ -22,6 +24,7 @@ import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (unless, void )
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.CLI (Options (..))
@@ -105,6 +108,34 @@ workflowKey :: SolveWorkflow -> Text
 workflowKey SolveOnly = actionKeyText SolveSelection
 workflowKey AutoSolve = actionKeyText AutoSolveSelection
 
+-- | What pressing a chooser digit does, as one total decision.
+--
+-- The roster is consulted here, before any session exists, as well as at the
+-- launch boundary — the same reason 'readOnlyHistoryRefusal' is asked twice,
+-- and it matters more here. A refusal reached after 'startFreshIssueSolve'
+-- has inserted a session leaves that session in the map, and
+-- 'reusableSolveSession' reopens a session of the same workflow whatever its
+-- phase — so the chooser never comes back and the operator can never pick
+-- the brand the roster actually loads. Refusing before the insert is what
+-- keeps the next press a fresh choice.
+data SolveStartDecision
+  = -- | Show this notice, close the chooser, and create nothing.
+    SolveStartRefused Text
+  | -- | An existing session for this issue owns the work; reopen it.
+    SolveStartReopen
+  | -- | Create the session and launch.
+    SolveStartFresh
+  deriving stock (Eq, Show)
+
+solveStartDecision :: AppState -> Issue -> SolveWorkflow -> SolverBrand -> SolveStartDecision
+solveStartDecision state issue workflow brand = case readOnlyHistoryRefusal state (IssueItem issue) of
+  Just notice -> SolveStartRefused notice
+  Nothing
+    | isJust (reusableSolveSession workflow issue.issueNumber state.appSolveSessions) -> SolveStartReopen
+    | otherwise -> case resolvedRosterFor (`solveAssignment` brand) state.appModelRoster of
+        Left message -> SolveStartRefused ("Solve did not start: " <> message)
+        Right _ -> SolveStartFresh
+
 -- | The launch boundary, reached by picking an agent in the chooser. The
 -- refusal is asked again here rather than trusted from the press that opened
 -- the chooser: the issue the overlay holds was live when it opened, and a
@@ -112,11 +143,10 @@ workflowKey AutoSolve = actionKeyText AutoSolveSelection
 startIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState ()
 startIssueSolve issue workflow brand = do
   state <- get
-  case readOnlyHistoryRefusal state (IssueItem issue) of
-    Just notice -> modify (\current -> current {appOverlay = Nothing, appNotice = Just notice})
-    Nothing -> case reusableSolveSession workflow issue.issueNumber state.appSolveSessions of
-      Just _ -> openExistingSolveOverlay issue.issueNumber
-      Nothing -> startFreshIssueSolve issue workflow brand
+  case solveStartDecision state issue workflow brand of
+    SolveStartRefused notice -> modify (\current -> current {appOverlay = Nothing, appNotice = Just notice})
+    SolveStartReopen -> openExistingSolveOverlay issue.issueNumber
+    SolveStartFresh -> startFreshIssueSolve issue workflow brand
 
 startFreshIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState ()
 startFreshIssueSolve issue workflow brand = do

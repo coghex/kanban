@@ -10,6 +10,7 @@ module Kanban.UI.PullRequest
     mergeItemDoneCard,
     mergeSelectedDoneCard,
     modifyAutoSolveForPullRequest,
+    pullRequestStartRefusal,
     runDrainerToggleHandoff,
     startPullRequestReview,
     startPullRequestReviewWithVisibility,
@@ -99,6 +100,17 @@ startPullRequestReview = startPullRequestReviewWithOptions directPullRequestActi
 startPullRequestReviewWithVisibility :: Bool -> PullRequest -> EventM Name AppState ()
 startPullRequestReviewWithVisibility showOverlay = startPullRequestReviewWithOptions labelPullRequestAction showOverlay False
 
+-- | The roster refusal a press must answer /before/ a session is created, for
+-- the reason 'Kanban.UI.Solve.solveStartDecision' documents: a session left
+-- behind by a refusal is one 'pullRequestSessionReusable' hands back to the
+-- next press instead of retrying. The launch boundary asks again, because
+-- that is the boundary a process actually crosses.
+pullRequestStartRefusal :: AppState -> PullRequestOrigin -> PullRequestAction -> Maybe Text
+pullRequestStartRefusal state origin action =
+  case resolvedRosterFor (\roster -> pullRequestAssignment roster origin action) state.appModelRoster of
+    Left message -> Just (pullRequestActionText action <> " did not start: " <> message)
+    Right _ -> Nothing
+
 startPullRequestReviewWithOptions :: (WorkflowConfig -> PullRequest -> PullRequestAction) -> Bool -> Bool -> PullRequest -> EventM Name AppState ()
 startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullRequest = case originFromBody pullRequest.pullRequestBody of
   Left message -> setNotice message
@@ -111,6 +123,7 @@ startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullReques
             when showOverlay $ do
               modify (\current -> current {appOverlay = Just (PullRequestReviewOverlay pullRequest.pullRequestNumber), appNotice = Nothing})
               presentTranscriptTail
+      _ | Just notice <- pullRequestStartRefusal state origin action -> setNotice notice
       _ -> do
         let brand = agentForAction origin action
             session =

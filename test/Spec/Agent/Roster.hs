@@ -52,10 +52,10 @@ import Kanban.Review
   )
 import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..), providerForBrand, solveAssignment)
 import Kanban.Solve (SolveEvent (..), SolveOutcome (..))
-import Kanban.UI.PullRequest (failPullRequestLaunch)
+import Kanban.UI.PullRequest (failPullRequestLaunch, pullRequestStartRefusal)
 import Kanban.UI.Session (pullRequestSessionReusable, solvePhaseActive)
 import Kanban.UI.Solve (failSolveLaunch)
-import Kanban.UI.Types (AppEvent (..), SolvePhase (..))
+import Kanban.UI.Types (AppEvent (..), AppState (..), SolvePhase (..))
 import Kanban.UI.Util (resolvedRosterFor)
 import Kanban.Worker
   ( WorkerId (..),
@@ -69,8 +69,9 @@ import Kanban.Worker
     workerDirectory,
     writeWorkerRoster,
   )
+import Spec.Support.App (testAppState)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
-import Spec.Support.Fixtures (epoch)
+import Spec.Support.Fixtures (epoch, fixtureBoard)
 import Spec.Support.Process
   ( encodedValue,
     expectNoFurtherClientRequests,
@@ -170,6 +171,17 @@ spec = do
         (PullRequestProtocolEvent (PullRequestFlowDiagnostic diagnosed diagnostic), PullRequestProtocolEvent (PullRequestProcessFinished settled (SolveFailed reason))) ->
           [(diagnosed, diagnostic), (settled, reason)] `shouldBe` [(468, message), (468, message)]
         _ -> expectationFailure "expected a pull-request diagnostic followed by a terminal failure"
+
+    -- The press that has not created a session yet refuses before it does,
+    -- so nothing is left for the reuse predicate to hand back.
+    it "refuses a pull-request press before any session exists" $ do
+      state <- testAppState (fixtureBoard [])
+      let rostered = state {appModelRoster = Right codexOnlyRoster}
+      pullRequestStartRefusal rostered PullRequestCodex PullRequestReview
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf "claude")
+      -- Revision runs on the pull request's own Codex brand, which this
+      -- roster does load, so the same press is allowed through.
+      pullRequestStartRefusal rostered PullRequestCodex PullRequestRevision `shouldBe` Nothing
 
     -- Why that pair is the fix rather than a nicety. A session left at
     -- 'SolveStarting' counts as live, and live is the disjunct that makes the
