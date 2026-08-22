@@ -23,7 +23,7 @@ concrete precondition
 - [x] MODEL-1. Define the model roster schema, loader, writer, and compiled defaults — [#414]
 - [x] MODEL-2. Resolve the Haskell spawn sites from the roster — [#461]
 - [x] MODEL-7. Record spawn-time assignments in worker specs and replay them on resume — [#480]
-- [ ] MODEL-3. Derive display labels and prompt prose from the roster
+- [x] MODEL-3. Derive display labels and prompt prose from the roster — [#482]
 - [ ] MODEL-4. Resolve the Python and plugin spawn sites from the roster
 - [ ] MODEL-5. Extend the settings screen to edit role assignments
 - [ ] MODEL-8. Derive the operating mode from the loaded provider set
