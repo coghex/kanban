@@ -73,15 +73,32 @@ preserve a new endpoint.
 ### PR mode
 
 While an older merged PR remains at the cursor, take the next 12 merged PRs
-newest-first. Over-fetch and sort by `mergedAt` yourself, because `gh`'s own
-ordering is not merge order:
+newest-first — or the requested count, at-and-below a supplied starting PR.
+Over-fetch and sort by `mergedAt` yourself, because `gh`'s own ordering is not
+merge order:
 
 ```bash
-gh pr list -R "$REPO" --state merged --limit 40 --json number,title,mergedAt,body,url
+gh pr list -R "$REPO" --state merged --limit "$LIMIT" --json number,title,mergedAt,body,url
 ```
 
-Take the newest 12, or the requested count at-and-below the supplied starting
-PR. Check `git log --first-parent` for direct-to-default-branch commits inside
+**`$LIMIT` is not a constant.** Start it at the requested count plus a margin
+for the over-fetch — 40 covers the 12-unit default — and then verify the
+listing actually reaches the batch you asked for, before selecting anything
+from it. Three conditions, all of them:
+
+- the requested count fits inside the listing;
+- a supplied starting PR appears in it;
+- a boundary endpoint from the cursor is at or above its oldest entry.
+
+Raise `$LIMIT` and list again until all three hold; `--limit` paginates for
+you, so a larger number is the whole remedy. A batch selected from a listing
+that stopped short of its own boundary is silently truncated to whatever
+happened to fit, and every later `continue` inherits the gap. If the listing
+cannot reach the request — a starting PR that does not exist, a count larger
+than the repository's merged history — say so and stop rather than reviewing
+the nearest thing that fits.
+
+Check `git log --first-parent` for direct-to-default-branch commits inside
 that landing interval and review them as bare commits. Do not mislabel a
 rebased PR's individual commits as direct when GitHub associates them with the
 PR.
@@ -112,8 +129,11 @@ reviewing the initial commit.
 For each PR:
 
 1. Read its description with `gh pr view -R "$REPO" <n>`.
-2. Find and read its linked issue. Treat the issue as a proposed specification,
-   not unquestioned authority.
+2. Find its linked issue in that description's closing reference and read it
+   with `gh issue view -R "$REPO" <m>`. Step 1's call returns the pull
+   request's own description, never the specification it claims to satisfy, so
+   this is a read of its own rather than a second look at the same text. Treat
+   the issue as a proposed specification, not unquestioned authority.
 3. Read the merged diff with `gh pr diff -R "$REPO" <n>` and judge it against
    what the issue should have required, not merely what the PR claims.
 4. Read the touched code at HEAD plus enough callers and consumers to verify

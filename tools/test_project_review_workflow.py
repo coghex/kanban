@@ -16,13 +16,13 @@ left to review.
   rendered body that said "never create an issue" while still carrying a
   tracker-creating call would read, to the agent executing it top to bottom, as
   permission. So the prohibition is checked as an absence — no `gh` call outside
-  the five declared ones, no issue creation, no origin-routing marker — and the
+  the six declared ones, no issue creation, no origin-routing marker — and the
   terminal act is pinned as the one report write.
 * **Every `gh` call names the repository.** Design D-5 requires it of all eight
   vendored commands. This one never mutates a tracker, so a wrong repository
   costs no data — it costs the whole run, which is spent reviewing code the user
   did not ask about and reported as if it were theirs. The calls are pinned
-  exactly: five of them, five spellings, `-R "$REPO"` on each. The resolution
+  exactly: six of them, six spellings, `-R "$REPO"` on each. The resolution
   that fills `$REPO` reads the remote with `git` and `sed`, so an initial
   `gh repo view` — a GitHub call made before the identity every other call
   depends on exists — is refused by name.
@@ -69,19 +69,68 @@ BUNDLE_ROOTS = ("claude-plugin", "codex-plugin")
 # what is left is only text an agent would run.
 GH_INVOCATION_RE = re.compile(r"(?<![\w-])gh (?P<tail>[a-z][^\n`]*)")
 
-# The five GitHub reads the workflow makes, by the leading words that identify
+# The six GitHub reads the workflow makes, by the leading words that identify
 # each, in the order the document introduces them. Every one is a read: this
 # workflow performs no tracker mutation at all, which is the whole of D-9.
-# `gh issue list` appears twice because deduplication lists the open backlog
-# once up front and then searches all states per finding.
+# `gh issue view` is the linked-issue read, and it is load-bearing rather than
+# decorative: the workflow's central judgement is the merged diff against what
+# the issue should have required, and `gh pr view` returns the pull request's
+# own description, never that specification. `gh issue list` appears twice
+# because deduplication lists the open backlog once up front and then searches
+# all states per finding.
 GITHUB_READS = (
     'pr list -R "$REPO" --state merged',
     'pr view -R "$REPO"',
+    'issue view -R "$REPO"',
     'pr diff -R "$REPO"',
     'issue list -R "$REPO" --state open',
     'issue list -R "$REPO" --search',
 )
 DECLARED_GITHUB_CALL_COUNT = len(GITHUB_READS)
+
+# The listing that opens PR mode has to reach the batch it was asked for. A
+# fixed `--limit` silently truncates any request that reaches past it -- a
+# count above the constant, or a starting PR older than the newest N merged --
+# and the truncation is invisible, because a shorter listing looks exactly like
+# a shorter history. So the limit is pinned as a variable, the constant is
+# refused by name, and the three conditions that have to hold before selection
+# are pinned individually.
+LISTING_LIMIT = '--limit "$LIMIT"'
+REFUSED_FIXED_LIMIT = "--limit 40 "
+LISTING_REACH = {
+    "the limit is not a constant": "**`$LIMIT` is not a constant.**",
+    "verified before selecting": (
+        "verify the listing actually reaches the batch you asked for, before "
+        "selecting anything from it"
+    ),
+    "the count fits": "- the requested count fits inside the listing;",
+    "the starting PR appears": "- a supplied starting PR appears in it;",
+    "the boundary is covered": (
+        "- a boundary endpoint from the cursor is at or above its oldest entry."
+    ),
+    "raise and re-list": (
+        "Raise `$LIMIT` and list again until all three hold; `--limit` "
+        "paginates for you, so a larger number is the whole remedy."
+    ),
+    "truncation is inherited": (
+        "A batch selected from a listing that stopped short of its own boundary "
+        "is silently truncated to whatever happened to fit, and every later "
+        "`continue` inherits the gap."
+    ),
+    "an unreachable request stops": (
+        "If the listing cannot reach the request — a starting PR that does not "
+        "exist, a count larger than the repository's merged history — say so "
+        "and stop rather than reviewing the nearest thing that fits."
+    ),
+}
+
+# Why the linked-issue read cannot be folded into `gh pr view`.
+LINKED_ISSUE_READ = (
+    "Find its linked issue in that description's closing reference and read it "
+    'with `gh issue view -R "$REPO" <m>`. Step 1\'s call returns the pull '
+    "request's own description, never the specification it claims to satisfy, "
+    "so this is a read of its own rather than a second look at the same text."
+)
 
 REPOSITORY_SCOPE = '-R "$REPO"'
 
@@ -414,7 +463,7 @@ class RenderedAssetTests(unittest.TestCase):
 class RepositoryScopeTests(unittest.TestCase):
     """Requirement 7: no `gh` call in either rendered file omits `-R "$REPO"`."""
 
-    def test_the_github_calls_are_exactly_the_five_declared_ones(self):
+    def test_the_github_calls_are_exactly_the_six_declared_ones(self):
         # Non-vacuity for the scoping assertion below: a regex that stopped
         # matching would report no unscoped call for the same reason a file
         # with no calls does.
@@ -445,6 +494,53 @@ class RepositoryScopeTests(unittest.TestCase):
             for leading in GITHUB_READS:
                 with self.subTest(asset=relative_path, call=leading):
                     self.assertIn(f"gh {leading}", content)
+
+    def test_the_listing_limit_is_not_a_fixed_constant(self):
+        # Blocker from round 1 of this pull request's review. The retired copies
+        # both listed `--limit 40`, which cannot honor a requested count above
+        # 40 or a starting PR older than the 40 newest merged pull requests --
+        # in either case the PR the workflow promises to select is absent from
+        # the only listing it takes.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            with self.subTest(asset=relative_path):
+                self.assertIn(LISTING_LIMIT, content)
+                self.assertNotIn(REFUSED_FIXED_LIMIT, content)
+
+    def test_the_listing_is_verified_to_reach_the_requested_batch(self):
+        # The other half: a variable limit fixes nothing unless the workflow
+        # checks that the value it used was large enough. All three conditions
+        # are pinned individually, because covering only the count would leave
+        # a supplied starting PR and a recorded boundary endpoint unreachable
+        # for exactly the same reason.
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            for rule, phrase in sorted(LISTING_REACH.items()):
+                with self.subTest(asset=relative_path, rule=rule):
+                    self.assertIn(flat(phrase), flattened)
+
+    def test_the_reach_check_precedes_the_review_of_the_batch(self):
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            with self.subTest(asset=relative_path):
+                self.assertLess(
+                    flattened.index(flat(LISTING_REACH["verified before selecting"])),
+                    flattened.index("## Review PRs newest-first"),
+                )
+
+    def test_the_linked_issue_has_a_read_of_its_own(self):
+        # Blocker from round 1 of this pull request's review. The workflow's
+        # central judgement is the merged diff against what the issue should
+        # have required, so "read its linked issue" needs a call that returns
+        # one -- and `gh pr view` is not it.
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            with self.subTest(asset=relative_path):
+                self.assertIn(flat(LINKED_ISSUE_READ), flattened)
+                self.assertLess(
+                    flattened.index('gh issue view -R "$REPO"'),
+                    flattened.index(f"gh {GITHUB_READS[3]}"),
+                )
 
     def test_the_repository_is_resolved_without_a_github_call_of_its_own(self):
         # Requirement 7 is absolute, so the resolution itself may not be a `gh`
@@ -543,8 +639,16 @@ class ReportOnlyTests(unittest.TestCase):
                 tail = match.group("tail")
                 with self.subTest(asset=relative_path, call=match.group(0)):
                     self.assertTrue(
-                        tail.startswith(("pr list", "pr view", "pr diff", "issue list")),
-                        f"{relative_path}: gh {tail!r} is not one of the five "
+                        tail.startswith(
+                            (
+                                "pr list",
+                                "pr view",
+                                "pr diff",
+                                "issue view",
+                                "issue list",
+                            )
+                        ),
+                        f"{relative_path}: gh {tail!r} is not one of the six "
                         "declared reads, so this workflow's GitHub surface is "
                         "no longer read-only",
                     )
