@@ -60,7 +60,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-9. Section 20 still defers the merged-work history view that shipped — [#424]
 - [x] PROD-10. Section 3 forbids the multi-repository board epic #354 plans — [no-issue]
 - [x] PROD-11. Section 20 still defers multi-repository aggregation — [no-issue]
-- [ ] PROD-12. Nothing holds sections 3 and 20 against the rest of the document — [deferred]: #423 and #424 must land first
+- [x] PROD-12. Nothing holds sections 3 and 20 against the rest of the document — [#457]
 - [x] PROD-13. The contract opens with a finished epic's processing ledger — [#428]
 - [x] PROD-14. The contract closes with that epic's decisions and delivery plan — [#429]
 - [ ] PROD-15. Nothing states when an arc's scaffolding leaves the document it was added to — [deferred]: #428 and #429 must land first
@@ -559,21 +559,7 @@ correcting section 3 alone leaves the contradiction half-fixed.
   If PROD-10's disposition is to keep the non-goal, this finding closes as
   `[no-issue]` rather than becoming its own change. Documentation only.
 
-### [deferred] PROD-12. Nothing holds sections 3 and 20 against the rest of the document
-
-> **Deferred:** A check written today goes red on master — §3's completed-work-archive
-> entry and §20's merged-work-history entry are exactly what #423 and #424 remove — so a
-> solver would meet a failing gate two other open issues own. This is the finding's own
-> "land after PROD-8 through PROD-11" constraint. **Precondition:** #423 and #424 merge,
-> leaving §3 and §20 with no entry the body of `docs/design.md` contradicts. Two
-> corrections for whoever writes the issue then. The split is two contradictions behind
-> shipped features (PROD-8, PROD-9) and two ahead of planned work (PROD-10, PROD-11), not
-> three and one. And the two framings above are not equivalent: `docs/design.md`'s body
-> mentions multi-repository boards nowhere outside those two entries, so a
-> *within-document* check stays clean on them, while "holding the lists against the arc
-> documents in `docs/`" fails on exactly the two entries
-> `docs/multi_repo_boards_design.md` D-4 deliberately leaves standing until MRB-3 — the
-> false blocker this finding warns against.
+### [#457] PROD-12. Nothing holds sections 3 and 20 against the rest of the document
 
 **Verification:** Verified — the repository already demonstrates the mechanism
 that would have caught PROD-8 through PROD-11, applied to one section only.
@@ -588,7 +574,8 @@ that would have caught PROD-8 through PROD-11, applied to one section only.
   is "the one declaration site for a board key binding, held against
   `docs/design.md` §7 by a test."
 - No equivalent exists for sections 3 or 20. Four contradictions accumulated
-  across roughly five weeks, three of them behind features that shipped.
+  across roughly five weeks, two of them behind features that shipped and two
+  ahead of planned work.
 - The contradictions are not subtle — each is a single line naming a capability
   the document specifies elsewhere — which is what makes a mechanical check
   plausible here.
