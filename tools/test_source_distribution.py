@@ -37,7 +37,10 @@ tracked file has none:
   reconciled against.
 * In, individually: `README.md`, `CLAUDE.md` and its `AGENTS.md` alias --
   the one session contract under the two names Claude and Codex each read
-  it by -- `LICENSE`, `kanban.cabal`, the `config.toml.example` and
+  it by -- `CONTRIBUTING.md`, the guide GitHub presents beside its issue
+  and pull-request interfaces, which states how outside work is proposed,
+  reviewed, and landed and links the two contracts the archive already
+  carries -- `LICENSE`, `kanban.cabal`, the `config.toml.example` and
   `models.toml.example` configuration templates, the eleven user
   and workflow-contract documents under `docs/`, `cabal.project` -- that
   one because the packaged `CLAUDE.md` describes it as what applies the
@@ -102,6 +105,7 @@ RELEASE_ROOT_FILES = (
     "AGENTS.md",
     "CHANGELOG.md",
     "CLAUDE.md",
+    "CONTRIBUTING.md",
     "LICENSE",
     "README.md",
     "cabal.project",
