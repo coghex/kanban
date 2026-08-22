@@ -204,7 +204,16 @@ the corresponding approved external action succeeds.
    blocker; silently skipping it would change the designed work order.
 7. If no entry is selectable, report either completion or the concrete blockers
    on remaining deferred/dependency-blocked entries. Do not call a blocked arc
-   complete.
+   complete. When you report completion, name the disposition the host document
+   then owes under `docs/document-workflow-contract.md` §10: once the arc's
+   umbrella epic is also closed, a specification document that merely hosted
+   this arc's processing apparatus owes that apparatus's removal, while an arc
+   document keeps its apparatus as the record. State it conditionally — a
+   ledger with no outstanding entry may precede the epic's closure, so do not
+   assert the removal is already owed unless that closure is verified. Removal
+   is separate follow-up work authorized by an ordinary issue and delivered
+   through the host document's own publication lane; this run does not perform,
+   file, or publish it.
 
 Before drafting a new item, reconcile the ledger's linked children with the
 epic checklist. If an earlier approved update partially failed, report the
