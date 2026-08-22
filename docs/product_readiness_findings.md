@@ -69,7 +69,7 @@ issue · `[deferred]` blocked on a concrete precondition
 - [x] PROD-18. The contribution protocol is recorded only in agent-facing instructions — [#432]
 - [x] PROD-19. No issue template encodes the tracker's required body shape — [#434]
 - [x] PROD-20. No pull-request template encodes the origin marker the router parses — [#435]
-- [ ] PROD-21. No security policy, though the project installs services and runs agents
+- [x] PROD-21. No security policy, though the project installs services and runs agents — [#459]
 - [ ] PROD-22. No code of conduct
 
 ---
@@ -956,7 +956,7 @@ time helps anyone get it right.
   brand answer, in which case the template should say what to do instead of
   offering a wrong default.
 
-### PROD-21. No security policy, though the project installs services and runs agents
+### [#459] PROD-21. No security policy, though the project installs services and runs agents
 
 **Verification:** Verified — no `SECURITY.md` exists, and the project's optional
 components do things that make a disclosure path meaningful rather than
