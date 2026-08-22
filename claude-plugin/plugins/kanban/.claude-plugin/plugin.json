@@ -1,6 +1,6 @@
 {
   "name": "kanban",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "description": "Kanban's Claude-side workflow bundle: the Kanban-invoked /solve, /pr-review, /pr-rereview, /pr-revise, /repair, plus the user-invoked drafting, canonical issue-review, design/report document, roadmap, and documentation-landing workflows /issue, /draft-issues, /autoissue, /issue-review, /issue-rereview, /design-epic, /process-design-doc, /draft-report, /note-problem, /process-report, /triage, /retriage, /push-docs, /backlog-review, /project-review.",
   "author": {
     "name": "Kanban"
