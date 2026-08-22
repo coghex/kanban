@@ -8,11 +8,11 @@ canonical issue-review workflows a user or the review daemon invokes directly:
 `/issue-rereview`. Since issue #229
 it also packages the design and report document workflows a user invokes
 directly — `/design-epic`, `/process-design-doc`, `/draft-report`,
-`/note-problem`, and `/process-report` — and since issues #393, #410, #427, and
-#430 the `/triage` roadmap workflow, its `/retriage` refresh, the `/push-docs`
-documentation-landing workflow, and the `/backlog-review` backlog audit, each
-rendered into both bundles from one authored source by
-`tools/render_command_sources.py`. It exists so a
+`/note-problem`, and `/process-report` — and since issues #393, #410, #427,
+#430, and #462 the `/triage` roadmap workflow, its `/retriage` refresh, the
+`/push-docs` documentation-landing workflow, the `/backlog-review` backlog
+audit, and the `/project-review` history audit, each rendered into both bundles
+from one authored source by `tools/render_command_sources.py`. It exists so a
 clean Claude Code installation can perform these actions without depending on
 any developer's personal command collection. See
 [docs/agent-workflow-contract.md](../docs/agent-workflow-contract.md) for the
@@ -94,12 +94,12 @@ Verify discovery:
 claude plugin list
 ```
 
-`kanban@kanban` should be listed, and all nineteen workflow names should be
+`kanban@kanban` should be listed, and all twenty workflow names should be
 available as `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/issue`,
 `/draft-issues`, `/autoissue`, `/issue-review`, `/issue-rereview`, `/repair`,
 `/design-epic`, `/process-design-doc`, `/draft-report`, `/note-problem`,
-`/process-report`, `/triage`, `/retriage`, `/push-docs`, and
-`/backlog-review`.
+`/process-report`, `/triage`, `/retriage`, `/push-docs`, `/backlog-review`, and
+`/project-review`.
 
 Verified against Claude Code `2.1.216` (`claude --version`), the version
 that provides the `claude plugin` / `claude plugin marketplace` subcommand
@@ -110,13 +110,13 @@ those subcommands cannot install this plugin.
 
 Kanban's own CLI spawns five of these by name: the first four, plus `/repair`,
 which `r` selects for a Done pull request whose status is a problem (issue
-#127). The other fourteen are drafting, readiness-gate, document, roadmap,
-documentation-landing, and backlog-audit workflows a user or the review daemon
-invokes directly;
+#127). The other fifteen are drafting, readiness-gate, document, roadmap,
+documentation-landing, backlog-audit, and history-audit workflows a user or the
+review daemon invokes directly;
 see
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md) and
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md).
-`/repair` is not part of either declared surface. Only those fourteen are
+`/repair` is not part of either declared surface. Only those fifteen are
 excluded from the Haskell invocation-parity pinning in
 `tools/test_claude_plugin.py`, which covers exactly the names Kanban's own
 code spawns.
@@ -142,6 +142,7 @@ code spawns.
 | `commands/push-docs.md` | `/push-docs` | Lands user-approved documentation from the docs-wip worktree straight onto master through the tracked `tools/docs_land.sh`, which gates every path against the §7 publication classification. Named paths land exactly; with no arguments it presents the helper's inventory and lands only the approved selection. Never lands unprompted, never bypasses a refusal. Paired with the Codex `$push-docs` skill. |
 | `commands/retriage.md` | `/retriage` | Refreshes a roadmap `/triage` already produced — minimal stable edits that keep its three sections, dependency-barrier blank lines, and marker vocabulary, with every approval marker recomputed through the canonical backend rather than carried forward. Renders no format of its own; reads `/triage`'s **Output Format** and **Approval Readiness** instead. Never claims, edits, or creates an issue itself. Paired with the Codex `$retriage` skill. |
 | `commands/backlog-review.md` | `/backlog-review` | Audits the open issue backlog oldest-first — re-verifies each issue's premise against the current code and proposes exactly one disposition per issue (Valid / Update / Obsolete / Duplicate / Needs decision) with `file:line`, repro, or resolving-PR evidence. Skips in-flight issues, resolves the repository once and passes `-R "$REPO"` on every `gh` call, and **stops** before editing, closing, labelling, or commenting on anything until the user says which to apply. Paired with the Codex `$backlog-review` skill. |
+| `commands/project-review.md` | `/project-review` | Audits merged pull requests newest-first — and, once PR history is exhausted, the older direct first-parent commits — judging each against the issue it claimed to satisfy, its commits, and the code at HEAD. **Report-only**: it never creates or edits a tracker issue, and a batch carrying at least one confirmed current finding ends in exactly one canonical findings report written to the branch-resolved `docs-wip` worktree for later `/process-report` disposition. Resolves the repository once and passes `-R "$REPO"` on every `gh` call. Paired with the Codex `$project-review` skill. |
 
 The five document commands are user-invoked only. Kanban's CLI never spawns
 one, because each has a mandatory human approval stop in the middle; see
@@ -291,11 +292,11 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the commands directory contains exactly the nineteen packaged workflows,
+- the commands directory contains exactly the twenty packaged workflows,
   and the five Kanban spawns exactly match the `/`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  fourteen user-invoked commands;
+  fifteen user-invoked commands;
 - the Codex-only document-workflow set is empty, so no counterpart is withheld
   from this bundle;
 - no packaged manifest sets model/effort/permission-mode/working-directory
@@ -321,7 +322,7 @@ difference permitted. Nothing is excluded — not a function, not a comment bloc
 issue-vs-pull-request number guard went eight days Codex-side only.
 
 `tools/test_agent_workflow_contract.py` reconciles this plugin's own bash
-surface (all nineteen commands under `claude-plugin/plugins/kanban/commands/`) and
+surface (all twenty commands under `claude-plugin/plugins/kanban/commands/`) and
 all five bundled Python assets — the review coordinator, `/solve`'s
 trusted-comment helper, and the three document-workflow modules — against the
 same manifest in

@@ -40,7 +40,12 @@ tracked file has none:
   it by -- `CONTRIBUTING.md`, the guide GitHub presents beside its issue
   and pull-request interfaces, which states how outside work is proposed,
   reviewed, and landed and links the two contracts the archive already
-  carries -- `LICENSE`, `kanban.cabal`, the `config.toml.example` and
+  carries -- `SECURITY.md`, that guide's disclosure-side companion: a
+  recipient holding only the unpacked tree holds the very code the policy
+  scopes -- the caches, the optional persistent jobs, the managed reviewer
+  link -- so the private reporting route and that scope have to travel with
+  it rather than being reachable only from the upstream repository page --
+  `LICENSE`, `kanban.cabal`, the `config.toml.example` and
   `models.toml.example` configuration templates, the eleven user
   and workflow-contract documents under `docs/`,
   `.github/pull_request_template.md` -- the body GitHub pre-fills for a new
@@ -116,6 +121,7 @@ RELEASE_ROOT_FILES = (
     "CONTRIBUTING.md",
     "LICENSE",
     "README.md",
+    "SECURITY.md",
     "cabal.project",
     "config.toml.example",
     "kanban.cabal",
@@ -179,10 +185,19 @@ EXCLUDED_TRACKED_PATHS = (
     "docs/managed_paths_design.md",
     "docs/model_settings_design.md",
     "docs/multi_repo_boards_design.md",
+    "docs/overlay_focus_fullscreen_design.md",
     "docs/pipeline-hardening.md",
     "docs/product_readiness_findings.md",
+    "docs/project_review_271-251.md",
+    "docs/project_review_297-272.md",
+    "docs/project_review_314-299.md",
+    "docs/project_review_342-317.md",
     "docs/project_review_386-361.md",
+    "docs/project_review_442-411.md",
+    "docs/project_review_456-446.md",
+    "docs/project_review_463-455.md",
     "docs/public_release_design.md",
+    "docs/superagent_design.md",
     "docs/ui-bugs.md",
     "docs/usage_awareness_design.md",
     "docs/workflow_audit_findings.md",
