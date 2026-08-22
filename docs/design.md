@@ -587,10 +587,31 @@ pull request through the same session machinery internally, and keeps its
 label-derived review/revise progression so a problem status cannot divert a
 running loop into a repair.
 
-Codex-origin PRs use Opus 5 xhigh for review and GPT-5.4 high for revision and
-repair; Claude-origin PRs use GPT-5.6-Terra xhigh for review and Sonnet 5 xhigh
-for revision and repair. A missing or contradictory `pr-origin` marker fails
-visibly rather than guessing.
+Every model and effort the Haskell layer spawns an agent on is a cell of the
+model roster (`src/Kanban/Models.hs`), loaded once at startup from
+`~/.config/kanban/models.toml` and otherwise the compiled defaults the tracked
+`models.toml.example` mirrors. Review and rereview read `pr_review`, revision
+and repair read `pr_revise`, solve reads `solve`, the embedded issue-review
+thread reads `issue_review.codex`, and `kanban_run_claude` reads
+`issue_revise.claude`; which brand's column applies is the routing described
+here and is unchanged by the roster. The defaults reproduce today's
+assignments exactly: Codex-origin PRs on Opus 5 xhigh for review and GPT-5.4
+high for revision and repair, Claude-origin PRs on GPT-5.6-Terra xhigh for
+review and Sonnet 5 xhigh for revision and repair, and both solvers on GPT-5.4
+high and Sonnet 5 high.
+
+A roster that cannot supply the cell a launch needs starts no process and
+reports why. That covers a present `models.toml` that is unreadable,
+unparseable, foreign-versioned, or invalid — the refusal names the file and
+the defect — and equally a valid roster that simply does not load the brand
+this run's routing selected. Neither case falls back to the compiled
+defaults. An absent file is not one of these: it silently *is* the defaults.
+The roster a launch was checked against is the one its detached supervisor
+constructs argv from, carried to it as a snapshot written beside the worker
+specification rather than reread there.
+
+A missing or contradictory `pr-origin` marker fails visibly rather than
+guessing.
 
 The review is a direct, explicit workflow and never starts an approval daemon.
 Initial review and rereview synchronously invoke the vendored
@@ -653,10 +674,12 @@ Command and file-change approval requests use the same waiting-state UI.
 Kanban also registers `kanban_run_claude`. Sonnet-authored revision stages use
 this tool instead of launching `claude` through a Codex command: the latter runs
 inside Codex's sandbox and cannot reliably reach the macOS keychain-backed
-Claude login. The client tool starts the official CLI directly from Kanban with
-`--model claude-sonnet-5 --effort high --permission-mode plan --safe-mode`,
-streams a standalone prompt over stdin, and returns its output to the coordinator. It has
-a ten-minute deadline, terminates its process group on timeout, and cannot edit
+Claude login. The client tool starts the official CLI directly from Kanban on
+the roster's `issue_revise.claude` cell — `claude-sonnet-5` at `high` by
+compiled default — under `--permission-mode plan --safe-mode`, refusing to
+spawn at all when the roster loads no Claude provider. It streams a standalone
+prompt over stdin, and returns its output to the coordinator. It has a
+ten-minute deadline, terminates its process group on timeout, and cannot edit
 the checkout or mutate GitHub directly.
 
 The third client tool, `kanban_github_issue`, owns authenticated issue I/O.
@@ -3247,6 +3270,11 @@ The first solve/autosolve-compatible slice is implemented.
 - Canonical solvers are GPT-5.4 high and Sonnet 5 high.
 - Canonical opposite-brand PR reviewers are Opus 5 xhigh for Codex-origin
   work and GPT-5.6-Terra xhigh for Claude-origin work.
+- Those pairings, the embedded issue-review thread's own model and effort, and
+  `kanban_run_claude`'s are roster cells rather than literals: the values above
+  are the compiled defaults, and a roster that cannot supply a cell refuses the
+  spawn instead of substituting one. The Python and plugin spawn sites still
+  carry their own literals.
 - Solver processes stream structured CLI output into a bounded, hideable
   overlay, retain their resumable session identifiers, and run as owned process
   groups. Solve and PR providers are owned by detached, repository-scoped

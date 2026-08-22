@@ -24,6 +24,7 @@ module Kanban.UI.Util
     pullRequestActionText,
     pullRequestAgentLabel,
     relativeAge,
+    resolvedRosterFor,
     rightOrNothing,
     safeIndex,
     safeLast,
@@ -45,6 +46,14 @@ import qualified Data.Text as Text
 import Data.Time (TimeZone, UTCTime, defaultTimeLocale, diffUTCTime, formatTime, utcToZonedTime)
 import Kanban.Config (cacheEnabled)
 import Kanban.Domain
+import Kanban.Models
+  ( Assignment,
+    AssignmentUnavailable,
+    ModelRoster,
+    RosterLoadError,
+    assignmentUnavailableMessage,
+    rosterErrorMessage,
+  )
 import Kanban.Preflight
   ( preflightDiagnosticDetail
     )
@@ -291,6 +300,26 @@ agentFailureNotice :: Text -> Text -> Text
 agentFailureNotice subject message = case preflightDiagnosticDetail message of
   Just remediation -> subject <> " cannot start — " <> sanitizeText remediation
   Nothing -> subject <> " failed: " <> sanitizeText message
+
+-- | The roster an agent-starting path may launch against, or the refusal it
+-- must show instead.
+--
+-- The one place the startup 'Either' is unwrapped, and the one place the
+-- selected cell is checked, so every spawn boundary refuses on the same two
+-- terms: a present-but-unusable @models.toml@ (D-3 — the message names the
+-- file and the defect), and a valid roster that does not cover the cell this
+-- run's routing selected. Neither falls back to the compiled defaults; an
+-- absent file already yielded them inside 'Kanban.Models.loadModelRoster'.
+--
+-- The roster, not the assignment, is what comes back: a detached supervisor
+-- resolves its own cell from the snapshot of this same value, so handing the
+-- launch the roster is what keeps the two ends resolving from one thing.
+resolvedRosterFor :: (ModelRoster -> Either AssignmentUnavailable Assignment) -> Either RosterLoadError ModelRoster -> Either Text ModelRoster
+resolvedRosterFor cell rosterResult = case rosterResult of
+  Left loadError -> Left (rosterErrorMessage loadError)
+  Right roster -> case cell roster of
+    Left unavailable -> Left (assignmentUnavailableMessage unavailable)
+    Right _ -> Right roster
 
 isDeadlineOutcome :: SolveOutcome -> Bool
 isDeadlineOutcome (SolveFailed message) = message == workerDeadlineReason

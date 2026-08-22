@@ -15,6 +15,8 @@ module Kanban.Review.Tools
     githubIssueEditArguments,
     githubIssueViewArguments,
     githubLabelCreateArguments,
+    authenticatedClaudeArguments,
+    issueReviseAssignment,
     runAuthenticatedClaude,
     runGitHubIssueTool,
   )
@@ -37,6 +39,15 @@ import Kanban.CommandCapture
     releaseCapture,
     renderWindow,
     startCapture,
+  )
+import Kanban.Models
+  ( Assignment (..),
+    AssignmentUnavailable,
+    ModelRoster,
+    ProviderName (..),
+    RoleName (..),
+    assignmentFor,
+    assignmentUnavailableMessage,
   )
 import Kanban.Process (killManagedProcess, managedProcess)
 import Kanban.Review.Client (ReviewClient (..), attachToolProcess)
@@ -303,8 +314,38 @@ renderGitHubCommandResult bounds outcome = case outcome of
 -- every exit path -- natural completion, a broken input pipe, or a timeout
 -- -- is swept with 'killManagedProcess' before returning, so a leader that
 -- already exited on its own can't leave a same-group child unsignalled.
+--
+-- The cell is resolved before the CLI is even looked for: a roster that
+-- loads no Claude provider must spawn nothing here rather than fall back to
+-- the compiled default. The refusal is this tool's, not the whole review's —
+-- a Codex-only install still reviews, it just cannot reach this tool.
 runAuthenticatedClaude :: ReviewClient -> Int -> Text -> IO (Either Text Text)
-runAuthenticatedClaude client key prompt = do
+runAuthenticatedClaude client key prompt = case issueReviseAssignment client.reviewModelRoster of
+  Left unavailable -> pure (Left (assignmentUnavailableMessage unavailable))
+  Right assignment -> runResolvedAuthenticatedClaude client key prompt assignment
+
+-- | The cell @kanban_run_claude@ runs on: the revision role's Claude
+-- provider, which 'Kanban.Models.roleApplicability' already makes the only
+-- one it can run on.
+issueReviseAssignment :: ModelRoster -> Either AssignmentUnavailable Assignment
+issueReviseAssignment roster = assignmentFor roster IssueReviseRole ClaudeProvider
+
+-- | The argv @kanban_run_claude@ spawns, from a resolved assignment.
+authenticatedClaudeArguments :: Assignment -> [String]
+authenticatedClaudeArguments assignment =
+  [ "--print",
+    "--model",
+    Text.unpack assignment.assignmentModel,
+    "--effort",
+    Text.unpack assignment.assignmentEffort,
+    "--permission-mode",
+    "plan",
+    "--safe-mode",
+    "--no-session-persistence"
+  ]
+
+runResolvedAuthenticatedClaude :: ReviewClient -> Int -> Text -> Assignment -> IO (Either Text Text)
+runResolvedAuthenticatedClaude client key prompt assignment = do
   executable <- findExecutable "claude"
   case executable of
     Nothing -> pure (Left "Claude CLI was not found on PATH")
@@ -332,20 +373,7 @@ runAuthenticatedClaude client key prompt = do
         Right _ -> pure (Left "Claude CLI did not provide all three standard streams")
   where
     bounds = client.reviewClaudeBounds
-    claudeProcess claudePath =
-      ( proc
-          claudePath
-          [ "--print",
-            "--model",
-            "claude-sonnet-5",
-            "--effort",
-            "high",
-            "--permission-mode",
-            "plan",
-            "--safe-mode",
-            "--no-session-persistence"
-          ]
-      )
+    claudeProcess claudePath = (proc claudePath (authenticatedClaudeArguments assignment))
         { cwd = Just client.reviewRepositoryRoot,
           std_in = CreatePipe,
           std_out = CreatePipe,

@@ -14,6 +14,8 @@ module Kanban.PullRequestFlow
     labelPullRequestAction,
     originFromBody,
     pullRequestArguments,
+    pullRequestAssignment,
+    pullRequestRole,
     pullRequestVerdictForLabels,
     runPullRequestFlow,
     runPullRequestFlowWith,
@@ -32,8 +34,15 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (BoardColumn (..), Label (..), PullRequest (..), Repository (..), WorkflowConfig (..))
+import Kanban.Models
+  ( Assignment (..),
+    AssignmentUnavailable,
+    ModelRoster,
+    RoleName (..),
+    assignmentFor,
+  )
 import Kanban.Process (ManagedProcess, managedProcess)
-import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, agentOutcome, emitStreamEvent, parseSolveOutputLine, resumeProvenanceHeader, sealUnknownAggregates)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, agentOutcome, emitStreamEvent, parseSolveOutputLine, providerForBrand, resumeProvenanceHeader, sealUnknownAggregates)
 import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Workflow (CardStatus (..), classifyPullRequest, pullRequestStatus)
@@ -144,7 +153,23 @@ agentForAction PullRequestClaude action | authoredOnOwnBrand action = ClaudeSolv
 agentForAction PullRequestCodex _ = ClaudeSolver
 agentForAction PullRequestClaude _ = CodexSolver
 
-runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (PullRequestFlowEvent -> IO ()) -> IO ()
+-- | An action that edits the pull request's own code is authored work and
+-- takes the author-side role; review and rereview are the canonical gate and
+-- take the reviewer's. The one declaration of that split, replacing the four
+-- literal-returning selection functions this slice removed.
+pullRequestRole :: PullRequestAction -> RoleName
+pullRequestRole action
+  | authoredOnOwnBrand action = PrReviseRole
+  | otherwise = PrReviewRole
+
+-- | The roster cell a pull-request invocation runs on, from the brand
+-- 'agentForAction' already routes it to. Shared by the UI boundary that
+-- refuses on it and by the supervisor that constructs argv from it.
+pullRequestAssignment :: ModelRoster -> PullRequestOrigin -> PullRequestAction -> Either AssignmentUnavailable Assignment
+pullRequestAssignment roster origin action =
+  assignmentFor roster (pullRequestRole action) (providerForBrand (agentForAction origin action))
+
+runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Assignment -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (PullRequestFlowEvent -> IO ()) -> IO ()
 runPullRequestFlow = runPullRequestFlowWith (const handleReadLine)
 
 -- | As 'runPullRequestFlow', but reads stdout/stderr via an injected
@@ -154,8 +179,8 @@ runPullRequestFlow = runPullRequestFlowWith (const handleReadLine)
 -- provider through the shared reader's abandonment path. The primitive is
 -- given the stream tag ("stdout"/"stderr") alongside the handle so a test
 -- can target one stream's abandonment path without racing the other's.
-runPullRequestFlowWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (PullRequestFlowEvent -> IO ()) -> IO ()
-runPullRequestFlowWith readLineFor repository pullRequestNumber origin action configPath config existingSession existingLogPath provenance userMessage aggregator eventSink = do
+runPullRequestFlowWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Assignment -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (PullRequestFlowEvent -> IO ()) -> IO ()
+runPullRequestFlowWith readLineFor repository pullRequestNumber origin action configPath config assignment existingSession existingLogPath provenance userMessage aggregator eventSink = do
   let brand = agentForAction origin action
       executableName = if brand == CodexSolver then "codex" else "claude"
   logResult <- openSessionLog repository ("pr-" <> actionName action <> if brand == CodexSolver then "-codex" else "-claude") pullRequestNumber existingLogPath
@@ -231,7 +256,7 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (PullRequestProcessFinished pullRequestNumber outcome)
     processSpec executablePath brand =
-      (proc executablePath (pullRequestArguments pullRequestNumber origin action brand configPath repository config existingSession provenance userMessage))
+      (proc executablePath (pullRequestArguments pullRequestNumber origin action brand configPath repository config assignment existingSession provenance userMessage))
         { cwd = Just repositoryRoot,
           std_in = NoStream,
           std_out = CreatePipe,
@@ -239,34 +264,31 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
           create_group = True
         }
 
-pullRequestArguments :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe FilePath -> Repository -> WorkflowConfig -> Maybe Text -> ResumeProvenance -> Text -> [String]
-pullRequestArguments number origin action CodexSolver configPath repository config existingSession provenance userMessage = case existingSession of
+-- | The provider argv for one pull-request invocation.
+--
+-- Takes the resolved 'Assignment' for the same reason 'solveArguments' does:
+-- 'pullRequestAssignment' has already been consulted at the launch boundary,
+-- so this stays total and no roster defect can reach it.
+pullRequestArguments :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe FilePath -> Repository -> WorkflowConfig -> Assignment -> Maybe Text -> ResumeProvenance -> Text -> [String]
+pullRequestArguments number origin action CodexSolver configPath repository config assignment existingSession provenance userMessage = case existingSession of
   Nothing -> codexBase <> [Text.unpack (initialPrompt number origin action configPath repository config CodexSolver)]
   Just sessionId -> ["exec", "resume"] <> codexOptions <> [Text.unpack sessionId, Text.unpack (resumePrompt config action provenance userMessage)]
   where
     codexBase = ["exec"] <> codexOptions
-    codexOptions = ["--model", codexModel action, "--config", "model_reasoning_effort=\"" <> codexEffort action <> "\"", "--config", "model_reasoning_summary=\"detailed\"", "--dangerously-bypass-approvals-and-sandbox", "--json"]
-pullRequestArguments number origin action ClaudeSolver configPath repository config existingSession provenance userMessage =
-  ["--print", "--model", claudeModel action, "--effort", claudeEffort action, "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose"]
+    codexOptions =
+      [ "--model",
+        Text.unpack assignment.assignmentModel,
+        "--config",
+        Text.unpack ("model_reasoning_effort=\"" <> assignment.assignmentEffort <> "\""),
+        "--config",
+        "model_reasoning_summary=\"detailed\"",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--json"
+      ]
+pullRequestArguments number origin action ClaudeSolver configPath repository config assignment existingSession provenance userMessage =
+  ["--print", "--model", Text.unpack assignment.assignmentModel, "--effort", Text.unpack assignment.assignmentEffort, "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose"]
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
     <> [Text.unpack (if existingSession == Nothing then initialPrompt number origin action configPath repository config ClaudeSolver else resumePrompt config action provenance userMessage)]
-
--- | An action that edits the pull request's own code gets the author-side
--- model pairing; review and rereview get the canonical reviewer's.
-codexModel :: PullRequestAction -> String
-codexModel action | authoredOnOwnBrand action = "gpt-5.4"
-codexModel _ = "gpt-5.6-terra"
-
-codexEffort :: PullRequestAction -> String
-codexEffort action | authoredOnOwnBrand action = "high"
-codexEffort _ = "xhigh"
-
-claudeModel :: PullRequestAction -> String
-claudeModel action | authoredOnOwnBrand action = "claude-sonnet-5"
-claudeModel _ = "claude-opus-5"
-
-claudeEffort :: PullRequestAction -> String
-claudeEffort _ = "xhigh"
 
 initialPrompt :: Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> Repository -> WorkflowConfig -> SolverBrand -> Text
 initialPrompt number _origin action configPath repository config brand = Text.unlines (actionLines <> configLines <> interactionLines)

@@ -24,11 +24,13 @@ module Spec.Support.Process
     isPullRequestSessionIdentifiedEvent,
     isPullRequestFlowOutputEvent,
     workerFixtureSpec,
+    writeWorkerRosterSnapshot,
     deadlineFixtureSpec,
     waitForWorkerState,
     isOrphaned,
     isTerminal,
     withRecordingReviewClient,
+    withRecordingReviewClientUsing,
     nextClientRequest,
     expectNoFurtherClientRequests,
     encodedValue,
@@ -38,6 +40,7 @@ module Spec.Support.Process
     withFakeGitHubCli,
     runBoundedGitHubTool,
     withFakeClaudeCli,
+    withFakeClaudeCliUsing,
     runBoundedClaudeCall,
     shouldRecordASweptProcess,
     shouldNotHaveSwept,
@@ -72,6 +75,7 @@ import Kanban.Process
     managedProcess,
     readProcessSnapshot
   )
+import Kanban.Models (ModelRoster, defaultRoster)
 import Kanban.PullRequestFlow (PullRequestFlowEvent (..))
 import Kanban.Review
   ( CommandBounds (..),
@@ -114,9 +118,11 @@ import Kanban.Worker
     WorkerState (..),
     WorkerStatus (..),
     WorkerTask (..),
+    descriptorForSpec,
     discoverWorkerHistory,
     monitorWorker,
-    runWorker
+    runWorker,
+    writeWorkerRoster
   )
 import Spec.Support.Env (ignoringIOException, withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (requireJust)
@@ -345,6 +351,10 @@ runChattyWorker temporaryRoot spec identifier = do
   originalPath <- maybe "" id <$> lookupEnv "PATH"
   withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
     withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+      -- The supervisor reads its model roster from the snapshot its
+      -- launcher writes beside the spec, so a fixture that writes the spec
+      -- by hand has to write that too or the run refuses before it spawns.
+      writeWorkerRosterSnapshot spec defaultRoster
       runWorker specPath `shouldReturn` Right ()
       journal <- ByteString.lines <$> ByteString.readFile eventPath
       replayed <- newIORef []
@@ -445,6 +455,17 @@ isPullRequestFlowOutputEvent :: PullRequestFlowEvent -> Bool
 isPullRequestFlowOutputEvent (PullRequestFlowOutput _ _) = True
 isPullRequestFlowOutputEvent _ = False
 
+-- | Writes the launch-scoped roster snapshot a hand-built spec's supervisor
+-- will read, exactly where 'Kanban.Worker.launchWorker' would have put it.
+-- Must run with the same @XDG_CACHE_HOME@ the worker will resolve under.
+writeWorkerRosterSnapshot :: WorkerSpec -> ModelRoster -> IO ()
+writeWorkerRosterSnapshot spec roster = do
+  descriptor <- descriptorForSpec spec
+  written <- writeWorkerRoster descriptor roster
+  case written of
+    Left message -> throwIO (userError ("could not write the fixture roster snapshot: " <> Data.Text.unpack message))
+    Right () -> pure ()
+
 workerFixtureSpec :: Repository -> WorkerId -> Int -> WorkerSpec
 workerFixtureSpec repository identifier issueNumber =
   WorkerSpec
@@ -487,10 +508,16 @@ waitForWorkerState path predicate attempts = do
 -- 'handleWireMessage' can be judged by both what it writes back and what it
 -- tells the session (issue #17).
 withRecordingReviewClient :: (ReviewClient -> Handle -> IORef [ReviewEvent] -> IO result) -> IO result
-withRecordingReviewClient action = do
+withRecordingReviewClient = withRecordingReviewClientUsing defaultRoster
+
+-- | As 'withRecordingReviewClient', but against a chosen roster, so a test
+-- can prove a non-default cell reaches the wire payloads the review thread
+-- constructs.
+withRecordingReviewClientUsing :: ModelRoster -> (ReviewClient -> Handle -> IORef [ReviewEvent] -> IO result) -> IO result
+withRecordingReviewClientUsing roster action = do
   events <- newIORef []
   bracket
-    (newRecordingReviewClientForTesting (\event -> modifyIORef events (<> [event])))
+    (newRecordingReviewClientForTesting roster (\event -> modifyIORef events (<> [event])))
     (\(client, wire) -> stopReviewClient client >> hClose wire)
     (\(client, wire) -> action client wire events)
 
@@ -582,7 +609,7 @@ withFakeGitHubCli scriptLines bounds action =
     originalPath <- maybe "" id <$> lookupEnv "PATH"
     withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $
       bracket
-        (newReviewClientForTesting bounds repositoryRoot "coghex/kanban" (const (pure ())))
+        (newReviewClientForTesting defaultRoster bounds repositoryRoot "coghex/kanban" (const (pure ())))
         stopReviewClient
         action
 
@@ -598,7 +625,12 @@ runBoundedGitHubTool boundMicros client request = do
 -- path the script is expected to record a PID at when the test needs to see
 -- that the spawned process group was swept.
 withFakeClaudeCli :: [ByteString.ByteString] -> CommandBounds -> (FilePath -> ReviewClient -> IO result) -> IO result
-withFakeClaudeCli scriptLines bounds action =
+withFakeClaudeCli = withFakeClaudeCliUsing defaultRoster
+
+-- | As 'withFakeClaudeCli', but against a chosen roster, so a test can prove
+-- a non-default @issue_revise.claude@ cell reaches the argv the tool spawns.
+withFakeClaudeCliUsing :: ModelRoster -> [ByteString.ByteString] -> CommandBounds -> (FilePath -> ReviewClient -> IO result) -> IO result
+withFakeClaudeCliUsing roster scriptLines bounds action =
   withTemporaryCacheRoot $ \temporaryRoot -> do
     let repositoryRoot = temporaryRoot </> "repo"
         binaryRoot = temporaryRoot </> "bin"
@@ -618,7 +650,7 @@ withFakeClaudeCli scriptLines bounds action =
     withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $
       withEnvironmentValue "CLAUDE_CHILD_MARKER" markerPath $
         bracket
-          (newReviewClientForTesting bounds repositoryRoot "coghex/kanban" (const (pure ())))
+          (newReviewClientForTesting roster bounds repositoryRoot "coghex/kanban" (const (pure ())))
           stopReviewClient
           (action markerPath)
 

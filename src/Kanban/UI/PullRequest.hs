@@ -47,6 +47,7 @@ import Kanban.Drainer
     runDirectMerge,
     setDrainerRunning
   )
+import Kanban.Models (ModelRoster)
 import Kanban.Preflight
   ( PreflightAction (..)
     )
@@ -58,7 +59,8 @@ import Kanban.PullRequestFlow
     agentForAction,
     directPullRequestAction,
     labelPullRequestAction,
-    originFromBody
+    originFromBody,
+    pullRequestAssignment
     )
 import Kanban.Solve
   ( ResumeProvenance (..),
@@ -149,8 +151,19 @@ launchPullRequestFlow number origin action brand existingSession provenance inpu
     Just notice -> setNotice notice
     Nothing -> launchLivePullRequestFlow number origin action brand existingSession provenance input
 
+-- | The roster refusal sits here for the reason the read-only-history one
+-- does: this is the boundary a process crosses. Autosolve's own review and
+-- rereview rounds come through 'launchPullRequestFlow' above, so they refuse
+-- on the same terms without an arm of their own.
 launchLivePullRequestFlow :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
-launchLivePullRequestFlow number origin action _brand existingSession provenance input = do
+launchLivePullRequestFlow number origin action brand existingSession provenance input = do
+  state <- get
+  case resolvedRosterFor (\roster -> pullRequestAssignment roster origin action) state.appModelRoster of
+    Left message -> setNotice (pullRequestActionText action <> " did not start: " <> message)
+    Right roster -> launchRosteredPullRequestFlow roster number origin action brand existingSession provenance input
+
+launchRosteredPullRequestFlow :: ModelRoster -> Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
+launchRosteredPullRequestFlow roster number origin action _brand existingSession provenance input = do
   state <- get
   let existingLogPath = Map.lookup number state.appPullRequestReviewSessions >>= (.sessionLogPath)
       parent = autoSolveWorkerParent state number
@@ -162,7 +175,7 @@ launchLivePullRequestFlow number origin action _brand existingSession provenance
         writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
         writeBChan eventChannel (PullRequestProtocolEvent (PullRequestProcessFinished number (SolveFailed message)))
       Nothing -> do
-        launched <- launchPullRequestWorker state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
+        launched <- launchPullRequestWorker roster state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
         case launched of
           Left message -> do
             writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))

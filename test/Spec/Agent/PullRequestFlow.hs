@@ -8,6 +8,7 @@ import Data.List (findIndex)
 import qualified Data.Text
 import Data.Time (UTCTime (..), fromGregorian)
 import Kanban.Domain
+import Kanban.Models (Assignment (..), ModelRoster, defaultRoster)
 import Kanban.Process (identityForPid, managedProcessPid, matchingIdentities, readProcessSnapshot)
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
@@ -20,6 +21,7 @@ import Kanban.PullRequestFlow
     labelPullRequestAction,
     originFromBody,
     pullRequestArguments,
+    pullRequestAssignment,
     pullRequestVerdictForLabels,
     runPullRequestFlow,
     runPullRequestFlowWith
@@ -47,6 +49,7 @@ import Kanban.Worker
     WorkerTask (..),
   )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.Roster (cellOf, rerosteredDefaults)
 import Spec.Support.Fixtures (basePullRequest, epoch)
 import Spec.Support.Process
   ( chattyProvider,
@@ -141,18 +144,22 @@ spec = do
       labelPullRequestAction defaultWorkflowConfig (withLabels [approvalLabelChip, Label "reviewed:changes" "b60205"])
         `shouldBe` PullRequestRevision
 
-    it "pins canonical reviewer and reviser models" $ do
-      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-5", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
-      pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
+    it "pins canonical reviewer and reviser models" $ mapM_ (assertRosterDrivenArguments defaultRoster) migratedRoutes
+
+    -- Byte-identity under the defaults (the arm above) only means something
+    -- if argv is genuinely derived from the cell, so every migrated route is
+    -- asserted a second time against a roster whose cells all differ.
+    it "carries a non-default roster's cells into every migrated pull-request route" $ do
+      mapM_ (assertRosterDrivenArguments rerosteredDefaults) migratedRoutes
+      [pullRequestCell rerosteredDefaults origin action | (origin, action, _) <- migratedRoutes]
+        `shouldNotBe` [pullRequestCell defaultRoster origin action | (origin, action, _) <- migratedRoutes]
 
     it "invokes the packaged repair workflow on the PR's own brand, with the author-side model pairing" $ do
       let repository = Repository "/tmp/repo" "coghex" "kanban"
-          codexOriginArguments = pullRequestArguments 42 PullRequestCodex PullRequestRepair CodexSolver Nothing repository defaultWorkflowConfig Nothing ResumeAnswer ""
-          claudeOriginArguments = pullRequestArguments 42 PullRequestClaude PullRequestRepair ClaudeSolver Nothing repository defaultWorkflowConfig Nothing ResumeAnswer ""
-      codexOriginArguments `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
-      claudeOriginArguments `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
+          codexOriginArguments = pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestRepair CodexSolver Nothing repository defaultWorkflowConfig Nothing ResumeAnswer ""
+          claudeOriginArguments = pullRequestArgumentsOn defaultRoster 42 PullRequestClaude PullRequestRepair ClaudeSolver Nothing repository defaultWorkflowConfig Nothing ResumeAnswer ""
+      codexOriginArguments `shouldContain` codexFlags (pullRequestCell defaultRoster PullRequestCodex PullRequestRepair)
+      claudeOriginArguments `shouldContain` claudeFlags (pullRequestCell defaultRoster PullRequestClaude PullRequestRepair)
       -- Each brand's own invocation token, and the repair coordinator rather
       -- than the review family named as the target of --repo.
       last codexOriginArguments `shouldContain` "$repair"
@@ -163,7 +170,7 @@ spec = do
       last claudeOriginArguments `shouldContain` "never remove a blocking label yourself"
 
     it "keeps a resumed repair session on the repair workflow" $ do
-      let resumedPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRepair ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "use the base branch")
+      let resumedPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestClaude PullRequestRepair ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "use the base branch")
       resumedPrompt `shouldContain` "Continue the same repair workflow"
       resumedPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
 
@@ -177,8 +184,8 @@ spec = do
       session.sessionTranscript.fullTranscript `shouldSatisfy` Data.Text.isInfixOf "reattached persistent PR repair worker"
 
     it "routes r-key revisions through canonical pr-revise instead of the legacy manual-label prompt" $ do
-      let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
-          claudeOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+      let codexOriginRevisionPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          claudeOriginRevisionPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       codexOriginRevisionPrompt `shouldContain` "$pr-revise"
       claudeOriginRevisionPrompt `shouldContain` "/pr-revise"
       codexOriginRevisionPrompt `shouldNotContain` "pr-review:v1"
@@ -188,19 +195,19 @@ spec = do
 
     it "builds the revision prompt's coordinator-owned labels from the configured workflow labels, not literals" $ do
       let customConfig = defaultWorkflowConfig {approvalLabel = "lgtm", changesRequestedLabel = "needs-work"}
-          customPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") customConfig Nothing ResumeAnswer "")
+          customPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") customConfig Nothing ResumeAnswer "")
       customPrompt `shouldContain` "leave lgtm, needs-work, and reviewed:revised to the canonical review coordinator"
       customPrompt `shouldNotContain` "reviewed:approve, reviewed:changes"
 
     it "tells a spawned reviewer to pass the dashboard's selected --config to the canonical coordinator, but only when one is configured" $ do
-      let configuredPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "/tmp/custom-config.toml") (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
-          defaultPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+      let configuredPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "/tmp/custom-config.toml") (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          defaultPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       configuredPrompt `shouldContain` "--config /tmp/custom-config.toml"
       defaultPrompt `shouldNotContain` "--config"
 
     it "always tells a spawned reviewer to pass Kanban's own resolved --repo to the canonical coordinator, even without a fork override" $ do
       let forkRepository = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
-          forkPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing forkRepository defaultWorkflowConfig Nothing ResumeAnswer "")
+          forkPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing forkRepository defaultWorkflowConfig Nothing ResumeAnswer "")
       forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to"
 
     it "tells a resumed autosolve pr-revise to pass the dashboard's selected --config, but only when one is configured" $ do
@@ -216,14 +223,14 @@ spec = do
       forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to"
 
     it "never asks the initial review prompt to remove a label only rereview can see, but keeps that instruction in rereview" $ do
-      let initialReviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
-          rereviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRereview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+      let initialReviewPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          rereviewPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestRereview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       initialReviewPrompt `shouldNotContain` "reviewed:revised"
       rereviewPrompt `shouldContain` "Remove reviewed:revised after successfully publishing the verdict"
 
     it "frames a resumed PR prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
-      let answerPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "looks good")
-          interruptPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "check the other file too")
+      let answerPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "looks good")
+          interruptPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "check the other file too")
       answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeAnswer)
       answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
       interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeInterruptGuidance)
@@ -232,7 +239,7 @@ spec = do
 
     it "names the configured changes-requested label in a resumed PR revision's automated-handoff header" $ do
       let customConfig = defaultWorkflowConfig {changesRequestedLabel = "needs-work"}
-          customAutomatedPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") customConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+          customAutomatedPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") customConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
       customAutomatedPrompt `shouldContain` "the PR received needs-work"
       customAutomatedPrompt `shouldNotContain` "the PR received reviewed:changes"
 
@@ -284,7 +291,7 @@ spec = do
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
             aggregator <- newUnknownAggregator
-            runPullRequestFlow repository 904 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
+            runPullRequestFlow repository 904 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case (findIndex isPullRequestSessionIdentifiedEvent collected, findIndex isPullRequestFlowOutputEvent collected) of
               (Just sessionIndex, Just outputIndex) -> sessionIndex `shouldSatisfy` (< outputIndex)
@@ -317,7 +324,7 @@ spec = do
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
             aggregator <- newUnknownAggregator
-            runPullRequestFlow repository 905 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
+            runPullRequestFlow repository 905 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case reverse collected of
               (PullRequestProcessFinished _ (SolveNeedsInput question) : _) -> question `shouldBe` "which reviewer wins?"
@@ -349,7 +356,7 @@ spec = do
                     | Data.Text.isInfixOf "stderr-poison-line" message -> throwIO (userError "diagnostic delivery exploded")
                   _ -> pure ()
             aggregator <- newUnknownAggregator
-            timeout 10000000 (runPullRequestFlow repository 903 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator poisonedSink) `shouldReturn` Just ()
+            timeout 10000000 (runPullRequestFlow repository 903 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator poisonedSink) `shouldReturn` Just ()
 
     it "terminates the still-live provider and forces a failed terminal outcome when the stdout reader's read primitive keeps failing" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -394,7 +401,7 @@ spec = do
                   | tag == "stdout" = pure (Left (userError "simulated persistent stdout read failure"))
                   | otherwise = handleReadLine handle
             aggregator <- newUnknownAggregator
-            timeout 20000000 (runPullRequestFlowWith stdoutOnlyFails repository 907 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
+            timeout 20000000 (runPullRequestFlowWith stdoutOnlyFails repository 907 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
             collected <- reverse <$> readIORef events
             let stdoutAbandonments = [message | PullRequestFlowDiagnostic _ message <- collected, Data.Text.isInfixOf "stdout stream reader gave up" message]
             stdoutAbandonments `shouldSatisfy` (not . null)
@@ -428,7 +435,7 @@ spec = do
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
             aggregator <- newUnknownAggregator
-            runPullRequestFlow repository 908 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
+            runPullRequestFlow repository 908 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             let notices = [agentEvent | PullRequestFlowOutput _ agentEvent <- collected, Data.Text.isPrefixOf "[event] telemetry" agentEvent.agentEventSummary]
             length notices `shouldBe` unknownNoticeSamples + 1
@@ -472,6 +479,7 @@ repairWorkerDescriptor task =
             workerWorkflowConfig = defaultWorkflowConfig
           },
       workerDescriptorSpecPath = "/tmp/pr-900-repair.spec.json",
+      workerDescriptorRosterPath = "/tmp/pr-900-repair.roster.toml",
       workerDescriptorEventPath = "/tmp/pr-900-repair.events.jsonl",
       workerDescriptorStatePath = "/tmp/pr-900-repair.state.json",
       workerDescriptorAckPath = "/tmp/pr-900-repair.ack",
@@ -479,3 +487,43 @@ repairWorkerDescriptor task =
       workerDescriptorLeaseOwnerPath = "/tmp/pr-900-repair.lease.owner",
       workerDescriptorPendingTerminationPath = "/tmp/pr-900-repair.terminating"
     }
+
+-- | Every route this slice migrated to the roster, with the brand
+-- 'agentForAction' routes it to. Enumerated once so the default-roster and
+-- non-default-roster arms cannot cover different sets.
+migratedRoutes :: [(PullRequestOrigin, PullRequestAction, SolverBrand)]
+migratedRoutes =
+  [ (PullRequestCodex, PullRequestReview, ClaudeSolver),
+    (PullRequestCodex, PullRequestRevision, CodexSolver),
+    (PullRequestClaude, PullRequestRevision, ClaudeSolver),
+    (PullRequestClaude, PullRequestRereview, CodexSolver),
+    (PullRequestCodex, PullRequestRepair, CodexSolver),
+    (PullRequestClaude, PullRequestRepair, ClaudeSolver)
+  ]
+
+assertRosterDrivenArguments :: ModelRoster -> (PullRequestOrigin, PullRequestAction, SolverBrand) -> Expectation
+assertRosterDrivenArguments roster (origin, action, brand) = do
+  agentForAction origin action `shouldBe` brand
+  let arguments = pullRequestArgumentsOn roster 42 origin action brand Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
+      cell = pullRequestCell roster origin action
+  arguments `shouldContain` (if brand == CodexSolver then codexFlags cell else claudeFlags cell)
+
+codexFlags :: Assignment -> [String]
+codexFlags cell =
+  [ "--model",
+    Data.Text.unpack cell.assignmentModel,
+    "--config",
+    Data.Text.unpack ("model_reasoning_effort=\"" <> cell.assignmentEffort <> "\"")
+  ]
+
+claudeFlags :: Assignment -> [String]
+claudeFlags cell = ["--model", Data.Text.unpack cell.assignmentModel, "--effort", Data.Text.unpack cell.assignmentEffort]
+
+-- | The one wrapper every argv assertion goes through, taking the roster
+-- explicitly so no expectation can silently read a compiled literal.
+pullRequestArgumentsOn :: ModelRoster -> Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe FilePath -> Repository -> WorkflowConfig -> Maybe Data.Text.Text -> ResumeProvenance -> Data.Text.Text -> [String]
+pullRequestArgumentsOn roster number origin action brand configPath repository config =
+  pullRequestArguments number origin action brand configPath repository config (pullRequestCell roster origin action)
+
+pullRequestCell :: ModelRoster -> PullRequestOrigin -> PullRequestAction -> Assignment
+pullRequestCell roster origin action = cellOf (pullRequestAssignment roster origin action)

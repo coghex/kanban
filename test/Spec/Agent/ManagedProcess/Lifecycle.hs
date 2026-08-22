@@ -17,6 +17,7 @@ import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import Kanban.Domain
+import Kanban.Models (defaultRoster)
 import Kanban.Process
   ( IdentityPresence (..),
     ProcessIdentity (..),
@@ -90,7 +91,8 @@ import Spec.Support.Process
     withManagedShell,
     withNonLeaderShell,
     withSurvivingGroupLeader,
-    workerFixtureSpec
+    workerFixtureSpec,
+    writeWorkerRosterSnapshot
   )
 import System.Directory
   ( createDirectory,
@@ -506,6 +508,7 @@ examples = do
         originalPath <- maybe "" id <$> lookupEnv "PATH"
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            writeWorkerRosterSnapshot spec defaultRoster
             runWorker specPath `shouldReturn` Right ()
             stateBytes <- LazyByteString.readFile statePath
             let decodedState = eitherDecode stateBytes :: Either String WorkerState
@@ -645,6 +648,7 @@ examples = do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             finished <- newEmptyMVar
+            writeWorkerRosterSnapshot spec defaultRoster
             void . forkIO $ runWorker specPath >>= putMVar finished
             orphanState <- waitForWorkerState statePath isOrphaned 80
             orphanState.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
@@ -706,6 +710,7 @@ examples = do
                   stillFailing <- readIORef failing
                   if stillFailing then pure (Left "simulated ps outage") else readProcessSnapshot
             finished <- newEmptyMVar
+            writeWorkerRosterSnapshot spec defaultRoster
             void . forkIO $ runWorkerWith flakySnapshot specPath >>= putMVar finished
             pendingState <- waitForWorkerState statePath isOrphaned 80
             pendingState.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
@@ -792,6 +797,7 @@ examples = do
                       mapM_ (killManagedProcess . managedProcessGroup . fromIntegral) groups
                     Left _ -> pure ()
                   timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            writeWorkerRosterSnapshot spec defaultRoster
             void . forkIO $ runWorkerWith readProcessSnapshot specPath >>= putMVar finished
             ( do
                 -- WorkerRunning is published as soon as the provider itself
@@ -1301,6 +1307,7 @@ examples = do
                           mapM_ (killManagedProcess . managedProcessGroup . fromIntegral) groups
                         Left _ -> pure ()
                       timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+                writeWorkerRosterSnapshot spec defaultRoster
                 void . forkIO $ runWorker specPath >>= putMVar finished
                 ( do
                     orphanState <- waitForWorkerState statePath isOrphaned 80
@@ -1549,6 +1556,7 @@ examples = do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withFakeOnPath temporaryRoot ("codex", completingProviderLines) $
             withFileCreationMask 0o000 $ do
+              writeWorkerRosterSnapshot spec defaultRoster
               runWorker specPath `shouldReturn` Right ()
               permissionsOf eventPath `shouldReturn` 0o600
 
@@ -1572,6 +1580,7 @@ examples = do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withFakeOnPath temporaryRoot ("codex", completingProviderLines) $
             withFileCreationMask 0o000 $ do
+              writeWorkerRosterSnapshot spec defaultRoster
               runWorker specPath `shouldReturn` Right ()
               permissionsOf eventPath `shouldReturn` 0o600
               journal <- ByteString.readFile eventPath

@@ -331,6 +331,7 @@ workerArtifactPaths descriptor = descriptor.workerDescriptorSpecPath : companion
 companionArtifactPaths :: WorkerDescriptor -> [FilePath]
 companionArtifactPaths descriptor =
   [ descriptor.workerDescriptorEventPath,
+    descriptor.workerDescriptorRosterPath,
     descriptor.workerDescriptorStatePath,
     descriptor.workerDescriptorAckPath,
     descriptor.workerDescriptorPendingTerminationPath

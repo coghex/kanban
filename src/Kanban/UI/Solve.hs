@@ -26,6 +26,7 @@ import qualified Data.Text as Text
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
+import Kanban.Models (ModelRoster)
 import Kanban.Preflight
   ( PreflightAction (..),
     actionReport,
@@ -40,6 +41,7 @@ import Kanban.Solve
     SolveOutcome (..),
     SolveWorkflow (..),
     SolverBrand (..),
+    solveAssignment,
     solverLabel
   )
 import Kanban.Text (sanitizeText)
@@ -169,8 +171,20 @@ launchSolveInvocation issueNumber workflow brand existingSession provenance inpu
     Just notice -> setNotice notice
     Nothing -> launchLiveSolveInvocation issueNumber workflow brand existingSession provenance input
 
+-- | The roster refusal sits beside the read-only-history one and for the
+-- same reason: this is the boundary a process crosses, so the roster the
+-- launch is checked against has to be the one it is handed. Autosolve's own
+-- revisions reach the provider through 'launchSolveInvocation' above, so
+-- they refuse here too rather than needing an arm of their own.
 launchLiveSolveInvocation :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchLiveSolveInvocation issueNumber workflow brand existingSession provenance input = do
+  state <- get
+  case resolvedRosterFor (`solveAssignment` brand) state.appModelRoster of
+    Left message -> setNotice ("Solve did not start: " <> message)
+    Right roster -> launchRosteredSolveInvocation roster issueNumber workflow brand existingSession provenance input
+
+launchRosteredSolveInvocation :: ModelRoster -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
+launchRosteredSolveInvocation roster issueNumber workflow brand existingSession provenance input = do
   state <- get
   let existingLogPath = Map.lookup issueNumber state.appSolveSessions >>= (.sessionLogPath)
       eventChannel = state.appEventChannel
@@ -197,7 +211,7 @@ launchLiveSolveInvocation issueNumber workflow brand existingSession provenance 
           writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
           writeBChan eventChannel (SolveProtocolEvent (SolveProcessFinished issueNumber (SolveFailed message)))
         Nothing -> do
-          launched <- launchSolveWorker state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
+          launched <- launchSolveWorker roster state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
           case launched of
             Left message -> do
               writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))

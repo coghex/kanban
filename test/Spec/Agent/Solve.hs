@@ -15,6 +15,7 @@ import Kanban.Process
     matchingIdentities,
     readProcessSnapshot
   )
+import Kanban.Models (Assignment (..), ModelRoster, defaultRoster)
 import Kanban.Settings (ChatVerbosity (..))
 import Kanban.Solve
   ( AgentEvent (..),
@@ -32,10 +33,12 @@ import Kanban.Solve
     runSolve,
     runSolveWith,
     solveArguments,
+    solveAssignment,
     unknownNoticeSamples
   )
 import Kanban.StreamReader (handleReadLine)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.Roster (cellOf, rerosteredDefaults)
 import Spec.Support.Process
   ( aggregatedNotices,
     chattyProvider,
@@ -56,24 +59,44 @@ spec :: Spec
 spec = do
   describe "solve process protocol" $ do
     it "launches each solver with its pinned model and effort, including the separately constructed Codex resume branch" $ do
-      let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
-          claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
-          codexResumeArguments = solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B"
-      codexArguments `shouldContain` ["--model", "gpt-5.4"]
-      codexArguments `shouldContain` ["model_reasoning_effort=\"high\""]
+      let codexArguments = solveArgumentsOn defaultRoster 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
+          claudeArguments = solveArgumentsOn defaultRoster 844 SolveOnly ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
+          codexResumeArguments = solveArgumentsOn defaultRoster 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B"
+      codexArguments `shouldContain` codexModelFlags defaultRoster
+      codexArguments `shouldContain` codexEffortOverride defaultRoster
       codexArguments `shouldContain` ["model_reasoning_summary=\"detailed\""]
-      claudeArguments `shouldContain` ["--model", "claude-sonnet-5"]
-      claudeArguments `shouldContain` ["--effort", "high"]
-      codexResumeArguments `shouldContain` ["--model", "gpt-5.4"]
-      codexResumeArguments `shouldContain` ["model_reasoning_effort=\"high\""]
+      claudeArguments `shouldContain` claudeModelFlags defaultRoster
+      claudeArguments `shouldContain` claudeEffortFlags defaultRoster
+      codexResumeArguments `shouldContain` codexModelFlags defaultRoster
+      codexResumeArguments `shouldContain` codexEffortOverride defaultRoster
       codexResumeArguments `shouldContain` ["model_reasoning_summary=\"detailed\""]
       codexResumeArguments `shouldContain` ["approval_policy=\"never\""]
 
+    -- The byte-identity claim in the arm above is only worth as much as the
+    -- proof that argv is genuinely derived rather than coincidentally equal,
+    -- so the same three argument sets are asserted against a roster whose
+    -- every cell differs from the compiled default.
+    it "carries a non-default roster's cells into every solve argument set" $ do
+      let roster = rerosteredDefaults
+          codexArguments = solveArgumentsOn roster 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
+          claudeArguments = solveArgumentsOn roster 844 SolveOnly ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
+          codexResumeArguments = solveArgumentsOn roster 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B"
+      codexModelFlags roster `shouldNotBe` codexModelFlags defaultRoster
+      claudeModelFlags roster `shouldNotBe` claudeModelFlags defaultRoster
+      codexEffortOverride roster `shouldNotBe` codexEffortOverride defaultRoster
+      claudeEffortFlags roster `shouldNotBe` claudeEffortFlags defaultRoster
+      codexArguments `shouldContain` codexModelFlags roster
+      codexArguments `shouldContain` codexEffortOverride roster
+      codexResumeArguments `shouldContain` codexModelFlags roster
+      codexResumeArguments `shouldContain` codexEffortOverride roster
+      claudeArguments `shouldContain` claudeModelFlags roster
+      claudeArguments `shouldContain` claudeEffortFlags roster
+
     it "runs the ordinary solve command for both S and Kanban-owned A orchestration" $ do
-      let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
-          codexAutoSolvePrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
-          claudeSolvePrompt = last (solveArguments 844 SolveOnly ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
-          claudeAutoSolvePrompt = last (solveArguments 844 AutoSolve ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+      let codexSolvePrompt = last (solveArgumentsOn defaultRoster 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          codexAutoSolvePrompt = last (solveArgumentsOn defaultRoster 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          claudeSolvePrompt = last (solveArgumentsOn defaultRoster 844 SolveOnly ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          claudeAutoSolvePrompt = last (solveArgumentsOn defaultRoster 844 AutoSolve ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       codexSolvePrompt `shouldContain` "$solve"
       codexAutoSolvePrompt `shouldContain` "$solve"
       codexAutoSolvePrompt `shouldNotContain` "$autosolve"
@@ -84,8 +107,8 @@ spec = do
       codexSolvePrompt `shouldContain` "Do not run issue-review"
 
     it "passes a configured --config path through to the read-only gate-check instruction" $ do
-      let promptWithConfig = last (solveArguments 844 SolveOnly CodexSolver (Just "/tmp/kanban/custom.toml") (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
-          promptWithoutConfig = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+      let promptWithConfig = last (solveArgumentsOn defaultRoster 844 SolveOnly CodexSolver (Just "/tmp/kanban/custom.toml") (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          promptWithoutConfig = last (solveArgumentsOn defaultRoster 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       promptWithConfig `shouldContain` "Pass --config /tmp/kanban/custom.toml to the read-only v2 gate check"
       promptWithoutConfig `shouldNotContain` "Pass --config"
 
@@ -103,7 +126,7 @@ spec = do
               "$WORKTREES_ROOT/" <> slug <> "/issue-844-<slug>",
               "open the pull request in " <> slug
             ]
-          promptFor brand repository = last (solveArguments 844 SolveOnly brand Nothing repository defaultWorkflowConfig Nothing ResumeAnswer "")
+          promptFor brand repository = last (solveArgumentsOn defaultRoster 844 SolveOnly brand Nothing repository defaultWorkflowConfig Nothing ResumeAnswer "")
           forkRepository = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
           ordinaryRepository = Repository "/tmp/repo" "coghex" "kanban"
       mapM_ (shouldContain (promptFor CodexSolver forkRepository)) (scopedInstructions "upstream-owner/upstream-repo")
@@ -116,14 +139,14 @@ spec = do
       promptFor CodexSolver ordinaryRepository `shouldNotContain` "upstream-owner/upstream-repo"
 
     it "stops a solve that cannot preserve one identity before the claim rather than falling back to the checkout" $ do
-      let forkPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/fork" "upstream-owner" "upstream-repo") defaultWorkflowConfig Nothing ResumeAnswer "")
+      let forkPrompt = last (solveArgumentsOn defaultRoster 844 SolveOnly CodexSolver Nothing (Repository "/tmp/fork" "upstream-owner" "upstream-repo") defaultWorkflowConfig Nothing ResumeAnswer "")
       forkPrompt `shouldContain` "never re-derive it from the checkout"
       forkPrompt `shouldContain` "stop and report before the first issue mutation"
       forkPrompt `shouldContain` "falling back to the checkout's own repository is never the repair"
 
     it "restates the resolved repository on a resumed solve, whose truncated session still owns the remaining GitHub operations" $ do
-      let resumedPrompt brand = last (solveArguments 844 AutoSolve brand Nothing (Repository "/tmp/fork" "upstream-owner" "upstream-repo") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
-          ordinaryResumedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
+      let resumedPrompt brand = last (solveArgumentsOn defaultRoster 844 AutoSolve brand Nothing (Repository "/tmp/fork" "upstream-owner" "upstream-repo") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
+          ordinaryResumedPrompt = last (solveArgumentsOn defaultRoster 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
       resumedPrompt CodexSolver `shouldContain` "Target GitHub repository: upstream-owner/upstream-repo"
       resumedPrompt ClaudeSolver `shouldContain` "Target GitHub repository: upstream-owner/upstream-repo"
       resumedPrompt CodexSolver `shouldContain` "never re-derived from the checkout"
@@ -133,7 +156,7 @@ spec = do
       -- Short distinguishing substrings rather than whole sentences, so this
       -- fails when the underlying instruction is lost or reversed but not on
       -- an unrelated copy edit to the surrounding prose.
-      let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+      let solvePrompt = last (solveArgumentsOn defaultRoster 782 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       solvePrompt `shouldContain` "issue #782"
       solvePrompt `shouldContain` "not a collision"
       solvePrompt `shouldContain` "inspect `git status`"
@@ -141,9 +164,9 @@ spec = do
       solvePrompt `shouldContain` "when no same-issue worktree exists"
 
     it "frames a resumed solve prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
-      let answerPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
-          interruptPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "focus on the other file instead")
-          automatedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+      let answerPrompt = last (solveArgumentsOn defaultRoster 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
+          interruptPrompt = last (solveArgumentsOn defaultRoster 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "focus on the other file instead")
+          automatedPrompt = last (solveArgumentsOn defaultRoster 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
       answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeAnswer)
       answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
       interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeInterruptGuidance)
@@ -155,7 +178,7 @@ spec = do
 
     it "names the configured changes-requested label in the automated resume header instead of the literal default" $ do
       let customConfig = defaultWorkflowConfig {changesRequestedLabel = "needs-work"}
-          customAutomatedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") customConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+          customAutomatedPrompt = last (solveArgumentsOn defaultRoster 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") customConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
       customAutomatedPrompt `shouldContain` "the PR received needs-work"
       customAutomatedPrompt `shouldNotContain` "the PR received reviewed:changes"
 
@@ -376,7 +399,7 @@ spec = do
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
             aggregator <- newUnknownAggregator
-            runSolve repository 900 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
+            runSolve repository 900 SolveOnly CodexSolver Nothing defaultWorkflowConfig (solveCell defaultRoster CodexSolver) Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case (findIndex isSolveSessionIdentifiedEvent collected, findIndex isSolveOutputEvent collected) of
               (Just sessionIndex, Just outputIndex) -> sessionIndex `shouldSatisfy` (< outputIndex)
@@ -409,7 +432,7 @@ spec = do
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
             aggregator <- newUnknownAggregator
-            runSolve repository 901 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
+            runSolve repository 901 SolveOnly CodexSolver Nothing defaultWorkflowConfig (solveCell defaultRoster CodexSolver) Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case reverse collected of
               (SolveProcessFinished _ (SolveNeedsInput question) : _) -> question `shouldBe` "which branch?"
@@ -441,7 +464,7 @@ spec = do
                     | Data.Text.isInfixOf "stderr-poison-line" message -> throwIO (userError "diagnostic delivery exploded")
                   _ -> pure ()
             aggregator <- newUnknownAggregator
-            timeout 10000000 (runSolve repository 902 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator poisonedSink) `shouldReturn` Just ()
+            timeout 10000000 (runSolve repository 902 SolveOnly CodexSolver Nothing defaultWorkflowConfig (solveCell defaultRoster CodexSolver) Nothing Nothing ResumeAnswer "" aggregator poisonedSink) `shouldReturn` Just ()
 
     it "terminates the still-live provider and forces a failed terminal outcome when the stdout reader's read primitive keeps failing" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -486,7 +509,7 @@ spec = do
                   | tag == "stdout" = pure (Left (userError "simulated persistent stdout read failure"))
                   | otherwise = handleReadLine handle
             aggregator <- newUnknownAggregator
-            timeout 20000000 (runSolveWith stdoutOnlyFails repository 906 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
+            timeout 20000000 (runSolveWith stdoutOnlyFails repository 906 SolveOnly CodexSolver Nothing defaultWorkflowConfig (solveCell defaultRoster CodexSolver) Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
             collected <- reverse <$> readIORef events
             let stdoutAbandonments = [message | SolveDiagnostic _ message <- collected, Data.Text.isInfixOf "stdout stream reader gave up" message]
             stdoutAbandonments `shouldSatisfy` (not . null)
@@ -517,7 +540,7 @@ spec = do
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
             aggregator <- newUnknownAggregator
-            runSolve repository 907 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
+            runSolve repository 907 SolveOnly CodexSolver Nothing defaultWorkflowConfig (solveCell defaultRoster CodexSolver) Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             -- Only a constant number of records reach the sink the worker
             -- journals: the samples plus one counted summary, however many
@@ -562,7 +585,7 @@ spec = do
                       | agentEvent.agentEventSummary == "READY" -> readIORef managedRef >>= mapM_ killManagedProcess
                     _ -> pure ()
             aggregator <- newUnknownAggregator
-            timeout 20000000 (runSolve repository 908 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
+            timeout 20000000 (runSolve repository 908 SolveOnly CodexSolver Nothing defaultWorkflowConfig (solveCell defaultRoster CodexSolver) Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
             collected <- reverse <$> readIORef events
             [agentEvent.agentEventSummary | SolveOutput _ agentEvent <- collected, Data.Text.isInfixOf "×" agentEvent.agentEventSummary]
               `shouldBe` ["[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)]
@@ -571,3 +594,26 @@ spec = do
                 summary.agentEventSummary `shouldBe` "[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)
               _ -> expectationFailure "expected the aggregate summary immediately before the interrupted terminal event"
             rawTelemetryLines [path | SolveLogOpened _ path <- collected] `shouldReturn` chattyProviderLines
+
+-- | The one wrapper every argv assertion below goes through: the roster is
+-- an explicit argument, so a spec says which roster it is asserting against
+-- and no expectation can silently be reading a compiled literal.
+solveArgumentsOn :: ModelRoster -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> Repository -> WorkflowConfig -> Maybe Data.Text.Text -> ResumeProvenance -> Data.Text.Text -> [String]
+solveArgumentsOn roster issueNumber workflow brand configPath repository config =
+  solveArguments issueNumber workflow brand configPath repository config (solveCell roster brand)
+
+solveCell :: ModelRoster -> SolverBrand -> Assignment
+solveCell roster brand = cellOf (solveAssignment roster brand)
+
+codexModelFlags :: ModelRoster -> [String]
+codexModelFlags roster = ["--model", Data.Text.unpack (solveCell roster CodexSolver).assignmentModel]
+
+codexEffortOverride :: ModelRoster -> [String]
+codexEffortOverride roster =
+  [Data.Text.unpack ("model_reasoning_effort=\"" <> (solveCell roster CodexSolver).assignmentEffort <> "\"")]
+
+claudeModelFlags :: ModelRoster -> [String]
+claudeModelFlags roster = ["--model", Data.Text.unpack (solveCell roster ClaudeSolver).assignmentModel]
+
+claudeEffortFlags :: ModelRoster -> [String]
+claudeEffortFlags roster = ["--effort", Data.Text.unpack (solveCell roster ClaudeSolver).assignmentEffort]

@@ -9,6 +9,7 @@ import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Text
+import Kanban.Models (defaultRoster)
 import Kanban.Process (killManagedProcess)
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Review
@@ -207,7 +208,7 @@ spec = do
         originalPath <- maybe "" id <$> lookupEnv "PATH"
         withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $
           withEnvironmentValue "STARTED_MARKER" markerPath $ do
-            client <- newReviewClientForTesting githubCommandBounds repositoryRoot "coghex/kanban" (const (pure ()))
+            client <- newReviewClientForTesting defaultRoster githubCommandBounds repositoryRoot "coghex/kanban" (const (pure ()))
             finished <- newEmptyMVar
             let request = GitHubIssueToolRequest GitHubIssueRead 844 Nothing [] []
             void . forkIO $ withReservedToolSlot client "thread-1" (\key -> runGitHubIssueTool client key request) >>= putMVar finished

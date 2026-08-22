@@ -225,6 +225,7 @@ test-suite kanban-test
     Spec.Agent.Preflight
     Spec.Agent.Protocol
     Spec.Agent.PullRequestFlow
+    Spec.Agent.Roster
     Spec.Agent.Solve
     Spec.Agent.Supervision
     Spec.Agent.Transcript
@@ -261,6 +262,7 @@ test-suite kanban-test
     Spec.Support.Preflight
     Spec.Support.Process
     Spec.Support.Render
+    Spec.Support.Roster
     Spec.UI.AutoSolve
     Spec.UI.Cards
     Spec.UI.CompletedHistory
