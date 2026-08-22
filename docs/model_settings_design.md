@@ -21,7 +21,7 @@ concrete precondition
 
 - [x] EPIC. Drive agent model and effort selection from a settings roster — [#412]
 - [x] MODEL-1. Define the model roster schema, loader, writer, and compiled defaults — [#414]
-- [ ] MODEL-2. Resolve the Haskell spawn sites from the roster
+- [x] MODEL-2. Resolve the Haskell spawn sites from the roster — [#461]
 - [ ] MODEL-7. Record spawn-time assignments in worker specs and replay them on resume
 - [ ] MODEL-3. Derive display labels and prompt prose from the roster
 - [ ] MODEL-4. Resolve the Python and plugin spawn sites from the roster
