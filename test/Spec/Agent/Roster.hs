@@ -16,8 +16,9 @@ module Spec.Agent.Roster (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
 import Data.List (isInfixOf)
+import Brick.BChan (newBChan, readBChan)
 import Data.Text (Text)
-import Data.Time (getCurrentTime)
+import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import qualified Data.Text
 import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
@@ -37,6 +38,7 @@ import Kanban.Models
   )
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
+    PullRequestFlowEvent (..),
     PullRequestOrigin (..),
     pullRequestAssignment,
     pullRequestRole,
@@ -49,6 +51,11 @@ import Kanban.Review
     sendReviewMessage,
   )
 import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..), providerForBrand, solveAssignment)
+import Kanban.Solve (SolveEvent (..), SolveOutcome (..))
+import Kanban.UI.PullRequest (failPullRequestLaunch)
+import Kanban.UI.Session (pullRequestSessionReusable, solvePhaseActive)
+import Kanban.UI.Solve (failSolveLaunch)
+import Kanban.UI.Types (AppEvent (..), SolvePhase (..))
 import Kanban.UI.Util (resolvedRosterFor)
 import Kanban.Worker
   ( WorkerId (..),
@@ -63,6 +70,7 @@ import Kanban.Worker
     writeWorkerRoster,
   )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.Fixtures (epoch)
 import Spec.Support.Process
   ( encodedValue,
     expectNoFurtherClientRequests,
@@ -137,6 +145,43 @@ spec = do
         `shouldBe` assignmentFor defaultRoster PrReviewRole ClaudeProvider
       pullRequestAssignment defaultRoster PullRequestClaude PullRequestRepair
         `shouldBe` assignmentFor defaultRoster PrReviseRole ClaudeProvider
+
+  -- A launch boundary is reached with a session already inserted, and
+  -- 'solvePhaseActive' counts 'SolveStarting' as live work. A refusal that
+  -- only set a notice would strand that session: reopened by the reuse
+  -- predicates rather than retried, and never terminalized.
+  describe "what a refused launch leaves behind" $ do
+    it "settles the solve session with the same diagnostic-then-terminal pair a failed preflight sends" $ do
+      let message = "model roster /home/example/.config/kanban/models.toml is invalid"
+      channel <- newBChan 4
+      failSolveLaunch channel 844 message
+      delivered <- (,) <$> readBChan channel <*> readBChan channel
+      case delivered of
+        (SolveProtocolEvent (SolveDiagnostic diagnosed diagnostic), SolveProtocolEvent (SolveProcessFinished settled (SolveFailed reason))) ->
+          [(diagnosed, diagnostic), (settled, reason)] `shouldBe` [(844, message), (844, message)]
+        _ -> expectationFailure "expected a solve diagnostic followed by a terminal failure"
+
+    it "settles the pull-request session the same way" $ do
+      let message = "model roster does not load provider \"claude\""
+      channel <- newBChan 4
+      failPullRequestLaunch channel 468 message
+      delivered <- (,) <$> readBChan channel <*> readBChan channel
+      case delivered of
+        (PullRequestProtocolEvent (PullRequestFlowDiagnostic diagnosed diagnostic), PullRequestProtocolEvent (PullRequestProcessFinished settled (SolveFailed reason))) ->
+          [(diagnosed, diagnostic), (settled, reason)] `shouldBe` [(468, message), (468, message)]
+        _ -> expectationFailure "expected a pull-request diagnostic followed by a terminal failure"
+
+    -- Why that pair is the fix rather than a nicety. A session left at
+    -- 'SolveStarting' counts as live, and live is the disjunct that makes the
+    -- reuse predicates hand it back whatever the caller now asks for; a
+    -- settled one gives way as soon as the request differs.
+    it "lands the session in the phase the reuse predicates stop treating as live" $ do
+      solvePhaseActive SolveStarting `shouldBe` True
+      solvePhaseActive SolveFailedPhase `shouldBe` False
+      pullRequestSessionReusable False (solvePhaseActive SolveStarting) PullRequestReview PullRequestRevision epoch laterThanEpoch
+        `shouldBe` True
+      pullRequestSessionReusable False (solvePhaseActive SolveFailedPhase) PullRequestReview PullRequestRevision epoch laterThanEpoch
+        `shouldBe` False
 
   describe "the worker launch boundary" $ do
     it "starts no worker at all when the roster cannot supply the task's cell" $
@@ -290,6 +335,11 @@ fastBounds = CommandBounds {commandDeadlineMicros = 3000000, commandCaptureGrace
 
 boundedCallMicros :: Int
 boundedCallMicros = 20000000
+
+-- | Any instant after 'epoch': what a pull request updated since the session
+-- was launched for it looks like.
+laterThanEpoch :: UTCTime
+laterThanEpoch = addUTCTime 60 epoch
 
 unusableRoster :: RosterLoadError
 unusableRoster =

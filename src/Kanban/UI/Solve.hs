@@ -1,5 +1,6 @@
 module Kanban.UI.Solve
   ( applySolveEvent,
+    failSolveLaunch,
     interruptSolveSession,
     issueFromBoard,
     launchSolveInvocation,
@@ -16,7 +17,7 @@ where
 
 
 import Brick
-import Brick.BChan (writeBChan)
+import Brick.BChan (BChan, writeBChan)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (unless, void )
 import Control.Monad.IO.Class (liftIO)
@@ -180,8 +181,25 @@ launchLiveSolveInvocation :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -
 launchLiveSolveInvocation issueNumber workflow brand existingSession provenance input = do
   state <- get
   case resolvedRosterFor (`solveAssignment` brand) state.appModelRoster of
-    Left message -> setNotice ("Solve did not start: " <> message)
+    Left message -> liftIO (failSolveLaunch state.appEventChannel issueNumber message)
     Right roster -> launchRosteredSolveInvocation roster issueNumber workflow brand existingSession provenance input
+
+-- | How a launch that never reached a provider reports itself: the
+-- diagnostic-then-terminal pair, which is the only thing that settles the
+-- session this launch was created for.
+--
+-- A bare notice is not enough and never was. Every caller of
+-- 'launchSolveInvocation' has already inserted or reopened a session, and
+-- 'solvePhaseActive' counts 'SolveStarting' as live work — so a refusal that
+-- only set a notice would leave that session permanently starting,
+-- 'reusableSolveSession' would hand it back instead of letting the user pick
+-- a different solver, and nothing would ever terminalize it. The pair below
+-- moves it to 'SolveFailedPhase' and raises the same
+-- 'Kanban.UI.Util.agentFailureNotice' the arm that consumes it always has.
+failSolveLaunch :: BChan AppEvent -> Int -> Text -> IO ()
+failSolveLaunch eventChannel issueNumber message = do
+  writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
+  writeBChan eventChannel (SolveProtocolEvent (SolveProcessFinished issueNumber (SolveFailed message)))
 
 launchRosteredSolveInvocation :: ModelRoster -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchRosteredSolveInvocation roster issueNumber workflow brand existingSession provenance input = do
@@ -207,15 +225,11 @@ launchRosteredSolveInvocation roster issueNumber workflow brand existingSession 
     $ do
       blocked <- preflightBlocker state.appRepository (solvePreflightAction workflow brand)
       case blocked of
-        Just message -> do
-          writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
-          writeBChan eventChannel (SolveProtocolEvent (SolveProcessFinished issueNumber (SolveFailed message)))
+        Just message -> failSolveLaunch eventChannel issueNumber message
         Nothing -> do
           launched <- launchSolveWorker roster state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
           case launched of
-            Left message -> do
-              writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
-              writeBChan eventChannel (SolveProtocolEvent (SolveProcessFinished issueNumber (SolveFailed message)))
+            Left message -> failSolveLaunch eventChannel issueNumber message
             Right descriptor -> do
               writeBChan eventChannel (WorkerRegistered descriptor)
   void

@@ -5,6 +5,7 @@ module Kanban.UI.PullRequest
     applyPullRequestFlowEvent,
     drainerErrorStatus,
     drainerTogglePress,
+    failPullRequestLaunch,
     interruptPullRequestSession,
     mergeItemDoneCard,
     mergeSelectedDoneCard,
@@ -19,7 +20,7 @@ where
 
 
 import Brick
-import Brick.BChan (writeBChan)
+import Brick.BChan (BChan, writeBChan)
 import Control.Concurrent (forkIO)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
@@ -159,8 +160,19 @@ launchLivePullRequestFlow :: Int -> PullRequestOrigin -> PullRequestAction -> So
 launchLivePullRequestFlow number origin action brand existingSession provenance input = do
   state <- get
   case resolvedRosterFor (\roster -> pullRequestAssignment roster origin action) state.appModelRoster of
-    Left message -> setNotice (pullRequestActionText action <> " did not start: " <> message)
+    Left message -> liftIO (failPullRequestLaunch state.appEventChannel number message)
     Right roster -> launchRosteredPullRequestFlow roster number origin action brand existingSession provenance input
+
+-- | The pull-request twin of 'Kanban.UI.Solve.failSolveLaunch', and for the
+-- same reason: every caller has already inserted or reopened a session, so a
+-- launch that never reached a provider has to settle that session rather than
+-- only raise a notice. A session left in 'SolveStarting' is what
+-- 'pullRequestSessionReusable' reads as live work and reopens instead of
+-- starting a fresh review.
+failPullRequestLaunch :: BChan AppEvent -> Int -> Text -> IO ()
+failPullRequestLaunch eventChannel number message = do
+  writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
+  writeBChan eventChannel (PullRequestProtocolEvent (PullRequestProcessFinished number (SolveFailed message)))
 
 launchRosteredPullRequestFlow :: ModelRoster -> Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchRosteredPullRequestFlow roster number origin action _brand existingSession provenance input = do
@@ -171,15 +183,11 @@ launchRosteredPullRequestFlow roster number origin action _brand existingSession
   void . liftIO . forkIO $ do
     blocked <- preflightBlocker state.appRepository (ActionPullRequestFlow origin action)
     case blocked of
-      Just message -> do
-        writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
-        writeBChan eventChannel (PullRequestProtocolEvent (PullRequestProcessFinished number (SolveFailed message)))
+      Just message -> failPullRequestLaunch eventChannel number message
       Nothing -> do
         launched <- launchPullRequestWorker roster state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
         case launched of
-          Left message -> do
-            writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
-            writeBChan eventChannel (PullRequestProtocolEvent (PullRequestProcessFinished number (SolveFailed message)))
+          Left message -> failPullRequestLaunch eventChannel number message
           Right descriptor -> do
             writeBChan eventChannel (WorkerRegistered descriptor)
 

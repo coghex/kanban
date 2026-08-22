@@ -601,10 +601,12 @@ review and Sonnet 5 xhigh for revision and repair, and both solvers on GPT-5.4
 high and Sonnet 5 high.
 
 A roster that cannot supply the cell a launch needs starts no process and
-reports why. That covers a present `models.toml` that is unreadable,
-unparseable, foreign-versioned, or invalid — the refusal names the file and
-the defect — and equally a valid roster that simply does not load the brand
-this run's routing selected. Neither case falls back to the compiled
+reports why: the session that launch was created for settles as a failed one
+carrying the message, exactly as a blocked preflight does, rather than waiting
+on a provider that will never start. That covers a present `models.toml` that
+is unreadable, unparseable, foreign-versioned, or invalid — the refusal names
+the file and the defect — and equally a valid roster that does not load the
+brand this run's routing selected. Neither case falls back to the compiled
 defaults. An absent file is not one of these: it silently *is* the defaults.
 The roster a launch was checked against is the one its detached supervisor
 constructs argv from, carried to it as a snapshot written beside the worker
