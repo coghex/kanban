@@ -18,7 +18,7 @@ concrete precondition
 ## Status
 
 - [x] PRR-1. Wrong-removal recovery can silently lose an identical stash entry — [#469]
-- [ ] PRR-2. Backlog review routes transient tracker bodies into repository worktrees
+- [x] PRR-2. Backlog review routes transient tracker bodies into repository worktrees — [#470]
 - [ ] PRR-3. The issue-approval dashboard path is outside the manifest's Haskell scan
 
 ## 1. Recovery stash retirement
@@ -83,7 +83,7 @@ restored. The defect remains at current `master` (`a920f7c`).
 
 ## 2. Backlog-review workflow hygiene
 
-### PRR-2. Backlog review routes transient tracker bodies into repository worktrees
+### [#470] PRR-2. Backlog review routes transient tracker bodies into repository worktrees
 
 > **Captured note:** Correct PR #451's backlog-review workflow so the temporary
 > body files required by its approved tracker mutations are created outside all
