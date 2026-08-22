@@ -2354,6 +2354,7 @@ recording only one would understate what a change to it can break:
   `pr-atomic` row.
 
 ```text
+.github/ISSUE_TEMPLATE/ | pr-atomic | test-parsed
 AGENTS.md | pr-atomic | release-document;implementation-coupled
 CHANGELOG.md | pr-atomic | release-document
 CLAUDE.md | pr-atomic | release-document;implementation-coupled
@@ -2395,7 +2396,9 @@ docs/workflow_command_vendoring_design.md | coordination | audit-report
 tools/ | pr-atomic | test-parsed;release-document
 ```
 
-The eight `test-parsed` rows name what actually parses them:
+The nine `test-parsed` rows name what actually parses them:
+`tools/test_issue_templates.py` reads the frontmatter, headings, and `Children`
+checklist of both templates under `.github/ISSUE_TEMPLATE/`,
 `tools/test_agent_workflow_contract.py` reads §4 of this document (and
 `tools/test_document_classification.py` reads §7),
 `test/Spec/UI/Keys.hs` reads the binding table in `docs/design.md` §7,

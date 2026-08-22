@@ -67,6 +67,10 @@ COORDINATION_REASONS = ("audit-report", "coordination-note")
 # parsed by their own modules, so the reason is not confined to the two
 # workflow-contract documents the issue body named.
 TEST_PARSED_PATHS = {
+    # tools/test_issue_templates.py reads both templates' frontmatter, their
+    # headings, and the epic template's Children checklist, which
+    # src/Kanban/Tracker.hs parses in an issue filed from it (issue #434).
+    ".github/ISSUE_TEMPLATE/",
     # tools/test_agent_workflow_contract.py parses §4; this module parses §7.
     "docs/agent-workflow-contract.md",
     # test/Spec/UI/Keys.hs parses the §7 keybinding table.
