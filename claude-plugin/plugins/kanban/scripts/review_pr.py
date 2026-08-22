@@ -411,13 +411,39 @@ def linked_issue_numbers(pr: dict[str, Any], repo: str) -> tuple[list[int], list
     return sorted(set(numbers)), invalid
 
 
-def issue_review_record_path() -> Path:
-    """The fixed document `tools/install_issue_review.py` records the
-    installed backend in. Deliberately not derived from
-    KANBAN_ISSUE_REVIEW_INSTALL_DIR: an install made with --install-dir still
-    has to be discoverable by a coordinator that never saw that option, so the
-    record's own path is the one thing that cannot move."""
-    return Path(f"{Path.home()}/Library/Application Support/kanban/issue-review/config.json")
+def issue_review_record_candidates() -> tuple[Path, Path]:
+    """Both fixed documents `tools/install_issue_review.py` may have recorded
+    the installed backend in, in probe order: the XDG data directory's first
+    and the `~/Library` one second, on every platform and with no platform
+    branch. That is the order tools/kanban_config.py's
+    `installed_issue_review_dir` probes in, so a macOS host that installed
+    under XDG and a Linux host that inherited a `~/Library` install each keep
+    the installation they have.
+
+    Deliberately not derived from KANBAN_ISSUE_REVIEW_INSTALL_DIR: an install
+    made with --install-dir still has to be discoverable by a coordinator that
+    never saw that option, so the record's own path is the one thing that
+    cannot move. $XDG_DATA_HOME does move the first candidate, because that is
+    what the variable means and what `_xdg_issue_review_dir` honors; it is read
+    the same way, as "set and non-empty" rather than "absolute".
+
+    Each literal is spelled whole rather than composed, for the reason
+    tools/kanban_config.py gives for its own: both are `personal-path` tokens
+    in docs/agent-workflow-contract.md §4 declaring this file, and that
+    reconciliation matches a literal, not an expression. This bundle vendors a
+    copy of kanban_config.py beside this module and still does not import it:
+    the Codex bundle vendors per skill and has none beside its own copy of this
+    coordinator, and one probe implemented two ways is the drift both bundles
+    exist to avoid."""
+    xdg_base = os.environ.get("XDG_DATA_HOME")
+    if xdg_base:
+        xdg_record = Path(xdg_base) / "kanban" / "issue-review" / "config.json"
+    else:
+        xdg_record = Path(f"{Path.home()}/.local/share/kanban/issue-review/config.json")
+    return (
+        xdg_record,
+        Path(f"{Path.home()}/Library/Application Support/kanban/issue-review/config.json"),
+    )
 
 
 def installed_backend(path: Path, repair: str) -> Path:
@@ -442,7 +468,9 @@ def approver_path() -> Path:
     lives in, which is where an install predating the record put it. A
     selected override or recorded backend that is missing fails there rather
     than falling through, so this gate never silently runs an installation the
-    user did not choose. This coordinator never hard-codes the pre-migration
+    user did not choose. The record itself is looked for in the two locations
+    `issue_review_record_candidates` names, probed in that one order on every
+    platform. This coordinator never hard-codes the pre-migration
     compatibility launcher path; see docs/agent-workflow-contract.md §3."""
     override = os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")
     if override and override.strip():
@@ -452,13 +480,27 @@ def approver_path() -> Path:
             f"`python3 tools/install_issue_review.py --install-dir {override}`, or unset "
             "that variable to use the recorded installation.",
         )
-    record = issue_review_record_path()
+    candidates = issue_review_record_candidates()
     # Absence is decided by whether anything occupies the path, not by
     # whether something readable does: `os.path.lexists` sees a symbolic link
     # whose target is gone, which `read_text` reports as FileNotFoundError
     # and which falling back would treat as "never installed". The installer
-    # refuses to write through a link here for the same reason.
-    if not os.path.lexists(record):
+    # refuses to write through a link here for the same reason. That is also
+    # what stops an occupied-but-invalid higher-precedence candidate from
+    # falling through to the lower-precedence one: a dangling link or a
+    # directory where the XDG record belongs still selects that installation,
+    # and the reader below then reports what is wrong with it.
+    occupied = [candidate for candidate in candidates if os.path.lexists(candidate)]
+    # Neither occupied is not a platform question. The XDG candidate answers
+    # it on every host, and what the diagnostic names is both locations, so no
+    # consumer of this coordinator has to decide which platform it is on.
+    record = occupied[0] if occupied else candidates[0]
+    consulted = (
+        str(record)
+        if occupied
+        else " and ".join(str(candidate) for candidate in candidates)
+    )
+    if not occupied:
         document = {}
     else:
         try:
@@ -478,7 +520,7 @@ def approver_path() -> Path:
         # naming nothing and must fail closed like any other unusable value.
         return installed_backend(
             record.parent / "approve_issues.py",
-            f"No install directory is recorded at {record}, so this default was used. "
+            f"No install directory is recorded at {consulted}, so this default was used. "
             "Run `python3 tools/install_issue_review.py` from the Kanban checkout to "
             "install and record it.",
         )

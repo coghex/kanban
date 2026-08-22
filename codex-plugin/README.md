@@ -142,10 +142,18 @@ regardless of which command an agent session starts from. The coordinator
 resolves the canonical issue-review backend the same way
 `Kanban.Review.resolveCanonicalIssueReviewer` does: a non-empty
 `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path
-`tools/install_issue_review.py` recorded in
-`~/Library/Application Support/kanban/issue-review/config.json`, then — only
+`tools/install_issue_review.py` recorded in its discovery record, then — only
 when that record names none — the directory the record lives in; it never
-hard-codes a personal path and never reconstructs the installer's default. None of the packaged skills set their own model, reasoning
+hard-codes a personal path and never reconstructs the installer's default. The
+record has two locations, probed in one order on every platform:
+`$XDG_DATA_HOME/kanban/issue-review/config.json` — or
+`~/.local/share/kanban/issue-review/config.json` when that variable is unset or
+empty — first, then
+`~/Library/Application Support/kanban/issue-review/config.json`. Whichever one
+exists is the installation, so a macOS host that installed under XDG and a
+Linux host that inherited a `~/Library` install each keep the one they have;
+when neither exists the XDG candidate supplies the answer and the diagnostic
+names both. None of the packaged skills set their own model, reasoning
 effort, sandbox, approval policy, or working directory — Kanban's own CLI
 invocation pins those per action, and `tools/test_codex_plugin.py` asserts
 none of the packaged manifests (or the coordinator's own nested-reviewer
@@ -192,9 +200,12 @@ applied to the document, and the repository lands it through the pull-request
 lane it already has.
 
 `$issue-review` — and `$autoissue`'s immediate review handoff — resolve the
-same canonical backend the same portable way, through the discovery record at
-`~/Library/Application Support/kanban/issue-review/config.json` that
-`python3 tools/install_issue_review.py` writes from a Kanban checkout.
+same canonical backend the same portable way, probing the same two discovery
+record locations in the same order on every platform —
+`~/.local/share/kanban/issue-review/config.json`, or `$XDG_DATA_HOME`'s
+equivalent when that variable is set, and then
+`~/Library/Application Support/kanban/issue-review/config.json` — for the
+record `python3 tools/install_issue_review.py` writes from a Kanban checkout.
 They never reference the pre-migration compatibility launcher described in
 [docs/agent-workflow-contract.md §3](../docs/agent-workflow-contract.md#3-migration-boundary),
 and they never pin a reviewer model or display name:

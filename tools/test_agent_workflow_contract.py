@@ -94,6 +94,24 @@ MANAGED_RECORD_TOKENS = {
     "/.local/share/kanban/pr-drainer/config.json",
 }
 
+# Every packaged markdown workflow whose `bash` fence resolves the canonical
+# issue-review backend out of the discovery record. All ten carry the same
+# probe, so all ten spell both record locations; `triage` and `retriage` reach
+# no other home-relative scan, which is why the pin below names the whole ten
+# rather than the six that also sit in a scanned surface list.
+MARKDOWN_RECORD_RESOLVER_FILES = (
+    "claude-plugin/plugins/kanban/commands/issue-review.md",
+    "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
+    "claude-plugin/plugins/kanban/commands/solve.md",
+    "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "claude-plugin/plugins/kanban/commands/issue-rereview.md",
+    "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
+    "claude-plugin/plugins/kanban/commands/triage.md",
+    "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
+    "claude-plugin/plugins/kanban/commands/retriage.md",
+    "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
+)
+
 # The issue approval service's own owning sources
 # (docs/agent-workflow-contract.md §2.8), scanned for the home-relative paths
 # they build rather than for the external commands they spawn — those are
@@ -1889,21 +1907,21 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # the only user-scoped path these assets name now: the backend itself
         # is read out of that record rather than composed from a default, so
         # there is no `$HOME`-anchored approve_issues.py left to find.
-        for relative_path in (
-            "claude-plugin/plugins/kanban/commands/issue-review.md",
-            "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
-            "claude-plugin/plugins/kanban/commands/solve.md",
-            "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
-            "claude-plugin/plugins/kanban/commands/issue-rereview.md",
-            "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
-        ):
+        #
+        # Both spellings, since issue #445: each fence probes the XDG record
+        # and then the `~/Library` one, so recovering only the macOS segment
+        # would pass against an asset that had lost half the probe. `triage`
+        # and `retriage` are listed here too -- they reach no other
+        # home-relative scan, so without them the manifest's `files`
+        # grounding is their only pin.
+        for relative_path in MARKDOWN_RECORD_RESOLVER_FILES:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = markdown_home_relative_segments(content)
-            self.assertIn(
+            for token in (
                 "/Library/Application Support/kanban/issue-review/config.json",
-                found,
-                relative_path,
-            )
+                "/.local/share/kanban/issue-review/config.json",
+            ):
+                self.assertIn(token, found, relative_path)
 
     def test_heredoc_bodies_are_read_as_data_rather_than_commands(self):
         # The issue-review workflows feed a Python resolver to `python3 -` as
@@ -2282,39 +2300,56 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # Haskell reader is src/Kanban/ManagedPaths.hs, which resolves this
         # record and the drainer's alike; src/Kanban/Review/Canonical.hs asks
         # it rather than spelling a location, so the count is unchanged.
+        #
+        # Both platform rows are pinned to the *same* thirteen files, and
+        # against the same list rather than against each other: since issue
+        # #445 every one of these readers probes both locations, so each
+        # spells both literals. Asserting one row alone would let the XDG
+        # spelling be reverted in an asset while the macOS half still passed,
+        # which is the half-blind gate requirement 10 forbids.
         by_id = {row["id"]: row for row in self.manifest}
-        self.assertIn("issue-review-discovery-record", by_id)
-        entry = by_id["issue-review-discovery-record"]
-        self.assertEqual(entry["kind"], "personal-path")
-        self.assertEqual(entry["owner"], "kanban")
-        self.assertEqual(entry["status"], "supported")
-        self.assertEqual(
-            entry["files"],
-            [
-                "src/Kanban/ManagedPaths.hs",
-                "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
-                "claude-plugin/plugins/kanban/scripts/review_pr.py",
-                "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
-                "claude-plugin/plugins/kanban/commands/issue-review.md",
-                "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
-                "claude-plugin/plugins/kanban/commands/solve.md",
-                "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
-                "claude-plugin/plugins/kanban/commands/issue-rereview.md",
-                "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
-                "claude-plugin/plugins/kanban/commands/triage.md",
-                "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
-                "claude-plugin/plugins/kanban/commands/retriage.md",
-            ],
-        )
-        for relative_path in entry["files"]:
-            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            self.assertIn(entry["token"], content, relative_path)
-        # The single tracked spelling of the install directory the record's
+        expected_files = [
+            "src/Kanban/ManagedPaths.hs",
+            "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
+            "claude-plugin/plugins/kanban/scripts/review_pr.py",
+            "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
+            "claude-plugin/plugins/kanban/commands/issue-review.md",
+            "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
+            "claude-plugin/plugins/kanban/commands/solve.md",
+            "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
+            "claude-plugin/plugins/kanban/commands/issue-rereview.md",
+            "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
+            "claude-plugin/plugins/kanban/commands/triage.md",
+            "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
+            "claude-plugin/plugins/kanban/commands/retriage.md",
+        ]
+        for row_id in (
+            "issue-review-discovery-record",
+            "issue-review-discovery-record-xdg",
+        ):
+            with self.subTest(row=row_id):
+                self.assertIn(row_id, by_id)
+                entry = by_id[row_id]
+                self.assertEqual(entry["kind"], "personal-path")
+                self.assertEqual(entry["owner"], "kanban")
+                self.assertEqual(entry["status"], "supported")
+                self.assertEqual(entry["files"], expected_files)
+                for relative_path in entry["files"]:
+                    content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                    self.assertIn(entry["token"], content, relative_path)
+        # The single tracked spelling of each install directory the record's
         # own path is derived from, and the only executable allowed to hold
         # it (issue #155's single-source acceptance).
-        install_dir = by_id["approve-issues-backend"]
-        self.assertEqual(install_dir["files"], ["tools/kanban_config.py"])
-        self.assertTrue(entry["token"].startswith(install_dir["token"] + "/"))
+        for record_id, install_id in (
+            ("issue-review-discovery-record", "approve-issues-backend"),
+            ("issue-review-discovery-record-xdg", "approve-issues-backend-xdg"),
+        ):
+            install_dir = by_id[install_id]
+            self.assertEqual(install_dir["files"], ["tools/kanban_config.py"])
+            self.assertTrue(
+                by_id[record_id]["token"].startswith(install_dir["token"] + "/"),
+                record_id,
+            )
 
     def test_every_managed_issue_review_location_is_declared_for_both_platforms(self):
         # Issue #357: two managed locations, each with a macOS spelling and an
@@ -2357,11 +2392,12 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 ),
             ),
             (
-                # Issue #444 gave the record its XDG sibling. Both spellings
-                # are src/Kanban/ManagedPaths.hs's rather than
-                # tools/kanban_config.py's: that module composes the record
-                # path from the install directory above and a separate file
-                # name, so it carries neither literal whole.
+                # Issue #444 gave the record its XDG sibling, and issue #445
+                # gave both rows the twelve packaged readers that probe them.
+                # Neither spelling is tools/kanban_config.py's: that module
+                # composes the record path from the install directory above
+                # and a separate file name, so it carries neither literal
+                # whole.
                 (
                     "issue-review-discovery-record",
                     "/Library/Application Support/kanban/issue-review/config.json",
@@ -2370,7 +2406,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 (
                     "issue-review-discovery-record-xdg",
                     "/.local/share/kanban/issue-review/config.json",
-                    ["src/Kanban/ManagedPaths.hs"],
+                    None,
                 ),
             ),
         ):
