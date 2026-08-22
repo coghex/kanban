@@ -44,9 +44,12 @@ tracked file has none:
   `models.toml.example` configuration templates, the eleven user
   and workflow-contract documents under `docs/`,
   `.github/pull_request_template.md` -- the body GitHub pre-fills for a new
-  pull request, which states at composition time what a pull-request body
-  has to satisfy, and so is documentation a recipient reads rather than
-  upstream-only machinery like the workflows excluded below --
+  pull request, and the composition-time companion to the packaged
+  `CONTRIBUTING.md`: a recipient following that guide from an agreed issue to
+  a pull request reads this file for what the body has to satisfy. The issue
+  templates excluded below were classified the other way, so each `.github/`
+  document states its own decision rather than inheriting one from the
+  directory --
   `cabal.project` -- that one because the packaged `CLAUDE.md` describes it
   as what applies the mandatory `-Werror` gate to the `cabal build all` and
   `cabal test all` runs the packaged `README.md` tells the recipient to
@@ -56,8 +59,9 @@ tracked file has none:
   what that version contains without consulting the upstream repository.
 * Out: `.drain-prs.json`, which `docs/pr-drainer.md` documents as optional
   per-repository drainer configuration and which is therefore the local
-  configuration requirement 2 excludes; `.gitignore` and `.github/workflows/`,
-  which only do anything in the upstream Git repository; and the development
+  configuration requirement 2 excludes; `.gitignore`, `.github/workflows/`, and
+  `.github/ISSUE_TEMPLATE/`, which only do anything in the upstream Git
+  repository; and the development
   audit reports, design documents, and coordination notes
   `EXCLUDED_TRACKED_PATHS` declares — each by exact path, or whole directories
   through a trailing-slash entry such as `docs/coordination/` that covers
@@ -145,6 +149,12 @@ RELEASE_DOCUMENTS = (
 # beneath `docs/coordination/` needs no entry of its own (issue #409).
 EXCLUDED_TRACKED_PATHS = (
     ".drain-prs.json",
+    # GitHub's new-issue templates: they populate the web UI's issue form in
+    # the upstream repository and do nothing in an unpacked archive, the same
+    # boundary the workflows below sit on. A trailing-slash entry so a template
+    # added later inherits the decision, and so a non-Markdown file such as a
+    # chooser config.yml is covered too -- §7 sees only the *.md files.
+    ".github/ISSUE_TEMPLATE/",
     # CI's own harness for the drainer's systemd lifecycle: an image that boots
     # systemd, the unit that runs the check inside it, and the check itself.
     # Out for the same reason the workflows below are — it verifies the source
