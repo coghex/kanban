@@ -42,10 +42,15 @@ tracked file has none:
   reviewed, and landed and links the two contracts the archive already
   carries -- `LICENSE`, `kanban.cabal`, the `config.toml.example` and
   `models.toml.example` configuration templates, the eleven user
-  and workflow-contract documents under `docs/`, `cabal.project` -- that
-  one because the packaged `CLAUDE.md` describes it as what applies the
-  mandatory `-Werror` gate to the `cabal build all` and `cabal test all`
-  runs the packaged `README.md` tells the recipient to make -- and
+  and workflow-contract documents under `docs/`,
+  `.github/pull_request_template.md` -- the body GitHub pre-fills for a new
+  pull request, which states at composition time what a pull-request body
+  has to satisfy, and so is documentation a recipient reads rather than
+  upstream-only machinery like the workflows excluded below --
+  `cabal.project` -- that one because the packaged `CLAUDE.md` describes it
+  as what applies the mandatory `-Werror` gate to the `cabal build all` and
+  `cabal test all` runs the packaged `README.md` tells the recipient to
+  make -- and
   `CHANGELOG.md`, whose top section is the notes for the very version the
   archive carries, so a recipient holding only the unpacked tree can tell
   what that version contains without consulting the upstream repository.
@@ -114,6 +119,7 @@ RELEASE_ROOT_FILES = (
 )
 
 RELEASE_DOCUMENTS = (
+    ".github/pull_request_template.md",
     "docs/README.md",
     "docs/agent-workflow-contract.md",
     "docs/bugs.md",

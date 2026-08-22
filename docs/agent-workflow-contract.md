@@ -2354,6 +2354,7 @@ recording only one would understate what a change to it can break:
   `pr-atomic` row.
 
 ```text
+.github/pull_request_template.md | pr-atomic | release-document
 AGENTS.md | pr-atomic | release-document;implementation-coupled
 CHANGELOG.md | pr-atomic | release-document
 CLAUDE.md | pr-atomic | release-document;implementation-coupled
