@@ -23,11 +23,11 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. A successful no-op ready command can roll back another actor's transition
+- [x] PRR-1. A successful no-op ready command can roll back another actor's transition — [#475]
 
 ## 1. Ready-transition ownership after a successful no-op
 
-### PRR-1. A successful no-op ready command can roll back another actor's transition
+### [#475] PRR-1. A successful no-op ready command can roll back another actor's transition
 
 > **Captured note:** Do not treat a successful `gh pr ready` return as proof
 > that the review coordinator created the ready transition. Another actor can

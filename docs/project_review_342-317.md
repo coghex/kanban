@@ -23,12 +23,12 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. Concurrent usage refreshes can erase each other's cached provider snapshots
+- [x] PRR-1. Concurrent usage refreshes can erase each other's cached provider snapshots — [#477]
 - [ ] PRR-2. The fixed usage sidebar clips 100%-remaining and long-label rows
 
 ## 1. Usage-cache transaction boundary
 
-### PRR-1. Concurrent usage refreshes can erase each other's cached provider snapshots
+### [#477] PRR-1. Concurrent usage refreshes can erase each other's cached provider snapshots
 
 > **Captured note:** Serialize the shared `usage.json` read-merge-write so a
 > TUI refresh, `kanban --usage`, or `kanban --ping` process cannot publish a
