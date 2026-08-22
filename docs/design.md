@@ -7135,7 +7135,7 @@ every ten seconds, roughly 0.7% of a core, so the board's own steady-state
 behavior has about 1.3% of the 2% mean budget left. If the gate fails on the
 poll rather than on Kanban, that is evidence for amending the threshold or
 making the poll cheaper — a release-blocking defect to be resolved or explicitly
-scoped out under the epic's `Done when`, not an automatic veto on the release.
+removed from scope before publication, not an automatic veto on the release.
 The record states the group total, and states the poll's contribution separately
 so a later release can tighten either number.
 
@@ -7169,8 +7169,9 @@ Iterating on a procedure against a checkout install is fine while developing it.
 Each record states which install produced the recorded numbers, names the commit
 the archive was built from, and gives the `cabal sdist` and install commands
 used. A gate that fails because of an sdist packaging fault rather than runtime
-behavior is still a release-blocking defect under the epic's `Done when`, and is
-recorded as such rather than retried against the checkout.
+behavior is still a release-blocking defect, to be resolved or explicitly removed
+from scope before publication, and is recorded as such rather than retried
+against the checkout.
 
 #### D-13. Release evidence lives in a new numbered section 21
 
