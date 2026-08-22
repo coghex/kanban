@@ -269,10 +269,11 @@ triggers — spawn a nested `codex`/`claude` reviewer. Unlike the
 self-reviewed path, this coordinator fully constructs that nested
 subprocess call itself, so — for this plugin's bundled coordinator only,
 per a round-2 review finding on issue #77 — it pins that nested reviewer to
-the same canonical `gpt-5.6-terra`/`claude-opus-5` at `xhigh` values
-`src/Kanban/PullRequestFlow.hs` already uses for Kanban's own top-level
-review invocation, and binds the verified model in the published
-`pr-review:v2` marker instead of `unspecified`. This is a deliberate,
+the same canonical `gpt-5.6-terra`/`claude-opus-5` at `xhigh` values the
+`roles.pr_review.*` cells of `models.toml.example` declare — the cells
+Kanban's own top-level review invocation resolves from the model roster — and
+binds the verified model in the published `pr-review:v2` marker instead of
+`unspecified`. This is a deliberate,
 reviewed divergence from §2.2's general "brand only, no pinned model"
 policy for this one nested-spawn path, and from
 [codex-plugin/](../codex-plugin/README.md)'s otherwise-identical
@@ -307,8 +308,9 @@ runs) checks that:
 - the bundled coordinator resolves the canonical issue-review backend the
   same way Kanban's Haskell code does, and its self-test passes standalone;
 - the coordinator's nested-reviewer model/effort pin matches the exact
-  values `src/Kanban/PullRequestFlow.hs` uses for Kanban's own review
-  invocation, so the two cannot silently drift apart;
+  values the `roles.pr_review.*` cells of `models.toml.example` declare —
+  the cells Kanban's own review invocation resolves — so the two cannot
+  silently drift apart;
 - handed an issue number, the bundled coordinator refuses it by name rather
   than surfacing `gh`'s raw resolver error, reading twice and writing nothing.
 

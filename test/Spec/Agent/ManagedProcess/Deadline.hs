@@ -61,6 +61,7 @@ import qualified Data.Text
 import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import GHC.Conc (BlockReason (..), ThreadStatus (..), listThreads, threadStatus)
 import Kanban.Domain
+import Kanban.Models (defaultRoster)
 import Kanban.Process
   ( ProcessIdentity (..),
     descendantProcesses,
@@ -110,7 +111,8 @@ import Spec.Support.Process
     shouldNotHaveSwept,
     waitForWorkerState,
     withManagedShell,
-    withSurvivingGroupLeader
+    withSurvivingGroupLeader,
+    writeWorkerRosterSnapshot
   )
 import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist)
 import System.Environment (lookupEnv)
@@ -647,6 +649,7 @@ examples = do
         originalPath <- maybe "" id <$> lookupEnv "PATH"
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            writeWorkerRosterSnapshot spec defaultRoster
             result <- timeout 15000000 (runWorker specPath)
             result `shouldBe` Just (Right ())
             stateBytes <- LazyByteString.readFile statePath
@@ -998,6 +1001,7 @@ examples = do
               Nothing -> expectationFailure "worker fixture was not discoverable"
               Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
             finished <- newEmptyMVar
+            writeWorkerRosterSnapshot spec defaultRoster
             void . forkIO $ runWorker specPath >>= putMVar finished
             -- The census has genuinely discovered the backgrounded child by
             -- descent, while the script is still its live parent. Only then
@@ -1117,6 +1121,7 @@ examples = do
               WorkerDescriptor
                 { workerDescriptorSpec = spec,
                   workerDescriptorSpecPath = temporaryRoot </> "unused.spec.json",
+                  workerDescriptorRosterPath = temporaryRoot </> "unused.roster.toml",
                   workerDescriptorEventPath = temporaryRoot </> "unused.events.jsonl",
                   workerDescriptorStatePath = temporaryRoot </> "unused.state.json",
                   workerDescriptorAckPath = temporaryRoot </> "unused.ack",

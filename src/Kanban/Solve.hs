@@ -19,12 +19,14 @@ module Kanban.Solve
     maxUnknownTypeLength,
     newUnknownAggregator,
     parseSolveOutputLine,
+    providerForBrand,
     renderAgentEvent,
     resumeProvenanceHeader,
     runSolve,
     runSolveWith,
     sealUnknownAggregates,
     solveArguments,
+    solveAssignment,
     solveOutcome,
     solverLabel,
     unknownNoticeSamples,
@@ -41,6 +43,14 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
+import Kanban.Models
+  ( Assignment (..),
+    AssignmentUnavailable,
+    ModelRoster,
+    ProviderName (..),
+    RoleName (..),
+    assignmentFor,
+  )
 import Kanban.Process (managedProcess)
 import Kanban.Solve.Event
   ( AgentEvent (..),
@@ -87,7 +97,21 @@ import System.Process
     waitForProcess,
   )
 
-runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (SolveEvent -> IO ()) -> IO ()
+-- | Which provider's compiled adapter a solver brand runs through. The one
+-- mapping between the two vocabularies: 'SolverBrand' names the executable
+-- this layer spawns, 'ProviderName' names the roster table it reads.
+providerForBrand :: SolverBrand -> ProviderName
+providerForBrand CodexSolver = CodexProvider
+providerForBrand ClaudeSolver = ClaudeProvider
+
+-- | The roster cell a solve invocation runs on. The single declaration of
+-- solve's @(role, provider)@ selection, shared by the UI boundary that
+-- refuses on it and by the supervisor that constructs argv from it, so the
+-- two can never disagree about which cell this run was checked against.
+solveAssignment :: ModelRoster -> SolverBrand -> Either AssignmentUnavailable Assignment
+solveAssignment roster brand = assignmentFor roster SolveRole (providerForBrand brand)
+
+runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Assignment -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (SolveEvent -> IO ()) -> IO ()
 runSolve = runSolveWith (const handleReadLine)
 
 -- | As 'runSolve', but reads stdout/stderr via an injected primitive instead
@@ -100,8 +124,8 @@ runSolve = runSolveWith (const handleReadLine)
 -- The primitive is given the stream tag ("stdout"/"stderr") alongside the
 -- handle so a test can target one stream's abandonment path without racing
 -- the other's.
-runSolveWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (SolveEvent -> IO ()) -> IO ()
-runSolveWith readLineFor repository issueNumber workflow brand configPath config existingSession existingLogPath provenance userMessage aggregator eventSink = do
+runSolveWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Assignment -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (SolveEvent -> IO ()) -> IO ()
+runSolveWith readLineFor repository issueNumber workflow brand configPath config assignment existingSession existingLogPath provenance userMessage aggregator eventSink = do
   logResult <- openSessionLog repository (workflowLogName workflow <> "-" <> solverName brand) issueNumber existingLogPath
   sessionLog <- case logResult of
     Left message -> eventSink (SolveDiagnostic issueNumber message) >> pure Nothing
@@ -187,7 +211,7 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (SolveProcessFinished issueNumber outcome)
     processSpec executablePath =
-      (proc executablePath (solveArguments issueNumber workflow brand configPath repository config existingSession provenance userMessage))
+      (proc executablePath (solveArguments issueNumber workflow brand configPath repository config assignment existingSession provenance userMessage))
         { cwd = Just repositoryRoot,
           std_out = CreatePipe,
           std_err = CreatePipe,
@@ -195,15 +219,23 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
           create_group = True
         }
 
-solveArguments :: Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> Repository -> WorkflowConfig -> Maybe Text -> ResumeProvenance -> Text -> [String]
-solveArguments issueNumber workflow CodexSolver configPath repository config existingSession provenance userMessage =
+-- | The provider argv for one solve invocation.
+--
+-- Takes the resolved 'Assignment' rather than the roster it came from: the
+-- caller has already established that the cell exists (see 'solveAssignment'
+-- and the refusals in "Kanban.UI.Solve" and "Kanban.Worker"), so this stays
+-- total and gains no failure return of its own. Under an absent
+-- @models.toml@ the compiled defaults make every argument below
+-- byte-identical to the literals this replaced.
+solveArguments :: Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> Repository -> WorkflowConfig -> Assignment -> Maybe Text -> ResumeProvenance -> Text -> [String]
+solveArguments issueNumber workflow CodexSolver configPath repository config assignment existingSession provenance userMessage =
   case existingSession of
     Nothing ->
       [ "exec",
         "--model",
-        "gpt-5.4",
+        Text.unpack assignment.assignmentModel,
         "--config",
-        "model_reasoning_effort=\"high\"",
+        codexEffortOption assignment,
         "--config",
         "model_reasoning_summary=\"detailed\"",
         "--dangerously-bypass-approvals-and-sandbox",
@@ -214,9 +246,9 @@ solveArguments issueNumber workflow CodexSolver configPath repository config exi
       [ "exec",
         "resume",
         "--model",
-        "gpt-5.4",
+        Text.unpack assignment.assignmentModel,
         "--config",
-        "model_reasoning_effort=\"high\"",
+        codexEffortOption assignment,
         "--config",
         "model_reasoning_summary=\"detailed\"",
         "--config",
@@ -226,12 +258,12 @@ solveArguments issueNumber workflow CodexSolver configPath repository config exi
         Text.unpack sessionId,
         Text.unpack (resumeSolvePrompt config workflow CodexSolver repository provenance userMessage)
       ]
-solveArguments issueNumber workflow ClaudeSolver configPath repository config existingSession provenance userMessage =
+solveArguments issueNumber workflow ClaudeSolver configPath repository config assignment existingSession provenance userMessage =
   [ "--print",
     "--model",
-    "claude-sonnet-5",
+    Text.unpack assignment.assignmentModel,
     "--effort",
-    "high",
+    Text.unpack assignment.assignmentEffort,
     "--permission-mode",
     "bypassPermissions",
     "--output-format",
@@ -240,6 +272,12 @@ solveArguments issueNumber workflow ClaudeSolver configPath repository config ex
   ]
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
     <> [Text.unpack (if existingSession == Nothing then initialSolvePrompt issueNumber workflow ClaudeSolver configPath repository else resumeSolvePrompt config workflow ClaudeSolver repository provenance userMessage)]
+
+-- | Codex takes its effort as a @-c@ style override rather than a flag, so
+-- the assignment's effort is quoted into the same @model_reasoning_effort@
+-- key both spawn sites already used.
+codexEffortOption :: Assignment -> String
+codexEffortOption assignment = Text.unpack ("model_reasoning_effort=\"" <> assignment.assignmentEffort <> "\"")
 
 initialSolvePrompt :: Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> Repository -> Text
 initialSolvePrompt issueNumber workflow brand configPath repository =

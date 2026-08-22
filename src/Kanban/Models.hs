@@ -24,9 +24,13 @@
 -- sparse patch over the defaults: every loaded provider a role applies to
 -- must resolve from the file itself.
 --
--- Nothing consumes the roster yet. This module is loaded once at startup and
--- retained (see 'Kanban.UI.Types.AppState'); the spawn sites migrate to it
--- in later slices of epic #412.
+-- The Haskell spawn sites consume it through 'assignmentFor', the one
+-- accessor a caller resolves a cell with: the roster is loaded once at
+-- startup and retained (see 'Kanban.UI.Types.AppState'), each agent-starting
+-- path unwraps that result and resolves the cell its routing selected, and a
+-- roster that cannot supply the cell refuses the spawn instead of falling
+-- back. The Python and plugin spawn sites migrate in a later slice of epic
+-- #412.
 module Kanban.Models
   ( ProviderName (..),
     RoleName (..),
@@ -36,6 +40,7 @@ module Kanban.Models
     RosterDefect (..),
     RosterFailure (..),
     RosterLoadError (..),
+    AssignmentUnavailable (..),
     allProviders,
     allRoles,
     roleApplicability,
@@ -50,9 +55,11 @@ module Kanban.Models
     rosterPath,
     loadModelRoster,
     saveModelRoster,
+    assignmentFor,
     rosterDefectMessage,
     rosterFailureMessage,
     rosterErrorMessage,
+    assignmentUnavailableMessage,
   )
 where
 
@@ -279,6 +286,63 @@ data RosterLoadError = RosterLoadError
     rosterErrorFailure :: RosterFailure
   }
   deriving stock (Eq, Show)
+
+-- | Why a @(role, provider)@ cell could not be resolved.
+--
+-- Distinct from 'RosterDefect' on purpose: a defect is a file the operator
+-- must repair, while every constructor here describes a /valid/ roster that
+-- simply does not cover what the caller's routing selected. 'validateRoster'
+-- demands an assignment only for loaded providers a role applies to, so a
+-- Claude-only or zero-agent roster is valid and yet has no cell for a Codex
+-- spawn; that is a refusal to report, not a file to fix.
+data AssignmentUnavailable
+  = -- | The provider this run's routing selected is not in @agents@, so the
+    -- file declares nothing for it to run on.
+    UnloadedProvider RoleName ProviderName
+  | -- | The role cannot run on that provider at all ('roleApplicability').
+    InapplicableRole RoleName ProviderName
+  | -- | Loaded and applicable, but the roster carries no assignment. A
+    -- validated roster cannot reach this; an unvalidated value built in
+    -- process can, and it must refuse rather than invent a default.
+    UnassignedCell RoleName ProviderName
+  deriving stock (Eq, Show)
+
+-- | The one accessor a spawn site resolves a cell through.
+--
+-- Total, and deliberately the /only/ way out of 'rosterAssignments': a
+-- partial lookup at each call site would let one of them recover with the
+-- compiled default, which is exactly the silent-old-model path D-3 forbids.
+-- Both preconditions are checked here rather than assumed, because a
+-- validated roster guarantees a cell only for loaded providers a role
+-- applies to, and nothing constrains today's brand routing to select one.
+assignmentFor :: ModelRoster -> RoleName -> ProviderName -> Either AssignmentUnavailable Assignment
+assignmentFor roster role provider
+  | provider `notElem` roster.rosterAgents = Left (UnloadedProvider role provider)
+  | provider `notElem` roleApplicability role = Left (InapplicableRole role provider)
+  | otherwise =
+      maybe (Left (UnassignedCell role provider)) Right (Map.lookup (role, provider) roster.rosterAssignments)
+
+-- | The refusal text every spawn boundary shares for an unavailable cell,
+-- naming the cell the way 'rosterDefectMessage' names a defective one.
+assignmentUnavailableMessage :: AssignmentUnavailable -> Text
+assignmentUnavailableMessage unavailable = case unavailable of
+  UnloadedProvider role provider ->
+    "model roster does not load provider "
+      <> quotedKey (providerKey provider)
+      <> ", which this "
+      <> quotedKey (roleKey role)
+      <> " step runs on"
+  InapplicableRole role provider ->
+    "model roster role "
+      <> quotedKey (roleKey role)
+      <> " cannot run on provider "
+      <> quotedKey (providerKey provider)
+  UnassignedCell role provider ->
+    "model roster has no "
+      <> quotedKey ("roles." <> roleKey role <> "." <> providerKey provider)
+      <> " assignment"
+  where
+    quotedKey text = "\"" <> text <> "\""
 
 rosterDefectMessage :: RosterDefect -> Text
 rosterDefectMessage defect = case defect of

@@ -5,10 +5,12 @@ module Kanban.UI.PullRequest
     applyPullRequestFlowEvent,
     drainerErrorStatus,
     drainerTogglePress,
+    failPullRequestLaunch,
     interruptPullRequestSession,
     mergeItemDoneCard,
     mergeSelectedDoneCard,
     modifyAutoSolveForPullRequest,
+    pullRequestStartRefusal,
     runDrainerToggleHandoff,
     startPullRequestReview,
     startPullRequestReviewWithVisibility,
@@ -19,7 +21,7 @@ where
 
 
 import Brick
-import Brick.BChan (writeBChan)
+import Brick.BChan (BChan, writeBChan)
 import Control.Concurrent (forkIO)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
@@ -47,6 +49,7 @@ import Kanban.Drainer
     runDirectMerge,
     setDrainerRunning
   )
+import Kanban.Models (ModelRoster)
 import Kanban.Preflight
   ( PreflightAction (..)
     )
@@ -58,7 +61,8 @@ import Kanban.PullRequestFlow
     agentForAction,
     directPullRequestAction,
     labelPullRequestAction,
-    originFromBody
+    originFromBody,
+    pullRequestAssignment
     )
 import Kanban.Solve
   ( ResumeProvenance (..),
@@ -96,6 +100,17 @@ startPullRequestReview = startPullRequestReviewWithOptions directPullRequestActi
 startPullRequestReviewWithVisibility :: Bool -> PullRequest -> EventM Name AppState ()
 startPullRequestReviewWithVisibility showOverlay = startPullRequestReviewWithOptions labelPullRequestAction showOverlay False
 
+-- | The roster refusal a press must answer /before/ a session is created, for
+-- the reason 'Kanban.UI.Solve.solveStartDecision' documents: a session left
+-- behind by a refusal is one 'pullRequestSessionReusable' hands back to the
+-- next press instead of retrying. The launch boundary asks again, because
+-- that is the boundary a process actually crosses.
+pullRequestStartRefusal :: AppState -> PullRequestOrigin -> PullRequestAction -> Maybe Text
+pullRequestStartRefusal state origin action =
+  case resolvedRosterFor (\roster -> pullRequestAssignment roster origin action) state.appModelRoster of
+    Left message -> Just (pullRequestActionText action <> " did not start: " <> message)
+    Right _ -> Nothing
+
 startPullRequestReviewWithOptions :: (WorkflowConfig -> PullRequest -> PullRequestAction) -> Bool -> Bool -> PullRequest -> EventM Name AppState ()
 startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullRequest = case originFromBody pullRequest.pullRequestBody of
   Left message -> setNotice message
@@ -108,6 +123,7 @@ startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullReques
             when showOverlay $ do
               modify (\current -> current {appOverlay = Just (PullRequestReviewOverlay pullRequest.pullRequestNumber), appNotice = Nothing})
               presentTranscriptTail
+      _ | Just notice <- pullRequestStartRefusal state origin action -> setNotice notice
       _ -> do
         let brand = agentForAction origin action
             session =
@@ -149,8 +165,30 @@ launchPullRequestFlow number origin action brand existingSession provenance inpu
     Just notice -> setNotice notice
     Nothing -> launchLivePullRequestFlow number origin action brand existingSession provenance input
 
+-- | The roster refusal sits here for the reason the read-only-history one
+-- does: this is the boundary a process crosses. Autosolve's own review and
+-- rereview rounds come through 'launchPullRequestFlow' above, so they refuse
+-- on the same terms without an arm of their own.
 launchLivePullRequestFlow :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
-launchLivePullRequestFlow number origin action _brand existingSession provenance input = do
+launchLivePullRequestFlow number origin action brand existingSession provenance input = do
+  state <- get
+  case resolvedRosterFor (\roster -> pullRequestAssignment roster origin action) state.appModelRoster of
+    Left message -> liftIO (failPullRequestLaunch state.appEventChannel number message)
+    Right roster -> launchRosteredPullRequestFlow roster number origin action brand existingSession provenance input
+
+-- | The pull-request twin of 'Kanban.UI.Solve.failSolveLaunch', and for the
+-- same reason: every caller has already inserted or reopened a session, so a
+-- launch that never reached a provider has to settle that session rather than
+-- only raise a notice. A session left in 'SolveStarting' is what
+-- 'pullRequestSessionReusable' reads as live work and reopens instead of
+-- starting a fresh review.
+failPullRequestLaunch :: BChan AppEvent -> Int -> Text -> IO ()
+failPullRequestLaunch eventChannel number message = do
+  writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
+  writeBChan eventChannel (PullRequestProtocolEvent (PullRequestProcessFinished number (SolveFailed message)))
+
+launchRosteredPullRequestFlow :: ModelRoster -> Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
+launchRosteredPullRequestFlow roster number origin action _brand existingSession provenance input = do
   state <- get
   let existingLogPath = Map.lookup number state.appPullRequestReviewSessions >>= (.sessionLogPath)
       parent = autoSolveWorkerParent state number
@@ -158,15 +196,11 @@ launchLivePullRequestFlow number origin action _brand existingSession provenance
   void . liftIO . forkIO $ do
     blocked <- preflightBlocker state.appRepository (ActionPullRequestFlow origin action)
     case blocked of
-      Just message -> do
-        writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
-        writeBChan eventChannel (PullRequestProtocolEvent (PullRequestProcessFinished number (SolveFailed message)))
+      Just message -> failPullRequestLaunch eventChannel number message
       Nothing -> do
-        launched <- launchPullRequestWorker state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
+        launched <- launchPullRequestWorker roster state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
         case launched of
-          Left message -> do
-            writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
-            writeBChan eventChannel (PullRequestProtocolEvent (PullRequestProcessFinished number (SolveFailed message)))
+          Left message -> failPullRequestLaunch eventChannel number message
           Right descriptor -> do
             writeBChan eventChannel (WorkerRegistered descriptor)
 

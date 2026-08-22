@@ -815,6 +815,7 @@ testWorkerDescriptor task =
             workerWorkflowConfig = defaultWorkflowConfig
           },
       workerDescriptorSpecPath = "/tmp/worker-1.spec.json",
+      workerDescriptorRosterPath = "/tmp/worker-1.roster.toml",
       workerDescriptorEventPath = "/tmp/worker-1.events.jsonl",
       workerDescriptorStatePath = "/tmp/worker-1.state.json",
       workerDescriptorAckPath = "/tmp/worker-1.ack",

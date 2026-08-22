@@ -27,6 +27,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import Kanban.CommandCapture (CommandBounds)
 import Kanban.Domain (WorkflowConfig)
+import Kanban.Models (ModelRoster)
 import Kanban.Process (ManagedProcess, killManagedProcess)
 import Kanban.Review.Types (PendingRequest, ReviewEvent)
 import Kanban.Transcript (SessionLog)
@@ -62,6 +63,17 @@ data ReviewClient = ReviewClient
     -- never re-derives identity from the checkout's own remote.
     reviewRepositorySlug :: Text,
     reviewWorkflowConfig :: WorkflowConfig,
+    -- | The roster snapshot this backend was started against, resolved once
+    -- at startup and retained rather than reread. Two cells are consulted
+    -- through it, each at its own spawn boundary and each with its own
+    -- refusal: @issue_review.codex@ for the review thread's own model and
+    -- effort ('Kanban.Review.beginIssueReview',
+    -- 'Kanban.Review.sendTurnStart'), and @issue_revise.claude@ for the
+    -- @kanban_run_claude@ tool ('Kanban.Review.Tools.runAuthenticatedClaude').
+    -- A roster that loads only one brand leaves the other's tool refusing,
+    -- which is why the whole roster travels here rather than one resolved
+    -- assignment.
+    reviewModelRoster :: ModelRoster,
     reviewSessionLog :: Maybe SessionLog,
     reviewOutputDone :: MVar (),
     reviewErrorDone :: MVar (),

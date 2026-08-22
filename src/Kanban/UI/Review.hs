@@ -49,6 +49,7 @@ import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.Drainer (normalizedRepositoryIdentity)
+import Kanban.Models (ProviderName (..), RoleName (..), assignmentFor)
 import Kanban.Preflight
   ( PreflightAction (..),
     issueOriginFromBody,
@@ -640,20 +641,30 @@ canonicalReviewNotice message
 -- revision on a backend failure, which is right for a shared cause and
 -- wrong for an issue-specific one. Each queued session gets its own
 -- preflight from 'launchIssueReview' once the coordinator is up.
+--
+-- The roster is unwrapped here, before any process is started, exactly as it
+-- is at the solve and pull-request boundaries: only @issue_review.codex@ is
+-- consulted, because the Claude embedded-review backend is MODEL-13's and
+-- @kanban_run_claude@ refuses on its own cell at its own boundary. A refusal
+-- travels the backend's existing failure surface, which already fails every
+-- session waiting on it.
 startReviewBackend :: EventM Name AppState ()
 startReviewBackend = do
   state <- get
   modify (\current -> current {appReviewBackend = ReviewBackendStarting})
   let eventChannel = state.appEventChannel
       eventSink = writeBChan eventChannel . ReviewProtocolEvent
-  void
-    . liftIO
-    . forkIO
-    $ do
-      blocked <- preflightBlocker state.appRepository reviewBackendAction
-      case blocked of
-        Just message -> writeBChan eventChannel (ReviewBackendStarted (Left message))
-        Nothing -> startReviewClient state.appConfig.resolvedWorkflow state.appRepository eventSink >>= writeBChan eventChannel . ReviewBackendStarted
+  case resolvedRosterFor (\roster -> assignmentFor roster IssueReviewRole CodexProvider) state.appModelRoster of
+    Left message -> liftIO (writeBChan eventChannel (ReviewBackendStarted (Left message)))
+    Right roster ->
+      void
+        . liftIO
+        . forkIO
+        $ do
+          blocked <- preflightBlocker state.appRepository reviewBackendAction
+          case blocked of
+            Just message -> writeBChan eventChannel (ReviewBackendStarted (Left message))
+            Nothing -> startReviewClient roster state.appConfig.resolvedWorkflow state.appRepository eventSink >>= writeBChan eventChannel . ReviewBackendStarted
 
 -- | Preflighted here too, not only in 'startReviewBackend': a backend
 -- already running for an earlier issue is reused as-is, so this is the only

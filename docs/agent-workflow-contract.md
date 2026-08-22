@@ -185,14 +185,16 @@ arithmetic, which §2.3 owns.
   `$pr-rereview` — the case Kanban's own invocation always produces, since
   every Kanban-created PR carries a `pr-origin` marker — the session Kanban
   spawns already *is* the correctly-pinned canonical reviewer (Kanban chose
-  its brand via `agentForAction` and its model/effort via `codexModel`/
-  `codexEffort`/`claudeModel`/`claudeEffort` before invoking it). A packaged
-  workflow implementing this action must have that already-correct session
+  its brand via `agentForAction` and its model/effort from the model roster's
+  `pr_review`/`pr_revise` cell for that brand — `src/Kanban/Models.hs`, whose
+  compiled defaults the tracked `models.toml.example` mirrors — before
+  invoking it, refusing to spawn at all if the roster cannot supply that
+  cell). A packaged workflow implementing this action must have that
+  already-correct session
   perform the review itself and use its bundled coordinator only to publish
   the result safely (gate/head/race checks, comment, label, and approval-only
-  draft readiness) — not spawn a
-  further, unpinned nested reviewer that would both waste and be unable to
-  verify Kanban's guarantee.
+  draft readiness) — not spawn a further, unpinned nested reviewer that would
+  both waste and be unable to verify Kanban's guarantee.
   `pr-revise` and `repair` are the genuine exceptions: each runs on the PR's
   own origin brand, so its internal "invoke exactly one canonical
   `pr-rereview`" step
@@ -217,9 +219,13 @@ arithmetic, which §2.3 owns.
   reviewed exception to this one nested-call policy: unlike the Codex
   plugin's otherwise-identical coordinator copy, it pins and verifies that
   nested reviewer to the exact `gpt-5.6-terra`/`claude-opus-5` at `xhigh`
-  values `codexModel`/`claudeModel`/`codexEffort`/`claudeEffort` already use
-  for `PullRequestReview`/`PullRequestRereview`, and binds the verified
-  model in the published `pr-review:v2` marker instead of `unspecified`.
+  values the `roles.pr_review.codex` and `roles.pr_review.claude` cells of
+  `models.toml.example` declare — the cells Kanban's own
+  `PullRequestReview`/`PullRequestRereview` spawns resolve — and binds the
+  verified model in the published `pr-review:v2` marker instead of
+  `unspecified`. `tools/test_claude_plugin.py` holds the coordinator's
+  constants against those cells; its Python half stays a verbatim constant
+  assertion until the coordinator itself reads the roster.
   See [claude-plugin/README.md](../claude-plugin/README.md) for the
   rationale; this remains a host-configuration concern for the Codex
   plugin's own nested call.

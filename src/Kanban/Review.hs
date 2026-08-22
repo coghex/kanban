@@ -46,6 +46,7 @@ module Kanban.Review
     githubCommandBounds,
     githubIssueCommentArguments,
     githubIssueEditArguments,
+    authenticatedClaudeArguments,
     githubIssueViewArguments,
     githubLabelCreateArguments,
     handleWireMessage,
@@ -65,6 +66,7 @@ module Kanban.Review
     resolveCanonicalIssueReviewer,
     resolveCanonicalIssueReviewerAt,
     reviewStageForLabels,
+    issueReviseAssignment,
     runAuthenticatedClaude,
     runCanonicalCommand,
     runCanonicalIssueReview,
@@ -103,6 +105,14 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import Kanban.CommandCapture (CommandBounds (..))
 import Kanban.Domain (Repository (..), WorkflowConfig, defaultWorkflowConfig)
+import Kanban.Models
+  ( Assignment (..),
+    ModelRoster,
+    ProviderName (..),
+    RoleName (..),
+    assignmentFor,
+    assignmentUnavailableMessage,
+  )
 import Kanban.Process (killManagedProcess, managedProcess)
 import Kanban.Review.Canonical
   ( IssueReviewerRecord (..),
@@ -146,13 +156,15 @@ import Kanban.Review.Prompts
     reviewPrompt,
   )
 import Kanban.Review.Tools
-  ( claudeCommandBounds,
+  ( authenticatedClaudeArguments,
+    claudeCommandBounds,
     githubActionSummary,
     githubCommandBounds,
     githubIssueCommentArguments,
     githubIssueEditArguments,
     githubIssueViewArguments,
     githubLabelCreateArguments,
+    issueReviseAssignment,
     runAuthenticatedClaude,
     runGitHubIssueTool,
   )
@@ -199,8 +211,23 @@ import System.Process
   )
 import System.Timeout (timeout)
 
-startReviewClient :: WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
-startReviewClient workflowConfig repository eventSink = do
+-- | The cell the embedded issue-review thread itself runs on. Only Codex is
+-- read: the Claude embedded-review backend is MODEL-13's, so
+-- @issue_review.claude@ stays unconsulted here even when the roster loads it.
+issueReviewAssignment :: ModelRoster -> Either Text Assignment
+issueReviewAssignment roster =
+  either (Left . assignmentUnavailableMessage) Right (assignmentFor roster IssueReviewRole CodexProvider)
+
+startReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
+startReviewClient roster workflowConfig repository eventSink = case issueReviewAssignment roster of
+  -- Resolved before the app-server is spawned, not after: a roster that
+  -- loads no Codex provider must start no process at all, and the backend's
+  -- own failure surface already carries the reason to the UI.
+  Left message -> pure (Left message)
+  Right _ -> startResolvedReviewClient roster workflowConfig repository eventSink
+
+startResolvedReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
+startResolvedReviewClient roster workflowConfig repository eventSink = do
   logResult <- openSessionLog repository "issue-revision-appserver" 0 Nothing
   sessionLog <- case logResult of
     Left message -> eventSink (ReviewProtocolWarning message) >> pure Nothing
@@ -236,6 +263,7 @@ startReviewClient workflowConfig repository eventSink = do
                 reviewRepositoryRoot = repositoryRoot,
                 reviewRepositorySlug = repository.repositoryOwner <> "/" <> repository.repositoryName,
                 reviewWorkflowConfig = workflowConfig,
+                reviewModelRoster = roster,
                 reviewSessionLog = sessionLog,
                 reviewOutputDone = outputDone,
                 reviewErrorDone = errorDone,
@@ -281,8 +309,12 @@ startReviewClient workflowConfig repository eventSink = do
 -- @claude@ reaches the deadline and capture-grace paths as cheaply as a
 -- fake @gh@ does. No test needs the two to differ; one that did could
 -- override 'reviewClaudeBounds' on the result.
-newReviewClientForTesting :: CommandBounds -> FilePath -> Text -> (ReviewEvent -> IO ()) -> IO ReviewClient
-newReviewClientForTesting bounds repositoryRoot repositorySlug eventSink = do
+--
+-- The roster is injected for the same reason: it is what the two consulted
+-- cells are resolved from, so a test proving a non-default roster reaches
+-- @kanban_run_claude@'s argv passes one in here.
+newReviewClientForTesting :: ModelRoster -> CommandBounds -> FilePath -> Text -> (ReviewEvent -> IO ()) -> IO ReviewClient
+newReviewClientForTesting roster bounds repositoryRoot repositorySlug eventSink = do
   (Just inputHandle, Just _outputHandle, Just _errorHandle, processHandle) <-
     createProcess
       (proc "git" ["--version"])
@@ -315,6 +347,7 @@ newReviewClientForTesting bounds repositoryRoot repositorySlug eventSink = do
         reviewRepositoryRoot = repositoryRoot,
         reviewRepositorySlug = repositorySlug,
         reviewWorkflowConfig = defaultWorkflowConfig,
+        reviewModelRoster = roster,
         reviewSessionLog = Nothing,
         reviewOutputDone = outputDone,
         reviewErrorDone = errorDone,
@@ -327,9 +360,9 @@ newReviewClientForTesting bounds repositoryRoot repositorySlug eventSink = do
 -- and assert on the exact wire traffic they provoke — the seam the steer
 -- recovery path needs, since the suite previously only decoded app-server
 -- messages rather than letting a handler answer one (issue #17).
-newRecordingReviewClientForTesting :: (ReviewEvent -> IO ()) -> IO (ReviewClient, Handle)
-newRecordingReviewClientForTesting eventSink = do
-  client <- newReviewClientForTesting githubCommandBounds "." "coghex/kanban" eventSink
+newRecordingReviewClientForTesting :: ModelRoster -> (ReviewEvent -> IO ()) -> IO (ReviewClient, Handle)
+newRecordingReviewClientForTesting roster eventSink = do
+  client <- newReviewClientForTesting roster githubCommandBounds "." "coghex/kanban" eventSink
   (readEnd, writeEnd) <- createPipe
   hSetBuffering writeEnd LineBuffering
   -- The placeholder process's own stdin is of no further use, and leaving it
@@ -376,13 +409,14 @@ initializeClient client outputHandle = do
         ]
 
 beginIssueReview :: ReviewClient -> Int -> IO (Either Text ())
-beginIssueReview client issueNumber =
-  sendRequest client (PendingThreadStart issueNumber) "thread/start" threadParams
+beginIssueReview client issueNumber = case issueReviewAssignment client.reviewModelRoster of
+  Left message -> pure (Left message)
+  Right assignment -> sendRequest client (PendingThreadStart issueNumber) "thread/start" (threadParams assignment)
   where
-    threadParams =
+    threadParams assignment =
       object
         [ "cwd" .= client.reviewRepositoryRoot,
-          "model" .= ("gpt-5.4" :: Text),
+          "model" .= assignment.assignmentModel,
           "approvalPolicy" .= ("on-request" :: Text),
           "sandbox" .= ("read-only" :: Text),
           "ephemeral" .= False,
@@ -482,13 +516,14 @@ sendRequest client pending method params = do
       pure (Left message)
 
 sendTurnStart :: ReviewClient -> Text -> Text -> IO (Either Text ())
-sendTurnStart client threadId prompt =
-  sendRequest client (PendingTurnStart threadId) "turn/start" params
+sendTurnStart client threadId prompt = case issueReviewAssignment client.reviewModelRoster of
+  Left message -> pure (Left message)
+  Right assignment -> sendRequest client (PendingTurnStart threadId) "turn/start" (params assignment)
   where
-    params =
+    params assignment =
       object
         [ "threadId" .= threadId,
-          "effort" .= ("high" :: Text),
+          "effort" .= assignment.assignmentEffort,
           "input" .= [textInput prompt],
           "outputSchema" .= finalOutputSchema
         ]

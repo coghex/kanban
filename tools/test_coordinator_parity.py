@@ -67,9 +67,10 @@ DOCUMENTED_DIVERGENCE = '''\
 +# fully construct the subprocess they spawn, so — for this plugin's
 +# bundled coordinator only — they pin it and can therefore verify and
 +# publish it, matching the exact gpt-5.6-terra/claude-opus-5 at xhigh
-+# values src/Kanban/PullRequestFlow.hs's codexModel/claudeModel/
-+# codexEffort/claudeEffort already use for PullRequestReview/
-+# PullRequestRereview. This is a deliberate, reviewed divergence from
++# values the roles.pr_review.codex and roles.pr_review.claude cells of
++# models.toml.example declare -- the cells Kanban's own
++# PullRequestReview/PullRequestRereview spawns resolve from the model
++# roster. This is a deliberate, reviewed divergence from
 +# codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py's
 +# otherwise-identical copy and from docs/agent-workflow-contract.md §2.2's
 +# general "brand only, no pinned model" policy for this nested-spawn path;

@@ -99,6 +99,12 @@ COMMAND_SIGIL = "/"
 SOLVE_HS = REPO_ROOT / "src" / "Kanban" / "Solve.hs"
 PR_FLOW_HS = REPO_ROOT / "src" / "Kanban" / "PullRequestFlow.hs"
 UI_HS = REPO_ROOT / "src" / "Kanban" / "UI.hs"
+# Since MODEL-2 the canonical reviewer's model and effort are roster cells
+# rather than literals in PullRequestFlow.hs, so the Haskell half of the
+# parity gate below reads the tracked example roster -- which
+# Spec.Config.Models holds byte-for-byte against the compiled defaults the
+# spawn sites actually resolve.
+MODELS_TOML_EXAMPLE = REPO_ROOT / "models.toml.example"
 REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review" / "Canonical.hs"
 # Since issue #444 the record's own location is resolved for both managed
 # installations by one module, and Review/Canonical.hs asks it rather than
@@ -835,6 +841,34 @@ class ReviewCoordinatorSelfTestTests(unittest.TestCase):
         self.assertIn("self-test passed", proc.stdout)
 
 
+def roster_cell(source: str, section: str) -> dict:
+    """The model/effort/display of one [roles.<role>.<provider>] table.
+
+    A deliberately small reader rather than a TOML parse: the assertion is
+    that the pinned Python constants equal what that one table declares, and
+    a table that is absent or missing a key must fail loudly here rather than
+    resolve to None and compare equal to nothing.
+    """
+
+    lines = source.splitlines()
+    header = "[" + section + "]"
+    if header not in lines:
+        raise AssertionError(f"models.toml.example declares no {header} table")
+    cell = {}
+    for line in lines[lines.index(header) + 1 :]:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            break
+        if "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        cell[key.strip()] = value.strip().strip('"')
+    missing = {"model", "effort"} - set(cell)
+    if missing:
+        raise AssertionError(f"{header} declares no {sorted(missing)}")
+    return cell
+
+
 class NestedReviewerModelPinningTests(unittest.TestCase):
     """Round-2 review finding: unlike the self-reviewed known-origin case
     (where Kanban's own top-level spawn pins the model outside this
@@ -842,22 +876,47 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
     the nested-reviewer subprocess call for /pr-revise's cross-brand
     handoff and the dual-review fallback, so they can and must pin and
     verify the canonical reviewer model/effort rather than deferring to an
-    arbitrary local default. Pinned against the exact values
-    src/Kanban/PullRequestFlow.hs's codexModel/claudeModel/codexEffort/
-    claudeEffort already use for PullRequestReview/PullRequestRereview, so
-    the two cannot silently drift apart. This is a deliberate, reviewed
-    divergence from codex-plugin's otherwise-identical coordinator copy and
-    from docs/agent-workflow-contract.md §2.2's general policy for this one
-    nested-spawn path in this plugin only."""
+    arbitrary local default.
+
+    Since MODEL-2 the Haskell half is the pr_review roster cell rather than a
+    literal in src/Kanban/PullRequestFlow.hs: Kanban's own PR review and
+    rereview spawns resolve roles.pr_review.<provider> from the roster, and
+    Spec.Config.Models holds models.toml.example byte-for-byte against the
+    compiled defaults, so reading the example here still pins exactly what
+    those spawns use. The Python half stays a verbatim constant assertion
+    until MODEL-4 migrates the coordinator itself. This is a deliberate,
+    reviewed divergence from codex-plugin's otherwise-identical coordinator
+    copy and from docs/agent-workflow-contract.md §2.2's general policy for
+    this one nested-spawn path in this plugin only."""
 
     def test_nested_reviewer_models_match_the_haskell_canonical_review_models(self):
+        roster_source = MODELS_TOML_EXAMPLE.read_text(encoding="utf-8")
+        codex_cell = roster_cell(roster_source, "roles.pr_review.codex")
+        claude_cell = roster_cell(roster_source, "roles.pr_review.claude")
+        self.assertEqual(codex_cell["model"], "gpt-5.6-terra")
+        self.assertEqual(codex_cell["effort"], "xhigh")
+        self.assertEqual(claude_cell["model"], "claude-opus-5")
+        self.assertEqual(claude_cell["effort"], "xhigh")
+
+        # The literals must be gone from the Haskell source, or this gate
+        # would keep passing against a stale second authority.
         pr_flow_source = PR_FLOW_HS.read_text(encoding="utf-8")
-        self.assertIn('codexModel _ = "gpt-5.6-terra"', pr_flow_source)
-        self.assertIn('codexEffort _ = "xhigh"', pr_flow_source)
-        self.assertIn('claudeModel _ = "claude-opus-5"', pr_flow_source)
-        self.assertIn('claudeEffort _ = "xhigh"', pr_flow_source)
+        for retired in ("codexModel", "codexEffort", "claudeModel", "claudeEffort"):
+            self.assertNotIn(retired, pr_flow_source)
 
         coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn(
+            f'CODEX_NESTED_REVIEW_MODEL = "{codex_cell["model"]}"', coordinator_source
+        )
+        self.assertIn(
+            f'CODEX_NESTED_REVIEW_EFFORT = "{codex_cell["effort"]}"', coordinator_source
+        )
+        self.assertIn(
+            f'CLAUDE_NESTED_REVIEW_MODEL = "{claude_cell["model"]}"', coordinator_source
+        )
+        self.assertIn(
+            f'CLAUDE_NESTED_REVIEW_EFFORT = "{claude_cell["effort"]}"', coordinator_source
+        )
         self.assertIn('CODEX_NESTED_REVIEW_MODEL = "gpt-5.6-terra"', coordinator_source)
         self.assertIn('CODEX_NESTED_REVIEW_EFFORT = "xhigh"', coordinator_source)
         self.assertIn('CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-5"', coordinator_source)

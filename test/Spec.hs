@@ -18,6 +18,7 @@ import qualified Spec.Agent.Ping as Ping
 import qualified Spec.Agent.Preflight as Preflight
 import qualified Spec.Agent.Protocol as Protocol
 import qualified Spec.Agent.PullRequestFlow as PullRequestFlow
+import qualified Spec.Agent.Roster as AgentRoster
 import qualified Spec.Agent.Solve as Solve
 import qualified Spec.Agent.Supervision as Supervision
 import qualified Spec.Agent.Transcript as Transcript
@@ -94,6 +95,7 @@ suiteGroups =
     SuiteGroup "Spec.Config.Models" PingLane Models.spec,
     SuiteGroup "Spec.Agent.Transcript" PingLane Transcript.spec,
     SuiteGroup "Spec.Agent.PullRequestFlow" PingLane PullRequestFlow.spec, -- 1.9s
+    SuiteGroup "Spec.Agent.Roster" LifecycleLane AgentRoster.spec,
     SuiteGroup "Spec.UI.ReviewSession" PingLane ReviewSession.spec,
     SuiteGroup "Spec.UI.SessionCore" PingLane SessionCore.spec,
     SuiteGroup "Spec.Repository.Identity" PingLane RepositoryIdentity.spec,

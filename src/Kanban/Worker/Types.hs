@@ -199,6 +199,16 @@ data WorkerEnvelope = WorkerEnvelope
 data WorkerDescriptor = WorkerDescriptor
   { workerDescriptorSpec :: WorkerSpec,
     workerDescriptorSpecPath :: FilePath,
+    -- | The launch-scoped model-roster snapshot written beside the spec.
+    --
+    -- The supervisor is a separate process, so the roster the dashboard
+    -- validated before it agreed to launch has to travel to it explicitly;
+    -- rereading the user's @models.toml@ inside the supervisor would run the
+    -- agent on whatever that file says at spawn time rather than on what was
+    -- checked. It is rewritten on every launch and never replayed — durable
+    -- per-session assignment recording is MODEL-7's, and 'WorkerSpec' keeps
+    -- its shape until then.
+    workerDescriptorRosterPath :: FilePath,
     workerDescriptorEventPath :: FilePath,
     workerDescriptorStatePath :: FilePath,
     workerDescriptorAckPath :: FilePath,

@@ -1,5 +1,7 @@
 module Kanban.UI.Solve
-  ( applySolveEvent,
+  ( SolveStartDecision (..),
+    applySolveEvent,
+    failSolveLaunch,
     interruptSolveSession,
     issueFromBoard,
     launchSolveInvocation,
@@ -7,6 +9,7 @@ module Kanban.UI.Solve
     openSelectedSolveChooser,
     preflightBlocker,
     pullRequestFromBoard,
+    solveStartDecision,
     startIssueSolve,
     submitSolveInput,
     suppressIfResolvedPullRequest,
@@ -16,16 +19,18 @@ where
 
 
 import Brick
-import Brick.BChan (writeBChan)
+import Brick.BChan (BChan, writeBChan)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (unless, void )
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
+import Kanban.Models (ModelRoster)
 import Kanban.Preflight
   ( PreflightAction (..),
     actionReport,
@@ -40,6 +45,7 @@ import Kanban.Solve
     SolveOutcome (..),
     SolveWorkflow (..),
     SolverBrand (..),
+    solveAssignment,
     solverLabel
   )
 import Kanban.Text (sanitizeText)
@@ -102,6 +108,34 @@ workflowKey :: SolveWorkflow -> Text
 workflowKey SolveOnly = actionKeyText SolveSelection
 workflowKey AutoSolve = actionKeyText AutoSolveSelection
 
+-- | What pressing a chooser digit does, as one total decision.
+--
+-- The roster is consulted here, before any session exists, as well as at the
+-- launch boundary — the same reason 'readOnlyHistoryRefusal' is asked twice,
+-- and it matters more here. A refusal reached after 'startFreshIssueSolve'
+-- has inserted a session leaves that session in the map, and
+-- 'reusableSolveSession' reopens a session of the same workflow whatever its
+-- phase — so the chooser never comes back and the operator can never pick
+-- the brand the roster actually loads. Refusing before the insert is what
+-- keeps the next press a fresh choice.
+data SolveStartDecision
+  = -- | Show this notice, close the chooser, and create nothing.
+    SolveStartRefused Text
+  | -- | An existing session for this issue owns the work; reopen it.
+    SolveStartReopen
+  | -- | Create the session and launch.
+    SolveStartFresh
+  deriving stock (Eq, Show)
+
+solveStartDecision :: AppState -> Issue -> SolveWorkflow -> SolverBrand -> SolveStartDecision
+solveStartDecision state issue workflow brand = case readOnlyHistoryRefusal state (IssueItem issue) of
+  Just notice -> SolveStartRefused notice
+  Nothing
+    | isJust (reusableSolveSession workflow issue.issueNumber state.appSolveSessions) -> SolveStartReopen
+    | otherwise -> case resolvedRosterFor (`solveAssignment` brand) state.appModelRoster of
+        Left message -> SolveStartRefused ("Solve did not start: " <> message)
+        Right _ -> SolveStartFresh
+
 -- | The launch boundary, reached by picking an agent in the chooser. The
 -- refusal is asked again here rather than trusted from the press that opened
 -- the chooser: the issue the overlay holds was live when it opened, and a
@@ -109,11 +143,10 @@ workflowKey AutoSolve = actionKeyText AutoSolveSelection
 startIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState ()
 startIssueSolve issue workflow brand = do
   state <- get
-  case readOnlyHistoryRefusal state (IssueItem issue) of
-    Just notice -> modify (\current -> current {appOverlay = Nothing, appNotice = Just notice})
-    Nothing -> case reusableSolveSession workflow issue.issueNumber state.appSolveSessions of
-      Just _ -> openExistingSolveOverlay issue.issueNumber
-      Nothing -> startFreshIssueSolve issue workflow brand
+  case solveStartDecision state issue workflow brand of
+    SolveStartRefused notice -> modify (\current -> current {appOverlay = Nothing, appNotice = Just notice})
+    SolveStartReopen -> openExistingSolveOverlay issue.issueNumber
+    SolveStartFresh -> startFreshIssueSolve issue workflow brand
 
 startFreshIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState ()
 startFreshIssueSolve issue workflow brand = do
@@ -169,8 +202,37 @@ launchSolveInvocation issueNumber workflow brand existingSession provenance inpu
     Just notice -> setNotice notice
     Nothing -> launchLiveSolveInvocation issueNumber workflow brand existingSession provenance input
 
+-- | The roster refusal sits beside the read-only-history one and for the
+-- same reason: this is the boundary a process crosses, so the roster the
+-- launch is checked against has to be the one it is handed. Autosolve's own
+-- revisions reach the provider through 'launchSolveInvocation' above, so
+-- they refuse here too rather than needing an arm of their own.
 launchLiveSolveInvocation :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchLiveSolveInvocation issueNumber workflow brand existingSession provenance input = do
+  state <- get
+  case resolvedRosterFor (`solveAssignment` brand) state.appModelRoster of
+    Left message -> liftIO (failSolveLaunch state.appEventChannel issueNumber message)
+    Right roster -> launchRosteredSolveInvocation roster issueNumber workflow brand existingSession provenance input
+
+-- | How a launch that never reached a provider reports itself: the
+-- diagnostic-then-terminal pair, which is the only thing that settles the
+-- session this launch was created for.
+--
+-- A bare notice is not enough and never was. Every caller of
+-- 'launchSolveInvocation' has already inserted or reopened a session, and
+-- 'solvePhaseActive' counts 'SolveStarting' as live work — so a refusal that
+-- only set a notice would leave that session permanently starting,
+-- 'reusableSolveSession' would hand it back instead of letting the user pick
+-- a different solver, and nothing would ever terminalize it. The pair below
+-- moves it to 'SolveFailedPhase' and raises the same
+-- 'Kanban.UI.Util.agentFailureNotice' the arm that consumes it always has.
+failSolveLaunch :: BChan AppEvent -> Int -> Text -> IO ()
+failSolveLaunch eventChannel issueNumber message = do
+  writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
+  writeBChan eventChannel (SolveProtocolEvent (SolveProcessFinished issueNumber (SolveFailed message)))
+
+launchRosteredSolveInvocation :: ModelRoster -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
+launchRosteredSolveInvocation roster issueNumber workflow brand existingSession provenance input = do
   state <- get
   let existingLogPath = Map.lookup issueNumber state.appSolveSessions >>= (.sessionLogPath)
       eventChannel = state.appEventChannel
@@ -193,15 +255,11 @@ launchLiveSolveInvocation issueNumber workflow brand existingSession provenance 
     $ do
       blocked <- preflightBlocker state.appRepository (solvePreflightAction workflow brand)
       case blocked of
-        Just message -> do
-          writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
-          writeBChan eventChannel (SolveProtocolEvent (SolveProcessFinished issueNumber (SolveFailed message)))
+        Just message -> failSolveLaunch eventChannel issueNumber message
         Nothing -> do
-          launched <- launchSolveWorker state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
+          launched <- launchSolveWorker roster state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
           case launched of
-            Left message -> do
-              writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
-              writeBChan eventChannel (SolveProtocolEvent (SolveProcessFinished issueNumber (SolveFailed message)))
+            Left message -> failSolveLaunch eventChannel issueNumber message
             Right descriptor -> do
               writeBChan eventChannel (WorkerRegistered descriptor)
   void

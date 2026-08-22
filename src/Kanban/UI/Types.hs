@@ -612,10 +612,12 @@ data AppState = AppState
     appSettings :: Settings,
     -- | The startup model-roster load, retained as the typed
     -- success-or-error value 'Kanban.Models.loadModelRoster' produced.
-    -- Nothing consumes it yet (MODEL-1): later slices resolve agent spawns
-    -- from the 'Right' and refuse them with the 'Left' (D-3), which is why
-    -- an unusable file must stay an error here rather than collapse into
-    -- the compiled defaults.
+    -- Every agent-starting path unwraps it once through
+    -- 'Kanban.UI.Util.resolvedRosterFor' (MODEL-2): the 'Right' resolves the
+    -- cell that run's routing selected, and the 'Left' refuses the spawn
+    -- naming the file and the defect (D-3), which is why an unusable file
+    -- must stay an error here rather than collapse into the compiled
+    -- defaults.
     appModelRoster :: Either RosterLoadError ModelRoster,
     appLogRoot :: FilePath,
     appProcessSelection :: ProcessSelection,

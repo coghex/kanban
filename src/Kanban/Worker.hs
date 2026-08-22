@@ -38,8 +38,12 @@ module Kanban.Worker
     -- snapshot, the same way the termination and recovery paths are.
     collectWorkerCacheWith,
     consumeJournalLines,
+    -- | Exported so the suite can address a hand-built spec's durable files,
+    -- including the roster snapshot its supervisor will read.
+    descriptorForSpec,
     discoverWorkers,
     discoverWorkerHistory,
+    assignmentForTask,
     launchPullRequestWorker,
     launchSolveWorker,
     monitorWorker,
@@ -50,6 +54,7 @@ module Kanban.Worker
     readWorkerState,
     recordLaunchedSupervisorIdentity,
     recoverIfWorkerStoppedWith,
+    readWorkerRoster,
     releaseWorkerLease,
     runWorker,
     runWorkerWith,
@@ -64,6 +69,8 @@ module Kanban.Worker
     waitForOrphanResolution,
     workerDeadlineReason,
     waitForWorkerStart,
+    workerDirectory,
+    writeWorkerRoster,
   )
 where
 
@@ -76,6 +83,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (addUTCTime, diffUTCTime, getCurrentTime)
 import Kanban.Domain (Repository, WorkflowConfig)
+import Kanban.Models (Assignment, ModelRoster, assignmentUnavailableMessage)
 import Kanban.Paths (createPrivateDirectory)
 import Kanban.Process
   ( ManagedProcess,
@@ -87,8 +95,8 @@ import Kanban.Process
     managedProcessPid,
     readProcessSnapshot,
   )
-import Kanban.PullRequestFlow (PullRequestAction, PullRequestFlowEvent (..), PullRequestOrigin, runPullRequestFlow)
-import Kanban.Solve (AgentEvent (..), ResumeProvenance, SolveEvent (..), SolveOutcome (..), SolveWorkflow, SolverBrand, UnknownAggregator, newUnknownAggregator, runSolve, sealUnknownAggregates)
+import Kanban.PullRequestFlow (PullRequestAction, PullRequestFlowEvent (..), PullRequestOrigin, pullRequestAssignment, runPullRequestFlow)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance, SolveEvent (..), SolveOutcome (..), SolveWorkflow, SolverBrand, UnknownAggregator, newUnknownAggregator, runSolve, sealUnknownAggregates, solveAssignment)
 import Kanban.Worker.Census (liveRecordedProcessesWith, recordProviderIdentity, refreshProcessCensus)
 import Kanban.Worker.Discovery
   ( acknowledgeSupersededWorkers,
@@ -106,10 +114,12 @@ import Kanban.Worker.Paths
     descriptorForSpec,
     newWorkerId,
     persistState,
+    readWorkerRoster,
     readWorkerState,
     workerDirectory,
     writePrivateJson,
     writeState,
+    writeWorkerRoster,
   )
 import Kanban.Worker.Termination
   ( pendingTerminationDiagnosticPrefix,
@@ -142,11 +152,26 @@ import System.Posix.Process (getProcessID)
 import System.Posix.Signals (Handler (Catch), installHandler, sigINT, sigTERM)
 import System.Process (CreateProcess (..), ProcessHandle, StdStream (UseHandle), createProcess, getProcessExitCode, proc)
 
-launchSolveWorker :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either Text WorkerDescriptor)
-launchSolveWorker repository issueNumber workflow brand existingSession existingLogPath provenance userMessage parent configPath workflowConfig = do
+-- | The roster cell a worker task's provider runs on, from the same two
+-- declarations the dashboard's own refusal consults ('solveAssignment' and
+-- 'pullRequestAssignment'). Both ends resolving through these is what makes
+-- the launch-time check and the supervisor's argv construction agree by
+-- construction rather than by coincidence.
+assignmentForTask :: ModelRoster -> WorkerTask -> Either Text Assignment
+assignmentForTask roster task = case task of
+  SolveWorkerTaskKind solveTask ->
+    render (solveAssignment roster solveTask.solveWorkerBrand)
+  PullRequestWorkerTaskKind pullRequestTask ->
+    render (pullRequestAssignment roster pullRequestTask.pullRequestWorkerOrigin pullRequestTask.pullRequestWorkerAction)
+  where
+    render = either (Left . assignmentUnavailableMessage) Right
+
+launchSolveWorker :: ModelRoster -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either Text WorkerDescriptor)
+launchSolveWorker roster repository issueNumber workflow brand existingSession existingLogPath provenance userMessage parent configPath workflowConfig = do
   now <- getCurrentTime
   workerId <- newWorkerId "solve" issueNumber
   launchWorker
+    roster
     WorkerSpec
       { workerId,
         workerRepository = repository,
@@ -162,11 +187,12 @@ launchSolveWorker repository issueNumber workflow brand existingSession existing
         workerWorkflowConfig = workflowConfig
       }
 
-launchPullRequestWorker :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either Text WorkerDescriptor)
-launchPullRequestWorker repository number origin action existingSession existingLogPath provenance userMessage parent configPath workflowConfig = do
+launchPullRequestWorker :: ModelRoster -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either Text WorkerDescriptor)
+launchPullRequestWorker roster repository number origin action existingSession existingLogPath provenance userMessage parent configPath workflowConfig = do
   now <- getCurrentTime
   workerId <- newWorkerId "pr" number
   launchWorker
+    roster
     WorkerSpec
       { workerId,
         workerRepository = repository,
@@ -225,8 +251,19 @@ spawnDetachedSupervisor executable arguments =
     closeNullStreams (inHandle, outHandle, errHandle) =
       mapM_ (void . try @IOException . hClose) [inHandle, outHandle, errHandle]
 
-launchWorker :: WorkerSpec -> IO (Either Text WorkerDescriptor)
-launchWorker spec = do
+-- | The roster is a launch input, not something the supervisor resolves for
+-- itself: it is checked here before any lease is taken, and the snapshot it
+-- was checked against is written beside the spec for the supervisor to read.
+-- A roster that cannot supply this task's cell — a valid Claude-only or
+-- zero-agent roster against Codex-routed work, say — refuses the launch
+-- outright rather than starting a supervisor that would have to invent one.
+launchWorker :: ModelRoster -> WorkerSpec -> IO (Either Text WorkerDescriptor)
+launchWorker roster spec = case assignmentForTask roster spec.workerTask of
+  Left message -> pure (Left message)
+  Right _ -> launchResolvedWorker roster spec
+
+launchResolvedWorker :: ModelRoster -> WorkerSpec -> IO (Either Text WorkerDescriptor)
+launchResolvedWorker roster spec = do
   descriptor <- descriptorForSpec spec
   directory <- workerDirectory spec.workerRepository
   createPrivateDirectory XdgCache directory
@@ -234,7 +271,13 @@ launchWorker spec = do
   case leased of
     Left message -> pure (Left message)
     Right () -> do
-      written <- writePrivateJson descriptor.workerDescriptorSpecPath spec
+      -- Snapshot first, spec second, deliberately. Discovery anchors on the
+      -- @.spec.json@ alone, so a spec that exists must already have the
+      -- roster its supervisor will read beside it; the reverse order would
+      -- leave a spec a failed snapshot write can no longer complete, and a
+      -- roster file with no spec is inert.
+      snapshotted <- writeWorkerRoster descriptor roster
+      written <- either (pure . Left) (const (writePrivateJson descriptor.workerDescriptorSpecPath spec)) snapshotted
       case written of
         Left message -> releaseWorkerLease descriptor >> pure (Left message)
         Right () -> do
@@ -286,14 +329,31 @@ runWorkerWith takeSnapshot = runWorkerWithTask takeSnapshot defaultRunTask
 -- the watchdog thread, so only the supervisor can guarantee the flow's
 -- suppressed-occurrence counts are journaled before that envelope rather
 -- than lost with the cancelled thread or appended after replay has stopped.
+--
+-- The model roster comes from the snapshot its launcher wrote beside this
+-- spec, never from the user's live @models.toml@: the dashboard refused or
+-- allowed this launch against a specific roster, and an edit landing in
+-- between must not change what this provider runs on. A snapshot that
+-- cannot be read or that no longer covers this task's cell spawns nothing
+-- and reports why, which is the same refusal the launch boundary makes.
 defaultRunTask :: WorkerSpec -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
-defaultRunTask spec aggregator rememberProvider emit = case spec.workerTask of
+defaultRunTask spec aggregator rememberProvider emit = do
+  descriptor <- descriptorForSpec spec
+  snapshot <- readWorkerRoster descriptor
+  case snapshot >>= \roster -> assignmentForTask roster spec.workerTask of
+    Left message -> do
+      emit (WorkerDiagnostic message)
+      emit (WorkerFinished (SolveFailed message))
+    Right assignment -> runTaskWithAssignment spec assignment aggregator rememberProvider emit
+
+runTaskWithAssignment :: WorkerSpec -> Assignment -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
+runTaskWithAssignment spec assignment aggregator rememberProvider emit = case spec.workerTask of
   SolveWorkerTaskKind task ->
-    runSolve spec.workerRepository task.solveWorkerIssueNumber task.solveWorkerWorkflow task.solveWorkerBrand spec.workerConfigPath spec.workerWorkflowConfig spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
+    runSolve spec.workerRepository task.solveWorkerIssueNumber task.solveWorkerWorkflow task.solveWorkerBrand spec.workerConfigPath spec.workerWorkflowConfig assignment spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
       aggregator
       (translateSolveEvent rememberProvider emit)
   PullRequestWorkerTaskKind task ->
-    runPullRequestFlow spec.workerRepository task.pullRequestWorkerNumber task.pullRequestWorkerOrigin task.pullRequestWorkerAction spec.workerConfigPath spec.workerWorkflowConfig spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
+    runPullRequestFlow spec.workerRepository task.pullRequestWorkerNumber task.pullRequestWorkerOrigin task.pullRequestWorkerAction spec.workerConfigPath spec.workerWorkflowConfig assignment spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
       aggregator
       (translatePullRequestEvent rememberProvider emit)
 
