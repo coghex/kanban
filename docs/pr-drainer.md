@@ -692,10 +692,10 @@ is a rebuild worth paying for. In this repository the authoritative set is the
 `test-parsed` rows of
 [agent-workflow-contract §7](agent-workflow-contract.md#7-document-publication-classification),
 which is where a newly parsed document gets classified, so consult it rather
-than any list repeated here. Two of those rows are directories —
-`claude-plugin/` and `codex-plugin/` — and each covers every tracked Markdown
-workflow beneath it, so the documents those rows reach are more numerous than
-the rows themselves.
+than any list repeated here. Four of those rows are directories —
+`.github/ISSUE_TEMPLATE/`, `claude-plugin/`, `codex-plugin/`, and `tools/` —
+and each covers every tracked Markdown file beneath it, so the documents those
+rows reach are more numerous than the rows themselves.
 
 The drainer is not the only reader. In a repository
 [agent-workflow-contract §7](agent-workflow-contract.md#7-document-publication-classification)

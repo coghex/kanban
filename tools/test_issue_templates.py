@@ -83,6 +83,21 @@ CHECKBOX_RE = re.compile(r"^\s*[-*]\s*\[[ xX]\](?P<contents>.*)$")
 ISSUE_REFERENCE_RE = re.compile(r"#(?P<number>\d+)")
 
 
+def setUpModule():
+    # `tools/` ships whole in the source distribution and
+    # `.github/ISSUE_TEMPLATE/` deliberately does not, so an unpacked release
+    # runs this module with nothing to read. That is the packaged state rather
+    # than a failure -- the same boundary tools/test_ci_workflow.py sits on for
+    # `.github/workflows/`.
+    #
+    # The directory, not either file: a checkout that has the directory but is
+    # missing a template is a real regression, and
+    # test_the_template_directory_holds_exactly_the_declared_templates reports
+    # it. Skipping on a missing file would hide exactly that.
+    if not TEMPLATE_DIR.is_dir():
+        raise unittest.SkipTest(f"{TEMPLATE_DIR} is absent (not a Git checkout)")
+
+
 def _approve_issues():
     """tools/approve_issues.py, loaded from the module itself so the origin
     rule under test is the one the gate actually runs. Loaded by path under a
