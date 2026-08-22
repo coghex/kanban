@@ -2297,11 +2297,15 @@ above are unchanged, and persistence the user switched off is not a failure.
   reachable from a qualifying ref, and every other entry still present in the
   same relative order. Whatever a failed proof finds missing is restored from
   its recorded object ID and verbatim message — at the top of the stash, since
-  Git offers no positional reinsertion — and a restoration that fails is logged
-  naming the object ID and a recovery command. A dry run decides and reports
-  identically while creating, deleting, and reordering nothing. Every failure
-  of either pass is logged and stepped over; neither may be what stops a pull
-  request from merging.
+  Git offers no positional reinsertion — and a restoration is itself proved by
+  the number of entries carrying that object ID and message rising by exactly
+  one, never by such an entry merely being present: the occurrence that went
+  can be indistinguishable from a surviving one, and `git stash store` adds
+  nothing while `refs/stash` already names the commit. A restoration that
+  fails, that one included, is logged naming the object ID and a recovery
+  command. A dry run decides and reports identically while creating, deleting,
+  and reordering nothing. Every failure of either pass is logged and stepped
+  over; neither may be what stops a pull request from merging.
 - The status response also names the local copies of work the drainer's
   autostash lifecycle left behind in the checkout, which are otherwise visible
   only in one log line per startup sweep — a line that repeats identically

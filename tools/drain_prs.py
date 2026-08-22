@@ -2929,22 +2929,52 @@ def _missing_entries(
     return missing
 
 
+def _matching_entry_count(
+    entries: list[tuple[str, str, str]], sha: str, message: str
+) -> int:
+    """How many entries carry exactly this (commit, verbatim message) pair.
+
+    A count rather than a presence test because the pair is not an identity:
+    `git stash store` records two entries naming one commit, and nothing stops
+    two of them carrying the same message as well. Only the count distinguishes
+    an entry that came back from a twin that was there all along.
+    """
+    pair = (sha, message)
+    return sum(1 for _selector, entry_sha, text in entries if (entry_sha, text) == pair)
+
+
 def _restore_stash_entry(ctx: RepoContext, sha: str, message: str) -> str | None:
     """Put one entry back, and prove it: the failure detail, or None on success.
 
     git offers no positional reinsertion, so the entry returns to `stash@{0}`
     rather than to the position it held. What restoration guarantees is that
-    the snapshot is a `git stash list` entry again, under its verbatim message
-    and its own object ID; where it sits in the list is not recoverable and is
-    not claimed.
+    the stash holds one *more* entry under this verbatim message and this
+    object ID than it did a moment earlier; where that entry sits in the list
+    is not recoverable and is not claimed.
 
-    The read afterwards is why this reports rather than assumes: `git stash
+    The proof is that count and not the pair's presence, because the entry
+    being put back can be indistinguishable from one that survived. `git stash
     store` is a no-op when `refs/stash` already names the commit being stored,
-    so an entry whose commit another surviving entry put at the tip cannot be
-    added back at all. The snapshot is still reachable in that case -- it is
-    the tip -- but the entry is gone, which is what the caller's failure log
+    so an entry whose twin holds the tip cannot be added back at all -- and
+    that twin answers any "is such a pair there?" question, which would report
+    a restoration that never happened. The snapshot stays reachable through the
+    twin, but one list entry is gone, and that is what the caller's failure log
     then says.
+
+    Reading either count is therefore part of the proof and not a formality. An
+    unreadable list beforehand establishes no baseline to compare against, so
+    the store is not attempted at all: a mutation that could never be shown to
+    have done anything is not worth the claim, and the caller's failure log
+    names the object ID and the command that recovers the snapshot either way.
     """
+    try:
+        before = _stash_entries(ctx)
+    except (DrainError, OSError) as exc:
+        return f"`git stash list` could not be read to count it beforehand ({exc})"
+    expected = _matching_entry_count(before, sha, message) + 1
+    # `refs/stash` names its tip, which is the entry `git stash list` prints
+    # first; storing that same commit again adds nothing.
+    stored_commit_is_the_tip = bool(before) and before[0][1] == sha
     try:
         proc = _retirement_git(
             ["git", "stash", "store", "-m", message, sha], cwd=ctx.path, check=False
@@ -2957,9 +2987,21 @@ def _restore_stash_entry(ctx: RepoContext, sha: str, message: str) -> str | None
         entries = _stash_entries(ctx)
     except (DrainError, OSError) as exc:
         return f"`git stash list` could not be read to confirm it ({exc})"
-    if (sha, message) not in [(entry_sha, text) for _, entry_sha, text in entries]:
-        return "`git stash list` does not report it"
-    return None
+    found = _matching_entry_count(entries, sha, message)
+    if found == expected:
+        return None
+    if stored_commit_is_the_tip:
+        return (
+            "`git stash store` reported success and added nothing, because `refs/stash` "
+            f"already named {sha}: git cannot put back an entry indistinguishable from "
+            "one that is still there"
+        )
+    # Anything else is the observed count and no more; what caused it was not
+    # read, so it is not named.
+    plural = "entry" if found == 1 else "entries"
+    return (
+        f"`git stash list` reports {found} matching {plural} where {expected} was expected"
+    )
 
 
 def _retire_recovery_stash(
