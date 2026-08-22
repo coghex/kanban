@@ -43,6 +43,7 @@ extra-source-files:
   claude-plugin/plugins/kanban/.claude-plugin/plugin.json
 
 extra-doc-files:
+  .github/pull_request_template.md
   AGENTS.md
   CHANGELOG.md
   CLAUDE.md
