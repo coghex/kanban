@@ -21,8 +21,8 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
 
 - `docs/design.md` is the complete behavior contract. A behavior change must stay
   consistent with it or update it in the same PR.
-- Its opening status paragraph and the milestones in section 19 record what is already
-  implemented. Read them before concluding something is missing.
+- Section 19's `Implementation state` paragraph and the milestones beneath it record
+  what is already implemented. Read them before concluding something is missing.
 - `docs/agent-workflow-contract.md` is authoritative for the external executables,
   authority, and durable state the solve, review, and drainer actions depend on.
 - `docs/development.md` has the build, test, and layout basics; `docs/pr-drainer.md` and

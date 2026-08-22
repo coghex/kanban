@@ -1,138 +1,5 @@
 # Kanban TUI — Design and Roadmap
 
-Design state: `ready for issue processing`
-
-Status legend: `[ ]` unprocessed · `[#N]` linked to issue N · `[no-issue]`
-reviewed and deliberately not tracked separately · `[deferred]` blocked on a
-concrete precondition
-
-## Processing status
-
-- [x] EPIC. Complete Kanban's first-release readiness gate — [#268]
-- [x] REL-1. Record real-terminal performance measurements — [#269]
-- [x] REL-2. Verify live Codex and Claude usage refreshes — [#270]
-- [x] REL-3. Exercise the installed terminal application — [#273]
-- [x] REL-4. Publish the first Kanban release — [#340]
-
-## Epic contract
-
-- **Goal:** Publish a traceable first Kanban release only after its installed
-  terminal behavior, idle-resource profile, and live usage-provider behavior
-  have been verified in the operator environment.
-- **Done when:** The manual evidence is recorded, every release-blocking defect
-  found by those checks is resolved or explicitly removed from scope, required
-  CI passes on the release commit, and the first-release tag and GitHub Release
-  both identify that commit.
-- **Users and operators:** People installing Kanban from its source release and
-  the maintainers responsible for its terminal and provider behavior.
-- **Arc label:** `release` — created 2026-08-12 (`Release readiness gates,
-  versioning, packaging, and publication`, `#FBCA04`) and carried by epic #268.
-  Also intended for `docs/public_release_design.md`'s packaging epic.
-
-Epic #268 was reconciled against this document on 2026-08-15. Its `Done when`
-now carries D-10's process-group rule and D-11's populated-board clock alongside
-the D-9 content-churn wording it already had, its background records what
-packaging epic #282 closed, its Phase 1 paragraph matches the delivery plan's
-dependency order, its three completed children are ticked, and its REL-4
-paragraph describes the post-#283, post-#289 shape D-14 and the rewritten slice
-below settle. Nothing is owed to it.
-
-## Release scope
-
-### In scope
-
-- Record startup, idle CPU, resident memory, refresh-count, and content-churn
-  behavior from an sdist-built installed executable driven under tmux.
-- Verify the built-in Codex and Claude usage providers against authenticated
-  live clients without submitting a model prompt.
-- Exercise startup, refresh, navigation, shutdown, and visible terminal
-  stability for a deliberately chosen observation period.
-- Publish the first release only after the recorded gates and required CI pass.
-
-### Out of scope
-
-- The broader provider-version fixture matrices noted in milestones 4, 5, and
-  7 unless a live release check exposes a release-blocking incompatibility.
-- New features from section 20's deferred-ideas list.
-- Performance optimization without evidence that an agreed release threshold
-  is missed.
-- Package-registry publication and binary installers; the first release is
-  distributed through GitHub only.
-
-## Current state and evidence
-
-The warning-clean GHC2024/Cabal foundation,
-local repository resolution, event-driven Brick/Vty dashboard, standalone-card
-workflow, and explicit GitHub refresh are implemented. Open issues and open
-pull requests are fetched live and uncapped on every refresh, with no display
-limit and no repository snapshot on disk. Checklist-based tracker hierarchy, inherited PR membership,
-tracker progress, and the on-demand Codex and Claude usage providers are also
-implemented. Malformed tracker diagnostics now fail visibly while preserving
-valid membership and standalone fallbacks. The sidebar also controls and
-monitors the local service-managed PR drainer, which runs as a launchd job on
-macOS and a systemd user unit on Linux. The persistent per-repository issue
-approval service now has the same dashboard lifecycle — discovery, status and
-incident decoding, the durable ordered barrier, the start/stop seam, the
-canonical-review interlock, and the board refresh a result requires — and the
-sidebar reaches that seam through an `approve_issues.py` control drawn directly
-above the drainer's, which `a` and a plain left click both press. Native GitHub sub-issue membership,
-canonical v2 issue-review sessions, embedded revision questions, and
-the first resumable issue-solve flow are implemented. The external
-usage-command escape hatch is also implemented. Broader provider-version
-fixtures remain for subsequent slices.
-
-The automated release foundation is already present: `.github/workflows/ci.yml`
-builds and runs both test suites on Linux as independent jobs behind one
-aggregate `build-test` job, which is the single CI context that branch
-protection, `tools/drain_prs.py`, and the release gate below all resolve;
-`docs/development.md` defines the source-distribution check, and the
-clean-install exercise recorded in milestone 9 has passed. As of
-2026-08-16 UTC, `kanban.cabal` and `src/Kanban/CLI.hs` both declare version
-`1.0.0.0` — established by #283 under packaging epic #282, along with the root
-`CHANGELOG.md` whose top section is the first release's notes — while the
-repository carries the annotated tag `v1.0.0.0` and the remote the published
-GitHub Release for it, whose sole asset is `kanban-1.0.0.0.tar.gz`.
-`.github/workflows/release.yml` joins `ci.yml` and `review-gate.yml` as a
-tracked workflow: a push of a `v*` tag publishes the verified `cabal sdist`
-archive as a GitHub Release, and `workflow_dispatch` rehearses the same path
-under a `release-dry-run-*` tag that can produce only a draft. It never creates
-a release tag. Completed epic #268 owns this release-readiness arc; closed
-issue #203 covers the source distribution rather than these manual gates. The
-document classification that gated publication is in place: PR #227 (commit
-518a3de) added `docs/document_workflow_findings.md` to
-`EXCLUDED_TRACKED_PATHS` in `tools/test_source_distribution.py`, and PR #232
-(commit 4146f43) closed #225 by adding the section 7 publication lanes to
-`docs/agent-workflow-contract.md`, which classify that document as
-`coordination`. The 2026-08-12 readiness run of
-`python3 -m unittest tools.test_source_distribution` executed all 11 tests
-without skipping and passed.
-
-A 2026-08-12 audit of the measurement surface found the manual gates
-underspecified against the code they measure. `startApplication` forks
-`monitorDrainer`, which spawns a fresh drainer-controller subprocess every ten
-seconds for the whole session (`src/Kanban/UI.hs:202-233`,
-`src/Kanban/Drainer.hs:487-533`). That job is loaded on the operator's machine
-(`com.coghex.drain-prs.coghex.kanban`), and one `--json status` poll costs about
-0.07 s of child CPU, so roughly 0.7% of a core is spent continuously in a
-process that `ps -o %cpu -p <kanban-pid>` does not count — about a third of
-D-4's 2% mean-CPU budget, attributed to a child. The first frame is drawn from a
-cache snapshot loaded synchronously before `customMain`
-(`src/Kanban/UI.hs:70-115`), while `startAllRefreshes` dispatches the board and
-*both* usage providers asynchronously afterwards
-(`src/Kanban/UI/Refresh.hs:43-51`), so "startup" names two very different
-instants. Neither `~/.local/bin/kanban` nor `~/.cabal/bin/kanban` exists, so
-every manual slice installs first, and the repository documents two different
-installs: `cabal install exe:kanban` from the checkout (`README.md`'s "Install
-from a source checkout") and the clean sdist unpack exercise
-(`docs/development.md:52-58`), which `README.md`'s quickstart now leads with as
-the release install path. `Q-4` through
-`Q-8` raised these; D-9 through D-13 settle them.
-
-Adding a section to this document is parser-safe. `test/Spec/UI/Keys.hs:198-207`
-reads only the table rows between `## 7. Keyboard interaction` and `## 8.`, and
-`tools/test_document_classification.py` asserts on this file's row inside
-`docs/agent-workflow-contract.md` section 7 rather than on its body.
-
 ## 1. Purpose
 
 `kanban` is a fast, keyboard-driven Haskell terminal dashboard for a GitHub
@@ -3144,6 +3011,21 @@ that job runs this module by name and refuses a skipped result, rather than
 leaving the gate to the toolchain-free job that runs the rest of the suite. It
 writes only outside the working tree.
 
+### Continuous integration
+
+`.github/workflows/ci.yml` builds and runs both test suites on Linux as
+independent jobs behind one aggregate `build-test` job, which is the single CI
+context that branch protection, `tools/drain_prs.py`, and the release gate all
+resolve.
+
+### What parses this document
+
+`test/Spec/UI/Keys.hs` reads only the table rows between `## 7. Keyboard
+interaction` and `## 8.`, and `tools/test_document_classification.py` asserts on
+this file's row inside `docs/agent-workflow-contract.md` section 7 rather than
+on its body. Adding, renaming, or removing any other section of this document is
+therefore parser-safe.
+
 ### Manual checks
 
 - Common terminal emulators on supported platforms.
@@ -3153,6 +3035,28 @@ writes only outside the working tree.
 - Real Codex and Claude usage refreshes without submitting a model prompt.
 
 ## 19. Implementation roadmap
+
+### Implementation state
+
+The warning-clean GHC2024/Cabal foundation, local repository resolution,
+event-driven Brick/Vty dashboard, standalone-card workflow, and explicit GitHub
+refresh are implemented. Open issues and open pull requests are fetched live
+and uncapped on every refresh, with no display limit and no repository snapshot
+on disk. Checklist-based tracker hierarchy, inherited PR membership, tracker
+progress, and the on-demand Codex and Claude usage providers are also
+implemented. Malformed tracker diagnostics now fail visibly while preserving
+valid membership and standalone fallbacks. The sidebar also controls and
+monitors the local service-managed PR drainer, which runs as a launchd job on
+macOS and a systemd user unit on Linux. The persistent per-repository issue
+approval service now has the same dashboard lifecycle — discovery, status and
+incident decoding, the durable ordered barrier, the start/stop seam, the
+canonical-review interlock, and the board refresh a result requires — and the
+sidebar reaches that seam through an `approve_issues.py` control drawn directly
+above the drainer's, which `a` and a plain left click both press. Native GitHub
+sub-issue membership, canonical v2 issue-review sessions, embedded revision
+questions, and the first resumable issue-solve flow are implemented. The
+external usage-command escape hatch is also implemented. Broader
+provider-version fixtures remain for subsequent slices.
 
 ### Milestone 0 — Project foundation
 
@@ -3460,8 +3364,8 @@ integration coverage. Installation instructions and a clean temporary
 `cabal install exe:kanban` exercise are complete.
 
 The remaining manual checks and release publication are now the canonical
-`REL-1` through `REL-4` slices in the processing ledger and delivery plan. This
-milestone is implementation history rather than a second status checklist.
+`REL-1` through `REL-4` slices in the delivery plan. This milestone is
+implementation history rather than a second status checklist.
 
 Exit criteria: the application is warning-clean, fixture/integration tests pass,
 idle CPU is effectively zero apart from the inexpensive local service status
@@ -3484,8 +3388,32 @@ predictable, read-only dashboard.
 ## 21. Release evidence
 
 Permanent records of the manual release gates D-1 requires, one subsection per
-gate (D-13). These outlive the `Epic contract` through `Delivery plan`
-scaffolding above.
+gate (D-13), preceded by the audit that specified what those gates measure.
+These are permanent contract content and outlive the arc's remaining
+`Decisions` through `Delivery plan` scaffolding below.
+
+### Measurement-surface audit, 2026-08-12
+
+A 2026-08-12 audit of the measurement surface found the manual gates
+underspecified against the code they measure. `startApplication` forks
+`monitorDrainer`, which spawns a fresh drainer-controller subprocess every ten
+seconds for the whole session (`src/Kanban/UI.hs:202-233`,
+`src/Kanban/Drainer.hs:487-533`). That job is loaded on the operator's machine
+(`com.coghex.drain-prs.coghex.kanban`), and one `--json status` poll costs about
+0.07 s of child CPU, so roughly 0.7% of a core is spent continuously in a
+process that `ps -o %cpu -p <kanban-pid>` does not count — about a third of
+D-4's 2% mean-CPU budget, attributed to a child. The first frame is drawn from a
+cache snapshot loaded synchronously before `customMain`
+(`src/Kanban/UI.hs:70-115`), while `startAllRefreshes` dispatches the board and
+*both* usage providers asynchronously afterwards
+(`src/Kanban/UI/Refresh.hs:43-51`), so "startup" names two very different
+instants. Neither `~/.local/bin/kanban` nor `~/.cabal/bin/kanban` exists, so
+every manual slice installs first, and the repository documents two different
+installs: `cabal install exe:kanban` from the checkout (`README.md`'s "Install
+from a source checkout") and the clean sdist unpack exercise
+(`docs/development.md:52-58`), which `README.md`'s quickstart now leads with as
+the release install path. `Q-4` through
+`Q-8` raised these; D-9 through D-13 settle them.
 
 ### REL-1. Installed performance calibration, macOS, 2026-08-13
 
