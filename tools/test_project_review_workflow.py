@@ -145,7 +145,9 @@ EXHAUSTION_DISPOSITIONS = {
     ),
     "a small repository is the same case": (
         "A repository with fewer merged PRs than the batch size meets this on "
-        "its first batch, and is reviewed the same way."
+        "its first batch, and is reviewed the same way — including one whose "
+        "listing comes back empty, which reviews no PR and enters direct mode "
+        "straight away."
     ),
 }
 
@@ -262,16 +264,28 @@ FORBIDDEN_SPELLINGS = ("gh issue create", "issue-origin")
 # existed only in the Codex copy.
 DIRECT_MODE = {
     "entered after PR history": (
-        "After PR history is exhausted, continue from the first-parent parent "
-        "of the earliest PR-owned commit already reviewed."
+        "**PR history existed.** Continue from the first-parent parent of the "
+        "earliest PR-owned commit already reviewed."
+    ),
+    "a repository with no PR history starts at HEAD": (
+        "**There was none.** A repository whose merged-PR listing came back "
+        "empty has no earliest PR-owned commit to walk back from, so start at "
+        "the default branch's own HEAD and take the first-parent commits from "
+        "there."
+    ),
+    "that is the only entry at HEAD": (
+        "This is the only case in which direct mode begins at HEAD, and a "
+        "repository that has never used pull requests is otherwise never "
+        "audited at all."
     ),
     "twelve older first-parent commits": (
-        "Take exactly the next 12 older first-parent commits, newest-first"
+        "Either way, take exactly the next 12 older first-parent commits, "
+        "newest-first, unless the user supplied another count."
     ),
     "a merge counts once": "A direct merge counts as one commit.",
     "resume from the parent, never HEAD": (
         "Every later `continue` resumes at the parent of the oldest completed "
-        "direct commit; never restart from HEAD."
+        "direct commit; never restart from HEAD once a batch has been reviewed."
     ),
     "inventory is not review": (
         "A broad blame or survivor inventory is triage, not a reviewed "
@@ -828,6 +842,34 @@ class SweepCursorTests(unittest.TestCase):
             for rule, phrase in sorted(DIRECT_MODE.items()):
                 with self.subTest(asset=relative_path, rule=rule):
                     self.assertIn(flat(phrase), flattened)
+
+    def test_the_two_direct_mode_entry_points_are_distinguished(self):
+        # Blocker from round 3. Round 2 made the zero-merged-PR case reachable
+        # by allowing the tail batch, and the entry rule it reaches walks back
+        # from "the earliest PR-owned commit already reviewed" -- which does
+        # not exist when the listing came back empty. Both entry points are
+        # pinned, and the ordering between them, so a rewrite cannot keep the
+        # general rule and quietly drop the one that makes a
+        # never-used-pull-requests repository auditable.
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    flat(
+                        "the entry point depends on whether there was any"
+                    ),
+                    flattened,
+                )
+                self.assertLess(
+                    flattened.index(flat(DIRECT_MODE["entered after PR history"])),
+                    flattened.index(
+                        flat(
+                            DIRECT_MODE[
+                                "a repository with no PR history starts at HEAD"
+                            ]
+                        )
+                    ),
+                )
 
     def test_the_boundary_rule_reaches_both_brands_as_prose(self):
         for relative_path in RENDERED_ASSETS:

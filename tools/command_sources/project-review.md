@@ -131,7 +131,8 @@ condition, and the three do not share an answer:
   of the sweep. Review every PR that does remain, say the batch was short and
   why, and treat PR history as exhausted so the next `continue` enters direct
   mode. A repository with fewer merged PRs than the batch size meets this on
-  its first batch, and is reviewed the same way.
+  its first batch, and is reviewed the same way — including one whose listing
+  comes back empty, which reviews no PR and enters direct mode straight away.
 
 Check `git -C "$ROOT" log --first-parent` for direct-to-default-branch commits
 inside that landing interval and review them as bare commits. Do not mislabel a
@@ -140,11 +141,20 @@ PR.
 
 ### Direct mode
 
-After PR history is exhausted, continue from the first-parent parent of the
-earliest PR-owned commit already reviewed. Take exactly the next 12 older
-first-parent commits, newest-first, unless the user supplied another count. A
-direct merge counts as one commit. Every later `continue` resumes at the parent
-of the oldest completed direct commit; never restart from HEAD.
+After PR history is exhausted, the entry point depends on whether there was any.
+
+- **PR history existed.** Continue from the first-parent parent of the earliest
+  PR-owned commit already reviewed.
+- **There was none.** A repository whose merged-PR listing came back empty has
+  no earliest PR-owned commit to walk back from, so start at the default
+  branch's own HEAD and take the first-parent commits from there. This is the
+  only case in which direct mode begins at HEAD, and a repository that has never
+  used pull requests is otherwise never audited at all.
+
+Either way, take exactly the next 12 older first-parent commits, newest-first,
+unless the user supplied another count. A direct merge counts as one commit.
+Every later `continue` resumes at the parent of the oldest completed direct
+commit; never restart from HEAD once a batch has been reviewed.
 
 A broad blame or survivor inventory is triage, not a reviewed direct-commit
 batch. Advance the cursor past a direct commit only after checking its patch,
