@@ -21,7 +21,7 @@ concrete precondition
 - [x] VEND-1. Vendor triage — [#393]
 - [x] VEND-2. Vendor retriage — [#427]
 - [x] VEND-3. Vendor backlog-review — [#430]
-- [ ] VEND-4. Vendor project-review — [deferred]: terminal behavior, the references asset, and cursor-state location undecided
+- [ ] VEND-4. Vendor project-review
 - [ ] VEND-5. Vendor drain-prs
 - [ ] VEND-6. Vendor janitor
 - [ ] VEND-7. Vendor finalize
@@ -35,7 +35,7 @@ concrete precondition
 - **Done when:** the eight commands below are tracked plugin assets rendered
   from one authored source per command, the personal copies are retired, the
   bundle manifest gate covers them, and invoking `kanban:<name>` in a consuming
-  repository behaves as the retired personal copy did.
+  repository behaves as the copy D-7's reconciliation selected did.
 - **Users and operators:** the owner, and any agent session driving the issue
   pipeline in a consuming repository.
 - **Arc label:** `agent-workflows`
@@ -259,6 +259,93 @@ it refuses a mismatched one. `autosolve`'s instruction is therefore
 belt-and-braces over an enforced guard, not the only thing preventing a bogus
 publish. Do not re-file this.
 
+### D-9. `project-review` is report-only, and the Codex copy's behavior wins
+
+The two personal copies implement opposite terminal acts. The Claude copy drafts
+issue bodies, stops for approval, and files them with `gh issue create`, treating
+a findings report as an explicit-request exception. The Codex copy forbids
+tracker writes outright — "do not modify code, push, touch merged PRs, or
+create/edit tracker issues" — and writes a canonical findings report to the
+branch-resolved `docs-wip` worktree whenever a completed batch has at least one
+current finding.
+
+The Codex behavior wins. This is D-7 applied rather than an exception to it: D-7
+anticipated `project-review` as a likely case where the Codex copy carries real
+improvements, and it does. Direct-commit mode with its parent-walking cursor, the
+report-filename precedence, and the structured `Captured note` / `Verification` /
+`Evidence` / `Handoff context` capture shape exist only there, and each is
+downstream of writing a report rather than an issue body. Picking the Claude copy
+would discard all three, which is the failure the `Design` section above names.
+
+It also fits the lane this repository already built. `docs/project_review_386-361.md`
+is tracked, `docs/agent-workflow-contract.md` §7 classifies it `coordination` /
+`audit-report`, and `process-report` is the one-at-a-time disposition workflow
+that turns such a report into tracker artifacts. Filing is therefore not lost,
+only deferred one step — report, then `process-report`, then issue — and that
+step routes a finding through the readiness gate a direct `gh issue create`
+skips. A review workflow that never writes the tracker also cannot mis-file into
+the wrong repository, which is the hazard D-5 exists for.
+
+The cost is real and accepted: a Claude session loses the single-invocation
+"review these and file three of them" path, and a one-finding batch now costs a
+report plus a `process-report` run. The issue-body shape the Claude copy carried
+— Background, Requirements, Acceptance, Out of scope, Related — does not move
+into `project-review`; it already lives in the workflows that draft issues.
+
+VEND-4's acceptance signals are rewritten to this model. The originals described
+only the Claude copy, which is what made them unable to accept the slice.
+
+### D-10. The boundary rule ships as prose; the asset does not
+
+The Codex copy reads `references/review-boundaries.md` before selecting a range
+and treats a recorded PR as an exclusive older endpoint. That rule is
+instructions, and it renders into both brands as ordinary body prose. The file is
+not instructions: its content is one consuming repository's cursor —
+`coghex/synarchy`, stop before PR #1296, with #1210 excluded by the user — so
+shipping it would put one consumer's state in every install and make recording
+where a synarchy sweep stopped a pull request against this repository.
+
+VEND-4 therefore ships no auxiliary asset, and `render_command_sources.py` is not
+extended. Its one-file-per-brand shape — `commands/<name>.md` and
+`skills/<name>/SKILL.md`, and nothing else — stays exactly as VEND-0 built it,
+which is also why no bundle skill today carries a `references/` directory.
+`process-report`'s `scripts/` is not a counterexample: those are tracked helper
+programs, not rendered output.
+
+The Codex copy's other sibling file needs no decision here. `agents/openai.yaml`
+carries interface metadata, and VEND-1 through VEND-3 already established where
+that goes — `codex-plugin/plugins/kanban/.codex-plugin/plugin.json`'s `interface`
+block, beside the manifest's keywords and descriptions. VEND-4 follows that
+established pattern mechanically.
+
+### D-11. The sweep cursor lives in the reviewed repository's docs worktree
+
+D-10 leaves the boundary data without a home. It lives at
+`docs/project_review_boundaries.md` under the branch-resolved `docs-wip` worktree
+of the repository being reviewed — the same `$DOCS_WT` resolution and the same
+directory the reports themselves use, so it adds no write lane the workflow does
+not already have. Per-repository state belongs in the repository it describes: it
+is visible in a diff, reviewable, survives a change of machine, and is
+per-repository by construction rather than by a key inside a shared file.
+
+Two alternatives lost. A state file under the XDG namespace
+`claude-plugin/plugins/kanban/scripts/kanban_config.py` already resolves on both
+platforms would keep the workflow from writing into a reviewed repository at all
+— but under D-9 it writes reports there regardless, so that purity is already
+spent, and the cursor would be machine-local and invisible in a diff. Deriving
+the cursor from the existing `project_review_*.md` filenames stores nothing and
+is already the Codex copy's compaction-recovery path, but it is lossy in exactly
+the ways the current file demonstrates: a clean batch writes no report, so a
+clean range would be re-reviewed, and "#1210 intentionally excluded by the user"
+is a fact no filename can carry.
+
+One consequence lands on this repository specifically. When a sweep of
+`coghex/kanban` itself records a boundary,
+`docs/project_review_boundaries.md` needs its own `coordination` row in
+`docs/agent-workflow-contract.md` §7, exactly as `docs/project_review_386-361.md`
+has one. Without that row the fail-closed default makes the file `pr-atomic`, and
+the cursor could not be landed the way the reports beside it are.
+
 ## Open questions
 
 None. Every question raised during design is recorded as a decision above.
@@ -273,9 +360,10 @@ Arc-level signals:
   vendored command, so a future change cannot ship a command the inventory does
   not declare — the enforcement #229 established.
 - Invoking each vendored command in a consuming repository reproduces the
-  retired personal copy's behavior. This is demonstrated per slice rather than
-  asserted, because none of these commands has automated behavioral coverage
-  today.
+  behavior of whichever copy that slice's reconciliation selected under D-7 —
+  which for `project-review` is the Codex copy, per D-9, and not the Claude one.
+  This is demonstrated per slice rather than asserted, because none of these
+  commands has automated behavioral coverage today.
 - No personal copy remains live for a command whose replacement has shipped.
 
 ## Delivery plan
@@ -354,30 +442,30 @@ Arc-level signals:
 
 ### VEND-4. Vendor project-review
 
-> **Deferred:** The two personal copies implement opposite terminal behavior —
-> Claude files approved issues and treats a findings report as an explicit
-> request; Codex forbids tracker writes outright and writes the report
-> unconditionally — and this slice's own acceptance signal describes only the
-> Claude model. The Codex copy also ships `references/review-boundaries.md`,
-> which `render_command_sources.py` cannot produce, which neither bundle has a
-> symmetric home for, and whose content is a consuming repository's mutable
-> review cursor. Clears when `/design-epic` records a decision for each: which
-> terminal behavior survives, whether the boundary asset ships and where, and
-> where its mutable state lives at runtime.
-
 - **Outcome:** `kanban:project-review` ships in both bundles; personal copies retire.
 - **Scope:** reconcile the largest divergence in the set — 223 differing lines,
-  with the Codex copy at 220 lines against the Claude copy's 79 — deciding
-  explicitly which behavior survives; register and retire.
+  with the Codex copy at 220 lines against the Claude copy's 79 — resolving it to
+  the Codex copy's report-only behavior (D-9); fold the boundary rule into the
+  rendered body while shipping no `references/` asset (D-10); establish the sweep
+  cursor at `docs/project_review_boundaries.md` in the reviewed repository's docs
+  worktree, with the `coordination` §7 row this repository's own copy needs
+  (D-11); relocate `agents/openai.yaml`'s interface content into `plugin.json`'s
+  `interface` block as VEND-1 through VEND-3 did; register and retire.
 - **Phase:** 2
 - **Depends on:** `VEND-0`
 - **Ordering:** `independent`, but the heaviest reconciliation; do not schedule
   it as a warm-up.
-- **Relevant decisions:** D-1, D-2, D-4, D-5, D-7
-- **Acceptance signals:** a project-review run audits recent merged PRs and
-  drafts findings without filing anything unapproved; the pull request states
-  which copy's behavior won and why.
-- **Out of scope:** extending the audit's scope.
+- **Relevant decisions:** D-1, D-2, D-4, D-5, D-7, D-9, D-10, D-11
+- **Acceptance signals:** a project-review run over a bounded batch writes one
+  canonical findings report to the branch-resolved `docs-wip` worktree and
+  creates no tracker item; a clean batch writes no report and still preserves its
+  cursor; the boundary rule appears in both rendered bodies while neither bundle
+  gains a `references/` directory; and the pull request records that the Codex
+  copy's behavior won, per D-9.
+- **Out of scope:** extending the audit's scope; extending
+  `render_command_sources.py` to emit auxiliary files, which D-10 removes the
+  need for; and any change to `process-report`'s own disposition behavior, which
+  already accepts a report of this shape.
 - **Open questions:** `None`
 
 ### VEND-5. Vendor drain-prs
