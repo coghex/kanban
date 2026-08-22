@@ -509,11 +509,13 @@ reimplement the removal, and `--check` remains read-only.
 - **Invocation:** `launchctl` (`bootstrap`/`bootout`/`kickstart`/`print`/
   `kill`) manages the LaunchAgent on macOS, and `systemctl --user`
   (`daemon-reload`/`reset-failed`/`start`/`stop`/`show`) manages the user unit
-  on Linux. Both are spawned only by `tools/service_manager.py`
+  on Linux. Managing a job is `tools/service_manager.py`'s alone
   — the controller and the installer both reach their host's manager through
   that backend, and neither builds a `launchctl` or `systemctl` argument
   vector, reads either one's output, or writes or parses a plist or a unit
-  file. The drainer's own PR-merge loop
+  file. `launchctl` is spawned nowhere else in the tree; the one `systemctl`
+  spawn outside that backend is the §2.8 dashboard's read-only user-manager
+  version probe, which manages no job. The drainer's own PR-merge loop
   (`tools/drain_prs.py`) shells out to `git` and `gh` for every repository
   operation, and, only for automated stale-head rereview rounds, to
   `codex exec`. Every executable these Python tools spawn is declared in the
@@ -1066,9 +1068,24 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   the backend spawns `gh` and a reviewer model of its own. Exactly one bounded
   JSON document crosses back, and the schema and version it must carry are
   mirrored in the controller rather than imported, held equal to the backend's
-  by `tools/test_approve_issues_service.py`. `launchctl` and `systemctl --user`
-  are spawned only by `tools/service_manager.py`, exactly as in §2.4. Unlike
-  §2.4, the home-relative paths these three modules build *are* reconciled from
+  by `tools/test_approve_issues_service.py`. Managing a job is
+  `tools/service_manager.py`'s alone, exactly as in §2.4: it is the only
+  component that spawns `launchctl` at all, and the only one that spawns
+  `systemctl --user` to act on a unit. One other component reaches these
+  commands without managing anything. `src/Kanban/ApprovalService.hs` — the
+  in-app dashboard, which installs and controls nothing — detects the host's
+  manager: it probes for both with `findExecutable`, and where it finds
+  `systemctl` it spawns `systemctl --user show --property Version --value`
+  through `runGroupedProcess` to learn whether this account's user manager
+  answers at all, mirroring the installer's own probe so the two agree about
+  which hosts have a service. That is why the `launchctl-cli` and
+  `systemctl-cli` rows in §4 name that module alongside the backend, as the
+  `plutil-cli` row already does, and why it is a scanned Haskell surface: the
+  §6 executable check recovers both names from it, and the same listing puts
+  the discovery-record location it builds into the home-relative
+  reconciliation, which is what holds the dashboard and the controller to one
+  answer about where the record is. Unlike §2.4, the home-relative paths this
+  service's three Python modules build *are* reconciled from
   here: `tools/test_agent_workflow_contract.py` resolves each parsed module for
   every chain of literal path segments reaching a home root — following a name
   to whatever it was bound to, and a nullary helper to what it returns, because
@@ -1355,8 +1372,8 @@ git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;t
 python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs;src/Kanban/ApprovalService.hs | kanban | supported | no
-launchctl-cli | executable | launchctl | tools/service_manager.py | kanban | supported | no
-systemctl-cli | executable | systemctl | tools/service_manager.py | kanban | supported | no
+launchctl-cli | executable | launchctl | tools/service_manager.py;src/Kanban/ApprovalService.hs | kanban | supported | no
+systemctl-cli | executable | systemctl | tools/service_manager.py;src/Kanban/ApprovalService.hs | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 approve-issues-backend-xdg | personal-path | /.local/share/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir | personal-path | /Library/Logs/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
@@ -1372,7 +1389,7 @@ drainer-log-dir | personal-path | /Library/Logs/kanban/pr-drainer | tools/kanban
 drainer-log-dir-xdg | personal-path | /.local/state/kanban/pr-drainer | tools/kanban_config.py | kanban | supported | no
 issue-approval-job-label | personal-path | com.coghex.issue-approval | tools/service_manager.py | kanban | supported | no
 issue-approval-install-dir | personal-path | /Library/Application Support/kanban/issue-approval | docs/issue-approval.md | kanban | supported | no
-issue-approval-discovery-record | personal-path | /Library/Application Support/kanban/issue-approval/config.json | docs/issue-approval.md | kanban | supported | no
+issue-approval-discovery-record | personal-path | /Library/Application Support/kanban/issue-approval/config.json | docs/issue-approval.md;src/Kanban/ApprovalService.hs | kanban | supported | no
 issue-approval-runtime-dir | personal-path | /Library/Application Support/kanban/issue-approval/runtime | docs/issue-approval.md | kanban | supported | no
 issue-approval-lock-dir | personal-path | /Library/Application Support/kanban/issue-approval/locks | docs/issue-approval.md | kanban | supported | no
 issue-approval-log-dir | personal-path | /Library/Logs/kanban/issue-approval | docs/issue-approval.md | kanban | supported | no
@@ -1498,16 +1515,34 @@ found by the scan below in `tools/approve_issues_service.py`.
 definitions and is not on that scan's surface, so this one row covers a location
 two modules write and one of them is policed for.
 
-Those five declare `docs/issue-approval.md` rather than the controller, and that
-is a statement about how the controller spells them rather than about who owns
-them. It composes each location segment by segment —
+Four of the five — `issue-approval-install-dir`, `issue-approval-runtime-dir`,
+`issue-approval-lock-dir`, and `issue-approval-log-dir` — declare
+`docs/issue-approval.md` alone, and that is a statement about how the controller
+spells them rather than about who owns them. It composes each location segment
+by segment —
 `account_home() / "Library" / "Application Support" / "kanban" / "issue-approval"`,
-and the four beneath it through a nullary helper each, as
+and the trees beneath it through a nullary helper each, as
 `service_root() / "runtime"` and its siblings — so no tracked source carries any
-of the composed literals for a `files` entry to be grounded in, and the guide is
-the one place in this repository where they are written down. What holds the
-composition to these rows is the Python home-relative-path scan in
-`tools/test_agent_workflow_contract.py`, which resolves
+of those four composed literals for a `files` entry to be grounded in, and the
+guide is the one place in this repository where they are written down.
+
+`issue-approval-discovery-record` is the fifth, and the exception: it names
+`src/Kanban/ApprovalService.hs` beside the guide. The controller composes that
+location exactly as it composes the other four, but unlike them it has a second
+consumer — the in-app dashboard §2.8 names — and `approvalRecordPath` there
+builds it as one literal joined to the account's home directory. So the record's
+spelling *is* carried in tracked source, and the row is grounded in it. Because
+the literal is joined rather than absolute it omits the row's leading separator,
+so the function writes the row's own spelling out in a comment beside it — the
+one place the two forms are reconciled, and a line whose deletion fails the
+grounding check rather than quietly unhooking the row from its consumer. The
+sibling `issue-review-discovery-record` and `drainer-discovery-record` rows, and
+their `-xdg` counterparts, name `src/Kanban/ManagedPaths.hs` on the same terms —
+there the literal carries the leading separator, so no reconciling comment is
+needed.
+
+What holds the composition to these rows is the Python home-relative-path scan
+in `tools/test_agent_workflow_contract.py`, which resolves
 `tools/approve_issues_service.py`, `tools/install_issue_approval.py`, and
 `tools/service_manager.py` as parsed modules — following a name to its binding
 and a helper to its return — and reconciles every chain that reaches a home root
@@ -1515,7 +1550,10 @@ against the `personal-path` tokens here. It is the counterpart of the Haskell an
 markdown scans above, over a third surface that spells its paths in neither of
 their shapes, and it is what makes each of these five rows load-bearing: change
 any one of these locations without changing its row and the scan reports the new
-one.
+one. `issue-approval-discovery-record` answers to the Haskell scan as well,
+since `src/Kanban/ApprovalService.hs` joined that surface: moving the record in
+either consumer without changing the row is reported, which is what keeps the
+dashboard and the controller from disagreeing about where it is.
 
 That last property needs one rule the literal scans do not have. Those recover
 whatever the source wrote down, which is routinely a file *inside* a declared
@@ -2152,18 +2190,40 @@ utilities.
 `python3 -m unittest discover -s tools -p 'test_*.py'`, which CI already
 runs) parses the manifest in §4 and:
 
-- fails if the solve, PR-flow, canonical-review, or shared provider/process
-  source files (`src/Kanban/Solve.hs`, `PullRequestFlow.hs`, `Review.hs`,
-  `Codex.hs`, `Claude.hs`, `GitHub/Run.hs`, `Repository.hs`, `Drainer.hs`,
-  `ManagedPaths.hs`, `Process.hs`) invoke a literal external command that has
-  no matching `executable` manifest entry — `GitHub/Run.hs` rather than
+- fails if the solve, PR-flow, canonical-review, shared provider/process, or
+  issue-approval-dashboard source files (`src/Kanban/Solve.hs`,
+  `PullRequestFlow.hs`, `Preflight/Environment.hs`, `Review.hs`,
+  `Review/Canonical.hs`, `Review/Tools.hs`, `Codex.hs`, `Claude.hs`,
+  `GitHub/Run.hs`, `Repository.hs`, `Drainer.hs`, `ManagedPaths.hs`,
+  `ApprovalService.hs`, `Process.hs`) invoke a literal external command that
+  has no matching `executable` manifest entry — `GitHub/Run.hs` rather than
   `GitHub.hs`
   because the split in #160 left `Kanban.GitHub` a re-export façade and moved
   the `gh` spawn into `Kanban.GitHub.Run`, which is the only module under
-  `src/Kanban/GitHub/` that resolves or starts an executable, and
+  `src/Kanban/GitHub/` that resolves or starts an executable;
   `ManagedPaths.hs` because the two managed discovery records' locations moved
   there out of `Drainer.hs` and `Review/Canonical.hs`, which is what the
-  bullet below has to see them in;
+  bullet below has to see them in; and `ApprovalService.hs` because it is the
+  §2.8 dashboard, which the same bullet has to see the issue-approval discovery
+  record in and which resolves `launchctl` and `systemctl` for its
+  host-backend detection. That list is exhaustive for `src/` over the call
+  shapes these extractors recognise — a literal name passed to
+  `proc`/`findExecutable`/`readProcessWithExitCode`, a literal name passed to
+  `Kanban.Drainer`'s timed `runProcess` helper, a `findExecutable` argument a
+  `case` or `if` binds to string literals, and a location spelled as one
+  literal hung off a `getHomeDirectory` result. Four other modules call one of
+  those functions and are deliberately out, because none of them writes a name
+  or a path any extractor could recover: `ServiceProcess.hs`,
+  `UsageCommand.hs`, and `Worker.hs` are spawn helpers that pass `proc` an
+  executable *value* their caller computed, and `Ping.hs` resolves
+  `findExecutable (pingExecutableName brand)`, whose argument is a
+  two-equation top-level function rather than the `case`/`if` binding the
+  indirect extractor reads, and builds its scratch directory with
+  `getXdgDirectory` rather than `getHomeDirectory`. Listing any of the four
+  would add a member the extractors recover nothing from, which is a surface
+  entry that scans nothing rather than coverage; the `codex` and `claude` that
+  `Ping.hs` and `Worker.hs` ultimately run carry `executable` rows grounded in
+  the scanned modules that do spell them;
 - fails if any of the tracked Codex plugin's packaged `SKILL.md` files or the
   tracked Claude plugin's packaged `commands/*.md` files invoke a command,
   inside a fenced ```` ```bash ```` block, that has no matching `executable`
