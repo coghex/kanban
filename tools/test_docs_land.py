@@ -1119,6 +1119,57 @@ class InventoryCleanupTests(DocsLandCase):
         self.assertEqual(set(glob.glob(pattern)) - before, set())
 
 
+class ReconcileAliasAndSymlinkTests(DocsLandCase):
+    """Two ways the reconcile can invalidate an answer about a NON-REGULAR
+    entry: the alias the gate verified, and a symlink standing where a
+    restored blob is written."""
+
+    def test_an_upstream_alias_change_is_re_gated_on_the_original_name(self):
+        # The gate canonicalizes AGENTS.md to CLAUDE.md, so re-gating the
+        # CANONICAL list alone would never call verify_alias again. Upstream
+        # replaces AGENTS.md with a regular file, breaking the alias; the
+        # re-gate has to re-judge the name the operator actually typed.
+        sb = self.sb
+        sb.git("rm", "-q", "AGENTS.md")
+        sb.write(sb.main, "AGENTS.md", "not a symlink any more\n")
+        sb.git("add", "AGENTS.md")
+        sb.git("commit", "-q", "-m", "upstream breaks the alias")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "CLAUDE.md", "root contract revised\n")
+        before = sb.snapshot()
+
+        refused = sb.run_script("-m", "Land the root contract", "AGENTS.md")
+        self.assertEqual(refused.returncode, 6, refused.stderr)
+        self.assertIn("AGENTS.md", refused.stderr)
+        self.assertEqual(sb.head("origin/master"), before["upstream"])
+
+    def test_a_restored_stage_never_writes_through_a_worktree_symlink(self):
+        # Upstream deletes the tracked AGENTS.md symlink while this worktree
+        # retargets it at docs/a.md. Restoring stage 3 with a shell
+        # redirection would follow the symlink and overwrite docs/a.md with
+        # the literal target string, corrupting an unrelated document that
+        # was never part of the landing.
+        sb = self.sb
+        original_a = (sb.docs / "docs/a.md").read_text(encoding="utf-8")
+        sb.git("rm", "-q", "AGENTS.md")
+        sb.git("commit", "-q", "-m", "upstream deletes the alias")
+        sb.git("push", "-q", "origin", "master")
+        (sb.docs / "AGENTS.md").unlink()
+        os.symlink("docs/a.md", sb.docs / "AGENTS.md")
+        sb.write(sb.docs, "docs/b.md", "b landed\n")
+
+        done = sb.run_script("-f", "-a", "-m", "Land B", "docs/b.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        # The unrelated document is untouched -- not overwritten with the
+        # symlink's target string.
+        self.assertEqual(
+            (sb.docs / "docs/a.md").read_text(encoding="utf-8"), original_a)
+        self.assertNotIn(
+            "docs/a.md",
+            (sb.docs / "docs/a.md").read_text(encoding="utf-8"))
+        self.assertEqual(sb.blob("origin/master", "docs/b.md"), "b landed\n")
+
+
 class AbsentContractTests(DocsLandCase):
     """A repository that publishes no docs/agent-workflow-contract.md runs no
     §7 lane split, so classification is not a gate it has. Every other

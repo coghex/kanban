@@ -149,6 +149,10 @@ cd "$DOCS_WT"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/docs-land.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+# Defined here rather than beside its other users: the -a resolver below is
+# reachable from the unmerged-path guard, which runs before them.
+_TAB="$(printf '\t')"
+
 # Resolve every unmerged path in favour of THIS worktree's side, hunk by
 # hunk, keeping the other side's non-conflicting hunks -- what -a means.
 #
@@ -164,48 +168,85 @@ resolve_unmerged_favouring_theirs() {
   [ -s "$TMP_DIR/conflicted" ] || return 0
   while IFS= read -r -d '' c; do
     [ -n "$c" ] || continue
+    GIT_LITERAL_PATHSPECS=1 git ls-files -s -z -- "$c" > "$TMP_DIR/stages"
+
     # Not every conflict has all three stages, and a DELETE/MODIFY has only
-    # two. Reading a missing one is a hard `git show` failure, which under
-    # `set -e` would abort the run mid-resolution -- leaving the path
-    # unmerged and never reaching the upstream-deletion refusal below. Each
-    # shape is answered by what "favour this worktree's side" means for it,
-    # so -a resolves every conflict it is documented to resolve.
-    if ! git show ":3:$c" > "$TMP_DIR/theirs" 2>/dev/null; then
+    # two. Each shape is answered by what "favour this worktree's side"
+    # means for it, so -a resolves every conflict it is documented to.
+    if ! _s3_sha="$(stage_field 3 sha)"; then
       # No stage 3: this worktree DELETED the path and the other side
       # modified it. Favouring this side means the deletion stands.
       GIT_LITERAL_PATHSPECS=1 git rm -q -f -- "$c"
       continue
     fi
-    if ! git show ":2:$c" > "$TMP_DIR/ours" 2>/dev/null; then
-      # No stage 2: the other side DELETED the path and this worktree
-      # modified it. Favouring this side means the content survives -- and
-      # a selected path in that state is then caught by the
-      # upstream-deletion refusal, which is where the deliberate decision
-      # to resurrect it belongs.
-      cp_theirs=1
+    _s3_mode="$(stage_field 3 mode)"
+
+    # A textual three-way merge is only meaningful between two REGULAR
+    # files. When either side is a symlink or a gitlink, there is no text to
+    # merge -- so the whole entry is taken from this worktree's side rather
+    # than having a target string merged line-by-line as if it were prose.
+    _mergeable=1
+    case "$_s3_mode" in 100644|100755) ;; *) _mergeable=0 ;; esac
+    if _s2_sha="$(stage_field 2 sha)"; then
+      case "$(stage_field 2 mode)" in 100644|100755) ;; *) _mergeable=0 ;; esac
     else
-      cp_theirs=0
+      # No stage 2: the other side DELETED the path and this worktree
+      # modified it. The content survives -- and a selected path in that
+      # state is then caught by the upstream-deletion refusal, which is
+      # where the deliberate decision to resurrect it belongs.
+      _s2_sha=""
+      _mergeable=0
     fi
+
+    if [ "$_mergeable" = 0 ]; then
+      resolve_to_blob "$c" "$_s3_mode" "$_s3_sha"
+      continue
+    fi
+
     # Stage 1 is absent for an add/add conflict; an empty base makes
     # merge-file treat both sides as pure additions, which is the right
     # reading of "neither side had this text before".
     git show ":1:$c" > "$TMP_DIR/base" 2>/dev/null || : > "$TMP_DIR/base"
-    if [ "$cp_theirs" = 1 ]; then
-      git show ":3:$c" > "$c"
-      GIT_LITERAL_PATHSPECS=1 git add -- "$c"
-      continue
-    fi
-    # -p writes the merge to stdout, straight over the conflicted file:
-    # every byte it needs is already in stages 1-3, so truncating the
-    # working copy first costs nothing and saves an intermediate write.
+    git show ":2:$c" > "$TMP_DIR/ours"
+    git show ":3:$c" > "$TMP_DIR/theirs"
     # merge-file exits with the conflict COUNT, not a failure code, and
     # --theirs leaves none anyway.
     git merge-file --theirs -q -p \
-      "$TMP_DIR/ours" "$TMP_DIR/base" "$TMP_DIR/theirs" > "$c" || true
-    GIT_LITERAL_PATHSPECS=1 git add -- "$c"
+      "$TMP_DIR/ours" "$TMP_DIR/base" "$TMP_DIR/theirs" \
+      > "$TMP_DIR/merged" || true
+    resolve_to_blob "$c" "$_s3_mode" "$(git hash-object -w -- "$TMP_DIR/merged")"
   done < "$TMP_DIR/conflicted"
   echo "resolved in favour of this worktree:"
   tr '\0' '\n' < "$TMP_DIR/conflicted" | sed 's/^/  /'
+}
+
+# One field of one stage of the ls-files -s record set in $TMP_DIR/stages.
+# $1 is the stage number, $2 is `mode` or `sha`. Nonzero when that stage has
+# no entry, which is how the caller detects a two-stage conflict.
+stage_field() {
+  while IFS= read -r -d '' _rec; do
+    _meta="${_rec%%$_TAB*}"
+    [ "${_meta##* }" = "$1" ] || continue
+    case "$2" in
+      mode) printf '%s\n' "${_meta%% *}" ;;
+      sha)  _rest="${_meta#* }"; printf '%s\n' "${_rest%% *}" ;;
+    esac
+    return 0
+  done < "$TMP_DIR/stages"
+  return 1
+}
+
+# Resolve path $1 to blob $3 at mode $2, in the index AND the worktree.
+#
+# Never a shell redirection onto the path. Redirection FOLLOWS a symlink, so
+# writing a restored entry over a path that is a symlink on disk silently
+# rewrites its TARGET -- an unrelated document, which the run then publishes
+# or leaves corrupted. Going through the index and `checkout-index -f`
+# replaces the entry itself, preserves its recorded mode, and cannot escape
+# the path being resolved.
+resolve_to_blob() {
+  GIT_LITERAL_PATHSPECS=1 git update-index --add --cacheinfo "$2" "$3" "$1"
+  GIT_LITERAL_PATHSPECS=1 git checkout-index -f -- "$1"
 }
 
 # --- Refuse a docs worktree stopped mid-operation --------------------------
@@ -250,6 +291,14 @@ if [ "$LIST" = 1 ]; then
 fi
 
 # --- Gate: validation, alias canonicalization, §7 classification -----------
+# The ORIGINAL names are kept because the gate replaces them with canonical
+# ones, and the post-reconcile re-gate has to re-judge what the operator
+# actually typed: an AGENTS.md selection canonicalizes to CLAUDE.md, and
+# re-gating the canonical name alone would never call verify_alias again --
+# so a reconcile that BROKE the alias would go unnoticed.
+: > "$TMP_DIR/original-args"
+for p in "$@"; do printf '%s\0' "$p" >> "$TMP_DIR/original-args"; done
+
 CANONICAL="$(python3 "$GATE" --worktree "$DOCS_WT" --gate -- "$@")" || exit 6
 set --
 while IFS= read -r p; do
@@ -280,7 +329,6 @@ in_nul_list() {
   return 1
 }
 
-_TAB="$(printf '\t')"
 # Whether worktree $2's index holds an entry at EXACTLY path $1 — not merely
 # beneath it, which is all a bare ls-files pathspec probe can say. The
 # distinction is what separates a tracked file an upstream transition may
@@ -685,6 +733,10 @@ if [ "$DRY" = 0 ] && [ "$RECONCILED" = 1 ]; then
     echo "note: check 'git status' in the docs worktree and name that path instead."
   fi
 
+  set --
+  while IFS= read -r -d '' p; do
+    [ -n "$p" ] && set -- "$@" "$p"
+  done < "$TMP_DIR/original-args"
   CANONICAL="$(python3 "$GATE" --worktree "$DOCS_WT" --gate -- "$@")" || exit 6
   set --
   while IFS= read -r p; do
