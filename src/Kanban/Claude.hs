@@ -20,7 +20,8 @@ import Control.Monad (void)
 import qualified Data.ByteString as ByteString
 import Data.Char (isDigit)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
-import Data.List (nub)
+import Data.Function (on)
+import Data.List (nub, nubBy)
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -254,6 +255,7 @@ runProcess _ _ _ _ _ _ processHandle = do
 
 driveProbe :: ProbeCensus -> Int -> UTCTime -> TimeZone -> Handle -> Handle -> IO (Either ProviderError UsageSnapshot)
 driveProbe census timeoutMicros fetchedAt timeZone input output = do
+  acquireProbeCensus census
   hSetBuffering input NoBuffering
   hSetBuffering output NoBuffering
   timedCapture <- timeout timeoutMicros (captureUsage census input output)
@@ -309,21 +311,14 @@ captureUsage census input output = do
                       }
             else loop stateAfterCensus
 
-    -- Two cadences, because the two things a refresh can buy cost very
-    -- differently. Until a census has seen anything below 'script' there is
-    -- nothing retained that would survive its exit, so the gap between
-    -- attempts is the capture's own polling interval; a probe whose client
-    -- starts normally pays one or two snapshots for that. Afterwards a
-    -- refresh only picks up something spawned later, which is worth a
-    -- snapshot every couple of seconds and not worth one every quarter of a
-    -- second for the whole of a multi-second probe.
-    refreshCensusIfDue now state = do
-      acquired <- probeCensusReachedDescendant census
-      let interval = if acquired then censusRefreshIntervalMicros else censusAcquireIntervalMicros
-      if diffMicros state.captureLastCensusAt now < interval
-        then pure state
-        else do
-          recordProbeCensus census
+    -- 'acquireProbeCensus' has already pinned the tree by the time the loop
+    -- starts; what a refresh buys here is only something spawned later, so
+    -- it is worth a snapshot every couple of seconds and not worth one for
+    -- every quarter-second of a multi-second probe.
+    refreshCensusIfDue now state
+      | diffMicros state.captureLastCensusAt now < censusRefreshIntervalMicros = pure state
+      | otherwise = do
+          _ <- recordProbeCensus census
           recordedAt <- getCurrentTime
           pure state {captureLastCensusAt = recordedAt}
 
@@ -401,27 +396,67 @@ newProbeCensus processHandle = do
 -- it. A snapshot that could not be taken leaves the retained census exactly
 -- as it was, so one failed @ps@ never discards identities an earlier one
 -- pinned.
-recordProbeCensus :: ProbeCensus -> IO ()
+recordProbeCensus :: ProbeCensus -> IO (Maybe [ProcessIdentity])
 recordProbeCensus census = do
   fresh <- captureProbeCensus census.probeCensusHandle
   case fresh of
     Nothing -> pure ()
     Just identities -> modifyIORef' census.probeCensusRetained (Just . mergeIdentities identities . fromMaybe [])
+  pure fresh
   where
-    mergeIdentities fresh retained = fresh <> filter ((`notElem` map identityKey fresh) . identityKey) retained
+    mergeIdentities fresh retained = nubBy ((==) `on` identityKey) (fresh <> retained)
     identityKey identity = (identity.processIdentityPid, identity.processIdentityStartedAt)
 
 -- | Whether anything below the wrapper has been pinned yet -- that is,
 -- whether the retained census would still reach the client if the wrapper
 -- went away now. 'Nothing' for the wrapper's own pid means 'getPid' never
 -- answered, in which case 'captureProbeCensus' cannot census either and
--- there is nothing for a slower cadence to preserve.
+-- there is nothing to pin at all.
 probeCensusReachedDescendant :: ProbeCensus -> IO Bool
 probeCensusReachedDescendant census = do
   retained <- readIORef census.probeCensusRetained
   pure $ case retained of
     Nothing -> False
     Just identities -> any ((/= census.probeCensusWrapperPid) . Just . (.processIdentityPid)) identities
+
+-- | Pins the tree the probe launched, before a byte is driven over the
+-- pseudo-terminal.
+--
+-- Waiting for the capture to do this lazily is not good enough. The whole
+-- reason the retained census exists is that 'script' can exit early, and a
+-- 'script' that forks its client and exits inside the gap before the first
+-- snapshot leaves that client reparented and unreachable, with a retained
+-- census that pins nothing below the wrapper and so signals nobody. So the
+-- first census is taken immediately -- while 'script' cannot yet have
+-- exited, because it has only just been spawned -- and repeated at a short
+-- interval until it has pinned something below the wrapper, until a
+-- snapshot shows the wrapper itself gone (after which nothing below it can
+-- appear, and 'descendantProcesses' walks by recorded parent pid, so
+-- anything already below it would have been found by that same snapshot),
+-- or until a fixed deadline passes. A snapshot that could not be taken at
+-- all is not a reason to stop; the deadline bounds that case.
+--
+-- In the ordinary case 'script' has forked its client within a few
+-- milliseconds and the second snapshot ends this. What it cannot close is a
+-- 'script' that both forks its client and exits between two snapshots: no
+-- parent-walking census can see a child that never shares a snapshot with
+-- its parent, which is why the deadline exists rather than a loop that
+-- insists on succeeding.
+acquireProbeCensus :: ProbeCensus -> IO ()
+acquireProbeCensus census = do
+  startedAt <- getCurrentTime
+  attempt startedAt
+  where
+    attempt startedAt = do
+      fresh <- recordProbeCensus census
+      pinned <- probeCensusReachedDescendant census
+      now <- getCurrentTime
+      let wrapperGone = case fresh of
+            Nothing -> False
+            Just identities -> not (any ((== census.probeCensusWrapperPid) . Just . (.processIdentityPid)) identities)
+      if pinned || wrapperGone || diffMicros startedAt now >= censusAcquireDeadlineMicros
+        then pure ()
+        else threadDelay censusAcquireIntervalMicros >> attempt startedAt
 
 -- | Waits out a clean @/exit@, then verifies -- and, if needed, escalates --
 -- unconditionally. Identities are censused before this wait even starts, not
@@ -439,7 +474,7 @@ probeCensusReachedDescendant census = do
 -- verifying snapshot.
 finishProcess :: ProbeCensus -> IO Bool
 finishProcess census = do
-  recordProbeCensus census
+  _ <- recordProbeCensus census
   _ <- timeout cleanExitMicros (waitForProcess census.probeCensusHandle)
   terminateWithCensus census
 
@@ -686,10 +721,11 @@ killGraceMicros = 1 * 1000 * 1000
 reapTimeoutMicros = 2 * 1000 * 1000
 quietPeriodMicros = 2 * 1000 * 1000
 
--- | How long the capture goes between census refreshes, before and after it
--- has pinned something below the wrapper. See 'captureUsage'.
-censusAcquireIntervalMicros, censusRefreshIntervalMicros :: Int
-censusAcquireIntervalMicros = 250 * 1000
+-- | How hard 'acquireProbeCensus' tries to pin the launched tree before the
+-- capture starts, and how long 'captureUsage' then goes between refreshes.
+censusAcquireIntervalMicros, censusAcquireDeadlineMicros, censusRefreshIntervalMicros :: Int
+censusAcquireIntervalMicros = 25 * 1000
+censusAcquireDeadlineMicros = 1 * 1000 * 1000
 censusRefreshIntervalMicros = 2 * 1000 * 1000
 
 inputWaitMillis, captureChunkSize :: Int

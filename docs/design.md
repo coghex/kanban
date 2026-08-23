@@ -1653,9 +1653,12 @@ The built-in provider therefore:
    reported as a failed refresh rather than a snapshot. Because a client the
    pty placed in its own session stops being reachable by walking down from
    `script` the moment `script` exits, the escalation runs against identities
-   the probe pinned while that walk still worked, refreshed as the capture
-   proceeds, rather than against a single census taken once the failure has
-   already happened.
+   the probe pinned while that walk still worked rather than against a single
+   census taken once the failure has already happened. Those identities are
+   pinned at launch — before a byte is driven over the pseudo-terminal, and
+   retried at a short interval until the launched tree is captured or a bounded
+   deadline passes — and refreshed as the capture proceeds so that anything
+   started later is covered too.
 9. Rejects unrecognized output and retains the previous snapshot.
 
 The provider does not read or reuse Claude OAuth credentials directly. It

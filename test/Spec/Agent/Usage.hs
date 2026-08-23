@@ -274,6 +274,26 @@ spec = do
         -- the sweep assertion above passing because it had exited anyway.
         doesFileExist fixture.claudeProbeTermMarker `shouldReturn` True
 
+    it "still sweeps that child when the wrapper leaves as soon as the client is up" $
+      -- The same failure, with the wrapper gone a fraction of a second after
+      -- the client it launched came up rather than after a stretch of the
+      -- session. Censusing the tree only once the capture is already driving
+      -- the pseudo-terminal -- or, as the bug did, only once the write has
+      -- failed -- is too late by then: the wrapper has gone, the child is
+      -- reparented, and walking down from the wrapper's pid reaches nothing,
+      -- so cleanup would escalate against a census that pins nothing below
+      -- the wrapper and signal nobody.
+      withClaudeProbeFixture True WrapperExitsAtStartup ClaudeIgnoresInterrupt CompleteUsageTranscript $ \fixture -> do
+        result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        case result of
+          Just (Left providerError) -> do
+            providerError.providerErrorKind `shouldBe` RequestFailed
+            providerError.providerErrorMessage `shouldMention` scriptFlavorLabel hostScriptFlavor
+          other -> expectationFailure ("expected a bounded request failure, got " <> show other)
+        shouldRecordASweptProcess fixture.claudeProbeScriptMarker "the script wrapper"
+        shouldRecordASweptProcess fixture.claudeProbeChildMarker "the claude child"
+        doesFileExist fixture.claudeProbeTermMarker `shouldReturn` True
+
   describe "external usage-command document decoding" $ do
     it "decodes windows using the refresh clock rather than any document timestamp" $
       case decodeUsageCommandDocument epoch "{\"windows\":[{\"label\":\"5 hour\",\"pct_left\":78,\"resets_at\":\"2026-07-16T16:05:00Z\"}]}" of

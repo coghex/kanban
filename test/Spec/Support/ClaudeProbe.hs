@@ -52,6 +52,18 @@ data ClaudeWrapperLifetime
     -- and its tail would sit waiting on bytes that never reach the stdin
     -- this shape gives it.
     WrapperExitsMidSession
+  | -- | As 'WrapperExitsMidSession', but gone as soon as the client it
+    -- launched is actually up, rather than after a stretch of the session.
+    -- The departure is ordered against the child's own first act, not
+    -- against the clock, because how long a fixture wrapper takes to be
+    -- scheduled, start a shell and fork is neither small nor predictable --
+    -- around a quarter of a second was observed on an ordinary macOS test
+    -- run -- so a wall-clock delay measured from launch says nothing about
+    -- how much of the client's lifetime the wrapper actually shares. What
+    -- it does hold to is the far end of that: a probe that leaves censusing
+    -- until it is driving the pseudo-terminal, or until the write fails,
+    -- has lost the child by then.
+    WrapperExitsAtStartup
   deriving stock (Eq, Show)
 
 -- | What the fake `claude` puts on the pseudo-terminal before its tail
@@ -107,7 +119,7 @@ withClaudeProbeFixture separateGroup wrapperLifetime signalPolicy transcript act
         childMarker = temporaryRoot </> "claude-child.pid"
         termMarker = temporaryRoot </> "claude-term-received"
     createDirectoryIfMissing True binaryRoot
-    ByteString.writeFile scriptPath (ByteString.unlines (fakeScriptBody scriptMarker separateGroup wrapperLifetime))
+    ByteString.writeFile scriptPath (ByteString.unlines (fakeScriptBody scriptMarker childMarker separateGroup wrapperLifetime))
     setFileMode scriptPath 0o700
     ByteString.writeFile claudePath (ByteString.unlines (fakeClaudeBody childMarker termMarker signalPolicy transcript))
     setFileMode claudePath 0o700
@@ -131,8 +143,8 @@ withClaudeProbeFixture separateGroup wrapperLifetime signalPolicy transcript act
 -- util-linux hands its @-c@ payload to a shell, so this does too, rather
 -- than word-splitting the payload itself -- otherwise the fixture would
 -- accept a payload no real `script` could run.
-fakeScriptBody :: FilePath -> Bool -> ClaudeWrapperLifetime -> [ByteString.ByteString]
-fakeScriptBody scriptMarkerPath separateGroup wrapperLifetime =
+fakeScriptBody :: FilePath -> FilePath -> Bool -> ClaudeWrapperLifetime -> [ByteString.ByteString]
+fakeScriptBody scriptMarkerPath childMarkerPath separateGroup wrapperLifetime =
   [ "#!/bin/bash",
     "printf '%s' \"$$\" > " <> quoted scriptMarkerPath,
     "if [ \"$2\" = '-c' ]; then",
@@ -151,12 +163,22 @@ fakeScriptBody scriptMarkerPath separateGroup wrapperLifetime =
     <> ["set +m" | separateGroup]
     <> case wrapperLifetime of
       WrapperWaitsForClaude -> ["wait \"$childPid\""]
-      -- One second is long enough for the probe to census the wrapper and
-      -- the child together, and short enough to be well inside the quiet
-      -- period the capture waits out before it writes the exit request --
-      -- so the wrapper is reliably gone by the time that write happens,
-      -- which is the failure this shape exists to produce.
+      -- Both leaving shapes are gone well inside the quiet period the
+      -- capture waits out before it writes the exit request, so the write
+      -- reliably fails, which is the failure they exist to produce.
       WrapperExitsMidSession -> ["sleep 1", "exit 0"]
+      -- The child's pid marker is its own first act, so waiting for that
+      -- file dates this departure from when the client came up rather than
+      -- from whenever this wrapper happened to be scheduled. The settle
+      -- after it is a few times what one census attempt costs -- enough
+      -- that a probe censusing from launch has certainly taken one with
+      -- both alive, and far short of the seconds a probe that waits for the
+      -- capture would need.
+      WrapperExitsAtStartup ->
+        [ "while [ ! -s " <> quoted childMarkerPath <> " ]; do sleep 0.02; done",
+          "sleep 0.3",
+          "exit 0"
+        ]
   where
     -- A real `script` is the only reader of Kanban's end: it owns the
     -- pseudo-terminal and hands the client a slave of its own, so the
@@ -175,6 +197,7 @@ fakeScriptBody scriptMarkerPath separateGroup wrapperLifetime =
     childStandardInput = case wrapperLifetime of
       WrapperWaitsForClaude -> ""
       WrapperExitsMidSession -> " </dev/null"
+      WrapperExitsAtStartup -> " </dev/null"
 
 -- | Stands in for real `claude --safe-mode --ax-screen-reader` running
 -- inside `script`'s pty: records its own pid, emits whichever screen the
