@@ -1644,7 +1644,22 @@ The built-in provider therefore:
    interrupt cannot outlive `script`'s pseudo-terminal wrapper; a client that
    requires SIGKILL to stop is reported as a failed refresh rather than a
    decoded snapshot, even when usage was already captured.
-8. Rejects unrecognized output and retains the previous snapshot.
+8. Completes that same descendant-aware cleanup on **every** path that returns
+   after the probe has been launched, not only the exit-and-escalate case
+   above: the refresh timeout, pseudo-terminal pipes that could not be opened,
+   and any I/O error raised while the probe is being driven — including the
+   clean-exit write itself, which fails precisely when the far end has already
+   gone — each escalate before the refresh returns, and an I/O error is
+   reported as a failed refresh rather than a snapshot. Because a client the
+   pty placed in its own session stops being reachable by walking down from
+   `script` the moment `script` exits, the escalation runs against identities
+   the probe pinned while that walk still worked rather than against a single
+   census taken once the failure has already happened. Those identities are
+   pinned at launch — before a byte is driven over the pseudo-terminal, and
+   retried at a short interval until the launched tree is captured or a bounded
+   deadline passes — and refreshed as the capture proceeds so that anything
+   started later is covered too.
+9. Rejects unrecognized output and retains the previous snapshot.
 
 The provider does not read or reuse Claude OAuth credentials directly. It
 delegates authentication and network access to the official client. Parsing is
