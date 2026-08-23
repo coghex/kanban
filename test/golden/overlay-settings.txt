@@ -1,0 +1,48 @@
+╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
+║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
+║┃ Codex          3h 0m old ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ 5 hour  [██████░░░░] 63% ┃┃                                          ┃                                         ┃  STANDALONE                             ┃  STANDALONE                             ┃║
+║┃ in 1h 5m · Thu 16:05     ┃┃  ▾ #700  Persistence contract rollout    ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ week    [████░░░░░░] 41% ┃┃  1/2 complete                            ┃  1/2 complete                           ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
+║┃ in 4d 18h · Tue 09:00    ┃┃  └─ ╭──────────────────────────────────╮ ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
+║┃ Claude         3h 0m old ┃┃     │ A1 · tracker #700                │ ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
+║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the versioned save    │ ┃     │ #712 Migrate the terrain cache  │ ┃  │ #833 · agent-name → master ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
+║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope                     ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ SETTINGS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓                    │ ┃  │ updated 3h ago                     │ ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature                     ┃                                                                  ┃n dispatch into     │ ┃  │ Updates the branch after the       │ ┃║
+║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · updated 4h ago  ┃ Chat output verbosity                                            ┃hile preserving the │ ┃  │ persistence registry changed on    │ ┃║
+║┃ ┏━━━┓                    ┃┃     │ Write the envelope header ahe┃ 1) Compact                                                       ┃                    │ ┃  │ master.                            │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃     │ of the payload so a partial  ┃    Agent messages and short tool status                          ┃hind                │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃ ┗━━━┛                    ┃┃     │ write is detectable on load. ┃ 2) Standard                                                      ┃────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃     ╰──────────────────────────────┃    Reasoning summaries, commands, tool inputs, and concise       ┃                      ┃                                         ┃║
+║┃                          ┃┃                                    ┃    results                                                       ┃────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                                    ┃ 3) Full                                                          ┃otype native        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
+║┃                          ┃┃  ▸ #701  Input routing hardening  0┃    Every formatted detail emitted by the provider                ┃t                   │ ┃  │  reviewed:approve   input   ui     │ ┃║
+║┃                          ┃┃  complete                          ┃ Full JSONL logs are always recorded at maximum provider          ┃                    │ ┃  │ #812 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  STANDALONE                        ┃ verbosity; this setting changes only the on-screen transcript.   ┃me → master ·       │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃ ▌╭─────────────────────────────────┃ Log directory: /fixture/logs                                     ┃                    │ ┃  │ Routes Shift-wheel through the     │ ┃║
+║┃                          ┃┃  │ #812 Modal input leaks through  ┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃of the native       │ ┃  │ same modal-aware ownership path as │ ┃║
+║┃                          ┃┃  │ overlay                         ┃ Agent models                                                     ┃e membership        │ ┃  │ ordinary wheel events.             │ ┃║
+║┃                          ┃┃  │  reviewed:approve   bug   ui    ┃ solve          codex   gpt-5.4 · high                   default  ┃                    │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago     ┃ solve          claude  claude-sonnet-5 · high           default  ┃calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ Empty modal areas currently allo┃ pr_review      codex   gpt-5.6-terra · xhigh            default  ┃────────────────────╯ ┃                                         ┃║
+║┃                          ┃┃  │ pointer events to reach lower   ┃ pr_review      claude  claude-opus-5 · xhigh            default  ┃                      ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  │ pages. This is visible when a…  ┃ pr_revise      codex   gpt-5.4 · high                   default  ┃                      ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃  ╰─────────────────────────────────┃ pr_revise      claude  claude-sonnet-5 · xhigh          default  ┃                      ┃  │ snapshot loader                    │ ┃║
+║┃                          ┃┃                                    ┃ issue_review   codex   gpt-5.4 · high                   default  ┃                      ┃  │  reviewed:approve   feature        │ ┃║
+║┃                          ┃┃  ╭─────────────────────────────────┃ issue_review   claude  claude-opus-5 · xhigh            default  ┃                      ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  │ #756 Define the persistence     ┃ issue_revise   claude  claude-sonnet-5 · high           default  ┃                      ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ contract                        ┃ issue_gate     codex   gpt-5.6-sol · xhigh              default  ┃                      ┃  │ Reads the cache through the        │ ┃║
+║┃                          ┃┃  │  architecture                   ┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃                      ┃  │ versioned envelope and reports a   │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago     ┃ j/k rows  h/l model  [/] effort  d reset  1/2/3 chat  Esc close  ┃                      ┃  │ truncated payload.                 │ ┃║
+║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ Document root owners, snapshot  ┃                                                                  ┃                      ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃ ┃ approve_issues.py ┃    ┃┃  │ barriers, and the versioned     ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                      ┃  ╰────────────────────────────────────╯ ┃║
+║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ envelope before implementation…     │ ┃                                         ┃                                         ┃                                         ┃║
+║┃ off                      ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┏━━━━━━━━━━━━━━┓         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┃ drain_prs.py ┃         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
+║┃ off                      ┃┃  │  feature                            │ ┃                                         ┃                                         ┃                                         ┃║
+║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
+║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  f filter  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p processes  i atten ║
+║ board: updated 3h ago · history: current                                                                                                                                                             ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

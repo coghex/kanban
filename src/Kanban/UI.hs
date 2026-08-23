@@ -139,6 +139,10 @@ runDashboard options config repository = do
             appSidebarVisible = True,
             appSettings = initialSettings,
             appModelRoster = modelRoster,
+            -- Presentation state: the settings overlay seats this on its
+            -- first roster row when it opens, and no launch restores a
+            -- previous session's.
+            appSettingsFocus = Nothing,
             appLogRoot = logRoot,
             appProcessSelection = ProcessSelection Nothing 0,
             appIncidentSelection = IncidentSelection Nothing 0,

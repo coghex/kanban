@@ -138,6 +138,7 @@ library
     Kanban.UI.Session
     Kanban.UI.SessionCore
     Kanban.UI.SessionEvents
+    Kanban.UI.Settings
     Kanban.UI.Solve
     Kanban.UI.State
     Kanban.UI.Theme
@@ -277,6 +278,7 @@ test-suite kanban-test
     Spec.UI.ReviewSession
     Spec.UI.Search
     Spec.UI.SessionCore
+    Spec.UI.Settings
     Spec.UI.SolveChooser
     Spec.UI.Text
     Spec.UI.Usage

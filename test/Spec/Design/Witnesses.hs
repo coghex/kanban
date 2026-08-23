@@ -79,6 +79,7 @@ import Kanban.GitHub
     initialHistoryFetchState,
     planCoordinator,
   )
+import Kanban.Models (allProviders, allRoles)
 import Kanban.Repository (parseRemoteRepository)
 import Kanban.Settings (defaultSettings)
 import Kanban.UI.Events (boardMouseAction, boardMousePress, mutatesSelectedWork)
@@ -961,6 +962,9 @@ probeTargets =
     ("PullRequestReviewViewport", [PullRequestReviewViewport]),
     ("ReviewPanel", [ReviewPanel]),
     ("ReviewViewport", [ReviewViewport]),
+    ("SettingsPanel", [SettingsPanel]),
+    ("SettingsRosterTarget", [SettingsRosterTarget role provider | role <- allRoles, provider <- allProviders]),
+    ("SettingsViewport", [SettingsViewport]),
     ("SolvePanel", [SolvePanel]),
     ("SolveViewport", [SolveViewport]),
     ("UpdateButton", [UpdateButton])

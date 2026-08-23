@@ -19,7 +19,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.CLI (Options (..))
-import Kanban.Card (boundedLines, elide, wrappedLines)
+import Kanban.Card (boundedLines, displayWidth, elide, wrappedLines)
 import Kanban.Domain
 import Kanban.Review
   ( ReviewApproval (..),
@@ -42,6 +42,7 @@ import Kanban.Settings
     verbosityDescription,
     verbosityLabel
   )
+import Kanban.Models (rosterErrorMessage)
 import Kanban.Text (sanitizeText)
 import Kanban.UI.Keys
   ( BoardAction (..),
@@ -53,6 +54,16 @@ import Kanban.UI.Keys
     helpRows,
   )
 import Kanban.UI.SessionCore (sessionInputHelp)
+import Kanban.UI.Settings
+  ( RosterRow (..),
+    noProvidersMessage,
+    resolvedSettingsFocus,
+    rosterRowCell,
+    rosterRowText,
+    rosterRecoveryHint,
+    settingsFooterHint,
+    settingsRosterRows
+  )
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.Theme
@@ -94,7 +105,11 @@ drawOverlay state overlay =
       _ -> 88
     overlayHeight = case overlay of
       SolveChooser _ _ -> 10
-      SettingsOverlay -> 19
+      -- Tall enough for the verbosity radio above and 'settingsRosterHeight'
+      -- rows of roster below it, plus the two rules and the footer between
+      -- them. The roster itself is bounded rather than sized to the list, so
+      -- a role or provider added later scrolls instead of growing this.
+      SettingsOverlay -> 35
       ProcessesOverlay -> 32
       -- Tall enough for the list it draws, so a binding added to the table
       -- cannot silently push a row past the border: the two rows 'padAll'
@@ -103,7 +118,7 @@ drawOverlay state overlay =
       _ -> 32
     panelExtent = case overlay of
       HelpOverlay -> id
-      SettingsOverlay -> id
+      SettingsOverlay -> clickable SettingsPanel
       ProcessesOverlay -> clickable ProcessesPanel
       IncidentsOverlay -> clickable IncidentsPanel
       DetailsOverlay _ -> clickable DetailsPanel
@@ -166,7 +181,11 @@ drawSettings state =
       txt "",
       withAttr dimAttr (txtWrap "Full JSONL logs are always recorded at maximum provider verbosity; this setting changes only the on-screen transcript."),
       withAttr dimAttr (txtWrap ("Log directory: " <> Text.pack state.appLogRoot)),
-      withAttr footerAttr (txt "1/2/3 select  Esc close")
+      hBorder,
+      withAttr cardTitleAttr (txt "Agent models"),
+      drawRoster state,
+      hBorder,
+      withAttr footerAttr (txt settingsFooterHint)
     ]
   where
     selected = state.appSettings.settingsChatVerbosity
@@ -174,6 +193,65 @@ drawSettings state =
       let attribute = if verbosity == selected then selectedAttr else neutralAttr
        in withAttr attribute (txt (Text.singleton key <> ") " <> verbosityLabel verbosity))
             <=> padLeft (Pad 3) (withAttr dimAttr (txtWrap (verbosityDescription verbosity)))
+
+-- | The roster section: one row per @(role, provider)@ assignment, inside a
+-- bounded viewport.
+--
+-- Bounded in both directions on purpose. Vertically, because the compiled
+-- roster already fills more than the panel can show and a role or provider
+-- added later must scroll rather than render past the border; horizontally,
+-- because the model IDs are user-supplied text and a long one has to be
+-- elided at the interior the panel really has rather than cropped silently
+-- by the viewport.
+drawRoster :: AppState -> Widget Name
+drawRoster state =
+  vLimit settingsRosterHeight
+    . viewport SettingsViewport Vertical
+    $ case state.appModelRoster of
+      -- The defect replaces the rows rather than sitting beside fabricated
+      -- ones, and says what the one available action would do to the file
+      -- before the key is pressed.
+      Left loadError ->
+        vBox
+          [ withAttr problemAttr (txtWrap (rosterErrorMessage loadError)),
+            padTop (Pad 1) (withAttr dimAttr (txtWrap rosterRecoveryHint))
+          ]
+      Right _
+        | null rows -> withAttr dimAttr (txtWrap noProvidersMessage)
+        | otherwise -> vBox (map drawRow rows)
+  where
+    rows = settingsRosterRows state.appModelRoster
+    focused = resolvedSettingsFocus state.appModelRoster state.appSettingsFocus
+    drawRow row =
+      let selected = Just (rosterRowCell row) == focused
+          attribute
+            | selected = selectedAttr
+            | row.rosterRowIsDefault = dimAttr
+            | otherwise = neutralAttr
+          widget =
+            clickable
+              (SettingsRosterTarget row.rosterRowRole row.rosterRowProvider)
+              (withAttr attribute (elidedRow (rosterRowText row)))
+       in if selected then visible widget else widget
+
+-- | One already-laid-out row, elided at the width the panel really has.
+--
+-- Distinct from 'elidedLine' on purpose. That one re-flows the text first,
+-- which is right for a row built out of single-spaced fields and wrong here:
+-- a roster row is columns, and wrapping collapses the runs of spaces the
+-- columns are made of. So this measures and cuts instead, and cuts only when
+-- there is something to cut — 'elide' appends its ellipsis unconditionally.
+elidedRow :: Text -> Widget Name
+elidedRow line = Widget Fixed Fixed $ do
+  context <- getContext
+  let width = availWidth context
+  render (txt (if width <= 0 then "" else if displayWidth line <= width then line else elide width line))
+
+-- | How many roster rows the settings panel shows at once. Fewer than the
+-- compiled thirteen, so the viewport the rows live in is exercised by the
+-- default roster rather than only by a future one.
+settingsRosterHeight :: Int
+settingsRosterHeight = 10
 
 drawProcesses :: AppState -> Widget Name
 drawProcesses state =

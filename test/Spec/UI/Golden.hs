@@ -58,7 +58,14 @@ import Kanban.Filter
   )
 import Kanban.Fixture (fixtureBoard, fixtureCompletedHistory, fixtureSnapshot, fixtureUsage)
 import Kanban.GitHub (HistoryTraversal, RefreshCoordinator, newHistoryTraversal)
-import Kanban.Models (defaultRoster)
+import Kanban.Models
+  ( ProviderName (..),
+    RoleName (..),
+    RosterDefect (..),
+    RosterFailure (..),
+    RosterLoadError (..),
+    defaultRoster,
+  )
 import Kanban.Settings (defaultSettings)
 import Kanban.UI (drawApplication)
 import Kanban.UI.Approval (approvalStatusApplied, approvalTogglePress)
@@ -74,6 +81,13 @@ import Kanban.UI.Board
 import Kanban.UI.Filter (focusFilterPanel, refreshVisibleBoard, toggleFilterBoxFromClick, toggleFilterPanel)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Search (SearchInput (..), applySearchInput, openSearch)
+import Kanban.UI.Settings
+  ( SettingsInput (..),
+    SettingsOutcome (..),
+    applyRosterWrite,
+    openSettings,
+    settingsOutcome,
+  )
 import Kanban.UI.Theme
   ( approvedAttr,
     neutralAttr,
@@ -637,7 +651,71 @@ frameCases =
   ]
     <> openDataCases
     <> filterCases
+    <> settingsCases
     <> approvalCases
+
+-- | The settings overlay, once per roster state §7's @o@ row promises a
+-- different screen for: the compiled roster with every cell at its default,
+-- the same roster with one cell edited off it, and a @models.toml@ that will
+-- not load at all.
+--
+-- The edited frame is produced by the overlay's own transitions rather than
+-- by writing an assignment into the record, so no frame can show a roster the
+-- interaction could not reach — including the regenerated display, which is a
+-- consequence of the edit rather than a label this suite chose.
+settingsCases :: [FrameCase]
+settingsCases =
+  [ FrameCase
+      { frameCaseName = "overlay-settings",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "the settings overlay over the wide board, every roster cell at its compiled default",
+        frameCaseState = openSettings
+      },
+    FrameCase
+      { frameCaseName = "overlay-settings-overridden",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "one roster cell cycled off its compiled default, marked override beside the rest",
+        frameCaseState = editedRosterCell
+      },
+    FrameCase
+      { frameCaseName = "overlay-settings-unusable",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "an unusable models.toml: its defect and what d would write, instead of roster rows",
+        frameCaseState = openSettings . unusableRoster
+      }
+  ]
+
+-- | Open the overlay, move to the second roster row, and cycle its model
+-- forward — the same three presses the keyboard makes.
+--
+-- The save the 'EventM' shell would perform is stood in for by
+-- 'applyRosterWrite' over a successful result, which is the one thing a frame
+-- cannot do for itself: the state it produces is exactly the state a real save
+-- produces, and an outcome this fixture did not expect fails loudly rather
+-- than quietly drawing the unedited roster.
+editedRosterCell :: AppState -> AppState
+editedRosterCell state = foldl press (openSettings state) [SettingsMoveRow 1, SettingsCycleModel 1]
+  where
+    press current input = case settingsOutcome input current.appModelRoster current.appSettingsFocus of
+      SettingsRefocused moved _ -> current {appSettingsFocus = moved}
+      SettingsRosterWrite write -> applyRosterWrite (Right ()) write current
+      other -> error ("the settings frame expected a focus move or a roster write, and got " <> show other)
+
+-- | A present @models.toml@ the loader refused, which is the one roster state
+-- no interaction can produce: it is what the startup load answered.
+unusableRoster :: AppState -> AppState
+unusableRoster state =
+  state
+    { appModelRoster =
+        Left
+          ( RosterLoadError
+              "/fixture/home/.config/kanban/models.toml"
+              (RosterInvalid [UnknownModel PrReviewRole CodexProvider "gpt-5.9"])
+          )
+    }
 
 -- | §7's two blocking panels at every setting the populated board is captured
 -- at, because a panel that replaces the board has to survive the same
@@ -1015,6 +1093,7 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       -- The pure compiled value, not a load: a golden frame must not read
       -- the developer's real XDG configuration.
       appModelRoster = Right defaultRoster,
+      appSettingsFocus = Nothing,
       appLogRoot = "/fixture/logs",
       appProcessSelection = ProcessSelection Nothing 0,
       appIncidentSelection = IncidentSelection Nothing 0,

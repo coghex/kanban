@@ -55,6 +55,7 @@ import qualified Spec.UI.OpenData as OpenData
 import qualified Spec.UI.ReviewSession as ReviewSession
 import qualified Spec.UI.Search as Search
 import qualified Spec.UI.SessionCore as SessionCore
+import qualified Spec.UI.Settings as UISettings
 import qualified Spec.UI.SolveChooser as SolveChooser
 import qualified Spec.UI.Text as UIText
 import qualified Spec.UI.Usage as UIUsage
@@ -129,6 +130,7 @@ suiteGroups =
     SuiteGroup "Spec.UI.Incidents" PingLane Incidents.spec,
     SuiteGroup "Spec.UI.Usage" PingLane UIUsage.spec,
     SuiteGroup "Spec.UI.Keys" PingLane Keys.spec,
+    SuiteGroup "Spec.UI.Settings" PingLane UISettings.spec,
     SuiteGroup "Spec.Design.Witnesses" PingLane DesignWitnesses.spec,
     SuiteGroup "Spec.UI.Search" PingLane Search.spec,
     SuiteGroup "Spec.Agent.Ping" PingLane Ping.spec, -- 46.1s

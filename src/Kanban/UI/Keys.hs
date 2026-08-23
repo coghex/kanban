@@ -233,7 +233,7 @@ binding action = case action of
       "Collapse or expand the usage sidebar"
   ShowSettings ->
     KeyBinding action [key 'o'] [BoardScope] Nothing "options" "settings"
-      "Open settings, including chat-output verbosity"
+      "Open settings: `1`/`2`/`3` select chat-output verbosity; `j`/`k` or Up/Down select a roster assignment; `h`/`l` or Left/Right cycle its model; `[`/`]` cycle its effort; `d` resets the selected assignment, or repairs an unusable roster with defaults; click selects, the wheel scrolls, and Esc closes"
   ShowHelp ->
     KeyBinding action [key '?'] [BoardScope] Nothing "help" "this help overlay"
       "Open a help overlay listing all bindings"

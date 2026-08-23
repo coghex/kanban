@@ -118,8 +118,10 @@ Modules live in `src/Kanban/`; search the group that matches the change.
   the seams live beside it — `UI.Types` and `UI.State` (state), `UI.Theme`,
   `UI.Board`, `UI.Overlay`, and `UI.Details` (drawing), `UI.Events` (dispatch),
   `UI.Keys` (the one declaration site for a board key binding, held against
-  `docs/design.md` §7 by a test), `UI.Search`, `UI.Filter`, `UI.Selection`
-  (column search, filter panel, and selection), `UI.Session` with `UI.SessionCore`
+  `docs/design.md` §7 by a test), `UI.Search`, `UI.Filter`, `UI.Selection`,
+  `UI.Settings`
+  (column search, filter panel, selection, and the settings overlay's roster
+  rows and pure input transitions), `UI.Session` with `UI.SessionCore`
   and `UI.SessionEvents`, `UI.Solve`, `UI.Review`, `UI.PullRequest`, `UI.Worker`
   (lifecycles), `UI.Transcript`, `UI.Refresh` and `UI.Reconcile` (refresh),
   `UI.AutoSolve`, the autosolve loop as pure functions, and `UI.Util`.
