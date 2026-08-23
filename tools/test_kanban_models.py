@@ -164,10 +164,11 @@ class AbsentFileTests(unittest.TestCase):
 class UnreadableFileTests(unittest.TestCase):
     """Present-but-unusable, which an existence probe cannot tell from absent.
 
-    Judged by `lstat` and then by regular-file-ness before any open, mirroring
-    `loadModelRoster`: a dangling link or a directory must refuse rather than
-    fall through to the defaults, and a FIFO must refuse without being opened,
-    because opening one blocks until a writer connects.
+    Judged by `os.lstat` and then by `os.stat`, mirroring `loadModelRoster`.
+    Only `ENOENT` is absence: a directory, a dangling link, a FIFO, and a path
+    this account simply cannot reach must all refuse rather than fall through
+    to the defaults, and the FIFO must refuse without being opened, because
+    opening one blocks until a writer connects.
     """
 
     def setUp(self):
@@ -189,9 +190,58 @@ class UnreadableFileTests(unittest.TestCase):
         self.assertIn("not a regular file", self.assert_unreadable(directory))
 
     def test_a_dangling_symlink_refuses_rather_than_reading_as_absent(self):
+        # The link itself exists, so this is present-but-unusable. Resolving it
+        # is what fails, exactly as `getFileStatus` does on the Haskell side --
+        # so the refusal names that failure rather than the file's kind.
         link = self.root / "models.toml"
         link.symlink_to(self.root / "gone.toml")
-        self.assertIn("not a regular file", self.assert_unreadable(link))
+        self.assert_unreadable(link)
+
+    def test_an_unreachable_parent_directory_refuses_rather_than_defaulting(self):
+        # The case a `lexists`/`is_file` probe cannot report: both answer False
+        # for *every* OSError, so a permission refusal on the way to the file
+        # would read exactly like a file that was never created -- and hand the
+        # caller the compiled defaults for a roster it could not even look at.
+        if os.geteuid() == 0:
+            self.skipTest("root traverses a 0000 directory, so the mode proves nothing")
+        closed = self.root / "closed"
+        closed.mkdir()
+        roster = closed / "models.toml"
+        roster.write_text(EXAMPLE, encoding="utf-8")
+        closed.chmod(0o000)
+        self.addCleanup(closed.chmod, 0o700)
+        with self.assertRaises(kanban_models.RosterError) as caught:
+            kanban_models.load_roster(roster)
+        self.assertIn(str(roster), str(caught.exception))
+        self.assertIn("could not be read", str(caught.exception))
+
+    def test_an_unreachable_parent_refuses_every_consumer_path_alike(self):
+        # Through the accessor a spawn site actually calls, and through the
+        # fallback a bundled consumer declares: neither may recover.
+        if os.geteuid() == 0:
+            self.skipTest("root traverses a 0000 directory, so the mode proves nothing")
+        closed = self.root / "closed-consumer"
+        closed.mkdir()
+        roster = closed / "models.toml"
+        roster.write_text(EXAMPLE, encoding="utf-8")
+        closed.chmod(0o000)
+        self.addCleanup(closed.chmod, 0o700)
+        stand_in = kanban_models.Assignment("gpt-5.4", "low", "stand-in")
+        for fallback in (None, stand_in):
+            with self.subTest(fallback=fallback):
+                with self.assertRaises(kanban_models.RosterError):
+                    kanban_models.resolve_assignment(
+                        "issue_gate", "codex", fallback=fallback, explicit_path=roster
+                    )
+
+    def test_a_missing_parent_directory_is_still_plain_absence(self):
+        # The fresh-install path goes through the same lstat: no
+        # `~/.config/kanban` at all is ENOENT, which is the one absence D-3
+        # makes silent.
+        missing = self.root / "never-made" / "kanban" / "models.toml"
+        self.assertEqual(
+            kanban_models.load_roster(missing), kanban_models.DEFAULT_ROSTER
+        )
 
     def test_a_fifo_refuses_without_being_opened(self):
         fifo = self.root / "models.toml"

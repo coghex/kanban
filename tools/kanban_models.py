@@ -39,6 +39,7 @@ it.
 from __future__ import annotations
 
 import os
+import stat
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -296,14 +297,24 @@ def _load_or_absent(
 ) -> tuple[ModelRoster | None, Path]:
     """The decoded roster and its path, or `None` when the file is absent.
 
-    Absence is judged by `lstat` rather than an existence probe: a dangling
-    symbolic link or a directory at the path is present but unusable, and D-3
-    requires that to be a refusal, never a silent fall-through to the defaults
-    an existence probe would produce. Once something is present, the resolved
-    target must additionally be a regular file *before* any open, because
-    opening is not a safe probe here -- a FIFO would block the reader until a
-    writer connects, hanging the caller rather than refusing. A symbolic link
-    to a regular file resolves through the same stat and stays loadable.
+    Absence is judged by `os.lstat` rather than an existence probe, and only
+    `ENOENT` counts as absent. `os.path.lexists` and `Path.is_file` both answer
+    False for *every* `OSError` -- an unreadable parent directory reads exactly
+    like a file that was never created -- so either would turn a permission
+    refusal into the compiled defaults, which is the silent-old-model
+    fall-through D-3 forbids. A dangling symbolic link or a directory at the
+    path is likewise present but unusable, never absent.
+
+    Once something is present, the resolved target must additionally be a
+    regular file *before* any open, because opening is not a safe probe here:
+    a FIFO would block the reader until a writer connects, hanging the caller
+    rather than refusing. That resolution is `os.stat`, not `Path.is_file`, for
+    the same swallowing reason -- and it is what makes a symbolic link to a
+    regular file stay loadable while one to nothing refuses.
+
+    This mirrors `Kanban.Models.loadModelRoster`, which draws exactly these
+    distinctions with `getSymbolicLinkStatus`, `isDoesNotExistError`, and
+    `getFileStatus`.
     """
     path = (
         Path(explicit_path).expanduser()
@@ -311,16 +322,16 @@ def _load_or_absent(
         else default_roster_path()
     )
     try:
-        present = os.path.lexists(path)
-    except OSError as error:
-        raise RosterError(path, f"could not be read: {error}") from error
-    if not present:
+        os.lstat(path)
+    except FileNotFoundError:
         return None, path
-    try:
-        regular = path.is_file()
     except OSError as error:
         raise RosterError(path, f"could not be read: {error}") from error
-    if not regular:
+    try:
+        status = os.stat(path)
+    except OSError as error:
+        raise RosterError(path, f"could not be read: {error}") from error
+    if not stat.S_ISREG(status.st_mode):
         raise RosterError(path, "could not be read: not a regular file")
     try:
         raw = path.read_bytes()
