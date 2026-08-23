@@ -30,6 +30,7 @@ if "--dry-run" in sys.argv[1:]:
 
 import drain_prs_service
 import kanban_config
+import kanban_models
 
 
 APPROVE_LABEL = "reviewed:approve"
@@ -86,8 +87,11 @@ SHUTDOWN_CLEANUP_BUDGET_SECONDS = 8.0
 SHUTDOWN_MIN_COMMAND_TIMEOUT_SECONDS = 1.0
 MAX_BACKOFF_ATTEMPTS = 16
 MAX_CONSECUTIVE_GLOBAL_FAILURES = 3
-FINALIZE_MODEL = "gpt-5.6-terra"
-FINALIZE_EFFORT = "medium"
+# The stale-head rereview's model and effort: the roster's `drain_rereview`
+# codex cell rather than two literals. Resolved per drain cycle rather than
+# frozen at import, so an operator's roster edit takes effect on the next pass
+# without restarting the managed service.
+FINALIZE_ASSIGNMENT: kanban_models.Assignment | None = None
 NTFY_URL = os.environ.get("KANBAN_DRAINER_NTFY_URL")
 # The private namespace an autostash snapshot is anchored under, written down
 # once: the ref every anchor is created at, the pattern the startup sweep
@@ -297,14 +301,50 @@ def log(message: str) -> None:
     append_log_line(line)
 
 
+def refresh_finalize_assignment() -> kanban_models.Assignment:
+    """Re-read the roster's `drain_rereview.codex` cell for this drain cycle.
+
+    A roster this cannot resolve stops the drainer where it stands, naming the
+    file and the defect: the alternative is a stale-head rereview spawned on
+    the compiled defaults an operator believes they replaced, published under a
+    model claim this process cannot back. `ModelUnavailableError` is the
+    existing vocabulary for exactly that -- the selected model could not be
+    run, and nothing was retried or substituted -- and is the one failure class
+    both the pass loop and the candidate loop deliberately re-raise rather than
+    absorb into a per-PR cooldown.
+    """
+    global FINALIZE_ASSIGNMENT
+    try:
+        FINALIZE_ASSIGNMENT = kanban_models.resolve_assignment(
+            "drain_rereview", "codex"
+        )
+    except kanban_models.KanbanModelsError as exc:
+        FINALIZE_ASSIGNMENT = None
+        raise ModelUnavailableError(
+            f"{exc}; no stale-head rereview was attempted"
+        ) from exc
+    return FINALIZE_ASSIGNMENT
+
+
+def finalize_assignment() -> kanban_models.Assignment:
+    """This cycle's assignment, resolving it if the cycle boundary has not.
+
+    The single-PR entry point runs no cycle loop, so the resolution has to be
+    reachable from the consumer as well as from the boundary that refreshes it.
+    """
+    if FINALIZE_ASSIGNMENT is None:
+        return refresh_finalize_assignment()
+    return FINALIZE_ASSIGNMENT
+
+
 def notify_model_failure(
     ctx: RepoContext,
     number: int,
     action: str,
     error: BaseException,
     *,
-    model: str = FINALIZE_MODEL,
-    effort: str = FINALIZE_EFFORT,
+    model: str,
+    effort: str,
 ) -> None:
     if os.environ.get("DRAIN_PRS_MANAGED") == "1":
         # The service runner sends the one failure notice after this process
@@ -2350,9 +2390,14 @@ def rereview_pr_with_codex(
 ) -> dict[str, Any]:
     number = pr["number"]
     expected_head = pr["headRefOid"]
+    # Before the log line names a model and before any worktree is prepared: a
+    # roster this cannot resolve refuses the rereview rather than describing
+    # one it will not run.
+    assignment = finalize_assignment()
     log(
         f"PR #{number}: unexpected push changed the approved head; "
-        f"running Codex rereview of {expected_head[:12]}"
+        f"running {assignment.model}@{assignment.effort} rereview of "
+        f"{expected_head[:12]}"
     )
     if dry_run:
         return pr
@@ -2391,9 +2436,9 @@ def rereview_pr_with_codex(
                     "--dangerously-bypass-approvals-and-sandbox",
                     "--ephemeral",
                     "-m",
-                    FINALIZE_MODEL,
+                    assignment.model,
                     "-c",
-                    f'model_reasoning_effort="{FINALIZE_EFFORT}"',
+                    f'model_reasoning_effort="{assignment.effort}"',
                     "-C",
                     str(review_path),
                     "-o",
@@ -2404,9 +2449,16 @@ def rereview_pr_with_codex(
                 input_text=prompt,
             )
         except DrainError as exc:
-            notify_model_failure(ctx, number, "stale-head rereview", exc)
+            notify_model_failure(
+                ctx,
+                number,
+                "stale-head rereview",
+                exc,
+                model=assignment.model,
+                effort=assignment.effort,
+            )
             raise ModelUnavailableError(
-                f"{FINALIZE_MODEL}@{FINALIZE_EFFORT} failed during stale-head "
+                f"{assignment.model}@{assignment.effort} failed during stale-head "
                 f"rereview for PR #{number}; no retry or fallback was attempted"
             ) from exc
 
@@ -4948,6 +5000,12 @@ def loop(
     stale_recovery_failures = 0
     queue_refresh_failures = 0
     while True:
+        # The per-cycle roster read, ahead of stale-approval recovery and every
+        # queue decision that could reach a rereview. Re-read here rather than
+        # frozen at import so an operator's edit takes effect on the next pass;
+        # refused here rather than at the spawn so a broken file stops the pass
+        # before it starts changing anything.
+        refresh_finalize_assignment()
         reconcile_conflict_incidents(ctx, dry_run=dry_run)
         try:
             recovered = recover_stale_approval(ctx, state, dry_run=dry_run)

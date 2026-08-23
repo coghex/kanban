@@ -142,10 +142,15 @@ def make_checkout(root):
     """
     checkout = root / "widgets"
     (checkout / "tools").mkdir(parents=True)
+    # Every module `install_drainer.repository_root` requires of a checkout,
+    # and therefore every module the installed controller resolves from beside
+    # itself. A name added there without being added here fails the install
+    # step rather than the lifecycle this check is about.
     for name in (
         "drain_prs.py",
         "drain_prs_service.py",
         "kanban_config.py",
+        "kanban_models.py",
         "service_manager.py",
     ):
         shutil.copy2(REPO_ROOT / "tools" / name, checkout / "tools" / name)

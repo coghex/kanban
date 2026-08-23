@@ -298,6 +298,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
+    "claude-plugin/plugins/kanban/scripts/kanban_models.py",
 ]
 
 # Both bundles' vendored trusted-comment issue-spec helper (issue #238). Each is
@@ -314,9 +315,12 @@ TRUSTED_SPEC_SURFACE_FILES = {
 # trusted-comment helper above is. Each bundle carries a byte-identical copy of
 # the three tools/ modules the document workflows invoke, so each copy's own
 # external commands are reconciled against the manifest rather than inheriting
-# the tracked original's row. The configuration reader spawns nothing at all,
-# which is a pin rather than an omission: a future edit that made it shell out
-# would have to declare that here.
+# the tracked original's row. Issue #483's model-roster reader is vendored the
+# same way and covered here with them, in the Claude bundle alone: the Codex
+# coordinator is forbidden model and effort values, so the roster never reaches
+# that bundle and it ships no copy. Both readers spawn nothing at all, which is
+# a pin rather than an omission: a future edit that made either shell out would
+# have to declare that here.
 DOCUMENT_MECHANISM_SURFACE_FILES = {
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py": {"git"},
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py": {"git"},
@@ -324,6 +328,7 @@ DOCUMENT_MECHANISM_SURFACE_FILES = {
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py": {"git"},
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py": {"git"},
     "claude-plugin/plugins/kanban/scripts/kanban_config.py": set(),
+    "claude-plugin/plugins/kanban/scripts/kanban_models.py": set(),
 }
 
 # The seven drafting and canonical issue-review assets vendored by issue #118,

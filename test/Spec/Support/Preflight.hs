@@ -14,6 +14,9 @@ module Spec.Support.Preflight
     isReadyBackend,
     fullyProvisionedFakes,
     BackendFixture (..),
+    BackendCompanion (..),
+    backendCompanionName,
+    allBackendCompanions,
     withPreflightMachine,
     machineSnapshot,
     probeInvocations,
@@ -134,7 +137,17 @@ data BackendFixture
   | BackendOrdinaryFile
   | BackendDanglingLink
   | BackendForeignLink
-  | BackendCompanionMissing
+  | -- | One companion module absent, with the script and the other companion
+    -- installed exactly as 'BackendInstalled' has them. Parameterized rather
+    -- than one constructor per module so every installed asset is covered by
+    -- construction: @approve_issues.py@ imports both at module scope, and a
+    -- probe that required only the one it was written for would report a
+    -- backend ready that cannot start.
+    BackendCompanionMissing BackendCompanion
+  | -- | One companion module present as an ordinary file rather than a
+    -- managed link -- the shape setup refuses to replace. Reported as a
+    -- conflict the operator must clear, not as an absence setup can fill.
+    BackendCompanionOrdinaryFile BackendCompanion
   | -- | Installed exactly as 'BackendInstalled' is, but discovered through
     -- the installer's record with no environment override -- the shape a
     -- @--install-dir@ installation has for a dashboard that never saw that
@@ -146,6 +159,18 @@ data BackendFixture
   | -- | A record that will not parse. Resolution fails before there is any
     -- path to stat, which is a different report from "not installed".
     BackendRecordUnreadable
+
+-- | The modules @approve_issues.py@ imports at startup, which the
+-- issue-review installer links beside it and preflight therefore requires.
+data BackendCompanion = ConfigCompanion | ModelsCompanion
+  deriving stock (Bounded, Enum, Show)
+
+backendCompanionName :: BackendCompanion -> String
+backendCompanionName ConfigCompanion = "kanban_config.py"
+backendCompanionName ModelsCompanion = "kanban_models.py"
+
+allBackendCompanions :: [BackendCompanion]
+allBackendCompanions = [minBound .. maxBound]
 
 -- | A hermetic fresh machine: a PATH holding only the fake executables the
 -- scenario installs, a Kanban install directory it populates, and a log
@@ -172,15 +197,22 @@ withPreflightMachine executables backend action =
             checkoutFile
             (ByteString.pack ("# kanban-managed-asset:issue-review/" <> name <> "\n"))
           createFileLink checkoutFile (installRoot </> name)
-        installCompanion = installAsset "kanban_config.py"
+        installCompanions = mapM_ (installAsset . backendCompanionName) allBackendCompanions
+        installCompanionsExcept absent =
+          mapM_
+            (installAsset . backendCompanionName)
+            [ companion
+            | companion <- allBackendCompanions,
+              backendCompanionName companion /= backendCompanionName absent
+            ]
     case backend of
-      BackendInstalled -> installAsset "approve_issues.py" >> installCompanion
-      BackendRecordedElsewhere -> installAsset "approve_issues.py" >> installCompanion
+      BackendInstalled -> installAsset "approve_issues.py" >> installCompanions
+      BackendRecordedElsewhere -> installAsset "approve_issues.py" >> installCompanions
       BackendRecordUnreadable -> pure ()
       BackendMissing -> pure ()
-      BackendOccupied -> createDirectoryIfMissing True backendPath >> installCompanion
-      BackendOrdinaryFile -> ByteString.writeFile backendPath "#!/usr/bin/env python3\n" >> installCompanion
-      BackendDanglingLink -> createFileLink (temporaryRoot </> "gone.py") backendPath >> installCompanion
+      BackendOccupied -> createDirectoryIfMissing True backendPath >> installCompanions
+      BackendOrdinaryFile -> ByteString.writeFile backendPath "#!/usr/bin/env python3\n" >> installCompanions
+      BackendDanglingLink -> createFileLink (temporaryRoot </> "gone.py") backendPath >> installCompanions
       BackendForeignLink -> do
         -- A perfectly good script that simply is not Kanban's: readable,
         -- resolvable, and sitting under a plausible tools/ path.
@@ -188,8 +220,16 @@ withPreflightMachine executables backend action =
         createDirectoryIfMissing True foreign_
         ByteString.writeFile (foreign_ </> "approve_issues.py") "#!/usr/bin/env python3\nprint('not kanban')\n"
         createFileLink (foreign_ </> "approve_issues.py") backendPath
-        installCompanion
-      BackendCompanionMissing -> installAsset "approve_issues.py"
+        installCompanions
+      BackendCompanionMissing absent -> do
+        installAsset "approve_issues.py"
+        installCompanionsExcept absent
+      BackendCompanionOrdinaryFile occupied -> do
+        installAsset "approve_issues.py"
+        installCompanionsExcept occupied
+        ByteString.writeFile
+          (installRoot </> backendCompanionName occupied)
+          "#!/usr/bin/env python3\n"
     -- The record cases drop the override and redirect $HOME instead, so the
     -- fixed record path lands inside this machine and the real one is never
     -- read. Everything else keeps selecting through the override.

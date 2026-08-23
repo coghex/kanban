@@ -11,6 +11,15 @@ docs/agent-workflow-contract.md §3), and §2.2 describes them as
 and verifies the nested reviewer's model/effort where the Codex copy leaves
 both to the host installation.
 
+Since issue #483 that exception is roster-backed rather than two pairs of
+literals: the Claude copy loads a bundled `kanban_models.py` from beside itself
+and resolves `roles.pr_review.<provider>` through it, keeping its four
+constants as the compiled fallbacks that reader is handed on a host with no
+roster file. That widened the divergence -- an import, a loader, and a resolver
+-- without changing what it is *about*, which is why those lines are recorded
+below rather than excluded: the Codex copy still passes no model or effort and
+still ships no reader (tools/test_codex_plugin.py asserts both).
+
 Nothing enforced that description, and the drift it invites is not
 hypothetical: commit 4525a35 added the issue-vs-pull-request number guard to
 the Codex copy only, and the Claude copy went eight days surfacing gh's raw
@@ -61,6 +70,8 @@ CODEX_COORDINATOR = (
 # exception rather than a snapshot of whatever the two files happen to be.
 DOCUMENTED_DIVERGENCE = '''\
 @@
++import importlib.util  # loads the model-roster reader beside this file
+@@
 +
 +# Canonical nested-reviewer model/effort (issue #77 round-2 review). Unlike
 +# the self-reviewed known-origin case, invoke_codex/invoke_claude below
@@ -81,6 +92,73 @@ DOCUMENTED_DIVERGENCE = '''\
 +CODEX_NESTED_REVIEW_EFFORT = "xhigh"
 +CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-5"
 +CLAUDE_NESTED_REVIEW_EFFORT = "xhigh"
++
++_KANBAN_MODELS_MODULE = None
++
++
++def kanban_models():
++    """The model-roster reader, loaded from beside this coordinator.
++
++    From beside itself and never from `tools/`: an installed bundle has no
++    `tools/` sibling, and a plain `import` would resolve one only when this
++    file happens to run out of a checkout -- silently reading a different
++    copy's compiled defaults there and failing everywhere else. Loaded once and
++    memoized, the way the document mechanism loads its own siblings, and
++    registered in `sys.modules` before execution because that module declares
++    dataclasses, which resolve their own class's `__module__` through
++    `sys.modules` while the class body is still being processed.
++    """
++    global _KANBAN_MODELS_MODULE
++    if _KANBAN_MODELS_MODULE is not None:
++        return _KANBAN_MODELS_MODULE
++    source = Path(__file__).resolve().parent / "kanban_models.py"
++    name = "_kanban_models_for_review_coordinator"
++    try:
++        spec = importlib.util.spec_from_file_location(name, source)
++        if spec is None or spec.loader is None:
++            raise ImportError(f"no loader for {source}")
++        module = importlib.util.module_from_spec(spec)
++        sys.modules[name] = module
++        try:
++            spec.loader.exec_module(module)
++        except BaseException:
++            sys.modules.pop(name, None)
++            raise
++    except Exception as error:  # noqa: BLE001 - reported, never raised bare
++        raise WorkflowError(
++            f"This bundle's model-roster reader at {source} could not be "
++            f"loaded, so no nested review was performed: {error}"
++        ) from error
++    _KANBAN_MODELS_MODULE = module
++    return module
++
++
++def nested_review_assignment(provider: str):
++    """The `roles.pr_review.<provider>` cell this coordinator spawns on.
++
++    The four constants above are what the reader falls back to when the host
++    carries no roster file at all -- equal, cell for cell, to that reader's own
++    compiled defaults, which `tools/test_claude_plugin.py` holds against the
++    tracked `models.toml.example`. A roster file that is present and will not
++    load refuses the nested review instead: an operator who edited it to change
++    a reviewer model must never have this coordinator quietly spawn the old one
++    and then publish that model as verified fact in the `pr-review:v2` marker.
++    """
++    models = kanban_models()
++    fallbacks = {
++        "codex": models.Assignment(
++            CODEX_NESTED_REVIEW_MODEL, CODEX_NESTED_REVIEW_EFFORT, "pr_review codex"
++        ),
++        "claude": models.Assignment(
++            CLAUDE_NESTED_REVIEW_MODEL, CLAUDE_NESTED_REVIEW_EFFORT, "pr_review claude"
++        ),
++    }
++    try:
++        return models.resolve_assignment(
++            "pr_review", provider, fallback=fallbacks[provider]
++        )
++    except models.KanbanModelsError as error:
++        raise WorkflowError(f"{error}; no nested review was performed") from error
 @@
 -def validate_review(value: Any, reviewer: Reviewer) -> dict[str, Any]:
 +def validate_review(value: Any, reviewer: Reviewer, model: str = UNVERIFIED_MODEL_TOKEN) -> dict[str, Any]:
@@ -96,18 +174,22 @@ DOCUMENTED_DIVERGENCE = '''\
 -        # key (`codex`) as verified fact, via UNVERIFIED_MODEL_TOKEN.
 -        # `codex exec` without -s/-a runs a read-only inspection task to
 +        # -m/-c model_reasoning_effort pin the canonical nested-reviewer
-+        # model (see CODEX_NESTED_REVIEW_MODEL above); no
++        # model (see nested_review_assignment above); no
 +        # -s/--dangerously-bypass-approvals-and-sandbox: sandbox/approval
 +        # policy is still left to this installation's own default. `codex
 +        # exec` without -s/-a runs a read-only inspection task to
 @@
++        model_assignment = nested_review_assignment("codex")
+@@
 +                "--model",
-+                CODEX_NESTED_REVIEW_MODEL,
++                model_assignment.model,
 +                "--config",
-+                f'model_reasoning_effort="{CODEX_NESTED_REVIEW_EFFORT}"',
++                f'model_reasoning_effort="{model_assignment.effort}"',
 @@
 -    return validate_review(value, reviewer)
-+    return validate_review(value, reviewer, f"{CODEX_NESTED_REVIEW_MODEL}@{CODEX_NESTED_REVIEW_EFFORT}")
++    return validate_review(
++        value, reviewer, f"{model_assignment.model}@{model_assignment.effort}"
++    )
 @@
 -    # No --model/--effort/--permission-mode/--tools: this coordinator does
 -    # not pin model, reasoning effort, or permission policy for the
@@ -119,18 +201,23 @@ DOCUMENTED_DIVERGENCE = '''\
 -    # --permission-mode runs a read-only inspection task to completion
 -    # under its own non-interactive defaults.
 +    # --model/--effort pin the canonical nested-reviewer model (see
-+    # CLAUDE_NESTED_REVIEW_MODEL above); no --permission-mode/--tools:
++    # nested_review_assignment above); no --permission-mode/--tools:
 +    # permission policy is still left to this installation's own default.
 +    # `claude -p` without --permission-mode runs a read-only inspection
 +    # task to completion under its own non-interactive defaults.
++    model_assignment = nested_review_assignment("claude")
 @@
 +            "--model",
-+            CLAUDE_NESTED_REVIEW_MODEL,
++            model_assignment.model,
 +            "--effort",
-+            CLAUDE_NESTED_REVIEW_EFFORT,
++            model_assignment.effort,
 @@
 -    return validate_review(parse_claude_output(proc.stdout), reviewer)
-+    return validate_review(parse_claude_output(proc.stdout), reviewer, f"{CLAUDE_NESTED_REVIEW_MODEL}@{CLAUDE_NESTED_REVIEW_EFFORT}")
++    return validate_review(
++        parse_claude_output(proc.stdout),
++        reviewer,
++        f"{model_assignment.model}@{model_assignment.effort}",
++    )
 @@
 -def review_marker(reviewers: list[Reviewer], head: str, verdict: str) -> str:
 +def review_marker(reviewers: list[Reviewer], models: list[str], head: str, verdict: str) -> str:

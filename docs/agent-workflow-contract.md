@@ -223,9 +223,21 @@ arithmetic, which §2.3 owns.
   `models.toml.example` declare — the cells Kanban's own
   `PullRequestReview`/`PullRequestRereview` spawns resolve — and binds the
   verified model in the published `pr-review:v2` marker instead of
-  `unspecified`. `tools/test_claude_plugin.py` holds the coordinator's
-  constants against those cells; its Python half stays a verbatim constant
-  assertion until the coordinator itself reads the roster.
+  `unspecified`. Since issue #483 the exception's *mechanism* is roster
+  resolution rather than a pinned constant, and the exception itself is
+  unchanged: that coordinator loads a byte-identical copy of
+  `tools/kanban_models.py` from beside itself -- never from `tools/`, which an
+  installed bundle has no sibling of -- and resolves those two cells through
+  it, keeping its four constants as the compiled fallbacks that reader is
+  handed on a host carrying no `~/.config/kanban/models.toml`. A roster file
+  that is present and will not load refuses the nested review instead of
+  spawning those fallbacks, because this coordinator publishes the model it
+  spawned as verified fact. The Codex bundle ships no copy of that reader and
+  passes no model or effort at all, which `tools/test_codex_plugin.py` asserts
+  rather than assumes.
+  `tools/test_claude_plugin.py` holds the coordinator's
+  compiled fallbacks against those cells, so the two lanes still cannot
+  silently diverge.
   See [claude-plugin/README.md](../claude-plugin/README.md) for the
   rationale; this remains a host-configuration concern for the Codex
   plugin's own nested call.
@@ -254,6 +266,37 @@ arithmetic, which §2.3 owns.
     `python3 <resolved path> --path <repository root> --review|--rereview
     <issue> --legacy-policy dual --json`. It writes the `issue-review:v2`
     comment and verdict labels; Kanban's own code never runs `--check`.
+  - **Which model the backend reviews with** comes from the model roster's
+    `roles.issue_gate.codex` and `roles.issue_gate.claude` cells, read through
+    `tools/kanban_models.py` (issue #483). Precedence has three layers:
+    the compiled defaults, which equal the tracked `models.toml.example`; then
+    `~/.config/kanban/models.toml` (or `$XDG_CONFIG_HOME`) when one exists;
+    then the environment, which wins outright. The environment layer is
+    complete — `APPROVE_ISSUES_CODEX_MODEL`, `APPROVE_ISSUES_CODEX_EFFORT`,
+    `APPROVE_ISSUES_CLAUDE_MODEL`, and `APPROVE_ISSUES_CLAUDE_EFFORT`, one
+    model and one effort variable per provider — so an operator cannot move a
+    model from the environment and be left running the file's effort. All four
+    are optional overrides with no tracked default, like every variable §5
+    names.
+    A roster file that is *absent* is silently the compiled defaults, which is
+    the fresh-install path. A roster file that is present and unreadable,
+    unparseable, foreign-versioned, or invalid makes this backend **perform no
+    review at all**: it exits non-zero naming the file and the defect, writes
+    nothing to stdout, and never falls back to the defaults, because an
+    operator who edited the file to change a model must never have a reviewer
+    quietly run on the one they believed they replaced. The reviewer display
+    names in published comments are deliberately *not* roster-derived: they
+    are a reviewer persona this backend parses back out of historical markers,
+    and they keep their own `APPROVE_ISSUES_CODEX_DISPLAY_NAME` /
+    `APPROVE_ISSUES_CLAUDE_DISPLAY_NAME` overrides.
+    The resolved assignment is what a published marker's `models=` field
+    records and what §2.3.1's reconciliation accepts as current, so changing
+    either half of it retires standing approvals and forces rereview.
+    `tools/drain_prs.py` resolves `roles.drain_rereview.codex` the same way for
+    its stale-head rereview, re-read once per drain cycle so a roster edit
+    takes effect without restarting the managed service; a roster it cannot
+    resolve stops that drainer where it stands rather than rereviewing on a
+    model it cannot claim.
   - The backend's manual `--review` form also accepts two or more issue
     numbers. It processes that explicit list from left to right under one
     approval lock, stops normally at the first `CHANGES_REQUESTED` verdict,
@@ -1274,9 +1317,12 @@ commands need.
   (`resolveCanonicalIssueReviewer`) and fails visibly, naming this
   installer, when it has not been installed yet; `src/Kanban/Preflight.hs`
   (§2.5) treats only that same marker-carrying link as installed, and
-  requires both installed files (`approve_issues.py` imports
-  `kanban_config.py`), so preflight and the installer can never disagree
-  about whether an install path is occupied.
+  requires all three installed files (`approve_issues.py` imports both
+  `kanban_config.py` and `kanban_models.py` at module scope), so preflight and
+  the installer can never disagree about whether an install path is occupied.
+  `tools/install_issue_approval.py` verifies the same three beside the backend
+  it resolves before it will make a service job, since a service with no
+  reviewer it can start is not an installation.
 - **`~/work/approve-issues.py`** is now a purely optional **compatibility
   launcher** for pre-migration automation that still invokes it directly. It
   is not Kanban's source of truth and nothing in Kanban's own code resolves
@@ -1355,7 +1401,10 @@ A `files` entry covers a bundle's byte-identical vendored copy of the module it
 names without listing it again. Issue #370 vendored `kanban_config.py` into both
 plugin bundles beside the document mechanism that reads it, and the copies are
 held byte-identical to `tools/kanban_config.py` by
-`tools/test_document_workflow_contract.py`. Being identical by test is what
+`tools/test_document_workflow_contract.py`. Issue #483 vendored
+`kanban_models.py` into the Claude bundle alone on the same terms, held
+byte-identical by `tools/test_claude_plugin.py`; it appears in no row below
+because it writes down no managed location of its own. Being identical by test is what
 makes a copy a copy rather than a second definition, which is the property these
 rows exist to protect — the managed locations that module writes down are still
 stated once, and a copy that drifted from that statement would fail before it
@@ -1688,9 +1737,11 @@ utilities.
   because doing so would let a later installation silently change the
   configuration an earlier repository's drainer restarts with.
   The drainer's own three managed locations are spelled once in
-  `tools/kanban_config.py`, the only tracked module installed beside the
-  controller and therefore the only one both the installer and the installed
-  controller can import. Its install directory — the discovery record and the
+  `tools/kanban_config.py`, the tracked module installed beside the controller
+  that both the installer and the installed controller can import.
+  `tools/kanban_models.py` is installed beside it too, since issue #483, but it
+  writes down no managed location: it reads the model roster from the XDG
+  configuration root and nothing else. Its install directory — the discovery record and the
   runtime root with it — defaults to
   `~/Library/Application Support/kanban/pr-drainer` on macOS and to
   `$XDG_DATA_HOME/kanban/pr-drainer` elsewhere; its log root defaults to
@@ -1770,7 +1821,7 @@ utilities.
   the next controller on it; a path it writes through is not a regular file; or the `~/Library` install directory
   holds an entry this installer did not put there — decided by what an entry
   *is*, with the expected relative name selecting each managed slot and its
-  required object type proving ownership, so the four script links must be
+  required object type proving ownership, so the five script links must be
   symlinks, the record and its lock plain files, `runtime/` a plain directory,
   and `__pycache__` recognized only when it holds nothing but plain `.pyc`
   files.
@@ -2180,9 +2231,20 @@ utilities.
 - **No credential, personal model preference, private endpoint, or
   machine-specific path may be tracked as a required asset.**
   `DRAIN_PRS_CLAUDE_REVIEW_MODEL`, `KANBAN_DRAINER_NTFY_URL`,
-  `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, and `KANBAN_ISSUE_REVIEW_NTFY_URL` are
-  optional environment overrides with no tracked default value, not required
-  configuration.
+  `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, `KANBAN_ISSUE_REVIEW_NTFY_URL`, and the
+  four `APPROVE_ISSUES_*_MODEL` / `APPROVE_ISSUES_*_EFFORT` overrides §2.3
+  documents are optional environment overrides with no tracked default value,
+  not required configuration.
+- **A new tracked module under `tools/` does not reach a live install by
+  itself.** Both service installations link a fixed module set beside the
+  script they install, resolved when that install was made, so a module added
+  to either set requires rerunning its installer —
+  `python3 tools/install_drainer.py` for the PR drainer, and
+  `python3 tools/install_issue_review.py` for the canonical issue-review
+  backend (`tools/install_issue_approval.py` deliberately installs no backend
+  of its own; it resolves and verifies the one that installer made). Until
+  then the installed script fails at import against the module set it was
+  installed with. Issue #483's `tools/kanban_models.py` joined both sets.
 
 ## 6. Completeness check
 

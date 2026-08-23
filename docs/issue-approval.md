@@ -158,10 +158,13 @@ The installer:
 - refuses when the copy of the controller it imported differs from
   `tools/approve_issues_service.py` in the checkout it is installing, since the
   definition would then be written by one copy and run by the other;
-- **resolves** the canonical issue-review backend and refuses if it is absent,
-  naming `python3 tools/install_issue_review.py` as the repair. It never installs
-  a second reviewer: that backend is one global installation shared with every
-  ordinary review workflow;
+- **resolves** the canonical issue-review backend and refuses if it is absent —
+  or if the modules it imports at startup (`kanban_config.py` and, since issue
+  #483, `kanban_models.py`) are not beside it, since a service with no reviewer
+  it can start is not an installation — naming
+  `python3 tools/install_issue_review.py` as the repair in either case. It never
+  installs a second reviewer: that backend is one global installation shared
+  with every ordinary review workflow;
 - refuses beside the untracked background approval daemon
   ([below](#the-legacy-approval-daemon)) and beside any live run of this
   repository's controller;

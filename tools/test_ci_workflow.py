@@ -46,6 +46,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 -m unittest tools.test_ci_workflow
 """
 
+import ast
 import json
 import os
 import re
@@ -55,8 +56,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import install_drainer
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+LIFECYCLE_CHECK = (
+    Path(__file__).resolve().parent.parent
+    / ".github"
+    / "systemd-lifecycle"
+    / "lifecycle_check.py"
+)
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 AGGREGATE_JOB = "build-test"
@@ -393,6 +402,45 @@ class AggregateGuardTests(unittest.TestCase):
                 results = self.all_succeeding()
                 results[SYSTEMD_JOB] = result
                 self.guard(results, expect_exit=1)
+
+    def test_the_lifecycle_fixture_carries_every_module_the_install_requires(self):
+        """The fixture checkout has to hold what `install_drainer` demands.
+
+        This is a fixture list, not an assertion, and that is exactly why it
+        drifts silently: a module added under `tools/` that the installed
+        controller imports makes the real installer refuse this checkout, and
+        the job then fails at its first step for a reason that has nothing to
+        do with the lifecycle it exists to prove. Issue #483's
+        `kanban_models.py` is the case that found it.
+        """
+        tree = ast.parse(LIFECYCLE_CHECK.read_text(encoding="utf-8"))
+        # The one `for name in (...)` loop whose body copies a tracked module.
+        # Found by what it does rather than by its position, so a rename or a
+        # move inside the fixture fails this comparison rather than silently
+        # matching nothing.
+        loops = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.For)
+            and any(
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Attribute)
+                and inner.func.attr == "copy2"
+                for inner in ast.walk(node)
+            )
+        ]
+        self.assertEqual(
+            len(loops),
+            1,
+            "expected exactly one module-copying loop in the lifecycle fixture",
+        )
+        self.assertEqual(
+            sorted(ast.literal_eval(loops[0].iter)),
+            sorted(install_drainer._MANAGED_LINK_NAMES),
+            "the systemd lifecycle fixture copies a different module set from "
+            "the one tools/install_drainer.py requires of a checkout, so the "
+            "install step fails before the lifecycle is exercised",
+        )
 
     def test_several_failures_are_all_reported(self):
         results = self.all_succeeding()

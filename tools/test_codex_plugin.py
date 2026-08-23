@@ -350,6 +350,27 @@ class PackagedCodeInvocationTests(unittest.TestCase):
                     offenders.append(f"{flag!r} appears in {match.group(0).splitlines()[0]}")
         self.assertEqual(offenders, [], "\n".join(offenders))
 
+    def test_the_codex_bundle_ships_no_model_roster_reader(self):
+        # The negative control for issue #483's deferral. The Claude bundle
+        # vendors kanban_models.py beside its coordinator and resolves the
+        # pr_review cells through it; this bundle deliberately does not,
+        # because D-2 as amended keeps its coordinator's delegation contract
+        # and the roster has nothing to say to a spawn that pins nothing.
+        # Asserted rather than assumed, so a later slice cannot hand this
+        # bundle model values by accident.
+        strays = sorted(
+            str(path.relative_to(REPO_ROOT))
+            for path in CODEX_PLUGIN_ROOT.rglob("kanban_models.py")
+        )
+        self.assertEqual(
+            strays,
+            [],
+            "the Codex bundle must ship no model-roster reader: its "
+            "coordinator passes no model or effort and has no cell to resolve",
+        )
+        source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
+        self.assertNotIn("kanban_models", source)
+
     def test_the_forbidden_flag_scan_actually_detects_a_planted_violation(self):
         # Guards against the regex/substring scan above silently matching
         # nothing due to a function-boundary or naming drift.

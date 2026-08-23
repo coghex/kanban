@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 import kanban_config
+import kanban_models
 
 
 # Identity marker for this tracked asset. tools/install_issue_review.py and
@@ -43,18 +44,71 @@ VERDICT_LABEL_SPECS = {
     ),
 }
 DEFAULT_INTERVAL_SECONDS = 60
-PRIMARY_CODEX_MODEL = "gpt-5.6-sol"
+# The accepted-marker model set, and the one part of this file's model
+# vocabulary the roster has no words for. These are not spawn values: they are
+# what keeps historical review markers validating across a default change
+# (accepted_reviewer_models below), so they stay literal by design.
 LEGACY_CODEX_MODEL = "gpt-5.6-terra"
 FALLBACK_CODEX_MODEL = "gpt-5.5"
-# Claude Opus 5 is the canonical Claude-side issue reviewer. Claude Fable 5
-# remains a legacy accepted model so historical review markers continue to
-# validate after this default change.
-PRIMARY_CLAUDE_MODEL = "claude-opus-5"
 LEGACY_CLAUDE_MODEL = "claude-fable-5"
-CODEX_MODEL = os.environ.get("APPROVE_ISSUES_CODEX_MODEL", PRIMARY_CODEX_MODEL)
-CODEX_EFFORT = "xhigh"
-CLAUDE_MODEL = os.environ.get("APPROVE_ISSUES_CLAUDE_MODEL", PRIMARY_CLAUDE_MODEL)
-CLAUDE_EFFORT = "xhigh"
+
+# The canonical issue-gate reviewers' wire values, resolved once at import from
+# the model roster's `issue_gate` cells the way every other constant here is
+# frozen at import. Precedence is the design's D-6: compiled defaults < roster
+# file < environment, and the environment layer is complete -- a model variable
+# and an effort variable per provider -- so an operator cannot move one and be
+# left with the other.
+#
+# A roster file that is present and unusable resolves to no assignment at all
+# and is remembered in MODEL_ROSTER_ERROR. This backend then refuses every mode
+# rather than reviewing (main() below), because falling back to the compiled
+# defaults from a file the operator edited is exactly the silent-old-model path
+# D-3 forbids. A cell a valid roster cannot supply -- a single-agent roster
+# asked for the other brand's reviewer -- refuses the same way: which brands
+# this gate routes to is not this slice's to change.
+MODEL_ROSTER_ERROR: str | None = None
+try:
+    ISSUE_GATE_ASSIGNMENTS = {
+        provider: kanban_models.resolve_assignment("issue_gate", provider)
+        for provider in ("codex", "claude")
+    }
+except kanban_models.KanbanModelsError as _roster_error:
+    MODEL_ROSTER_ERROR = str(_roster_error)
+    ISSUE_GATE_ASSIGNMENTS = {}
+
+# What every roster-resolved constant below carries while MODEL_ROSTER_ERROR
+# stands. Never a model or effort any CLI accepts, and never reached: main()
+# refuses before any mode runs, and invoke_reviewer() refuses again at the
+# spawn boundary itself.
+UNRESOLVED_ASSIGNMENT_VALUE = "<model roster unavailable>"
+
+
+def gate_model(provider: str, variable: str) -> str:
+    override = os.environ.get(variable)
+    if override:
+        return override
+    assignment = ISSUE_GATE_ASSIGNMENTS.get(provider)
+    return assignment.model if assignment else UNRESOLVED_ASSIGNMENT_VALUE
+
+
+def gate_effort(provider: str, variable: str) -> str:
+    override = os.environ.get(variable)
+    if override:
+        return override
+    assignment = ISSUE_GATE_ASSIGNMENTS.get(provider)
+    return assignment.effort if assignment else UNRESOLVED_ASSIGNMENT_VALUE
+
+
+# The current canonical reviewer assignment, per provider. Both the published
+# marker's `models=` field and accepted_reviewer_models' "current" route read
+# these, so a roster or environment edit both changes what runs and retires the
+# standing approvals recorded under the old assignment.
+PRIMARY_CODEX_MODEL = gate_model("codex", "APPROVE_ISSUES_CODEX_MODEL")
+CODEX_EFFORT = gate_effort("codex", "APPROVE_ISSUES_CODEX_EFFORT")
+PRIMARY_CLAUDE_MODEL = gate_model("claude", "APPROVE_ISSUES_CLAUDE_MODEL")
+CLAUDE_EFFORT = gate_effort("claude", "APPROVE_ISSUES_CLAUDE_EFFORT")
+CODEX_MODEL = PRIMARY_CODEX_MODEL
+CLAUDE_MODEL = PRIMARY_CLAUDE_MODEL
 REVIEW_TIMEOUT_SECONDS = 60 * 60
 
 # Portable runtime locations. Kanban is a namespaced, opt-in citizen of the
@@ -1400,7 +1454,19 @@ def model_invocation_count() -> int:
     return MODEL_INVOCATIONS
 
 
+def require_model_roster() -> None:
+    """Refuse rather than review when the roster is present and unusable.
+
+    Stated as its own funnel and called at both ends -- once in main() before
+    any mode runs, once here at the single spawn boundary -- because a refusal
+    that only guards the entry point is one a future mode can be added past.
+    """
+    if MODEL_ROSTER_ERROR is not None:
+        raise ApproveError(MODEL_ROSTER_ERROR)
+
+
 def invoke_reviewer(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
+    require_model_roster()
     # Counted before the call, not after: a model that ran and then failed,
     # timed out, or returned unparseable output still ran.
     note_model_invocation()
@@ -3443,6 +3509,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    # Before mode selection, --self-test, and every GitHub call: an unusable
+    # roster is not a mode-specific failure. This backend cannot name the
+    # reviewer any of its modes would run, publish, or accept a marker from, so
+    # it performs no work at all and reports the file and the defect.
+    if MODEL_ROSTER_ERROR is not None:
+        fail(f"approve-issues.py error: {MODEL_ROSTER_ERROR}")
     # Mode selection is resolved BEFORE --self-test's early return, because a
     # rejected --review-queue invocation must exit non-zero having written
     # nothing to stdout. Returning through --self-test would do the exact

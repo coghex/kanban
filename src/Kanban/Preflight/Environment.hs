@@ -335,13 +335,14 @@ probeReviewBackend = do
       case selected of
         Left message -> pure (ReviewBackendUnresolved message)
         Right (_, scriptPath) -> do
-          -- The backend cannot run without its config module:
-          -- approve_issues.py imports kanban_config at module scope, and the
-          -- issue-review setup component installs both. A half-installed
-          -- pair fails at import time, so both links are part of
-          -- "installed" here.
-          let companionPath = takeDirectory scriptPath </> "kanban_config.py"
-          observations <- mapM probeInstalledAsset [scriptPath, companionPath]
+          -- The backend cannot run without its companion modules:
+          -- approve_issues.py imports both kanban_config and kanban_models at
+          -- module scope, and the issue-review setup component installs all
+          -- three together. A half-installed set fails at import time, so
+          -- every link is part of "installed" here.
+          let companionPath name = takeDirectory scriptPath </> name
+              companionPaths = map companionPath ["kanban_config.py", "kanban_models.py"]
+          observations <- mapM probeInstalledAsset (scriptPath : companionPaths)
           pure (foldr worseObservation (ReviewBackendReadyAt scriptPath) observations)
 
 -- | Classify one installed backend file. Only a symlink resolving to a file

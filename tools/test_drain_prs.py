@@ -16,12 +16,20 @@ repair path; and issue #230's rule that a branch update carries
 
 import contextlib
 import io
+import json
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import drain_prs
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+MODELS_TOML_EXAMPLE = REPO_ROOT / "models.toml.example"
 
 
 class ParseRepoSlugTests(unittest.TestCase):
@@ -365,3 +373,172 @@ class ApprovalIsNeverAddedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# A stand-in `codex`: records its argument vector and writes the rereview
+# transcript its caller then reads.
+FAKE_CODEX = """#!{interpreter}
+import json, sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+Path({log!r}).write_text(json.dumps(argv), encoding="utf-8")
+sys.stdin.read()
+if "-o" in argv:
+    Path(argv[argv.index("-o") + 1]).write_text("done\\n", encoding="utf-8")
+"""
+
+
+class RosterBackedDrainRereviewTests(unittest.TestCase):
+    """Issue #483: the stale-head rereview's model and effort come from the
+    roster's `drain_rereview.codex` cell, re-read per drain cycle.
+
+    Every case resolves through a configuration root it controls, because the
+    real one belongs to whoever is running the suite.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.config_home = self.root / "config"
+        self.config_home.mkdir()
+        # The module-level cache is process-wide, so a case that left one
+        # behind would decide the next one's answer.
+        cached = mock.patch.object(drain_prs, "FINALIZE_ASSIGNMENT", None)
+        cached.start()
+        self.addCleanup(cached.stop)
+
+    @contextlib.contextmanager
+    def rooted(self):
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.config_home)}):
+            yield
+
+    def write_roster(self, text: str) -> Path:
+        path = self.config_home / "kanban" / "models.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def edited_example(self, model: str, effort: str) -> str:
+        text = MODELS_TOML_EXAMPLE.read_text(encoding="utf-8")
+        old = '[roles.drain_rereview.codex]\nmodel = "gpt-5.6-terra"\neffort = "medium"'
+        assert old in text
+        return text.replace(
+            old, f'[roles.drain_rereview.codex]\nmodel = "{model}"\neffort = "{effort}"'
+        )
+
+    def test_no_roster_file_preserves_todays_values_exactly(self):
+        with self.rooted():
+            assignment = drain_prs.refresh_finalize_assignment()
+        self.assertEqual((assignment.model, assignment.effort), ("gpt-5.6-terra", "medium"))
+
+    def test_a_roster_file_moves_the_model_the_fake_cli_is_given(self):
+        self.write_roster(self.edited_example("gpt-5.5", "low"))
+        log = self.root / "codex.argv.json"
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        script = bin_dir / "codex"
+        # This interpreter by absolute path: PATH is replaced below with the
+        # directory holding only this stand-in.
+        script.write_text(
+            FAKE_CODEX.format(interpreter=sys.executable, log=str(log)),
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+        worktree = self.root / "review"
+        worktree.mkdir()
+        pr = {"number": 7, "headRefOid": "a" * 40, "headRefName": "topic"}
+        with self.rooted():
+            drain_prs.refresh_finalize_assignment()
+            with mock.patch.object(drain_prs, "prepare_review_worktree", return_value=worktree):
+                with mock.patch.object(drain_prs, "drain_rereview_prompt", return_value="prompt"):
+                    with mock.patch.object(drain_prs, "get_pr", return_value=pr):
+                        with mock.patch.object(
+                            drain_prs,
+                            "run",
+                            side_effect=self._run_recording(worktree, log, bin_dir),
+                        ):
+                            # What is under test ends at the spawn: the
+                            # verdict bookkeeping after it reads GitHub, which
+                            # this fixture answers with nothing. The argv log
+                            # below is what proves the model call really ran.
+                            with contextlib.suppress(drain_prs.DrainError):
+                                drain_prs.rereview_pr_with_codex(
+                                    make_ctx(), pr, dry_run=False
+                                )
+        argv = json.loads(log.read_text(encoding="utf-8"))
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-5.5")
+        self.assertIn('model_reasoning_effort="low"', argv)
+
+    def _run_recording(self, worktree, log, bin_dir):
+        """Answer the git probes the rereview makes, and really spawn `codex`.
+
+        Only the model call is a subprocess here: the surrounding git reads are
+        about a worktree this test has no reason to build, and what is being
+        asserted is the argument vector the roster produced.
+        """
+
+        def fake_run(args, **kwargs):
+            if args[0] != "codex":
+                # Everything around the model call is answered rather than
+                # run: a clean worktree sitting on exactly the head under
+                # review, and no GitHub state. What is asserted here is the
+                # argument vector the roster produced, not the surrounding
+                # bookkeeping other suites already cover.
+                stdout = "a" * 40 if "rev-parse" in args else ""
+                return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+            with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+                return subprocess.run(
+                    args,
+                    cwd=str(worktree),
+                    text=True,
+                    capture_output=True,
+                    input=kwargs.get("input_text"),
+                )
+
+        return fake_run
+
+    def test_an_unusable_roster_stops_the_drainer_naming_the_file(self):
+        roster = self.write_roster("schema_version = 1\nagents = 7\n")
+        with self.rooted():
+            with self.assertRaises(drain_prs.ModelUnavailableError) as caught:
+                drain_prs.refresh_finalize_assignment()
+        message = str(caught.exception)
+        self.assertIn(str(roster), message)
+        self.assertIn("agents", message)
+        self.assertIn("no stale-head rereview was attempted", message)
+        # Nothing fell back to the compiled defaults, and the failure is the
+        # one class the pass loop and the candidate loop both re-raise rather
+        # than absorbing into a per-PR cooldown.
+        self.assertIsNone(drain_prs.FINALIZE_ASSIGNMENT)
+        self.assertIsInstance(caught.exception, drain_prs.DrainError)
+
+    def test_an_unusable_roster_refuses_the_rereview_before_any_worktree(self):
+        self.write_roster("schema_version = 1\nagents = 7\n")
+        pr = {"number": 7, "headRefOid": "a" * 40, "headRefName": "topic"}
+        with self.rooted():
+            with mock.patch.object(drain_prs, "prepare_review_worktree") as prepare:
+                with self.assertRaises(drain_prs.ModelUnavailableError):
+                    drain_prs.rereview_pr_with_codex(make_ctx(), pr, dry_run=False)
+        prepare.assert_not_called()
+
+    def test_the_assignment_is_re_read_rather_than_frozen(self):
+        # A roster edit takes effect on the next pass without restarting the
+        # managed service, which is what the per-cycle refresh is for.
+        self.write_roster(self.edited_example("gpt-5.5", "low"))
+        with self.rooted():
+            first = drain_prs.refresh_finalize_assignment()
+            self.assertEqual(first.model, "gpt-5.5")
+            self.write_roster(self.edited_example("gpt-5.4", "high"))
+            second = drain_prs.refresh_finalize_assignment()
+        self.assertEqual((second.model, second.effort), ("gpt-5.4", "high"))
+
+    def test_the_drain_loop_refreshes_before_any_queue_work(self):
+        source = (REPO_ROOT / "tools" / "drain_prs.py").read_text(encoding="utf-8")
+        loop_body = source[source.index("def loop("):]
+        refresh = loop_body.index("refresh_finalize_assignment()")
+        for later in ("recover_stale_approval(", "get_open_approved_prs(", "run_drain_pass("):
+            with self.subTest(step=later):
+                self.assertLess(refresh, loop_body.index(later))

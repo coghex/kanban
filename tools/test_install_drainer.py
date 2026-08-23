@@ -138,6 +138,7 @@ class InstallerFixture(unittest.TestCase):
         (tools / "drain_prs.py").write_text("drainer\n", encoding="utf-8")
         (tools / "drain_prs_service.py").write_text("controller\n", encoding="utf-8")
         (tools / "kanban_config.py").write_text("config module\n", encoding="utf-8")
+        (tools / "kanban_models.py").write_text("models module\n", encoding="utf-8")
         (tools / "service_manager.py").write_text("backend\n", encoding="utf-8")
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run(
@@ -507,7 +508,13 @@ class InstallerBackendTests(InstallerFixture):
         links = self.dry_run(backend)["links"]
         self.assertEqual(
             sorted(links),
-            ["config_module", "controller", "drainer", "service_manager"],
+            [
+                "config_module",
+                "controller",
+                "drainer",
+                "models_module",
+                "service_manager",
+            ],
         )
         for key, link in links.items():
             with self.subTest(link=key):

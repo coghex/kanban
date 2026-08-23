@@ -155,6 +155,260 @@ class PortableDefaultPathTests(unittest.TestCase):
         self.assertIsNone(approve_issues.NTFY_URL)
 
 
+MODELS_TOML_EXAMPLE = REPO_ROOT / "models.toml.example"
+
+# A stand-in reviewer CLI: records the argument vector it was called with, and
+# writes the structured result its caller then reads. Enough for the one claim
+# these tests make -- that the model and effort the roster resolved are what
+# reaches the process -- and nothing more.
+FAKE_REVIEWER = """#!{interpreter}
+import json, sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+Path({log!r}).write_text(json.dumps(argv), encoding="utf-8")
+sys.stdin.read()
+review = {{
+    "verdict": "APPROVE",
+    "summary": "fixture",
+    "corrections": [],
+    "spec_additions": [],
+    "supporting_context": [],
+    "open_decisions": [],
+    "recommended_disposition": [],
+}}
+if "-o" in argv:
+    Path(argv[argv.index("-o") + 1]).write_text(json.dumps(review), encoding="utf-8")
+else:
+    sys.stdout.write(json.dumps({{"result": json.dumps(review)}}))
+"""
+
+
+class RosterBackedIssueGateTests(unittest.TestCase):
+    """Issue #483: the two `issue_gate` cells come from the model roster.
+
+    The constants are frozen at import by design, so every case re-imports the
+    tracked backend under the configuration root it is about, exactly as
+    PortableDefaultPathTests re-imports it under a platform. Reading the module
+    this suite already imported would answer for whatever roster the host
+    running the suite happens to carry.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.config_home = self.root / "config"
+        self.config_home.mkdir()
+
+    def write_roster(self, text: str) -> Path:
+        path = self.config_home / "kanban" / "models.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def backend(self, **environment):
+        base = {
+            "HOME": str(self.root / "home"),
+            "XDG_CONFIG_HOME": str(self.config_home),
+        }
+        with mock.patch.dict(os.environ, {**base, **environment}, clear=True):
+            spec = importlib.util.spec_from_file_location(
+                "approve_issues_under_roster",
+                REPO_ROOT / "tools" / "approve_issues.py",
+            )
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                sys.modules.pop(spec.name, None)
+        return module
+
+    def invoke(self, module, reviewer):
+        """Run one reviewer against a fake CLI and return its argv."""
+        binary = "codex" if reviewer.key == "codex" else "claude"
+        bin_dir = self.root / f"bin-{binary}"
+        bin_dir.mkdir(exist_ok=True)
+        log = self.root / f"{binary}.argv.json"
+        script = bin_dir / binary
+        # This interpreter by absolute path: the invocation below replaces
+        # PATH with the directory holding only this stand-in, so `env python3`
+        # would resolve nothing.
+        script.write_text(
+            FAKE_REVIEWER.format(interpreter=sys.executable, log=str(log)),
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+            module.invoke_reviewer(reviewer, "prompt", self.root)
+        return json.loads(log.read_text(encoding="utf-8"))
+
+    def test_no_roster_file_preserves_todays_values_exactly(self):
+        module = self.backend()
+        self.assertEqual(module.MODEL_ROSTER_ERROR, None)
+        self.assertEqual(module.CODEX_REVIEWER.model, "gpt-5.6-sol")
+        self.assertEqual(module.CODEX_REVIEWER.effort, "xhigh")
+        self.assertEqual(module.CLAUDE_REVIEWER.model, "claude-opus-5")
+        self.assertEqual(module.CLAUDE_REVIEWER.effort, "xhigh")
+
+    def test_a_roster_file_moves_the_model_and_effort_the_cli_is_given(self):
+        self.write_roster(
+            MODELS_TOML_EXAMPLE.read_text(encoding="utf-8")
+            .replace(
+                '[roles.issue_gate.codex]\nmodel = "gpt-5.6-sol"\neffort = "xhigh"',
+                '[roles.issue_gate.codex]\nmodel = "gpt-5.5"\neffort = "low"',
+            )
+            .replace(
+                '[roles.issue_gate.claude]\nmodel = "claude-opus-5"\neffort = "xhigh"',
+                '[roles.issue_gate.claude]\nmodel = "claude-sonnet-5"\neffort = "medium"',
+            )
+        )
+        module = self.backend()
+
+        codex_argv = self.invoke(module, module.CODEX_REVIEWER)
+        self.assertEqual(codex_argv[codex_argv.index("-m") + 1], "gpt-5.5")
+        self.assertIn('model_reasoning_effort="low"', codex_argv)
+
+        claude_argv = self.invoke(module, module.CLAUDE_REVIEWER)
+        self.assertEqual(claude_argv[claude_argv.index("--model") + 1], "claude-sonnet-5")
+        self.assertEqual(claude_argv[claude_argv.index("--effort") + 1], "medium")
+
+    def test_the_environment_beats_the_file_for_model_and_effort_alike(self):
+        # D-6's chain, completed: the two effort variables are new in this
+        # slice, so an operator can no longer move the model from the
+        # environment and be left with the file's effort.
+        self.write_roster(
+            MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
+                '[roles.issue_gate.codex]\nmodel = "gpt-5.6-sol"\neffort = "xhigh"',
+                '[roles.issue_gate.codex]\nmodel = "gpt-5.5"\neffort = "low"',
+            )
+        )
+        module = self.backend(
+            APPROVE_ISSUES_CODEX_MODEL="gpt-5.6-terra",
+            APPROVE_ISSUES_CODEX_EFFORT="high",
+            APPROVE_ISSUES_CLAUDE_EFFORT="medium",
+        )
+        argv = self.invoke(module, module.CODEX_REVIEWER)
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-5.6-terra")
+        self.assertIn('model_reasoning_effort="high"', argv)
+        # The claude model was left to the file; only its effort was overridden.
+        self.assertEqual(module.CLAUDE_REVIEWER.model, "claude-opus-5")
+        self.assertEqual(module.CLAUDE_REVIEWER.effort, "medium")
+
+    def test_the_published_marker_carries_the_resolved_assignment(self):
+        self.write_roster(
+            MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
+                '[roles.issue_gate.codex]\nmodel = "gpt-5.6-sol"\neffort = "xhigh"',
+                '[roles.issue_gate.codex]\nmodel = "gpt-5.5"\neffort = "low"',
+            )
+        )
+        module = self.backend()
+        self.assertEqual(
+            module.reviewer_models([module.CODEX_REVIEWER]), "gpt-5.5@low"
+        )
+        # And the same assignment is what the gate accepts as current, so a
+        # marker this run publishes validates on the next --check rather than
+        # reading as stale the moment it is written.
+        self.assertIn(
+            "gpt-5.5@low",
+            module.accepted_reviewer_models([module.CODEX_REVIEWER]),
+        )
+
+    def test_a_changed_assignment_makes_a_standing_marker_stale(self):
+        # Stale-approval reconciliation compares the recorded `models` field,
+        # so a roster edit invalidates standing approvals and forces rereview.
+        # That is the intended consequence, and it has to hold for an effort
+        # change as much as a model one -- while the deliberately retained
+        # legacy models keep validating.
+        default = self.backend()
+        standing = default.reviewer_models([default.CODEX_REVIEWER])
+
+        for old, new in (
+            ('model = "gpt-5.6-sol"\neffort = "xhigh"', 'model = "gpt-5.5"\neffort = "xhigh"'),
+            ('model = "gpt-5.6-sol"\neffort = "xhigh"', 'model = "gpt-5.6-sol"\neffort = "high"'),
+        ):
+            with self.subTest(edit=new):
+                self.write_roster(
+                    MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
+                        f"[roles.issue_gate.codex]\n{old}",
+                        f"[roles.issue_gate.codex]\n{new}",
+                    )
+                )
+                module = self.backend()
+                self.assertNotIn(
+                    standing,
+                    module.accepted_reviewer_models([module.CODEX_REVIEWER]),
+                )
+
+        # The legacy accepted models are not spawn values and stay literal, so
+        # a marker recorded under one goes on validating.
+        module = self.backend()
+        self.assertIn(
+            f"{module.LEGACY_CODEX_MODEL}@{module.CODEX_EFFORT}",
+            module.accepted_reviewer_models([module.CODEX_REVIEWER]),
+        )
+
+    def test_an_unusable_roster_refuses_every_mode_and_reviews_nothing(self):
+        roster = self.write_roster("schema_version = 1\nagents = 7\n")
+        module = self.backend()
+        self.assertIsNotNone(module.MODEL_ROSTER_ERROR)
+        self.assertIn(str(roster), module.MODEL_ROSTER_ERROR)
+        self.assertIn("agents", module.MODEL_ROSTER_ERROR)
+
+        # Nothing anywhere fell back to the compiled defaults.
+        self.assertEqual(module.ISSUE_GATE_ASSIGNMENTS, {})
+        self.assertEqual(
+            module.CODEX_REVIEWER.model, module.UNRESOLVED_ASSIGNMENT_VALUE
+        )
+
+        # The spawn boundary refuses even if a future mode reached it directly.
+        with self.assertRaises(module.ApproveError) as caught:
+            module.invoke_reviewer(module.CODEX_REVIEWER, "prompt", self.root)
+        self.assertIn(str(roster), str(caught.exception))
+
+    def test_the_cli_reports_the_file_and_the_defect_and_exits_non_zero(self):
+        roster = self.write_roster("schema_version = 1\nagents = 7\n")
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "tools" / "approve_issues.py"),
+                "--path",
+                str(self.root),
+                "--check",
+                "1",
+                "--json",
+            ],
+            text=True,
+            capture_output=True,
+            cwd=str(REPO_ROOT / "tools"),
+            env={
+                **os.environ,
+                "HOME": str(self.root / "home"),
+                "XDG_CONFIG_HOME": str(self.config_home),
+            },
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout, "")
+        self.assertIn(str(roster), proc.stderr)
+        self.assertIn("is invalid", proc.stderr)
+
+    def test_an_unloadable_provider_cell_refuses_rather_than_defaulting(self):
+        # A valid single-agent roster is not a file to repair, but this gate
+        # still routes to both brands, so a cell it cannot resolve refuses the
+        # same way. Which brands it routes to is MODEL-8's question, not this
+        # slice's -- and answering it by quietly spawning a compiled default
+        # would be the wrong answer to it.
+        self.write_roster(
+            MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
+                'agents = ["codex", "claude"]', 'agents = ["claude"]'
+            )
+        )
+        module = self.backend()
+        self.assertIsNotNone(module.MODEL_ROSTER_ERROR)
+        self.assertIn("codex", module.MODEL_ROSTER_ERROR)
+
+
 class InstalledConfigReferenceTests(unittest.TestCase):
     """install_issue_review.py persists a --config path beside the installed
     backend (config.json's config_path key) so a backend invoked without an

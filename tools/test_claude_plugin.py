@@ -105,6 +105,8 @@ UI_HS = REPO_ROOT / "src" / "Kanban" / "UI.hs"
 # Spec.Config.Models holds byte-for-byte against the compiled defaults the
 # spawn sites actually resolve.
 MODELS_TOML_EXAMPLE = REPO_ROOT / "models.toml.example"
+TRACKED_ROSTER_READER = REPO_ROOT / "tools" / "kanban_models.py"
+BUNDLED_ROSTER_READER = PLUGIN_ROOT / "scripts" / "kanban_models.py"
 REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review" / "Canonical.hs"
 # Since issue #444 the record's own location is resolved for both managed
 # installations by one module, and Review/Canonical.hs asks it rather than
@@ -883,11 +885,16 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
     rereview spawns resolve roles.pr_review.<provider> from the roster, and
     Spec.Config.Models holds models.toml.example byte-for-byte against the
     compiled defaults, so reading the example here still pins exactly what
-    those spawns use. The Python half stays a verbatim constant assertion
-    until MODEL-4 migrates the coordinator itself. This is a deliberate,
-    reviewed divergence from codex-plugin's otherwise-identical coordinator
-    copy and from docs/agent-workflow-contract.md §2.2's general policy for
-    this one nested-spawn path in this plugin only."""
+    those spawns use. Since MODEL-4 the Python half is roster-backed too: the
+    coordinator resolves the same cells through its own bundled
+    kanban_models.py, and its four constants are the compiled fallbacks that
+    reader is handed for a host carrying no roster file at all. Holding those
+    fallbacks against the example is therefore the same gate it always was --
+    the two lanes cannot silently diverge -- with the mechanism moved off a
+    pair of literals a spawn read directly. This is a deliberate, reviewed
+    divergence from codex-plugin's otherwise-identical coordinator copy and
+    from docs/agent-workflow-contract.md §2.2's general policy for this one
+    nested-spawn path in this plugin only."""
 
     def test_nested_reviewer_models_match_the_haskell_canonical_review_models(self):
         roster_source = MODELS_TOML_EXAMPLE.read_text(encoding="utf-8")
@@ -904,6 +911,25 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
         for retired in ("codexModel", "codexEffort", "claudeModel", "claudeEffort"):
             self.assertNotIn(retired, pr_flow_source)
 
+        # The coordinator's compiled fallbacks -- what its bundled reader is
+        # handed for a host with no roster file, and therefore what a default
+        # install spawns -- read out of the file rather than imported, so this
+        # gate keeps working on a source-only check of the tracked bundle.
+        coordinator = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            # A configuration root with no models.toml in it: the fallback is
+            # only reachable on the absent-file path, and the host running this
+            # suite must not be able to decide the answer.
+            with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
+                for provider, cell in (("codex", codex_cell), ("claude", claude_cell)):
+                    with self.subTest(provider=provider):
+                        fallback = coordinator.nested_review_assignment(provider)
+                        self.assertEqual(fallback.model, cell["model"])
+                        self.assertEqual(fallback.effort, cell["effort"])
+
+        # And the constants those fallbacks are built from stay declared in the
+        # coordinator itself, so a reader looking at that file still finds the
+        # values it spawns on by default rather than only a call into a reader.
         coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn(
             f'CODEX_NESTED_REVIEW_MODEL = "{codex_cell["model"]}"', coordinator_source
@@ -917,22 +943,68 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
         self.assertIn(
             f'CLAUDE_NESTED_REVIEW_EFFORT = "{claude_cell["effort"]}"', coordinator_source
         )
-        self.assertIn('CODEX_NESTED_REVIEW_MODEL = "gpt-5.6-terra"', coordinator_source)
-        self.assertIn('CODEX_NESTED_REVIEW_EFFORT = "xhigh"', coordinator_source)
-        self.assertIn('CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-5"', coordinator_source)
-        self.assertIn('CLAUDE_NESTED_REVIEW_EFFORT = "xhigh"', coordinator_source)
 
-    def test_invoke_codex_and_invoke_claude_pass_the_pinned_model_flags(self):
+    def test_an_unusable_roster_refuses_the_nested_review(self):
+        # D-3, on this side of the language boundary: a roster file that is
+        # present and will not load must never leave the coordinator spawning
+        # the compiled fallbacks and then publishing them as verified fact in
+        # the pr-review:v2 marker.
+        coordinator = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            roster = Path(tmp) / "kanban" / "models.toml"
+            roster.parent.mkdir(parents=True)
+            roster.write_text("schema_version = 1\nagents = 3\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
+                for provider in ("codex", "claude"):
+                    with self.subTest(provider=provider):
+                        with self.assertRaises(coordinator.WorkflowError) as caught:
+                            coordinator.nested_review_assignment(provider)
+                        message = str(caught.exception)
+                        self.assertIn(str(roster), message)
+                        self.assertIn("agents", message)
+                        self.assertIn("no nested review was performed", message)
+
+    def test_a_roster_file_moves_the_model_the_coordinator_spawns(self):
+        # The other half of the same claim: a roster the operator really did
+        # edit is what the nested reviewer runs on, not the constants above.
+        coordinator = load_review_pr_module()
+        edited = MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
+            '[roles.pr_review.codex]\nmodel = "gpt-5.6-terra"\neffort = "xhigh"',
+            '[roles.pr_review.codex]\nmodel = "gpt-5.5"\neffort = "medium"',
+        )
+        self.assertIn('model = "gpt-5.5"', edited)
+        with tempfile.TemporaryDirectory() as tmp:
+            roster = Path(tmp) / "kanban" / "models.toml"
+            roster.parent.mkdir(parents=True)
+            roster.write_text(edited, encoding="utf-8")
+            with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
+                assignment = coordinator.nested_review_assignment("codex")
+        self.assertEqual((assignment.model, assignment.effort), ("gpt-5.5", "medium"))
+
+    def test_the_coordinator_loads_the_reader_from_beside_itself(self):
+        # An installed bundle has no tools/ sibling, so a plain import would
+        # resolve the tracked original only when this file happens to run out
+        # of a checkout -- and silently read a different copy's compiled
+        # defaults there.
+        source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn(
+            'Path(__file__).resolve().parent / "kanban_models.py"', source
+        )
+        self.assertNotIn("import kanban_models", source)
+
+    def test_invoke_codex_and_invoke_claude_pass_the_resolved_model_flags(self):
         coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
         codex_match = re.search(r"def invoke_codex\(.*?(?=\ndef |\Z)", coordinator_source, re.DOTALL)
         self.assertIsNotNone(codex_match)
-        self.assertIn('"--model",\n                CODEX_NESTED_REVIEW_MODEL', codex_match.group(0))
+        self.assertIn('nested_review_assignment("codex")', codex_match.group(0))
+        self.assertIn('"--model",\n                model_assignment.model', codex_match.group(0))
         self.assertIn("model_reasoning_effort", codex_match.group(0))
 
         claude_match = re.search(r"def invoke_claude\(.*?(?=\ndef |\Z)", coordinator_source, re.DOTALL)
         self.assertIsNotNone(claude_match)
-        self.assertIn('"--model",\n            CLAUDE_NESTED_REVIEW_MODEL', claude_match.group(0))
-        self.assertIn('"--effort",\n            CLAUDE_NESTED_REVIEW_EFFORT', claude_match.group(0))
+        self.assertIn('nested_review_assignment("claude")', claude_match.group(0))
+        self.assertIn('"--model",\n            model_assignment.model', claude_match.group(0))
+        self.assertIn('"--effort",\n            model_assignment.effort', claude_match.group(0))
 
     def test_self_test_covers_the_pinned_marker_binding(self):
         # Pins the coordinator's own --self-test (already run standalone by
@@ -1327,6 +1399,38 @@ class NumberKindGuardTests(unittest.TestCase):
         message = str(raised.exception)
         self.assertIn(PR_RESOLVER_SENTINEL, message)
         self.assertNotIn("is an ISSUE", message)
+
+
+class BundledRosterReaderTests(unittest.TestCase):
+    """The reader ships in two homes, held identical the way kanban_config.py's
+    copies are.
+
+    Byte equality is what keeps two copies one reader: the coordinator resolves
+    its cells through the bundled one and every other Python consumer through
+    the tracked original, and a bundle whose compiled defaults had drifted
+    would spawn a different model from the backend that gates the same
+    pipeline. The Codex bundle's absence is asserted by its own suite, where
+    the no-pinning contract it belongs to lives."""
+
+    def test_the_bundled_reader_is_identical_to_its_tracked_source(self):
+        self.assertEqual(
+            BUNDLED_ROSTER_READER.read_bytes(),
+            TRACKED_ROSTER_READER.read_bytes(),
+            "claude-plugin's kanban_models.py has drifted from "
+            "tools/kanban_models.py; the two copies are the same reader, not a "
+            "fork. Repair: cp tools/kanban_models.py "
+            "claude-plugin/plugins/kanban/scripts/kanban_models.py",
+        )
+
+    def test_the_bundled_reader_carries_the_managed_asset_marker(self):
+        # The issue-review installer links the tracked original beside
+        # approve_issues.py and both it and Kanban.Preflight recognize an
+        # installed file by this marker rather than by path, so the identity
+        # travels with the bytes into every copy.
+        self.assertIn(
+            "kanban-managed-asset:issue-review/kanban_models.py",
+            TRACKED_ROSTER_READER.read_text(encoding="utf-8"),
+        )
 
 
 class BundleVersionGateTests(unittest.TestCase):

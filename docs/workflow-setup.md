@@ -56,7 +56,7 @@ four with `--all`.
 
 | Component | What it installs | Needed for |
 | --- | --- | --- |
-| `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend (and its `kanban_config.py` companion) under `~/Library/Application Support/kanban/issue-review/` on macOS or `$XDG_DATA_HOME/kanban/issue-review/` — `~/.local/share/kanban/issue-review/` when that variable is unset — on Linux, plus the discovery record naming that link | Every AI action except issue revision: canonical issue review/rereview (`r`), the readiness gate a solve session checks before claiming an issue, and the gate the PR coordinator checks before publishing a verdict |
+| `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend (and its `kanban_config.py` and `kanban_models.py` companions) under `~/Library/Application Support/kanban/issue-review/` on macOS or `$XDG_DATA_HOME/kanban/issue-review/` — `~/.local/share/kanban/issue-review/` when that variable is unset — on Linux, plus the discovery record naming that link | Every AI action except issue revision: canonical issue review/rereview (`r`), the readiness gate a solve session checks before claiming an issue, and the gate the PR coordinator checks before publishing a verdict |
 | `codex-plugin` | `kanban@kanban` from `codex-plugin/`, through `codex plugin marketplace add` and `codex plugin add` | `$solve`, `$pr-review`, `$pr-rereview`, `$pr-revise`, `$repair` |
 | `claude-plugin` | `kanban@kanban` from `claude-plugin/`, through `claude plugin marketplace add` and `claude plugin install` | `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/repair` |
 | `legacy-launcher` | A symlink at `~/work/approve-issues.py` pointing at the installed backend | Nothing in Kanban. Purely a compatibility shim for pre-migration automation that still invokes that path directly — see [agent-workflow-contract §3](agent-workflow-contract.md#3-migration-boundary) |
@@ -207,8 +207,9 @@ action, and exits non-zero if any action is blocked. It distinguishes:
 Coverage is per action, not per provider, and follows what each action
 actually spawns:
 
-- **Canonical review/rereview** needs the backend (both its installed
-  files — `approve_issues.py` imports `kanban_config.py`), `gh`, and the
+- **Canonical review/rereview** needs the backend (all three of its installed
+  files — `approve_issues.py` imports `kanban_config.py` and
+  `kanban_models.py`), `gh`, and the
   provider the backend itself invokes: the opposite brand from the issue's
   origin marker, or both for an unmarked issue under the dual policy Kanban
   passes. No packaged bundle: the backend runs `codex exec` / `claude -p`
