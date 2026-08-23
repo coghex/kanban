@@ -18,7 +18,7 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Hold one repository to one board and give its `gh` record an owner
+- [x] EPIC. Hold one repository to one board and give its `gh` record an owner — [#499]
 - [ ] GHA-1. Add the repository-scoped lease and its two-process test harness
 - [ ] GHA-2. Hold the repository at launch, refuse a second board, and give record entries an owner
 
