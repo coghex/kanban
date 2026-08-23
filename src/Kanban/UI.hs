@@ -93,9 +93,12 @@ runDashboard options config repository = do
   approvalController <- discoverApprovalController repository
   approvalEpoch <- newIORef 0
   (initialSettings, settingsNotice) <- loadSettings
-  -- Loaded once beside the resolved configuration and retained as-is:
-  -- nothing reads it yet, and a Left must survive to the slices that
-  -- refuse agent spawns with it (D-3).
+  -- Loaded once beside the resolved configuration and retained as-is. The
+  -- agent-starting paths resolve their cell from the Right (MODEL-2) and
+  -- refuse on the Left, which is why an unusable file must stay an error
+  -- here rather than collapse into the compiled defaults (D-3). It stays a
+  -- startup-only load: a resume replays what its session already recorded
+  -- (MODEL-7) rather than rereading anything.
   modelRoster <- loadModelRoster
   logRoot <- transcriptRoot repository
   eventChannel <- newBChan 256

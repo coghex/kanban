@@ -313,5 +313,6 @@ workerParent reviewRound =
       workerParentSolverSession = Just "session-1",
       workerParentSolverLogPath = Nothing,
       workerParentStartedAt = addUTCTime 60 epoch,
-      workerParentKnownPullRequests = Set.singleton 7
+      workerParentKnownPullRequests = Set.singleton 7,
+      workerParentSolverAssignment = Nothing
     }

@@ -169,7 +169,8 @@ testSolveSession issue phase =
           solveSessionBrand = ClaudeSolver,
           solveSessionId = Nothing,
           solveSessionAutoProgress = Nothing,
-          solveSessionResumeProvenance = ResumeAnswer
+          solveSessionResumeProvenance = ResumeAnswer,
+          solveSessionAssignment = Nothing
         }
 
 testPullRequestSession :: PullRequest -> SolvePhase -> PullRequestReviewSession
@@ -184,7 +185,8 @@ testPullRequestSession pullRequest phase =
           pullRequestSessionLaunchedForUpdatedAt = epoch,
           pullRequestSessionBrand = CodexSolver,
           pullRequestSessionId = Nothing,
-          pullRequestSessionResumeProvenance = ResumeAnswer
+          pullRequestSessionResumeProvenance = ResumeAnswer,
+          pullRequestSessionAssignment = Nothing
         }
 
 testReviewSession :: Issue -> ReviewPhase -> ReviewSession

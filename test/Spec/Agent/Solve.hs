@@ -15,7 +15,7 @@ import Kanban.Process
     matchingIdentities,
     readProcessSnapshot
   )
-import Kanban.Models (Assignment (..), ModelRoster, defaultRoster)
+import Kanban.Models (Assignment (..), ModelRoster, defaultRoster, recordedAssignmentCell)
 import Kanban.Settings (ChatVerbosity (..))
 import Kanban.Solve
   ( AgentEvent (..),
@@ -603,7 +603,7 @@ solveArgumentsOn roster issueNumber workflow brand configPath repository config 
   solveArguments issueNumber workflow brand configPath repository config (solveCell roster brand)
 
 solveCell :: ModelRoster -> SolverBrand -> Assignment
-solveCell roster brand = cellOf (solveAssignment roster brand)
+solveCell roster brand = recordedAssignmentCell (cellOf (solveAssignment roster brand))
 
 codexModelFlags :: ModelRoster -> [String]
 codexModelFlags roster = ["--model", Data.Text.unpack (solveCell roster CodexSolver).assignmentModel]

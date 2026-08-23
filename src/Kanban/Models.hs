@@ -29,13 +29,16 @@
 -- startup and retained (see 'Kanban.UI.Types.AppState'), each agent-starting
 -- path unwraps that result and resolves the cell its routing selected, and a
 -- roster that cannot supply the cell refuses the spawn instead of falling
--- back. The Python and plugin spawn sites migrate in a later slice of epic
--- #412.
+-- back. What a launch resolves becomes a 'RecordedAssignment' it persists,
+-- and every later launch continuing that same provider session replays the
+-- record rather than resolving again (D-7). The Python and plugin spawn
+-- sites migrate in a later slice of epic #412.
 module Kanban.Models
   ( ProviderName (..),
     RoleName (..),
     ProviderCatalog (..),
     Assignment (..),
+    RecordedAssignment (..),
     ModelRoster (..),
     RosterDefect (..),
     RosterFailure (..),
@@ -56,6 +59,8 @@ module Kanban.Models
     loadModelRoster,
     saveModelRoster,
     assignmentFor,
+    recordAssignment,
+    recordedAssignmentCell,
     rosterDefectMessage,
     rosterFailureMessage,
     rosterErrorMessage,
@@ -64,6 +69,7 @@ module Kanban.Models
 where
 
 import Control.Exception (IOException, bracketOnError, try)
+import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:))
 import qualified Data.ByteString as ByteString
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -160,6 +166,64 @@ data Assignment = Assignment
     assignmentDisplay :: Text
   }
   deriving stock (Eq, Show)
+
+-- | The roster cell a launch resolved, together with the provider it
+-- resolved through, in the shape a durable record carries (D-7).
+--
+-- The provider travels with the cell rather than being recomputed from the
+-- task beside it. A resumed launch replays this record instead of resolving
+-- anything, so the record is the only thing that still knows which compiled
+-- adapter these values were read for; a supervisor that re-derived the
+-- provider from today's routing could pair one brand's model with the
+-- other's executable.
+data RecordedAssignment = RecordedAssignment
+  { recordedAssignmentProvider :: ProviderName,
+    recordedAssignmentModel :: Text,
+    recordedAssignmentEffort :: Text,
+    recordedAssignmentDisplay :: Text
+  }
+  deriving stock (Eq, Show)
+
+-- | The provider's own file key is what the durable record spells, so the
+-- wire vocabulary the roster file and the worker specification use is one
+-- vocabulary rather than two that have to be kept in step.
+instance ToJSON RecordedAssignment where
+  toJSON recorded =
+    -- Spelled as explicit pairs rather than with aeson's @.=@: this module
+    -- also imports @Toml.Schema@'s operator of that name.
+    object
+      [ ("provider", toJSON (providerKey recorded.recordedAssignmentProvider)),
+        ("model", toJSON recorded.recordedAssignmentModel),
+        ("effort", toJSON recorded.recordedAssignmentEffort),
+        ("display", toJSON recorded.recordedAssignmentDisplay)
+      ]
+
+instance FromJSON RecordedAssignment where
+  parseJSON = withObject "RecordedAssignment" $ \value -> do
+    provider <- value .: "provider"
+    RecordedAssignment
+      <$> maybe (fail ("unknown provider " <> show provider)) pure (parseProviderKey provider)
+      <*> value .: "model"
+      <*> value .: "effort"
+      <*> value .: "display"
+
+recordAssignment :: ProviderName -> Assignment -> RecordedAssignment
+recordAssignment provider assignment =
+  RecordedAssignment
+    { recordedAssignmentProvider = provider,
+      recordedAssignmentModel = assignment.assignmentModel,
+      recordedAssignmentEffort = assignment.assignmentEffort,
+      recordedAssignmentDisplay = assignment.assignmentDisplay
+    }
+
+-- | The cell an adapter builds argv from, projected back out of the record.
+recordedAssignmentCell :: RecordedAssignment -> Assignment
+recordedAssignmentCell recorded =
+  Assignment
+    { assignmentModel = recorded.recordedAssignmentModel,
+      assignmentEffort = recorded.recordedAssignmentEffort,
+      assignmentDisplay = recorded.recordedAssignmentDisplay
+    }
 
 -- | A complete roster. 'rosterAgents' is the loaded provider set (D-10) —
 -- and therefore, in a later slice, the operating mode — kept in file order;

@@ -472,7 +472,8 @@ spec = do
                   solveSessionBrand = CodexSolver,
                   solveSessionId = Nothing,
                   solveSessionAutoProgress = Nothing,
-                  solveSessionResumeProvenance = ResumeAnswer
+                  solveSessionResumeProvenance = ResumeAnswer,
+                  solveSessionAssignment = Nothing
                 }
           solveSessionsWith phase = Map.fromList [(787, solveSessionWith phase)]
       mapM_
@@ -497,7 +498,8 @@ spec = do
                   pullRequestSessionLaunchedForUpdatedAt = epoch,
                   pullRequestSessionBrand = CodexSolver,
                   pullRequestSessionId = Nothing,
-                  pullRequestSessionResumeProvenance = ResumeAnswer
+                  pullRequestSessionResumeProvenance = ResumeAnswer,
+                  pullRequestSessionAssignment = Nothing
                 }
           pullRequestSessionsWith phase = Map.fromList [(826, pullRequestSessionWith phase)]
       mapM_

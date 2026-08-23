@@ -97,7 +97,7 @@ import Kanban.Solve
     SolveWorkflow (..),
     SolverBrand (..)
     )
-import Kanban.Models (ModelRoster, RosterLoadError)
+import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
 import Kanban.Settings
   ( Settings (..)
     )
@@ -253,7 +253,14 @@ data SolveDetail = SolveDetail
     -- guidance typed after an interrupt -- both land in the same phase and
     -- are submitted through the same key -- and frame the resumed prompt
     -- accordingly. Meaningless while not in 'SolveAttention'.
-    solveSessionResumeProvenance :: ResumeProvenance
+    solveSessionResumeProvenance :: ResumeProvenance,
+    -- | The model assignment this session's last worker recorded, which
+    -- every later launch for the same provider session replays rather than
+    -- resolving again (D-7). 'Nothing' before the first launch of a fresh
+    -- session, and on a session recovered from a worker specification
+    -- written before the field existed; either way the next launch resolves
+    -- once and records the result here.
+    solveSessionAssignment :: Maybe RecordedAssignment
   }
   deriving stock (Eq, Show)
 
@@ -272,7 +279,10 @@ data PullRequestDetail = PullRequestDetail
     pullRequestSessionId :: Maybe Text,
     -- | See 'solveSessionResumeProvenance'; the PR flow's own resume path
     -- has the same answer-vs-interrupt ambiguity.
-    pullRequestSessionResumeProvenance :: ResumeProvenance
+    pullRequestSessionResumeProvenance :: ResumeProvenance,
+    -- | See 'solveSessionAssignment'; both task kinds share one worker
+    -- specification and therefore one replay rule.
+    pullRequestSessionAssignment :: Maybe RecordedAssignment
   }
   deriving stock (Eq, Show)
 
@@ -612,12 +622,13 @@ data AppState = AppState
     appSettings :: Settings,
     -- | The startup model-roster load, retained as the typed
     -- success-or-error value 'Kanban.Models.loadModelRoster' produced.
-    -- Every agent-starting path unwraps it once through
-    -- 'Kanban.UI.Util.resolvedRosterFor' (MODEL-2): the 'Right' resolves the
-    -- cell that run's routing selected, and the 'Left' refuses the spawn
+    -- Every agent-starting path unwraps it through
+    -- 'Kanban.UI.Util.resolvedRosterCellFor' (MODEL-2): the 'Right' resolves
+    -- the cell that run's routing selected, and the 'Left' refuses the spawn
     -- naming the file and the defect (D-3), which is why an unusable file
     -- must stay an error here rather than collapse into the compiled
-    -- defaults.
+    -- defaults. A resume of a session that already recorded its assignment
+    -- reads neither half (MODEL-7); see 'Kanban.UI.Util.launchAssignment'.
     appModelRoster :: Either RosterLoadError ModelRoster,
     appLogRoot :: FilePath,
     appProcessSelection :: ProcessSelection,
