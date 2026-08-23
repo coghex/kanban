@@ -101,12 +101,99 @@ class ActionsRerunTests(unittest.TestCase):
         }
         self.assertEqual(drain_prs.action_run_id(check), "12345")
 
-    def test_rerun_is_capped_per_approved_head(self):
+    def test_extracts_job_id_from_actions_details_url(self):
+        # The run id is stable across every attempt; the job id is not, which
+        # is what tells a rerun's result from the failure that triggered it.
+        check = {
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/12345/job/67890"
+        }
+        self.assertEqual(drain_prs.action_job_id(check), "67890")
+        self.assertIsNone(
+            drain_prs.action_job_id(
+                {"detailsUrl": "https://github.com/acme/widgets/actions/runs/12345"}
+            )
+        )
+
+    def test_only_completed_per_attempt_evidence_names_an_attempt(self):
+        complete = {
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "startedAt": "2026-08-01T00:00:00Z",
+            "completedAt": "2026-08-01T00:10:00Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/12345/job/67890",
+        }
+        identity = drain_prs.ci_attempt_identity(complete)
+        self.assertIsNotNone(identity)
+        # The run id alone never carries the answer: a second attempt of the
+        # same run has to read differently.
+        self.assertNotEqual(
+            identity,
+            drain_prs.ci_attempt_identity(
+                {
+                    **complete,
+                    "detailsUrl": (
+                        "https://github.com/acme/widgets/actions/runs/12345/job/67891"
+                    ),
+                }
+            ),
+        )
+        self.assertIsNone(drain_prs.ci_attempt_identity(None))
+        for missing in (
+            {**complete, "status": "IN_PROGRESS", "conclusion": None},
+            {**complete, "status": None},
+            {**complete, "detailsUrl": "https://example.invalid/build/7"},
+            # A run id and no job: everything this names is shared by every
+            # attempt of the head, so it names no attempt.
+            {**complete, "detailsUrl": (
+                "https://github.com/acme/widgets/actions/runs/12345"
+            )},
+        ):
+            with self.subTest(check=missing):
+                self.assertIsNone(drain_prs.ci_attempt_identity(missing))
+
+    def test_one_attempts_identity_does_not_move_with_its_timestamps(self):
+        # The timestamps are per-attempt but not stable per read: `startedAt`
+        # can be absent from one snapshot and present in the next, and either
+        # value can come back normalized differently. Two reads of one attempt
+        # must still agree, or the second buys a duplicate rerun.
+        base = {
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/12345/job/67890",
+        }
+        identity = drain_prs.ci_attempt_identity(base)
+        self.assertIsNotNone(identity)
+        for variation in (
+            {"startedAt": "2026-08-01T00:00:00Z"},
+            {"startedAt": None, "completedAt": "2026-08-01T00:10:00Z"},
+            {"startedAt": "2026-08-01T00:00:00.000Z", "completedAt": ""},
+            {"completedAt": "2026-08-01T00:10:00+00:00"},
+            {"startedAt": 0, "completedAt": None},
+            {"detailsUrl": base["detailsUrl"] + "?check_suite_focus=true"},
+        ):
+            with self.subTest(variation=variation):
+                self.assertEqual(
+                    drain_prs.ci_attempt_identity({**base, **variation}), identity
+                )
+
+    def _rerun_fixture(self, **entry_overrides):
         ctx = drain_prs.RepoContext(
             Path("/fake-repo"), "acme/widgets", "widgets", "master"
         )
         head = "a" * 40
-        pr = {
+        entry = {
+            "approved_head": head,
+            "ci_rerun_head": None,
+            "ci_rerun_attempts": 0,
+            "ci_rerun_active": False,
+            "ci_rerun_attempt_identity": None,
+            "ci_rerun_exhausted_head": None,
+        }
+        entry.update(entry_overrides)
+        return ctx, head, {"prs": {"42": entry}}
+
+    def _failed_pr(self, head, *, job="67890", completed="2026-08-01T00:00:00Z"):
+        return {
             "number": 42,
             "headRefOid": head,
             "statusCheckRollup": [
@@ -114,31 +201,25 @@ class ActionsRerunTests(unittest.TestCase):
                     "name": "build-test",
                     "status": "COMPLETED",
                     "conclusion": "FAILURE",
-                    "completedAt": "2026-08-01T00:00:00Z",
-                    "detailsUrl": "https://github.com/acme/widgets/actions/runs/12345/job/67890",
+                    "completedAt": completed,
+                    "detailsUrl": (
+                        "https://github.com/acme/widgets/actions/runs/12345"
+                        f"/job/{job}"
+                    ),
                 }
             ],
         }
-        state = {
-            "prs": {
-                "42": {
-                    "approved_head": head,
-                    "ci_rerun_head": None,
-                    "ci_rerun_attempts": 0,
-                    "ci_rerun_active": False,
-                    "ci_rerun_exhausted_head": None,
-                }
-            }
-        }
+
+    def test_the_first_failure_of_a_head_requests_one_rerun(self):
+        ctx, head, state = self._rerun_fixture()
+        pr = self._failed_pr(head)
+
         with mock.patch.object(drain_prs, "run") as run_mock:
-            self.assertTrue(
+            self.assertEqual(
                 drain_prs.rerun_failed_ci(
-                    ctx,
-                    pr,
-                    state=state,
-                    check_name="build-test",
-                    dry_run=False,
-                )
+                    ctx, pr, state=state, check_name="build-test", dry_run=False
+                ),
+                drain_prs.CI_RERUN_REQUESTED,
             )
         run_mock.assert_called_once_with(
             [
@@ -152,19 +233,235 @@ class ActionsRerunTests(unittest.TestCase):
             ],
             cwd=Path("/fake-repo"),
         )
-        state["prs"]["42"]["ci_rerun_attempts"] = drain_prs.MAX_CI_RERUN_ATTEMPTS
-        self.assertFalse(
+        entry = state["prs"]["42"]
+        self.assertEqual(entry["ci_rerun_attempts"], 1)
+        self.assertTrue(entry["ci_rerun_active"])
+        self.assertEqual(
+            entry["ci_rerun_attempt_identity"],
+            drain_prs.ci_attempt_identity(pr["statusCheckRollup"][0]),
+        )
+
+    def test_the_same_failure_seen_again_below_the_cap_requests_nothing(self):
+        # Issue #474 acceptance 1. GitHub does not swap the failed rollup out
+        # the moment a rerun is accepted, so the next poll normally sees the
+        # very failure the request was made against. It is a barrier: no
+        # second `gh run rerun`, no second attempt spent.
+        ctx, head, state = self._rerun_fixture()
+        pr = self._failed_pr(head)
+
+        with mock.patch.object(drain_prs, "run") as run_mock:
+            first = drain_prs.rerun_failed_ci(
+                ctx, pr, state=state, check_name="build-test", dry_run=False
+            )
+            second = drain_prs.rerun_failed_ci(
+                ctx, pr, state=state, check_name="build-test", dry_run=False
+            )
+
+        self.assertEqual(first, drain_prs.CI_RERUN_REQUESTED)
+        self.assertEqual(second, drain_prs.CI_RERUN_IN_FLIGHT)
+        self.assertEqual(len(run_mock.mock_calls), 1)
+        entry = state["prs"]["42"]
+        self.assertEqual(entry["ci_rerun_attempts"], 1)
+        self.assertTrue(entry["ci_rerun_active"])
+        self.assertIsNone(entry["ci_rerun_exhausted_head"])
+        # A barrier is not a skip: process_pr maps this reason back to one.
+        self.assertEqual(drain_prs.PASS_OUTCOMES["checks_pending"], drain_prs.PASS_BARRIER)
+
+    def test_the_same_attempt_read_with_new_timestamps_requests_nothing(self):
+        # The regression behind that stability: a second poll of the very same
+        # job, now carrying timestamps the first snapshot did not, is the same
+        # attempt and must stay a barrier.
+        ctx, head, state = self._rerun_fixture()
+        first = self._failed_pr(head)
+        del first["statusCheckRollup"][0]["completedAt"]
+        later = self._failed_pr(head, completed="2026-08-01T00:40:00Z")
+        later["statusCheckRollup"][0]["startedAt"] = "2026-08-01T00:00:00Z"
+
+        with mock.patch.object(drain_prs, "run") as run_mock:
+            decisions = [
+                drain_prs.rerun_failed_ci(
+                    ctx, snapshot, state=state, check_name="build-test", dry_run=False
+                )
+                for snapshot in (first, later, later)
+            ]
+
+        self.assertEqual(
+            decisions,
+            [
+                drain_prs.CI_RERUN_REQUESTED,
+                drain_prs.CI_RERUN_IN_FLIGHT,
+                drain_prs.CI_RERUN_IN_FLIGHT,
+            ],
+        )
+        self.assertEqual(len(run_mock.mock_calls), 1)
+        self.assertEqual(state["prs"]["42"]["ci_rerun_attempts"], 1)
+
+    def test_an_indistinguishable_failure_holds_the_barrier_at_the_cap(self):
+        # The capped request is still in flight, so this is neither another
+        # request nor grounds to quarantine the head.
+        ctx, head, state = self._rerun_fixture()
+        pr = self._failed_pr(head)
+        identity = drain_prs.ci_attempt_identity(pr["statusCheckRollup"][0])
+        state["prs"]["42"].update(
+            {
+                "ci_rerun_head": head,
+                "ci_rerun_attempts": drain_prs.MAX_CI_RERUN_ATTEMPTS,
+                "ci_rerun_active": True,
+                "ci_rerun_attempt_identity": identity,
+            }
+        )
+
+        with mock.patch.object(drain_prs, "run") as run_mock:
+            self.assertEqual(
+                drain_prs.rerun_failed_ci(
+                    ctx, pr, state=state, check_name="build-test", dry_run=False
+                ),
+                drain_prs.CI_RERUN_IN_FLIGHT,
+            )
+
+        self.assertEqual(run_mock.mock_calls, [])
+        self.assertIsNone(state["prs"]["42"]["ci_rerun_exhausted_head"])
+        self.assertEqual(
+            state["prs"]["42"]["ci_rerun_attempts"], drain_prs.MAX_CI_RERUN_ATTEMPTS
+        )
+
+    def test_a_completed_attempt_below_the_cap_spends_exactly_one_more(self):
+        ctx, head, state = self._rerun_fixture()
+        first = self._failed_pr(head)
+        later = self._failed_pr(head, job="67891", completed="2026-08-01T00:40:00Z")
+
+        with mock.patch.object(drain_prs, "run") as run_mock:
             drain_prs.rerun_failed_ci(
+                ctx, first, state=state, check_name="build-test", dry_run=False
+            )
+            second = drain_prs.rerun_failed_ci(
+                ctx, later, state=state, check_name="build-test", dry_run=False
+            )
+
+        self.assertEqual(second, drain_prs.CI_RERUN_REQUESTED)
+        self.assertEqual(len(run_mock.mock_calls), 2)
+        entry = state["prs"]["42"]
+        self.assertEqual(entry["ci_rerun_attempts"], 2)
+        self.assertEqual(
+            entry["ci_rerun_attempt_identity"],
+            drain_prs.ci_attempt_identity(later["statusCheckRollup"][0]),
+        )
+
+    def test_rerun_is_capped_per_approved_head(self):
+        # Exhaustion counts distinct requested attempts that each came back as
+        # a completed failure, so the head is quarantined only when the capped
+        # request's own result is finally distinguishable.
+        ctx, head, state = self._rerun_fixture()
+        snapshots = [
+            self._failed_pr(head, job=str(67890 + index), completed=f"2026-08-0{index + 1}T00:00:00Z")
+            for index in range(drain_prs.MAX_CI_RERUN_ATTEMPTS + 1)
+        ]
+
+        with mock.patch.object(drain_prs, "run") as run_mock:
+            decisions = [
+                drain_prs.rerun_failed_ci(
+                    ctx, snapshot, state=state, check_name="build-test", dry_run=False
+                )
+                for snapshot in snapshots
+            ]
+
+        self.assertEqual(
+            decisions,
+            [drain_prs.CI_RERUN_REQUESTED] * drain_prs.MAX_CI_RERUN_ATTEMPTS
+            + [drain_prs.CI_RERUN_REFUSED],
+        )
+        self.assertEqual(len(run_mock.mock_calls), drain_prs.MAX_CI_RERUN_ATTEMPTS)
+        entry = state["prs"]["42"]
+        self.assertEqual(entry["ci_rerun_exhausted_head"], head)
+        self.assertFalse(entry["ci_rerun_active"])
+        self.assertEqual(
+            entry["ci_rerun_attempts"], drain_prs.MAX_CI_RERUN_ATTEMPTS
+        )
+
+    def test_a_legacy_active_entry_stays_ambiguous_while_nothing_changes(self):
+        # A state file written before ci_rerun_attempt_identity existed says a
+        # rerun was requested and nothing about which failure provoked it. No
+        # observation can be told apart from that failure -- not on the first
+        # upgraded pass and not on any later one.
+        ctx, head, state = self._rerun_fixture(
+            ci_rerun_head="a" * 40,
+            ci_rerun_attempts=1,
+            ci_rerun_active=True,
+        )
+        del state["prs"]["42"]["ci_rerun_attempt_identity"]
+        pr = self._failed_pr(head)
+
+        with mock.patch.object(drain_prs, "run") as run_mock:
+            decisions = [
+                drain_prs.rerun_failed_ci(
+                    ctx, pr, state=state, check_name="build-test", dry_run=False
+                )
+                for _ in range(3)
+            ]
+
+        self.assertEqual(decisions, [drain_prs.CI_RERUN_IN_FLIGHT] * 3)
+        self.assertEqual(run_mock.mock_calls, [])
+        self.assertEqual(state["prs"]["42"]["ci_rerun_attempts"], 1)
+        self.assertIsNone(state["prs"]["42"]["ci_rerun_exhausted_head"])
+
+    def test_a_legacy_active_entry_releases_on_a_different_attempt(self):
+        # The other half of the upgrade. The first pass keeps what it saw as
+        # the baseline it had no record of, so once a genuinely different
+        # finished attempt shows up the entry is no longer ambiguous and the
+        # next request is due -- without which a legacy entry would hold the
+        # lane until a new reviewed head arrived.
+        ctx, head, state = self._rerun_fixture(
+            ci_rerun_head="a" * 40,
+            ci_rerun_attempts=1,
+            ci_rerun_active=True,
+        )
+        del state["prs"]["42"]["ci_rerun_attempt_identity"]
+
+        with mock.patch.object(drain_prs, "run") as run_mock:
+            first = drain_prs.rerun_failed_ci(
                 ctx,
-                pr,
+                self._failed_pr(head),
                 state=state,
                 check_name="build-test",
                 dry_run=False,
             )
+            second = drain_prs.rerun_failed_ci(
+                ctx,
+                self._failed_pr(
+                    head, job="67891", completed="2026-08-01T00:40:00Z"
+                ),
+                state=state,
+                check_name="build-test",
+                dry_run=False,
+            )
+
+        self.assertEqual(first, drain_prs.CI_RERUN_IN_FLIGHT)
+        self.assertEqual(second, drain_prs.CI_RERUN_REQUESTED)
+        self.assertEqual(len(run_mock.mock_calls), 1)
+        self.assertEqual(state["prs"]["42"]["ci_rerun_attempts"], 2)
+
+    def test_a_new_head_starts_the_allowance_over(self):
+        ctx, head, state = self._rerun_fixture(
+            ci_rerun_head="b" * 40,
+            ci_rerun_attempts=drain_prs.MAX_CI_RERUN_ATTEMPTS,
+            ci_rerun_active=True,
+            ci_rerun_attempt_identity="stale",
+            ci_rerun_exhausted_head="b" * 40,
         )
-        self.assertEqual(
-            state["prs"]["42"]["ci_rerun_exhausted_head"], head
-        )
+        pr = self._failed_pr(head)
+
+        with mock.patch.object(drain_prs, "run") as run_mock:
+            self.assertEqual(
+                drain_prs.rerun_failed_ci(
+                    ctx, pr, state=state, check_name="build-test", dry_run=False
+                ),
+                drain_prs.CI_RERUN_REQUESTED,
+            )
+
+        self.assertEqual(len(run_mock.mock_calls), 1)
+        entry = state["prs"]["42"]
+        self.assertEqual(entry["ci_rerun_attempts"], 1)
+        self.assertIsNone(entry["ci_rerun_exhausted_head"])
 
 
 class FailureBackoffAttemptsTests(unittest.TestCase):
@@ -511,6 +808,55 @@ class MigrateDrainStateTests(unittest.TestCase):
         self.assertEqual(entry["ci_rerun_attempts"], 2)
         self.assertTrue(entry["ci_rerun_active"])
         self.assertEqual(entry["cleanup"], {"pending": [{"kind": "worktree"}]})
+
+    def test_an_active_rerun_written_before_the_identity_field_upgrades_whole(self):
+        # Issue #474 requirement 8. A file carrying ci_rerun_active = True and
+        # no attempt identity is the shape this change has to read: everything
+        # it records survives, and the missing evidence is named rather than
+        # invented. The pass that then runs against it is asserted in
+        # test_integration's QueueOrderTests.
+        state = {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 12,
+            "active_pr": 42,
+            "prs": {
+                "42": {
+                    "approved_head": "deadbeef",
+                    "last_rereviewed_head": "cafe",
+                    "consecutive_failures": 2,
+                    "retry_after_attempt": 19,
+                    "last_attempt": 11,
+                    "last_error": "boom",
+                    "ci_rerun_head": "deadbeef",
+                    "ci_rerun_attempts": 2,
+                    "ci_rerun_active": True,
+                    "ci_rerun_exhausted_head": None,
+                    "cleanup": {"pending": [{"kind": "worktree"}]},
+                }
+            },
+        }
+        migrated = drain_prs.migrate_drain_state(state, source="test")
+
+        self.assertEqual(migrated["active_pr"], 42)
+        self.assertEqual(migrated["attempt_counter"], 12)
+        entry = migrated["prs"]["42"]
+        self.assertEqual(entry["approved_head"], "deadbeef")
+        self.assertEqual(entry["last_rereviewed_head"], "cafe")
+        self.assertEqual(entry["consecutive_failures"], 2)
+        self.assertEqual(entry["retry_after_attempt"], 19)
+        self.assertEqual(entry["last_attempt"], 11)
+        self.assertEqual(entry["last_error"], "boom")
+        self.assertEqual(entry["ci_rerun_head"], "deadbeef")
+        self.assertEqual(entry["ci_rerun_attempts"], 2)
+        self.assertTrue(entry["ci_rerun_active"])
+        self.assertIsNone(entry["ci_rerun_exhausted_head"])
+        self.assertEqual(entry["cleanup"], {"pending": [{"kind": "worktree"}]})
+        # The upgrade adds nothing: an absent identity already reads as "no
+        # attempt this can be told apart from", and defaulting it would
+        # rewrite every entry on load -- which a single-PR run must not do to
+        # the pull requests it was not asked about.
+        self.assertNotIn("ci_rerun_attempt_identity", entry)
+        self.assertIsNone(entry.get("ci_rerun_attempt_identity"))
 
     def test_a_recorded_active_candidate_is_kept(self):
         state = {

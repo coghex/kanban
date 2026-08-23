@@ -661,20 +661,70 @@ A candidate's turn ends in one of three ways.
   advance it and that says nothing about the pull requests behind it: it is
   closed, a draft, targets another branch, lost its approval or gained
   `reviewed:changes`, conflicts with the default branch (recorded as an
-  incident, as below), has a required check that failed with no automatic rerun
-  left to start, has moved to a head no review has cleared, or is still cooling
-  down after a failed attempt.
+  incident, as below), has a required check that failed with every automatic
+  rerun of that head already spent, has moved to a head no review has cleared,
+  or is still cooling down after a failed attempt.
 - **A barrier ends the pass with nothing else touched.** A candidate whose
   required CI or review check is missing, queued, pending, or in progress —
   including the replacement checks a branch update or an automatic CI rerun
-  just started — is waiting, not blocked. No later pull request is updated,
-  rerun, or merged while it waits; the pass ends and the next ordinary poll
-  looks at that candidate again.
+  just started — is waiting, not blocked. So is one whose required CI check
+  still reads as the failure an automatic rerun was already requested against,
+  as below. No later pull request is updated, rerun, or merged while it waits;
+  the pass ends and the next ordinary poll looks at that candidate again.
 - **An advance ends the pass too.** Updating a branch that is behind,
   requesting an automatic CI rerun, and merging are each the whole of one pass.
 
 `--once` is exactly one such pass: it skips the blocked candidates, stops at
 the first advance or barrier, and exits.
+
+### Automatic CI reruns
+
+A required CI check that failed gets a bounded number of automatic reruns,
+keyed to the approved head: a head that keeps failing is retried up to
+`MAX_CI_RERUN_ATTEMPTS` times (`tools/drain_prs.py`) and then left alone until a
+new reviewed head arrives.
+
+**A requested rerun is a barrier until its own result is distinguishable from
+the failure that triggered it.** GitHub does not replace the failed rollup at
+the moment it accepts a rerun, so the next poll normally reads back the very
+failure the request was made against. Reading that as a new failure would
+request the rerun again, spend another attempt on it, and — when GitHub
+declines the duplicate because the first rerun is still running — turn an
+ordinary wait into a failed attempt whose cooldown releases the lane while that
+rerun is still in flight. So the drainer records, beside the request, *which*
+finished attempt it was made against, and requests nothing further until it
+sees a different one.
+
+What names an attempt is the job id GitHub already puts in the check's details
+URL: rerunning creates fresh job records, so that id is one per attempt and
+never changes once issued. The workflow run id alone cannot — `gh run rerun
+--failed` starts a new attempt of the *same* run, so that id is identical
+before and after. The timestamps are deliberately left out: they belong to the
+attempt but not to the read, since one snapshot can carry a timestamp the next
+snapshot of that same attempt carries differently, and two reads that disagree
+would buy exactly the duplicate rerun this rule refuses. Anything that does not
+name a finished attempt holds the barrier: a check the rollup has not reported
+as completed, a details URL with no run id, and one with a run id but no job.
+Elapsed time is never evidence; the drainer does not decide a rerun has
+finished because it has been a while.
+
+**The attempt count is a count of requests, and the cap is spent only by
+results.** Each `gh run rerun` this drainer issues advances `ci_rerun_attempts`
+by one, and repeated sightings of the failure that provoked it advance nothing.
+The head is quarantined — the `checks_failed` refusal, and the durable skip on
+every later pass — only once the capped request's own result comes back as a
+distinguishable failure. Exhausting a head therefore takes that many requests
+that each completed as a failure, rather than that many polls that happened to
+read one stale rollup.
+
+A state file written before the drainer recorded that evidence says a rerun was
+requested and nothing about what provoked it. The first pass after the upgrade
+requests nothing — the failure in front of it could equally be the one that
+triggered that request or that request's own result, and there is no record to
+tell them apart — and it keeps what it saw as the baseline for the passes after
+it. From there the entry behaves like any other: the same failure holds the
+barrier, a different finished attempt releases it, and everything the old file
+recorded, including the attempts already spent, carries forward untouched.
 
 ### Merging past a coordination-only base advance
 

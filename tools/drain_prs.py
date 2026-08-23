@@ -193,6 +193,15 @@ SWAP_LANDED = "swap_landed"
 SWAP_REFUSED = "swap_refused"
 SWAP_UNKNOWN = "swap_unknown"
 
+# What one look at a failed required CI check decided. Only rerun_failed_ci()
+# produces these, and only process_pr() consumes them. The middle value is the
+# one the numeric attempt cap cannot express: a rerun this drainer already
+# requested for this head has not yet produced a distinguishable result, so
+# there is nothing to request and nothing to give up on either.
+CI_RERUN_REQUESTED = "ci_rerun_requested"
+CI_RERUN_IN_FLIGHT = "ci_rerun_in_flight"
+CI_RERUN_REFUSED = "ci_rerun_refused"
+
 # What one candidate's turn did to the polling pass around it. The queue
 # advances one candidate at a time in ascending pull-request order, so every
 # turn has to say whether the pass may keep walking the queue.
@@ -732,6 +741,13 @@ def migrate_drain_state(state: Any, *, source: str) -> dict[str, Any]:
         entry.setdefault("retry_after_attempt", 0)
         entry.setdefault("last_attempt", 0)
         entry.setdefault("last_error", None)
+        # `ci_rerun_attempt_identity` is deliberately not defaulted here, as
+        # none of the other `ci_rerun_*` fields is. An absent field already
+        # reads as the answer it would be given -- rerun_failed_ci() sees no
+        # attempt it can recognize and holds the barrier rather than
+        # requesting a duplicate -- and writing one would rewrite every
+        # recorded entry on load, which a single-PR run must not do to the
+        # pull requests it was not asked about.
         entry.setdefault("cleanup", None)
     return state
 
@@ -784,6 +800,7 @@ def remember_approved_head(
         "ci_rerun_head": None,
         "ci_rerun_attempts": 0,
         "ci_rerun_active": False,
+        "ci_rerun_attempt_identity": None,
         "ci_rerun_exhausted_head": None,
         # Approval bookkeeping is reset here; a recorded cleanup obligation is
         # not. It belongs to a merge that already landed, and only completing
@@ -1058,6 +1075,54 @@ def action_run_id(check: dict[str, Any] | None) -> str | None:
     return match.group(1) if match else None
 
 
+def action_job_id(check: dict[str, Any] | None) -> str | None:
+    """Extract the GitHub Actions job id from a check's details URL.
+
+    Unlike the run id, this changes with every attempt: rerunning a workflow
+    creates fresh job records under the same run.
+    """
+    if check is None:
+        return None
+    details_url = check.get("detailsUrl") or check.get("details_url") or ""
+    match = re.search(r"/actions/runs/\d+/job/(\d+)(?:[/?#]|$)", details_url)
+    return match.group(1) if match else None
+
+
+def ci_attempt_identity(check: dict[str, Any] | None) -> str | None:
+    """Which finished attempt of a required check this failure is, if it says.
+
+    `gh run rerun --failed` starts a new attempt of the *same* workflow run, so
+    the run id is stable across every attempt of one head and cannot on its own
+    tell a rerun's result apart from the failure that triggered it. The job id
+    in the check's details URL can: rerunning creates fresh job records, so the
+    id is one per attempt and never changes once GitHub has issued it.
+
+    Nothing else enters the identity, and the timestamps in particular do not.
+    They are per-attempt but not stable per *read*: `startedAt` can be absent
+    from one snapshot of a queued-then-started job and present in the next, and
+    a value can come back normalized differently. Folding either in would let
+    two reads of one attempt disagree, which reads as a new attempt and buys a
+    duplicate rerun -- the very thing the barrier exists to refuse.
+
+    None means the evidence does not name an attempt, and every caller reads
+    that as "indistinguishable" rather than as "new". A check the rollup has
+    not reported as completed is not a finished attempt at all; a details URL
+    with no run id was not produced by Actions; and one with a run id but no
+    job segment names only what every attempt of this head shares. Elapsed time
+    never stands in for any of it: nothing here reads a clock.
+    """
+    if check is None:
+        return None
+    status = check.get("status")
+    if not isinstance(status, str) or status.upper() != "COMPLETED":
+        return None
+    run_id = action_run_id(check)
+    job_id = action_job_id(check)
+    if run_id is None or job_id is None:
+        return None
+    return f"{run_id}/{job_id}"
+
+
 def rerun_failed_ci(
     ctx: RepoContext,
     pr: dict[str, Any],
@@ -1065,13 +1130,27 @@ def rerun_failed_ci(
     state: dict[str, Any],
     check_name: str,
     dry_run: bool,
-) -> bool:
-    """Request one bounded retry of a failed GitHub Actions run.
+) -> str:
+    """Decide what one look at a failed required CI check may do.
 
     The retry is keyed to the approved head. A persistent source failure is
     therefore retried at most MAX_CI_RERUN_ATTEMPTS times and then quarantined
     until a new reviewed head arrives. The polling loop gives an active retry
     a short cadence without changing the normal queue interval.
+
+    A request already made for this head is a barrier, not an invitation to
+    make it again. GitHub does not replace a failed rollup the moment a rerun
+    is accepted, so the same completed failure is normally visible on the next
+    poll -- and re-reading it as a fresh failure is what used to spend the
+    whole allowance on one failure, quarantine a head no rerun had actually
+    retried, and turn GitHub's refusal of the duplicate request into an
+    operational failure whose cooldown released the lane mid-wait.
+
+    `ci_rerun_attempts` therefore counts *requests* this drainer made, and
+    only an observation that names a different finished attempt than the
+    failure a request was made against may spend another one. Anything that
+    cannot name one -- a check still running, metadata that carries no
+    per-attempt evidence, the recorded failure seen again -- holds the barrier.
     """
     number = pr["number"]
     head = pr["headRefOid"]
@@ -1080,21 +1159,56 @@ def rerun_failed_ci(
         entry["ci_rerun_head"] = head
         entry["ci_rerun_attempts"] = 0
         entry["ci_rerun_active"] = False
+        entry["ci_rerun_attempt_identity"] = None
         entry["ci_rerun_exhausted_head"] = None
+
+    check = latest_check(pr, check_name)
+    observed = ci_attempt_identity(check)
+
+    if entry.get("ci_rerun_active"):
+        recorded = entry.get("ci_rerun_attempt_identity")
+        if not isinstance(recorded, str) or not recorded:
+            # A state file written before this field existed, or one whose
+            # request could name no attempt: it records that a rerun was
+            # requested and nothing about which failure provoked it. The
+            # failure in front of this pass could equally be that trigger or
+            # that request's own result, and nothing recorded can separate
+            # them, so this pass requests nothing. What is kept is only what
+            # this pass itself saw -- never a claim about which of the two it
+            # is -- so the passes after it have a baseline, and a genuinely
+            # different finished attempt can release the barrier instead of
+            # holding the lane until a new reviewed head arrives.
+            if observed is not None:
+                entry["ci_rerun_attempt_identity"] = observed
+            log(
+                f"PR #{number}: an automatic rerun of {check_name} is recorded "
+                "as requested for this head with no attempt to compare "
+                "against; waiting rather than requesting another"
+            )
+            return CI_RERUN_IN_FLIGHT
+        if observed is None or observed == recorded:
+            log(
+                f"PR #{number}: the automatic rerun of {check_name} requested "
+                f"for this head ({int(entry.get('ci_rerun_attempts', 0))}/"
+                f"{MAX_CI_RERUN_ATTEMPTS}) has produced no distinguishable "
+                "result yet; waiting rather than requesting another"
+            )
+            return CI_RERUN_IN_FLIGHT
 
     attempts = int(entry.get("ci_rerun_attempts", 0))
     if attempts >= MAX_CI_RERUN_ATTEMPTS:
         entry["ci_rerun_active"] = False
+        entry["ci_rerun_attempt_identity"] = None
         entry["ci_rerun_exhausted_head"] = head
         log(
             f"PR #{number}: {check_name} remained failed after "
             f"{attempts} automatic rerun(s); leaving it for human action"
         )
-        return False
+        return CI_RERUN_REFUSED
 
-    run_id = action_run_id(latest_check(pr, check_name))
+    run_id = action_run_id(check)
     if run_id is None:
-        return False
+        return CI_RERUN_REFUSED
 
     attempts += 1
     if dry_run:
@@ -1122,7 +1236,11 @@ def rerun_failed_ci(
     entry["ci_rerun_head"] = head
     entry["ci_rerun_attempts"] = attempts
     entry["ci_rerun_active"] = True
-    return True
+    # The failure this request was made against. Every later observation is
+    # compared to it, so it is written in the same breath as the request and
+    # travels with it into the state file.
+    entry["ci_rerun_attempt_identity"] = observed
+    return CI_RERUN_REQUESTED
 
 
 def clear_ci_rerun(state: dict[str, Any], number: int) -> None:
@@ -1132,6 +1250,7 @@ def clear_ci_rerun(state: dict[str, Any], number: int) -> None:
     entry["ci_rerun_head"] = None
     entry["ci_rerun_attempts"] = 0
     entry["ci_rerun_active"] = False
+    entry["ci_rerun_attempt_identity"] = None
     entry["ci_rerun_exhausted_head"] = None
 
 
@@ -4262,17 +4381,29 @@ def process_pr(
     # caller shown one blocking gate is never left guessing about the other.
     gate_detail = describe_check_gates(gates, build_state, review_state)
     if build_state == "failure":
-        if rerun_failed_ci(
+        rerun = rerun_failed_ci(
             ctx,
             pr,
             state=state,
             check_name=gates.required_ci_check or DEFAULT_REQUIRED_CI_CHECK,
             dry_run=dry_run,
-        ):
+        )
+        if rerun == CI_RERUN_REQUESTED:
             message = (
                 f"PR #{number}: required CI check failed ({gate_detail}); "
                 f"automatic rerun requested, polling again in "
                 f"{CI_RERUN_INTERVAL_SECONDS}s."
+            )
+            set_outcome(report, "checks_pending", message)
+            return True
+        if rerun == CI_RERUN_IN_FLIGHT:
+            # The same barrier a pending check gets, said differently on
+            # purpose: this pass requested nothing, and a caller told a rerun
+            # "was requested" would read one request per poll.
+            message = (
+                f"PR #{number}: required CI check failed ({gate_detail}); "
+                f"an automatic rerun requested earlier is still in flight, "
+                f"polling again in {CI_RERUN_INTERVAL_SECONDS}s."
             )
             set_outcome(report, "checks_pending", message)
             return True

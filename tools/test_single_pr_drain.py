@@ -235,6 +235,21 @@ class SinglePrCliFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
             ],
         }
 
+    def failed_ci_rollup(self, *, job="770001", completed="2026-07-18T00:00:00Z"):
+        """The required CI check failed, as one identifiable attempt of run 9911."""
+        rollup = self.base_pr_json()["statusCheckRollup"]
+        return [
+            {
+                **rollup[0],
+                "conclusion": "FAILURE",
+                "completedAt": completed,
+                "detailsUrl": (
+                    f"https://github.com/acme/widgets/actions/runs/9911/job/{job}"
+                ),
+            },
+            rollup[1],
+        ]
+
     def script_pr_view(self, *overrides):
         """Queue one `gh pr view 42` response per override, consumed in order."""
         if not overrides:
@@ -487,6 +502,66 @@ class SinglePrOutcomeTests(SinglePrCliFixture):
         self.assertEqual(result["reason"], "checks_failed")
         self.assertIn(drain_prs.DEFAULT_REQUIRED_CI_CHECK, result["message"])
         self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+
+    def test_an_active_rerun_makes_no_duplicate_request_on_the_pr_path(self):
+        # Issue #474 requirement 7. `--pr` shares rerun_failed_ci with the
+        # queue, so the in-flight barrier reaches it too -- and its result
+        # contract does not move: same schema version, the same checks_pending
+        # no-action reason, and exit code 2.
+        rollup = self.failed_ci_rollup()
+        self.script_pr_view({"statusCheckRollup": rollup})
+        entry = self.state_entry(self.head_sha)
+        entry.update(
+            {
+                "ci_rerun_head": self.head_sha,
+                "ci_rerun_attempts": 1,
+                "ci_rerun_active": True,
+                "ci_rerun_attempt_identity": drain_prs.ci_attempt_identity(rollup[0]),
+                "ci_rerun_exhausted_head": None,
+            }
+        )
+        self.write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "active_pr": None,
+                "prs": {"42": entry},
+            }
+        )
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assert_result(
+            result,
+            outcome="no_action",
+            reason="checks_pending",
+            merged=False,
+            would_merge=False,
+            dry_run=False,
+        )
+        self.assertIn("still in flight", result["message"])
+        self.assertEqual(self.gh_calls("run", "rerun"), [])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        saved = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["prs"]["42"]["ci_rerun_attempts"], 1)
+        self.assertIsNone(saved["prs"]["42"]["ci_rerun_exhausted_head"])
+
+    def test_a_first_failure_on_the_pr_path_still_requests_one_rerun(self):
+        # The other half of the same contract: with nothing recorded as in
+        # flight, `--pr` still starts the one rerun the queue would.
+        self.script_pr_view({"statusCheckRollup": self.failed_ci_rollup()})
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertIn("automatic rerun requested", result["message"])
+        self.assertEqual(len(self.gh_calls("run", "rerun", "9911")), 1)
+        saved = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["prs"]["42"]["ci_rerun_attempts"], 1)
+        self.assertTrue(saved["prs"]["42"]["ci_rerun_attempt_identity"])
 
     def test_two_failing_checks_are_both_named_in_one_message(self):
         rollup = [
