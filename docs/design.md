@@ -292,7 +292,7 @@ Initial bindings:
 | `d` or click | Start or stop the service-managed PR drainer |
 | `m` | Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path |
 | `c` | Collapse or expand the usage sidebar |
-| `o` | Open settings, including chat-output verbosity |
+| `o` | Open settings: `1`/`2`/`3` select chat-output verbosity; `j`/`k` or Up/Down select a roster assignment; `h`/`l` or Left/Right cycle its model; `[`/`]` cycle its effort; `d` resets the selected assignment, or repairs an unusable roster with defaults; click selects, the wheel scrolls, and Esc closes |
 | `?` | Open a help overlay listing all bindings |
 | `Ctrl-L` | Force a terminal repaint without a network request |
 | `Tab` | In an open solve, PR, or review overlay, show the next in-memory session of that kind |
@@ -588,17 +588,20 @@ label-derived review/revise progression so a problem status cannot divert a
 running loop into a repair.
 
 Every model and effort the Haskell layer spawns an agent on is a cell of the
-model roster (`src/Kanban/Models.hs`), loaded once at startup from
+model roster (`src/Kanban/Models.hs`), read at startup from
 `~/.config/kanban/models.toml` and otherwise the compiled defaults the tracked
-`models.toml.example` mirrors. Review and rereview read `pr_review`, revision
-and repair read `pr_revise`, solve reads `solve`, the embedded issue-review
-thread reads `issue_review.codex`, and `kanban_run_claude` reads
-`issue_revise.claude`; which brand's column applies is the routing described
-here and is unchanged by the roster. The defaults reproduce today's
-assignments exactly: Codex-origin PRs on Opus 5 xhigh for review and GPT-5.4
-high for revision and repair, Claude-origin PRs on GPT-5.6-Terra xhigh for
-review and Sonnet 5 xhigh for revision and repair, and both solvers on GPT-5.4
-high and Sonnet 5 high.
+`models.toml.example` mirrors. The settings overlay is the other way it
+changes: an assignment edited there is written back to that same file, and the
+roster the dashboard holds moves to what was saved only once the write
+succeeds, so a running process never resolves a cell that is not on disk.
+Review and rereview read `pr_review`, revision and repair read `pr_revise`,
+solve reads `solve`, the embedded issue-review thread reads
+`issue_review.codex`, and `kanban_run_claude` reads `issue_revise.claude`;
+which brand's column applies is the routing described here and is unchanged by
+the roster. The defaults reproduce today's assignments exactly: Codex-origin
+PRs on Opus 5 xhigh for review and GPT-5.4 high for revision and repair,
+Claude-origin PRs on GPT-5.6-Terra xhigh for review and Sonnet 5 xhigh for
+revision and repair, and both solvers on GPT-5.4 high and Sonnet 5 high.
 
 A roster that cannot supply the cell a launch needs starts no process and
 reports why. A press that has not created a session yet — a chooser digit, an

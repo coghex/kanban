@@ -97,7 +97,7 @@ import Kanban.Solve
     SolveWorkflow (..),
     SolverBrand (..)
     )
-import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
+import Kanban.Models (ModelRoster, ProviderName, RecordedAssignment, RoleName, RosterLoadError)
 import Kanban.Settings
   ( Settings (..)
     )
@@ -116,6 +116,7 @@ data Name
   | PullRequestReviewViewport
   | ProcessesViewport
   | IncidentsViewport
+  | SettingsViewport
   | CardTarget BoardColumn Int
   | EpicTarget BoardColumn Int Int
   | -- | One checkbox of the card filter panel. Named by the box rather than
@@ -130,6 +131,12 @@ data Name
   | ProcessTarget AgentSessionRef
   | IncidentsPanel
   | IncidentTarget IncidentRef
+  | SettingsPanel
+  | -- | One roster assignment of the settings overlay. Named by the
+    -- @(role, provider)@ cell it was drawn for rather than by a row index,
+    -- for the reason 'FilterBoxTarget' is: a click then resolves to the
+    -- assignment under the pointer however the list happened to be scrolled.
+    SettingsRosterTarget RoleName ProviderName
   | DrainerButton
   | -- | The usage sidebar's issue approval service control, drawn directly
     -- above 'DrainerButton'. Its own name rather than a shared service
@@ -620,8 +627,11 @@ data AppState = AppState
     appSearch :: Maybe ColumnSearch,
     appSidebarVisible :: Bool,
     appSettings :: Settings,
-    -- | The startup model-roster load, retained as the typed
-    -- success-or-error value 'Kanban.Models.loadModelRoster' produced.
+    -- | The model roster in force, as the typed success-or-error value
+    -- 'Kanban.Models.loadModelRoster' produced at startup — and afterwards
+    -- whatever the settings overlay last saved, which it moves here only on a
+    -- successful 'Kanban.Models.saveModelRoster'
+    -- ('Kanban.UI.Settings.applyRosterWrite').
     -- Every agent-starting path unwraps it through
     -- 'Kanban.UI.Util.resolvedRosterCellFor' (MODEL-2): the 'Right' resolves
     -- the cell that run's routing selected, and the 'Left' refuses the spawn
@@ -630,6 +640,14 @@ data AppState = AppState
     -- defaults. A resume of a session that already recorded its assignment
     -- reads neither half (MODEL-7); see 'Kanban.UI.Util.launchAssignment'.
     appModelRoster :: Either RosterLoadError ModelRoster,
+    -- | Which roster assignment the settings overlay has focused, or
+    -- 'Nothing' when it has no row to focus: an unusable roster, or a valid
+    -- one that loads no provider. Presentation state like every other
+    -- selection here — opening the overlay seats it on the first row, and a
+    -- cell the roster stops carrying resolves back to the first row through
+    -- 'Kanban.UI.Settings.resolvedSettingsFocus' rather than focusing
+    -- nothing.
+    appSettingsFocus :: Maybe (RoleName, ProviderName),
     appLogRoot :: FilePath,
     appProcessSelection :: ProcessSelection,
     appIncidentSelection :: IncidentSelection,

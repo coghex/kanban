@@ -40,6 +40,7 @@ import Kanban.GitHub
     coordinatorMustSettle,
     shutdownRefreshCoordinator
     )
+import Kanban.Models (saveModelRoster)
 import Kanban.Process (killManagedProcess )
 import Kanban.Review
   ( interruptReview,
@@ -76,6 +77,15 @@ import Kanban.UI.Filter
   )
 import Kanban.UI.Keys
 import Kanban.UI.SessionCore
+import Kanban.UI.Settings
+  ( RosterWrite (..),
+    SettingsInput,
+    SettingsOutcome (..),
+    applyRosterWrite,
+    openSettings,
+    settingsInput,
+    settingsOutcome
+  )
 import Kanban.UI.State
 import Kanban.UI.Transcript
 import Kanban.UI.Search
@@ -133,11 +143,11 @@ handleEvent event = do
     -- be resolved before the overlays below, which do.
     (Just HelpOverlay, VtyEvent keyEvent)
       | Just action <- boardAction HelpScope keyEvent -> applyBoardAction action
-    (Just SettingsOverlay, VtyEvent (Vty.EvKey (Vty.KChar '1') [])) -> chooseChatVerbosity CompactChat
-    (Just SettingsOverlay, VtyEvent (Vty.EvKey (Vty.KChar '2') [])) -> chooseChatVerbosity StandardChat
-    (Just SettingsOverlay, VtyEvent (Vty.EvKey (Vty.KChar '3') [])) -> chooseChatVerbosity FullChat
-    (Just SettingsOverlay, VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
-    (Just SettingsOverlay, _) -> pure ()
+    -- The settings overlay answers every event it receives, so its policy is
+    -- one total decoder rather than an arm per key: 'settingsInput' names the
+    -- input, 'settingsOutcome' decides what it does, and only the roster
+    -- write below reaches a file.
+    (Just SettingsOverlay, settingsEvent) -> handleSettingsInput (settingsInput settingsEvent)
     (Just ProcessesOverlay, VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
     (Just ProcessesOverlay, VtyEvent (Vty.EvKey Vty.KDown [])) -> moveProcessSelection 1
     (Just ProcessesOverlay, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> moveProcessSelection 1
@@ -452,7 +462,7 @@ dispatchBoardAction = \case
   ToggleDrainer -> toggleDrainer
   MergeDoneCard -> onSelection mergeItemDoneCard mergeSelectedDoneCard
   ToggleSidebar -> modify (\current -> current {appSidebarVisible = not current.appSidebarVisible})
-  ShowSettings -> modify (\current -> current {appOverlay = Just SettingsOverlay, appNotice = Nothing})
+  ShowSettings -> modify openSettings
   OpenSearch -> modify openSearch
   ShowFilter -> modify toggleFilterPanel
   ShowHelp -> modify (\current -> current {appOverlay = Just HelpOverlay})
@@ -590,6 +600,28 @@ applyOverlayMouseAction scrollOverlay = \case
   OverlayMouseScroll amount -> scrollOverlay amount
   OverlayMouseClose -> closeOverlay
   OverlayMouseNoOp -> pure ()
+
+-- | Carries out one settings input.
+--
+-- The only step that is not already decided by 'settingsOutcome' is the write
+-- itself: 'saveModelRoster' runs here, and its result — not the proposal —
+-- is what 'applyRosterWrite' turns into state. A roster the file refused
+-- therefore never reaches the screen, which is what keeps this process from
+-- spawning on a value that disappears at the next restart.
+handleSettingsInput :: SettingsInput -> EventM Name AppState ()
+handleSettingsInput input = do
+  state <- get
+  case settingsOutcome input state.appModelRoster state.appSettingsFocus of
+    SettingsUnchanged -> pure ()
+    SettingsClosed -> closeOverlay
+    SettingsVerbosityChosen verbosity -> chooseChatVerbosity verbosity
+    SettingsRefused message -> setNotice message
+    SettingsRefocused focus scrolled -> do
+      modify (\current -> current {appSettingsFocus = focus})
+      when (scrolled /= 0) (vScrollBy (viewportScroll SettingsViewport) scrolled)
+    SettingsRosterWrite write -> do
+      result <- liftIO (saveModelRoster write.rosterWriteRoster)
+      modify (applyRosterWrite result write)
 
 chooseChatVerbosity :: ChatVerbosity -> EventM Name AppState ()
 chooseChatVerbosity verbosity = do

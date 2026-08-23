@@ -86,6 +86,7 @@ testAppState board = do
         -- The pure compiled value, not a load: a test state must not read
         -- the developer's real XDG configuration.
         appModelRoster = Right defaultRoster,
+        appSettingsFocus = Nothing,
         appLogRoot = "/tmp/example-project/logs",
         appProcessSelection = ProcessSelection Nothing 0,
         appIncidentSelection = IncidentSelection Nothing 0,

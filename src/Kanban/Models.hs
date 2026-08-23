@@ -25,11 +25,13 @@
 -- must resolve from the file itself.
 --
 -- The Haskell spawn sites consume it through 'assignmentFor', the one
--- accessor a caller resolves a cell with: the roster is loaded once at
--- startup and retained (see 'Kanban.UI.Types.AppState'), each agent-starting
--- path unwraps that result and resolves the cell its routing selected, and a
--- roster that cannot supply the cell refuses the spawn instead of falling
--- back. What a launch resolves becomes a 'RecordedAssignment' it persists,
+-- accessor a caller resolves a cell with: the roster is read at startup and
+-- retained (see 'Kanban.UI.Types.AppState'), each agent-starting path unwraps
+-- that result and resolves the cell its routing selected, and a roster that
+-- cannot supply the cell refuses the spawn instead of falling back. The
+-- settings overlay edits it in place ("Kanban.UI.Settings"), always through
+-- 'saveModelRoster' and only moving what the dashboard holds once that write
+-- succeeded, so what a later spawn resolves is always something on disk. What a launch resolves becomes a 'RecordedAssignment' it persists,
 -- and every later launch continuing that same provider session replays the
 -- record rather than resolving again (D-7). The Python and plugin spawn
 -- sites migrate in a later slice of epic #412.

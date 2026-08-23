@@ -1,16 +1,18 @@
 -- | The model roster reaching the Haskell spawn sites (MODEL-2), and the
 -- assignment a launch records so a session's whole life runs on it (MODEL-7).
 --
--- Four things fail independently and are proved separately here. The launch
+-- Five things fail independently and are proved separately here. The launch
 -- boundary refuses a roster that cannot supply the cell its routing selected,
 -- whether the file was unusable or merely loads a different brand. The
 -- assignment that launch resolves is recorded in the worker specification and
 -- is the only thing the detached supervisor constructs argv from, proved end
 -- to end through a real supervisor and a real provider process. A launch that
 -- resumes an existing provider session replays what that session's previous
--- worker recorded and consults no roster at all. And the embedded review
--- thread and its @kanban_run_claude@ tool read their own two cells, each
--- refusing on its own terms.
+-- worker recorded and consults no roster at all. The embedded review thread
+-- and its @kanban_run_claude@ tool read their own two cells, each refusing on
+-- its own terms. And an assignment edited on the settings screen (MODEL-5)
+-- travels the whole way: one decoded key press, the @models.toml@ it wrote,
+-- and the provider the next launch reaches.
 --
 -- The per-argument default-roster expectations live beside the argument
 -- builders in "Spec.Agent.Solve" and "Spec.Agent.PullRequestFlow"; only what
@@ -21,7 +23,9 @@ import qualified Data.ByteString.Char8 as ByteString
 import Control.Monad (void)
 import Data.Maybe (fromMaybe)
 import Data.List (isInfixOf, isSuffixOf, sort)
+import Brick (BrickEvent (..))
 import Brick.BChan (newBChan, readBChan)
+import qualified Graphics.Vty as Vty
 import Data.Text (Text)
 import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import qualified Data.Text
@@ -41,8 +45,11 @@ import Kanban.Models
     decodeRoster,
     defaultRoster,
     encodeRoster,
+    loadModelRoster,
     recordAssignment,
     recordedAssignmentCell,
+    rosterPath,
+    saveModelRoster,
   )
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
@@ -62,8 +69,16 @@ import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..)
 import Kanban.Solve (SolveEvent (..), SolveOutcome (..))
 import Kanban.UI.PullRequest (failPullRequestLaunch, pullRequestStartRefusal)
 import Kanban.UI.Session (pullRequestSessionReusable, solvePhaseActive)
+import Kanban.UI.Settings
+  ( RosterWrite (..),
+    SettingsOutcome (..),
+    applyRosterWrite,
+    openSettings,
+    settingsInput,
+    settingsOutcome,
+  )
 import Kanban.UI.Solve (failSolveLaunch)
-import Kanban.UI.Types (AgentSession (..), AppEvent (..), AppState (..), PullRequestDetail (..), SolveDetail (..), SolvePhase (..))
+import Kanban.UI.Types (AgentSession (..), AppEvent (..), AppState (..), Name, PullRequestDetail (..), SolveDetail (..), SolvePhase (..))
 import Kanban.UI.Util (launchAssignment, resolvedRosterCellFor)
 import Kanban.UI.Worker (recoveredAutoSolveParentSession, recoveredPullRequestSession, recoveredSolveSession)
 import Kanban.Worker
@@ -457,6 +472,52 @@ spec = do
         [ (`solveAssignment` CodexSolver),
           \roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview
         ]
+
+  -- The settings screen and the spawn sites, end to end. Every step is the
+  -- real one: the key is decoded by the overlay's own decoder, the roster it
+  -- proposes is written by 'saveModelRoster', the file that produced is read
+  -- back by the loader, and the next worker is a real detached supervisor
+  -- over a fake @codex@ that records its own argv. Nothing between the press
+  -- and that argv is stood in for.
+  describe "an assignment edited on the settings screen" $
+    it "reaches models.toml, the loader, and the next spawned provider" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CONFIG_HOME" (temporaryRoot </> "config") $ do
+          now <- getCurrentTime
+          -- Opening the overlay focuses the first row, which is the solve
+          -- codex cell the launch below resolves.
+          opened <- openSettings <$> testAppState (fixtureBoard [])
+          opened.appSettingsFocus `shouldBe` Just (SolveRole, CodexProvider)
+          let pressed = settingsInput (VtyEvent (Vty.EvKey (Vty.KChar 'l') []) :: BrickEvent Name AppEvent)
+          write <- case settingsOutcome pressed opened.appModelRoster opened.appSettingsFocus of
+            SettingsRosterWrite proposal -> pure proposal
+            other -> fail ("the press earned no roster write: " <> show other)
+          saved <- saveModelRoster write.rosterWriteRoster
+          saved `shouldBe` Right ()
+          let edited = applyRosterWrite saved write opened
+          edited.appModelRoster `shouldBe` Right write.rosterWriteRoster
+
+          -- The exact file: byte for byte what the encoder produces, and a
+          -- roster the loader accepts back unchanged.
+          path <- rosterPath
+          written <- readFile path
+          written `shouldBe` Data.Text.unpack (encodeRoster write.rosterWriteRoster)
+          loadModelRoster `shouldReturn` Right write.rosterWriteRoster
+
+          -- And the next launch runs on it. The rejected cell is the compiled
+          -- default the press moved off, so this fails if anything downstream
+          -- resolved the defaults instead of the saved roster.
+          spawned <- case edited.appModelRoster of
+            Right roster -> pure (cellOf (solveAssignment roster CodexSolver))
+            Left failure -> fail ("the edited roster did not load: " <> show failure)
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              fixture =
+                (workerFixtureSpec repository (WorkerId "solve-852-settings") 852)
+                  { workerCreatedAt = now,
+                    workerAssignment = Just spawned
+                  }
+          run <- runWorkerFromSpec temporaryRoot fixture "solve-852-settings"
+          assertProviderRanOn spawned (cellOf (solveAssignment defaultRoster CodexSolver)) run.runCodexArguments run.runJournal
 
   describe "the embedded issue review" $ do
     it "starts its thread and its turns on the roster's issue_review codex cell" $ do
