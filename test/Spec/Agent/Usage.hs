@@ -29,6 +29,7 @@ import Spec.Support.ClaudeProbe
   ( ClaudeProbeFixture (..),
     ClaudeSignalPolicy (..),
     ClaudeTranscript (..),
+    ClaudeWrapperLifetime (..),
     withClaudeProbeFixture
   )
 import Spec.Support.Env
@@ -165,7 +166,7 @@ spec = do
     -- Driven through the util-linux operands on whichever host runs the
     -- suite, so the -c payload is launched for real on macOS too.
     it "names the selected flavor on a signed-out client, still as AuthenticationRequired" $
-      withClaudeProbeFixture True ClaudeExitsCleanly AuthenticationFailureTranscript $ \fixture -> do
+      withClaudeProbeFixture True WrapperWaitsForClaude ClaudeExitsCleanly AuthenticationFailureTranscript $ \fixture -> do
         result <- timeout 20000000 (runClaudeProviderWith UtilLinuxScript 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Just (Left providerError) -> do
@@ -175,7 +176,7 @@ spec = do
           other -> expectationFailure ("expected an authentication failure, got " <> show other)
 
     it "names the selected flavor on an unrecognized /usage screen, still as UnsupportedVersion" $
-      withClaudeProbeFixture True ClaudeExitsCleanly MissingWeeklyWindowTranscript $ \fixture -> do
+      withClaudeProbeFixture True WrapperWaitsForClaude ClaudeExitsCleanly MissingWeeklyWindowTranscript $ \fixture -> do
         result <- timeout 20000000 (runClaudeProviderWith BsdScript 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Just (Left providerError) -> do
@@ -192,7 +193,7 @@ spec = do
       -- child needs the actual bytes Kanban writes to know when to exit.
       -- The descendant exits on its own once it has drained them, so
       -- escalation never needs to signal anyone.
-      withClaudeProbeFixture True ClaudeExitsCleanly CompleteUsageTranscript $ \fixture -> do
+      withClaudeProbeFixture True WrapperWaitsForClaude ClaudeExitsCleanly CompleteUsageTranscript $ \fixture -> do
         result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Nothing -> expectationFailure "expected the clean-exit probe to return well within its bound"
@@ -207,7 +208,7 @@ spec = do
       -- before the claude child (which ignores INT, in its own process
       -- group) does -- exactly the "leader reaped, descendant survives"
       -- shape 'script''s pty produces in production.
-      withClaudeProbeFixture True ClaudeIgnoresInterrupt NoTranscript $ \fixture -> do
+      withClaudeProbeFixture True WrapperWaitsForClaude ClaudeIgnoresInterrupt NoTranscript $ \fixture -> do
         result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Just (Left providerError) -> do
@@ -223,7 +224,7 @@ spec = do
         doesFileExist fixture.claudeProbeTermMarker `shouldReturn` True
 
     it "kills an INT-resistant claude child that still shares the wrapper's own process group" $
-      withClaudeProbeFixture False ClaudeIgnoresInterrupt NoTranscript $ \fixture -> do
+      withClaudeProbeFixture False WrapperWaitsForClaude ClaudeIgnoresInterrupt NoTranscript $ \fixture -> do
         result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
@@ -237,7 +238,7 @@ spec = do
       -- on its own -- but the claude child ignores both INT and TERM, so
       -- only SIGKILL ends it; the provider must report that as a failure
       -- rather than silently decode the snapshot it already has.
-      withClaudeProbeFixture True ClaudeIgnoresInterruptAndTerminate CompleteUsageTranscript $ \fixture -> do
+      withClaudeProbeFixture True WrapperWaitsForClaude ClaudeIgnoresInterruptAndTerminate CompleteUsageTranscript $ \fixture -> do
         result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Just (Left providerError) -> do
@@ -247,6 +248,51 @@ spec = do
           other -> expectationFailure ("expected a forced-kill failure, got " <> show other)
         shouldRecordASweptProcess fixture.claudeProbeScriptMarker "the script wrapper"
         shouldRecordASweptProcess fixture.claudeProbeChildMarker "the claude child"
+
+    it "sweeps a reparented, separate-group claude child after the pseudo-terminal breaks under the clean-exit write" $
+      -- The one return path the census-aware cleanup used not to cover. The
+      -- wrapper emits a complete /usage screen and then leaves mid-session,
+      -- so Kanban's ESC + "/exit" write raises a broken pipe while the claude
+      -- child it launched is still alive in a process group of its own.
+      -- 'withCreateProcess' reaps the wrapper it spawned and knows nothing
+      -- about that child, so nothing else in the probe would sweep it: the
+      -- census the escalation needs can only have been taken earlier, while
+      -- the wrapper was still there to be walked through.
+      withClaudeProbeFixture True WrapperExitsMidSession ClaudeIgnoresInterrupt CompleteUsageTranscript $ \fixture -> do
+        result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        case result of
+          Just (Left providerError) -> do
+            -- An I/O failure, classified and annotated exactly as every other
+            -- probe failure is -- not a timeout, and never a snapshot decoded
+            -- out of the transcript it did manage to capture.
+            providerError.providerErrorKind `shouldBe` RequestFailed
+            providerError.providerErrorMessage `shouldMention` scriptFlavorLabel hostScriptFlavor
+          other -> expectationFailure ("expected a bounded request failure, got " <> show other)
+        shouldRecordASweptProcess fixture.claudeProbeScriptMarker "the script wrapper"
+        shouldRecordASweptProcess fixture.claudeProbeChildMarker "the claude child"
+        -- Confirms the escalation reached the reparented child, rather than
+        -- the sweep assertion above passing because it had exited anyway.
+        doesFileExist fixture.claudeProbeTermMarker `shouldReturn` True
+
+    it "still sweeps that child when the wrapper leaves as soon as the client is up" $
+      -- The same failure, with the wrapper gone a fraction of a second after
+      -- the client it launched came up rather than after a stretch of the
+      -- session. Censusing the tree only once the capture is already driving
+      -- the pseudo-terminal -- or, as the bug did, only once the write has
+      -- failed -- is too late by then: the wrapper has gone, the child is
+      -- reparented, and walking down from the wrapper's pid reaches nothing,
+      -- so cleanup would escalate against a census that pins nothing below
+      -- the wrapper and signal nobody.
+      withClaudeProbeFixture True WrapperExitsAtStartup ClaudeIgnoresInterrupt CompleteUsageTranscript $ \fixture -> do
+        result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        case result of
+          Just (Left providerError) -> do
+            providerError.providerErrorKind `shouldBe` RequestFailed
+            providerError.providerErrorMessage `shouldMention` scriptFlavorLabel hostScriptFlavor
+          other -> expectationFailure ("expected a bounded request failure, got " <> show other)
+        shouldRecordASweptProcess fixture.claudeProbeScriptMarker "the script wrapper"
+        shouldRecordASweptProcess fixture.claudeProbeChildMarker "the claude child"
+        doesFileExist fixture.claudeProbeTermMarker `shouldReturn` True
 
   describe "external usage-command document decoding" $ do
     it "decodes windows using the refresh clock rather than any document timestamp" $
