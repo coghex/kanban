@@ -41,13 +41,21 @@ it only if it lands before anything has been read from the wrong tracker.
 **Scope the batch:** list the open issues and sort them oldest-first:
 
 ```bash
-gh issue list -R "$REPO" --state open --limit 500 --json number,title,labels,assignees,body,createdAt,url
+gh issue list -R "$REPO" --state open --limit "$ISSUE_LIMIT" --json number,title,labels,assignees,body,createdAt,url
 ```
+
+The batch is the *oldest* issues in the tracker, and a capped listing drops
+exactly those, so the open set is read whole before it is narrowed. Set and
+verify `$ISSUE_LIMIT` as **Complete Snapshots** below specifies, then apply any
+label or area restriction the user asked for, sort what remains by `createdAt`
+oldest-first, and take the count off the front of that.
 
 Skip issues that are in-flight (assignee, `wip` label, or an open PR closing
 them) — changing a spec under an active agent yanks the rug; list them as
-skipped. Restate the batch as the concrete issue number range the list yields
-before starting the verification below.
+skipped. Restate the batch as the concrete issue number range it spans — the
+issues actually selected, after the restriction, the sort, and the count, not the
+range of the complete listing they were drawn from — before starting the
+verification below.
 
 **Verify each issue's premise against HEAD:**
 - Bug: does the described defect still exist? Trace the named code path in the current code; re-run the repro if it's cheap.
@@ -77,6 +85,46 @@ close, label, or comment until told.
 **Clean batch:** If everything came back Valid, say so — name the issue range
 you cleared — and ask whether to continue with the next batch (the next `<n>`
 issues in age order).
+
+## Complete Snapshots
+
+`gh` documents `--limit` as the maximum number of rows to fetch, and it returns
+the newest first. A fixed number therefore drops the *oldest* rows, and it drops
+them silently: a truncated listing is indistinguishable from a shorter tracker.
+Every completeness claim this workflow makes is a claim about the listing it
+read, so each listing has to be the whole collection — or the run has to say it
+was not.
+
+**A listing limit is never a constant.** Each snapshot listing above — the ones
+a completeness claim rests on, not a bounded keyword search for one named issue
+or pull request — carries its own limit variable, raised independently of any
+other: `$ISSUE_LIMIT` for the open-issue listing, and `$PR_LIMIT` for an
+open-pull-request listing where the workflow takes one. Start each at 500, which
+reaches most trackers in one round trip, then check what came back against the
+limit it was taken with:
+
+- **Fewer rows than the limit** — that listing is the complete collection.
+  `--limit` paginates for you, so a short listing is `gh` running out of rows,
+  not out of budget.
+- **Exactly the limit** — the listing may have been cut off at the cap. Double
+  that variable, capped at 10000, and take the listing again.
+
+Repeat until a listing comes back short.
+
+**A completeness check succeeds before the snapshot it covers is used** — for
+classification, batch selection, approval reconciliation, or any tracker
+mutation. Whichever of those this workflow performs, none of them may read a
+snapshot that has not passed, and a partial snapshot is never presented as
+complete.
+
+**Fail visibly.** If a listing errors, or still comes back full once its limit
+variable has reached 10000, that collection was not read and this run cannot
+make the completeness claim it owes. Stop, and name in the diagnostic the
+repository `$REPO`, which collection is incomplete — the **open issues** or the
+**open pull requests** — and the limit the last listing used. Do not fall back
+to the partial snapshot, do not classify or select from what was read, and do
+not present a roadmap or a batch as covering anything. This is a stop, not a
+warning.
 
 ## Where files go
 

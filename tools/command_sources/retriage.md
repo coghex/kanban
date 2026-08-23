@@ -74,14 +74,18 @@ before anything changes, and once beside the lists it produced.
 3. Pull current open GitHub issues:
 
 ```bash
-gh issue list -R "$REPO" --limit 500 --state open --json number,title,labels,assignees,body,createdAt,updatedAt,url
+gh issue list -R "$REPO" --limit "$ISSUE_LIMIT" --state open --json number,title,labels,assignees,body,createdAt,updatedAt,url
 ```
+
+Step 6 computes every delta from this snapshot's `current_open_numbers` and step 12 verifies that every current open issue appears exactly once, so the snapshot has to be the whole open set rather than its newest page. Set and verify `$ISSUE_LIMIT` as **Complete Snapshots** below specifies, before computing a single delta.
 
 4. Pull open PRs and refresh in-flight status:
 
 ```bash
-gh pr list -R "$REPO" --state open --limit 100 --json number,title,body
+gh pr list -R "$REPO" --state open --limit "$PR_LIMIT" --json number,title,body
 ```
+
+An issue whose closing pull request fell outside this listing loses its `[in-flight: PR #NNN]` note and becomes eligible for `Start with`, which hands a second agent work already under way. Set and verify `$PR_LIMIT` the same way, before deciding that any issue is not in flight.
 
 An issue referenced by an open PR's `Closes #<n>`, carrying one or more assignees, or labeled `wip` is **in-flight**. Keep it in place and show every applicable work signal: `[in-flight: PR #NNN]`, `[assigned: @login]` (include every assignee), and/or `[wip]`. Add, update, or remove these notes as current PRs, assignments, and labels change; never collapse an assignment into generic `[claimed]`. Never choose an in-flight or `needs-decision` issue as `Start with`.
 
@@ -127,6 +131,46 @@ gh issue view -R "$REPO" <number> --json number,title,state,closedAt,body,labels
 11. Renumber all sections after edits.
 
 12. Verify every current open issue appears exactly once across the three output lists.
+
+## Complete Snapshots
+
+`gh` documents `--limit` as the maximum number of rows to fetch, and it returns
+the newest first. A fixed number therefore drops the *oldest* rows, and it drops
+them silently: a truncated listing is indistinguishable from a shorter tracker.
+Every completeness claim this workflow makes is a claim about the listing it
+read, so each listing has to be the whole collection — or the run has to say it
+was not.
+
+**A listing limit is never a constant.** Each snapshot listing above — the ones
+a completeness claim rests on, not a bounded keyword search for one named issue
+or pull request — carries its own limit variable, raised independently of any
+other: `$ISSUE_LIMIT` for the open-issue listing, and `$PR_LIMIT` for an
+open-pull-request listing where the workflow takes one. Start each at 500, which
+reaches most trackers in one round trip, then check what came back against the
+limit it was taken with:
+
+- **Fewer rows than the limit** — that listing is the complete collection.
+  `--limit` paginates for you, so a short listing is `gh` running out of rows,
+  not out of budget.
+- **Exactly the limit** — the listing may have been cut off at the cap. Double
+  that variable, capped at 10000, and take the listing again.
+
+Repeat until a listing comes back short.
+
+**A completeness check succeeds before the snapshot it covers is used** — for
+classification, batch selection, approval reconciliation, or any tracker
+mutation. Whichever of those this workflow performs, none of them may read a
+snapshot that has not passed, and a partial snapshot is never presented as
+complete.
+
+**Fail visibly.** If a listing errors, or still comes back full once its limit
+variable has reached 10000, that collection was not read and this run cannot
+make the completeness claim it owes. Stop, and name in the diagnostic the
+repository `$REPO`, which collection is incomplete — the **open issues** or the
+**open pull requests** — and the limit the last listing used. Do not fall back
+to the partial snapshot, do not classify or select from what was read, and do
+not present a roadmap or a batch as covering anything. This is a stop, not a
+warning.
 
 ## Refreshing Approval Markers
 
@@ -242,6 +286,9 @@ itself:
 - Confirm the answer's first line names the repository step 1 resolved, and
   that the same identity was echoed to the user before step 5 ran.
 - Confirm every `gh` call this run made carried `-R "$REPO"`.
+- Confirm both listings passed their completeness check before step 5 reconciled
+  anything and before any delta was computed, and that no list here was built from
+  a snapshot that did not pass.
 - Confirm every previously listed issue that is now closed or otherwise not
   open is removed.
 - Confirm no approval marker was carried over: every one in the answer traces
