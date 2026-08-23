@@ -241,7 +241,12 @@ fi
 git fetch -q origin
 
 if [ "$LIST" = 1 ]; then
-  exec python3 "$GATE" --worktree "$DOCS_WT" --inventory
+  # Not `exec`: that replaces this shell, so the EXIT trap never runs and
+  # every inventory invocation leaves its scratch directory behind. Running
+  # the helper normally keeps the cleanup. A nonzero exit still propagates --
+  # `set -e` ends the script with the helper's status, trap included.
+  python3 "$GATE" --worktree "$DOCS_WT" --inventory
+  exit 0
 fi
 
 # --- Gate: validation, alias canonicalization, §7 classification -----------
@@ -515,6 +520,37 @@ if [ -s "$TMP_DIR/risk" ]; then
   echo "can conflict; an untracked one blocks its checkout outright, and an" >&2
   echo "ignored one would be silently overwritten." >&2
   echo "Land or commit them first, or accept the risk and re-run with -f." >&2
+  [ "$FORCE" = 1 ] || [ "$DRY" = 1 ] || exit 3
+fi
+
+# --- Pre-flight: a SELECTED path the reconcile's checkout would clobber ----
+# The predictor above deliberately skips selected paths, because their
+# overwrite question is SELRISK's below. That leaves a gap: SELRISK compares
+# CONTENT, and an untracked or ignored occupant has no content git will
+# compare. A selected `docs/new.md` that is ignored here and newly ADDED
+# upstream is checked out straight over the local file -- silently, because
+# git overwrites an ignored path without complaint -- and the landing then
+# measures upstream's own bytes and reports nothing to land. The operator's
+# document is gone with no diagnostic anywhere.
+#
+# Same presence test the unselected arm uses, so the two cannot disagree
+# about what occupies a path.
+: > "$TMP_DIR/selected-occupied"
+for p in "$@"; do
+  in_nul_list "$p" "$TMP_DIR/changed-upstream" || continue
+  if OCCUPANT="$(occupied_untracked "$p" "$DOCS_WT" "$TMP_DIR/dirty")"; then
+    if ! in_nul_list "$OCCUPANT" "$TMP_DIR/selected-occupied"; then
+      printf '%s\0' "$OCCUPANT" >> "$TMP_DIR/selected-occupied"
+    fi
+  fi
+done
+if [ -s "$TMP_DIR/selected-occupied" ]; then
+  echo "WARNING: these SELECTED paths are untracked or ignored here AND changed on master:" >&2
+  tr '\0' '\n' < "$TMP_DIR/selected-occupied" | sed 's/^/  /' >&2
+  echo "Reconciling would check upstream's version out over the local file." >&2
+  echo "An ignored one is overwritten silently and its content is NOT" >&2
+  echo "recoverable afterwards -- -f does not save it, it only proceeds." >&2
+  echo "Commit the file, or move it aside, before landing it." >&2
   [ "$FORCE" = 1 ] || [ "$DRY" = 1 ] || exit 3
 fi
 

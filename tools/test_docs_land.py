@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import pathlib
 import subprocess
 import tempfile
 import unittest
@@ -1044,6 +1045,78 @@ class ReconcileInvalidatesEarlierAnswersTests(DocsLandCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(sb.git("ls-files", "-u", cwd=sb.docs).strip(), "")
         self.assertNotIn("docs/b.md", sb.tracked("origin/master"))
+
+
+class SelectedOccupantTests(DocsLandCase):
+    """A SELECTED path with an untracked or ignored occupant that upstream
+    also changed. The unselected arm was always predicted; the selected one
+    fell through the gap between the predictor (which skips selections) and
+    SELRISK (which compares content an occupant does not have)."""
+
+    def test_a_selected_ignored_file_upstream_also_adds_is_refused(self):
+        sb = self.sb
+        sb.write(sb.main, ".gitignore", "docs/new.md\n")
+        sb.git("add", ".gitignore")
+        sb.git("commit", "-q", "-m", "ignore new.md")
+        sb.write(sb.main, "docs/new.md", "upstream version\n")
+        sb.git("add", "-f", "docs/new.md")
+        sb.git("commit", "-q", "-m", "upstream adds new.md")
+        sb.git("push", "-q", "origin", "master")
+        # Ignored here, holding the operator's own content.
+        sb.write(sb.docs, "docs/new.md", "MY LOCAL CONTENT\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land new", "docs/new.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn("untracked or ignored here AND changed on master",
+                      blocked.stderr)
+        self.assertIn("docs/new.md", blocked.stderr)
+        self.assertEqual(sb.head("origin/master"), before["upstream"])
+        # The whole point: the local file is still the local file.
+        self.assertEqual(
+            (sb.docs / "docs/new.md").read_text(encoding="utf-8"),
+            "MY LOCAL CONTENT\n")
+
+    def test_a_selected_untracked_file_upstream_also_adds_is_refused(self):
+        # Not ignored, merely untracked: git REFUSES this checkout rather
+        # than overwriting, so the failure mode differs -- but predicting it
+        # before the fast-forward is what turns an abort into a diagnosis.
+        sb = self.sb
+        sb.write(sb.main, "docs/new.md", "upstream version\n")
+        sb.git("add", "docs/new.md")
+        sb.git("commit", "-q", "-m", "upstream adds new.md")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/new.md", "MY LOCAL CONTENT\n")
+
+        blocked = sb.run_script("-m", "Land new", "docs/new.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn("docs/new.md", blocked.stderr)
+        self.assertEqual(
+            (sb.docs / "docs/new.md").read_text(encoding="utf-8"),
+            "MY LOCAL CONTENT\n")
+
+    def test_an_ordinary_selected_path_is_unaffected(self):
+        # The check must not fire for a tracked document, which is the
+        # normal case the whole reconcile exists to serve.
+        sb = self.sb
+        sb.move_master_upstream()
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(sb.blob("origin/master", "docs/a.md"), "a landed\n")
+
+
+class InventoryCleanupTests(DocsLandCase):
+    def test_the_inventory_leaves_no_scratch_directory_behind(self):
+        # -l used to `exec` the helper, replacing the shell before its EXIT
+        # trap could run, so every invocation leaked a scratch directory.
+        import glob, tempfile
+        pattern = str(pathlib.Path(tempfile.gettempdir()) / "docs-land.*")
+        before = set(glob.glob(pattern))
+        listed = self.sb.run_script("-l")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(set(glob.glob(pattern)) - before, set())
 
 
 class AbsentContractTests(DocsLandCase):
