@@ -22,12 +22,12 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. Retriage silently truncates the tracker snapshot it calls exhaustive
+- [x] PRR-1. Retriage silently truncates the tracker snapshot it calls exhaustive — [#492]
 - [ ] PRR-2. The approval sidebar control is absent from the Unreleased notes
 
 ## 1. Retriage snapshot completeness
 
-### PRR-1. Retriage silently truncates the tracker snapshot it calls exhaustive
+### [#492] PRR-1. Retriage silently truncates the tracker snapshot it calls exhaustive
 
 > **Captured note:** Replace PR #442's finite issue and pull-request listing
 > caps with an exhaustive repository-scoped read, so retriage cannot silently

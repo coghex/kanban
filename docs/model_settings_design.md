@@ -330,11 +330,16 @@ enforces elsewhere, decided up front instead of one blocker per round.
   `drain_prs.py`, and the Claude plugin's `review_pr.py`; the Codex plugin's
   copy keeps its no-pinning delegation contract and never gains the reader's
   model values (D-2 as amended), though it reads the loaded-provider set for
-  MODEL-11's mode awareness. The reader ships exactly the way
-  `kanban_config.py` already does — byte-identical copies in `tools/` and in
-  both plugin bundles' `scripts/` directories, held identical by the same
-  parity discipline — because an installed coordinator runs from its bundle
-  with no `tools/` sibling and must load the reader from beside itself. The
+  MODEL-11's mode awareness. The reader ships the way `kanban_config.py`
+  already does — byte-identical copies held identical by the same parity
+  discipline — because an installed coordinator runs from its bundle with no
+  `tools/` sibling and must load the reader from beside itself. It ships in
+  **two** homes when MODEL-4 lands, not three: `tools/` and the Claude
+  bundle's `scripts/`. The Codex bundle's copy is deferred to MODEL-11, which
+  is what gives that bundle its first consumer (the loaded-provider set) and
+  therefore picks the skill directory it belongs in; shipping it earlier would
+  be a vendored asset no asset reads, in a bundle whose coordinator D-2 as
+  amended forbids model values to. The
   drainer re-reads per drain cycle so a roster edit does not require a
   service restart; a new module under `tools/` means `install_drainer.py`
   (and the issue-approval installer, which relocates its own module set)
@@ -801,11 +806,13 @@ concrete proposal before any implementation.
   fallbacks; the Codex plugin's copy keeps its no-pinning delegation
   contract and is held to it by a negative control; one cross-language
   parity gate holds every roster-backed copy to the tracked defaults.
-- **Scope:** the reader module in its three homes — `tools/` plus a
-  byte-identical copy in each plugin bundle's `scripts/`, the shipping
+- **Scope:** the reader module in its two homes — `tools/` plus a
+  byte-identical copy in the *Claude* bundle's `scripts/`, the shipping
   pattern `kanban_config.py` already follows, with the copies held
   byte-identical by the same gate and the new bundled asset declared in the
-  bundle inventories; `issue_gate` consumption in `approve_issues.py` under
+  bundle inventories (the Codex bundle's copy is MODEL-11's, per Consumption
+  above, and MODEL-4 asserts its absence as a negative control instead);
+  `issue_gate` consumption in `approve_issues.py` under
   the D-6 precedence (defaults < roster file < environment);
   `drain_rereview` in `drain_prs.py`, re-read per drain cycle; the Claude
   plugin copy's pinned constants become fallbacks behind the reader, loaded
@@ -822,9 +829,9 @@ concrete proposal before any implementation.
   model each roster-backed script passes to its fake CLI and that absence
   preserves today's values; the env layer wins over the file for
   `issue_gate`; the Codex plugin copy still spawns with no model or effort
-  flags; the byte-identity gate fails when any of the reader's three copies
-  drifts; the parity gate fails when any roster-backed copy's fallback
-  drifts from the tracked defaults.
+  flags and ships no copy of the reader at all; the byte-identity gate fails
+  when either of the reader's two copies drifts; the parity gate fails when
+  any roster-backed copy's fallback drifts from the tracked defaults.
 - **Out of scope:** changing which brand any script routes to; giving the
   Codex plugin copy pins — D-2 as amended keeps its delegation contract, and
   the roster never reaches it.
