@@ -28,6 +28,9 @@ module Kanban.UI.Board
     solvePhaseGlyphFor,
     trackerHeaderText,
     usageAgeText,
+    usageBarWidth,
+    usageLabelField,
+    usagePercentField,
     usageResetRowText,
     usageSidebarInterior,
     usageSidebarWidth,
@@ -64,6 +67,7 @@ import Kanban.Card
   ( CardChip (..),
     boundedLines,
     displayWidth,
+    elide,
     labelChipRows,
     overflowChipText,
     wrappedLines,
@@ -300,18 +304,98 @@ usageStatusText _ NotLoaded = "press " <> actionKeyText RefreshAll <> " to refre
 drawUsageWindow :: AppState -> Maybe Int -> UsageWindow -> Widget Name
 drawUsageWindow state estimate usageWindow =
   vBox
-    [ txt (padLabel usageWindow.usageWindowLabel <> " " <> usageBar state usageWindow.usagePercentLeft),
+    [ txt (usagePercentRowText state usageWindow),
       withAttr dimAttr (txt (usageResetRowText estimate state.appTimeZone state.appNow usageWindow))
     ]
+
+-- | The width of the label field the percentage row opens with, in terminal
+-- cells.
+usageLabelField :: Int
+usageLabelField = 7
+
+-- | The width of the bracketed bar, in terminal cells: the two brackets and
+-- the ten cells between them. Fixed, so two rows' fills are comparable at a
+-- glance.
+usageBarWidth :: Int
+usageBarWidth = 12
+
+-- | The width of the percentage field the row closes with, in terminal cells:
+-- the decimal right-aligned within three cells, then the @%@ marker.
+usagePercentField :: Int
+usagePercentField = 4
+
+-- | A window's first row: what the window is called, how much of it is left
+-- drawn as a bar, and the same figure as a number.
+--
+-- Every part of this row is a fixed-width field, and the fields together are
+-- exactly 'usageSidebarInterior': 'usageLabelField', one separator cell,
+-- 'usageBarWidth', and 'usagePercentField'. Composing it out of fields rather
+-- than out of whatever its parts happen to measure is what keeps the @%@ off
+-- the cell Brick clips — the row used to grow with the percentage, so a
+-- hundred percent remaining drew twenty-five cells and lost its marker — and
+-- what keeps every bar in a provider's block starting in the same column
+-- whatever its label measures.
+--
+-- The percentage field is a minimum rather than a bound, because the figure
+-- in it is the one thing on the row the user cannot recover from anything
+-- else. Three cells hold every percentage a provider decodes, which
+-- 'Kanban.UsageCommand.parseUsageWindow' bounds to 0-100; a wider figure can
+-- only come from a cache written outside that bound, which
+-- 'Kanban.Usage.Render.renderWindowLine' also states in full rather than
+-- shortening.
+usagePercentRowText :: AppState -> UsageWindow -> Text
+usagePercentRowText state usageWindow =
+  usageLabelText usageWindow.usageWindowLabel
+    <> " "
+    <> usageBar state usageWindow.usagePercentLeft
+    <> usagePercentText usageWindow.usagePercentLeft
+
+-- | A window's label in exactly 'usageLabelField' cells.
+--
+-- Both halves are measured in terminal cells rather than characters, because
+-- the field is a column position the bar beside it depends on: a label of
+-- seven wide characters counts as seven and occupies fourteen, which is how
+-- a label that "fits" used to push the bar and the percentage past the
+-- interior. A label too wide for the field is cut and marked with
+-- 'Kanban.Card.elide'\'s ellipsis, so a shortened label reads as shortened
+-- rather than as the window's real name.
+--
+-- Line breaks are flattened to spaces first. 'Kanban.Text.sanitizeText'
+-- keeps @\n@ deliberately, and Brick draws a newline as a row break, so an
+-- external command's multi-line label would otherwise put the bar and the
+-- percentage on a row of their own beneath a provider block of fixed height.
+usageLabelText :: Text -> Text
+usageLabelText label = padToWidth usageLabelField bounded
+  where
+    flattened = Text.map flattenLineBreak label
+    flattenLineBreak '\n' = ' '
+    flattenLineBreak character = character
+    bounded
+      | displayWidth flattened <= usageLabelField = flattened
+      | otherwise = elide usageLabelField flattened
+
+-- | The remaining percentage as the row's closing field: right-aligned within
+-- three cells so the figures in a provider's block line up under each other,
+-- then the @%@ that says what they are.
+--
+-- Counting characters is counting cells here, unlike everywhere else on this
+-- row: a decimal is digits and at most a sign, and none of those is wide.
+usagePercentText :: Int -> Text
+usagePercentText percentage = Text.justifyRight (usagePercentField - 1) ' ' (showText percentage) <> "%"
+
+-- | Pad @value@ out to @width@ terminal cells. 'Data.Text.justifyLeft' counts
+-- characters, which is the measure this row cannot use.
+padToWidth :: Int -> Text -> Text
+padToWidth width value = value <> Text.replicate (max 0 (width - displayWidth value)) " "
 
 -- | A window's second row: how long until it resets, then the wall clock it
 -- resets at, and — where it fits — how many solve rounds the percentage above
 -- is estimated to buy.
 --
 -- The countdown takes the indent this row used to open with rather than a
--- third row, because the percentage row above already spends all
--- 'usageSidebarInterior' cells and the sidebar's height per provider is
--- fixed. Both halves are bounded — 'usageResetCountdownText' by
+-- third row, because the percentage row above spends all
+-- 'usageSidebarInterior' cells on its own fields and the sidebar's height per
+-- provider is fixed. Both halves are bounded — 'usageResetCountdownText' by
 -- 'Kanban.Usage.Render.usageDurationDayBound' and the wall clock by its
 -- format — so the row fits that interior for any instant a provider reports,
 -- including one already behind the clock.
@@ -336,11 +420,15 @@ usageResetRowText estimate zone now usageWindow
     withEstimate =
       base <> maybe "" usageSolveRoundsSuffix (usageSolveRoundsLeft estimate usageWindow.usagePercentLeft)
 
+-- | The bracketed bar alone, always 'usageBarWidth' cells. The percentage it
+-- draws is stated beside it by 'usagePercentText' rather than appended here,
+-- so the bar cannot borrow a cell from the field after it.
 usageBar :: AppState -> Int -> Text
 usageBar state percentage =
-  left <> Text.replicate filled fullCharacter <> Text.replicate (10 - filled) emptyCharacter <> right <> " " <> Text.pack (show percentage) <> "%"
+  left <> Text.replicate filled fullCharacter <> Text.replicate (cells - filled) emptyCharacter <> right
   where
-    filled = max 0 (min 10 ((percentage + 5) `div` 10))
+    cells = usageBarWidth - 2
+    filled = max 0 (min cells ((percentage * cells + 50) `div` 100))
     (left, right, fullCharacter, emptyCharacter)
       | state.appOptions.optionAscii = ("[", "]", "#", ".")
       | otherwise = ("[", "]", "█", "░")

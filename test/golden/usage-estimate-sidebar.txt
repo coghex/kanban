@@ -8,7 +8,7 @@ Codex             0s old
 in 30m · Thu 15:30 · ≈12
 == three-digit count, omitted whole because the suffix would not fit ==
 Codex             0s old
-5 hour  [██████████] 100
+5 hour  [██████████]100%
 in 30m · Thu 15:30
 == zero rounds, rendered rather than hidden ==
 Codex             0s old
