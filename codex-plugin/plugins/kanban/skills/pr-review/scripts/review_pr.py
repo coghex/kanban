@@ -1142,9 +1142,11 @@ def publish_results(
     consolidated comment, then label. An approved draft is also marked ready
     for review, which is what moves it into Kanban's Done column even while CI
     is pending. If anything changes during publication, clear both verdict
-    labels and restore draft state when this call changed it. Shared by
-    workflow()'s own nested-reviewer path and publish_verdict()'s self-reviewed
-    path, so both go through identical race handling."""
+    labels and leave draft state exactly as it stands: nothing readable
+    separates a ready transition this call made from one another actor made,
+    so it is never rolled back. Shared by workflow()'s own nested-reviewer
+    path and publish_verdict()'s self-reviewed path, so both go through
+    identical race handling."""
     approval_label, changes_requested_label = resolve_workflow_labels(config_path, repo)
     refreshed_pr = pr_view(root, repo, number)
     refreshed_gate = gate_status(root, refreshed_pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)

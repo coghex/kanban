@@ -14,7 +14,9 @@ verdict labels, and says so without claiming anything was restored.
 
 Each ready-command outcome -- a normal return, and a failure -- is staged twice
 over world states the coordinator cannot tell apart, and both stagings assert
-the same result.
+the same result. A second class holds the two packaged pr-review assets, which
+tell an agent what a publication failure leaves behind, to that same rule and
+to each other.
 """
 
 from __future__ import annotations
@@ -403,6 +405,71 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                         ),
                     ],
                 )
+
+
+PR_REVIEW_ASSETS = {
+    "codex": REPO_ROOT
+    / "codex-plugin"
+    / "plugins"
+    / "kanban"
+    / "skills"
+    / "pr-review"
+    / "SKILL.md",
+    "claude": REPO_ROOT / "claude-plugin" / "plugins" / "kanban" / "commands" / "pr-review.md",
+}
+
+# The sentence in each packaged pr-review asset that tells an agent what a
+# publication failure leaves behind. Anchored on its opening clause, which
+# names the constraint the whole passage exists to explain.
+PUBLICATION_FAILURE_ANCHOR = (
+    "GitHub cannot atomically combine a comment, label, and draft transition"
+)
+
+
+class PublicationFailureDescriptionTests(unittest.TestCase):
+    """Both brands' pr-review assets describe the failure path identically.
+
+    The asset is the program an agent executes, so what it says publication
+    leaves behind has to be what publication leaves behind. Nothing but review
+    caught the copy that still promised a rollback after the rollback was
+    removed. The two coordinator scripts already have a gate for that --
+    tools/test_coordinator_parity.py holds them line-identical -- but the two
+    assets have none, and they are edited by hand, one brand at a time. So pin
+    the passage to its twin: a correction that reaches one brand and not the
+    other fails here, which is how the two descriptions drift apart.
+    """
+
+    def passage(self, brand: str) -> str:
+        lines = [
+            line
+            for line in PR_REVIEW_ASSETS[brand].read_text(encoding="utf-8").splitlines()
+            if PUBLICATION_FAILURE_ANCHOR in line
+        ]
+        # Not a formality: an asset that stopped describing the failure path,
+        # or reworded the anchor, would otherwise leave this class comparing
+        # nothing against nothing and passing.
+        self.assertEqual(
+            len(lines),
+            1,
+            f"{PR_REVIEW_ASSETS[brand]} must describe the publication failure "
+            f"path in exactly one paragraph anchored on "
+            f"{PUBLICATION_FAILURE_ANCHOR!r}; found {len(lines)}",
+        )
+        return lines[0]
+
+    def test_the_two_assets_describe_a_publication_failure_the_same_way(self):
+        self.assertEqual(self.passage("claude"), self.passage("codex"))
+
+    def test_the_description_matches_what_publication_actually_does(self):
+        # The rule this module's other class enforces against both
+        # coordinators, stated the way the assets state it. Kept to the two
+        # claims that failed here before -- the labels are cleared, the draft
+        # state is not touched -- rather than the whole sentence, so ordinary
+        # rewording stays free.
+        passage = self.passage("claude")
+        self.assertIn("clears both verdict labels", passage)
+        self.assertIn("leaves draft state exactly as it stands", passage)
+        self.assertIn("never returns the PR to draft", passage)
 
 
 if __name__ == "__main__":
