@@ -37,19 +37,11 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. Claude probe I/O exceptions bypass descendant cleanup — [deferred]: PR #479 unmerged
+- [x] PRR-1. Claude probe I/O exceptions bypass descendant cleanup — [#491]
 
 ## 1. Claude usage-probe lifecycle
 
-### [deferred] PRR-1. Claude probe I/O exceptions bypass descendant cleanup
-
-> **Deferred:** This report is not yet a tracked coordination document, so a
-> disposition applied to it cannot be recorded — publication returns
-> `no-baseline` and writes nothing, which would strand the tracker
-> transaction with the issue already filed. Cleared when PR #479 merges and
-> `docs/project_review_183-170.md` is covered by a §7 `coordination` row on
-> `master`. The finding itself is verified and its issue drafted and
-> approved; only the filing is held.
+### [#491] PRR-1. Claude probe I/O exceptions bypass descendant cleanup
 
 > **Captured note:** Complete PR #175's process-ownership guarantee by routing
 > every exception after the Claude probe starts through its census-aware
