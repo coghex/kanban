@@ -50,7 +50,7 @@ import qualified Data.Text.IO as TextIO
 import Data.Word (Word64)
 import Data.Time (TimeZone, UTCTime, getCurrentTime, getCurrentTimeZone)
 import GHC.Clock (getMonotonicTimeNSec)
-import Kanban.Cache (UsageCacheLoad (..), loadUsageCache, writeUsageCache)
+import Kanban.Cache (UsageCommit (..), commitUsageSnapshots)
 import Kanban.Claude (claudeEnvironment, claudeScratchDirectory)
 import Kanban.Config
   ( RawConfig,
@@ -278,23 +278,21 @@ runPing mode config = do
   where
     brand = mode.pingModeBrand
     provider = pingBrandProvider brand
-    -- Merged into whatever is already stored rather than replacing it, so
-    -- pinging one brand never drops the other's snapshot; the writer's own
-    -- atomic replacement keeps the file from being observed half-written.
+    -- The pinged brand's entry and nothing else is handed over: the stored
+    -- map is read, merged, and replaced inside the commit's own lock, so
+    -- pinging one brand never drops the other's snapshot -- including one
+    -- another Kanban process committed while this refresh was still running.
     -- Only a live success is written, so a failed refresh leaves the previous
     -- cache exactly as it was.
+    --
+    -- The commit's two halves stay apart here. A failed write is fatal to the
+    -- command (section 14); a warning about the file the merge started from is
+    -- not, and is reported beside the printed result like any other.
     persist (Right snapshot)
       | mode.pingModeCache = do
-          (existing, warnings) <- loadExisting
-          stored <- writeUsageCache (Map.insert provider snapshot existing)
-          pure (either Just (const Nothing) stored, warnings)
+          commit <- commitUsageSnapshots (Map.singleton provider snapshot)
+          pure (either Just (const Nothing) commit.usageCommitResult, maybe [] (: []) commit.usageCommitWarning)
     persist _ = pure (Nothing, [])
-    loadExisting = do
-      load <- loadUsageCache
-      pure $ case load of
-        UsageCacheAbsent -> (Map.empty, [])
-        UsageCacheInvalid message -> (Map.empty, [message])
-        UsageCacheLoaded snapshots -> (snapshots, [])
     outcomeOf = either (UsageFailed . (.providerErrorMessage)) UsageAvailable
 
 launchPing :: Int -> PingBrand -> IO PingLaunch
