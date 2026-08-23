@@ -164,12 +164,37 @@ resolve_unmerged_favouring_theirs() {
   [ -s "$TMP_DIR/conflicted" ] || return 0
   while IFS= read -r -d '' c; do
     [ -n "$c" ] || continue
+    # Not every conflict has all three stages, and a DELETE/MODIFY has only
+    # two. Reading a missing one is a hard `git show` failure, which under
+    # `set -e` would abort the run mid-resolution -- leaving the path
+    # unmerged and never reaching the upstream-deletion refusal below. Each
+    # shape is answered by what "favour this worktree's side" means for it,
+    # so -a resolves every conflict it is documented to resolve.
+    if ! git show ":3:$c" > "$TMP_DIR/theirs" 2>/dev/null; then
+      # No stage 3: this worktree DELETED the path and the other side
+      # modified it. Favouring this side means the deletion stands.
+      GIT_LITERAL_PATHSPECS=1 git rm -q -f -- "$c"
+      continue
+    fi
+    if ! git show ":2:$c" > "$TMP_DIR/ours" 2>/dev/null; then
+      # No stage 2: the other side DELETED the path and this worktree
+      # modified it. Favouring this side means the content survives -- and
+      # a selected path in that state is then caught by the
+      # upstream-deletion refusal, which is where the deliberate decision
+      # to resurrect it belongs.
+      cp_theirs=1
+    else
+      cp_theirs=0
+    fi
     # Stage 1 is absent for an add/add conflict; an empty base makes
     # merge-file treat both sides as pure additions, which is the right
     # reading of "neither side had this text before".
     git show ":1:$c" > "$TMP_DIR/base" 2>/dev/null || : > "$TMP_DIR/base"
-    git show ":2:$c" > "$TMP_DIR/ours"
-    git show ":3:$c" > "$TMP_DIR/theirs"
+    if [ "$cp_theirs" = 1 ]; then
+      git show ":3:$c" > "$c"
+      GIT_LITERAL_PATHSPECS=1 git add -- "$c"
+      continue
+    fi
     # -p writes the merge to stdout, straight over the conflicted file:
     # every byte it needs is already in stages 1-3, so truncating the
     # working copy first costs nothing and saves an intermediate write.
@@ -594,6 +619,46 @@ if [ "$RECONCILE" = 1 ] \
   fi
 fi
 
+# --- Re-run the authoritative gate against the reconciled worktree --------
+# The gate above validated the paths the operator NAMED, against the worktree
+# as it stood before the reconcile. The reconcile then rewrote those very
+# paths, so every on-disk judgement the gate made is stale: a path that was a
+# regular file can now be a symlink, a directory, or gone. Nothing downstream
+# re-checks -- `git hash-object` FOLLOWS a symlink and `path_mode` reports
+# 100644 for it, so a landing built on the stale answer would replace an
+# upstream symlink with a regular file holding its target's bytes and call it
+# a modify.
+#
+# Re-running the real gate is the fix rather than a bespoke re-check, because
+# the property needed is exactly the one it already decides, and a second
+# implementation could disagree with it.
+if [ "$DRY" = 0 ] && [ "$RECONCILED" = 1 ]; then
+  # Report a path the reconcile removed BEFORE the gate refuses its name, so
+  # the refusal reads as a consequence rather than a mystery. `git stash
+  # apply` follows renames, so an edit to a path upstream RENAMED is not
+  # lost -- it is sitting on the new name, still dirty and still landable
+  # once that name is the one selected.
+  : > "$TMP_DIR/vanished"
+  while IFS= read -r -d '' p; do
+    [ -e "$p" ] || printf '%s\0' "$p" >> "$TMP_DIR/vanished"
+  done < "$TMP_DIR/upstream-deleted"
+  if [ -s "$TMP_DIR/vanished" ]; then
+    echo "note: upstream deleted or renamed these selected paths, so they no longer exist here:"
+    tr '\0' '\n' < "$TMP_DIR/vanished" | sed 's/^/  /'
+    echo "note: an edit to a RENAMED path followed the rename and is still dirty under its new name;"
+    echo "note: check 'git status' in the docs worktree and name that path instead."
+  fi
+
+  CANONICAL="$(python3 "$GATE" --worktree "$DOCS_WT" --gate -- "$@")" || exit 6
+  set --
+  while IFS= read -r p; do
+    [ -n "$p" ] && set -- "$@" "$p"
+  done <<EOF
+$CANONICAL
+EOF
+  [ $# -gt 0 ] || { echo "error: the gate returned no paths" >&2; exit 6; }
+fi
+
 # --- Recompute every upstream-relative fact against the reconciled state ---
 # BASE, BASE_TIP and both path lists were read before the reconcile, when the
 # worktree still sat on an older base. The selected-path overwrite check and
@@ -615,27 +680,9 @@ fi
 # deletion was reverted rather than a document created.
 if [ "$RECONCILED" = 1 ] && [ -s "$TMP_DIR/upstream-deleted" ]; then
   : > "$TMP_DIR/resurrect"
-  : > "$TMP_DIR/vanished"
   while IFS= read -r -d '' p; do
-    if [ -e "$p" ]; then
-      printf '%s\0' "$p" >> "$TMP_DIR/resurrect"
-    else
-      printf '%s\0' "$p" >> "$TMP_DIR/vanished"
-    fi
+    [ -e "$p" ] && printf '%s\0' "$p" >> "$TMP_DIR/resurrect"
   done < "$TMP_DIR/upstream-deleted"
-  # Selected, deleted upstream, and gone from the worktree after the
-  # reconcile: there is nothing left to land under that name, and saying
-  # only "nothing to land" would leave the operator thinking their edit
-  # evaporated. It did not -- `git stash apply` follows renames, so an edit
-  # to a path upstream RENAMED is sitting on the new name, still dirty and
-  # still landable once it is named. Reported rather than refused, because
-  # the reconcile did the right thing and there is nothing to decide.
-  if [ -s "$TMP_DIR/vanished" ]; then
-    echo "note: upstream deleted or renamed these selected paths, so they no longer exist here:"
-    tr '\0' '\n' < "$TMP_DIR/vanished" | sed 's/^/  /'
-    echo "note: an edit to a RENAMED path followed the rename and is still dirty under its new name;"
-    echo "note: check 'git status' in the docs worktree and name that path instead."
-  fi
   if [ -s "$TMP_DIR/resurrect" ]; then
     echo "WARNING: upstream deleted these selected paths, and the reconcile replayed them back:" >&2
     tr '\0' '\n' < "$TMP_DIR/resurrect" | sed 's/^/  /' >&2
