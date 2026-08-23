@@ -1093,17 +1093,23 @@ def ci_attempt_identity(check: dict[str, Any] | None) -> str | None:
 
     `gh run rerun --failed` starts a new attempt of the *same* workflow run, so
     the run id is stable across every attempt of one head and cannot on its own
-    tell a rerun's result apart from the failure that triggered it. What can:
-    the job id in the check's details URL, which is a fresh record per attempt,
-    and the timestamps beside it, which move with each one. The job id is taken
-    when the URL carries one and the timestamps stand alone when it does not.
+    tell a rerun's result apart from the failure that triggered it. The job id
+    in the check's details URL can: rerunning creates fresh job records, so the
+    id is one per attempt and never changes once GitHub has issued it.
+
+    Nothing else enters the identity, and the timestamps in particular do not.
+    They are per-attempt but not stable per *read*: `startedAt` can be absent
+    from one snapshot of a queued-then-started job and present in the next, and
+    a value can come back normalized differently. Folding either in would let
+    two reads of one attempt disagree, which reads as a new attempt and buys a
+    duplicate rerun -- the very thing the barrier exists to refuse.
 
     None means the evidence does not name an attempt, and every caller reads
     that as "indistinguishable" rather than as "new". A check the rollup has
-    not reported as completed is still running, a details URL with no run id
-    was not produced by Actions at all, and a missing or blank `completedAt`
-    leaves nothing per-attempt to compare -- so each of those is None. Elapsed
-    time never stands in for any of it: nothing here reads a clock.
+    not reported as completed is not a finished attempt at all; a details URL
+    with no run id was not produced by Actions; and one with a run id but no
+    job segment names only what every attempt of this head shares. Elapsed time
+    never stands in for any of it: nothing here reads a clock.
     """
     if check is None:
         return None
@@ -1111,16 +1117,10 @@ def ci_attempt_identity(check: dict[str, Any] | None) -> str | None:
     if not isinstance(status, str) or status.upper() != "COMPLETED":
         return None
     run_id = action_run_id(check)
-    if run_id is None:
+    job_id = action_job_id(check)
+    if run_id is None or job_id is None:
         return None
-    completed_at = check.get("completedAt") or check.get("completed_at")
-    if not isinstance(completed_at, str) or not completed_at.strip():
-        return None
-    job_id = action_job_id(check) or ""
-    started_at = check.get("startedAt") or check.get("started_at") or ""
-    if not isinstance(started_at, str):
-        started_at = ""
-    return f"{run_id}/{job_id}@{started_at.strip()}|{completed_at.strip()}"
+    return f"{run_id}/{job_id}"
 
 
 def rerun_failed_ci(

@@ -3811,8 +3811,9 @@ class QueueOrderTests(ProcessPrFixture):
         """A failed required check, and which attempt of run 9911 it is.
 
         `gh run rerun --failed` starts a new attempt of the same run, so the
-        run id stays 9911 throughout and the job id and completion timestamp
-        are what tell one attempt from the next.
+        run id stays 9911 throughout and the job id is what tells one attempt
+        from the next. The timestamp is varied by some cases only to prove it
+        makes no difference either way.
         """
         return [
             {
@@ -4084,6 +4085,35 @@ class QueueOrderTests(ProcessPrFixture):
             state["prs"]["7"]["ci_rerun_attempt_identity"],
             after_first["prs"]["7"]["ci_rerun_attempt_identity"],
         )
+
+    def test_the_same_attempt_with_new_timestamps_requests_no_second_rerun(self):
+        # The failure that triggered the request, read again with timestamps
+        # the first snapshot did not carry. It is the same job and so the same
+        # attempt: the barrier holds and no second rerun is requested.
+        first = self._failed_ci()
+        del first[0]["completedAt"]
+        later = self._failed_ci(completed="2026-07-18T00:30:00Z")
+        later[0]["startedAt"] = "2026-07-18T00:20:00Z"
+        self._script_pr_over_passes(
+            7,
+            self._other_pr_json(7, "b" * 40, statusCheckRollup=first),
+            self._other_pr_json(7, "b" * 40, statusCheckRollup=later),
+        )
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        self._script_merge_of_42()
+        queue = [self._queued(7, "b" * 40), self._queued(42, self.head_sha)]
+        self._script_pr_list(queue, queue)
+
+        self._run_passes(2)
+
+        self.assertEqual(
+            [args[:3] for args in self._advancing_gh_calls()],
+            [["run", "rerun", "9911"]],
+        )
+        self.assertEqual(self._merged_numbers(), [])
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        self.assertEqual(state["prs"]["7"]["ci_rerun_attempts"], 1)
 
     def test_a_completed_rerun_attempt_spends_exactly_one_more(self):
         # Issue #474 acceptance 4. The second pass reads a failure the first

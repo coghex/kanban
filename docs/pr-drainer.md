@@ -695,15 +695,18 @@ rerun is still in flight. So the drainer records, beside the request, *which*
 finished attempt it was made against, and requests nothing further until it
 sees a different one.
 
-What names an attempt is the per-attempt evidence GitHub already puts in the
-check: the job id in its details URL, a fresh record for each attempt, and the
-start and completion timestamps beside it, which move with each one. The
-workflow run id alone cannot — `gh run rerun --failed` starts a new attempt of
-the *same* run, so that id is identical before and after. Anything that does not name a
-finished attempt holds the barrier: a check still running, a details URL that
-carries no run id, and a missing completion timestamp. Elapsed time is never
-evidence; the drainer does not decide a rerun has finished because it has been
-a while.
+What names an attempt is the job id GitHub already puts in the check's details
+URL: rerunning creates fresh job records, so that id is one per attempt and
+never changes once issued. The workflow run id alone cannot — `gh run rerun
+--failed` starts a new attempt of the *same* run, so that id is identical
+before and after. The timestamps are deliberately left out: they belong to the
+attempt but not to the read, since one snapshot can carry a timestamp the next
+snapshot of that same attempt carries differently, and two reads that disagree
+would buy exactly the duplicate rerun this rule refuses. Anything that does not
+name a finished attempt holds the barrier: a check the rollup has not reported
+as completed, a details URL with no run id, and one with a run id but no job.
+Elapsed time is never evidence; the drainer does not decide a rerun has
+finished because it has been a while.
 
 **The attempt count is a count of requests, and the cap is spent only by
 results.** Each `gh run rerun` this drainer issues advances `ci_rerun_attempts`

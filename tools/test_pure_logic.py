@@ -131,7 +131,6 @@ class ActionsRerunTests(unittest.TestCase):
             drain_prs.ci_attempt_identity(
                 {
                     **complete,
-                    "completedAt": "2026-08-01T00:40:00Z",
                     "detailsUrl": (
                         "https://github.com/acme/widgets/actions/runs/12345/job/67891"
                     ),
@@ -141,12 +140,41 @@ class ActionsRerunTests(unittest.TestCase):
         self.assertIsNone(drain_prs.ci_attempt_identity(None))
         for missing in (
             {**complete, "status": "IN_PROGRESS", "conclusion": None},
+            {**complete, "status": None},
             {**complete, "detailsUrl": "https://example.invalid/build/7"},
-            {**complete, "completedAt": ""},
-            {**complete, "completedAt": None},
+            # A run id and no job: everything this names is shared by every
+            # attempt of the head, so it names no attempt.
+            {**complete, "detailsUrl": (
+                "https://github.com/acme/widgets/actions/runs/12345"
+            )},
         ):
             with self.subTest(check=missing):
                 self.assertIsNone(drain_prs.ci_attempt_identity(missing))
+
+    def test_one_attempts_identity_does_not_move_with_its_timestamps(self):
+        # The timestamps are per-attempt but not stable per read: `startedAt`
+        # can be absent from one snapshot and present in the next, and either
+        # value can come back normalized differently. Two reads of one attempt
+        # must still agree, or the second buys a duplicate rerun.
+        base = {
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/12345/job/67890",
+        }
+        identity = drain_prs.ci_attempt_identity(base)
+        self.assertIsNotNone(identity)
+        for variation in (
+            {"startedAt": "2026-08-01T00:00:00Z"},
+            {"startedAt": None, "completedAt": "2026-08-01T00:10:00Z"},
+            {"startedAt": "2026-08-01T00:00:00.000Z", "completedAt": ""},
+            {"completedAt": "2026-08-01T00:10:00+00:00"},
+            {"startedAt": 0, "completedAt": None},
+            {"detailsUrl": base["detailsUrl"] + "?check_suite_focus=true"},
+        ):
+            with self.subTest(variation=variation):
+                self.assertEqual(
+                    drain_prs.ci_attempt_identity({**base, **variation}), identity
+                )
 
     def _rerun_fixture(self, **entry_overrides):
         ctx = drain_prs.RepoContext(
@@ -238,6 +266,35 @@ class ActionsRerunTests(unittest.TestCase):
         self.assertIsNone(entry["ci_rerun_exhausted_head"])
         # A barrier is not a skip: process_pr maps this reason back to one.
         self.assertEqual(drain_prs.PASS_OUTCOMES["checks_pending"], drain_prs.PASS_BARRIER)
+
+    def test_the_same_attempt_read_with_new_timestamps_requests_nothing(self):
+        # The regression behind that stability: a second poll of the very same
+        # job, now carrying timestamps the first snapshot did not, is the same
+        # attempt and must stay a barrier.
+        ctx, head, state = self._rerun_fixture()
+        first = self._failed_pr(head)
+        del first["statusCheckRollup"][0]["completedAt"]
+        later = self._failed_pr(head, completed="2026-08-01T00:40:00Z")
+        later["statusCheckRollup"][0]["startedAt"] = "2026-08-01T00:00:00Z"
+
+        with mock.patch.object(drain_prs, "run") as run_mock:
+            decisions = [
+                drain_prs.rerun_failed_ci(
+                    ctx, snapshot, state=state, check_name="build-test", dry_run=False
+                )
+                for snapshot in (first, later, later)
+            ]
+
+        self.assertEqual(
+            decisions,
+            [
+                drain_prs.CI_RERUN_REQUESTED,
+                drain_prs.CI_RERUN_IN_FLIGHT,
+                drain_prs.CI_RERUN_IN_FLIGHT,
+            ],
+        )
+        self.assertEqual(len(run_mock.mock_calls), 1)
+        self.assertEqual(state["prs"]["42"]["ci_rerun_attempts"], 1)
 
     def test_an_indistinguishable_failure_holds_the_barrier_at_the_cap(self):
         # The capped request is still in flight, so this is neither another
