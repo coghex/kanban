@@ -10,6 +10,7 @@ module Kanban.Solve
     UnknownStreamCategory (..),
     UnknownStreamKey (..),
     agentOutcome,
+    brandForProvider,
     codexSolverModel,
     claudeSolverModel,
     codexReviewerModel,
@@ -48,8 +49,10 @@ import Kanban.Models
     AssignmentUnavailable,
     ModelRoster,
     ProviderName (..),
+    RecordedAssignment,
     RoleName (..),
     assignmentFor,
+    recordAssignment,
   )
 import Kanban.Process (managedProcess)
 import Kanban.Solve.Event
@@ -104,12 +107,27 @@ providerForBrand :: SolverBrand -> ProviderName
 providerForBrand CodexSolver = CodexProvider
 providerForBrand ClaudeSolver = ClaudeProvider
 
+-- | 'providerForBrand' read the other way, which is what a replayed launch
+-- needs: a recorded assignment names the provider it was resolved for, and
+-- the supervisor has to reach the executable that provider's adapter spawns
+-- without re-deriving it from the task's own routing (D-7).
+brandForProvider :: ProviderName -> SolverBrand
+brandForProvider CodexProvider = CodexSolver
+brandForProvider ClaudeProvider = ClaudeSolver
+
 -- | The roster cell a solve invocation runs on. The single declaration of
 -- solve's @(role, provider)@ selection, shared by the UI boundary that
--- refuses on it and by the supervisor that constructs argv from it, so the
--- two can never disagree about which cell this run was checked against.
-solveAssignment :: ModelRoster -> SolverBrand -> Either AssignmentUnavailable Assignment
-solveAssignment roster brand = assignmentFor roster SolveRole (providerForBrand brand)
+-- refuses on it and by the launch that records it, so the two can never
+-- disagree about which cell this run was checked against.
+--
+-- The provider comes back with the cell rather than being left for a caller
+-- to recompute: the record this becomes outlives the roster it was read
+-- from, and a resume replays it without consulting either again.
+solveAssignment :: ModelRoster -> SolverBrand -> Either AssignmentUnavailable RecordedAssignment
+solveAssignment roster brand =
+  recordAssignment provider <$> assignmentFor roster SolveRole provider
+  where
+    provider = providerForBrand brand
 
 runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Assignment -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (SolveEvent -> IO ()) -> IO ()
 runSolve = runSolveWith (const handleReadLine)

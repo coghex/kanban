@@ -36,6 +36,7 @@ import Data.Text (Text)
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository, WorkflowConfig, defaultWorkflowConfig)
+import Kanban.Models (RecordedAssignment)
 import Kanban.Process (ManagedProcess, ProcessIdentity)
 import Kanban.PullRequestFlow (PullRequestAction, PullRequestOrigin)
 import Kanban.Solve (AgentEvent, ResumeProvenance (..), SolveOutcome, SolveWorkflow, SolverBrand)
@@ -64,6 +65,15 @@ data WorkerTask = SolveWorkerTaskKind SolveWorkerTask | PullRequestWorkerTaskKin
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | What an autosolve pull-request worker records about the /solver/ that
+-- launched it, so a dashboard restart can restore that solver's own session
+-- beside the pull-request one it discovered.
+--
+-- Every field here describes the solver rather than this worker: the pull
+-- request's specification already carries its own session id, log path,
+-- brand, and model assignment, and reading those into the parent session is
+-- how a restarted revision reaches the reviewer's provider instead of the
+-- solver's.
 data WorkerParent = WorkerParent
   { workerParentIssueNumber :: Int,
     workerParentReviewRound :: Int,
@@ -71,10 +81,32 @@ data WorkerParent = WorkerParent
     workerParentSolverSession :: Maybe Text,
     workerParentSolverLogPath :: Maybe FilePath,
     workerParentStartedAt :: UTCTime,
-    workerParentKnownPullRequests :: Set Int
+    workerParentKnownPullRequests :: Set Int,
+    -- | The assignment the solver's own worker recorded, so a revision
+    -- launched after a restart replays the solver's cell rather than the
+    -- reviewer's (D-7). 'Nothing' for a parent recorded before this field
+    -- existed, which resolves once on that session's next launch exactly as
+    -- any other pre-MODEL-7 session does.
+    workerParentSolverAssignment :: Maybe RecordedAssignment
   }
   deriving stock (Eq, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (ToJSON)
+
+-- | Hand-written for the same reason 'WorkerSpec's is: a pull-request
+-- worker's durable specification written before 'workerParentSolverAssignment'
+-- existed still decodes, so an upgrade cannot drop a running autosolve loop
+-- out of discovery.
+instance FromJSON WorkerParent where
+  parseJSON = withObject "WorkerParent" $ \object ->
+    WorkerParent
+      <$> object .: "workerParentIssueNumber"
+      <*> object .: "workerParentReviewRound"
+      <*> object .: "workerParentSolverBrand"
+      <*> object .: "workerParentSolverSession"
+      <*> object .: "workerParentSolverLogPath"
+      <*> object .: "workerParentStartedAt"
+      <*> object .: "workerParentKnownPullRequests"
+      <*> object .:? "workerParentSolverAssignment" .!= Nothing
 
 data WorkerSpec = WorkerSpec
   { workerId :: WorkerId,
@@ -95,16 +127,24 @@ data WorkerSpec = WorkerSpec
     -- | The dashboard's resolved workflow configuration, forwarded to a
     -- pull-request worker so its spawned agent's prompt can name the same
     -- configured approval/changes-requested labels instead of the defaults.
-    workerWorkflowConfig :: WorkflowConfig
+    workerWorkflowConfig :: WorkflowConfig,
+    -- | The roster cell this launch resolved, recorded here so the detached
+    -- supervisor runs on exactly what the dashboard checked and every later
+    -- resume of the same provider session replays it unchanged (D-7,
+    -- MODEL-7). 'Nothing' is a specification written before this field
+    -- existed: the supervisor refuses such a spec rather than resolving a
+    -- cell of its own, and the launch boundary resolves once and records the
+    -- result on that session's next resume.
+    workerAssignment :: Maybe RecordedAssignment
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
 
 -- | Manual instance so a durable spec file written before
--- 'workerResumeProvenance'/'workerConfigPath'/'workerWorkflowConfig' existed
--- still decodes: legacy specs default to 'ResumeAnswer'/'Nothing'/
--- 'defaultWorkflowConfig', matching every resume's framing prior to their
--- introduction.
+-- 'workerResumeProvenance'/'workerConfigPath'/'workerWorkflowConfig'/
+-- 'workerAssignment' existed still decodes: legacy specs default to
+-- 'ResumeAnswer'/'Nothing'/'defaultWorkflowConfig'/'Nothing', matching every
+-- resume's framing prior to their introduction.
 instance FromJSON WorkerSpec where
   parseJSON = withObject "WorkerSpec" $ \object ->
     WorkerSpec
@@ -120,6 +160,7 @@ instance FromJSON WorkerSpec where
       <*> object .: "workerMaxRuntimeSeconds"
       <*> object .:? "workerConfigPath" .!= Nothing
       <*> object .:? "workerWorkflowConfig" .!= defaultWorkflowConfig
+      <*> object .:? "workerAssignment" .!= Nothing
 
 data WorkerEvent
   = WorkerProviderStarted Int
@@ -199,15 +240,14 @@ data WorkerEnvelope = WorkerEnvelope
 data WorkerDescriptor = WorkerDescriptor
   { workerDescriptorSpec :: WorkerSpec,
     workerDescriptorSpecPath :: FilePath,
-    -- | The launch-scoped model-roster snapshot written beside the spec.
+    -- | Where a pre-MODEL-7 worker's model-roster snapshot was written.
     --
-    -- The supervisor is a separate process, so the roster the dashboard
-    -- validated before it agreed to launch has to travel to it explicitly;
-    -- rereading the user's @models.toml@ inside the supervisor would run the
-    -- agent on whatever that file says at spawn time rather than on what was
-    -- checked. It is rewritten on every launch and never replayed — durable
-    -- per-session assignment recording is MODEL-7's, and 'WorkerSpec' keeps
-    -- its shape until then.
+    -- Nothing writes one any more: 'workerAssignment' carries the resolved
+    -- cell to the supervisor inside the specification itself, so a second
+    -- durable artifact describing the same cell was retired with it. The
+    -- path survives for exactly one job — 'companionArtifactPaths' still
+    -- names it, so a snapshot an upgraded-over worker left behind is
+    -- collected rather than accumulating in the cache forever.
     workerDescriptorRosterPath :: FilePath,
     workerDescriptorEventPath :: FilePath,
     workerDescriptorStatePath :: FilePath,

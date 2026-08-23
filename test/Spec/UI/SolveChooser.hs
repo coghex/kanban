@@ -38,7 +38,8 @@ spec = do
                   solveSessionBrand = CodexSolver,
                   solveSessionId = Just "recovered-worker-session",
                   solveSessionAutoProgress = Nothing,
-                  solveSessionResumeProvenance = ResumeAnswer
+                  solveSessionResumeProvenance = ResumeAnswer,
+                  solveSessionAssignment = Nothing
                 }
           )
             {sessionLogPath = Just "/tmp/recovered.jsonl"}

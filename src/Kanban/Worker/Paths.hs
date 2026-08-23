@@ -20,8 +20,6 @@ module Kanban.Worker.Paths
     listDirectoryOrEmpty,
     ignoreFileOperation,
     writePrivateJson,
-    writeWorkerRoster,
-    readWorkerRoster,
     decodeFile,
     readWorkerState,
     writeState,
@@ -37,15 +35,8 @@ import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Encoding
 import Data.Time (UTCTime, getCurrentTime)
 import Kanban.Domain (Repository (..))
-import Kanban.Models
-  ( ModelRoster,
-    decodeRoster,
-    encodeRoster,
-    rosterFailureMessage,
-  )
 import Kanban.Worker.Types
   ( PullRequestWorkerTask (..),
     SolveWorkerTask (..),
@@ -132,37 +123,6 @@ writePrivateJson path value = do
     setFileMode temporary 0o600
     renameFile temporary path
   pure (either (Left . Text.pack . show) Right result)
-
--- | Writes the launch-scoped roster snapshot beside the spec, through the
--- same temporary-file, @0600@, rename discipline 'writePrivateJson' uses.
---
--- Deliberately the roster's own TOML rather than a JSON projection of it:
--- 'encodeRoster' and 'decodeRoster' are already each other's inverse and
--- already tested as such, so the snapshot cannot drift from the schema the
--- dashboard validated.
-writeWorkerRoster :: WorkerDescriptor -> ModelRoster -> IO (Either Text ())
-writeWorkerRoster descriptor roster = do
-  let path = descriptor.workerDescriptorRosterPath
-      temporary = path <> ".tmp"
-  result <- try @IOException $ do
-    ByteString.writeFile temporary (Encoding.encodeUtf8 (encodeRoster roster))
-    setFileMode temporary 0o600
-    renameFile temporary path
-  pure (either (Left . Text.pack . show) Right result)
-
--- | Reads back the snapshot its launcher wrote. Fails closed: a supervisor
--- that cannot read the roster it was launched against spawns nothing, rather
--- than loading the user's current file or the compiled defaults.
-readWorkerRoster :: WorkerDescriptor -> IO (Either Text ModelRoster)
-readWorkerRoster descriptor = do
-  let path = descriptor.workerDescriptorRosterPath
-  bytesResult <- try @IOException (ByteString.readFile path)
-  pure $ case bytesResult of
-    Left exception -> Left ("model roster snapshot " <> Text.pack path <> " could not be read: " <> Text.pack (show exception))
-    Right bytes -> case Encoding.decodeUtf8' bytes of
-      Left unicodeError -> Left ("model roster snapshot " <> Text.pack path <> " is not UTF-8: " <> Text.pack (show unicodeError))
-      Right contents ->
-        either (\failure -> Left ("model roster snapshot " <> Text.pack path <> " " <> rosterFailureMessage failure)) Right (decodeRoster contents)
 
 decodeFile :: FromJSON value => FilePath -> IO (Either Text value)
 decodeFile path = do

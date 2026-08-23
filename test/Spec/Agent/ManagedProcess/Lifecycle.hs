@@ -17,7 +17,7 @@ import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import Kanban.Domain
-import Kanban.Models (defaultRoster)
+import Kanban.Models (ProviderName (..), RecordedAssignment (..))
 import Kanban.Process
   ( IdentityPresence (..),
     ProcessIdentity (..),
@@ -91,8 +91,8 @@ import Spec.Support.Process
     withManagedShell,
     withNonLeaderShell,
     withSurvivingGroupLeader,
-    workerFixtureSpec,
-    writeWorkerRosterSnapshot
+    workerFixtureAssignment,
+    workerFixtureSpec
   )
 import System.Directory
   ( createDirectory,
@@ -201,7 +201,11 @@ examples = do
                 workerParentSolverSession = Just "solver-session",
                 workerParentSolverLogPath = Just "/tmp/solver.jsonl",
                 workerParentStartedAt = epoch,
-                workerParentKnownPullRequests = Set.fromList [857, 858]
+                workerParentKnownPullRequests = Set.fromList [857, 858],
+                -- The solver's own cell, distinct from the reviewer's below:
+                -- a decoder that dropped this would hand a restarted
+                -- revision the wrong provider.
+                workerParentSolverAssignment = Just (RecordedAssignment CodexProvider "codex-recorded" "high" "Recorded Codex")
               }
           spec =
             WorkerSpec
@@ -216,7 +220,14 @@ examples = do
                 workerCreatedAt = epoch,
                 workerMaxRuntimeSeconds = 14400,
                 workerConfigPath = Nothing,
-                workerWorkflowConfig = defaultWorkflowConfig
+                workerWorkflowConfig = defaultWorkflowConfig,
+                -- The additive assignment field has to survive the round
+                -- trip too: a spec that loses it on decode is one the
+                -- supervisor then refuses to spawn from. Deliberately not
+                -- this build's default cell, and deliberately the provider
+                -- this task does /not/ route to today, so a decoder that
+                -- dropped either could not pass.
+                workerAssignment = Just (RecordedAssignment ClaudeProvider "claude-recorded" "xhigh" "Recorded Claude")
               }
       eitherDecode (encode spec) `shouldBe` Right spec
       -- Every PR action a key can spawn has to survive the durable spec, or
@@ -486,7 +497,8 @@ examples = do
                   workerCreatedAt = now,
                   workerMaxRuntimeSeconds = 60,
                   workerConfigPath = Nothing,
-                  workerWorkflowConfig = defaultWorkflowConfig
+                  workerWorkflowConfig = defaultWorkflowConfig,
+                  workerAssignment = Just workerFixtureAssignment
                 }
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-782-fixture.spec.json"
@@ -508,7 +520,6 @@ examples = do
         originalPath <- maybe "" id <$> lookupEnv "PATH"
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
-            writeWorkerRosterSnapshot spec defaultRoster
             runWorker specPath `shouldReturn` Right ()
             stateBytes <- LazyByteString.readFile statePath
             let decodedState = eitherDecode stateBytes :: Either String WorkerState
@@ -648,7 +659,6 @@ examples = do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             finished <- newEmptyMVar
-            writeWorkerRosterSnapshot spec defaultRoster
             void . forkIO $ runWorker specPath >>= putMVar finished
             orphanState <- waitForWorkerState statePath isOrphaned 80
             orphanState.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
@@ -710,7 +720,6 @@ examples = do
                   stillFailing <- readIORef failing
                   if stillFailing then pure (Left "simulated ps outage") else readProcessSnapshot
             finished <- newEmptyMVar
-            writeWorkerRosterSnapshot spec defaultRoster
             void . forkIO $ runWorkerWith flakySnapshot specPath >>= putMVar finished
             pendingState <- waitForWorkerState statePath isOrphaned 80
             pendingState.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
@@ -797,7 +806,6 @@ examples = do
                       mapM_ (killManagedProcess . managedProcessGroup . fromIntegral) groups
                     Left _ -> pure ()
                   timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
-            writeWorkerRosterSnapshot spec defaultRoster
             void . forkIO $ runWorkerWith readProcessSnapshot specPath >>= putMVar finished
             ( do
                 -- WorkerRunning is published as soon as the provider itself
@@ -1307,7 +1315,6 @@ examples = do
                           mapM_ (killManagedProcess . managedProcessGroup . fromIntegral) groups
                         Left _ -> pure ()
                       timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
-                writeWorkerRosterSnapshot spec defaultRoster
                 void . forkIO $ runWorker specPath >>= putMVar finished
                 ( do
                     orphanState <- waitForWorkerState statePath isOrphaned 80
@@ -1556,7 +1563,6 @@ examples = do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withFakeOnPath temporaryRoot ("codex", completingProviderLines) $
             withFileCreationMask 0o000 $ do
-              writeWorkerRosterSnapshot spec defaultRoster
               runWorker specPath `shouldReturn` Right ()
               permissionsOf eventPath `shouldReturn` 0o600
 
@@ -1580,7 +1586,6 @@ examples = do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withFakeOnPath temporaryRoot ("codex", completingProviderLines) $
             withFileCreationMask 0o000 $ do
-              writeWorkerRosterSnapshot spec defaultRoster
               runWorker specPath `shouldReturn` Right ()
               permissionsOf eventPath `shouldReturn` 0o600
               journal <- ByteString.readFile eventPath

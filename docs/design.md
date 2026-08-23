@@ -612,9 +612,15 @@ foreign-versioned, or invalid — the refusal names the file and the defect — 
 equally a valid roster that does not load the brand this run's routing
 selected. Neither case falls back to the compiled
 defaults. An absent file is not one of these: it silently *is* the defaults.
-The roster a launch was checked against is the one its detached supervisor
-constructs argv from, carried to it as a snapshot written beside the worker
-specification rather than reread there.
+The cell a launch resolves is recorded in the worker specification it writes,
+and that record — the provider as well as the model, effort, and label — is
+what its detached supervisor constructs argv from. Nothing is resolved a
+second time: a launch that resumes an existing provider session replays the
+assignment that session's previous worker recorded and consults no roster at
+all, so editing `models.toml` between two turns of one session cannot move it
+onto a different model, and a resume still starts when the file has since
+become unusable. A session whose worker predates the record resolves once on
+its first resume and records the result.
 
 A missing or contradictory `pr-origin` marker fails visibly rather than
 guessing.
