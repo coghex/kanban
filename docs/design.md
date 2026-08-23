@@ -1779,8 +1779,24 @@ Each window shows its own reset time; five-hour and weekly windows reset
 independently. A window's second row states both how long until that window
 resets and the local wall clock it resets at, and the countdown takes that
 row's former indent rather than a row of its own: the percentage row above it
-already spends the sidebar's whole interior, and a provider's block is a fixed
-height.
+spends the sidebar's whole interior on its own fixed fields, and a provider's
+block is a fixed height.
+
+Those fields are what the percentage row's whole 24-cell interior is
+allocated to, and none of them grows with what it holds: a seven-cell label
+field, one separator cell, the twelve-cell bracketed bar, and a four-cell
+percentage field — the decimal right-aligned within three cells, then `%`.
+Right-aligning the decimal is what lets one, two, and three digits share a
+column, so the remaining percentage is stated in full at every value a
+provider reports, including a hundred, and the `%` is never the cell that
+falls off the end. A label wider than its field is cut to fit and marked with
+the same ellipsis a card's elided line carries, rather than pushing the bar
+and the percentage past the interior; a narrower one is padded out to it, so
+every bar in a provider's block starts in the same column and two rows' fills
+stay comparable at a glance. Both the cut and the padding are measured in
+terminal cells, because a label of wide characters occupies twice the columns
+its character count suggests, and an external usage command's label is
+arbitrary sanitized text.
 
 A provider's name shares its row with the age of the snapshot on screen. That
 age is drawn for every snapshot rather than only for a stale one, because a
