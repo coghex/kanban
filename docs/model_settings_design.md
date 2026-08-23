@@ -25,7 +25,7 @@ concrete precondition
 - [x] MODEL-7. Record spawn-time assignments in worker specs and replay them on resume — [#480]
 - [x] MODEL-3. Derive display labels and prompt prose from the roster — [#482]
 - [x] MODEL-4. Resolve the Python and plugin spawn sites from the roster — [#483]
-- [ ] MODEL-5. Extend the settings screen to edit role assignments
+- [x] MODEL-5. Extend the settings screen to edit role assignments — [#484]
 - [ ] MODEL-8. Derive the operating mode from the loaded provider set
 - [ ] MODEL-9. Implement no-agent mode: board-only UI and spawn refusal
 - [ ] MODEL-12. Extract the provider adapter interface behind the agent flows
