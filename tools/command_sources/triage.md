@@ -48,14 +48,18 @@ Either path leaves `$REPO` holding one `owner/name` before the first `gh` call. 
 2. Pull fresh open issue data. Prefer `gh` if no GitHub issue-listing connector is available:
 
 ```bash
-gh issue list -R "$REPO" --limit 500 --state open --json number,title,labels,assignees,body,createdAt,updatedAt,url
+gh issue list -R "$REPO" --limit "$ISSUE_LIMIT" --state open --json number,title,labels,assignees,body,createdAt,updatedAt,url
 ```
+
+Step 7 classifies *every* currently open issue and step 10 verifies that it did, so this listing has to be the whole open set rather than its newest page. Set and verify `$ISSUE_LIMIT` as **Complete Snapshots** below specifies, before reading a single issue out of it.
 
 3. Pull open PRs so in-flight work is visible:
 
 ```bash
-gh pr list -R "$REPO" --state open --limit 100 --json number,title,body
+gh pr list -R "$REPO" --state open --limit "$PR_LIMIT" --json number,title,body
 ```
+
+This listing carries a completeness claim of its own: an issue whose closing pull request fell outside it reads as available, and can be chosen as `Start with` for a second agent to collide with. Set and verify `$PR_LIMIT` the same way, before deciding that any issue is not in flight.
 
 An issue referenced by an open PR's `Closes #<n>`, carrying one or more assignees, or labeled `wip` is **in-flight**. Keep it in its normal section, order it under the rules below, and show every applicable work signal: `[in-flight: PR #NNN]`, `[assigned: @login]` (include every assignee), and/or `[wip]`. Never collapse an assignment into a generic `[claimed]` note, and never choose any in-flight issue as `Start with` — an agent picking it would collide with existing work.
 
@@ -74,8 +78,48 @@ gh issue view -R "$REPO" <number> --json number,title,state,closedAt,body,labels
 
 8. Build the Main Sequence dependency groups and the Anytime priority order using the rules below.
 9. Estimate every issue's implementation difficulty as `easy`, `medium`, or `hard` using the rubric below.
-10. Before final output, verify the classification covers all open issues and has no duplicates.
+10. Before final output, verify the classification covers every issue in the verified-complete open-issue snapshot, exactly once and with no duplicates.
 11. Verify approval readiness through the canonical backend, as **Approval Readiness** below specifies, and mark only confirmed-current approvals with `✓`. Put the marker immediately after the title and before any bracket note. This is display-only: it does not affect ordering, classification, in-flight status, or `Start with` eligibility.
+
+## Complete Snapshots
+
+`gh` documents `--limit` as the maximum number of rows to fetch, and it returns
+the newest first. A fixed number therefore drops the *oldest* rows, and it drops
+them silently: a truncated listing is indistinguishable from a shorter tracker.
+Every completeness claim this workflow makes is a claim about the listing it
+read, so each listing has to be the whole collection — or the run has to say it
+was not.
+
+**A listing limit is never a constant.** Each snapshot listing above — the ones
+a completeness claim rests on, not a bounded keyword search for one named issue
+or pull request — carries its own limit variable, raised independently of any
+other: `$ISSUE_LIMIT` for the open-issue listing, and `$PR_LIMIT` for an
+open-pull-request listing where the workflow takes one. Start each at 500, which
+reaches most trackers in one round trip, then check what came back against the
+limit it was taken with:
+
+- **Fewer rows than the limit** — that listing is the complete collection.
+  `--limit` paginates for you, so a short listing is `gh` running out of rows,
+  not out of budget.
+- **Exactly the limit** — the listing may have been cut off at the cap. Double
+  that variable, capped at 10000, and take the listing again.
+
+Repeat until a listing comes back short.
+
+**A completeness check succeeds before the snapshot it covers is used** — for
+classification, batch selection, approval reconciliation, or any tracker
+mutation. Whichever of those this workflow performs, none of them may read a
+snapshot that has not passed, and a partial snapshot is never presented as
+complete.
+
+**Fail visibly.** If a listing errors, or still comes back full once its limit
+variable has reached 10000, that collection was not read and this run cannot
+make the completeness claim it owes. Stop, and name in the diagnostic the
+repository `$REPO`, which collection is incomplete — the **open issues** or the
+**open pull requests** — and the limit the last listing used. Do not fall back
+to the partial snapshot, do not classify or select from what was read, and do
+not present a roadmap or a batch as covering anything. This is a stop, not a
+warning.
 
 ## Approval Readiness
 
@@ -300,7 +344,7 @@ Important formatting rules:
 
 Before answering:
 
-- Confirm all open issue numbers appear once across the three lists.
+- Confirm both listings passed their completeness check before anything was classified from either, and that every open issue number the verified-complete snapshot returned appears once across the three lists.
 - Confirm every `✓` is backed by a reconciliation entry whose `approved` is true, and that no issue carries one on the strength of its label alone.
 - Confirm every candidate the backend reported as `removed` or `unverified` is rendered without `✓` and carries its `[needs canonical review]` or `[approval unverified]` note, and that no such issue is presented as ready to solve or chosen as `Start with`.
 - Confirm every issue has exactly one valid difficulty marker.

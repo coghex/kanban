@@ -185,10 +185,19 @@ OPENING_REPORT = (
 )
 
 # The batch's concrete issue-number range, which is only knowable once the list
-# returns, so it is restated rather than guessed before the read.
+# returns, so it is restated rather than guessed before the read. Issue #492
+# made the listing exhaustive, which split "the list" in two: the range of the
+# complete snapshot spans the whole tracker, and restating *that* would report
+# a batch of fifteen as covering every open issue. So the restatement names the
+# batch that was selected -- after the label/area restriction, the oldest-first
+# sort, and the count -- and `tools/test_triage_family_listing_reach.py` pins
+# that distinction; this constant only has to stay the phrase the ordering is
+# measured from.
 BATCH_RANGE_REPORT = (
-    "Restate the batch as the concrete issue number range the list yields "
-    "before starting the verification below."
+    "Restate the batch as the concrete issue number range it spans — the "
+    "issues actually selected, after the restriction, the sort, and the count, "
+    "not the range of the complete listing they were drawn from — before "
+    "starting the verification below."
 )
 
 # The one sentence that differs per brand because the providers really do pass
