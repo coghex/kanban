@@ -19,7 +19,7 @@ concrete precondition
 ## Processing status
 
 - [x] EPIC. Hold one repository to one board and give its `gh` record an owner — [#499]
-- [ ] GHA-1. Add the repository-scoped lease and its two-process test harness
+- [x] GHA-1. Add the repository-scoped lease and its two-process test harness — [#501]
 - [ ] GHA-2. Hold the repository at launch, refuse a second board, and give record entries an owner
 
 D-1 through D-7 are signed off and fix this decomposition. No open questions
