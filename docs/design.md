@@ -1828,7 +1828,12 @@ Freshness policy:
   snapshot.
 - A live result obtained under an enabled cache is merged into `usage.json`,
   leaving the other provider's stored entry intact. A provider that fails
-  never erases its own last-good stored snapshot.
+  never erases its own last-good stored snapshot. What the merge happens
+  against is the map committed at the moment of the write, not the map this run
+  read before it started probing, so an entry another Kanban process committed
+  while a probe was still running survives; only the providers this run
+  obtained are submitted at all. Section 16 states the transaction that makes
+  that true across processes.
 - The printed output always describes the acquisition path that ran. A forced
   live probe that fails reports that failure rather than falling back to the
   older cached snapshot, even though an enabled cache keeps that snapshot on
@@ -1977,8 +1982,11 @@ failed stays a failure however well the refresh after it went.
 
 With caching enabled, a successful refresh is merged into `usage.json` under
 the pinged brand alone, leaving the other provider's stored entry intact, and
-the replacement is the same atomic rename every other cache write uses. A
-failed refresh or a failed write leaves the previous cache as it was.
+the replacement is the same atomic rename every other cache write uses. The
+pinged brand's entry is the whole of what the command submits, and the merge
+against the committed map is section 16's transaction, so the refresh a
+concurrent Kanban process committed during this ping's own is not rolled back.
+A failed refresh or a failed write leaves the previous cache as it was.
 `--no-cache` and a global `cache = false` suppress those reads and writes and
 nothing else: the ping, the refresh, the printed result, and the exit rules
 above are unchanged, and persistence the user switched off is not a failure.
@@ -2746,6 +2754,7 @@ Suggested paths:
 ~/.config/kanban/settings.json
 ~/.cache/kanban/repos/<owner>-<repo>.json
 ~/.cache/kanban/usage.json
+~/.cache/kanban/usage.lock
 ~/.cache/kanban/logs/<owner>-<repo>/<workflow>-<number>-<timestamp>.jsonl
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.{spec,state}.json
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.events.jsonl
@@ -2828,6 +2837,28 @@ Defaults:
   live usage result is merged into `usage.json` rather than replacing it, so
   one provider's failure never erases the other's stored entry or its own
   last-good one (section 14).
+- Make every write of `usage.json` one transaction, and the only way anything
+  mutates it. The committed map is read, the caller's freshly obtained provider
+  entries are merged onto it, and the merged result is written, all while an
+  exclusive lock on a `usage.lock` file beside the snapshot is held. Two Kanban
+  processes writing at once therefore serialise rather than losing one
+  another's updates: each observes what the other committed, both report
+  success, and both provider entries survive. A caller submits only the entries
+  it just obtained and never composes a whole provider map, so it cannot carry
+  an entry it read before its own probes back over a newer one.
+- Within that merge, an incoming entry replaces the committed entry for its
+  provider only when it is not older by the snapshot's own fetch time. Equal
+  fetch times take the incoming entry; a strictly older one — a slow probe in
+  one process landing after a quick one in another — leaves the committed entry
+  as it is, and the write still reports success.
+- Hold that lock across the read, the merge, and the write and across nothing
+  else. No provider probe, subprocess, or redraw happens under it, so a hung or
+  slow provider in one process can never block another process's write. A
+  transaction that cannot be established fails the write, reported in the same
+  non-fatal cache-write wording a failed write has always used, and never falls
+  back to an unsynchronised whole-file replacement. `--no-cache` and
+  `cache = false` create neither the snapshot nor the lock, since the lock is
+  work under the cache root on the snapshot's behalf.
 - Key repository settings by `owner/name`; do not require modifying the target
   repository. The key is canonical: two non-empty segments of ASCII lowercase
   letters, digits, `.`, `_`, and `-` around exactly one `/`, with no

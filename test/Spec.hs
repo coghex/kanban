@@ -42,6 +42,7 @@ import qualified Spec.Repository.Identity as RepositoryIdentity
 import qualified Spec.Repository.State as RepositoryState
 import Spec.Support.Lanes (Lane (..), SuiteGroup (..), runSuiteInLanes)
 import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
+import Spec.Support.UsageWriters (runUsageWriter, usageWriterVariable)
 import qualified Spec.UI.AutoSolve as AutoSolve
 import qualified Spec.UI.Cards as Cards
 import qualified Spec.UI.CompletedHistory as CompletedHistory
@@ -61,16 +62,26 @@ import qualified Spec.UI.Text as UIText
 import qualified Spec.UI.Usage as UIUsage
 import System.Environment (lookupEnv)
 
--- | Ordinarily the suite. When 'localeProbeVariable' is set this process is
--- the C-locale child a single test re-ran the binary as, and it runs that
--- probe instead — see "Spec.Support.Locale" for why the condition cannot be
--- established from inside an already-started test process.
+-- | Ordinarily the suite. Two markers divert it instead, and each names a
+-- condition that cannot be established from inside an already-started test
+-- process: 'localeProbeVariable' makes this the C-locale child a single test
+-- re-ran the binary as (see "Spec.Support.Locale" for why the locale is fixed
+-- before @main@ runs), and 'usageWriterVariable' makes it one of the
+-- independent processes contending over the usage cache (see
+-- "Spec.Support.UsageWriters" for why a thread would not do).
 --
--- The probe is asked about first and deliberately so: a lane carries its own
--- marker in the environment its children inherit, and a probe started from
--- inside a lane must run the probe rather than that lane a second time.
+-- Both are asked about before the suite and deliberately so: a lane carries
+-- its own marker in the environment its children inherit, and a child started
+-- from inside a lane must run its probe rather than that lane a second time.
+-- Neither marker reaches a child of a probe, so this cannot recurse.
 main :: IO ()
-main = lookupEnv localeProbeVariable >>= maybe (runSuiteInLanes suiteGroups) runLocaleProbe
+main = do
+  localeProbe <- lookupEnv localeProbeVariable
+  usageWriter <- lookupEnv usageWriterVariable
+  case (localeProbe, usageWriter) of
+    (Just probeRoot, _) -> runLocaleProbe probeRoot
+    (Nothing, Just planPath) -> runUsageWriter planPath
+    (Nothing, Nothing) -> runSuiteInLanes suiteGroups
 
 -- | Every group, its lane, and its established order.
 --

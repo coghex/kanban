@@ -34,13 +34,14 @@ where
 
 import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy.Char8 as LazyChar8
+import Data.List (nub)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import Data.Time (getCurrentTime, getCurrentTimeZone)
-import Kanban.Cache (UsageCacheLoad (..), loadUsageCache, writeUsageCache)
+import Kanban.Cache (UsageCacheLoad (..), commitUsageSnapshots, loadUsageCache, usageCommitNotes)
 import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), UsageCommandConfig (..), UsageConfig (..), usageSolveRoundEstimates)
@@ -130,8 +131,13 @@ acquireUsageReport :: UsageAcquisition -> Bool -> ResolvedConfig -> IO (UsageRep
 acquireUsageReport acquisition cacheOn config = do
   (cached, loadWarnings) <- if cacheOn then loadCached else pure (Map.empty, [])
   acquired <- mapM (\provider -> (,) provider <$> acquireOne cached provider) usageProviders
-  writeWarnings <- writeBack cached acquired
-  pure (UsageReport (map (fmap outcomeOf) acquired), loadWarnings <> writeWarnings)
+  writeWarnings <- writeBack acquired
+  -- Both halves can report the same corrupt file: the load above read it, and
+  -- the commit below reads it again inside its own transaction. It is one
+  -- fault and is said once. They are not always the same text -- another
+  -- process may have replaced the file in between -- so this deduplicates
+  -- rather than dropping one side.
+  pure (UsageReport (map (fmap outcomeOf) acquired), nub (loadWarnings <> writeWarnings))
   where
     loadCached = do
       load <- loadUsageCache
@@ -144,12 +150,16 @@ acquireUsageReport acquisition cacheOn config = do
       UsageCacheFirst | Just snapshot <- usableCached cached provider -> pure (AcquiredFromCache snapshot)
       _ -> AcquiredLive <$> fetchProviderUsage config provider
 
-    -- Merged onto whatever was already stored rather than replacing it, so a
-    -- run in which one provider fails preserves the other's cached snapshot
-    -- exactly as the dashboard's own refresh does.
-    writeBack cached acquired
+    -- Only what this run obtained live is handed over, never the map loaded
+    -- above: the probes between the two are exactly the window another Kanban
+    -- process commits its own refresh in, and a map read before them is stale
+    -- by the time it would be written. The merge against what is actually
+    -- committed happens inside 'commitUsageSnapshots', under its lock, which
+    -- is what preserves the other provider's entry -- whether it is the one
+    -- this run failed to refresh or one another process just refreshed.
+    writeBack acquired
       | not cacheOn || Map.null fresh = pure []
-      | otherwise = either (: []) (const []) <$> writeUsageCache (Map.union fresh cached)
+      | otherwise = usageCommitNotes <$> commitUsageSnapshots fresh
       where
         fresh = Map.fromList [(provider, snapshot) | (provider, AcquiredLive (Right snapshot)) <- acquired]
 

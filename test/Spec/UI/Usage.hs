@@ -7,8 +7,14 @@
 -- The golden frames cover what the sidebar looks like with the fixture
 -- snapshots. What they cannot cover is the range: a fixture is one reset
 -- instant, and the rows here are the ones that stop being true off it.
+--
+-- Beneath the drawing sits what a refresh does to the stored snapshot.
+-- 'commitRefreshedUsage' is the dashboard's whole contact with that file and
+-- the only part of the refresh arm outside brick's @EventM@, which no test
+-- here can drive, so it is asserted directly.
 module Spec.UI.Usage (spec) where
 
+import qualified Data.ByteString.Char8 as ByteString
 import Data.Foldable (for_)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -22,7 +28,16 @@ import Kanban.Domain
     UsageSnapshot (..),
     UsageWindow (..),
   )
+import Kanban.Cache
+  ( UsageCacheLoad (..),
+    UsageCommit (..),
+    commitUsageSnapshots,
+    loadUsageCache,
+    usageCacheLockPath,
+    usageCachePath
+  )
 import Kanban.UI (drawApplication)
+import Kanban.UI.Reconcile (commitRefreshedUsage)
 import Kanban.UI.Board
   ( usageAgeText,
     usageResetRowText,
@@ -41,13 +56,86 @@ import Kanban.Usage.Render
     usageSolveRoundsSuffix,
   )
 import Spec.Support.App (testAppState)
+import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Fixtures (fixtureBoard)
 import Spec.Support.Golden (expectGolden, goldenPath)
 import Spec.Support.Render (frameRowText, renderFrameCells)
+import System.Directory (createDirectory, doesFileExist, removeFile)
 import Test.Hspec
 
 spec :: Spec
-spec = describe "usage sidebar" $ do
+spec = do
+  sidebarSpec
+  refreshCommitSpec
+
+-- | What a provider refresh commits, and what it reports back to the notice
+-- line.
+--
+-- The dashboard holds a usage map for the process's whole lifetime, seeded
+-- once at launch, and writing that map back is how a refresh in another
+-- process was reverted (issue #477). What is asserted here is that this seam
+-- hands over the refreshed provider alone and merges against what is actually
+-- stored -- it never receives the dashboard's map at all, which is what makes
+-- the old whole-map write unreachable from the arm above it.
+refreshCommitSpec :: Spec
+refreshCommitSpec = describe "what a dashboard usage refresh commits" $ do
+  it "keeps a provider entry the dashboard never refreshed" $
+    withUsageCache $ do
+      commitUsageSnapshots (Map.fromList [(Claude, storedClaude)]) `shouldReturn` UsageCommit (Right ()) Nothing
+      commitRefreshedUsage True Codex refreshedCodex `shouldReturn` []
+      storedPercentages `shouldReturn` Map.fromList [(Codex, [71]), (Claude, [22])]
+
+  it "writes neither the snapshot nor its lock when caching is off" $
+    withUsageCache $ do
+      commitRefreshedUsage False Codex refreshedCodex `shouldReturn` []
+      snapshotPath <- usageCachePath
+      lockPath <- usageCacheLockPath
+      doesFileExist snapshotPath `shouldReturn` False
+      doesFileExist lockPath `shouldReturn` False
+      -- The paired positive control, so the absence above is a decision the
+      -- flag made rather than something the fixture could not do anyway.
+      commitRefreshedUsage True Codex refreshedCodex `shouldReturn` []
+      doesFileExist snapshotPath `shouldReturn` True
+      doesFileExist lockPath `shouldReturn` True
+
+  -- The notice line carries both halves of the commit. A failed write was
+  -- always reported there; the warning about a stored file the merge could
+  -- not read is new, and reaches the same place for the same reason -- it is
+  -- non-fatal and the user is the only one who can act on it.
+  it "reports a failed commit and a corrupt stored snapshot on the notice line" $
+    withUsageCache $ do
+      snapshotPath <- usageCachePath
+      commitUsageSnapshots (Map.fromList [(Claude, storedClaude)]) `shouldReturn` UsageCommit (Right ()) Nothing
+      ByteString.writeFile snapshotPath "not JSON"
+      warned <- commitRefreshedUsage True Codex refreshedCodex
+      warned `shouldSatisfy` all (Data.Text.isPrefixOf "usage cache ignored: ")
+      warned `shouldSatisfy` ((== 1) . length)
+      lockPath <- usageCacheLockPath
+      removeFile lockPath
+      createDirectory lockPath
+      failed <- commitRefreshedUsage True Codex refreshedCodex
+      failed `shouldSatisfy` all (Data.Text.isPrefixOf "cache write failed: ")
+      failed `shouldSatisfy` ((== 1) . length)
+
+withUsageCache :: IO result -> IO result
+withUsageCache action =
+  withTemporaryCacheRoot $ \cacheRoot -> withEnvironmentValue "XDG_CACHE_HOME" cacheRoot action
+
+storedPercentages :: IO (Map.Map UsageProvider [Int])
+storedPercentages = do
+  load <- loadUsageCache
+  case load of
+    UsageCacheLoaded snapshots -> pure (fmap (map (.usagePercentLeft) . (.usageWindows)) snapshots)
+    other -> fail ("expected a loaded usage cache, got " <> show other)
+
+-- | Two entries an hour apart, so the refreshed one is accepted on its own
+-- stamp rather than by arriving second.
+storedClaude, refreshedCodex :: UsageSnapshot
+storedClaude = UsageSnapshot [UsageWindow "week" 22 goldenNow] goldenNow
+refreshedCodex = UsageSnapshot [UsageWindow "week" 71 goldenNow] (addUTCTime 3600 goldenNow)
+
+sidebarSpec :: Spec
+sidebarSpec = describe "usage sidebar" $ do
   -- §6 fixes the sidebar at 28 cells and derives the 164-cell four-column
   -- threshold from it, so the countdown has to be paid for out of the
   -- existing rows rather than out of the width.

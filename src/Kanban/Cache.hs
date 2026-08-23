@@ -6,23 +6,27 @@ module Kanban.Cache
     CompletedCacheLoad (..),
     GhGroupRecordLoad (..),
     UsageCacheLoad (..),
+    UsageCommit (..),
+    commitUsageSnapshots,
     completedCacheSchemaVersion,
     ghGroupRecordPath,
     loadCompletedCache,
     loadGhGroupRecord,
     loadRepositoryCache,
     loadUsageCache,
+    mergeUsageSnapshots,
     removeGhGroupRecord,
     repositoryCachePath,
     repositoryCacheSchemaVersion,
+    usageCacheLockPath,
     usageCachePath,
+    usageCommitNotes,
     writeCompletedCache,
     writeGhGroupRecord,
-    writeUsageCache,
   )
 where
 
-import Control.Exception (IOException, bracketOnError, try)
+import Control.Exception (IOException, bracketOnError, catch, finally, onException, try)
 import Control.Monad (when)
 import Data.Aeson
   ( FromJSON (parseJSON),
@@ -30,6 +34,7 @@ import Data.Aeson
     ToJSON (toJSON),
     Value,
     eitherDecodeFileStrict',
+    eitherDecodeStrict',
     encode,
     fromJSON,
     object,
@@ -38,12 +43,15 @@ import Data.Aeson
     (.=),
   )
 import Data.Aeson.Types (parse)
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
-import Kanban.Domain (CompletedHistory, RepoSnapshot, Repository (..), UsageProvider, UsageSnapshot)
+import GHC.IO.Handle.Lock (FileLockingNotSupported, LockMode (ExclusiveLock), hLock, hUnlock)
+import Kanban.Domain (CompletedHistory, RepoSnapshot, Repository (..), UsageProvider, UsageSnapshot (..))
 import Kanban.Paths (createPrivateDirectory)
 import Kanban.Process (OwnedProcessGroup)
 import System.Directory
@@ -55,7 +63,9 @@ import System.Directory
   )
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (Handle, hClose, openBinaryTempFile)
-import System.Posix.Files (setFileMode)
+import System.IO.Error (isDoesNotExistError)
+import System.Posix.Files (setFdMode, setFileMode)
+import System.Posix.IO (OpenFileFlags (..), OpenMode (ReadWrite), closeFd, defaultFileFlags, fdToHandle, openFd)
 
 data CacheLoad
   = CacheAbsent
@@ -201,6 +211,22 @@ usageCachePath :: IO FilePath
 usageCachePath = do
   cacheRoot <- getXdgDirectory XdgCache "kanban"
   pure (cacheRoot </> "usage.json")
+
+-- | The file every usage-cache transaction serialises on.
+--
+-- Separate from @usage.json@ rather than the snapshot file itself, because
+-- 'writeCacheFile' replaces that file by renaming a new one over it: a lock
+-- taken on the snapshot would be held on an inode the next writer has already
+-- replaced, and two processes would find themselves locking different files
+-- under one path. This one is only ever created, never replaced, so every
+-- process that opens it opens the same inode.
+--
+-- Nothing reads or writes it: it carries no payload, only the exclusive lock
+-- 'commitUsageSnapshots' holds across its read, merge, and write.
+usageCacheLockPath :: IO FilePath
+usageCacheLockPath = do
+  cacheRoot <- getXdgDirectory XdgCache "kanban"
+  pure (cacheRoot </> "usage.lock")
 
 ghGroupRecordPath :: Repository -> IO FilePath
 ghGroupRecordPath repository = do
@@ -351,10 +377,156 @@ loadDecodedUsageCache value = case parse (withObject "usage cache" (.: "schemaVe
         Error message -> UsageCacheInvalid ("usage cache ignored: " <> Text.pack message)
         Success envelope -> UsageCacheLoaded envelope.usageSnapshots
 
-writeUsageCache :: Map UsageProvider UsageSnapshot -> IO (Either Text ())
-writeUsageCache snapshots = do
+-- | What one usage-cache transaction did.
+--
+-- The two halves are independent on purpose. 'usageCommitResult' is the
+-- write: @kanban --ping@ makes a failed one fatal (section 14), so it may not
+-- be blurred into anything advisory. 'usageCommitWarning' is the
+-- 'UsageCacheInvalid' reading of the file the merge started from, which stays
+-- non-fatal exactly as it is on the @--usage@ and ping load paths -- a corrupt
+-- file is warned about and then replaced, not refused. A commit can carry
+-- both: a corrupt base whose replacement then failed to land.
+data UsageCommit = UsageCommit
+  { usageCommitResult :: Either Text (),
+    usageCommitWarning :: Maybe Text
+  }
+  deriving stock (Eq, Show)
+
+-- | A commit's failure and warning flattened into the note list the @--usage@
+-- path and the dashboard's notice line both carry.
+--
+-- Ping does not use it: there the failure is fatal and the warning is not, so
+-- the two must stay apart.
+usageCommitNotes :: UsageCommit -> [Text]
+usageCommitNotes commit =
+  either (: []) (const []) commit.usageCommitResult
+    <> maybe [] (: []) commit.usageCommitWarning
+
+-- | The one way anything mutates @usage.json@.
+--
+-- The caller hands over the provider entries it just obtained and nothing
+-- else. It never composes the whole stored map, because it cannot have one
+-- that is still current: every caller reads the file before it probes a
+-- provider, and a probe is exactly the window another Kanban process commits
+-- its own refresh in. Merging a map read that long ago is how a successful
+-- refresh in one process was reverted by another (issue #477).
+--
+-- So the map the merge happens against is read here, inside an exclusive
+-- cross-process lock on 'usageCacheLockPath', and the merged result is written
+-- before the lock is released. Two processes committing different providers
+-- therefore serialise, each observing what the other committed, and both
+-- entries survive.
+--
+-- The lock spans the read, the merge, and the write and nothing else. No
+-- provider probe, subprocess, or redraw happens under it, so a hung provider
+-- in one process cannot block another process's commit.
+--
+-- Establishing the transaction is not optional. A lock that cannot be taken
+-- fails the commit in the same @cache write failed: ...@ shape a failed write
+-- has always used; it never degrades into the unsynchronised whole-file
+-- replacement this exists to remove.
+commitUsageSnapshots :: Map UsageProvider UsageSnapshot -> IO UsageCommit
+commitUsageSnapshots fresh = do
   path <- usageCachePath
-  writeCacheFile path (UsageCacheEnvelope usageCacheSchemaVersion snapshots)
+  lockPath <- usageCacheLockPath
+  opened <- try @IOException (createPrivateDirectory XdgCache (takeDirectory path) >> openUsageCacheLock lockPath)
+  case opened of
+    Left exception -> pure (transactionFailed "could not be established" (Text.pack (show exception)))
+    Right handle -> (`finally` hClose handle) $ do
+      taken <- takeExclusiveLock handle
+      case taken of
+        Left message -> pure (transactionFailed "could not be established" message)
+        Right () -> (`finally` hUnlock handle) $ do
+          committed <- readCommittedUsage path
+          case committed of
+            Left exception -> pure (transactionFailed "found the stored usage cache unreadable" (Text.pack (show exception)))
+            Right (base, warning) -> do
+              written <- writeCacheFile path (UsageCacheEnvelope usageCacheSchemaVersion (mergeUsageSnapshots fresh base))
+              pure (UsageCommit written warning)
+  where
+    -- The one wording every way of failing to complete the transaction is
+    -- reported in, so a caller that only knows "the cache write failed" is
+    -- never told anything else and a reader of the message still learns which
+    -- step gave way.
+    transactionFailed what detail =
+      UsageCommit (Left ("cache write failed: usage cache transaction " <> what <> ": " <> detail)) Nothing
+
+-- | Merges freshly obtained provider entries onto the committed map.
+--
+-- A provider the caller says nothing about keeps its committed entry
+-- untouched -- that is the promise sections 14 and 16 make, and the reason a
+-- caller submits only what it obtained.
+--
+-- A provider the caller does name replaces its committed entry only when the
+-- incoming snapshot is not older by 'usageFetchedAt'. Equal timestamps take
+-- the incoming one: two snapshots of the same instant describe the same
+-- windows, and preferring the stored one would make a first write to an
+-- entry's own timestamp behave differently from a rewrite of it. A strictly
+-- older snapshot -- a slow probe in one process landing after a quick one in
+-- another -- leaves the committed entry alone.
+mergeUsageSnapshots :: Map UsageProvider UsageSnapshot -> Map UsageProvider UsageSnapshot -> Map UsageProvider UsageSnapshot
+mergeUsageSnapshots fresh committed = Map.foldrWithKey accept committed fresh
+  where
+    accept provider snapshot = Map.insertWith notOlder provider snapshot
+    notOlder incoming existing
+      | incoming.usageFetchedAt < existing.usageFetchedAt = existing
+      | otherwise = incoming
+
+-- | The committed map as the merge must see it, with the three readings the
+-- transaction has to keep apart.
+--
+-- A file that is not there is an empty base and says nothing: that is the
+-- ordinary first commit. A file this build does not claim to understand is the
+-- same silence 'loadUsageCache' gives it, for the same reason -- the version
+-- gate, not the decoder, decides.
+--
+-- A file that /is/ there and cannot be read at all is neither. Treating an I\/O
+-- failure as an empty base would merge onto nothing and replace a stored map
+-- whose contents are still unknown, which is the lost update in a different
+-- costume, so it fails the commit instead. A file that reads but does not
+-- decode is corruption: the warning 'loadUsageCache' already gives it, and the
+-- merged result then replaces it.
+readCommittedUsage :: FilePath -> IO (Either IOException (Map UsageProvider UsageSnapshot, Maybe Text))
+readCommittedUsage path = do
+  contents <- try @IOException (ByteString.readFile path)
+  pure $ case contents of
+    Left exception
+      | isDoesNotExistError exception -> Right (Map.empty, Nothing)
+      | otherwise -> Left exception
+    Right bytes -> Right $ case eitherDecodeStrict' bytes :: Either String Value of
+      Left message -> (Map.empty, Just ("usage cache ignored: " <> Text.pack message))
+      Right value -> case loadDecodedUsageCache value of
+        UsageCacheAbsent -> (Map.empty, Nothing)
+        UsageCacheInvalid message -> (Map.empty, Just message)
+        UsageCacheLoaded snapshots -> (snapshots, Nothing)
+
+-- | Opens the lock file, creating it private.
+--
+-- The mode is forced on every acquisition rather than at creation alone: an
+-- @O_CREAT@ mode is still reduced by the process umask, and a file an earlier
+-- release or a stray umask left at another mode is not re-created by the open
+-- that finds it. It is set through the descriptor rather than the path so a
+-- concurrent process replacing the name cannot receive the chmod.
+--
+-- Close-on-exec is set because a leaked descriptor keeps the lock: a
+-- @flock@ belongs to the open file description, which @fork@ shares, so a
+-- child spawned while the lock is held would hold it for its own lifetime --
+-- and this process spawns long-lived agents.
+openUsageCacheLock :: FilePath -> IO Handle
+openUsageCacheLock path = do
+  descriptor <- openFd path ReadWrite defaultFileFlags {creat = Just 0o600, cloexec = True}
+  (setFdMode descriptor 0o600 >> fdToHandle descriptor) `onException` closeFd descriptor
+
+-- | Takes the exclusive lock, reporting rather than throwing.
+--
+-- A platform with no file locking at all is reported like any other failure to
+-- establish the transaction, because that is what it is. Falling through to an
+-- unsynchronised write there would restore the defect on exactly the platform
+-- that cannot be protected from it.
+takeExclusiveLock :: Handle -> IO (Either Text ())
+takeExclusiveLock handle =
+  ((Right <$> hLock handle ExclusiveLock) `catch` (\exception -> pure (Left (Text.pack (show (exception :: IOException))))))
+    `catch` (\exception -> pure (Left (Text.pack (show (exception :: FileLockingNotSupported)))))
 
 writeCacheFile :: ToJSON value => FilePath -> value -> IO (Either Text ())
 writeCacheFile path value = do

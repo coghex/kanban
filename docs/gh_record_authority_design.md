@@ -18,12 +18,13 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Hold one repository to one board and give its `gh` record an owner
-- [ ] GHA-1. Add the repository-scoped lease and its two-process test harness
+- [x] EPIC. Hold one repository to one board and give its `gh` record an owner — [#499]
+- [x] GHA-1. Add the repository-scoped lease and its two-process test harness — [#501]
 - [ ] GHA-2. Hold the repository at launch, refuse a second board, and give record entries an owner
 
 D-1 through D-7 are signed off and fix this decomposition. No open questions
-remain.
+remain. D-3 was amended after processing found its migration premise false
+against the tree, and that amendment carries its own readiness signoff.
 
 ## Epic contract
 
@@ -39,8 +40,8 @@ remain.
 - **Users and operators:** anyone who leaves a Kanban board open in two
   terminals on the same repository; and every future board, because a lost
   record entry is a `gh` no later run knows to reclaim.
-- **Arc label:** `None proposed` — no existing label fits; a new one is a
-  processing-time question.
+- **Arc label:** `board-authority`, created during processing — "One-board-per-repository
+  lease and cross-process authority over the durable gh process-group record".
 
 ## Current state and evidence
 
@@ -134,6 +135,38 @@ what it found. `censused = True` is written only from failed-cleanup paths
 at risk of being killed by another board; the safety here rests on that
 coincidence rather than on anything the design says.
 
+### The unusable-record refusal never clears the record
+
+`loadGhGroupRecord` returns `GhGroupRecordUnusable` for four distinct causes —
+an `IOException`, a JSON decode failure, an unsupported schema version, and a
+repository-identity mismatch (`src/Kanban/Cache.hs:219-223`) — all carried in
+one constructor as free text. `Cache.hs:135` states the intent: such a record is
+"never silently treated as 'nothing recorded'".
+
+The reclaim honors that by refusing —
+`GhGroupRecordUnusable message -> refuse message`
+(`src/Kanban/GitHub/Guard.hs:351`) — and `refuse` (`:374-375`) only records a
+cleanup failure and returns `Left`. It never removes the file.
+`removeGhGroupRecord` has exactly two call sites, `dropGhGroup`'s empty-list
+branch (`:308`) and the path taken once every entry is reclaimed (`:366`), and
+neither is reachable from the unusable branch, because the refusal precedes any
+reclaim and any spawn. `recordedGhGroups` (`:314-319`) does map an unusable load
+to `[]`, but no writer ever runs. No test anywhere pins this behavior.
+
+So an unusable record refuses every board refresh, in that process and in every
+later one, until a human deletes
+`$XDG_CACHE_HOME/kanban/gh-groups/<owner-name>.json`. For a genuinely corrupt
+record that is correct and deliberate. What it means for a *deliberate* schema
+bump is that the cost is not one refusal per installation but a permanent
+refusal — while `src/Kanban/UI/Reconcile.hs:309` goes on telling the user "the
+next refresh re-checks it and will proceed once it is gone", which nothing would
+ever make true.
+
+That matters because a record file exists precisely when an earlier refresh
+could not confirm its `gh` dead — a state that self-heals today, since the
+record loads, the reclaim censuses the group, and `:366` clears it. A bump would
+convert a self-healing state into a wedged one. D-3 is amended accordingly.
+
 ### Deduplication
 
 Five open issues read in full. None covers this. `#132` (verified `gh`
@@ -149,6 +182,14 @@ process-group record.
 board; it says nothing about several boards on one repository, so that
 configuration is currently neither supported nor excluded. D-1 closes that gap by
 adding the missing non-goal.
+
+Both arcs therefore amend §3, and the two edits must not undo each other.
+`#354`'s MRB-3 *narrows* the existing "Multi-repository aggregation in one
+running board" non-goal — an overturn approved on 2026-08-10 — while this arc
+*adds* one. The wording that survives both is about **repository → board**
+uniqueness ("a repository is worked by one board at a time"), never about one
+board per process, which is precisely what MRB-3 is making false. Whichever
+lands second reconciles against the other, and both owe a witness declaration.
 
 ## Desired experience
 
@@ -180,7 +221,8 @@ A repository is worked by one board at a time, and Kanban says so plainly.
 - A startup refusal — diagnostic plus non-zero exit — distinct in wording and in
   meaning from the two refusals that already exist (D-2 as amended, D-4).
   §17 itself is untouched (D-2 as amended).
-- Owner identity on durable record entries, at schema version 2 (D-3).
+- Optional owner identity on durable record entries, with no schema version
+  change and no migration (D-3 as amended).
 - A test harness able to run two independent processes against one isolated
   cache root and pause both at a shared state.
 
@@ -241,14 +283,20 @@ the board that started it.
 
 `OwnedProcessGroup` (`src/Kanban/Process.hs:67-82`) gains the identity of the
 board that owns the entry — PID plus start time, the same shape
-`Kanban.Process` already uses to survive PID reuse. `ghGroupRecordSchemaVersion`
-goes to 2.
+`Kanban.Process` already uses to survive PID reuse — as an **optional** field.
+`ghGroupRecordSchemaVersion` stays 1.
 
-An existing version-1 record then loads as `GhGroupRecordUnusable`, which is
-already a refusal rather than a silent discard (`Cache.hs:221-224`). That is a
-safe one-time cost and it is deliberate: the alternative — an optional field —
-buys compatibility at the price of a permanent "owner unknown" branch that every
-reader must fail closed on. D-3 chose the bump.
+The change is additive: every existing entry is otherwise valid and fully
+readable by the new binary, and the only thing that could make it unreadable is
+*requiring* the new key. Requiredness, not the version number, is what would
+break an existing record — a required field fails `.:` on a missing key with or
+without a bump, and lands in the never-clearing refusal above. An optional field
+decoded with `.:?` reads a pre-change record unchanged, with the owner absent,
+which is exactly what it is. `WorkerState` already carries a
+`Maybe ProcessIdentity` on a durable record for this reason, behind a
+hand-written decoder using `.:?` and `.!=`
+(`src/Kanban/Worker/Types.hs:185,197-210`); `OwnedProcessGroup` uses the derived
+instance today (`Process.hs:84-85`), so it gains one of its own.
 
 What attribution buys under D-1 is narrower than it would have been under a
 coordinating design, and worth stating exactly: with one board per repository,
@@ -258,6 +306,14 @@ leftovers as such, and how the reclaim's message can be true about what it found
 instead of calling it "an earlier GitHub refresh". Because that narrower value
 has exactly one consumer, D-5 ships it in the same slice as the lease rather
 than on its own.
+
+It is also not the only signal available for that message. Under D-4 a board
+holds the lease for its whole life, so any entry already present when a process
+performs its first reclaim was necessarily written by a process that is now
+dead, while entries appearing later in the same process are that process's own.
+That distinction needs no stored owner at all, and it is what lets the corrected
+message be true of a pre-change record too. The owner adds *which* board and
+when it started, rather than supplying the distinction itself.
 
 ### The refusal
 
@@ -318,23 +374,45 @@ form.
 > between amending D-2 and reopening D-4, and amended D-2. The "refused
 > immediately, no waiting" half was never in question and is unchanged.
 
-### D-3. Record entries carry their owner's identity, at schema version 2
+### D-3. Record entries carry their owner's identity, as an optional field
 
-`OwnedProcessGroup` gains an owner `ProcessIdentity`;
-`ghGroupRecordSchemaVersion` becomes 2; version-1 records load as unusable
-exactly once and are cleared by the refusal path that already handles that.
+*Amended after the unusable-record finding; see the history note below.*
+
+`OwnedProcessGroup` gains an owner `ProcessIdentity` as an **optional** field,
+decoded with `.:?`. `ghGroupRecordSchemaVersion` stays 1. Records written before
+the change load unchanged, with the owner absent.
 
 **Rationale:** an entry that says what group it is but not whose forces every
-reader to guess. The optional-field alternative avoids a one-time invalidation
-by adding a permanent unknown-owner branch that must fail closed everywhere,
-forever.
+reader to guess, and the change that fixes that is additive. A required field —
+with or without a version bump — makes every existing record unreadable, and the
+existing unusable-record path refuses the fetch without ever clearing it, so the
+cost is not one refusal per installation but a permanent refusal until a human
+deletes the file. The "permanent unknown-owner branch that must fail closed
+everywhere" the original decision feared does not exist under D-1: `provablyOurs`
+keys on the censused flag and on identity matching, never on the owner
+(`src/Kanban/GitHub/Guard.hs:437-439`), so an absent owner fails nothing closed.
+It changes one message.
 
-**Consequences:** a durable schema change, and one refusal per installation on
-first upgrade. Under D-1 the value is crash recovery and honest messages rather
-than live-group protection — which is why D-5 ships it beside its one consumer
-rather than as its own slice.
+**Consequences:** no migration, no invalidation, and no first-upgrade cost at
+all. The schema version stays available for a future change that really is
+incompatible. `OwnedProcessGroup` gains a hand-written `FromJSON` in place of the
+derived one. GHA-2 no longer carries a durable schema change, which retires the
+bundling tension D-5 had accepted. Under D-1 the value remains crash recovery
+and honest messages rather than live-group protection.
 
-**Signed off:** by the user, this session.
+**Signed off:** by the user, this session, in both its original and its amended
+form.
+
+> **History.** D-3 was first signed off as *"record entries carry their owner's
+> identity, at schema version 2"*, on the stated premise that version-1 records
+> "load as unusable exactly once and are cleared by the refusal path that
+> already handles that". Processing verified that premise against the tree and
+> found it false — the refusal never clears, as *The unusable-record refusal
+> never clears the record* records. The user was shown the finding and the three
+> directions it opened: repair the premise, have GHA-2 delete the record on a
+> signal that today merges four causes, or take the optional field the original
+> decision had rejected. The user chose the optional field. That the entry
+> carries its owner at all was never in question and is unchanged.
 
 ### D-4. The refusal happens at launch, and the lease is held for the process's life
 
@@ -377,19 +455,22 @@ required every action path to respect.
 
 ### D-5. Attribution folds into GHA-2 rather than taking its own slice
 
-The owner identity, the schema bump, and the corrected reclaim message land in
-the same pull request as the lease acquisition and the refusal.
+The owner identity and the corrected reclaim message land in the same pull
+request as the lease acquisition and the refusal.
 
 **Rationale:** the user's call. Under D-4 the reclaim only ever runs against a
 dead board's record, so attribution has exactly one consumer and shipping it
-apart from that consumer would land a schema change nothing yet reads.
+apart from that consumer would land a field nothing yet reads.
 
-**Consequences:** GHA-2 carries a durable schema change alongside a behavior
-change. `CLAUDE.md`'s *"Don't bundle unrelated changes into one pull request"*
-pushes against that, and this decision accepts the tension deliberately rather
-than by oversight. The arc has two slices.
+**Consequences:** the arc has two slices. Under D-3 as amended there is no
+durable schema change to bundle, so `CLAUDE.md`'s *"Don't bundle unrelated
+changes into one pull request"* no longer pushes against this decision the way
+it did when D-5 was taken: the tension D-5 accepted deliberately has been
+retired rather than merely tolerated, and the schema half is no longer a split
+point because there is no schema half.
 
-**Signed off:** by the user, this session.
+**Signed off:** by the user, this session. The amendment to D-3 narrowed its
+consequences; the decision itself is unchanged.
 
 ### D-6. The arc remains an epic
 
@@ -441,7 +522,8 @@ cause.
 
 ### Q-3. Should a record entry name the board that owns it?
 
-Resolved by D-3 — yes, with `ghGroupRecordSchemaVersion` bumped to 2.
+Resolved by D-3 as amended — yes, as an optional field, with
+`ghGroupRecordSchemaVersion` left at 1 and no migration.
 
 ### Q-4. Where does the refusal land?
 
@@ -486,16 +568,24 @@ the mechanism, and the decomposition.
   proceeding without human action; a board crashing with a live `gh` registered,
   so the next one both takes the lease and reclaims; two boards on *different*
   repositories proceeding concurrently (the authority must not globally
-  serialize); a version-1 record loading as unusable exactly once and clearing;
-  and the single-board case behaving identically to today, which is the arc's
-  loudest invariant.
+  serialize); a record written before the owner field loading unchanged with its
+  owner absent, and still drawing a true reclaim message; and the single-board
+  case behaving identically to today, which is the arc's loudest invariant.
 - The refusal's wording is itself a test subject: the startup diagnostic must be
   distinguishable from `Reconcile.hs:305` and `Events.hs:550`, which mean
   something else, and must carry the holder's PID (D-7).
 - The exit status is part of the contract, not an afterthought — a second
   `kanban` exits non-zero, which is what makes the refusal scriptable.
-- `design.md` is `pr-atomic`, so every §15 or §17 amendment lands in the same
-  pull request as the behavior it describes, not as a documentation slice.
+- `design.md` is `pr-atomic`, so the §3 and §15 amendments land in the same pull
+  request as the behavior they describe, not as a documentation slice. (This
+  bullet said "§15 or §17" before D-2 was amended; §17 is untouched and §3 is
+  what gains an entry.)
+- §3's entries are machine-checked, which the §3 amendment has to satisfy in the
+  same pull request: `test/Spec/Design/Witnesses.hs` asserts that declarations
+  and document entries match in *both* directions, so the new non-goal lands with
+  a witness declaration — or an explicit `Unwitnessed` reason — beside it. A
+  witness may not read a path `tools/test_source_distribution.py` excludes, which
+  rules out resting it on this document.
 
 ## Delivery plan
 
@@ -529,29 +619,34 @@ Two slices, D-5. Every decision this plan depends on is signed off.
   a dead board's record recognizes it as such rather than calling it "an earlier
   GitHub refresh".
 - **Scope:** lease acquisition during startup and release at exit; the refusal
-  diagnostic and exit status; owner `ProcessIdentity` on `OwnedProcessGroup`;
-  `ghGroupRecordSchemaVersion` to 2 with its one-time version-1 invalidation;
-  the reclaim's corrected message; and the `design.md` amendments — §3's new
-  non-goal and §15's retired cross-process sentence. §17 is untouched (D-2 as
-  amended). `design.md` is `pr-atomic`, so all of that lands here rather than
-  separately.
+  diagnostic and exit status; an optional owner `ProcessIdentity` on
+  `OwnedProcessGroup`, behind the hand-written decoder that keeps pre-change
+  records readable (`ghGroupRecordSchemaVersion` stays 1, D-3 as amended); the
+  reclaim's corrected message; and the `design.md` amendments — §3's new
+  non-goal with its witness declaration, and §15's retired cross-process
+  sentence. §17 is untouched (D-2 as amended). `design.md` is `pr-atomic`, so all
+  of that lands here rather than separately.
 - **Phase:** 2
 - **Depends on:** `GHA-1`
 - **Ordering:** `critical path`
 - **Relevant decisions:** `D-1`, `D-2`, `D-3`, `D-4`, `D-5`
 - **Acceptance signals:** a second `kanban` on a held repository exits non-zero
   with a diagnostic naming the repository and the holder's PID; the original
-  two-process reproduction can no longer be staged; a version-1 record loads as
-  unusable exactly once and is cleared; a dead board's entries are reclaimed and
-  described as a dead board's; and a single board behaves identically to today,
-  which is the arc's loudest invariant.
+  two-process reproduction can no longer be staged; a record written before the
+  owner field loads unchanged with its owner absent, and is still described
+  truthfully; a dead board's entries are reclaimed and described as a dead
+  board's; and a single board behaves identically to today, which is the arc's
+  loudest invariant.
 - **Out of scope:** the reclaim mechanism itself — this changes what the reclaim
   knows and says, never how it censuses or kills; the agent workers' own `gh`
   calls; `--usage` and `--ping`.
 - **Open questions:** `None`
-- **Note:** this slice deliberately carries a durable schema change beside a
-  behavior change (D-5), against `CLAUDE.md`'s bundling guidance. If the review
-  burden proves too high, the schema half is the clean split point.
+- **Note:** this slice used to carry a durable schema change beside a behavior
+  change, and named that half as its split point if the review burden proved too
+  high. D-3 as amended removes the schema change, so neither the bundling
+  tension nor that split point applies any more. What remains is the lease, the
+  refusal, the optional owner field, the corrected message, and the `design.md`
+  amendments.
 
 ## Source notes
 

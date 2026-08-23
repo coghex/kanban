@@ -17,11 +17,11 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. The pull-request template's marker-absence rule is verified once, by hand, and held by nothing
+- [x] PRR-1. The pull-request template's marker-absence rule is verified once, by hand, and held by nothing — [#494]
 
 ## 1. Acceptance that cannot fail a later wrong implementation
 
-### PRR-1. The pull-request template's marker-absence rule is verified once, by hand, and held by nothing
+### [#494] PRR-1. The pull-request template's marker-absence rule is verified once, by hand, and held by nothing
 
 > **Captured note:** PR #456 added `.github/pull_request_template.md`, whose
 > explanatory comment describes the `pr-origin` marker's three rules while
