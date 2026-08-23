@@ -13,7 +13,7 @@ import qualified Data.Text as Text
 import Data.Time (UTCTime, hoursToTimeZone)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Kanban.CLI (Options (..), optionsParserInfo)
-import Kanban.Cache (UsageCacheLoad (..), loadUsageCache, writeUsageCache)
+import Kanban.Cache (UsageCacheLoad (..), UsageCommit (..), commitUsageSnapshots, loadUsageCache, usageCacheLockPath, usageCachePath)
 import Kanban.Config
   ( RawConfig (..),
     ResolvedConfig (..),
@@ -44,7 +44,8 @@ import Kanban.Usage
 import Options.Applicative (defaultPrefs, execParserPure, getParseResult)
 import Spec.Support.Env (createTemporaryDirectory, withEnvironmentValue, withTemporaryCacheRoot, writeExecutableScript)
 import Spec.Support.Fixtures (testResolvedConfig)
-import System.Directory (removePathForcibly, withCurrentDirectory)
+import Spec.Support.UsageWriters (UsageWriter (..), usageWriterCommand)
+import System.Directory (doesFileExist, removePathForcibly, withCurrentDirectory)
 import System.FilePath ((</>))
 import System.IO (readFile')
 import Test.Hspec
@@ -411,6 +412,58 @@ spec = do
         stored <- storedCache
         fmap (map (.usagePercentLeft) . (.usageWindows)) stored `shouldBe` Map.fromList [(Codex, [12]), (Claude, [12])]
 
+    -- The snapshot is one of two things caching off has to leave alone. The
+    -- other is whatever the write needs in order to serialise: a lock file
+    -- created on a run that was forbidden to write is still a file the run
+    -- created under the cache root on the snapshot's behalf. A configured
+    -- usage command's own scratch directory is not, and is left out of this
+    -- deliberately -- section 14 permits it either way.
+    it "creates neither the snapshot nor its lock under a cold cache root when caching is off" $
+      withUsageCacheRoot $ \root -> do
+        codexScript <- recordingProvider root "codex" 71
+        claudeScript <- recordingProvider root "claude" 22
+        _ <- acquireUsageReport UsageForceFresh False (configuredWith codexScript claudeScript)
+        snapshotPath <- usageCachePath
+        lockPath <- usageCacheLockPath
+        doesFileExist snapshotPath `shouldReturn` False
+        doesFileExist lockPath `shouldReturn` False
+        -- The paired positive control: the same fixture, caching on, creates
+        -- both. Without it "did not create" would pass on a run that could
+        -- not have created anything anyway.
+        _ <- acquireUsageReport UsageForceFresh True (configuredWith codexScript claudeScript)
+        doesFileExist snapshotPath `shouldReturn` True
+        doesFileExist lockPath `shouldReturn` True
+
+    -- The lost update issue #477 reports, driven through the acquisition path
+    -- itself. The caller reads the cache, then spends real time probing a
+    -- provider, and that is the window another Kanban process commits its own
+    -- refresh in. The map read before the probe named no Claude at all, so
+    -- writing it back as the whole file deleted the entry the other process
+    -- had just committed -- a loss the same-provider ordering rule cannot
+    -- catch, because there is no same provider involved.
+    --
+    -- Claude is probed live here and fails, so nothing this run obtained has
+    -- anything to say about Claude. Everything Claude ends up with came from
+    -- the other process.
+    --
+    -- It also pins the transaction's boundary. The other process commits from
+    -- inside the Codex probe and this run waits for that command to return, so
+    -- a lock held across the probe rather than across the read, merge, and
+    -- write alone would block the writer, and the probe would time out instead
+    -- of answering.
+    it "keeps a refresh another process committed while this one was still probing" $
+      withUsageCacheRoot $ \root -> do
+        outsideCommit <-
+          usageWriterCommand
+            (root </> "writers")
+            (UsageWriter "outside-claude" Claude (UsageSnapshot [UsageWindow "outside-window" 99 laterInstant] laterInstant))
+        codexScript <- providerCommittingFirst root "codex" 71 outsideCommit
+        (report, warnings) <- acquireUsageReport UsageCacheFirst True (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
+        warnings `shouldBe` []
+        lookup Codex (reportWindows report) `shouldBe` Just (Right [("codex-window", 71)])
+        stored <- storedCache
+        fmap (map (.usagePercentLeft) . (.usageWindows)) stored `shouldBe` Map.fromList [(Codex, [71]), (Claude, [99])]
+
 parseOptions :: [String] -> Maybe Options
 parseOptions arguments = getParseResult (execParserPure defaultPrefs optionsParserInfo arguments)
 
@@ -469,6 +522,24 @@ recordingProvider root name percentLeft =
         )
     ]
 
+-- | A provider command that commits somebody else's refresh before it answers
+-- with its own, so the caller is provably between its read and its write when
+-- the outside commit lands.
+providerCommittingFirst :: FilePath -> String -> Int -> ByteString.ByteString -> IO FilePath
+providerCommittingFirst root name percentLeft outsideCommit =
+  writeExecutableScript
+    (root </> (name <> "-committing-usage.sh"))
+    [ ByteString.pack ("echo " <> name <> " >> " <> spawnLog root),
+      outsideCommit,
+      ByteString.pack
+        ( "printf '%s' '{\"windows\":[{\"label\":\""
+            <> name
+            <> "-window\",\"pct_left\":"
+            <> show percentLeft
+            <> ",\"resets_at\":\"2026-07-16T17:00:00Z\"}]}'"
+        )
+    ]
+
 spawnLog :: FilePath -> FilePath
 spawnLog root = root </> "spawns.log"
 
@@ -478,12 +549,13 @@ spawnsRecorded root = do
   recorded <- try @IOException (readFile' (spawnLog root))
   pure (either (const []) lines recorded)
 
--- | The cache is seeded through the writer the application itself uses, so the
--- fixture cannot drift from the schema the loader expects.
+-- | The cache is seeded through the transaction the application itself
+-- commits by, so the fixture cannot drift from the schema the loader expects
+-- and cannot seed a state no production path could produce.
 seedCache :: Map.Map UsageProvider UsageSnapshot -> IO ()
 seedCache snapshots = do
-  outcome <- writeUsageCache snapshots
-  either (expectationFailure . Text.unpack) pure outcome
+  commit <- commitUsageSnapshots snapshots
+  either (expectationFailure . Text.unpack) pure commit.usageCommitResult
 
 storedCache :: IO (Map.Map UsageProvider UsageSnapshot)
 storedCache = do
@@ -546,6 +618,12 @@ aheadSnapshot =
 cachedSnapshot :: UsageSnapshot
 cachedSnapshot =
   UsageSnapshot [UsageWindow "cached" 12 (instant "2026-07-16T17:00:00Z")] (instant "2026-07-16T11:30:00Z")
+
+-- | After 'cachedSnapshot' was stamped, so an outside commit carrying it is
+-- accepted over the seeded entry on its own merits rather than by arriving
+-- second.
+laterInstant :: UTCTime
+laterInstant = instant "2026-07-16T12:30:00Z"
 
 instant :: String -> UTCTime
 instant text = case iso8601ParseM text of

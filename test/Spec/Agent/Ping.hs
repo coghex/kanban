@@ -21,7 +21,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import Kanban.CLI (Options (..), optionsParserInfo)
-import Kanban.Cache (UsageCacheLoad (..), loadUsageCache, writeUsageCache)
+import Kanban.Cache (UsageCacheLoad (..), UsageCommit (..), commitUsageSnapshots, loadUsageCache, usageCacheLockPath)
 import Kanban.Claude (claudeScratchDirectory)
 import Kanban.Config
   ( RawConfig,
@@ -65,9 +65,11 @@ import Spec.Support.Env
     writeExecutableScript,
   )
 import Spec.Support.Fixtures (fullFixtureToml, testResolvedConfig)
+import Spec.Support.UsageWriters (UsageWriter (..), usageWriterCommand)
 import System.Directory
   ( createDirectoryIfMissing,
     doesDirectoryExist,
+    doesFileExist,
     removePathForcibly,
     withCurrentDirectory,
   )
@@ -544,6 +546,45 @@ spec = do
         pingResultSucceeded result `shouldBe` True
         storedPercentages `shouldReturn` Map.fromList [(Codex, [12]), (Claude, [12])]
 
+    -- Whatever the commit needs in order to serialise is created on the
+    -- snapshot's behalf, so caching off may not create that either. The ping's
+    -- own scratch directory under the cache root is a different thing and is
+    -- deliberately not asserted on: section 14 leaves it alone either way.
+    it "creates neither the snapshot nor its lock under a cold cache root when caching is off" $
+      withPingRoot $ \root -> do
+        lockPath <- usageCacheLockPath
+        _ <- runPing (PingMode PingCodex False) =<< refreshingConfig root
+        doesFileExist (usageCachePath root) `shouldReturn` False
+        doesFileExist lockPath `shouldReturn` False
+        -- The same fixture with caching on creates both, so the absence above
+        -- is a decision rather than an inability.
+        _ <- runPing (PingMode PingCodex True) =<< refreshingConfig root
+        doesFileExist (usageCachePath root) `shouldReturn` True
+        doesFileExist lockPath `shouldReturn` True
+
+    -- The refresh a ping owes is a subprocess, and a subprocess takes long
+    -- enough for another Kanban process to commit its own. Storing the map
+    -- read before that refresh deleted whatever had arrived in the meantime
+    -- (issue #477): here the cache starts cold, so the Claude entry the other
+    -- process commits exists only on disk and only the merge can keep it.
+    --
+    -- The refresh command waits for that other process, so this also pins the
+    -- transaction's boundary: a lock held across the refresh rather than across
+    -- the read, merge, and write alone would block the writer and the refresh
+    -- would never return.
+    it "keeps a refresh another process committed while this one was still refreshing" $
+      withPingRoot $ \root -> do
+        outsideCommit <-
+          usageWriterCommand
+            (root </> "writers")
+            (UsageWriter "outside-claude" Claude (UsageSnapshot [UsageWindow "outside-window" 99 outsideInstant] outsideInstant))
+        codexCommand <- committingRefreshCommand root "codex" 71 outsideCommit
+        let claudeCommand = missingCommand
+        result <- runPing (PingMode PingCodex True) (configuredWith codexCommand claudeCommand)
+        result.pingResultCacheError `shouldBe` Nothing
+        pingResultSucceeded result `shouldBe` True
+        storedPercentages `shouldReturn` Map.fromList [(Codex, [71]), (Claude, [99])]
+
   describe "the paths that must never ping" $ do
     -- The same recorder that counted exactly one ping above counts none here.
     -- These paths do spawn providers — that is what makes the measurement
@@ -701,6 +742,24 @@ refreshCommand root name percentLeft =
   writeExecutableScript
     (root </> (name <> "-refresh.sh"))
     [ recordRefresh name,
+      ByteString.pack
+        ( "printf '%s' '{\"windows\":[{\"label\":\""
+            <> name
+            <> "-window\",\"pct_left\":"
+            <> show percentLeft
+            <> ",\"resets_at\":\"2026-07-16T17:00:00Z\"}]}'"
+        )
+    ]
+
+-- | The recording refresh command with somebody else's commit in front of it,
+-- so the outside write provably lands while this process is between the read
+-- and the write of its own.
+committingRefreshCommand :: FilePath -> String -> Int -> ByteString.ByteString -> IO FilePath
+committingRefreshCommand root name percentLeft outsideCommit =
+  writeExecutableScript
+    (root </> (name <> "-committing-refresh.sh"))
+    [ recordRefresh name,
+      outsideCommit,
       ByteString.pack
         ( "printf '%s' '{\"windows\":[{\"label\":\""
             <> name
@@ -945,17 +1004,18 @@ isPing = Text.isInfixOf (Text.pack pingPrompt)
 usageCachePath :: FilePath -> FilePath
 usageCachePath root = root </> "kanban" </> "usage.json"
 
--- | Occupies the snapshot file's own path with a directory, so the writer's
--- atomic rename cannot complete. Nothing else about the cache root changes,
--- and the blocked path is still there afterwards to prove the failed write
--- replaced nothing.
+-- | Occupies the snapshot file's own path with a directory, so the commit
+-- cannot read the map it would merge onto and cannot rename its replacement
+-- into place either. Nothing else about the cache root changes, and the
+-- blocked path is still there afterwards to prove the failed commit replaced
+-- nothing.
 blockUsageCachePath :: FilePath -> IO ()
 blockUsageCachePath root = createDirectoryIfMissing True (usageCachePath root)
 
 seedCache :: Map.Map UsageProvider UsageSnapshot -> IO ()
 seedCache snapshots = do
-  outcome <- writeUsageCache snapshots
-  either (expectationFailure . Text.unpack) pure outcome
+  commit <- commitUsageSnapshots snapshots
+  either (expectationFailure . Text.unpack) pure commit.usageCommitResult
 
 storedPercentages :: IO (Map.Map UsageProvider [Int])
 storedPercentages = do
@@ -968,6 +1028,13 @@ storedPercentages = do
 cachedSnapshot :: UsageSnapshot
 cachedSnapshot =
   UsageSnapshot [UsageWindow "cached" 12 (instant "2026-07-16T17:00:00Z")] (instant "2026-07-16T11:30:00Z")
+
+-- | What another process stamps its commit with. Well before the real clock
+-- the ping's own refresh is stamped from, so the two entries are never
+-- compared for order -- they are different providers, and this fixture is
+-- about the merge, not about the ordering rule.
+outsideInstant :: UTCTime
+outsideInstant = instant "2026-07-16T12:30:00Z"
 
 -- | The refresh stamps its snapshot with the real clock, so the rendering is
 -- pinned against a zone and an instant chosen to make the fixture's own reset

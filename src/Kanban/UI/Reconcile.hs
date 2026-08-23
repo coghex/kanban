@@ -4,6 +4,7 @@ module Kanban.UI.Reconcile
     applyBoardRefresh,
     applyClaudeRefresh,
     applyCodexRefresh,
+    commitRefreshedUsage,
     currentCompletedGeneration,
     currentOpenGeneration,
     failureFreshness,
@@ -25,8 +26,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime)
 import Kanban.Cache
-  ( writeCompletedCache,
-    writeUsageCache
+  ( commitUsageSnapshots,
+    usageCommitNotes,
+    writeCompletedCache
   )
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
@@ -363,19 +365,35 @@ applyUsageRefresh provider displayName result = case result of
       )
   Right snapshot -> do
     state <- get
-    let snapshots = Map.insert provider snapshot state.appUsage
-    cacheWarning <-
-      if cacheEnabled state.appOptions state.appConfig
-        then either Just (const Nothing) <$> liftIO (writeUsageCache snapshots)
-        else pure Nothing
+    cacheNotes <- liftIO (commitRefreshedUsage (cacheEnabled state.appOptions state.appConfig) provider snapshot)
     modify
       ( \current ->
           current
-            { appUsage = snapshots,
+            { appUsage = Map.insert provider snapshot current.appUsage,
               appUsageFreshness = Map.insert provider (Fresh snapshot.usageFetchedAt) current.appUsageFreshness,
-              appNotice = Just (displayName <> " usage refreshed" <> maybe "" (" · " <>) cacheWarning)
+              appNotice = Just (displayName <> " usage refreshed" <> Text.concat (map (" · " <>) cacheNotes))
             }
       )
+
+-- | Everything a provider refresh does to the snapshot cache, outside
+-- 'EventM'.
+--
+-- The dashboard holds a usage map for the whole process lifetime, seeded once
+-- at launch, so the entry it carries for the provider that did /not/ just
+-- refresh is as old as the session. Writing that map back is how a refresh in
+-- another process was reverted (issue #477), so only the provider that
+-- actually refreshed is handed over and the merge happens against what is
+-- committed at that moment. That is also why the in-process map above is
+-- updated separately: it is what the sidebar draws, not what the file holds.
+--
+-- It is a plain 'IO' seam rather than two lines inline because it is the arm's
+-- entire contact with the cache, and no test here can drive an 'EventM'. There
+-- is no whole-map usage writer left in "Kanban.Cache" for the arm to reach
+-- instead.
+commitRefreshedUsage :: Bool -> UsageProvider -> UsageSnapshot -> IO [Text]
+commitRefreshedUsage cacheOn provider snapshot
+  | not cacheOn = pure []
+  | otherwise = usageCommitNotes <$> commitUsageSnapshots (Map.singleton provider snapshot)
 
 usageFailureFreshness :: UsageProvider -> AppState -> ProviderError -> Freshness
 usageFailureFreshness provider state providerError = case Map.lookup provider state.appUsage of
