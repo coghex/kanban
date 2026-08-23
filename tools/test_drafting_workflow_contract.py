@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -820,8 +821,8 @@ class PortableBackendTests(unittest.TestCase):
         # APPROVE_ISSUES_CLAUDE_DISPLAY_NAME to scope the reviewer model for
         # the owner's own machine. Requirement 5 of issue #118 drops that
         # personal configuration when vendoring: reviewer selection belongs
-        # to tools/approve_issues.py, whose PRIMARY_CLAUDE_MODEL default
-        # already selects the same reviewer.
+        # to tools/approve_issues.py, whose own default already selects the
+        # same reviewer.
         offenders = []
         for path in sorted(EXPECTED_DECLARED_PATHS):
             text = (REPO_ROOT / path).read_text(encoding="utf-8")
@@ -833,9 +834,29 @@ class PortableBackendTests(unittest.TestCase):
     def test_approve_issues_default_reviewer_makes_the_dropped_pin_a_no_op(self):
         # Pins the claim above: dropping the personal env vars preserves
         # behavior only because the backend's own default is the same model.
+        #
+        # Since issue #483 that default is the model roster's
+        # `roles.issue_gate.claude` cell rather than a literal in the backend,
+        # so the same claim is held in two halves: the backend resolves that
+        # cell with APPROVE_ISSUES_CLAUDE_MODEL as the override the vendored
+        # assets no longer set, and the tracked roster's cell still names the
+        # reviewer those assets used to pin. Read out of the backend rather
+        # than imported, because what a vendoring drop is safe against is what
+        # the tracked file says, not what this suite's host resolved.
         source = (REPO_ROOT / "tools" / "approve_issues.py").read_text(encoding="utf-8")
-        self.assertIn('PRIMARY_CLAUDE_MODEL = "claude-opus-5"', source)
-        self.assertIn('os.environ.get("APPROVE_ISSUES_CLAUDE_MODEL", PRIMARY_CLAUDE_MODEL)', source)
+        self.assertIn(
+            'kanban_models.resolve_assignment("issue_gate", provider)', source
+        )
+        self.assertIn(
+            'PRIMARY_CLAUDE_MODEL = gate_model("claude", "APPROVE_ISSUES_CLAUDE_MODEL")',
+            source,
+        )
+        roster = tomllib.loads(
+            (REPO_ROOT / "models.toml.example").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            roster["roles"]["issue_gate"]["claude"]["model"], "claude-opus-5"
+        )
 
 
 class IssueRereviewProtocolTests(unittest.TestCase):

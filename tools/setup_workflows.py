@@ -494,9 +494,15 @@ def component_result(component: str, status: str, **extra: Any) -> dict[str, Any
 
 
 def issue_review_links(repo: Path, install_dir: Path) -> list[tuple[Path, Path]]:
+    """Every link this component installs, from the installer's own inventory.
+
+    Read from `install_issue_review.BACKEND_MODULES` rather than restated, so
+    the two supported ways to install this backend cannot converge on different
+    sets: setup is not a second definition of what an installation is.
+    """
     return [
-        (repo / "tools" / "approve_issues.py", install_dir / "approve_issues.py"),
-        (repo / "tools" / "kanban_config.py", install_dir / "kanban_config.py"),
+        (repo / "tools" / name, install_dir / name)
+        for name in install_issue_review.BACKEND_MODULES.values()
     ]
 
 
@@ -556,15 +562,15 @@ def backend_is_installed(install_dir: Path) -> bool:
     Exactly the shape `plan_issue_review` converges on and
     `Kanban.Preflight` counts as installed: for each installed asset, a
     symlink resolving to a file that carries that asset's identity marker.
-    Both are required, since `approve_issues.py` imports `kanban_config.py`
-    at module scope.
+    All of them are required, since `approve_issues.py` imports both
+    `kanban_config.py` and `kanban_models.py` at module scope.
 
     An ordinary marker-bearing copy is deliberately *not* accepted. Setup
     refuses to manage that path and preflight reports it as a conflicting
     installation, so treating it as ready here would install a compatibility
     launcher pointing at something the rest of the system will not use.
     """
-    for name in ("approve_issues.py", "kanban_config.py"):
+    for name in install_issue_review.BACKEND_MODULES.values():
         path = install_dir / name
         if not path.is_symlink() or not path.is_file():
             return False

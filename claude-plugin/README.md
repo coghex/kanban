@@ -273,13 +273,24 @@ the same canonical `gpt-5.6-terra`/`claude-opus-5` at `xhigh` values the
 `roles.pr_review.*` cells of `models.toml.example` declare — the cells
 Kanban's own top-level review invocation resolves from the model roster — and
 binds the verified model in the published `pr-review:v2` marker instead of
-`unspecified`. This is a deliberate,
-reviewed divergence from §2.2's general "brand only, no pinned model"
-policy for this one nested-spawn path, and from
+`unspecified`. Since issue #483 it reaches those values the same way Kanban
+does: `scripts/kanban_models.py`, a byte-identical copy of
+`tools/kanban_models.py` bundled here and loaded from beside the coordinator
+(never from `tools/`, which an installed bundle has no sibling of), resolves
+`roles.pr_review.codex` and `roles.pr_review.claude` against the operator's
+`~/.config/kanban/models.toml` if they have one. The four
+`*_NESTED_REVIEW_*` constants survive as the compiled fallbacks that reader
+is handed on a host with no roster file, which is why a default install still
+spawns exactly what it always did; a roster file that is present and will not
+load refuses the nested review rather than spawning them, because this
+coordinator publishes the model it spawned as verified fact. This is a
+deliberate, reviewed divergence from §2.2's general "brand only, no pinned
+model" policy for this one nested-spawn path, and from
 [codex-plugin/](../codex-plugin/README.md)'s otherwise-identical
-coordinator copy, which still leaves it unpinned; see
+coordinator copy, which still leaves it unpinned and ships no copy of the
+reader at all; see
 `CODEX_NESTED_REVIEW_MODEL`/`CLAUDE_NESTED_REVIEW_MODEL` in
-`scripts/review_pr.py` for the exact values. Dual review runs its two
+`scripts/review_pr.py` for the exact fallback values. Dual review runs its two
 reviewers strictly one at a time, each in its own unpredictably-named,
 read-only temp directory torn down before the next begins — never two
 reviewers' source trees on disk at once.
@@ -307,17 +318,20 @@ runs) checks that:
   [docs/agent-workflow-contract.md §3](../docs/agent-workflow-contract.md#3-migration-boundary));
 - the bundled coordinator resolves the canonical issue-review backend the
   same way Kanban's Haskell code does, and its self-test passes standalone;
-- the coordinator's nested-reviewer model/effort pin matches the exact
+- the coordinator's nested-reviewer compiled fallbacks match the exact
   values the `roles.pr_review.*` cells of `models.toml.example` declare —
   the cells Kanban's own review invocation resolves — so the two cannot
-  silently drift apart;
+  silently drift apart, and `scripts/kanban_models.py` stays byte-identical
+  to `tools/kanban_models.py`;
 - handed an issue number, the bundled coordinator refuses it by name rather
   than surfacing `gh`'s raw resolver error, reading twice and writing nothing.
 
 `tools/test_coordinator_parity.py` bounds how far this coordinator may differ
 from [codex-plugin/](../codex-plugin/README.md)'s copy: the two are compared
 line for line, and the model-pinning divergence described above is the only
-difference permitted. Nothing is excluded — not a function, not a comment block
+difference permitted — including the import, the sibling loader, and the
+resolver issue #483 added to it, which widened that divergence without
+changing what it is about. Nothing is excluded — not a function, not a comment block
 — so a fix landing in one copy only fails there, which is how the
 issue-vs-pull-request number guard went eight days Codex-side only.
 

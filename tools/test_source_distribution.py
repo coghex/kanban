@@ -226,8 +226,13 @@ PROVIDER_MANIFESTS = (
 # and "the tree ships" is the guarantee that was already true while these files
 # existed only under tools/. Naming them here is what makes an unpacked release
 # prove it carries them.
+# The model-roster reader joins them for the Claude bundle only. Its
+# coordinator resolves the pr_review cells through a copy loaded from beside
+# itself; the Codex bundle deliberately carries none, because its coordinator
+# is forbidden model and effort values and the roster never reaches it.
 BUNDLED_MECHANISM_MODULES = (
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
+    "claude-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
@@ -243,6 +248,7 @@ COMPONENT_SOURCES = {
         "tools/approve_issues.py",
         "tools/install_issue_review.py",
         "tools/kanban_config.py",
+        "tools/kanban_models.py",
     ),
     "legacy-launcher": (
         "tools/approve_issues.py",
@@ -609,8 +615,9 @@ class SourceDistributionTest(unittest.TestCase):
             BUNDLED_MECHANISM_MODULES,
             "Both provider bundles must carry the publication, tracker "
             "transaction, and configuration modules their document workflows "
-            "invoke; a bundle that ships the workflows without them installs "
-            "a command that fails closed in every repository.",
+            "invoke, and the Claude bundle its review coordinator's model "
+            "roster reader; a bundle that ships the workflows without them "
+            "installs a command that fails closed in every repository.",
         )
 
     def test_provider_bundle_manifests_ship(self):

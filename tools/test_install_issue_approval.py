@@ -484,6 +484,14 @@ class InstallerFixture(unittest.TestCase):
         self.canonical_backend = self.backend_dir / "approve_issues.py"
         self.canonical_backend.write_text(FAKE_CANONICAL_BACKEND, encoding="utf-8")
         self.canonical_backend.chmod(0o700)
+        # The modules the real backend imports at startup, which this
+        # installer verifies are beside the script it resolved: a directory
+        # holding only the script is a reviewer that cannot start, and this
+        # installer refuses to give a service one.
+        for name in installer.BACKEND_COMPANION_MODULES:
+            (self.backend_dir / name).write_text(
+                f"# stand-in for {name}\n", encoding="utf-8"
+            )
 
         self.git_config = self.root / "gitconfig"
         self.git_config.write_text("", encoding="utf-8")
@@ -2061,6 +2069,31 @@ class CanonicalBackendTests(InstallerFixture):
         self.assertIn(str(self.canonical_backend.resolve()), str(raised.exception))
         self.assertIn("install_issue_review.py", str(raised.exception))
 
+    def test_a_half_installed_backend_is_refused_before_a_job_is_made(self):
+        # Issue #483 gave the backend a third module; `approve_issues.py`
+        # imports both companions at module scope, so a resolvable script
+        # beside a missing one is a service with no reviewer it can start --
+        # which this module's install contract says is not an installation.
+        # Each companion in turn, so neither is covered only by the other.
+        for name in installer.BACKEND_COMPANION_MODULES:
+            with self.subTest(module=name):
+                companion = self.backend_dir / name
+                body = companion.read_text(encoding="utf-8")
+                companion.unlink()
+                try:
+                    with self.assertRaises(installer.InstallError) as raised:
+                        self.install()
+                    message = str(raised.exception)
+                    self.assertIn(str(companion), message)
+                    self.assertIn("install_issue_review.py", message)
+                    # Refused before the first write, like every other
+                    # backend refusal: no job definition may exist.
+                    self.assertFalse(
+                        self.manager.definition_path(self.label()).exists()
+                    )
+                finally:
+                    companion.write_text(body, encoding="utf-8")
+
     def test_an_install_with_no_selection_records_none(self):
         # The ordinary case: no override anywhere, so the job resolves through
         # the fixed issue-review record and needs no environment at all.
@@ -2071,6 +2104,8 @@ class CanonicalBackendTests(InstallerFixture):
         review_root = service.kanban_config.default_issue_review_install_dir()
         review_root.mkdir(parents=True, exist_ok=True)
         (review_root / "approve_issues.py").write_text("backend\n", encoding="utf-8")
+        for name in installer.BACKEND_COMPANION_MODULES:
+            (review_root / name).write_text(f"# {name}\n", encoding="utf-8")
         self.install()
         self.assertIsNone(self.definition_override())
         self.assertNotIn(

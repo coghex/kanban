@@ -333,6 +333,9 @@ class InstallerPolicyTests(unittest.TestCase):
         (tools / "kanban_config.py").write_text(
             managed_asset_text("kanban_config.py", "config module\n"), encoding="utf-8"
         )
+        (tools / "kanban_models.py").write_text(
+            managed_asset_text("kanban_models.py", "models module\n"), encoding="utf-8"
+        )
         self.install_dir = self.root / "installed"
         self.legacy_path = self.root / "legacy" / "approve-issues.py"
         self.home = self.root / "home"
@@ -460,6 +463,94 @@ class InstallerPolicyTests(unittest.TestCase):
         )
         self.assertEqual(self.legacy_path.resolve(), kanban_link.resolve())
 
+    def test_every_backend_module_is_created_updated_and_reported(self):
+        """Issue #483 gave the backend a third companion, so the link set is
+        driven from the installer's own inventory rather than named.
+
+        Every one of them has to be planned, created, recognized on a rerun,
+        and re-planned when the checkout moves: a companion that were merely
+        present in the inventory and never acted on is a backend that fails at
+        import on a fresh install, which is the failure the inventory exists
+        to prevent.
+        """
+        fields = sorted(install_issue_review.BACKEND_MODULES)
+        self.assertEqual(
+            fields, ["config_module_link", "kanban_link", "models_module_link"]
+        )
+
+        plan = install_issue_review.install(
+            self.repo,
+            self.install_dir,
+            self.legacy_path,
+            migrate_legacy_launcher_flag=False,
+            dry_run=True,
+        )
+        for field in fields:
+            with self.subTest(field=field, phase="dry-run"):
+                self.assertEqual(plan[field]["result"], "created")
+
+        result = install_issue_review.install(
+            self.repo,
+            self.install_dir,
+            self.legacy_path,
+            migrate_legacy_launcher_flag=False,
+            dry_run=False,
+        )
+        for field, name in install_issue_review.BACKEND_MODULES.items():
+            with self.subTest(field=field, phase="install"):
+                self.assertEqual(result[field]["result"], "created")
+                link = self.install_dir / name
+                self.assertTrue(link.is_symlink(), link)
+                self.assertEqual(link.resolve(), (self.repo / "tools" / name).resolve())
+                # Recognized the way setup and preflight recognize it: by the
+                # asset's own identity marker, never by where the path points.
+                self.assertTrue(install_issue_review.is_managed_asset(link, name))
+
+        rerun = install_issue_review.install(
+            self.repo,
+            self.install_dir,
+            self.legacy_path,
+            migrate_legacy_launcher_flag=False,
+            dry_run=True,
+        )
+        for field in fields:
+            with self.subTest(field=field, phase="rerun"):
+                self.assertEqual(rerun[field]["result"], "unchanged")
+
+        moved_repo = self.root / "repo-moved"
+        self.repo.rename(moved_repo)
+        moved = install_issue_review.install(
+            moved_repo,
+            self.install_dir,
+            self.legacy_path,
+            migrate_legacy_launcher_flag=False,
+            dry_run=True,
+        )
+        for field in fields:
+            with self.subTest(field=field, phase="moved"):
+                self.assertEqual(moved[field]["result"], "updated")
+
+    def test_refuses_when_any_backend_module_is_missing(self):
+        # Each in turn, so a companion the repository never had cannot be
+        # installed as a link to nothing.
+        for name in install_issue_review.BACKEND_MODULES.values():
+            with self.subTest(module=name):
+                source = self.repo / "tools" / name
+                body = source.read_text(encoding="utf-8")
+                source.unlink()
+                try:
+                    with self.assertRaises(install_issue_review.InstallError) as caught:
+                        install_issue_review.install(
+                            self.repo,
+                            self.install_dir,
+                            self.legacy_path,
+                            migrate_legacy_launcher_flag=False,
+                            dry_run=False,
+                        )
+                    self.assertIn(name, str(caught.exception))
+                finally:
+                    source.write_text(body, encoding="utf-8")
+
     def test_refuses_when_backend_file_is_missing(self):
         (self.repo / "tools" / "approve_issues.py").unlink()
         with self.assertRaises(install_issue_review.InstallError):
@@ -489,6 +580,9 @@ class CLIOutputTests(unittest.TestCase):
         )
         (tools / "kanban_config.py").write_text(
             managed_asset_text("kanban_config.py", "config module\n"), encoding="utf-8"
+        )
+        (tools / "kanban_models.py").write_text(
+            managed_asset_text("kanban_models.py", "models module\n"), encoding="utf-8"
         )
         subprocess.run(
             ["git", "init", "-q", str(self.repo)], check=True, capture_output=True
@@ -557,7 +651,7 @@ class DiscoveryRecordTests(unittest.TestCase):
         self.repo = self.root / "repo"
         tools = self.repo / "tools"
         tools.mkdir(parents=True)
-        for name in ("approve_issues.py", "kanban_config.py"):
+        for name in install_issue_review.BACKEND_MODULES.values():
             (tools / name).write_text(managed_asset_text(name, "x\n"), encoding="utf-8")
         self.legacy_path = self.root / "legacy" / "approve-issues.py"
 

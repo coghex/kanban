@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest import mock
 
 import fake_cli
+import install_issue_review
 import kanban_config
 import setup_workflows
 
@@ -98,7 +99,7 @@ class HermeticSetupTests(unittest.TestCase):
 
     def _make_checkout(self):
         (self.repo / "tools").mkdir(parents=True)
-        for name in ("approve_issues.py", "kanban_config.py"):
+        for name in install_issue_review.BACKEND_MODULES.values():
             shutil.copy(REPO_ROOT / "tools" / name, self.repo / "tools" / name)
         (self.repo / "claude-plugin").mkdir()
         # A miniature but structurally real tracked Codex bundle: a manifest
@@ -298,10 +299,12 @@ class CleanMachineTests(HermeticSetupTests):
             (self.install_dir / "approve_issues.py").resolve(),
             (self.repo / "tools" / "approve_issues.py").resolve(),
         )
-        self.assertEqual(
-            (self.install_dir / "kanban_config.py").resolve(),
-            (self.repo / "tools" / "kanban_config.py").resolve(),
-        )
+        for name in install_issue_review.BACKEND_MODULES.values():
+            with self.subTest(module=name):
+                self.assertEqual(
+                    (self.install_dir / name).resolve(),
+                    (self.repo / "tools" / name).resolve(),
+                )
         self.assertEqual(
             self.legacy_path.resolve(), (self.install_dir / "approve_issues.py").resolve()
         )
@@ -818,7 +821,7 @@ class ConflictTests(HermeticSetupTests):
         # manage that path and preflight calls it a conflicting
         # installation, so the launcher must not be pointed at it either.
         self.install_dir.mkdir(parents=True)
-        for name in ("approve_issues.py", "kanban_config.py"):
+        for name in install_issue_review.BACKEND_MODULES.values():
             (self.install_dir / name).write_text(
                 f"# kanban-managed-asset:issue-review/{name}\n", encoding="utf-8"
             )
@@ -839,7 +842,7 @@ class ConflictTests(HermeticSetupTests):
 
     def test_a_dangling_backend_link_does_not_count_as_an_installation(self):
         self.install_dir.mkdir(parents=True)
-        for name in ("approve_issues.py", "kanban_config.py"):
+        for name in install_issue_review.BACKEND_MODULES.values():
             (self.install_dir / name).symlink_to(self.root / "gone" / name)
 
         self.assertFalse(setup_workflows.backend_is_installed(self.install_dir))

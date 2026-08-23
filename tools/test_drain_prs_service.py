@@ -224,6 +224,7 @@ class RedirectedControllerTestCase(unittest.TestCase):
             ("CONTROLLER_PATH", self.install_dir / "drain_prs_service.py"),
             ("DRAINER_PATH", self.install_dir / "drain_prs.py"),
             ("CONFIG_MODULE_PATH", self.install_dir / "kanban_config.py"),
+            ("MODELS_MODULE_PATH", self.install_dir / "kanban_models.py"),
             (
                 "SERVICE_MANAGER_MODULE_PATH",
                 self.install_dir / "service_manager.py",
@@ -4084,6 +4085,7 @@ SOURCE_NAMES = (
     "drain_prs.py",
     "drain_prs_service.py",
     "kanban_config.py",
+    "kanban_models.py",
     "service_manager.py",
 )
 
@@ -4126,6 +4128,7 @@ class InstalledSourceAdvisoryTests(unittest.TestCase):
             controller=self.install / "drain_prs_service.py",
             drainer=self.install / "drain_prs.py",
             config=self.install / "kanban_config.py",
+            models=self.install / "kanban_models.py",
             backend=self.install / "service_manager.py",
         )
 
@@ -4145,11 +4148,14 @@ class InstalledSourceAdvisoryTests(unittest.TestCase):
             _git(path, "fetch", "-q", "origin")
         return path
 
-    def point_at(self, *, controller=None, drainer=None, config=None, backend=None):
+    def point_at(
+        self, *, controller=None, drainer=None, config=None, models=None, backend=None
+    ):
         for name, value in (
             ("CONTROLLER_PATH", controller),
             ("DRAINER_PATH", drainer),
             ("CONFIG_MODULE_PATH", config),
+            ("MODELS_MODULE_PATH", models),
             ("SERVICE_MANAGER_MODULE_PATH", backend),
         ):
             if value is None:
@@ -4309,7 +4315,9 @@ class InstalledSourceAdvisoryTests(unittest.TestCase):
         ):
             audit = self.audit()
         self.assertEqual(audit.diverged, ())
-        self.assertEqual(len(audit.unavailable), 4)
+        self.assertEqual(
+            len(audit.unavailable), len(drain_prs_service.installed_source_paths())
+        )
         self.assertEqual(len(drain_prs_service.source_advisory_lines(audit)), 1)
 
     def test_an_unexpected_comparison_failure_is_contained(self):

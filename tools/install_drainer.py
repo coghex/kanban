@@ -82,6 +82,7 @@ def repository_root(requested: Path) -> Path:
         root / "tools" / "drain_prs.py",
         root / "tools" / "drain_prs_service.py",
         root / "tools" / "kanban_config.py",
+        root / "tools" / "kanban_models.py",
         root / "tools" / "service_manager.py",
     ]
     missing = [str(item) for item in required if not item.is_file()]
@@ -297,7 +298,7 @@ def write_installed_config_path(identity: str, config_path: str) -> Path:
 # run relocates that whole installation to this platform's own convention and
 # then takes the old one away.
 #
-# The installation is shared. Its discovery record and its four script links
+# The installation is shared. Its discovery record and its five script links
 # serve every repository at once, while each repository owns its definition,
 # its runtime state, its logs, and its incidents. Every definition embeds the
 # controller path, the install-directory environment, the working directory
@@ -315,6 +316,7 @@ _MANAGED_LINK_NAMES = (
     "drain_prs.py",
     "drain_prs_service.py",
     "kanban_config.py",
+    "kanban_models.py",
     "service_manager.py",
 )
 _RUNTIME_DIRECTORY_NAME = "runtime"
@@ -1447,7 +1449,7 @@ def _rebind_managed_paths(install_dir: Path) -> None:
 def _install_links(
     transition: _Transition, install_dir: Path, sources: dict[str, Path]
 ) -> None:
-    """The four script links, at the destination, before any definition is
+    """The five script links, at the destination, before any definition is
     rewritten to name the controller among them."""
     for name, source in sorted(sources.items()):
         destination = install_dir / source.name
@@ -4100,12 +4102,14 @@ def install(
         "drainer": repo / "tools" / "drain_prs.py",
         "controller": repo / "tools" / "drain_prs_service.py",
         "config_module": repo / "tools" / "kanban_config.py",
+        "models_module": repo / "tools" / "kanban_models.py",
         "service_manager": repo / "tools" / "service_manager.py",
     }
     destinations = {
         "drainer": install_dir / "drain_prs.py",
         "controller": install_dir / "drain_prs_service.py",
         "config_module": install_dir / "kanban_config.py",
+        "models_module": install_dir / "kanban_models.py",
         "service_manager": install_dir / "service_manager.py",
     }
     for destination in destinations.values():
@@ -4134,7 +4138,7 @@ def install(
 
     # Before anything is installed at the destination, because a relocation
     # that cannot complete has to fail the run rather than leave an
-    # installation split across two locations. It installs the same four links
+    # installation split across two locations. It installs the same five links
     # itself when it does run, so that the definitions it rewrites name a
     # controller that is already there; the idempotent pass below then reports
     # them unchanged. A takeover installs none, because the controller its

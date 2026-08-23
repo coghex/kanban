@@ -40,6 +40,19 @@ discovery_record_path = kanban_config.issue_review_record_path
 selected_install_dir = kanban_config.issue_review_install_dir
 DEFAULT_LEGACY_PATH = Path.home() / "work" / "approve-issues.py"
 
+# Every tracked file this installer links into the install directory, keyed by
+# the field its result document reports each under. `approve_issues.py` imports
+# both companions at module scope, so a directory holding fewer than all three
+# is a backend that fails at import rather than a partial installation that
+# runs: `tools/setup_workflows.py` converges on the same set and
+# `Kanban.Preflight` counts an install as ready only when every one of them is
+# a marker-bearing managed link.
+BACKEND_MODULES = {
+    "kanban_link": "approve_issues.py",
+    "config_module_link": "kanban_config.py",
+    "models_module_link": "kanban_models.py",
+}
+
 
 class InstallError(RuntimeError):
     pass
@@ -61,7 +74,7 @@ def repository_root(requested: Path) -> Path:
         raise InstallError(
             f"Install from the repository's main checkout, not a linked worktree: {root}"
         )
-    required = [root / "tools" / "approve_issues.py", root / "tools" / "kanban_config.py"]
+    required = [root / "tools" / name for name in BACKEND_MODULES.values()]
     missing = [str(item) for item in required if not item.is_file()]
     if missing:
         raise InstallError(
@@ -397,39 +410,39 @@ def install(
     config_path: str | None = None,
     dry_run: bool,
 ) -> dict[str, Any]:
-    source = repo / "tools" / "approve_issues.py"
-    config_module_source = repo / "tools" / "kanban_config.py"
-    missing = [str(item) for item in (source, config_module_source) if not item.is_file()]
+    sources = {field: repo / "tools" / name for field, name in BACKEND_MODULES.items()}
+    missing = [str(item) for item in sources.values() if not item.is_file()]
     if missing:
         raise InstallError(
             "Repository does not contain the required backend file(s): "
             + ", ".join(missing)
         )
     install_dir = install_dir.resolve()
-    kanban_link = install_dir / "approve_issues.py"
-    config_module_link = install_dir / "kanban_config.py"
+    destinations = {
+        field: install_dir / name for field, name in BACKEND_MODULES.items()
+    }
+    kanban_link = destinations["kanban_link"]
     resolved_config_path = (
         str(Path(config_path).expanduser().resolve()) if config_path else None
     )
 
     if dry_run:
-        resolved_source = source.resolve(strict=True)
-        resolved_config_module_source = config_module_source.resolve(strict=True)
+        links = {
+            field: {
+                "source": str(sources[field]),
+                "destination": str(destination),
+                "result": plan_symlink(
+                    sources[field].resolve(strict=True), destination
+                ),
+            }
+            for field, destination in destinations.items()
+        }
         return {
             "installed": False,
             "dry_run": True,
             "repo": str(repo),
             "install_dir": str(install_dir),
-            "kanban_link": {
-                "source": str(source),
-                "destination": str(kanban_link),
-                "result": plan_symlink(resolved_source, kanban_link),
-            },
-            "config_module_link": {
-                "source": str(config_module_source),
-                "destination": str(config_module_link),
-                "result": plan_symlink(resolved_config_module_source, config_module_link),
-            },
+            **links,
             "legacy_launcher": plan_legacy_launcher(
                 legacy_path, kanban_link, allow_migration=migrate_legacy_launcher_flag
             ),
@@ -441,8 +454,14 @@ def install(
             "config_path": resolved_config_path,
         }
 
-    kanban_result = install_symlink(source, kanban_link)
-    config_module_result = install_symlink(config_module_source, config_module_link)
+    links = {
+        field: {
+            "source": str(sources[field]),
+            "destination": str(destination),
+            "result": install_symlink(sources[field], destination),
+        }
+        for field, destination in destinations.items()
+    }
     legacy_result = migrate_legacy_launcher(
         legacy_path, kanban_link, allow_migration=migrate_legacy_launcher_flag
     )
@@ -456,16 +475,7 @@ def install(
         "installed": True,
         "repo": str(repo),
         "install_dir": str(install_dir),
-        "kanban_link": {
-            "source": str(source),
-            "destination": str(kanban_link),
-            "result": kanban_result,
-        },
-        "config_module_link": {
-            "source": str(config_module_source),
-            "destination": str(config_module_link),
-            "result": config_module_result,
-        },
+        **links,
         "legacy_launcher": legacy_result,
         "record": {"path": str(record_path), "backend_path": str(kanban_link)},
         "config_path": resolved_config_path,

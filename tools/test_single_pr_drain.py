@@ -44,6 +44,7 @@ SCRIPT_MODULES = (
     "drain_prs.py",
     "drain_prs_service.py",
     "kanban_config.py",
+    "kanban_models.py",
     "service_manager.py",
 )
 

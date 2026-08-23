@@ -147,6 +147,13 @@ def repository_job(
         raise InstallError(str(exc)) from exc
 
 
+# Every module the canonical backend imports at module scope, so a resolved
+# script with one of them missing is a reviewer that cannot start. Restated
+# here rather than imported from `tools/install_issue_review.py`: this
+# installer verifies an installation it never makes, and must stay runnable
+# beside a checkout whose issue-review installer it does not load.
+BACKEND_COMPANION_MODULES = ("kanban_config.py", "kanban_models.py")
+
 # What every canonical-backend failure has to end with, whatever went wrong.
 BACKEND_REMEDIATION = (
     "Run `python3 tools/install_issue_review.py` from the Kanban checkout, "
@@ -174,6 +181,14 @@ def canonical_backend(job: approve_issues_service.ApprovalJob) -> Path:
     record that will not parse is not treated as an absent one, and neither is
     repaired by installing a second backend here: an install made against a
     reviewer the operator did not choose is worse than an install refused.
+
+    Resolving the script is not the whole question. `approve_issues.py` imports
+    its companion modules at module scope, so an install directory holding the
+    script and only some of them is a backend that fails at import -- and a
+    service with no runnable reviewer is not an installation, which is this
+    module's own `install` contract. The companions are therefore verified
+    beside the resolved script, with the same remediation: the issue-review
+    installer is what completes a half-installed backend, here as everywhere.
     """
     try:
         resolved = approve_issues_service.resolve_backend(
@@ -185,12 +200,25 @@ def canonical_backend(job: approve_issues_service.ApprovalJob) -> Path:
         # would read is not the one verified here. An already-absolute path is
         # reported exactly as recorded, symlinks and all, because the managed
         # link is the stable name the record deliberately holds.
-        return resolved if resolved.is_absolute() else resolved.resolve()
+        backend = resolved if resolved.is_absolute() else resolved.resolve()
     except approve_issues_service.ServiceError as exc:
         message = str(exc)
         if "install_issue_review.py" not in message:
             message = f"{message} {BACKEND_REMEDIATION}"
         raise InstallError(message) from exc
+    missing = [
+        str(backend.parent / name)
+        for name in BACKEND_COMPANION_MODULES
+        if not (backend.parent / name).is_file()
+    ]
+    if missing:
+        raise InstallError(
+            f"The canonical issue-review backend at {backend} is missing the "
+            "module(s) it imports at startup: "
+            + ", ".join(missing)
+            + f". {BACKEND_REMEDIATION}"
+        )
+    return backend
 
 
 # ---------------------------------------------------------------------------

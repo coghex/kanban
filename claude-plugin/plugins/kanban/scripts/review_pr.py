@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util  # loads the model-roster reader beside this file
 import io
 import json
 import os
@@ -56,6 +57,73 @@ CODEX_NESTED_REVIEW_MODEL = "gpt-5.6-terra"
 CODEX_NESTED_REVIEW_EFFORT = "xhigh"
 CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-5"
 CLAUDE_NESTED_REVIEW_EFFORT = "xhigh"
+
+_KANBAN_MODELS_MODULE = None
+
+
+def kanban_models():
+    """The model-roster reader, loaded from beside this coordinator.
+
+    From beside itself and never from `tools/`: an installed bundle has no
+    `tools/` sibling, and a plain `import` would resolve one only when this
+    file happens to run out of a checkout -- silently reading a different
+    copy's compiled defaults there and failing everywhere else. Loaded once and
+    memoized, the way the document mechanism loads its own siblings, and
+    registered in `sys.modules` before execution because that module declares
+    dataclasses, which resolve their own class's `__module__` through
+    `sys.modules` while the class body is still being processed.
+    """
+    global _KANBAN_MODELS_MODULE
+    if _KANBAN_MODELS_MODULE is not None:
+        return _KANBAN_MODELS_MODULE
+    source = Path(__file__).resolve().parent / "kanban_models.py"
+    name = "_kanban_models_for_review_coordinator"
+    try:
+        spec = importlib.util.spec_from_file_location(name, source)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no loader for {source}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(name, None)
+            raise
+    except Exception as error:  # noqa: BLE001 - reported, never raised bare
+        raise WorkflowError(
+            f"This bundle's model-roster reader at {source} could not be "
+            f"loaded, so no nested review was performed: {error}"
+        ) from error
+    _KANBAN_MODELS_MODULE = module
+    return module
+
+
+def nested_review_assignment(provider: str):
+    """The `roles.pr_review.<provider>` cell this coordinator spawns on.
+
+    The four constants above are what the reader falls back to when the host
+    carries no roster file at all -- equal, cell for cell, to that reader's own
+    compiled defaults, which `tools/test_claude_plugin.py` holds against the
+    tracked `models.toml.example`. A roster file that is present and will not
+    load refuses the nested review instead: an operator who edited it to change
+    a reviewer model must never have this coordinator quietly spawn the old one
+    and then publish that model as verified fact in the `pr-review:v2` marker.
+    """
+    models = kanban_models()
+    fallbacks = {
+        "codex": models.Assignment(
+            CODEX_NESTED_REVIEW_MODEL, CODEX_NESTED_REVIEW_EFFORT, "pr_review codex"
+        ),
+        "claude": models.Assignment(
+            CLAUDE_NESTED_REVIEW_MODEL, CLAUDE_NESTED_REVIEW_EFFORT, "pr_review claude"
+        ),
+    }
+    try:
+        return models.resolve_assignment(
+            "pr_review", provider, fallback=fallbacks[provider]
+        )
+    except models.KanbanModelsError as error:
+        raise WorkflowError(f"{error}; no nested review was performed") from error
 
 REVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -870,11 +938,12 @@ def invoke_codex(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
         output_path = Path(temp) / "result.json"
         schema_path.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
         # -m/-c model_reasoning_effort pin the canonical nested-reviewer
-        # model (see CODEX_NESTED_REVIEW_MODEL above); no
+        # model (see nested_review_assignment above); no
         # -s/--dangerously-bypass-approvals-and-sandbox: sandbox/approval
         # policy is still left to this installation's own default. `codex
         # exec` without -s/-a runs a read-only inspection task to
         # completion under its own non-interactive defaults.
+        model_assignment = nested_review_assignment("codex")
         run(
             [
                 "codex",
@@ -884,9 +953,9 @@ def invoke_codex(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
                 "-C",
                 str(cwd),
                 "--model",
-                CODEX_NESTED_REVIEW_MODEL,
+                model_assignment.model,
                 "--config",
-                f'model_reasoning_effort="{CODEX_NESTED_REVIEW_EFFORT}"',
+                f'model_reasoning_effort="{model_assignment.effort}"',
                 "--output-schema",
                 str(schema_path),
                 "-o",
@@ -903,7 +972,9 @@ def invoke_codex(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
             value = json.loads(output_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise WorkflowError(f"{reviewer.display_name} did not return structured JSON") from exc
-    return validate_review(value, reviewer, f"{CODEX_NESTED_REVIEW_MODEL}@{CODEX_NESTED_REVIEW_EFFORT}")
+    return validate_review(
+        value, reviewer, f"{model_assignment.model}@{model_assignment.effort}"
+    )
 
 
 def parse_claude_output(stdout: str) -> Any:
@@ -921,18 +992,19 @@ def parse_claude_output(stdout: str) -> Any:
 
 def invoke_claude(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
     # --model/--effort pin the canonical nested-reviewer model (see
-    # CLAUDE_NESTED_REVIEW_MODEL above); no --permission-mode/--tools:
+    # nested_review_assignment above); no --permission-mode/--tools:
     # permission policy is still left to this installation's own default.
     # `claude -p` without --permission-mode runs a read-only inspection
     # task to completion under its own non-interactive defaults.
+    model_assignment = nested_review_assignment("claude")
     proc = run(
         [
             "claude",
             "-p",
             "--model",
-            CLAUDE_NESTED_REVIEW_MODEL,
+            model_assignment.model,
             "--effort",
-            CLAUDE_NESTED_REVIEW_EFFORT,
+            model_assignment.effort,
             "--no-session-persistence",
             "--output-format",
             "json",
@@ -943,7 +1015,11 @@ def invoke_claude(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
         input_text=prompt,
         timeout=REVIEW_TIMEOUT_SECONDS,
     )
-    return validate_review(parse_claude_output(proc.stdout), reviewer, f"{CLAUDE_NESTED_REVIEW_MODEL}@{CLAUDE_NESTED_REVIEW_EFFORT}")
+    return validate_review(
+        parse_claude_output(proc.stdout),
+        reviewer,
+        f"{model_assignment.model}@{model_assignment.effort}",
+    )
 
 
 def invoke_reviewer(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:

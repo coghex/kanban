@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import kanban_config
+import kanban_models
 import service_manager
 
 
@@ -156,7 +157,12 @@ CONFIG_MODULE_PATH = Path(kanban_config.__file__)
 # controller imports it out of the install directory, so what it resolved to is
 # what this run's service-manager interactions actually behaved as.
 SERVICE_MANAGER_MODULE_PATH = Path(service_manager.__file__)
-# What `audit_installed_sources` compares those four against. The published
+# The fifth. The drainer this controller launches resolves its model roster
+# through it, so a copy that diverged from the baseline changes which model a
+# stale-head rereview spawns -- exactly what the audit exists to report. Named
+# by what this process imported for the same reason as the two above.
+MODELS_MODULE_PATH = Path(kanban_models.__file__)
+# What `audit_installed_sources` compares those five against. The published
 # baseline, read out of the checkout's own local remote-tracking ref — never
 # fetched, because the audit may not touch the network or repository state.
 SOURCE_BASELINE_REF = "refs/remotes/origin/master"
@@ -2623,9 +2629,9 @@ class SourceAudit:
 
 
 def installed_source_paths() -> tuple[tuple[str, Path], ...]:
-    """The four files this service actually executes from.
+    """The five files this service actually executes from.
 
-    `tools/install_drainer.py` links all four out of one development checkout,
+    `tools/install_drainer.py` links all five out of one development checkout,
     so they are read here at call time rather than captured: whatever they
     resolve to now is what this run is about to behave as.
     """
@@ -2633,6 +2639,7 @@ def installed_source_paths() -> tuple[tuple[str, Path], ...]:
         ("controller", CONTROLLER_PATH),
         ("drainer", DRAINER_PATH),
         ("config module", CONFIG_MODULE_PATH),
+        ("models module", MODELS_MODULE_PATH),
         ("service manager", SERVICE_MANAGER_MODULE_PATH),
     )
 

@@ -1,6 +1,7 @@
 -- | The preflight probes that gate every AI action.
 module Spec.Agent.Preflight (spec) where
 
+import Control.Monad (forM_)
 import qualified Data.Text
 import Kanban.Preflight
   ( AuthObservation (..),
@@ -40,7 +41,9 @@ import Kanban.UI.Util (agentFailureNotice, failureActivity)
 import Spec.Support.Expect (shouldMention)
 import Spec.Support.Preflight
   ( BackendFixture (..),
+    allBackendCompanions,
     allowedProbeInvocations,
+    backendCompanionName,
     blockedProblems,
     bundlelessCodexFake,
     fullyProvisionedFakes,
@@ -428,13 +431,25 @@ spec = do
           environment <- gatherPreflightEnvironment root
           environment.environmentReviewBackend `shouldSatisfy` isConflictingBackend
           blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ConflictingInstallation]
-      -- approve_issues.py imports kanban_config at module scope, so half an
-      -- installation is not an installation.
-      it "reports a missing companion config module as an unavailable backend" $
-        withPreflightMachine fullyProvisionedFakes BackendCompanionMissing $ \root _ -> do
-          environment <- gatherPreflightEnvironment root
-          environment.environmentReviewBackend `shouldSatisfy` isMissingBackend
-          blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ReviewBackendUnavailable]
+      -- approve_issues.py imports both companion modules at module scope, so
+      -- half an installation is not an installation. Every companion is
+      -- driven, rather than the one this check was first written for: a probe
+      -- that required only that one would report a backend ready that cannot
+      -- start.
+      forM_ allBackendCompanions $ \companion -> do
+        it ("reports a missing " <> backendCompanionName companion <> " as an unavailable backend") $
+          withPreflightMachine fullyProvisionedFakes (BackendCompanionMissing companion) $ \root _ -> do
+            environment <- gatherPreflightEnvironment root
+            environment.environmentReviewBackend `shouldSatisfy` isMissingBackend
+            blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ReviewBackendUnavailable]
+        -- And an unmanaged copy of a companion is the conflict setup refuses
+        -- to replace, not an absence it can fill -- the same distinction the
+        -- script's own cases above draw.
+        it ("reports an ordinary " <> backendCompanionName companion <> " on the install path as conflicting") $
+          withPreflightMachine fullyProvisionedFakes (BackendCompanionOrdinaryFile companion) $ \root _ -> do
+            environment <- gatherPreflightEnvironment root
+            environment.environmentReviewBackend `shouldSatisfy` isConflictingBackend
+            blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ConflictingInstallation]
       -- Preflight parity with Kanban.Review: a --install-dir installation is
       -- discovered through the installer's record with no environment
       -- override at all. Without this, a custom install would review fine

@@ -196,6 +196,7 @@ class RelocationFixture(unittest.TestCase):
             ("drainer", "drain_prs.py"),
             ("controller", "drain_prs_service.py"),
             ("config_module", "kanban_config.py"),
+            ("models_module", "kanban_models.py"),
             ("service_manager", "service_manager.py"),
         ):
             path = tools / name
