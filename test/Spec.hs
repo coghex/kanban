@@ -39,8 +39,10 @@ import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.ManagedPaths as ManagedPaths
 import qualified Spec.Repository.Identity as RepositoryIdentity
+import qualified Spec.Repository.Lease as RepositoryLease
 import qualified Spec.Repository.State as RepositoryState
 import Spec.Support.Lanes (Lane (..), SuiteGroup (..), runSuiteInLanes)
+import Spec.Support.LeaseProbes (leaseProbeVariable, runLeaseProbe)
 import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import Spec.Support.UsageWriters (runUsageWriter, usageWriterVariable)
 import qualified Spec.UI.AutoSolve as AutoSolve
@@ -62,26 +64,31 @@ import qualified Spec.UI.Text as UIText
 import qualified Spec.UI.Usage as UIUsage
 import System.Environment (lookupEnv)
 
--- | Ordinarily the suite. Two markers divert it instead, and each names a
+-- | Ordinarily the suite. Three markers divert it instead, and each names a
 -- condition that cannot be established from inside an already-started test
 -- process: 'localeProbeVariable' makes this the C-locale child a single test
 -- re-ran the binary as (see "Spec.Support.Locale" for why the locale is fixed
--- before @main@ runs), and 'usageWriterVariable' makes it one of the
--- independent processes contending over the usage cache (see
--- "Spec.Support.UsageWriters" for why a thread would not do).
+-- before @main@ runs), 'usageWriterVariable' makes it one of the independent
+-- processes contending over the usage cache (see "Spec.Support.UsageWriters"
+-- for why a thread would not do), and 'leaseProbeVariable' makes it one of the
+-- independent processes contending for a repository's lease (see
+-- "Spec.Support.LeaseProbes" for why a thread would not merely be weaker but
+-- would prove the opposite).
 --
--- Both are asked about before the suite and deliberately so: a lane carries
--- its own marker in the environment its children inherit, and a child started
--- from inside a lane must run its probe rather than that lane a second time.
--- Neither marker reaches a child of a probe, so this cannot recurse.
+-- All three are asked about before the suite and deliberately so: a lane
+-- carries its own marker in the environment its children inherit, and a child
+-- started from inside a lane must run its probe rather than that lane a second
+-- time. No marker reaches a child of a probe, so this cannot recurse.
 main :: IO ()
 main = do
   localeProbe <- lookupEnv localeProbeVariable
   usageWriter <- lookupEnv usageWriterVariable
-  case (localeProbe, usageWriter) of
-    (Just probeRoot, _) -> runLocaleProbe probeRoot
-    (Nothing, Just planPath) -> runUsageWriter planPath
-    (Nothing, Nothing) -> runSuiteInLanes suiteGroups
+  leaseProbe <- lookupEnv leaseProbeVariable
+  case (localeProbe, usageWriter, leaseProbe) of
+    (Just probeRoot, _, _) -> runLocaleProbe probeRoot
+    (Nothing, Just planPath, _) -> runUsageWriter planPath
+    (Nothing, Nothing, Just planPath) -> runLeaseProbe planPath
+    (Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups
 
 -- | Every group, its lane, and its established order.
 --
@@ -95,7 +102,15 @@ main = do
 --
 -- > cabal run kanban-test -- --print-slow-items=2000
 --
--- which is how to check the packing again after a group's cost moves.
+-- which is how to check the packing again after a group's cost moves. Those
+-- measurements predate "Spec.Repository.Lease", whose 1.7 seconds are small
+-- enough to ride along anywhere on cost alone — but it is the one group here
+-- placed for what it must /not/ overlap with rather than for balance. It
+-- starts suite processes of its own, and "Spec.Agent.Usage" asserts that a
+-- process it swept is gone by the time a call returned; run beside that, the
+-- lease group raised the rate at which those sweeps were observed late from
+-- roughly one full run in six to four in seven. In the same lane the two are
+-- serialised and cannot overlap at all.
 suiteGroups :: [SuiteGroup]
 suiteGroups =
   [ SuiteGroup "Spec.Agent.ManagedProcess.Lifecycle" LifecycleLane ManagedProcess.lifecycleSpec, -- 53.8s
@@ -121,6 +136,7 @@ suiteGroups =
     SuiteGroup "Spec.Agent.Capture" LifecycleLane Capture.spec, -- 10.5s
     SuiteGroup "Spec.UI.SolveChooser" PingLane SolveChooser.spec,
     SuiteGroup "Spec.Agent.Usage" UsageLane Usage.spec, -- 45.7s
+    SuiteGroup "Spec.Repository.Lease" UsageLane RepositoryLease.spec, -- 1.7s
     SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
     SuiteGroup "Spec.Agent.IssueReviewer" PingLane IssueReviewer.spec,
     SuiteGroup "Spec.Drainer" PingLane Drainer.spec, -- 17.6s
