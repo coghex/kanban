@@ -1,12 +1,21 @@
--- | The usage sidebar's countdown and snapshot age: that both fit the fixed
--- interior for every instant a provider can report, that an elapsed reset is
--- named rather than counted down to, that a snapshot restored from the cache
--- says how old it is, and that the sidebar and @kanban --usage@ state the
--- same thing for one snapshot at one instant.
+-- | Both of a usage window's rows against the fixed sidebar interior they
+-- are budgeted against.
+--
+-- The reset row: that its countdown and snapshot age fit that interior for
+-- every instant a provider can report, that an elapsed reset is named rather
+-- than counted down to, that a snapshot restored from the cache says how old
+-- it is, and that the sidebar and @kanban --usage@ state the same thing for
+-- one snapshot at one instant.
+--
+-- The percentage row above it: that its label field, bar, and percentage
+-- field spend that interior exactly, for every percentage a provider decodes
+-- and every label an external usage command can supply, under each of the
+-- three border styles.
 --
 -- The golden frames cover what the sidebar looks like with the fixture
 -- snapshots. What they cannot cover is the range: a fixture is one reset
--- instant, and the rows here are the ones that stop being true off it.
+-- instant, one label, and one percentage, and the rows here are the ones that
+-- stop being true off it.
 --
 -- Beneath the drawing sits what a refresh does to the stored snapshot.
 -- 'commitRefreshedUsage' is the dashboard's whole contact with that file and
@@ -14,12 +23,15 @@
 -- here can drive, so it is asserted directly.
 module Spec.UI.Usage (spec) where
 
+import Data.Aeson ((.=))
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Foldable (for_)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (NominalDiffTime, TimeZone, UTCTime (..), addUTCTime, diffUTCTime, fromGregorian, hoursToTimeZone, secondsToDiffTime, utc)
+import Kanban.CLI (BorderPolicy (..), Options (..))
 import Kanban.Card (displayWidth)
 import Kanban.Config (ResolvedConfig (..), UsageConfig (..), defaultUsageConfig)
 import Kanban.Domain
@@ -40,6 +52,9 @@ import Kanban.UI (drawApplication)
 import Kanban.UI.Reconcile (commitRefreshedUsage)
 import Kanban.UI.Board
   ( usageAgeText,
+    usageBarWidth,
+    usageLabelField,
+    usagePercentField,
     usageResetRowText,
     usageSidebarInterior,
     usageSidebarWidth,
@@ -55,6 +70,7 @@ import Kanban.Usage.Render
     usageSolveRoundsLeft,
     usageSolveRoundsSuffix,
   )
+import Kanban.UsageCommand (decodeUsageCommandDocument)
 import Spec.Support.App (testAppState)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Fixtures (fixtureBoard)
@@ -66,6 +82,7 @@ import Test.Hspec
 spec :: Spec
 spec = do
   sidebarSpec
+  percentRowSpec
   refreshCommitSpec
 
 -- | What a provider refresh commits, and what it reports back to the notice
@@ -382,10 +399,10 @@ windowAt' percentLeft resetsAt = UsageWindow "weekly" percentLeft resetsAt
 --
 -- A three-digit count is only reachable at a hundred percent remaining, since
 -- the live decoder bounds @pct_left@ at 100 and the smallest legal estimate is
--- 1. That case's percentage row therefore shows the one-cell overflow the
--- hundred-percent bar has always had — @5 hour  [..........] 100%@ is 25
--- cells — which is a property of the row above this one and is neither
--- introduced nor repaired here.
+-- 1. That case's percentage row is therefore the one drawn at three digits,
+-- and it fits the interior like every other: the row is composed of fixed
+-- fields, so the hundred-percent case spends its three-cell decimal field
+-- rather than growing a twenty-fifth cell and losing the @%@ off the end.
 data EstimateCase = EstimateCase
   { estimateCaseName :: Text,
     estimateCaseEstimate :: Maybe Int,
@@ -418,6 +435,280 @@ renderEstimateCase estimateCase = do
   pure (("== " <> estimateCase.estimateCaseName <> " ==") : providerBlock Codex (sidebarInterior (sidebarFrame configured)))
   where
     snapshots = Map.singleton Codex (UsageSnapshot estimateCase.estimateCaseWindows goldenNow)
+
+-- | The percentage row: that it spends the interior it is budgeted and no
+-- more, whatever percentage a provider decodes and whatever label an external
+-- usage command supplies.
+--
+-- Every assertion here reads the row back out of the whole drawn application,
+-- because the fault this covers was invisible anywhere else. The row was
+-- concatenated without being measured, Brick clipped the twenty-fifth cell --
+-- the @%@ -- on the way to the terminal, and the golden frame then recorded
+-- the clipped row as the expected one. So the rows are read in terminal cells
+-- and past the budget rather than through 'sidebarInterior', whose
+-- @Text.take usageSidebarInterior@ discards exactly the cell an overflow
+-- lands in and miscounts any row holding a wide character.
+percentRowSpec :: Spec
+percentRowSpec = describe "usage sidebar percentage row" $ do
+  -- The allocation every assertion below rests on: three fixed fields and one
+  -- separator, spending 'usageSidebarInterior' exactly. Nothing on this row
+  -- grows with its content, so nothing on it can push the field after it out.
+  it "spends the interior on fixed fields, exactly" $
+    (usageLabelField + 1 + usageBarWidth + usagePercentField) `shouldBe` usageSidebarInterior
+
+  -- Requirements 1 and 2 across the whole range a provider can decode, under
+  -- every way the sidebar is framed. 'Kanban.UsageCommand.parseUsageWindow'
+  -- is what bounds @pct_left@ to 0-100, and 100 is the case whose row used to
+  -- measure 25 cells and lose its @%@; a cached percentage outside that range
+  -- belongs to another issue. §6's width is the same in all three styles, but
+  -- 'Kanban.UI.Theme.usesOpenBorders' and @--ascii@ reach
+  -- 'Kanban.UI.Board.drawUsage' by distinct compositions and ASCII swaps the
+  -- bar's glyphs, so a row that fits one is not thereby known to fit the rest.
+  it "draws every percentage a provider decodes complete and inside the interior" $ do
+    faults <-
+      traverse
+        (uncurry rowFaults)
+        [ (style, chunk)
+        | style <- sidebarStyles,
+          chunk <- sweepChunks [(defaultLabel, percentage) | percentage <- [0 .. 100]]
+        ]
+    concat faults `shouldBe` []
+
+  -- Requirement 2's second half, pinned as text: the decimal is right-aligned
+  -- in a field of its own, so one, two, and three digits end in the same
+  -- column and the bars above and below each other stay comparable.
+  it "right-aligns the decimal so one-, two-, and three-digit rows share a column" $ do
+    rows <- drawnPercentRows closedBorders [(defaultLabel, percentage) | percentage <- boundaryPercentages]
+    rows
+      `shouldBe` [ "5 hour  [\9617\9617\9617\9617\9617\9617\9617\9617\9617\9617]  0%",
+                   "5 hour  [\9608\9617\9617\9617\9617\9617\9617\9617\9617\9617]  5%",
+                   "5 hour  [\9608\9608\9608\9608\9608\9608\9617\9617\9617\9617] 63%",
+                   "5 hour  [\9608\9608\9608\9608\9608\9608\9608\9608\9608\9617] 94%",
+                   "5 hour  [\9608\9608\9608\9608\9608\9608\9608\9608\9608\9608]100%"
+                 ]
+
+  it "draws that same range with ASCII glyphs under --ascii" $ do
+    rows <- drawnPercentRows asciiBorders [(defaultLabel, percentage) | percentage <- boundaryPercentages]
+    rows
+      `shouldBe` [ "5 hour  [..........]  0%",
+                   "5 hour  [#.........]  5%",
+                   "5 hour  [######....] 63%",
+                   "5 hour  [#########.] 94%",
+                   "5 hour  [##########]100%"
+                 ]
+
+  -- Requirements 3 and 4, over the shapes an external command can supply:
+  -- narrower than the field, exactly at it, wider than it, and one whose
+  -- 'Data.Text.length' fits while its display width does not -- which is the
+  -- shape that used to slip past a character-counted pad and take the bar and
+  -- the percentage out of the interior with it.
+  it "bounds and pads every label to the field, measured in cells" $ do
+    faults <- traverse (\style -> rowFaults style [(label, 63) | label <- labelSweep]) sidebarStyles
+    concat faults `shouldBe` []
+
+  it "marks a shortened label and leaves a fitting one alone" $ do
+    rows <- drawnPercentRows closedBorders [(label, 63) | label <- labelSweep]
+    map labelFieldOf rows
+      `shouldBe` [ "wk     ",
+                   "5 hour ",
+                   "weekly!",
+                   "fortni\8230",
+                   "\26085\26412\35486\8230",
+                   "5 hour\8230"
+                 ]
+
+  -- The amendment's newline case. 'Kanban.Text.sanitizeText' keeps @\n@
+  -- deliberately and Brick draws one as a row break, so a multi-line label
+  -- would otherwise leave the bar and the percentage on a row of their own
+  -- beneath a provider block whose height is fixed. 'drawnPercentRows' fails
+  -- on the row count before it ever reaches the fields.
+  it "keeps a multi-line label on one row, marked as shortened" $ do
+    Data.Text.isInfixOf "\n" multiLineLabel `shouldBe` True
+    rows <- drawnPercentRows closedBorders [(multiLineLabel, 63)]
+    rows `shouldBe` ["5 hour\8230 [\9608\9608\9608\9608\9608\9608\9617\9617\9617\9617] 63%"]
+
+  -- Requirement 2 read across the two surfaces: one window's remaining
+  -- percentage is one figure, whichever surface states it.
+  it "states the same percentage as kanban --usage for the same window" $
+    for_ boundaryPercentages $ \percentage -> do
+      rows <- drawnPercentRows closedBorders [(defaultLabel, percentage)]
+      snapshot <- decodedSnapshot [(defaultLabel, percentage)]
+      let stated = Data.Text.pack (show percentage) <> "%"
+          command = renderUsageReport Map.empty utc goldenNow (UsageReport [(Codex, UsageAvailable snapshot)])
+      map (Data.Text.stripStart . percentFieldOf) rows `shouldBe` [stated]
+      filter (stated `Data.Text.isInfixOf`) command `shouldNotBe` []
+
+-- | The label the percentage sweeps hold constant: a fixture label six cells
+-- wide, so what varies between those rows is the percentage alone.
+defaultLabel :: Text
+defaultLabel = "5 hour"
+
+-- | The percentages the field's boundaries sit on: the empty bar, the
+-- narrowest single digit that still fills a cell, the fixture's own figure,
+-- the widest two-digit row, and the three-digit row that used to overflow.
+boundaryPercentages :: [Int]
+boundaryPercentages = [0, 5, 63, 94, 100]
+
+-- | Every shape of label the field has to answer for, each one text an
+-- external usage command can supply: narrower than the field, exactly at it,
+-- wider than it, wider in cells while narrower in characters, and one whose
+-- remainder would have become a row of its own.
+labelSweep :: [Text]
+labelSweep = ["wk", defaultLabel, "weekly!", "fortnightly", "\26085\26412\35486\12391\12377", multiLineLabel]
+
+-- | A label whose line break 'Kanban.Text.sanitizeText' keeps.
+multiLineLabel :: Text
+multiLineLabel = "5 hour\nand a bit"
+
+-- | One way the sidebar is framed, and how many cells stand before its
+-- interior begins. §6 fixes the sidebar at 'usageSidebarWidth' in all three,
+-- but the closed box spends two of them on a border the open rules do not
+-- draw at all.
+data SidebarStyle = SidebarStyle
+  { sidebarStyleName :: String,
+    sidebarStyleOptions :: Options -> Options,
+    sidebarStyleIndent :: Int
+  }
+
+sidebarStyles :: [SidebarStyle]
+sidebarStyles = [closedBorders, openBorders, asciiBorders]
+
+closedBorders, openBorders, asciiBorders :: SidebarStyle
+closedBorders = SidebarStyle "closed borders" id 3
+openBorders = SidebarStyle "open borders" (\options -> options {optionBorder = BorderOpen}) 1
+asciiBorders = SidebarStyle "ascii" (\options -> options {optionAscii = True}) 3
+
+-- | The percentage rows one style draws for @windows@, read out of the whole
+-- application.
+--
+-- The row count is asserted against the windows asked for, so a sweep that
+-- outgrew the sidebar's height fails here rather than quietly covering less
+-- than it claims to.
+drawnPercentRows :: SidebarStyle -> [(Text, Int)] -> IO [Text]
+drawnPercentRows style windows = do
+  snapshot <- decodedSnapshot windows
+  base <- usageState (Map.singleton Codex snapshot) (Map.singleton Codex (Fresh goldenNow)) goldenNow
+  let state = base {appOptions = style.sidebarStyleOptions base.appOptions}
+      rows = drop 1 (providerBlock Codex (sidebarDrawn style state))
+  length rows `shouldBe` 2 * length windows
+  pure [row | (index, row) <- zip [0 :: Int ..] rows, even index]
+
+-- | One thing a drawn row got wrong, named rather than counted, so a failure
+-- says which field moved, in which frame, and what it moved to.
+data RowFault = RowFault
+  { faultStyle :: String,
+    faultLabel :: Text,
+    faultPercentage :: Int,
+    faultField :: Text,
+    faultDrawn :: Text,
+    faultExpected :: Text
+  }
+  deriving stock (Eq, Show)
+
+-- | Everything the rows one style drew for @windows@ got wrong.
+--
+-- Each field is read at the cell offset the allocation puts it at rather than
+-- searched for, so this is also where "the bar starts in the same column in
+-- every row" is asserted: a bar that moved is a bar whose brackets are no
+-- longer at its offset's edges.
+--
+-- The row's own width is an equality rather than a bound. Every field on it
+-- is fixed, so a row that fits by measuring less than the interior is as
+-- wrong as one that overflows -- it means a field went missing.
+rowFaults :: SidebarStyle -> [(Text, Int)] -> IO [RowFault]
+rowFaults style windows = do
+  rows <- drawnPercentRows style windows
+  pure (concat (zipWith faults windows rows))
+  where
+    faults (label, percentage) row =
+      [ RowFault style.sidebarStyleName label percentage field drawn expected
+      | (field, drawn, expected) <-
+          [ ("row width", cells (displayWidth row), cells usageSidebarInterior),
+            ("content past the interior", dropCells usageSidebarInterior row, ""),
+            ("label field width", cells (displayWidth (labelFieldOf row)), cells usageLabelField),
+            ("separator", takeCells 1 (dropCells usageLabelField row), " "),
+            ("bar width", cells (displayWidth (barOf row)), cells usageBarWidth),
+            ("bar edges", Data.Text.take 1 (barOf row) <> Data.Text.takeEnd 1 (barOf row), "[]"),
+            ("percentage", Data.Text.stripStart (percentFieldOf row), Data.Text.pack (show percentage) <> "%"),
+            ("percentage field width", cells (displayWidth (percentFieldOf row)), cells usagePercentField)
+          ],
+        drawn /= expected
+      ]
+    cells = Data.Text.pack . show
+
+labelFieldOf :: Text -> Text
+labelFieldOf = takeCells usageLabelField
+
+barOf :: Text -> Text
+barOf = takeCells usageBarWidth . dropCells (usageLabelField + 1)
+
+percentFieldOf :: Text -> Text
+percentFieldOf = takeCells usagePercentField . dropCells (usageLabelField + 1 + usageBarWidth)
+
+-- | Chunks small enough that a sweep's windows all fit the sidebar's height,
+-- so 'drawnPercentRows' never has to fail its row count for a reason the
+-- sweep did not mean to test.
+sweepChunks :: [(Text, Int)] -> [[(Text, Int)]]
+sweepChunks [] = []
+sweepChunks windows = take 6 windows : sweepChunks (drop 6 windows)
+
+-- | A snapshot of the windows an external usage command reported, produced by
+-- decoding that command's own document rather than assembled by hand: the
+-- label bound covered here is a bound on what
+-- 'Kanban.UsageCommand.parseUsageWindow' admits, so a fixture that skipped
+-- the decoder would be asserting over labels no provider can supply.
+decodedSnapshot :: [(Text, Int)] -> IO UsageSnapshot
+decodedSnapshot windows = either (fail . show) pure (decodeUsageCommandDocument goldenNow (Aeson.encode document))
+  where
+    document =
+      Aeson.object
+        [ "windows"
+            .= [ Aeson.object
+                   [ "label" .= label,
+                     "pct_left" .= percentage,
+                     "resets_at" .= addUTCTime 1800 goldenNow
+                   ]
+               | (label, percentage) <- windows
+               ]
+        ]
+
+-- | Every cell the sidebar drew of one frame, from its first interior cell to
+-- the last cell inside its right edge.
+--
+-- Deliberately not 'sidebarInterior': that projection takes
+-- 'usageSidebarInterior' /characters/ off the front of a row and throws the
+-- rest away, which is both the wrong measure for a row holding a wide
+-- character and a guarantee that an overflowing cell is gone before any
+-- assertion sees it. This one is measured in cells and reaches past the
+-- budget into the sidebar's own padding, so content that escaped the interior
+-- is read back rather than trimmed into agreement.
+sidebarDrawn :: SidebarStyle -> AppState -> [Text]
+sidebarDrawn style state =
+  [ Data.Text.stripEnd (takeCells (usageSidebarWidth - style.sidebarStyleIndent) (dropCells style.sidebarStyleIndent row))
+  | row <- map frameRowText (renderFrameCells (themeFor state.appOptions) (164, 48) (drawApplication state))
+  ]
+
+-- | 'Data.Text.take' and 'Data.Text.drop' measured in terminal cells, which
+-- is the measure a rendered row has to be cut by: seven characters of
+-- Japanese occupy fourteen columns, so cutting by characters would read
+-- fourteen columns of the board beside the sidebar as part of the sidebar.
+takeCells :: Int -> Text -> Text
+takeCells limit = Data.Text.pack . go limit . Data.Text.unpack
+  where
+    go _ [] = []
+    go remaining (character : rest)
+      | width > remaining = []
+      | otherwise = character : go (remaining - width) rest
+      where
+        width = displayWidth (Data.Text.singleton character)
+
+dropCells :: Int -> Text -> Text
+dropCells limit = Data.Text.pack . go limit . Data.Text.unpack
+  where
+    go remaining rest
+      | remaining <= 0 = rest
+    go _ [] = []
+    go remaining (character : rest) = go (remaining - displayWidth (Data.Text.singleton character)) rest
 
 snapshotFetchedAt :: UTCTime -> UsageSnapshot
 snapshotFetchedAt fetchedAt =

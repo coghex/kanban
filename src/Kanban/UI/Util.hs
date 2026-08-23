@@ -20,7 +20,6 @@ module Kanban.UI.Util
     mergeText,
     outstandingDirectMergeReport,
     overflowText,
-    padLabel,
     primaryTrackerNumber,
     pullRequestActionText,
     pullRequestAgentLabel,
@@ -76,9 +75,6 @@ import Kanban.Worker
   ( workerDeadlineReason
   )
 import Kanban.UI.Types
-
-padLabel :: Text -> Text
-padLabel value = value <> Text.replicate (max 0 (7 - Text.length value)) " "
 
 overflowText :: Int -> Text
 overflowText count
