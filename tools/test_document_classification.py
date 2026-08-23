@@ -71,6 +71,10 @@ TEST_PARSED_PATHS = {
     # headings, and the epic template's Children checklist, which
     # src/Kanban/Tracker.hs parses in an issue filed from it (issue #434).
     ".github/ISSUE_TEMPLATE/",
+    # tools/test_pull_request_template.py and test/Spec/Agent/PullRequestFlow.hs
+    # both read the tracked pull-request template and run the three parsers
+    # that route on its absent pr-origin marker over it (issue #494).
+    ".github/pull_request_template.md",
     # tools/test_agent_workflow_contract.py parses §4; this module parses §7.
     "docs/agent-workflow-contract.md",
     # test/Spec/UI/Keys.hs parses the §7 keybinding table.
