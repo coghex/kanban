@@ -38,8 +38,10 @@ import Kanban.Models
   ( Assignment (..),
     AssignmentUnavailable,
     ModelRoster,
+    RecordedAssignment,
     RoleName (..),
     assignmentFor,
+    recordAssignment,
   )
 import Kanban.Process (ManagedProcess, managedProcess)
 import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, agentOutcome, emitStreamEvent, parseSolveOutputLine, providerForBrand, resumeProvenanceHeader, sealUnknownAggregates)
@@ -164,12 +166,20 @@ pullRequestRole action
 
 -- | The roster cell a pull-request invocation runs on, from the brand
 -- 'agentForAction' already routes it to. Shared by the UI boundary that
--- refuses on it and by the supervisor that constructs argv from it.
-pullRequestAssignment :: ModelRoster -> PullRequestOrigin -> PullRequestAction -> Either AssignmentUnavailable Assignment
+-- refuses on it and by the launch that records it, and — like
+-- 'Kanban.Solve.solveAssignment' — it hands back the provider it resolved
+-- through, because the record outlives the routing that selected it.
+pullRequestAssignment :: ModelRoster -> PullRequestOrigin -> PullRequestAction -> Either AssignmentUnavailable RecordedAssignment
 pullRequestAssignment roster origin action =
-  assignmentFor roster (pullRequestRole action) (providerForBrand (agentForAction origin action))
+  recordAssignment provider <$> assignmentFor roster (pullRequestRole action) provider
+  where
+    provider = providerForBrand (agentForAction origin action)
 
-runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Assignment -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (PullRequestFlowEvent -> IO ()) -> IO ()
+-- | The brand is an argument rather than 'agentForAction' applied here: the
+-- supervisor spawns whichever provider its recorded assignment names, and
+-- re-deriving one from the origin and action would let a replayed launch
+-- pair a recorded model with the other brand's executable (D-7).
+runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Assignment -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (PullRequestFlowEvent -> IO ()) -> IO ()
 runPullRequestFlow = runPullRequestFlowWith (const handleReadLine)
 
 -- | As 'runPullRequestFlow', but reads stdout/stderr via an injected
@@ -179,10 +189,9 @@ runPullRequestFlow = runPullRequestFlowWith (const handleReadLine)
 -- provider through the shared reader's abandonment path. The primitive is
 -- given the stream tag ("stdout"/"stderr") alongside the handle so a test
 -- can target one stream's abandonment path without racing the other's.
-runPullRequestFlowWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Assignment -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (PullRequestFlowEvent -> IO ()) -> IO ()
-runPullRequestFlowWith readLineFor repository pullRequestNumber origin action configPath config assignment existingSession existingLogPath provenance userMessage aggregator eventSink = do
-  let brand = agentForAction origin action
-      executableName = if brand == CodexSolver then "codex" else "claude"
+runPullRequestFlowWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Assignment -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (PullRequestFlowEvent -> IO ()) -> IO ()
+runPullRequestFlowWith readLineFor repository pullRequestNumber origin action brand configPath config assignment existingSession existingLogPath provenance userMessage aggregator eventSink = do
+  let executableName = if brand == CodexSolver then "codex" else "claude"
   logResult <- openSessionLog repository ("pr-" <> actionName action <> if brand == CodexSolver then "-codex" else "-claude") pullRequestNumber existingLogPath
   sessionLog <- case logResult of
     Left message -> eventSink (PullRequestFlowDiagnostic pullRequestNumber message) >> pure Nothing
@@ -210,7 +219,7 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
       managedRef <- newIORef Nothing
       started <- uninterruptibleMask_ $ do
         eventSink (PullRequestProcessSpawning pullRequestNumber True)
-        result <- try (createProcess (processSpec executablePath brand)) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
+        result <- try (createProcess (processSpec executablePath)) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
         case result of
           Right (Nothing, Just _, Just _, processHandle) -> do
             (managed, groupLeaderProblem) <- managedProcess processHandle
@@ -255,7 +264,7 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
       sealUnknownAggregates aggregator (eventSink . PullRequestFlowOutput pullRequestNumber)
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (PullRequestProcessFinished pullRequestNumber outcome)
-    processSpec executablePath brand =
+    processSpec executablePath =
       (proc executablePath (pullRequestArguments pullRequestNumber origin action brand configPath repository config assignment existingSession provenance userMessage))
         { cwd = Just repositoryRoot,
           std_in = NoStream,

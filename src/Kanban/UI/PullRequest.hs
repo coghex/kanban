@@ -49,7 +49,7 @@ import Kanban.Drainer
     runDirectMerge,
     setDrainerRunning
   )
-import Kanban.Models (ModelRoster)
+import Kanban.Models (RecordedAssignment)
 import Kanban.Preflight
   ( PreflightAction (..)
     )
@@ -107,7 +107,7 @@ startPullRequestReviewWithVisibility showOverlay = startPullRequestReviewWithOpt
 -- that is the boundary a process actually crosses.
 pullRequestStartRefusal :: AppState -> PullRequestOrigin -> PullRequestAction -> Maybe Text
 pullRequestStartRefusal state origin action =
-  case resolvedRosterFor (\roster -> pullRequestAssignment roster origin action) state.appModelRoster of
+  case resolvedRosterCellFor (\roster -> pullRequestAssignment roster origin action) state.appModelRoster of
     Left message -> Just (pullRequestActionText action <> " did not start: " <> message)
     Right _ -> Nothing
 
@@ -140,7 +140,10 @@ startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullReques
                     pullRequestSessionLaunchedForUpdatedAt = pullRequest.pullRequestUpdatedAt,
                     pullRequestSessionBrand = brand,
                     pullRequestSessionId = Nothing,
-                    pullRequestSessionResumeProvenance = ResumeAnswer
+                    pullRequestSessionResumeProvenance = ResumeAnswer,
+                    -- A fresh press is never a replay; see
+                    -- 'Kanban.UI.Solve.startFreshIssueSolve'.
+                    pullRequestSessionAssignment = Nothing
                   }
         modify
           ( \current ->
@@ -172,9 +175,12 @@ launchPullRequestFlow number origin action brand existingSession provenance inpu
 launchLivePullRequestFlow :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchLivePullRequestFlow number origin action brand existingSession provenance input = do
   state <- get
-  case resolvedRosterFor (\roster -> pullRequestAssignment roster origin action) state.appModelRoster of
+  let recorded = Map.lookup number state.appPullRequestReviewSessions >>= (.sessionDetail.pullRequestSessionAssignment)
+  case launchAssignment recorded (\roster -> pullRequestAssignment roster origin action) state.appModelRoster of
     Left message -> liftIO (failPullRequestLaunch state.appEventChannel number message)
-    Right roster -> launchRosteredPullRequestFlow roster number origin action brand existingSession provenance input
+    Right assignment -> do
+      modifyPullRequestSession number (withSessionDetail (\detail -> detail {pullRequestSessionAssignment = Just assignment}))
+      launchAssignedPullRequestFlow assignment number origin action brand existingSession provenance input
 
 -- | The pull-request twin of 'Kanban.UI.Solve.failSolveLaunch', and for the
 -- same reason: every caller has already inserted or reopened a session, so a
@@ -187,8 +193,8 @@ failPullRequestLaunch eventChannel number message = do
   writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
   writeBChan eventChannel (PullRequestProtocolEvent (PullRequestProcessFinished number (SolveFailed message)))
 
-launchRosteredPullRequestFlow :: ModelRoster -> Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
-launchRosteredPullRequestFlow roster number origin action _brand existingSession provenance input = do
+launchAssignedPullRequestFlow :: RecordedAssignment -> Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
+launchAssignedPullRequestFlow assignment number origin action _brand existingSession provenance input = do
   state <- get
   let existingLogPath = Map.lookup number state.appPullRequestReviewSessions >>= (.sessionLogPath)
       parent = autoSolveWorkerParent state number
@@ -198,7 +204,7 @@ launchRosteredPullRequestFlow roster number origin action _brand existingSession
     case blocked of
       Just message -> failPullRequestLaunch eventChannel number message
       Nothing -> do
-        launched <- launchPullRequestWorker roster state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
+        launched <- launchPullRequestWorker assignment state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
         case launched of
           Left message -> failPullRequestLaunch eventChannel number message
           Right descriptor -> do

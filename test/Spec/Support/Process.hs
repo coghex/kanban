@@ -24,7 +24,7 @@ module Spec.Support.Process
     isPullRequestSessionIdentifiedEvent,
     isPullRequestFlowOutputEvent,
     workerFixtureSpec,
-    writeWorkerRosterSnapshot,
+    workerFixtureAssignment,
     deadlineFixtureSpec,
     waitForWorkerState,
     isOrphaned,
@@ -75,7 +75,7 @@ import Kanban.Process
     managedProcess,
     readProcessSnapshot
   )
-import Kanban.Models (ModelRoster, defaultRoster)
+import Kanban.Models (ModelRoster, RecordedAssignment, defaultRoster)
 import Kanban.PullRequestFlow (PullRequestFlowEvent (..))
 import Kanban.Review
   ( CommandBounds (..),
@@ -106,6 +106,7 @@ import Kanban.Solve
     maxUnknownNoticeLength,
     newUnknownAggregator,
     parseSolveOutputLine,
+    solveAssignment,
     unknownNoticeSamples
   )
 import Kanban.UI.Types (ChatTranscript (..))
@@ -118,15 +119,14 @@ import Kanban.Worker
     WorkerState (..),
     WorkerStatus (..),
     WorkerTask (..),
-    descriptorForSpec,
     discoverWorkerHistory,
     monitorWorker,
-    runWorker,
-    writeWorkerRoster
+    runWorker
   )
 import Spec.Support.Env (ignoringIOException, withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (requireJust)
 import Spec.Support.Fixtures (epoch)
+import Spec.Support.Roster (cellOf)
 import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>))
@@ -351,10 +351,6 @@ runChattyWorker temporaryRoot spec identifier = do
   originalPath <- maybe "" id <$> lookupEnv "PATH"
   withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
     withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
-      -- The supervisor reads its model roster from the snapshot its
-      -- launcher writes beside the spec, so a fixture that writes the spec
-      -- by hand has to write that too or the run refuses before it spawns.
-      writeWorkerRosterSnapshot spec defaultRoster
       runWorker specPath `shouldReturn` Right ()
       journal <- ByteString.lines <$> ByteString.readFile eventPath
       replayed <- newIORef []
@@ -455,16 +451,13 @@ isPullRequestFlowOutputEvent :: PullRequestFlowEvent -> Bool
 isPullRequestFlowOutputEvent (PullRequestFlowOutput _ _) = True
 isPullRequestFlowOutputEvent _ = False
 
--- | Writes the launch-scoped roster snapshot a hand-built spec's supervisor
--- will read, exactly where 'Kanban.Worker.launchWorker' would have put it.
--- Must run with the same @XDG_CACHE_HOME@ the worker will resolve under.
-writeWorkerRosterSnapshot :: WorkerSpec -> ModelRoster -> IO ()
-writeWorkerRosterSnapshot spec roster = do
-  descriptor <- descriptorForSpec spec
-  written <- writeWorkerRoster descriptor roster
-  case written of
-    Left message -> throwIO (userError ("could not write the fixture roster snapshot: " <> Data.Text.unpack message))
-    Right () -> pure ()
+-- | The cell every hand-built fixture spec records: the compiled default
+-- for the solve task 'workerFixtureSpec' carries. A supervisor takes its
+-- assignment from the specification it is handed and resolves nothing of its
+-- own, so a fixture that writes the spec by hand has to record one or the
+-- run refuses before it spawns.
+workerFixtureAssignment :: RecordedAssignment
+workerFixtureAssignment = cellOf (solveAssignment defaultRoster CodexSolver)
 
 workerFixtureSpec :: Repository -> WorkerId -> Int -> WorkerSpec
 workerFixtureSpec repository identifier issueNumber =
@@ -480,7 +473,8 @@ workerFixtureSpec repository identifier issueNumber =
       workerCreatedAt = epoch,
       workerMaxRuntimeSeconds = 60,
       workerConfigPath = Nothing,
-      workerWorkflowConfig = defaultWorkflowConfig
+      workerWorkflowConfig = defaultWorkflowConfig,
+      workerAssignment = Just workerFixtureAssignment
     }
 
 -- | Like 'workerFixtureSpec', but with an explicit 'workerCreatedAt' and

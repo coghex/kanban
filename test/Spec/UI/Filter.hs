@@ -812,7 +812,8 @@ testWorkerDescriptor task =
             workerCreatedAt = epoch,
             workerMaxRuntimeSeconds = 60,
             workerConfigPath = Nothing,
-            workerWorkflowConfig = defaultWorkflowConfig
+            workerWorkflowConfig = defaultWorkflowConfig,
+            workerAssignment = Nothing
           },
       workerDescriptorSpecPath = "/tmp/worker-1.spec.json",
       workerDescriptorRosterPath = "/tmp/worker-1.roster.toml",

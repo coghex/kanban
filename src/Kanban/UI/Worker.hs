@@ -3,6 +3,7 @@ module Kanban.UI.Worker
     attachDiscoveredWorker,
     orphanMessage,
     recoveredPullRequestSession,
+    recoveredSolveSession,
     registerWorker,
     startPendingWorkerMonitors,
   )
@@ -260,7 +261,13 @@ recoveredSolveSession state descriptor issue task =
               descriptor.workerDescriptorSpec.workerParent
               (boardPullRequestNumbers state.appBoard)
               descriptor.workerDescriptorSpec.workerCreatedAt,
-          solveSessionResumeProvenance = ResumeAnswer
+          solveSessionResumeProvenance = ResumeAnswer,
+          -- The recovered session's assignment is whatever the worker that
+          -- is still running recorded, so answering its question replays
+          -- that rather than resolving against a roster this process may
+          -- have loaded differently. 'Nothing' is a specification written
+          -- before the field existed, and the first resume resolves once.
+          solveSessionAssignment = descriptor.workerDescriptorSpec.workerAssignment
         }
   )
     {sessionLogPath = descriptor.workerDescriptorSpec.workerExistingLogPath}
@@ -281,7 +288,9 @@ recoveredPullRequestSession priorGeneration descriptor pullRequest task =
               pullRequestSessionLaunchedForUpdatedAt = pullRequest.pullRequestUpdatedAt,
               pullRequestSessionBrand = brand,
               pullRequestSessionId = descriptor.workerDescriptorSpec.workerExistingSession,
-              pullRequestSessionResumeProvenance = ResumeAnswer
+              pullRequestSessionResumeProvenance = ResumeAnswer,
+              -- See 'recoveredSolveSession'.
+              pullRequestSessionAssignment = descriptor.workerDescriptorSpec.workerAssignment
             }
       )
         {sessionLogPath = descriptor.workerDescriptorSpec.workerExistingLogPath}

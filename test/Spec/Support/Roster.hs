@@ -34,7 +34,11 @@ import Kanban.Models
 -- supply it is a broken fixture, so this fails loudly rather than standing
 -- in a default — which is the very substitution the code under test is
 -- forbidden to make.
-cellOf :: Either AssignmentUnavailable Assignment -> Assignment
+--
+-- Polymorphic in what the resolver hands back: 'Kanban.Models.assignmentFor'
+-- yields the bare cell, while the task-routing resolvers yield the recorded
+-- assignment that carries the provider with it.
+cellOf :: Either AssignmentUnavailable cell -> cell
 cellOf =
   either
     (error . Text.unpack . ("fixture roster cannot supply the cell under test: " <>) . assignmentUnavailableMessage)

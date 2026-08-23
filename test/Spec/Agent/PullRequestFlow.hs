@@ -8,7 +8,7 @@ import Data.List (findIndex)
 import qualified Data.Text
 import Data.Time (UTCTime (..), fromGregorian)
 import Kanban.Domain
-import Kanban.Models (Assignment (..), ModelRoster, defaultRoster)
+import Kanban.Models (Assignment (..), ModelRoster, defaultRoster, recordedAssignmentCell)
 import Kanban.Process (identityForPid, managedProcessPid, matchingIdentities, readProcessSnapshot)
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
@@ -291,7 +291,7 @@ spec = do
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
             aggregator <- newUnknownAggregator
-            runPullRequestFlow repository 904 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
+            runPullRequestFlow repository 904 PullRequestClaude PullRequestReview CodexSolver Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case (findIndex isPullRequestSessionIdentifiedEvent collected, findIndex isPullRequestFlowOutputEvent collected) of
               (Just sessionIndex, Just outputIndex) -> sessionIndex `shouldSatisfy` (< outputIndex)
@@ -324,7 +324,7 @@ spec = do
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
             aggregator <- newUnknownAggregator
-            runPullRequestFlow repository 905 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
+            runPullRequestFlow repository 905 PullRequestClaude PullRequestReview CodexSolver Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case reverse collected of
               (PullRequestProcessFinished _ (SolveNeedsInput question) : _) -> question `shouldBe` "which reviewer wins?"
@@ -356,7 +356,7 @@ spec = do
                     | Data.Text.isInfixOf "stderr-poison-line" message -> throwIO (userError "diagnostic delivery exploded")
                   _ -> pure ()
             aggregator <- newUnknownAggregator
-            timeout 10000000 (runPullRequestFlow repository 903 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator poisonedSink) `shouldReturn` Just ()
+            timeout 10000000 (runPullRequestFlow repository 903 PullRequestClaude PullRequestReview CodexSolver Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator poisonedSink) `shouldReturn` Just ()
 
     it "terminates the still-live provider and forces a failed terminal outcome when the stdout reader's read primitive keeps failing" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -401,7 +401,7 @@ spec = do
                   | tag == "stdout" = pure (Left (userError "simulated persistent stdout read failure"))
                   | otherwise = handleReadLine handle
             aggregator <- newUnknownAggregator
-            timeout 20000000 (runPullRequestFlowWith stdoutOnlyFails repository 907 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
+            timeout 20000000 (runPullRequestFlowWith stdoutOnlyFails repository 907 PullRequestClaude PullRequestReview CodexSolver Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
             collected <- reverse <$> readIORef events
             let stdoutAbandonments = [message | PullRequestFlowDiagnostic _ message <- collected, Data.Text.isInfixOf "stdout stream reader gave up" message]
             stdoutAbandonments `shouldSatisfy` (not . null)
@@ -435,7 +435,7 @@ spec = do
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
             aggregator <- newUnknownAggregator
-            runPullRequestFlow repository 908 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
+            runPullRequestFlow repository 908 PullRequestClaude PullRequestReview CodexSolver Nothing defaultWorkflowConfig (pullRequestCell defaultRoster PullRequestClaude PullRequestReview) Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             let notices = [agentEvent | PullRequestFlowOutput _ agentEvent <- collected, Data.Text.isPrefixOf "[event] telemetry" agentEvent.agentEventSummary]
             length notices `shouldBe` unknownNoticeSamples + 1
@@ -476,7 +476,11 @@ repairWorkerDescriptor task =
             workerCreatedAt = epoch,
             workerMaxRuntimeSeconds = 60,
             workerConfigPath = Nothing,
-            workerWorkflowConfig = defaultWorkflowConfig
+            workerWorkflowConfig = defaultWorkflowConfig,
+            -- A worker whose spec predates the recorded field: what the
+            -- reattach reads, and what its first resume then resolves once
+            -- and records.
+            workerAssignment = Nothing
           },
       workerDescriptorSpecPath = "/tmp/pr-900-repair.spec.json",
       workerDescriptorRosterPath = "/tmp/pr-900-repair.roster.toml",
@@ -526,4 +530,4 @@ pullRequestArgumentsOn roster number origin action brand configPath repository c
   pullRequestArguments number origin action brand configPath repository config (pullRequestCell roster origin action)
 
 pullRequestCell :: ModelRoster -> PullRequestOrigin -> PullRequestAction -> Assignment
-pullRequestCell roster origin action = cellOf (pullRequestAssignment roster origin action)
+pullRequestCell roster origin action = recordedAssignmentCell (cellOf (pullRequestAssignment roster origin action))

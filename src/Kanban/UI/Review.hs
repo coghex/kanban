@@ -654,9 +654,9 @@ startReviewBackend = do
   modify (\current -> current {appReviewBackend = ReviewBackendStarting})
   let eventChannel = state.appEventChannel
       eventSink = writeBChan eventChannel . ReviewProtocolEvent
-  case resolvedRosterFor (\roster -> assignmentFor roster IssueReviewRole CodexProvider) state.appModelRoster of
+  case resolvedRosterCellFor (\roster -> assignmentFor roster IssueReviewRole CodexProvider) state.appModelRoster of
     Left message -> liftIO (writeBChan eventChannel (ReviewBackendStarted (Left message)))
-    Right roster ->
+    Right (roster, _) ->
       void
         . liftIO
         . forkIO

@@ -30,7 +30,7 @@ import qualified Data.Text as Text
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
-import Kanban.Models (ModelRoster)
+import Kanban.Models (RecordedAssignment)
 import Kanban.Preflight
   ( PreflightAction (..),
     actionReport,
@@ -132,7 +132,7 @@ solveStartDecision state issue workflow brand = case readOnlyHistoryRefusal stat
   Just notice -> SolveStartRefused notice
   Nothing
     | isJust (reusableSolveSession workflow issue.issueNumber state.appSolveSessions) -> SolveStartReopen
-    | otherwise -> case resolvedRosterFor (`solveAssignment` brand) state.appModelRoster of
+    | otherwise -> case resolvedRosterCellFor (`solveAssignment` brand) state.appModelRoster of
         Left message -> SolveStartRefused ("Solve did not start: " <> message)
         Right _ -> SolveStartFresh
 
@@ -175,7 +175,10 @@ startFreshIssueSolve issue workflow brand = do
               solveSessionBrand = brand,
               solveSessionId = Nothing,
               solveSessionAutoProgress = autoProgress,
-              solveSessionResumeProvenance = ResumeAnswer
+              solveSessionResumeProvenance = ResumeAnswer,
+              -- A fresh start is never a replay: this launch resolves the
+              -- cell and records what it resolved.
+              solveSessionAssignment = Nothing
             }
   modify
     ( \current ->
@@ -203,16 +206,25 @@ launchSolveInvocation issueNumber workflow brand existingSession provenance inpu
     Nothing -> launchLiveSolveInvocation issueNumber workflow brand existingSession provenance input
 
 -- | The roster refusal sits beside the read-only-history one and for the
--- same reason: this is the boundary a process crosses, so the roster the
+-- same reason: this is the boundary a process crosses, so the cell the
 -- launch is checked against has to be the one it is handed. Autosolve's own
 -- revisions reach the provider through 'launchSolveInvocation' above, so
 -- they refuse here too rather than needing an arm of their own.
+--
+-- 'launchAssignment' is what makes a resume immune to a roster edit landing
+-- between two turns of the same provider session: it replays this session's
+-- recorded assignment and never reaches 'state.appModelRoster'. Recording
+-- the result back on the session is what carries the replay forward, and is
+-- also how a session recovered from a pre-MODEL-7 specification gains one.
 launchLiveSolveInvocation :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchLiveSolveInvocation issueNumber workflow brand existingSession provenance input = do
   state <- get
-  case resolvedRosterFor (`solveAssignment` brand) state.appModelRoster of
+  let recorded = Map.lookup issueNumber state.appSolveSessions >>= (.sessionDetail.solveSessionAssignment)
+  case launchAssignment recorded (`solveAssignment` brand) state.appModelRoster of
     Left message -> liftIO (failSolveLaunch state.appEventChannel issueNumber message)
-    Right roster -> launchRosteredSolveInvocation roster issueNumber workflow brand existingSession provenance input
+    Right assignment -> do
+      modifySolveSession issueNumber (withSessionDetail (\detail -> detail {solveSessionAssignment = Just assignment}))
+      launchAssignedSolveInvocation assignment issueNumber workflow brand existingSession provenance input
 
 -- | How a launch that never reached a provider reports itself: the
 -- diagnostic-then-terminal pair, which is the only thing that settles the
@@ -231,8 +243,8 @@ failSolveLaunch eventChannel issueNumber message = do
   writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
   writeBChan eventChannel (SolveProtocolEvent (SolveProcessFinished issueNumber (SolveFailed message)))
 
-launchRosteredSolveInvocation :: ModelRoster -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
-launchRosteredSolveInvocation roster issueNumber workflow brand existingSession provenance input = do
+launchAssignedSolveInvocation :: RecordedAssignment -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
+launchAssignedSolveInvocation assignment issueNumber workflow brand existingSession provenance input = do
   state <- get
   let existingLogPath = Map.lookup issueNumber state.appSolveSessions >>= (.sessionLogPath)
       eventChannel = state.appEventChannel
@@ -257,7 +269,7 @@ launchRosteredSolveInvocation roster issueNumber workflow brand existingSession 
       case blocked of
         Just message -> failSolveLaunch eventChannel issueNumber message
         Nothing -> do
-          launched <- launchSolveWorker roster state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
+          launched <- launchSolveWorker assignment state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
           case launched of
             Left message -> failSolveLaunch eventChannel issueNumber message
             Right descriptor -> do

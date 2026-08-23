@@ -16,6 +16,7 @@ module Kanban.UI.Util
     itemHeading,
     itemMetadata,
     itemStatusText,
+    launchAssignment,
     mergeText,
     outstandingDirectMergeReport,
     overflowText,
@@ -24,7 +25,7 @@ module Kanban.UI.Util
     pullRequestActionText,
     pullRequestAgentLabel,
     relativeAge,
-    resolvedRosterFor,
+    resolvedRosterCellFor,
     rightOrNothing,
     safeIndex,
     safeLast,
@@ -47,9 +48,9 @@ import Data.Time (TimeZone, UTCTime, defaultTimeLocale, diffUTCTime, formatTime,
 import Kanban.Config (cacheEnabled)
 import Kanban.Domain
 import Kanban.Models
-  ( Assignment,
-    AssignmentUnavailable,
+  ( AssignmentUnavailable,
     ModelRoster,
+    RecordedAssignment,
     RosterLoadError,
     assignmentUnavailableMessage,
     rosterErrorMessage,
@@ -301,8 +302,8 @@ agentFailureNotice subject message = case preflightDiagnosticDetail message of
   Just remediation -> subject <> " cannot start — " <> sanitizeText remediation
   Nothing -> subject <> " failed: " <> sanitizeText message
 
--- | The roster an agent-starting path may launch against, or the refusal it
--- must show instead.
+-- | The roster an agent-starting path may launch against and the cell it
+-- resolved from it, or the refusal it must show instead.
 --
 -- The one place the startup 'Either' is unwrapped, and the one place the
 -- selected cell is checked, so every spawn boundary refuses on the same two
@@ -311,15 +312,38 @@ agentFailureNotice subject message = case preflightDiagnosticDetail message of
 -- run's routing selected. Neither falls back to the compiled defaults; an
 -- absent file already yielded them inside 'Kanban.Models.loadModelRoster'.
 --
--- The roster, not the assignment, is what comes back: a detached supervisor
--- resolves its own cell from the snapshot of this same value, so handing the
--- launch the roster is what keeps the two ends resolving from one thing.
-resolvedRosterFor :: (ModelRoster -> Either AssignmentUnavailable Assignment) -> Either RosterLoadError ModelRoster -> Either Text ModelRoster
-resolvedRosterFor cell rosterResult = case rosterResult of
+-- Both halves come back because the two kinds of caller need different ones:
+-- a worker launch records the cell in the specification it persists, while
+-- the embedded review backend hands the whole roster to a client that reads
+-- more than one of its cells over that client's life.
+resolvedRosterCellFor :: (ModelRoster -> Either AssignmentUnavailable cell) -> Either RosterLoadError ModelRoster -> Either Text (ModelRoster, cell)
+resolvedRosterCellFor cell rosterResult = case rosterResult of
   Left loadError -> Left (rosterErrorMessage loadError)
   Right roster -> case cell roster of
     Left unavailable -> Left (assignmentUnavailableMessage unavailable)
-    Right _ -> Right roster
+    Right resolved -> Right (roster, resolved)
+
+-- | What a worker launch runs on, as one total decision (D-7, MODEL-7).
+--
+-- A session whose previous worker recorded an assignment replays it
+-- unchanged and consults no roster at all: not the cell, not the loaded
+-- provider set, and not the startup 'Either' — so a resume still launches
+-- after the operator has edited a model out of @models.toml@, or left the
+-- file unusable. If the provider has genuinely retired that model the CLI
+-- fails visibly at resume, which is the honest outcome; silently moving a
+-- live provider session onto a different model is not.
+--
+-- Only a launch that is not a replay resolves, and it refuses on exactly the
+-- terms 'resolvedRosterCellFor' states. That covers a fresh start and the
+-- first resume of a session whose worker predates the recorded field.
+launchAssignment ::
+  Maybe RecordedAssignment ->
+  (ModelRoster -> Either AssignmentUnavailable RecordedAssignment) ->
+  Either RosterLoadError ModelRoster ->
+  Either Text RecordedAssignment
+launchAssignment recorded cell rosterResult = case recorded of
+  Just replayed -> Right replayed
+  Nothing -> snd <$> resolvedRosterCellFor cell rosterResult
 
 isDeadlineOutcome :: SolveOutcome -> Bool
 isDeadlineOutcome (SolveFailed message) = message == workerDeadlineReason
