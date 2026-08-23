@@ -7,6 +7,7 @@ module Spec.Support.ClaudeProbe
   ( ClaudeSignalPolicy (..),
     ClaudeProbeFixture (..),
     ClaudeTranscript (..),
+    ClaudeWrapperLifetime (..),
     withClaudeProbeFixture,
   )
 where
@@ -29,6 +30,28 @@ data ClaudeSignalPolicy
     ClaudeIgnoresInterrupt
   | -- | Ignores both INT and TERM, so only SIGKILL can end it.
     ClaudeIgnoresInterruptAndTerminate
+  deriving stock (Eq, Show)
+
+-- | How long the fake `script` stays around. A real `script` outlives the
+-- client it launched, which is what keeps a `claude` its pty put in a
+-- session of its own reachable by walking down from the wrapper's pid. The
+-- other shape is the one the exception path has to survive: the wrapper
+-- leaves mid-session, the child it launched is reparented, and Kanban's next
+-- write to the pseudo-terminal fails.
+data ClaudeWrapperLifetime
+  = -- | Waits for the `claude` child, as a real `script` does.
+    WrapperWaitsForClaude
+  | -- | Leaves while the child is still running, so Kanban's end of the
+    -- pseudo-terminal breaks under whatever it writes next. It stays up
+    -- through the client's startup first, which is what a real `script`
+    -- does for the whole session: a wrapper that vanished before the probe
+    -- had ever seen the tree it launched would be an unrecoverable case
+    -- rather than this one, since nothing could have censused the child
+    -- through it. Pair it with a policy whose child outlives the wrapper --
+    -- with 'ClaudeExitsCleanly' there would be nothing left to reparent,
+    -- and its tail would sit waiting on bytes the broken pipe can no longer
+    -- carry.
+    WrapperExitsMidSession
   deriving stock (Eq, Show)
 
 -- | What the fake `claude` puts on the pseudo-terminal before its tail
@@ -69,9 +92,13 @@ data ClaudeProbeFixture = ClaudeProbeFixture
 -- wrapper's process group (the ordinary "create_group took effect and
 -- nothing else changed it" case) and one placed in a session/group of its
 -- own -- what `script`'s pty actually does in production, and the shape a
--- create_group-only signal never reaches.
-withClaudeProbeFixture :: Bool -> ClaudeSignalPolicy -> ClaudeTranscript -> (ClaudeProbeFixture -> IO result) -> IO result
-withClaudeProbeFixture separateGroup signalPolicy transcript action =
+-- create_group-only signal never reaches. `wrapperLifetime` decides whether
+-- the wrapper stays for the whole session or leaves the child behind
+-- part-way through it; the two knobs are independent, and it is their
+-- combination -- a separately grouped child whose wrapper has gone -- that
+-- nothing reachable from the wrapper's pid can find afterwards.
+withClaudeProbeFixture :: Bool -> ClaudeWrapperLifetime -> ClaudeSignalPolicy -> ClaudeTranscript -> (ClaudeProbeFixture -> IO result) -> IO result
+withClaudeProbeFixture separateGroup wrapperLifetime signalPolicy transcript action =
   withTemporaryCacheRoot $ \temporaryRoot -> do
     let binaryRoot = temporaryRoot </> "bin"
         scriptPath = binaryRoot </> "script"
@@ -80,9 +107,9 @@ withClaudeProbeFixture separateGroup signalPolicy transcript action =
         childMarker = temporaryRoot </> "claude-child.pid"
         termMarker = temporaryRoot </> "claude-term-received"
     createDirectoryIfMissing True binaryRoot
-    ByteString.writeFile scriptPath (ByteString.unlines (fakeScriptBody scriptMarker separateGroup))
+    ByteString.writeFile scriptPath (ByteString.unlines (fakeScriptBody scriptMarker separateGroup wrapperLifetime))
     setFileMode scriptPath 0o700
-    ByteString.writeFile claudePath (ByteString.unlines (fakeClaudeBody childMarker termMarker signalPolicy transcript))
+    ByteString.writeFile claudePath (ByteString.unlines (fakeClaudeBody childMarker termMarker wrapperLifetime signalPolicy transcript))
     setFileMode claudePath 0o700
     action (ClaudeProbeFixture scriptPath claudePath scriptMarker childMarker termMarker)
 
@@ -91,7 +118,8 @@ withClaudeProbeFixture separateGroup signalPolicy transcript action =
 -- its own pid, then runs the `claude` the operands name as a child,
 -- optionally under job-control monitor mode so the child gets a process
 -- group of its own -- the same effect `script`'s pty gets for free via
--- `forkpty`'s implicit `setsid`.
+-- `forkpty`'s implicit `setsid` -- and then either waits for that child or,
+-- per `wrapperLifetime`, leaves without it.
 --
 -- Accepting both dialects is what keeps the termination tests below running
 -- against whichever one the host selects, on macOS and on Linux alike. It is
@@ -103,8 +131,8 @@ withClaudeProbeFixture separateGroup signalPolicy transcript action =
 -- util-linux hands its @-c@ payload to a shell, so this does too, rather
 -- than word-splitting the payload itself -- otherwise the fixture would
 -- accept a payload no real `script` could run.
-fakeScriptBody :: FilePath -> Bool -> [ByteString.ByteString]
-fakeScriptBody scriptMarkerPath separateGroup =
+fakeScriptBody :: FilePath -> Bool -> ClaudeWrapperLifetime -> [ByteString.ByteString]
+fakeScriptBody scriptMarkerPath separateGroup wrapperLifetime =
   [ "#!/bin/bash",
     "printf '%s' \"$$\" > " <> quoted scriptMarkerPath,
     "if [ \"$2\" = '-c' ]; then",
@@ -121,11 +149,19 @@ fakeScriptBody scriptMarkerPath separateGroup =
          "childPid=$!"
        ]
     <> ["set +m" | separateGroup]
-    <> ["wait \"$childPid\""]
+    <> case wrapperLifetime of
+      WrapperWaitsForClaude -> ["wait \"$childPid\""]
+      -- One second is long enough for the probe to census the pair while
+      -- both are alive and related, and short enough to be well inside the
+      -- quiet period the capture waits out before it writes the exit
+      -- request -- so the wrapper is reliably gone by the time that write
+      -- happens, which is the failure this shape exists to produce.
+      WrapperExitsMidSession -> ["sleep 1", "exit 0"]
 
 -- | Stands in for real `claude --safe-mode --ax-screen-reader` running
 -- inside `script`'s pty: records its own pid, emits whichever screen the
--- transcript names, then either drains the exact byte count Kanban's
+-- transcript names, lets go of the pseudo-terminal if `wrapperLifetime`
+-- calls for it, then either drains the exact byte count Kanban's
 -- ESC+`/exit` writes before exiting on its own, or loops under whichever
 -- signal-ignoring trap the policy names.
 --
@@ -140,13 +176,14 @@ fakeScriptBody scriptMarkerPath separateGroup =
 -- fake that closed its output pipe any earlier would race a real Claude
 -- session's output never closing on its own, hitting a decode path this
 -- fixture is not testing.
-fakeClaudeBody :: FilePath -> FilePath -> ClaudeSignalPolicy -> ClaudeTranscript -> [ByteString.ByteString]
-fakeClaudeBody childMarkerPath termMarkerPath signalPolicy transcript =
+fakeClaudeBody :: FilePath -> FilePath -> ClaudeWrapperLifetime -> ClaudeSignalPolicy -> ClaudeTranscript -> [ByteString.ByteString]
+fakeClaudeBody childMarkerPath termMarkerPath wrapperLifetime signalPolicy transcript =
   [ "#!/bin/bash",
     "printf '%s' \"$$\" > " <> quoted childMarkerPath
   ]
     <> trapLines
     <> outputLines
+    <> detachLines
     <> tailLines
   where
     recordTermThenExit = "trap 'printf 1 > " <> quoted termMarkerPath <> "; exit 143' TERM"
@@ -172,6 +209,20 @@ fakeClaudeBody childMarkerPath termMarkerPath signalPolicy transcript =
         [ "printf '$\\n'",
           "printf 'Current session\\n5%% used\\nResets 8:40pm (America/Los_Angeles)\\n'",
           "printf 'Current week\\n10%% used\\nResets 9:40pm (America/Los_Angeles)\\n'"
+        ]
+    -- Kanban's end of the pseudo-terminal only breaks once every reader of
+    -- it is gone. In production that is `script` alone, which owns the pty
+    -- and hands the client a slave of its own; here the child inherited the
+    -- very same pipe, so it has to let go of its copy for the wrapper's exit
+    -- to close the pseudo-terminal the way a real one would. It drains the
+    -- seven bytes 'respondToScreen' writes for the "$" prompt first, so the
+    -- "/usage" request itself still lands and the screen above is still
+    -- produced the way every other shape produces it.
+    detachLines = case wrapperLifetime of
+      WrapperWaitsForClaude -> []
+      WrapperExitsMidSession ->
+        [ "dd bs=1 count=7 of=/dev/null 2>/dev/null",
+          "exec 0</dev/null"
         ]
     tailLines = case signalPolicy of
       -- 14 bytes: 'respondToScreen' answers the "$" prompt above with

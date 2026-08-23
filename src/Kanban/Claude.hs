@@ -19,8 +19,9 @@ import Control.Exception (IOException, try)
 import Control.Monad (void)
 import qualified Data.ByteString as ByteString
 import Data.Char (isDigit)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.List (nub)
-import Data.Maybe (listToMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -218,43 +219,79 @@ claudeProcess flavor scriptPath claudePath scratchDirectory environment =
       create_group = True
     }
 
+-- | Every way this can return runs 'stopProcess' or 'finishProcess' first,
+-- the exception path included. Driving the probe is all handle work --
+-- buffering, the capture's reads and its answers to the screen, and the
+-- clean-exit write -- and every one of those raises 'IOException' once the
+-- far end of the pseudo-terminal has gone away, which is exactly when a
+-- @claude@ the pty put in its own session is most likely to be outliving
+-- the 'script' that launched it. Letting such an exception escape to
+-- 'runClaudeProviderWith' still classified the refresh correctly, but by
+-- then no process handle is in scope to clean up through, and
+-- 'withCreateProcess''s own cleanup only knows about the direct child.
+--
+-- Only synchronous 'IOException's are caught. A 'timeout' expiring, or any
+-- other asynchronous interruption, still unwinds as it always did rather
+-- than being reported as a provider failure.
+--
+-- Nothing sits between the process being created and the guard going up
+-- that could raise one: 'newProbeCensus' only reads the handle's pid and
+-- allocates a reference, neither of which touches the outside world, and it
+-- has to come first because it is what the handler cleans up through.
 runProcess :: Int -> UTCTime -> TimeZone -> Maybe Handle -> Maybe Handle -> Maybe Handle -> ProcessHandle -> IO (Either ProviderError UsageSnapshot)
 runProcess timeoutMicros fetchedAt timeZone (Just input) (Just output) _ processHandle = do
+  census <- newProbeCensus processHandle
+  driven <- try @IOException (driveProbe census timeoutMicros fetchedAt timeZone input output)
+  case driven of
+    Right result -> pure result
+    Left exception -> do
+      _ <- stopProcess census
+      pure (Left (ProviderError RequestFailed (Text.pack (show exception))))
+runProcess _ _ _ _ _ _ processHandle = do
+  census <- newProbeCensus processHandle
+  _ <- stopProcess census
+  pure (Left (ProviderError RequestFailed "could not open Claude pseudo-terminal pipes"))
+
+driveProbe :: ProbeCensus -> Int -> UTCTime -> TimeZone -> Handle -> Handle -> IO (Either ProviderError UsageSnapshot)
+driveProbe census timeoutMicros fetchedAt timeZone input output = do
   hSetBuffering input NoBuffering
   hSetBuffering output NoBuffering
-  timedCapture <- timeout timeoutMicros (captureUsage input output)
+  timedCapture <- timeout timeoutMicros (captureUsage census input output)
   case timedCapture of
     Nothing -> do
-      _ <- stopProcess processHandle
+      _ <- stopProcess census
       pure (Left (ProviderError RequestTimedOut ("Claude usage refresh timed out after " <> Text.pack (show (timeoutMicros `div` 1000000)) <> " seconds")))
     Just transcript -> do
       requestCleanExit input
-      forcedKill <- finishProcess processHandle
+      forcedKill <- finishProcess census
       pure $
         if forcedKill
           then Left (ProviderError RequestFailed "Claude usage probe did not exit cleanly after /exit and required a forced kill")
           else decodeClaudeUsageText timeZone fetchedAt transcript
-runProcess _ _ _ _ _ _ processHandle = do
-  _ <- stopProcess processHandle
-  pure (Left (ProviderError RequestFailed "could not open Claude pseudo-terminal pipes"))
 
 data CaptureState = CaptureState
   { captureBytes :: ByteString.ByteString,
     captureTrustAccepted :: Bool,
     captureUsageRequested :: Bool,
-    captureLastOutputAt :: UTCTime
+    captureLastOutputAt :: UTCTime,
+    captureLastCensusAt :: UTCTime
   }
 
-captureUsage :: Handle -> Handle -> IO Text
-captureUsage input output = do
+-- | Drives the screen exchange, and keeps the probe's census fresh while it
+-- does: this is the only stretch of the probe long enough for 'script' to
+-- exit under it, and the only one during which the tree it launched is
+-- still forming.
+captureUsage :: ProbeCensus -> Handle -> Handle -> IO Text
+captureUsage census input output = do
   startedAt <- getCurrentTime
-  loop (CaptureState ByteString.empty False False startedAt)
+  loop (CaptureState ByteString.empty False False startedAt startedAt)
   where
     loop state = do
       let transcript = decodeTranscript state.captureBytes
       stateAfterInput <- respondToScreen input transcript state
       now <- getCurrentTime
-      if captureFailed transcript || (captureComplete transcript && diffMicros stateAfterInput.captureLastOutputAt now >= quietPeriodMicros)
+      stateAfterCensus <- refreshCensusIfDue now stateAfterInput
+      if captureFailed transcript || (captureComplete transcript && diffMicros stateAfterCensus.captureLastOutputAt now >= quietPeriodMicros)
         then pure transcript
         else do
           ready <- hWaitForInput output inputWaitMillis
@@ -266,11 +303,29 @@ captureUsage input output = do
                 else do
                   receivedAt <- getCurrentTime
                   loop
-                    stateAfterInput
-                      { captureBytes = stateAfterInput.captureBytes <> chunk,
+                    stateAfterCensus
+                      { captureBytes = stateAfterCensus.captureBytes <> chunk,
                         captureLastOutputAt = receivedAt
                       }
-            else loop stateAfterInput
+            else loop stateAfterCensus
+
+    -- Two cadences, because the two things a refresh can buy cost very
+    -- differently. Until a census has seen anything below 'script' there is
+    -- nothing retained that would survive its exit, so the gap between
+    -- attempts is the capture's own polling interval; a probe whose client
+    -- starts normally pays one or two snapshots for that. Afterwards a
+    -- refresh only picks up something spawned later, which is worth a
+    -- snapshot every couple of seconds and not worth one every quarter of a
+    -- second for the whole of a multi-second probe.
+    refreshCensusIfDue now state = do
+      acquired <- probeCensusReachedDescendant census
+      let interval = if acquired then censusRefreshIntervalMicros else censusAcquireIntervalMicros
+      if diffMicros state.captureLastCensusAt now < interval
+        then pure state
+        else do
+          recordProbeCensus census
+          recordedAt <- getCurrentTime
+          pure state {captureLastCensusAt = recordedAt}
 
 respondToScreen :: Handle -> Text -> CaptureState -> IO CaptureState
 respondToScreen input transcript state
@@ -311,6 +366,63 @@ requestCleanExit input = do
   threadDelay 100000
   sendInput input "/exit\r"
 
+-- | Everything this probe has been observed to own, accumulated as it runs
+-- rather than censused once at cleanup time.
+--
+-- A census can only reach a separately grouped @claude@ by walking down
+-- from 'script': the pty hands that child its own session, so the moment
+-- 'script' exits the child is reparented and no walk from 'script''s pid
+-- finds it again. Two of the three cleanup branches that already existed
+-- census at a moment 'script' is necessarily still there -- the refresh
+-- timeout fires while it is wedged, and the missing-pipe branch runs before
+-- anything has been written to it -- and the third, 'finishProcess',
+-- censuses before it begins waiting for exactly that reason. The exception
+-- path has no such moment: an 'IOException' from the capture's own handle
+-- work arrives *because* the far end went away, so by then the census that
+-- can still see the child is one an earlier refresh took. Retaining those
+-- identities is what keeps it reachable.
+data ProbeCensus = ProbeCensus
+  { probeCensusHandle :: ProcessHandle,
+    -- | Read once, while the probe is known to be unreaped, so
+    -- 'probeCensusReachedDescendant' can still tell the wrapper apart from
+    -- what it launched after 'getPid' has stopped answering.
+    probeCensusWrapperPid :: Maybe Int,
+    probeCensusRetained :: IORef (Maybe [ProcessIdentity])
+  }
+
+newProbeCensus :: ProcessHandle -> IO ProbeCensus
+newProbeCensus processHandle = do
+  wrapperPid <- getPid processHandle
+  ProbeCensus processHandle (fromIntegral <$> wrapperPid) <$> newIORef Nothing
+
+-- | Folds a fresh census into what earlier ones recorded, the newest record
+-- of each (pid, start time) winning so a process that has since been
+-- reparented or moved group is remembered as the last snapshot actually saw
+-- it. A snapshot that could not be taken leaves the retained census exactly
+-- as it was, so one failed @ps@ never discards identities an earlier one
+-- pinned.
+recordProbeCensus :: ProbeCensus -> IO ()
+recordProbeCensus census = do
+  fresh <- captureProbeCensus census.probeCensusHandle
+  case fresh of
+    Nothing -> pure ()
+    Just identities -> modifyIORef' census.probeCensusRetained (Just . mergeIdentities identities . fromMaybe [])
+  where
+    mergeIdentities fresh retained = fresh <> filter ((`notElem` map identityKey fresh) . identityKey) retained
+    identityKey identity = (identity.processIdentityPid, identity.processIdentityStartedAt)
+
+-- | Whether anything below the wrapper has been pinned yet -- that is,
+-- whether the retained census would still reach the client if the wrapper
+-- went away now. 'Nothing' for the wrapper's own pid means 'getPid' never
+-- answered, in which case 'captureProbeCensus' cannot census either and
+-- there is nothing for a slower cadence to preserve.
+probeCensusReachedDescendant :: ProbeCensus -> IO Bool
+probeCensusReachedDescendant census = do
+  retained <- readIORef census.probeCensusRetained
+  pure $ case retained of
+    Nothing -> False
+    Just identities -> any ((/= census.probeCensusWrapperPid) . Just . (.processIdentityPid)) identities
+
 -- | Waits out a clean @/exit@, then verifies -- and, if needed, escalates --
 -- unconditionally. Identities are censused before this wait even starts, not
 -- after: 'script' can be reaped by it (or, if the wait is itself interrupted
@@ -325,16 +437,16 @@ requestCleanExit input = do
 -- SIGKILL was required to reach a confirmed-clear state; the normal fast
 -- path (everyone already gone) sends no signal at all, just the one
 -- verifying snapshot.
-finishProcess :: ProcessHandle -> IO Bool
-finishProcess processHandle = do
-  census <- captureProbeCensus processHandle
-  _ <- timeout cleanExitMicros (waitForProcess processHandle)
-  terminateWithCensus processHandle census
+finishProcess :: ProbeCensus -> IO Bool
+finishProcess census = do
+  recordProbeCensus census
+  _ <- timeout cleanExitMicros (waitForProcess census.probeCensusHandle)
+  terminateWithCensus census
 
 -- | Escalates termination for a probe that has not exited on its own.
 -- Returns whether SIGKILL was required.
-stopProcess :: ProcessHandle -> IO Bool
-stopProcess processHandle = captureProbeCensus processHandle >>= terminateWithCensus processHandle
+stopProcess :: ProbeCensus -> IO Bool
+stopProcess census = recordProbeCensus census >> terminateWithCensus census
 
 -- | Census of 'script' and every descendant it has spawned by the time this
 -- is called (walked recursively by parent pid, so a grandchild -- e.g. a
@@ -368,12 +480,18 @@ captureProbeCensus processHandle = do
 -- this cannot itself confirm the reap succeeded (a wedged 'script' would
 -- make it time out), but by that point every group it or its descendants
 -- held has already been verified clear or force-killed.
-terminateWithCensus :: ProcessHandle -> Maybe [ProcessIdentity] -> IO Bool
-terminateWithCensus processHandle census = do
-  forced <- case census of
+--
+-- The fallback is reserved for a probe nothing was *ever* censused for. A
+-- retained census whose members have all since exited is not that case: it
+-- escalates against them, which costs one verifying snapshot and sends no
+-- signal, rather than signalling a bare pid unverified.
+terminateWithCensus :: ProbeCensus -> IO Bool
+terminateWithCensus census = do
+  retained <- readIORef census.probeCensusRetained
+  forced <- case retained of
     Just identities -> escalateProbeTermination identities
-    Nothing -> fallbackTerminate processHandle
-  _ <- timeout reapTimeoutMicros (waitForProcess processHandle)
+    Nothing -> fallbackTerminate census.probeCensusHandle
+  _ <- timeout reapTimeoutMicros (waitForProcess census.probeCensusHandle)
   pure forced
 
 -- | INT every owned group, grace, verify; then TERM, grace, verify; then
@@ -567,6 +685,12 @@ terminationGraceMicros = 1 * 1000 * 1000
 killGraceMicros = 1 * 1000 * 1000
 reapTimeoutMicros = 2 * 1000 * 1000
 quietPeriodMicros = 2 * 1000 * 1000
+
+-- | How long the capture goes between census refreshes, before and after it
+-- has pinned something below the wrapper. See 'captureUsage'.
+censusAcquireIntervalMicros, censusRefreshIntervalMicros :: Int
+censusAcquireIntervalMicros = 250 * 1000
+censusRefreshIntervalMicros = 2 * 1000 * 1000
 
 inputWaitMillis, captureChunkSize :: Int
 inputWaitMillis = 250
