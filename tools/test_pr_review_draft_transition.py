@@ -3,12 +3,20 @@
 Both packaged coordinators publish through their own copy of review_pr.py, so
 the same behavioral contract is exercised against each copy. An approval must
 mark a draft ready for review and verify the new state; changes requested must
-leave draft state alone. Rollback is scoped to ownership: if publication
-becomes stale after the coordinator's own ready command succeeded, the
-coordinator restores the draft while clearing verdict labels, but a ready
-state whose ownership it cannot establish -- the case where its ready command
-failed, which is indistinguishable from a concurrent actor's transition -- is
-left exactly as it stands.
+leave draft state alone. Publication never restores the draft on its failure
+path: rollback would need positive evidence that this invocation created the
+ready transition, and no such evidence exists. The ready command's own draft
+check and its mutation are not atomic, so neither a normal return nor a failed
+one separates "ours applied" from "another actor marked it ready" -- both act
+through the same credentials. Every failure after the ready command therefore
+leaves the pull request's draft state exactly as it stands, clears only the
+verdict labels, and says so without claiming anything was restored.
+
+Each ready-command outcome -- a normal return, and a failure -- is staged twice
+over world states the coordinator cannot tell apart, and both stagings assert
+the same result. A second class holds the two packaged pr-review assets, which
+tell an agent what a publication failure leaves behind, to that same rule and
+to each other.
 """
 
 from __future__ import annotations
@@ -186,7 +194,17 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                 restore.assert_not_called()
                 clear.assert_not_called()
 
-    def test_stale_publication_after_ready_restores_the_draft(self):
+    def test_stale_publication_after_ready_leaves_the_ready_state_alone(self):
+        """A ready transition outlives the publication that went stale after it.
+
+        This is the owned half of the successful-command pair: the
+        coordinator's own ready command made the transition, and the
+        verification that followed it went stale. The coordinator still has no
+        evidence that the transition was its own -- the concurrent case below
+        stages the identical observable sequence with another actor as the
+        author -- so it leaves the pull request ready for review and clears
+        only the verdict labels.
+        """
         for brand, module in self.modules.items():
             with self.subTest(brand=brand):
                 pr = self.pr(draft=True)
@@ -201,10 +219,21 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                     "APPROVE",
                     [before, module.WorkflowError("PR head changed after publication")],
                 )
+
+                def owned_transition(*_args, **_kwargs):
+                    # This invocation's own command applies the transition,
+                    # which is the one case a rollback would be entitled to
+                    # undo -- and it is indistinguishable from the concurrent
+                    # case below by anything the coordinator reads.
+                    pr["isDraft"] = False
+
+                ready.side_effect = owned_transition
+
                 with stack, self.assertRaises(module.WorkflowError) as excinfo:
                     self.publish(module, pr, "APPROVE")
 
                 ready.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
+                self.assertEqual(verify.call_count, 2)
                 clear.assert_called_once_with(
                     Path("/fake-repo"),
                     "coghex/kanban",
@@ -212,8 +241,61 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                     "reviewed:approve",
                     "reviewed:changes",
                 )
-                restore.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
-                self.assertIn("draft state was restored", str(excinfo.exception))
+                restore.assert_not_called()
+                self.assertFalse(pr["isDraft"])
+                self.assertNotIn("draft state was restored", str(excinfo.exception))
+
+    def test_successful_ready_command_leaves_a_concurrent_transition_alone(self):
+        """A ready command that succeeded as a no-op undoes nothing.
+
+        Another actor marks the pull request ready after the first
+        verification read a draft, so the coordinator's own ready command
+        returns successfully having changed nothing, and the verification
+        after it goes stale. That is the same sequence the owned case above
+        presents -- normal return, then a failure -- and `gh pr ready` cannot
+        close the gap, because its draft check and its mutation are not atomic
+        either. So publication leaves the external ready state standing.
+        """
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                pr = self.pr(draft=True)
+                before = {
+                    "comment_url": "https://example.test/comment",
+                    "labels": ["reviewed:approve"],
+                    "ready_for_review": False,
+                }
+                stack, verify, ready, restore, clear = self.publication_context(
+                    module,
+                    pr,
+                    "APPROVE",
+                    [before, module.WorkflowError("PR head changed after publication")],
+                )
+
+                def external_transition_then_no_op(*_args, **_kwargs):
+                    # The concurrency window itself: the verification above
+                    # observed a draft, then someone else marked the pull
+                    # request ready, so this command succeeds without applying
+                    # anything. Staged here and asserted below, so the fixture
+                    # proves the external ready state survives publication.
+                    pr["isDraft"] = False
+
+                ready.side_effect = external_transition_then_no_op
+
+                with stack, self.assertRaises(module.WorkflowError) as excinfo:
+                    self.publish(module, pr, "APPROVE")
+
+                ready.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
+                self.assertEqual(verify.call_count, 2)
+                clear.assert_called_once_with(
+                    Path("/fake-repo"),
+                    "coghex/kanban",
+                    89,
+                    "reviewed:approve",
+                    "reviewed:changes",
+                )
+                restore.assert_not_called()
+                self.assertFalse(pr["isDraft"])
+                self.assertNotIn("draft state was restored", str(excinfo.exception))
 
     def test_failed_ready_command_leaves_a_concurrent_transition_alone(self):
         """A ready state the coordinator cannot prove it created stays put.
@@ -323,6 +405,71 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                         ),
                     ],
                 )
+
+
+PR_REVIEW_ASSETS = {
+    "codex": REPO_ROOT
+    / "codex-plugin"
+    / "plugins"
+    / "kanban"
+    / "skills"
+    / "pr-review"
+    / "SKILL.md",
+    "claude": REPO_ROOT / "claude-plugin" / "plugins" / "kanban" / "commands" / "pr-review.md",
+}
+
+# The sentence in each packaged pr-review asset that tells an agent what a
+# publication failure leaves behind. Anchored on its opening clause, which
+# names the constraint the whole passage exists to explain.
+PUBLICATION_FAILURE_ANCHOR = (
+    "GitHub cannot atomically combine a comment, label, and draft transition"
+)
+
+
+class PublicationFailureDescriptionTests(unittest.TestCase):
+    """Both brands' pr-review assets describe the failure path identically.
+
+    The asset is the program an agent executes, so what it says publication
+    leaves behind has to be what publication leaves behind. Nothing but review
+    caught the copy that still promised a rollback after the rollback was
+    removed. The two coordinator scripts already have a gate for that --
+    tools/test_coordinator_parity.py holds them line-identical -- but the two
+    assets have none, and they are edited by hand, one brand at a time. So pin
+    the passage to its twin: a correction that reaches one brand and not the
+    other fails here, which is how the two descriptions drift apart.
+    """
+
+    def passage(self, brand: str) -> str:
+        lines = [
+            line
+            for line in PR_REVIEW_ASSETS[brand].read_text(encoding="utf-8").splitlines()
+            if PUBLICATION_FAILURE_ANCHOR in line
+        ]
+        # Not a formality: an asset that stopped describing the failure path,
+        # or reworded the anchor, would otherwise leave this class comparing
+        # nothing against nothing and passing.
+        self.assertEqual(
+            len(lines),
+            1,
+            f"{PR_REVIEW_ASSETS[brand]} must describe the publication failure "
+            f"path in exactly one paragraph anchored on "
+            f"{PUBLICATION_FAILURE_ANCHOR!r}; found {len(lines)}",
+        )
+        return lines[0]
+
+    def test_the_two_assets_describe_a_publication_failure_the_same_way(self):
+        self.assertEqual(self.passage("claude"), self.passage("codex"))
+
+    def test_the_description_matches_what_publication_actually_does(self):
+        # The rule this module's other class enforces against both
+        # coordinators, stated the way the assets state it. Kept to the two
+        # claims that failed here before -- the labels are cleared, the draft
+        # state is not touched -- rather than the whole sentence, so ordinary
+        # rewording stays free.
+        passage = self.passage("claude")
+        self.assertIn("clears both verdict labels", passage)
+        self.assertIn("leaves draft state exactly as it stands", passage)
+        self.assertIn("never returns the PR to draft", passage)
 
 
 if __name__ == "__main__":
