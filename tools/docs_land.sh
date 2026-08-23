@@ -25,28 +25,51 @@
 # only when it is clean and no untracked or ignored file occupies a path the
 # update would touch.
 #
+# RECONCILE FIRST (issue: stale docs worktree). The landing commit is built
+# from this worktree's bytes on top of origin/master, so landing from a
+# worktree that is BEHIND master overwrites every upstream edit to a selected
+# path with a stale copy. The pre-flight refuses that (exit 3), which is
+# correct but leaves the operator stuck whenever the branch has drifted --
+# the common state, since docs-wip only advances when something lands.
+#
+# So the worktree is reconciled with the publication tip BEFORE anything is
+# computed or published: stash the dirty documents, fast-forward (or rebase,
+# when there are real local commits), then re-apply the stash as a three-way
+# merge. An edit already published upstream collapses to a no-op instead of a
+# conflict, an untouched-upstream edit replays cleanly, and only a genuine
+# same-region divergence stops -- with nothing yet published, so stopping is
+# free. -a resolves such a divergence by favouring this worktree's side per
+# hunk while keeping upstream's non-conflicting hunks. -R skips the whole
+# stage and lands from the worktree exactly as it stands.
+#
 # Usage:
 #   tools/docs_land.sh -m "Commit subject" docs/foo.md [docs/bar.md ...]
 #   tools/docs_land.sh -n -m "..." docs/foo.md   # dry run: plan, no changes
 #   tools/docs_land.sh -f -m "..." docs/foo.md   # ignore the risk warning
+#   tools/docs_land.sh -a -m "..." docs/foo.md   # auto-resolve reconcile conflicts
+#   tools/docs_land.sh -R -m "..." docs/foo.md   # do not reconcile first
 #   tools/docs_land.sh -l                        # inventory of landable docs
 #
 # Exit codes: 0 landed (or nothing to land); 1 environment failure; 2 usage;
-# 3 predicted conflict without -f; 4 rebase stopped; 5 push not verified;
-# 6 a named path was refused by validation or classification.
+# 3 predicted conflict without -f; 4 rebase or reconcile stopped; 5 push not
+# verified; 6 a named path was refused by validation or classification.
 set -euo pipefail
 
 DRY=0
 FORCE=0
 LIST=0
+RECONCILE=1
+AUTO=0
 MSG=""
-while getopts "m:nflh" opt; do
+while getopts "m:nflaRh" opt; do
   case "$opt" in
     m) MSG="$OPTARG" ;;
     n) DRY=1 ;;
     f) FORCE=1 ;;
     l) LIST=1 ;;
-    h) sed -n '2,36p' "$0"; exit 0 ;;
+    a) AUTO=1 ;;
+    R) RECONCILE=0 ;;
+    h) sed -n '2,40p' "$0"; exit 0 ;;
     *) exit 2 ;;
   esac
 done
@@ -117,6 +140,49 @@ PRIMARY="$(resolve_worktree master)"
 require_one master "$PRIMARY"
 cd "$DOCS_WT"
 
+# Path lists and scratch files live in NUL-delimited temp files, never in
+# shell variables: newline-delimited `git diff --name-only` C-quotes filenames
+# containing quotes or non-ASCII bytes, so a `cafe.md` in such a list would
+# never match its own on-disk path -- and a shell variable cannot hold a NUL
+# byte. Created this early because the unmerged-path resolver below needs
+# scratch space too, and one directory means one cleanup trap.
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/docs-land.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+# Resolve every unmerged path in favour of THIS worktree's side, hunk by
+# hunk, keeping the other side's non-conflicting hunks -- what -a means.
+#
+# Deliberately indifferent to who created the conflict. A conflict this run
+# produced (a stash re-apply during the reconcile) and one it merely found
+# (a half-finished resolution from an earlier run) need the same treatment,
+# and making -a work on both is what lets the operator recover by re-running
+# instead of unpicking an index by hand. Stage 2 is the side already in the
+# branch, stage 3 the side being applied onto it; -a is defined as favouring
+# stage 3, which in the reconcile is the operator's own edit.
+resolve_unmerged_favouring_theirs() {
+  git diff --name-only --diff-filter=U -z > "$TMP_DIR/conflicted"
+  [ -s "$TMP_DIR/conflicted" ] || return 0
+  while IFS= read -r -d '' c; do
+    [ -n "$c" ] || continue
+    # Stage 1 is absent for an add/add conflict; an empty base makes
+    # merge-file treat both sides as pure additions, which is the right
+    # reading of "neither side had this text before".
+    git show ":1:$c" > "$TMP_DIR/base" 2>/dev/null || : > "$TMP_DIR/base"
+    git show ":2:$c" > "$TMP_DIR/ours"
+    git show ":3:$c" > "$TMP_DIR/theirs"
+    # -p writes the merge to stdout, straight over the conflicted file:
+    # every byte it needs is already in stages 1-3, so truncating the
+    # working copy first costs nothing and saves an intermediate write.
+    # merge-file exits with the conflict COUNT, not a failure code, and
+    # --theirs leaves none anyway.
+    git merge-file --theirs -q -p \
+      "$TMP_DIR/ours" "$TMP_DIR/base" "$TMP_DIR/theirs" > "$c" || true
+    GIT_LITERAL_PATHSPECS=1 git add -- "$c"
+  done < "$TMP_DIR/conflicted"
+  echo "resolved in favour of this worktree:"
+  tr '\0' '\n' < "$TMP_DIR/conflicted" | sed 's/^/  /'
+}
+
 # --- Refuse a docs worktree stopped mid-operation --------------------------
 # A stopped rebase, merge, or conflicted stash application leaves worktree
 # files half-replayed — possibly holding conflict markers — and a landing
@@ -134,8 +200,17 @@ if [ -f "$(git rev-parse --git-path MERGE_HEAD)" ]; then
   exit 1
 fi
 if [ -n "$(git ls-files -u)" ]; then
-  echo "error: the docs worktree has unmerged paths; resolve them before landing" >&2
-  exit 1
+  if [ "$AUTO" = 1 ] && [ "$DRY" = 0 ]; then
+    # -a is a standing instruction, not a per-conflict prompt: a worktree
+    # left unmerged by an earlier run is exactly the state -a exists to
+    # clear, and refusing it here would make the flag unusable as a retry.
+    echo "note: -a given and the docs worktree has unmerged paths; resolving them first"
+    resolve_unmerged_favouring_theirs
+  else
+    echo "error: the docs worktree has unmerged paths; resolve them before landing" >&2
+    [ "$AUTO" = 1 ] || echo "Re-run with -a to resolve them in favour of this worktree." >&2
+    exit 1
+  fi
 fi
 
 git fetch -q origin
@@ -157,12 +232,6 @@ EOF
 BASE_TIP="$(git rev-parse origin/master)"
 BASE="$(git merge-base HEAD origin/master)"
 
-# Path lists live in NUL-delimited temp files, never in shell variables:
-# newline-delimited `git diff --name-only` C-quotes filenames containing
-# quotes or non-ASCII bytes, so a `café.md` in such a list would never match
-# its own on-disk path — and a shell variable cannot hold a NUL byte.
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/docs-land.XXXXXX")"
-trap 'rm -rf "$TMP_DIR"' EXIT
 # --no-renames: with rename detection, an upstream rename reports only its
 # NEW name, so the old path — deleted upstream, perhaps edited and selected
 # here — would vanish from this list and the risk checks below would let a
@@ -422,6 +491,159 @@ if [ -s "$TMP_DIR/risk" ]; then
   echo "ignored one would be silently overwritten." >&2
   echo "Land or commit them first, or accept the risk and re-run with -f." >&2
   [ "$FORCE" = 1 ] || [ "$DRY" = 1 ] || exit 3
+fi
+
+# Selected paths that existed at the pre-reconcile base and are GONE from the
+# publication tip: upstream deleted them, a rename's delete half included.
+# Recorded HERE, before the reconcile, because afterwards the two states are
+# indistinguishable from an ordinary new document -- and the difference
+# matters: re-adding one is resurrecting what upstream removed.
+: > "$TMP_DIR/upstream-deleted"
+for p in "$@"; do
+  if git cat-file -e "$BASE:$p" 2>/dev/null \
+     && ! git cat-file -e "origin/master:$p" 2>/dev/null; then
+    printf '%s\0' "$p" >> "$TMP_DIR/upstream-deleted"
+  fi
+done
+
+RECONCILED=0
+# --- Reconcile the docs worktree with the publication tip ------------------
+# Runs BEFORE the gate, the risk pre-flight and the landing commit, because
+# every one of those reads the worktree's bytes and would otherwise be
+# reasoning about a stale copy. See the RECONCILE FIRST note in the header.
+#
+# Untracked files are deliberately NOT stashed (`git stash push` without -u):
+# a scratch or ignored file beside the documents is not part of the landing
+# and must not be swept into a stash the operator then has to remember to
+# recover. The pre-flight below still reports one that collides with an
+# upstream change.
+#
+# Scope: docs-wip PURELY BEHIND the tip -- an ancestor of origin/master, so
+# it carries no unpushed local commits. That is the state this stage exists
+# for, and it is the overwhelmingly common one, because docs-wip only ever
+# advances when a landing pushes it. A branch that does carry local commits
+# is left to the post-landing rebase below, unchanged: replaying real commits
+# is a different operation from replaying uncommitted edits, and folding the
+# two into one stage would mean stashing documents that a rebase then has to
+# reapply over each replayed commit in turn.
+if [ "$RECONCILE" = 1 ] \
+   && ! git merge-base --is-ancestor origin/master HEAD \
+   && git merge-base --is-ancestor HEAD origin/master; then
+  BEHIND="$(git rev-list --count HEAD..origin/master)"
+  DIRTY=0
+  git diff --quiet || DIRTY=1
+  git diff --cached --quiet || DIRTY=1
+
+  if [ "$DRY" = 1 ]; then
+    echo "plan: reconcile: docs-wip is $BEHIND commit(s) behind origin/master"
+    echo "plan: reconcile: would fast-forward docs-wip to origin/master"
+    if [ "$DIRTY" = 1 ]; then
+      echo "plan: reconcile: would re-apply the dirty documents as a three-way merge"
+      echo "plan: note: the warnings below are computed BEFORE that reconcile, so they overstate the risk"
+    fi
+  else
+    echo "reconciling: docs-wip is $BEHIND commit(s) behind origin/master"
+    STASH_REF=""
+    if [ "$DIRTY" = 1 ]; then
+      git stash push -q -m "docs_land.sh reconcile" \
+        || { echo "error: could not stash the dirty documents" >&2; exit 4; }
+      STASH_REF="$(git rev-parse --verify refs/stash)"
+    fi
+    git merge --ff-only -q origin/master
+    if [ -n "$STASH_REF" ]; then
+      # --index so a staged entry stays staged. One attempt only: a failed
+      # apply has already written its conflict into the worktree, so a second
+      # apply would be replaying onto that half-merged state. Which failure
+      # it was is read from the index -- unmerged entries mean a content
+      # conflict to resolve, anything else is a real error.
+      if ! git stash apply --index -q "$STASH_REF" 2>"$TMP_DIR/stash-err"; then
+        if [ -z "$(git ls-files -u)" ]; then
+          echo "error: could not re-apply the stashed documents:" >&2
+          sed 's/^/  /' < "$TMP_DIR/stash-err" >&2
+          echo "Nothing was published. Your edits are in 'git stash list'." >&2
+          exit 4
+        fi
+        if [ "$AUTO" = 1 ]; then
+          resolve_unmerged_favouring_theirs
+        else
+          # The markers STAY in the worktree. That is what makes a manual
+          # resolution possible, and the up-front guard above lets a re-run
+          # with -a clear them instead -- so both routes forward work from
+          # exactly this state, and neither needs the operator to unpick an
+          # index by hand first.
+          git diff --name-only --diff-filter=U -z > "$TMP_DIR/conflicted"
+          echo "" >&2
+          echo "Reconcile conflict in:" >&2
+          tr '\0' '\n' < "$TMP_DIR/conflicted" | sed 's/^/  /' >&2
+          echo "" >&2
+          echo "NOTHING has been published. docs-wip has been fast-forwarded" >&2
+          echo "to origin/master and the conflict is in the worktree." >&2
+          echo "" >&2
+          echo "Either resolve the markers and 'git add' them, then re-run," >&2
+          echo "or re-run with -a to resolve every conflicting hunk in favour" >&2
+          echo "of your side while keeping upstream's other hunks." >&2
+          exit 4
+        fi
+      fi
+      if [ "$(git rev-parse --verify --quiet refs/stash || true)" = "$STASH_REF" ]; then
+        git stash drop -q
+      fi
+    fi
+    RECONCILED=1
+    echo "reconciled: docs-wip is at origin/master with its documents re-applied"
+  fi
+fi
+
+# --- Recompute every upstream-relative fact against the reconciled state ---
+# BASE, BASE_TIP and both path lists were read before the reconcile, when the
+# worktree still sat on an older base. The selected-path overwrite check and
+# the landing commit below must reason about where the worktree is NOW, or
+# the reconcile would be invisible to exactly the check it exists to satisfy.
+if [ "$DRY" = 0 ] && [ "$RECONCILED" = 1 ]; then
+  BASE_TIP="$(git rev-parse origin/master)"
+  BASE="$(git merge-base HEAD origin/master)"
+  git diff --name-only -z --no-renames "$BASE" origin/master > "$TMP_DIR/changed-upstream"
+  { git diff --name-only -z --no-renames
+    git diff --cached --name-only -z --no-renames
+  } > "$TMP_DIR/dirty"
+fi
+
+# A SELECTED path upstream DELETED that the reconcile has just replayed back
+# onto disk. The landing would re-add it, silently undoing an upstream
+# removal or the delete half of an upstream rename -- and unlike the
+# overwrite case below, nothing in the resulting diff would show that a
+# deletion was reverted rather than a document created.
+if [ "$RECONCILED" = 1 ] && [ -s "$TMP_DIR/upstream-deleted" ]; then
+  : > "$TMP_DIR/resurrect"
+  : > "$TMP_DIR/vanished"
+  while IFS= read -r -d '' p; do
+    if [ -e "$p" ]; then
+      printf '%s\0' "$p" >> "$TMP_DIR/resurrect"
+    else
+      printf '%s\0' "$p" >> "$TMP_DIR/vanished"
+    fi
+  done < "$TMP_DIR/upstream-deleted"
+  # Selected, deleted upstream, and gone from the worktree after the
+  # reconcile: there is nothing left to land under that name, and saying
+  # only "nothing to land" would leave the operator thinking their edit
+  # evaporated. It did not -- `git stash apply` follows renames, so an edit
+  # to a path upstream RENAMED is sitting on the new name, still dirty and
+  # still landable once it is named. Reported rather than refused, because
+  # the reconcile did the right thing and there is nothing to decide.
+  if [ -s "$TMP_DIR/vanished" ]; then
+    echo "note: upstream deleted or renamed these selected paths, so they no longer exist here:"
+    tr '\0' '\n' < "$TMP_DIR/vanished" | sed 's/^/  /'
+    echo "note: an edit to a RENAMED path followed the rename and is still dirty under its new name;"
+    echo "note: check 'git status' in the docs worktree and name that path instead."
+  fi
+  if [ -s "$TMP_DIR/resurrect" ]; then
+    echo "WARNING: upstream deleted these selected paths, and the reconcile replayed them back:" >&2
+    tr '\0' '\n' < "$TMP_DIR/resurrect" | sed 's/^/  /' >&2
+    echo "Landing would re-add them, reverting the upstream deletion (or the" >&2
+    echo "delete half of an upstream rename). Drop them from the selection, or" >&2
+    echo "accept the resurrection and re-run with -f." >&2
+    [ "$FORCE" = 1 ] || [ "$DRY" = 1 ] || exit 3
+  fi
 fi
 
 # A SELECTED path that also changed on master since the merge base would be
