@@ -30,11 +30,11 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. An in-flight CI rerun can be requested repeatedly and exhausted from one stale failure
+- [x] PRR-1. An in-flight CI rerun can be requested repeatedly and exhausted from one stale failure — [#474]
 
 ## 1. Automatic CI rerun lifecycle
 
-### PRR-1. An in-flight CI rerun can be requested repeatedly and exhausted from one stale failure
+### [#474] PRR-1. An in-flight CI rerun can be requested repeatedly and exhausted from one stale failure
 
 > **Captured note:** Make the durable `ci_rerun_active` state authoritative on
 > the next polling pass: do not request or consume another retry until the
