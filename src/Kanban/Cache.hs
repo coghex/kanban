@@ -18,6 +18,7 @@ module Kanban.Cache
     removeGhGroupRecord,
     repositoryCachePath,
     repositoryCacheSchemaVersion,
+    repositoryLeasePath,
     usageCacheLockPath,
     usageCachePath,
     usageCommitNotes,
@@ -232,6 +233,26 @@ ghGroupRecordPath :: Repository -> IO FilePath
 ghGroupRecordPath repository = do
   cacheRoot <- getXdgDirectory XdgCache "kanban"
   pure (cacheRoot </> "gh-groups" </> Text.unpack (safeKey (repositoryIdentity repository)) <> ".json")
+
+-- | The file one repository's cross-process authority is taken on.
+--
+-- Keyed by the repository's identity, so two boards on one repository resolve
+-- one file and two repositories resolve two: the authority this path carries
+-- is over a repository, never over the machine (issue #354 keys per repository
+-- for the same reason).
+--
+-- Its own file rather than 'ghGroupRecordPath', and for the same reason
+-- 'usageCacheLockPath' is not @usage.json@, only stronger here. A POSIX record
+-- lock is released when the holding process closes /any/ descriptor referring
+-- to the file, so a lock taken on the record would be dropped by the next
+-- ordinary read or write of it -- including 'writeCacheFile' renaming a new
+-- file over the name, which would leave two processes locking different
+-- inodes under one path. This one carries no payload: nothing reads it,
+-- nothing writes it, and nothing but the lease opens it.
+repositoryLeasePath :: Repository -> IO FilePath
+repositoryLeasePath repository = do
+  cacheRoot <- getXdgDirectory XdgCache "kanban"
+  pure (cacheRoot </> "leases" </> Text.unpack (safeKey (repositoryIdentity repository)) <> ".lock")
 
 loadGhGroupRecord :: Repository -> IO GhGroupRecordLoad
 loadGhGroupRecord repository = do
