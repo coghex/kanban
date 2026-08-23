@@ -22,14 +22,15 @@
 --     so immediately, because the answer it needs is whose it is, not a queue
 --     position behind a process that may outlive it.
 --
---   * /Held for as long as it is held/. 'acquireRepositoryLease' hands back a
---     'RepositoryLease' carrying the open descriptor, and only
---     'releaseRepositoryLease' closes it. The descriptor is what the lock
---     lives on: POSIX releases /every/ lock a process holds on a file the
---     moment that process closes /any/ descriptor referring to it, so an
---     unrelated open-and-close of this path anywhere in the process would drop
---     a held lease silently. That is why the path carries no payload and why
---     this module does not export the descriptor.
+--   * /Held for as long as it is held/. The descriptor the lock lives on is
+--     opened by 'acquireRepositoryLease' and closed by
+--     'releaseRepositoryLease' and by nothing else. POSIX releases /every/
+--     lock a process holds on a file the moment that process closes /any/
+--     descriptor referring to it, so an unrelated open-and-close of this path
+--     anywhere in the process would drop a held lease silently. That is why
+--     the path carries no payload, why nothing outside this module is given
+--     the descriptor, and why 'heldLeases' below keeps exactly one of them per
+--     path.
 --
 --   * /No staleness rule of its own/. There is no PID file, no heartbeat, no
 --     timeout, and no way for one process to reclaim, break, or remove
@@ -40,11 +41,22 @@
 --     same name while the first still held the old one.
 --
 -- Contention is a distinct outcome from failure, not a shade of it.
--- 'acquireRepositoryLease' returns 'LeaseHeld' only for the conflict
--- @F_SETLK@ itself reported; a cache root that cannot be created, a file that
--- cannot be opened, and any other locking failure are 'LeaseUnusable', so no
--- caller can ever announce that another board holds the repository because the
--- cache root was read-only.
+-- 'acquireRepositoryLease' returns 'LeaseHeld' for a lease already held and
+-- for the conflict @F_SETLK@ itself reported; a cache root that cannot be
+-- created, a file that cannot be opened, and any other locking failure are
+-- 'LeaseUnusable', so no caller can ever announce that another board holds the
+-- repository because the cache root was read-only.
+--
+-- The kernel cannot answer \"is this repository already taken?\" on its own,
+-- which is why 'heldLeases' exists. A POSIX record lock belongs to the
+-- /process/: the process that already holds one is granted it again rather
+-- than refused, so without a register two boards inside one process would each
+-- be handed a lease, and the first of them to let go would free the repository
+-- while the other still believed it held it — the very defect this authority
+-- exists to close, moved indoors. The register is a module-level value rather
+-- than something a caller creates because a caller-created one is exactly the
+-- mistake being fixed: @newGhRecordLock@ mints an 'Control.Concurrent.MVar.MVar'
+-- per board coordinator, and two coordinators therefore share no lock at all.
 module Kanban.Repository.Lease
   ( LeaseAcquisition (..),
     RepositoryLease,
@@ -54,7 +66,10 @@ module Kanban.Repository.Lease
   )
 where
 
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
 import Control.Exception (IOException, mask_, onException, try)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Foreign.C.Error (Errno (Errno), eACCES, eAGAIN, eWOULDBLOCK)
@@ -66,6 +81,7 @@ import Kanban.Paths (createPrivateDirectory)
 import System.Directory (XdgDirectory (XdgCache))
 import System.FilePath (takeDirectory)
 import System.IO (SeekMode (AbsoluteSeek))
+import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.Files (setFdMode)
 import System.Posix.IO
   ( FileLock,
@@ -79,17 +95,42 @@ import System.Posix.IO
   )
 import System.Posix.Types (Fd)
 
--- | A lease this process holds, and the descriptor holding it.
+-- | A lease this process holds.
 --
--- Opaque on purpose. The descriptor is the lock — closing it releases the
--- lease, wherever the close happens — so the only thing outside this module
--- that may touch it is 'releaseRepositoryLease'. 'leaseFile' is exported
--- because naming the path is useful in a diagnostic and cannot drop anything.
+-- Opaque, and deliberately not the descriptor. The descriptor is the lock —
+-- closing it releases every lock this process has on the file, wherever the
+-- close happens — so it lives in 'heldLeases', where there is exactly one of
+-- it per path and only 'releaseRepositoryLease' can reach it. What the holder
+-- carries is the name of what it holds: 'leaseFile' is exported because naming
+-- the path is useful in a diagnostic and cannot drop anything.
 data RepositoryLease = RepositoryLease
   { leaseFile :: FilePath,
-    leaseDescriptor :: Fd
+    leaseToken :: Integer
   }
   deriving stock (Eq, Show)
+
+-- | Every lease path this process holds, the descriptor it is held on, and
+-- which acquisition holds it.
+--
+-- Process-wide because that is the scope a POSIX record lock has. It is both
+-- the register that refuses a second acquisition of a repository this process
+-- already holds and the sole owner of the descriptors.
+--
+-- The token is what makes a 'RepositoryLease' name an /acquisition/ rather
+-- than a path. Paths repeat: a repository released and taken again resolves
+-- the same file, and a stale lease value from the first acquisition would
+-- otherwise release the second one — the same silent release the register
+-- exists to stop, arriving by the door the register itself opened. Only the
+-- acquisition the register still names can give the lease up; every other
+-- release is a no-op.
+data LeaseRegister = LeaseRegister
+  { registerNextToken :: !Integer,
+    registerHeld :: !(Map FilePath (Integer, Fd))
+  }
+
+heldLeases :: MVar LeaseRegister
+heldLeases = unsafePerformIO (newMVar (LeaseRegister 0 Map.empty))
+{-# NOINLINE heldLeases #-}
 
 -- | How an attempt on a repository's lease turned out.
 --
@@ -101,7 +142,8 @@ data RepositoryLease = RepositoryLease
 data LeaseAcquisition
   = -- | Taken. Held until 'releaseRepositoryLease' or this process exits.
     LeaseAcquired RepositoryLease
-  | -- | Another process holds the lease on this path. Nothing waited.
+  | -- | The lease on this path is already held — by another process, or by
+    -- a board inside this one. Nothing waited.
     LeaseHeld FilePath
   | -- | The lease could not be established at all, for a reason that is not
     -- contention: the directory could not be created, the file could not be
@@ -129,29 +171,42 @@ data LeaseAcquisition
 acquireRepositoryLease :: Repository -> IO LeaseAcquisition
 acquireRepositoryLease repository = do
   path <- repositoryLeasePath repository
-  attempt <- try @IOException $ mask_ $ do
-    createPrivateDirectory XdgCache (takeDirectory path)
-    descriptor <- openLeaseFile path
-    taken <- try @IOException (setLock descriptor wholeFileLock) `onException` closeFd descriptor
-    case taken of
-      Right () -> pure (Right descriptor)
-      -- The close is allowed to fail without changing the answer. What the
-      -- caller must not be told is that the lock failed for some reason other
-      -- than a conflict when a conflict is precisely what happened, and the
-      -- descriptor being closed here holds nothing either way -- the lock it
-      -- was opened for is the one that was refused.
-      Left conflict -> do
-        _ <- try @IOException (closeFd descriptor)
-        pure (Left conflict)
-  pure $ case attempt of
-    -- Raised by the directory creation or the open, never by the lock: the
-    -- lock's own failure is the 'Left' below. Requirement: an unwritable cache
-    -- root is never reported as another board holding the repository.
-    Left exception -> LeaseUnusable path (diagnostic exception)
-    Right (Right descriptor) -> LeaseAcquired (RepositoryLease path descriptor)
-    Right (Left exception)
-      | conflictingLock exception -> LeaseHeld path
-      | otherwise -> LeaseUnusable path (diagnostic exception)
+  modifyMVar heldLeases $ \register -> mask_ $
+    -- Asked before the kernel is, because the kernel would say yes. The whole
+    -- attempt is inside the register's own lock, so two threads cannot both
+    -- find the path free and both be granted it.
+    if Map.member path register.registerHeld
+      then pure (register, LeaseHeld path)
+      else do
+        attempt <- try @IOException $ do
+          createPrivateDirectory XdgCache (takeDirectory path)
+          descriptor <- openLeaseFile path
+          taken <- try @IOException (setLock descriptor wholeFileLock) `onException` closeFd descriptor
+          case taken of
+            Right () -> pure (Right descriptor)
+            -- The close is allowed to fail without changing the answer. What
+            -- the caller must not be told is that the lock failed for some
+            -- reason other than a conflict when a conflict is precisely what
+            -- happened, and the descriptor being closed here holds nothing
+            -- either way -- the lock it was opened for is the one refused.
+            Left conflict -> do
+              _ <- try @IOException (closeFd descriptor)
+              pure (Left conflict)
+        pure $ case attempt of
+          -- Raised by the directory creation or the open, never by the lock:
+          -- the lock's own failure is the 'Left' below. Requirement: an
+          -- unwritable cache root is never reported as another board holding
+          -- the repository.
+          Left exception -> (register, LeaseUnusable path (diagnostic exception))
+          Right (Right descriptor) ->
+            ( LeaseRegister
+                (register.registerNextToken + 1)
+                (Map.insert path (register.registerNextToken, descriptor) register.registerHeld),
+              LeaseAcquired (RepositoryLease path register.registerNextToken)
+            )
+          Right (Left exception)
+            | conflictingLock exception -> (register, LeaseHeld path)
+            | otherwise -> (register, LeaseUnusable path (diagnostic exception))
 
 -- | Gives the lease up, making it immediately available to another process.
 --
@@ -161,10 +216,25 @@ acquireRepositoryLease repository = do
 -- free. Masked so that the descriptor is closed even if this is interrupted,
 -- and the unlock's own failure is swallowed for the same reason — it would
 -- otherwise skip the close and strand the lease for the life of the process.
+--
+-- A lease already given up is a no-op rather than a second close, and so is a
+-- lease whose path the register now holds under a later acquisition. Both are
+-- the same mistake: the descriptor number the stale value was held on may by
+-- then belong to something else entirely — including this repository's next
+-- lease — and closing it would be the silent release this authority exists to
+-- stop, arriving from the caller's side.
+--
+-- The entry is dropped only once the close has been made: a close that failed
+-- leaves the lease registered, because forgetting a descriptor that may still
+-- be holding the lock is the worse of the two answers.
 releaseRepositoryLease :: RepositoryLease -> IO ()
-releaseRepositoryLease lease = mask_ $ do
-  _ <- try @IOException (setLock lease.leaseDescriptor releaseWholeFile)
-  closeFd lease.leaseDescriptor
+releaseRepositoryLease lease = modifyMVar_ heldLeases $ \register -> mask_ $
+  case Map.lookup lease.leaseFile register.registerHeld of
+    Just (token, descriptor) | token == lease.leaseToken -> do
+      _ <- try @IOException (setLock descriptor releaseWholeFile)
+      closeFd descriptor
+      pure register {registerHeld = Map.delete lease.leaseFile register.registerHeld}
+    _ -> pure register
 
 -- | Opens the lock file, creating it private.
 --

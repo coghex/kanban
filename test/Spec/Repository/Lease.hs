@@ -21,9 +21,14 @@
 -- report an unusable cache as another board holding the repository, which is
 -- the one thing a future startup refusal must never say.
 --
--- The rest are the requirements that have no signal of their own: the lease
--- file is keyed and is shared with nothing, and a probe carries exactly one
--- marker onward so that a suite cannot start inside a suite.
+-- The rest are requirements with no signal of their own. Two of them are about
+-- the lease seen from inside one process, where @F_SETLK@ is no help
+-- whatsoever: it grants the holder's second request rather than refusing it,
+-- so a second acquisition has to be refused by Kanban, and a lease value left
+-- over from an earlier acquisition must not be able to release the one that
+-- replaced it. The other two are that the lease file is keyed and is shared
+-- with nothing, and that a probe carries exactly one marker onward so that a
+-- suite cannot start inside a suite.
 module Spec.Repository.Lease (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
@@ -36,7 +41,7 @@ import Kanban.Cache
     usageCacheLockPath,
   )
 import Kanban.Domain (Repository (..))
-import Kanban.Repository.Lease (LeaseAcquisition (..), acquireRepositoryLease)
+import Kanban.Repository.Lease (LeaseAcquisition (..), acquireRepositoryLease, releaseRepositoryLease)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.LeaseProbes
   ( LeaseProbe (..),
@@ -183,6 +188,62 @@ spec = do
             killLeaseHolder probes "holder"
             openLeaseGate probes "successor"
             awaitLeaseOutcome probes "successor" `shouldReturn` ProbeAcquired
+
+    -- The same repository, twice, inside one process. @F_SETLK@ belongs to the
+    -- process, so the kernel grants a second request from the holder rather
+    -- than refusing it, and every one of that process's locks on the file goes
+    -- the moment /any/ descriptor referring to it is closed. Two lease values
+    -- in one process would therefore mean that letting either one go frees the
+    -- repository while the other still reports that it holds it — this
+    -- authority's own defect, moved indoors. The intruder is what shows the
+    -- refusal changed nothing about the lease that is really held, and the
+    -- successor is what shows the release still works afterwards.
+    it "refuses a second acquisition inside the process already holding it" $
+      withTemporaryCacheRoot $ \root ->
+        withEnvironmentValue "XDG_CACHE_HOME" (root </> "cache") $ do
+          path <- repositoryLeasePath boardRepository
+          taken <- acquireRepositoryLease boardRepository
+          case taken of
+            LeaseAcquired lease ->
+              withLeaseProbes
+                (root </> "probes")
+                [ LeaseProbe "intruder" boardRepository (root </> "cache") "intruder",
+                  LeaseProbe "successor" boardRepository (root </> "cache") "successor"
+                ]
+                $ \probes -> do
+                  acquireRepositoryLease boardRepository `shouldReturn` LeaseHeld path
+                  openLeaseGate probes "intruder"
+                  awaitLeaseOutcome probes "intruder" `shouldReturn` ProbeHeld
+                  releaseRepositoryLease lease
+                  openLeaseGate probes "successor"
+                  awaitLeaseOutcome probes "successor" `shouldReturn` ProbeAcquired
+            other -> expectationFailure ("expected the lease to be acquired, and it was " <> show other)
+
+    -- The same hazard from the other side. A descriptor number is reused, so a
+    -- second release of a lease already given up would close whatever now
+    -- answers to that number — and if a later acquisition of the same
+    -- repository is what answers to it, that release would silently free a
+    -- lease its holder still believes in.
+    it "ignores a release of a lease it has already given up" $
+      withTemporaryCacheRoot $ \root ->
+        withEnvironmentValue "XDG_CACHE_HOME" (root </> "cache") $ do
+          taken <- acquireRepositoryLease boardRepository
+          case taken of
+            LeaseAcquired lease -> do
+              releaseRepositoryLease lease
+              retaken <- acquireRepositoryLease boardRepository
+              case retaken of
+                LeaseAcquired live ->
+                  withLeaseProbes
+                    (root </> "probes")
+                    [LeaseProbe "intruder" boardRepository (root </> "cache") "intruder"]
+                    $ \probes -> do
+                      releaseRepositoryLease lease
+                      openLeaseGate probes "intruder"
+                      awaitLeaseOutcome probes "intruder" `shouldReturn` ProbeHeld
+                      releaseRepositoryLease live
+                other -> expectationFailure ("expected the lease to be retaken, and it was " <> show other)
+            other -> expectationFailure ("expected the lease to be acquired, and it was " <> show other)
 
     -- Acceptance 6, at the open. @EACCES@ is the errno Linux also raises for
     -- a lock conflict, so a lease file this process may not open is the exact
