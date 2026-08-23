@@ -6,6 +6,7 @@ import qualified Data.ByteString.Char8 as ByteString
 import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 import Data.List (findIndex)
 import qualified Data.Text
+import qualified Data.Text.IO as TextIO
 import Data.Time (UTCTime (..), fromGregorian)
 import Kanban.Domain
 import Kanban.Models (Assignment (..), ModelRoster, defaultRoster, recordedAssignmentCell)
@@ -72,6 +73,29 @@ spec = do
       originFromBody "body\n<!-- pr-origin:codex -->" `shouldBe` Right PullRequestCodex
       originFromBody "body\n<!-- pr-origin:claude -->" `shouldBe` Right PullRequestClaude
       originFromBody "body" `shouldBe` Left "PR body has no valid pr-origin marker"
+
+    -- Issue #494. `originFromBody` counts each marker across the whole body
+    -- with no awareness of HTML comments, so a marker pasted into the
+    -- template's own ORIGIN COMMENT -- the mistake that comment warns
+    -- against -- would make every agent-authored body opened from it
+    -- ambiguous. The literals above cannot see that; the tracked file is read
+    -- here instead, the way "Spec.UI.Keys" reads @docs\/design.md@ and
+    -- @tools\/test_pull_request_template.py@ reads this same file for the two
+    -- packaged coordinators' parser.
+    it "reads no origin from the tracked pull-request template" $ do
+      template <- TextIO.readFile pullRequestTemplatePath
+      (pullRequestTemplatePath, originFromBody template)
+        `shouldBe` (pullRequestTemplatePath, Left "PR body has no valid pr-origin marker")
+
+    -- The negative control for the assertion above, and the body an agent
+    -- actually opens: with its own trailing marker the template must resolve
+    -- to exactly one brand. A stray marker anywhere above would make this a
+    -- duplicate instead.
+    it "reads the appended marker on a body opened from that template" $ do
+      template <- TextIO.readFile pullRequestTemplatePath
+      let opened = Data.Text.stripEnd template <> "\n\n<!-- pr-origin:claude -->\n"
+      (pullRequestTemplatePath, originFromBody opened)
+        `shouldBe` (pullRequestTemplatePath, Right PullRequestClaude)
 
     it "advances review, revision, and rereview from durable labels" $ do
       actionForLabels defaultWorkflowConfig [] `shouldBe` PullRequestReview
@@ -445,6 +469,13 @@ spec = do
                 summary.agentEventSummary `shouldBe` "[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)
               _ -> expectationFailure "expected the aggregate summary immediately before the terminal event"
             rawTelemetryLines [path | PullRequestLogOpened _ path <- collected] `shouldReturn` chattyProviderLines
+
+-- | The tracked template GitHub pre-fills a new pull-request body with. Bound
+-- here so a failing origin example names the file rather than only the parser
+-- result. Paired with @tools\/test_pull_request_template.py@, which runs both
+-- packaged coordinators' parser over the same file.
+pullRequestTemplatePath :: FilePath
+pullRequestTemplatePath = ".github/pull_request_template.md"
 
 -- | An approved, non-draft pull request: in Done under the default
 -- label-based approval mode, with nothing wrong with it yet.
