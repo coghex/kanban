@@ -3686,6 +3686,7 @@ class QueueOrderTests(ProcessPrFixture):
             "ci_rerun_head": None,
             "ci_rerun_attempts": 0,
             "ci_rerun_active": False,
+            "ci_rerun_attempt_identity": None,
             "ci_rerun_exhausted_head": None,
             "cleanup": None,
         }
@@ -3718,6 +3719,31 @@ class QueueOrderTests(ProcessPrFixture):
                 dry_run=dry_run,
                 gates=self._gates(),
             )
+
+    def _run_passes(self, count, *, interval=3600, dry_run=False):
+        """Run `count` polling passes inside one loop() call.
+
+        Returns the sleep each pass chose, so a case can assert the cadence as
+        well as the decisions. The loop sleeps after every pass, so stopping on
+        the `count`-th sleep stops after exactly `count` passes.
+        """
+        slept = []
+
+        def stop_after_the_last_pass(seconds):
+            slept.append(seconds)
+            if len(slept) >= count:
+                raise KeyboardInterrupt
+
+        with self._drainer(), mock.patch("time.sleep", stop_after_the_last_pass):
+            with self.assertRaises(KeyboardInterrupt):
+                drain_prs.loop(
+                    self.ctx,
+                    interval=interval,
+                    once=False,
+                    dry_run=dry_run,
+                    gates=self._gates(),
+                )
+        return slept
 
     def _queued(self, number, head):
         return {
@@ -3781,14 +3807,22 @@ class QueueOrderTests(ProcessPrFixture):
             },
         ]
 
-    def _failed_ci(self):
+    def _failed_ci(self, *, job="770001", completed="2026-07-18T00:00:00Z"):
+        """A failed required check, and which attempt of run 9911 it is.
+
+        `gh run rerun --failed` starts a new attempt of the same run, so the
+        run id stays 9911 throughout and the job id and completion timestamp
+        are what tell one attempt from the next.
+        """
         return [
             {
                 "name": drain_prs.DEFAULT_REQUIRED_CI_CHECK,
                 "status": "COMPLETED",
                 "conclusion": "FAILURE",
-                "completedAt": "2026-07-18T00:00:00Z",
-                "detailsUrl": "https://github.com/acme/widgets/actions/runs/9911",
+                "completedAt": completed,
+                "detailsUrl": (
+                    f"https://github.com/acme/widgets/actions/runs/9911/job/{job}"
+                ),
             },
             {
                 "name": drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
@@ -3831,6 +3865,27 @@ class QueueOrderTests(ProcessPrFixture):
             elif args[:1] == ["api"] and any("update-branch" in arg for arg in args):
                 found.append(args)
         return found
+
+    def _merged_numbers(self):
+        return [
+            call["args"][2]
+            for call in self.fake.calls("gh")
+            if call["args"][:2] == ["pr", "merge"]
+        ]
+
+    def _script_pr_over_passes(self, number, *per_pass):
+        """One `gh pr view` snapshot per polling pass, from the second pass on.
+
+        A pass after the first reads each recorded pull request twice: once in
+        stale-approval recovery, and once when the queue gives the candidate
+        its turn. Both must see that pass's snapshot, so every pass but the
+        first contributes its snapshot twice.
+        """
+        first, rest = per_pass[0], per_pass[1:]
+        snapshots = [first]
+        for snapshot in rest:
+            snapshots.extend([snapshot, snapshot])
+        self._script_pr(number, *snapshots)
 
     def _update_branch_calls(self):
         return [
@@ -3959,6 +4014,203 @@ class QueueOrderTests(ProcessPrFixture):
         state = self._read_state()
         self.assertEqual(state["active_pr"], 7)
         self.assertTrue(state["prs"]["7"]["ci_rerun_active"])
+
+    def test_the_same_failed_rollup_next_pass_requests_no_second_rerun(self):
+        # Issue #474 acceptance 2. GitHub does not replace the failed rollup
+        # the moment a rerun is accepted, so the next pass normally reads the
+        # very failure the request was made against. That is the barrier
+        # continuing, not a new failure: one `gh run rerun` across both passes,
+        # the lane and the attempt count untouched, and nothing behind #7
+        # updated, rerun, or merged.
+        failed = self._failed_ci()
+        self._script_pr_over_passes(
+            7,
+            self._other_pr_json(7, "b" * 40, statusCheckRollup=failed),
+            self._other_pr_json(7, "b" * 40, statusCheckRollup=failed),
+        )
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        self._script_merge_of_42()
+        queue = [self._queued(7, "b" * 40), self._queued(42, self.head_sha)]
+        self._script_pr_list(queue, queue)
+
+        slept = self._run_passes(2)
+
+        self.assertEqual(
+            [args[:3] for args in self._advancing_gh_calls()],
+            [["run", "rerun", "9911"]],
+        )
+        self.assertEqual(self._merged_numbers(), [])
+        # Requirement 2: the barrier keeps polling on the short cadence.
+        self.assertEqual(slept, [drain_prs.CI_RERUN_INTERVAL_SECONDS] * 2)
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        entry = state["prs"]["7"]
+        self.assertEqual(entry["ci_rerun_attempts"], 1)
+        self.assertTrue(entry["ci_rerun_active"])
+        self.assertIsNone(entry["ci_rerun_exhausted_head"])
+
+    def test_the_barrier_survives_reloading_the_queue_state_file(self):
+        # Issue #474 acceptance 3. The same two passes, but each in its own
+        # loop() call, so the second reads its whole picture back off disk --
+        # which is what a drainer restarted mid-wait does.
+        failed = self._failed_ci()
+        self._script_pr_over_passes(
+            7,
+            self._other_pr_json(7, "b" * 40, statusCheckRollup=failed),
+            self._other_pr_json(7, "b" * 40, statusCheckRollup=failed),
+        )
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        self._script_merge_of_42()
+        queue = [self._queued(7, "b" * 40), self._queued(42, self.head_sha)]
+        self._script_pr_list(queue, queue)
+
+        self._run_loop()
+        after_first = self._read_state()
+        self.assertEqual(after_first["prs"]["7"]["ci_rerun_attempts"], 1)
+        # The evidence the second pass compares against is on disk, not in the
+        # process that requested the rerun.
+        self.assertTrue(after_first["prs"]["7"]["ci_rerun_attempt_identity"])
+        self._run_loop()
+
+        self.assertEqual(
+            [args[:3] for args in self._advancing_gh_calls()],
+            [["run", "rerun", "9911"]],
+        )
+        self.assertEqual(self._merged_numbers(), [])
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        self.assertEqual(state["prs"]["7"]["ci_rerun_attempts"], 1)
+        self.assertEqual(
+            state["prs"]["7"]["ci_rerun_attempt_identity"],
+            after_first["prs"]["7"]["ci_rerun_attempt_identity"],
+        )
+
+    def test_a_completed_rerun_attempt_spends_exactly_one_more(self):
+        # Issue #474 acceptance 4. The second pass reads a failure the first
+        # one could not have seen -- a different finished attempt of the same
+        # run -- so the rerun it triggered is over and the next one is due.
+        self._script_pr_over_passes(
+            7,
+            self._other_pr_json(7, "b" * 40, statusCheckRollup=self._failed_ci()),
+            self._other_pr_json(
+                7,
+                "b" * 40,
+                statusCheckRollup=self._failed_ci(
+                    job="770002", completed="2026-07-18T00:30:00Z"
+                ),
+            ),
+        )
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        self._script_merge_of_42()
+        queue = [self._queued(7, "b" * 40), self._queued(42, self.head_sha)]
+        self._script_pr_list(queue, queue)
+
+        self._run_passes(2)
+
+        self.assertEqual(
+            [args[:3] for args in self._advancing_gh_calls()],
+            [["run", "rerun", "9911"], ["run", "rerun", "9911"]],
+        )
+        self.assertEqual(self._merged_numbers(), [])
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        self.assertEqual(state["prs"]["7"]["ci_rerun_attempts"], 2)
+        self.assertIsNone(state["prs"]["7"]["ci_rerun_exhausted_head"])
+
+    def test_three_completed_attempts_exhaust_the_head_and_free_the_lane(self):
+        # Issue #474 acceptance 5. Exactly MAX_CI_RERUN_ATTEMPTS requests are
+        # made, each against a failure distinguishable from the one before, and
+        # the head is quarantined only once the capped request's own result
+        # comes back failed. The lane goes with it, and #42 -- kept waiting
+        # behind the barrier until now -- merges in that same pass.
+        attempts = drain_prs.MAX_CI_RERUN_ATTEMPTS
+        self._script_pr_over_passes(
+            7,
+            *[
+                self._other_pr_json(
+                    7,
+                    "b" * 40,
+                    statusCheckRollup=self._failed_ci(
+                        job=f"77000{index + 1}",
+                        completed=f"2026-07-18T0{index}:00:00Z",
+                    ),
+                )
+                for index in range(attempts + 1)
+            ],
+        )
+        for _ in range(attempts):
+            self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        self._script_merge_of_42()
+        queue = [self._queued(7, "b" * 40), self._queued(42, self.head_sha)]
+        self._script_pr_list(*[queue] * (attempts + 1))
+
+        for _ in range(attempts + 1):
+            self._run_loop()
+
+        reruns = [
+            args for args in self._advancing_gh_calls() if args[:2] == ["run", "rerun"]
+        ]
+        self.assertEqual(len(reruns), attempts)
+        self.assertEqual(self._merged_numbers(), ["42"])
+        state = self._read_state()
+        entry = state["prs"]["7"]
+        self.assertEqual(entry["ci_rerun_exhausted_head"], "b" * 40)
+        self.assertEqual(entry["ci_rerun_attempts"], attempts)
+        self.assertFalse(entry["ci_rerun_active"])
+        self.assertNotEqual(state["active_pr"], 7)
+
+    def test_a_legacy_active_entry_upgrades_into_the_barrier(self):
+        # Issue #474 requirement 8. A state file written before the attempt
+        # identity existed records a request and no evidence of which failure
+        # provoked it, so the first pass after the upgrade requests nothing
+        # rather than duplicating a rerun that may still be running. What the
+        # upgrade itself keeps is settled in test_pure_logic's
+        # DrainStateMigrationTests.
+        self._script_pr(
+            7, self._other_pr_json(7, "b" * 40, statusCheckRollup=self._failed_ci())
+        )
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+        legacy = self._entry(
+            "b" * 40,
+            ci_rerun_head="b" * 40,
+            ci_rerun_attempts=2,
+            ci_rerun_active=True,
+        )
+        del legacy["ci_rerun_attempt_identity"]
+        self._write_state({"7": legacy, "42": self._entry(self.head_sha)}, active_pr=7)
+
+        self._run_loop()
+
+        self.assertEqual(self._advancing_gh_calls(), [])
+        self.assertEqual(self._merged_numbers(), [])
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        entry = state["prs"]["7"]
+        self.assertEqual(entry["approved_head"], "b" * 40)
+        self.assertEqual(entry["ci_rerun_attempts"], 2)
+        self.assertTrue(entry["ci_rerun_active"])
+        self.assertIsNone(entry["ci_rerun_exhausted_head"])
+
+    def test_a_dry_run_simulates_the_barrier_without_writing_state(self):
+        # Issue #474 requirement 9. The same request-then-barrier decisions,
+        # no `gh run rerun`, and a state file left exactly as it was found.
+        failed = self._failed_ci()
+        self._script_pr(
+            7, self._other_pr_json(7, "b" * 40, statusCheckRollup=failed)
+        )
+        self._script_merge_of_42()
+        queue = [self._queued(7, "b" * 40), self._queued(42, self.head_sha)]
+        self._script_pr_list(queue, queue)
+        self._write_state({"7": self._entry("b" * 40), "42": self._entry(self.head_sha)})
+        before = self.state_path.read_bytes()
+
+        self._run_passes(2, dry_run=True)
+
+        self.assertEqual(self._advancing_gh_calls(), [])
+        self.assertEqual(self._merged_numbers(), [])
+        self.assertEqual(self.state_path.read_bytes(), before)
 
     def test_the_short_rerun_cadence_follows_the_active_candidate(self):
         # A pass that ends on a requested rerun still polls again quickly. The
