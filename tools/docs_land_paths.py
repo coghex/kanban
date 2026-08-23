@@ -185,16 +185,30 @@ def run_git(
     return proc
 
 
-def contract_rows(worktree: Path) -> dict[str, dict]:
-    """§7's rows as read from the publication tip, keyed by declared path."""
+def contract_rows(worktree: Path) -> dict[str, dict] | None:
+    """§7's rows as read from the publication tip, keyed by declared path, or
+    `None` when this repository declares no §7 policy at all.
+
+    The distinction is deliberate, and it is the difference between a
+    repository that has an opinion and one that has none:
+
+    * The contract is ABSENT from the publication tip — the repository runs no
+      §7 lane split, so classification is not a gate it has. Every other check
+      in this module still applies (shape, aliases, symlinks, existence,
+      casefold and nesting collisions); only the lane question goes away.
+      Kanban's own CLAUDE.md is what makes §7 binding HERE, and a repository
+      without that contract has its own publication rule — Synarchy's, for
+      instance, is simply "documentation lands on master by direct push".
+    * The contract is PRESENT but unreadable — a missing fence, an unparseable
+      row — which is a BROKEN policy rather than an absent one. That still
+      fails closed below, because a repository that declares a lane split and
+      then cannot state it must not be treated as having no opinion.
+    """
     proc = run_git(
         worktree, "show", f"{CONTRACT_REF}:{CONTRACT_PATH}", check=False
     )
     if proc.returncode != 0:
-        raise SystemExit(
-            f"{CONTRACT_REF} carries no {CONTRACT_PATH}, so no path can be "
-            "classified; nothing lands without a §7 classification"
-        )
+        return None
     fence = SECTION_7_FENCE_RE.search(proc.stdout)
     if fence is None:
         raise SystemExit(
@@ -226,7 +240,9 @@ def row_covers(declared_path: str, markdown_path: str) -> bool:
     return PurePosixPath(markdown_path).parts[: len(prefix)] == prefix
 
 
-def matching_rows(rows: dict[str, dict], markdown_path: str) -> list[str]:
+def matching_rows(rows: dict[str, dict] | None, markdown_path: str) -> list[str]:
+    if rows is None:
+        return []
     return sorted(path for path in rows if row_covers(path, markdown_path))
 
 
@@ -314,7 +330,7 @@ def verify_alias(worktree: Path) -> None:
 
 
 def assess(
-    worktree: Path, rows: dict[str, dict], argument: str
+    worktree: Path, rows: dict[str, dict] | None, argument: str
 ) -> tuple[str | None, str | None]:
     """`(canonical path, refusal)` — exactly one of the two is set.
 
@@ -521,8 +537,15 @@ def verify_names_a_document(worktree: Path, path: str) -> None:
         )
 
 
-def classification_refusal(rows: dict[str, dict], path: str) -> str | None:
+def classification_refusal(rows: dict[str, dict] | None, path: str) -> str | None:
     """Why §7 keeps `path` out of the direct lane, or None when it may land."""
+    if rows is None:
+        # No §7 policy in this repository (see contract_rows): there is no
+        # lane to be in the wrong one of. Returning a refusal here would make
+        # the tool unusable outside Kanban while proving nothing about the
+        # document, since the whole judgement it would be reporting is one
+        # this repository never made.
+        return None
     matched = matching_rows(rows, path)
     if not matched:
         return (
@@ -765,6 +788,13 @@ def divergence(
 
 def inventory(worktree: Path) -> int:
     rows = contract_rows(worktree)
+    if rows is None:
+        print(
+            f"note: {CONTRACT_REF} carries no {CONTRACT_PATH}; this repository "
+            "declares no §7 lane split, so every validated document is "
+            "landable and the row/lane columns read n/a",
+            file=sys.stderr,
+        )
     states = worktree_states(worktree)
     # Every listing is NUL-delimited for the same reason worktree_states is:
     # newline output C-quotes unusual filenames, and the inventory must show
@@ -821,8 +851,17 @@ def inventory(worktree: Path) -> int:
             path in upstream_changed, base_paths, upstream_paths, tracked,
         )
         matched = matching_rows(rows, path)
-        row_name = matched[0] if len(matched) == 1 else ("none" if not matched else "multiple")
-        lane = rows[matched[0]]["klass"] if len(matched) == 1 else "-"
+        if rows is None:
+            # Distinct from "none": no row matched because this repository
+            # publishes no §7 table, not because this document is missing one.
+            row_name = "n/a"
+            lane = "unclassified"
+        else:
+            row_name = (
+                matched[0] if len(matched) == 1
+                else ("none" if not matched else "multiple")
+            )
+            lane = rows[matched[0]]["klass"] if len(matched) == 1 else "-"
         canonical_path, refusal_text = assess(worktree, rows, path)
         if refusal_text is not None:
             landable = f"no ({refusal_text})"

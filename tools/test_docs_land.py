@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import pathlib
 import subprocess
 import tempfile
 import unittest
@@ -417,17 +418,20 @@ class CommittedWorkTests(DocsLandCase):
 
 
 class RebasePathTests(DocsLandCase):
-    def test_isolation_holds_when_the_rebase_path_runs(self):
+    def test_isolation_holds_when_the_reconcile_path_runs(self):
         sb = self.sb
         # Move master via a path that is NOT dirty here, so the pre-flight
-        # risk predictor does not exit 3 before the rebase is exercised.
+        # risk predictor does not exit 3 before the reconcile is exercised.
         sb.move_master_upstream()
         sb.write(sb.docs, "docs/a.md", "a landed\n")
         b_body = sb.stage_unrelated_b()
 
         done = sb.run_script("-m", "Land A", "docs/a.md")
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("rebasing onto the landed master", done.stdout)
+        # A branch that is purely BEHIND is fast-forwarded and its documents
+        # re-applied, rather than rebased after the fact; the isolation
+        # guarantees below are what must survive that change of route.
+        self.assertIn("reconciled: docs-wip is at origin/master", done.stdout)
         self.assertEqual(sb.commit_files(), {"docs/a.md"})
 
         published = sb.tracked("origin/master")
@@ -488,12 +492,12 @@ class RebasePathTests(DocsLandCase):
         self.assertIn("plan: land docs/a.md (modify)", planned.stdout)
 
         # A suppressed warning is a prediction, so the prediction is checked
-        # against the real thing: this lands for real, down the rebase path,
-        # and the autostash replays a change both sides already made.
+        # against the real thing: this lands for real, down the reconcile
+        # path, replaying a change both sides already made.
         done = sb.run_script("-m", "Land A", "docs/a.md")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertNotIn("WARNING", done.stderr)
-        self.assertIn("rebasing onto the landed master", done.stdout)
+        self.assertIn("reconciled: docs-wip is at origin/master", done.stdout)
         self.assertEqual(sb.commit_files(), {"docs/a.md"})
         self.assertEqual(sb.blob("origin/master", "docs/b.md"), upstream)
         # Content preserved, and the local write has converged with the
@@ -777,12 +781,14 @@ class RebasePathTests(DocsLandCase):
                 encoding="utf-8"),
             "untracked note\n")
 
-    def test_upstream_rename_of_a_selected_path_is_refused_without_force(self):
-        # With rename detection, an upstream rename of docs/a.md to
-        # docs/a-new.md reports only the new name, so the selected-path
-        # check would miss that docs/a.md changed upstream and the landing
-        # would silently reintroduce the old path beside the renamed
-        # document. --no-renames keeps the delete-plus-add reading.
+    def test_upstream_rename_is_reported_and_lands_under_the_new_name(self):
+        # Upstream renamed docs/a.md to docs/a-new.md while this worktree
+        # edited the old name. The reconcile fast-forwards and re-applies,
+        # and `git stash apply` follows the rename -- so the edit lands on
+        # docs/a-new.md rather than being lost or reintroducing the old
+        # path beside the renamed document. Nothing is published under the
+        # named path, because that path no longer exists, and the operator
+        # is TOLD so instead of being left with a bare "nothing to land".
         sb = self.sb
         sb.git("config", "diff.renames", "true")
         sb.git("mv", "docs/a.md", "docs/a-new.md")
@@ -791,19 +797,31 @@ class RebasePathTests(DocsLandCase):
         sb.write(sb.docs, "docs/a.md", "a locally edited\n")
         before = sb.snapshot()
 
-        blocked = sb.run_script("-m", "Land A", "docs/a.md")
-        self.assertEqual(blocked.returncode, 3, blocked.stderr)
-        self.assertIn(
-            "changed on master since this worktree's base", blocked.stderr)
-        self.assertIn("docs/a.md", blocked.stderr)
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        # The post-reconcile gate refuses the name, because after the
+        # reconcile there is genuinely no document at it -- but the note
+        # above the refusal is what makes that answer usable rather than a
+        # mystery, and it names where the edit actually went.
+        self.assertEqual(done.returncode, 6, done.stderr)
+        self.assertIn("upstream deleted or renamed these selected paths", done.stdout)
+        self.assertIn("docs/a.md", done.stdout)
+        self.assertIn("still dirty under its new name", done.stdout)
+        self.assertIn("names no document", done.stderr)
+        # Nothing published, and the old path was NOT resurrected.
         self.assertEqual(sb.head("origin/master"), before["upstream"])
-
-        # -f makes the reintroduction deliberate rather than silent.
-        forced = sb.run_script("-f", "-m", "Land A", "docs/a.md")
-        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertNotIn("docs/a.md", sb.tracked("origin/master"))
+        # The edit rode the rename and is still there to land by its new name.
         self.assertEqual(
-            sb.blob("origin/master", "docs/a.md"), "a locally edited\n")
-        self.assertIn("docs/a-new.md", sb.tracked("origin/master"))
+            (sb.docs / "docs/a-new.md").read_text(encoding="utf-8"),
+            "a locally edited\n")
+        self.assertFalse((sb.docs / "docs/a.md").exists())
+
+        # Not even -f resurrects it: -f waives a risk warning, not the gate,
+        # and there is no document at that path to reconstruct.
+        forced = sb.run_script("-f", "-m", "Land A", "docs/a.md")
+        self.assertEqual(forced.returncode, 6, forced.stderr)
+        self.assertIn("names no document", forced.stderr)
+        self.assertNotIn("docs/a.md", sb.tracked("origin/master"))
 
     def test_ignored_dangling_symlink_upstream_collision_is_predicted(self):
         # A dangling symlink fails -e yet still occupies its path, and when
@@ -913,7 +931,7 @@ class RebasePathTests(DocsLandCase):
         self.assertEqual(
             os.readlink(sb.docs / "docs/coordination"), "does-not-exist")
 
-    def test_selected_path_changed_upstream_is_refused_without_force(self):
+    def test_selected_path_changed_upstream_conflicts_then_resolves_with_a(self):
         # A named path that also moved upstream would be overwritten
         # wholesale by the landing; that must be a stop, not a silent loss.
         sb = self.sb
@@ -924,14 +942,398 @@ class RebasePathTests(DocsLandCase):
         sb.write(sb.docs, "docs/a.md", "a local\n")
         before = sb.snapshot()
 
+        # Both sides edited the same region, so the reconcile cannot merge
+        # them and stops BEFORE publishing anything -- the same protection
+        # the old exit-3 refusal gave, but recoverable by resolving rather
+        # than only by overwriting upstream with -f.
         blocked = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 4, blocked.stderr)
+        self.assertIn("Reconcile conflict in", blocked.stderr)
+        self.assertIn("docs/a.md", blocked.stderr)
+        self.assertEqual(sb.head("origin/master"), before["upstream"])
+        # The conflict is left in the worktree, which is what makes a manual
+        # resolution possible at all...
+        self.assertIn("<<<<<<<",
+                      (sb.docs / "docs/a.md").read_text(encoding="utf-8"))
+        # ...and the retry below has to work FROM that state, so the -a run
+        # must not be turned away by the up-front unmerged-paths guard.
+
+        # -a resolves the conflicting hunk in favour of this worktree, which
+        # reaches the same published result the old -f overwrite did -- but
+        # by merging rather than by discarding upstream wholesale.
+        forced = sb.run_script("-a", "-m", "Land A", "docs/a.md")
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertIn("resolving them first", forced.stdout)
+        self.assertEqual(sb.blob("origin/master", "docs/a.md"), "a local\n")
+        # No markers survive into what was published, nor into the worktree.
+        self.assertNotIn("<<<<<<<", sb.blob("origin/master", "docs/a.md"))
+        self.assertNotIn("<<<<<<<",
+                         (sb.docs / "docs/a.md").read_text(encoding="utf-8"))
+
+
+class ReconcileInvalidatesEarlierAnswersTests(DocsLandCase):
+    """The reconcile rewrites the very paths the gate already judged, so any
+    on-disk answer taken before it is stale by the time the landing commit is
+    built. Both cases here published or crashed before the re-gate."""
+
+    def test_an_upstream_path_type_change_is_re_gated_after_the_reconcile(self):
+        # Upstream replaced the regular file with a SYMLINK. The pre-reconcile
+        # gate saw a regular file and accepted; the fast-forward then installs
+        # the symlink. Without re-gating, git hash-object FOLLOWS it and
+        # path_mode reports 100644, so the landing would replace upstream's
+        # symlink with a regular file holding b.md's bytes -- reported as an
+        # ordinary "modify".
+        sb = self.sb
+        sb.git("rm", "-q", "docs/a.md")
+        (sb.main / "docs/a.md").symlink_to("b.md")
+        sb.git("add", "docs/a.md")
+        sb.git("commit", "-q", "-m", "upstream makes a.md a symlink")
+        sb.git("push", "-q", "origin", "master")
+        before = sb.snapshot()
+
+        refused = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(refused.returncode, 6, refused.stderr)
+        self.assertIn("symlink", refused.stderr)
+        # Nothing published, and upstream's symlink is still a symlink.
+        self.assertEqual(sb.head("origin/master"), before["upstream"])
+        self.assertEqual(
+            sb.git("cat-file", "-t",
+                   sb.git("rev-parse", "origin/master:docs/a.md").strip()
+                   ).strip(), "blob")
+        self.assertEqual(
+            sb.git("ls-tree", "origin/master", "--", "docs/a.md").split()[0],
+            "120000")
+
+    def test_a_modify_delete_conflict_is_resolvable_by_a(self):
+        # Upstream DELETED a document this worktree had edited. The stash
+        # re-apply is a modify/delete conflict, whose index carries stages 1
+        # and 3 but no stage 2 -- reading the missing stage aborted the run
+        # under `set -e`, so the documented -a recovery crashed and never
+        # reached the upstream-deletion refusal.
+        sb = self.sb
+        sb.git("rm", "-q", "docs/a.md")
+        sb.git("commit", "-q", "-m", "upstream deletes a")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/a.md", "a locally edited\n")
+        before = sb.snapshot()
+
+        resolved = sb.run_script("-a", "-m", "Land A", "docs/a.md")
+        # -a favours this worktree, so the content survives the conflict --
+        # and landing it is then the deliberate act the deletion refusal
+        # exists to gate, not a crash.
+        self.assertEqual(resolved.returncode, 3, resolved.stderr)
+        self.assertIn("upstream deleted these selected paths", resolved.stderr)
+        self.assertIn("docs/a.md", resolved.stderr)
+        self.assertEqual(sb.head("origin/master"), before["upstream"])
+        # It resolved rather than aborting: no unmerged entry survives.
+        self.assertEqual(sb.git("ls-files", "-u", cwd=sb.docs).strip(), "")
+        self.assertEqual(
+            (sb.docs / "docs/a.md").read_text(encoding="utf-8"),
+            "a locally edited\n")
+
+    def test_a_local_delete_against_an_upstream_edit_resolves_to_the_delete(self):
+        # The mirror shape: stages 1 and 2, no stage 3. Favouring this
+        # worktree means the deletion stands, and it must not crash either.
+        sb = self.sb
+        sb.write(sb.main, "docs/b.md", B_UPSTREAM)
+        sb.git("add", "docs/b.md")
+        sb.git("commit", "-q", "-m", "upstream edits b")
+        sb.git("push", "-q", "origin", "master")
+        (sb.docs / "docs/b.md").unlink()
+
+        done = sb.run_script("-a", "-m", "Drop B", "docs/b.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(sb.git("ls-files", "-u", cwd=sb.docs).strip(), "")
+        self.assertNotIn("docs/b.md", sb.tracked("origin/master"))
+
+
+class SelectedOccupantTests(DocsLandCase):
+    """A SELECTED path with an untracked or ignored occupant that upstream
+    also changed. The unselected arm was always predicted; the selected one
+    fell through the gap between the predictor (which skips selections) and
+    SELRISK (which compares content an occupant does not have)."""
+
+    def test_a_selected_ignored_file_upstream_also_adds_is_refused(self):
+        sb = self.sb
+        sb.write(sb.main, ".gitignore", "docs/new.md\n")
+        sb.git("add", ".gitignore")
+        sb.git("commit", "-q", "-m", "ignore new.md")
+        sb.write(sb.main, "docs/new.md", "upstream version\n")
+        sb.git("add", "-f", "docs/new.md")
+        sb.git("commit", "-q", "-m", "upstream adds new.md")
+        sb.git("push", "-q", "origin", "master")
+        # Ignored here, holding the operator's own content.
+        sb.write(sb.docs, "docs/new.md", "MY LOCAL CONTENT\n")
+        before = sb.snapshot()
+
+        blocked = sb.run_script("-m", "Land new", "docs/new.md")
         self.assertEqual(blocked.returncode, 3, blocked.stderr)
-        self.assertIn("changed on master since this worktree's base", blocked.stderr)
+        self.assertIn("untracked or ignored here AND changed on master",
+                      blocked.stderr)
+        self.assertIn("docs/new.md", blocked.stderr)
+        self.assertEqual(sb.head("origin/master"), before["upstream"])
+        # The whole point: the local file is still the local file.
+        self.assertEqual(
+            (sb.docs / "docs/new.md").read_text(encoding="utf-8"),
+            "MY LOCAL CONTENT\n")
+
+    def test_a_selected_untracked_file_upstream_also_adds_is_refused(self):
+        # Not ignored, merely untracked: git REFUSES this checkout rather
+        # than overwriting, so the failure mode differs -- but predicting it
+        # before the fast-forward is what turns an abort into a diagnosis.
+        sb = self.sb
+        sb.write(sb.main, "docs/new.md", "upstream version\n")
+        sb.git("add", "docs/new.md")
+        sb.git("commit", "-q", "-m", "upstream adds new.md")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/new.md", "MY LOCAL CONTENT\n")
+
+        blocked = sb.run_script("-m", "Land new", "docs/new.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn("docs/new.md", blocked.stderr)
+        self.assertEqual(
+            (sb.docs / "docs/new.md").read_text(encoding="utf-8"),
+            "MY LOCAL CONTENT\n")
+
+    def test_an_ordinary_selected_path_is_unaffected(self):
+        # The check must not fire for a tracked document, which is the
+        # normal case the whole reconcile exists to serve.
+        sb = self.sb
+        sb.move_master_upstream()
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(sb.blob("origin/master", "docs/a.md"), "a landed\n")
+
+
+class InventoryCleanupTests(DocsLandCase):
+    def test_the_inventory_leaves_no_scratch_directory_behind(self):
+        # -l used to `exec` the helper, replacing the shell before its EXIT
+        # trap could run, so every invocation leaked a scratch directory.
+        import glob, tempfile
+        pattern = str(pathlib.Path(tempfile.gettempdir()) / "docs-land.*")
+        before = set(glob.glob(pattern))
+        listed = self.sb.run_script("-l")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(set(glob.glob(pattern)) - before, set())
+
+
+class ReconcileAliasAndSymlinkTests(DocsLandCase):
+    """Two ways the reconcile can invalidate an answer about a NON-REGULAR
+    entry: the alias the gate verified, and a symlink standing where a
+    restored blob is written."""
+
+    def test_an_upstream_alias_change_is_re_gated_on_the_original_name(self):
+        # The gate canonicalizes AGENTS.md to CLAUDE.md, so re-gating the
+        # CANONICAL list alone would never call verify_alias again. Upstream
+        # replaces AGENTS.md with a regular file, breaking the alias; the
+        # re-gate has to re-judge the name the operator actually typed.
+        sb = self.sb
+        sb.git("rm", "-q", "AGENTS.md")
+        sb.write(sb.main, "AGENTS.md", "not a symlink any more\n")
+        sb.git("add", "AGENTS.md")
+        sb.git("commit", "-q", "-m", "upstream breaks the alias")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "CLAUDE.md", "root contract revised\n")
+        before = sb.snapshot()
+
+        refused = sb.run_script("-m", "Land the root contract", "AGENTS.md")
+        self.assertEqual(refused.returncode, 6, refused.stderr)
+        self.assertIn("AGENTS.md", refused.stderr)
         self.assertEqual(sb.head("origin/master"), before["upstream"])
 
-        forced = sb.run_script("-f", "-m", "Land A", "docs/a.md")
-        self.assertEqual(forced.returncode, 0, forced.stderr)
-        self.assertEqual(sb.blob("origin/master", "docs/a.md"), "a local\n")
+    def test_a_restored_stage_never_writes_through_a_worktree_symlink(self):
+        # Upstream deletes the tracked AGENTS.md symlink while this worktree
+        # retargets it at docs/a.md. Restoring stage 3 with a shell
+        # redirection would follow the symlink and overwrite docs/a.md with
+        # the literal target string, corrupting an unrelated document that
+        # was never part of the landing.
+        sb = self.sb
+        original_a = (sb.docs / "docs/a.md").read_text(encoding="utf-8")
+        sb.git("rm", "-q", "AGENTS.md")
+        sb.git("commit", "-q", "-m", "upstream deletes the alias")
+        sb.git("push", "-q", "origin", "master")
+        (sb.docs / "AGENTS.md").unlink()
+        os.symlink("docs/a.md", sb.docs / "AGENTS.md")
+        sb.write(sb.docs, "docs/b.md", "b landed\n")
+
+        done = sb.run_script("-f", "-a", "-m", "Land B", "docs/b.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        # The unrelated document is untouched -- not overwritten with the
+        # symlink's target string.
+        self.assertEqual(
+            (sb.docs / "docs/a.md").read_text(encoding="utf-8"), original_a)
+        self.assertNotIn(
+            "docs/a.md",
+            (sb.docs / "docs/a.md").read_text(encoding="utf-8"))
+        self.assertEqual(sb.blob("origin/master", "docs/b.md"), "b landed\n")
+
+
+class AbsentContractTests(DocsLandCase):
+    """A repository that publishes no docs/agent-workflow-contract.md runs no
+    §7 lane split, so classification is not a gate it has. Every other
+    validation still applies -- this is the difference between a repository
+    with no opinion and one whose stated opinion cannot be read."""
+
+    def _remove_contract_upstream(self) -> None:
+        sb = self.sb
+        sb.git("rm", "-q", "docs/agent-workflow-contract.md")
+        sb.git("commit", "-q", "-m", "drop the contract")
+        sb.git("push", "-q", "origin", "master")
+
+    def test_a_document_lands_with_no_contract_upstream(self):
+        sb = self.sb
+        self._remove_contract_upstream()
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(sb.blob("origin/master", "docs/a.md"), "a landed\n")
+
+    def test_the_inventory_says_so_rather_than_refusing_everything(self):
+        sb = self.sb
+        self._remove_contract_upstream()
+        listed = sb.run_script("-l")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertIn("declares no §7 lane split", listed.stderr)
+        self.assertIn("unclassified", listed.stdout)
+        self.assertIn("docs/a.md", listed.stdout)
+
+    def test_path_validation_still_applies_without_a_contract(self):
+        # The safety half of the gate is repo-agnostic and must survive: only
+        # the lane question goes away, not traversal, globbing or absence.
+        sb = self.sb
+        self._remove_contract_upstream()
+        for bad in ("../escape.md", "docs/*.md", "docs/nope.md"):
+            refused = sb.run_script("-m", "Land it", bad)
+            self.assertEqual(refused.returncode, 6, f"{bad}: {refused.stderr}")
+            self.assertIn("refused:", refused.stderr)
+
+    def test_an_unreadable_contract_still_fails_closed(self):
+        # PRESENT but with no §7 fence is a BROKEN policy, not an absent one:
+        # a repository that declares a lane split and cannot state it must
+        # not be silently treated as having none.
+        sb = self.sb
+        sb.write(sb.main, "docs/agent-workflow-contract.md", "# 7. nope\n")
+        sb.git("add", "docs/agent-workflow-contract.md")
+        sb.git("commit", "-q", "-m", "break the contract")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+
+        refused = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("no §7 classification fence", refused.stderr)
+
+
+class ReconcileStageTests(DocsLandCase):
+    """The reconcile-first stage: a docs worktree that is merely BEHIND is
+    fast-forwarded and its documents re-applied before anything is measured
+    or published, so a stale branch is an ordinary state rather than a
+    refusal (and never a source of silent upstream overwrites)."""
+
+    def test_a_non_overlapping_upstream_edit_merges_instead_of_refusing(self):
+        # THE case this stage exists for. Upstream edited the same document
+        # in a different region; before reconcile-first the selected-path
+        # check refused the landing outright (exit 3) and -f would have
+        # published the stale copy, silently dropping the upstream edit.
+        sb = self.sb
+        sb.write(sb.main, "docs/b.md", B_UPSTREAM)          # upstream: line 20
+        sb.git("add", "docs/b.md")
+        sb.git("commit", "-q", "-m", "upstream edits b line 20")
+        sb.git("push", "-q", "origin", "master")
+        local = B_SEED.replace("b line 1\n", "b local 1\n")  # here: line 1
+        sb.write(sb.docs, "docs/b.md", local)
+
+        done = sb.run_script("-m", "Land B", "docs/b.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("reconciling: docs-wip is 1 commit(s) behind", done.stdout)
+        # Both edits survive: the merge kept upstream's line 20 and this
+        # worktree's line 1, which neither refusing nor forcing would have.
+        self.assertEqual(
+            sb.blob("origin/master", "docs/b.md"),
+            B_SEED.replace("b line 1\n", "b local 1\n")
+                  .replace("b line 20", "b upstream 20"))
+
+    def test_an_already_published_edit_collapses_to_nothing_to_land(self):
+        # The commonest state in a batch: the worktree still holds an edit
+        # that someone already landed. Re-applying it produces no diff, so
+        # the landing is a no-op rather than a redundant commit.
+        sb = self.sb
+        sb.write(sb.main, "docs/a.md", "a landed\n")
+        sb.git("add", "docs/a.md")
+        sb.git("commit", "-q", "-m", "someone landed a")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.head("origin/master")
+
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("nothing to land", done.stdout)
+        self.assertEqual(sb.head("origin/master"), before)
+
+    def test_untracked_files_are_never_swept_into_the_stash(self):
+        # A scratch file beside the documents is not part of the landing and
+        # must still be sitting there afterwards -- `git stash push` without
+        # -u is load-bearing, not incidental.
+        sb = self.sb
+        sb.move_master_upstream()
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        sb.write(sb.docs, "docs/scratch.json", "{}\n")
+
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(
+            (sb.docs / "docs/scratch.json").read_text(encoding="utf-8"), "{}\n")
+        self.assertNotIn("docs/scratch.json", sb.tracked("origin/master"))
+
+    def test_R_skips_the_reconcile_entirely(self):
+        # -R is the escape hatch back to the old behaviour: no fast-forward,
+        # and the selected-path overwrite check refuses as it always did.
+        sb = self.sb
+        sb.write(sb.main, "docs/a.md", "a upstream\n")
+        sb.git("add", "docs/a.md")
+        sb.git("commit", "-q", "-m", "upstream touches a")
+        sb.git("push", "-q", "origin", "master")
+        sb.write(sb.docs, "docs/a.md", "a local\n")
+
+        blocked = sb.run_script("-R", "-m", "Land A", "docs/a.md")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertNotIn("reconciling", blocked.stdout)
+        self.assertIn("changed on master since this worktree's base",
+                      blocked.stderr)
+
+    def test_dry_run_reports_the_reconcile_and_changes_nothing(self):
+        sb = self.sb
+        sb.move_master_upstream()
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+        before = sb.snapshot()
+
+        planned = sb.run_script("-n", "-m", "Land A", "docs/a.md")
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        self.assertIn("plan: reconcile: docs-wip is 1 commit(s) behind",
+                      planned.stdout)
+        self.assertIn("would fast-forward docs-wip", planned.stdout)
+        self.assertEqual(sb.head("origin/master"), before["upstream"])
+        self.assertEqual(sb.head("HEAD"), before["head"])
+
+    def test_a_branch_with_local_commits_still_takes_the_rebase_path(self):
+        # The stage is scoped to a purely-behind branch. One carrying real
+        # unpushed commits is left to the post-landing rebase, unchanged.
+        sb = self.sb
+        # The local commit and the upstream move touch DIFFERENT documents,
+        # so the rebase this asserts on is exercised rather than conflicting.
+        sb.write(sb.docs, "docs/b.md", "b committed locally\n")
+        sb.git("add", "docs/b.md", cwd=sb.docs)
+        sb.git("commit", "-q", "-m", "local docs commit", cwd=sb.docs)
+        sb.move_master_upstream()
+        sb.write(sb.docs, "docs/a.md", "a landed\n")
+
+        done = sb.run_script("-m", "Land A", "docs/a.md")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("reconciling:", done.stdout)
+        self.assertIn("rebasing onto the landed master", done.stdout)
+        self.assertEqual(sb.blob("origin/master", "docs/a.md"), "a landed\n")
 
 
 class PushVerificationTests(DocsLandCase):

@@ -35,11 +35,11 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. Card top and bottom border runs discard their selected or status color
+- [x] PRR-1. Card top and bottom border runs discard their selected or status color — [#496]
 
 ## 1. Card border attributes
 
-### PRR-1. Card top and bottom border runs discard their selected or status color
+### [#496] PRR-1. Card top and bottom border runs discard their selected or status color
 
 > **Captured note:** Correct the rendering defect PR #185 pinned: draw card
 > horizontal border runs without Brick's `hBorderAttr` override so the
