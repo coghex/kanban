@@ -23,7 +23,7 @@ concrete precondition
 ## Status
 
 - [x] PRR-1. Retriage silently truncates the tracker snapshot it calls exhaustive — [#492]
-- [ ] PRR-2. The approval sidebar control is absent from the Unreleased notes
+- [x] PRR-2. The approval sidebar control is absent from the Unreleased notes — [#497]
 
 ## 1. Retriage snapshot completeness
 
@@ -92,7 +92,7 @@ shipped renderings.
 
 ## 2. Unreleased-note accrual
 
-### PRR-2. The approval sidebar control is absent from the Unreleased notes
+### [#497] PRR-2. The approval sidebar control is absent from the Unreleased notes
 
 > **Captured note:** Add PR #439's user-visible approval-service control to the
 > current Unreleased notes, and audit later qualifying merges so the section
