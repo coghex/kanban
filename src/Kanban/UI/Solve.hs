@@ -259,7 +259,8 @@ launchAssignedSolveInvocation assignment issueNumber workflow brand existingSess
               workerParentSolverSession = session.sessionDetail.solveSessionId,
               workerParentSolverLogPath = session.sessionLogPath,
               workerParentStartedAt = progress.autoSolveStartedAt,
-              workerParentKnownPullRequests = progress.autoSolveKnownPullRequests
+              workerParentKnownPullRequests = progress.autoSolveKnownPullRequests,
+              workerParentSolverAssignment = session.sessionDetail.solveSessionAssignment
             }
   void
     . liftIO

@@ -201,7 +201,11 @@ examples = do
                 workerParentSolverSession = Just "solver-session",
                 workerParentSolverLogPath = Just "/tmp/solver.jsonl",
                 workerParentStartedAt = epoch,
-                workerParentKnownPullRequests = Set.fromList [857, 858]
+                workerParentKnownPullRequests = Set.fromList [857, 858],
+                -- The solver's own cell, distinct from the reviewer's below:
+                -- a decoder that dropped this would hand a restarted
+                -- revision the wrong provider.
+                workerParentSolverAssignment = Just (RecordedAssignment CodexProvider "codex-recorded" "high" "Recorded Codex")
               }
           spec =
             WorkerSpec

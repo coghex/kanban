@@ -65,11 +65,12 @@ import Kanban.UI.Session (pullRequestSessionReusable, solvePhaseActive)
 import Kanban.UI.Solve (failSolveLaunch)
 import Kanban.UI.Types (AgentSession (..), AppEvent (..), AppState (..), PullRequestDetail (..), SolveDetail (..), SolvePhase (..))
 import Kanban.UI.Util (launchAssignment, resolvedRosterCellFor)
-import Kanban.UI.Worker (recoveredPullRequestSession, recoveredSolveSession)
+import Kanban.UI.Worker (recoveredAutoSolveParentSession, recoveredPullRequestSession, recoveredSolveSession)
 import Kanban.Worker
   ( PullRequestWorkerTask (..),
     SolveWorkerTask (..),
     WorkerId (..),
+    WorkerParent (..),
     WorkerSpec (..),
     WorkerTask (..),
     descriptorForSpec,
@@ -263,10 +264,21 @@ spec = do
     -- A specification written before MODEL-7 still decodes, and its
     -- supervisor then refuses rather than resolving a cell of its own or
     -- reaching for the compiled defaults.
-    it "decodes a spec written without the recorded assignment" $ do
-      let fixture = workerFixtureSpec (Repository "/tmp/repo" "coghex" "kanban") (WorkerId "solve-845-legacy") 845
-      fixture.workerAssignment `shouldSatisfy` maybe False (const True)
-      decodeLegacySpec fixture `shouldBe` Right (fixture {workerAssignment = Nothing})
+    it "decodes a spec written without either recorded assignment" $ do
+      let parent = autoSolveParent (Just (cellOf (solveAssignment rerosteredDefaults ClaudeSolver)))
+          fixture =
+            (workerFixtureSpec (Repository "/tmp/repo" "coghex" "kanban") (WorkerId "solve-845-legacy") 845)
+              {workerParent = Just parent}
+      -- Both fields are populated here, so a decoder that dropped either one
+      -- could not produce the expectation below by accident.
+      fixture.workerAssignment `shouldNotBe` Nothing
+      parent.workerParentSolverAssignment `shouldNotBe` Nothing
+      decodeLegacySpec fixture
+        `shouldBe` Right
+          fixture
+            { workerAssignment = Nothing,
+              workerParent = Just parent {workerParentSolverAssignment = Nothing}
+            }
 
     it "refuses a supervisor whose spec records no assignment rather than resolving a cell of its own" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -382,6 +394,39 @@ spec = do
         [ ((`solveAssignment` CodexSolver), claudeOnlyRoster),
           (\roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview, codexOnlyRoster)
         ]
+
+    -- An autosolve pull-request worker's reattach restores the /solver's/
+    -- session too, from the descriptor of the reviewer. Every value that
+    -- identifies the solver has to come from 'WorkerParent': taking the
+    -- recorded assignment off that descriptor instead pairs the solver's own
+    -- resumable session id with the reviewer's provider, so the revision
+    -- this restart is heading for launches the wrong brand.
+    it "restores the solver's own assignment when an autosolve PR worker is reattached" $ do
+      let repository = Repository "/tmp/repo" "coghex" "kanban"
+          solverCell = cellOf (solveAssignment rerosteredDefaults ClaudeSolver)
+          reviewerCell = cellOf (pullRequestAssignment rerosteredDefaults PullRequestClaude PullRequestReview)
+          task = PullRequestWorkerTask 851 PullRequestClaude PullRequestReview
+          parent = autoSolveParent (Just solverCell)
+          reviewerSpec =
+            (workerFixtureSpec repository (WorkerId "pr-851-autosolve") 851)
+              { workerTask = PullRequestWorkerTaskKind task,
+                workerParent = Just parent,
+                workerAssignment = Just reviewerCell
+              }
+      -- The fixture only proves anything while the two really do differ.
+      solverCell `shouldNotBe` reviewerCell
+      state <- testAppState (fixtureBoard [])
+      descriptor <- descriptorForSpec reviewerSpec
+      let restored = recoveredAutoSolveParentSession state descriptor (baseIssue 851 []) parent task
+      -- The resumable id and the cell have to name the same agent.
+      (restored.sessionDetail.solveSessionAssignment, restored.sessionDetail.solveSessionId)
+        `shouldBe` (parent.workerParentSolverAssignment, parent.workerParentSolverSession)
+      -- ...and the revision this restart is heading for replays exactly that.
+      launchAssignment restored.sessionDetail.solveSessionAssignment (`solveAssignment` ClaudeSolver) (Left unusableRoster)
+        `shouldBe` Right solverCell
+      -- The reviewer's own session is unaffected and still carries its cell.
+      (recoveredPullRequestSession 0 descriptor (basePullRequest 851 [] False []) task).sessionDetail.pullRequestSessionAssignment
+        `shouldBe` Just reviewerCell
 
     -- A session reattached from a pre-MODEL-7 specification carries no
     -- assignment, resolves once on its first resume, and every resume after
@@ -539,15 +584,38 @@ recordedAssignmentIn directory name = do
   decoded <- (eitherDecode <$> LazyByteString.readFile (directory </> name)) :: IO (Either String WorkerSpec)
   pure (decoded >>= maybe (Left (name <> " records no assignment")) Right . (.workerAssignment))
 
--- | The same specification as written by a release that predates
--- 'workerAssignment': its own encoding with that one key removed, so this is
--- the document master leaves on disk rather than an invented one.
+-- | The autosolve parent a discovered pull-request worker carries: the
+-- solver's own brand, resumable session, log, and — the field under test —
+-- the cell that solver was launched on.
+autoSolveParent :: Maybe RecordedAssignment -> WorkerParent
+autoSolveParent assignment =
+  WorkerParent
+    { workerParentIssueNumber = 851,
+      workerParentReviewRound = 1,
+      workerParentSolverBrand = ClaudeSolver,
+      workerParentSolverSession = Just "solver-session",
+      workerParentSolverLogPath = Just "/tmp/solver.jsonl",
+      workerParentStartedAt = epoch,
+      workerParentKnownPullRequests = mempty,
+      workerParentSolverAssignment = assignment
+    }
+
+-- | The same specification as written by a release that predates the two
+-- recorded-assignment fields: its own encoding with those keys removed, so
+-- this is the document master leaves on disk rather than an invented one.
 decodeLegacySpec :: WorkerSpec -> Either String WorkerSpec
-decodeLegacySpec written = eitherDecode (encode (withoutAssignment (toJSON written)))
+decodeLegacySpec written = eitherDecode (encode (withoutAssignments (toJSON written)))
   where
-    withoutAssignment value = case value of
-      Object fields -> Object (KeyMap.delete "workerAssignment" fields)
+    withoutAssignments value = case value of
+      Object fields ->
+        Object
+          ( KeyMap.mapWithKey stripParent (KeyMap.delete "workerAssignment" fields)
+          )
       other -> other
+    stripParent key value
+      | key /= "workerParent" = value
+      | Object fields <- value = Object (KeyMap.delete "workerParentSolverAssignment" fields)
+      | otherwise = value
 
 assertReviewPayloadsFrom :: ModelRoster -> IO ()
 assertReviewPayloadsFrom roster =

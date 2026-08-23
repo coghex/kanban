@@ -2,6 +2,7 @@ module Kanban.UI.Worker
   ( applyWorkerProtocolEvent,
     attachDiscoveredWorker,
     orphanMessage,
+    recoveredAutoSolveParentSession,
     recoveredPullRequestSession,
     recoveredSolveSession,
     registerWorker,
@@ -303,26 +304,53 @@ ensureRecoveredAutoSolve descriptor task = case descriptor.workerDescriptorSpec.
     when (Map.notMember parent.workerParentIssueNumber state.appSolveSessions) $
       case issueFromBoard state.appBoard parent.workerParentIssueNumber of
         Nothing -> pure ()
-        Just issue -> do
-          let progress =
-                AutoSolveProgress
-                  { autoSolveStage = AutoReviewing,
-                    autoSolvePullRequest = Just task.pullRequestWorkerNumber,
-                    autoSolveReviewRound = parent.workerParentReviewRound,
-                    autoSolveKnownPullRequests = parent.workerParentKnownPullRequests,
-                    autoSolveStartedAt = parent.workerParentStartedAt
+        Just issue ->
+          modify
+            ( \current ->
+                current
+                  { appSolveSessions =
+                      Map.insert
+                        parent.workerParentIssueNumber
+                        (recoveredAutoSolveParentSession state descriptor issue parent task)
+                        current.appSolveSessions
                   }
-              session =
-                withSessionDetail
-                  ( \detail ->
-                      detail
-                        { solveSessionId = parent.workerParentSolverSession,
-                          solveSessionAutoProgress = Just progress
-                        }
-                  )
-                  (recoveredSolveSession state descriptor issue (SolveWorkerTask parent.workerParentIssueNumber AutoSolve parent.workerParentSolverBrand))
-                    { sessionPhase = SolveRunning,
-                      sessionActivity = "PR agent is running",
-                      sessionLogPath = parent.workerParentSolverLogPath
-                    }
-          modify (\current -> current {appSolveSessions = Map.insert parent.workerParentIssueNumber session current.appSolveSessions})
+            )
+
+-- | The /solver's/ session an autosolve pull-request worker's reattach
+-- restores beside the pull-request one.
+--
+-- The descriptor names the pull-request agent, so every value that
+-- identifies the solver is taken from 'WorkerParent' and overrides what
+-- 'recoveredSolveSession' read out of that descriptor: the session id, the
+-- log path, the brand, and — this is the one a resume runs on — the recorded
+-- model assignment. Leaving the last of those to the descriptor would hand
+-- the solver the reviewer's cell, so a revision launched after a restart
+-- would replay the wrong provider against the solver's own session id.
+--
+-- Lifted out of 'ensureRecoveredAutoSolve' rather than left inline because
+-- that arm runs in brick's 'EventM', which no unit test here can drive; this
+-- is the whole of what it decides.
+recoveredAutoSolveParentSession :: AppState -> WorkerDescriptor -> Issue -> WorkerParent -> PullRequestWorkerTask -> SolveSession
+recoveredAutoSolveParentSession state descriptor issue parent task =
+  withSessionDetail
+    ( \detail ->
+        detail
+          { solveSessionId = parent.workerParentSolverSession,
+            solveSessionAssignment = parent.workerParentSolverAssignment,
+            solveSessionAutoProgress = Just progress
+          }
+    )
+    (recoveredSolveSession state descriptor issue (SolveWorkerTask parent.workerParentIssueNumber AutoSolve parent.workerParentSolverBrand))
+      { sessionPhase = SolveRunning,
+        sessionActivity = "PR agent is running",
+        sessionLogPath = parent.workerParentSolverLogPath
+      }
+  where
+    progress =
+      AutoSolveProgress
+        { autoSolveStage = AutoReviewing,
+          autoSolvePullRequest = Just task.pullRequestWorkerNumber,
+          autoSolveReviewRound = parent.workerParentReviewRound,
+          autoSolveKnownPullRequests = parent.workerParentKnownPullRequests,
+          autoSolveStartedAt = parent.workerParentStartedAt
+        }

@@ -65,6 +65,15 @@ data WorkerTask = SolveWorkerTaskKind SolveWorkerTask | PullRequestWorkerTaskKin
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | What an autosolve pull-request worker records about the /solver/ that
+-- launched it, so a dashboard restart can restore that solver's own session
+-- beside the pull-request one it discovered.
+--
+-- Every field here describes the solver rather than this worker: the pull
+-- request's specification already carries its own session id, log path,
+-- brand, and model assignment, and reading those into the parent session is
+-- how a restarted revision reaches the reviewer's provider instead of the
+-- solver's.
 data WorkerParent = WorkerParent
   { workerParentIssueNumber :: Int,
     workerParentReviewRound :: Int,
@@ -72,10 +81,32 @@ data WorkerParent = WorkerParent
     workerParentSolverSession :: Maybe Text,
     workerParentSolverLogPath :: Maybe FilePath,
     workerParentStartedAt :: UTCTime,
-    workerParentKnownPullRequests :: Set Int
+    workerParentKnownPullRequests :: Set Int,
+    -- | The assignment the solver's own worker recorded, so a revision
+    -- launched after a restart replays the solver's cell rather than the
+    -- reviewer's (D-7). 'Nothing' for a parent recorded before this field
+    -- existed, which resolves once on that session's next launch exactly as
+    -- any other pre-MODEL-7 session does.
+    workerParentSolverAssignment :: Maybe RecordedAssignment
   }
   deriving stock (Eq, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (ToJSON)
+
+-- | Hand-written for the same reason 'WorkerSpec's is: a pull-request
+-- worker's durable specification written before 'workerParentSolverAssignment'
+-- existed still decodes, so an upgrade cannot drop a running autosolve loop
+-- out of discovery.
+instance FromJSON WorkerParent where
+  parseJSON = withObject "WorkerParent" $ \object ->
+    WorkerParent
+      <$> object .: "workerParentIssueNumber"
+      <*> object .: "workerParentReviewRound"
+      <*> object .: "workerParentSolverBrand"
+      <*> object .: "workerParentSolverSession"
+      <*> object .: "workerParentSolverLogPath"
+      <*> object .: "workerParentStartedAt"
+      <*> object .: "workerParentKnownPullRequests"
+      <*> object .:? "workerParentSolverAssignment" .!= Nothing
 
 data WorkerSpec = WorkerSpec
   { workerId :: WorkerId,

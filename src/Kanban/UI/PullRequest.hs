@@ -220,7 +220,8 @@ autoSolveWorkerParent state pullRequestNumber =
             workerParentSolverSession = session.sessionDetail.solveSessionId,
             workerParentSolverLogPath = session.sessionLogPath,
             workerParentStartedAt = progress.autoSolveStartedAt,
-            workerParentKnownPullRequests = progress.autoSolveKnownPullRequests
+            workerParentKnownPullRequests = progress.autoSolveKnownPullRequests,
+            workerParentSolverAssignment = session.sessionDetail.solveSessionAssignment
           }
         | (issueNumber, session) <- Map.toList state.appSolveSessions,
           Just progress <- [session.sessionDetail.solveSessionAutoProgress],
