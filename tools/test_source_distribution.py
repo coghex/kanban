@@ -179,6 +179,7 @@ EXCLUDED_TRACKED_PATHS = (
     "docs/coordination/",
     "docs/document_workflow_findings.md",
     "docs/drainer-bugs.md",
+    "docs/gh_record_authority_design.md",
     "docs/issue_approval_queue_design.md",
     "docs/issue_search_design.md",
     "docs/linux_portability_design.md",

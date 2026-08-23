@@ -2339,8 +2339,8 @@ check failure rather than a document that publishes directly.
 The `coordination` documents are
 `docs/card_filter_design.md`, `docs/claude_document_workflows_design.md`,
 `docs/code-health-report.md`, `docs/document_workflow_findings.md`,
-`docs/drainer-bugs.md`, `docs/issue_approval_queue_design.md`,
-`docs/issue_search_design.md`,
+`docs/drainer-bugs.md`, `docs/gh_record_authority_design.md`,
+`docs/issue_approval_queue_design.md`, `docs/issue_search_design.md`,
 `docs/linux_portability_design.md`, `docs/managed_paths_design.md`,
 `docs/model_settings_design.md`,
 `docs/multi_repo_boards_design.md`,
@@ -2450,6 +2450,7 @@ docs/document-workflow-contract.md | pr-atomic | test-parsed;release-document
 docs/document_workflow_findings.md | coordination | audit-report
 docs/drafting-workflow-contract.md | pr-atomic | test-parsed;release-document
 docs/drainer-bugs.md | coordination | audit-report
+docs/gh_record_authority_design.md | coordination | audit-report
 docs/issue-approval.md | pr-atomic | release-document
 docs/issue_approval_queue_design.md | coordination | audit-report
 docs/issue_search_design.md | coordination | audit-report
