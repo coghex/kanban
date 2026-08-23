@@ -23,11 +23,11 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. The mandatory art-decision policy exists only in the Claude workflows
+- [x] PRR-1. The mandatory art-decision policy exists only in the Claude workflows — [#493]
 
 ## 1. Cross-brand art-decision policy
 
-### PRR-1. The mandatory art-decision policy exists only in the Claude workflows
+### [#493] PRR-1. The mandatory art-decision policy exists only in the Claude workflows
 
 > **Captured note:** Apply the same missing-art blocker and user-decision
 > boundary to the Codex `$issue` and `$solve` workflows that PR #251 added to
