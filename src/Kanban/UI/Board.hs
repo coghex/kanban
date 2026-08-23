@@ -875,22 +875,35 @@ drawCardFrame env selected entry =
         contents = cardLines env selected entry innerWidth
         interiorHeight = length contents
         verticalEdge = vBox (replicate interiorHeight (str [vertical]))
+        -- The corners are the only two cells of a horizontal row the run does
+        -- not fill, so this is the width Brick's 'hBorder' greedily took
+        -- between them and the frame stays exactly as wide as its interior.
+        horizontalRun = txt (Text.replicate (max 0 (BrickTypes.availWidth context - 2)) (Text.singleton horizontal))
     BrickTypes.render
-      . withBorderStyle (cardBorderStyle env.cardOptions)
       . vBox
-      $ [ hBox [withAttr topBottomAttribute (txt topLeft), withAttr topBottomAttribute hBorder, withAttr statusAttribute (txt topRight)],
+      $ [ hBox [withAttr topBottomAttribute (txt topLeft), withAttr topBottomAttribute horizontalRun, withAttr statusAttribute (txt topRight)],
           hBox
             [ withAttr leftAttribute verticalEdge,
               withAttr interiorAttribute (padLeftRight 1 (padRight Max (vBox contents))),
               withAttr statusAttribute verticalEdge
             ],
-          hBox [withAttr topBottomAttribute (txt bottomLeft), withAttr topBottomAttribute hBorder, withAttr statusAttribute (txt bottomRight)]
+          hBox [withAttr topBottomAttribute (txt bottomLeft), withAttr topBottomAttribute horizontalRun, withAttr statusAttribute (txt bottomRight)]
         ]
   where
     item = entryItem entry
-    (topLeft, topRight, bottomLeft, bottomRight, vertical)
-      | env.cardOptions.optionAscii = ("+", "+", "+", "+", '|')
-      | otherwise = ("╭", "╮", "╰", "╯", '│')
+    -- Every glyph the frame draws, the horizontal run included. Drawing that
+    -- run as text rather than as Brick's 'hBorder' is what keeps §10's color
+    -- on it: 'sidebarControl' records the same hazard, that a Brick border
+    -- widget draws its run under @borderAttr@, which the theme does not name,
+    -- so the run would land on the attribute map's default and lose the
+    -- selection or status color the corners beside it keep. Card glyphs have
+    -- always been chosen here rather than taken from 'cardBorderStyle' --
+    -- §10's corners are rounded, which no 'BorderStyle' offers -- and the
+    -- horizontal one now joins them, leaving one place a mode's glyphs are
+    -- decided.
+    (topLeft, topRight, bottomLeft, bottomRight, vertical, horizontal)
+      | env.cardOptions.optionAscii = ("+", "+", "+", "+", '|', '-')
+      | otherwise = ("╭", "╮", "╰", "╯", '│', '─')
     statusAttribute = cardStatusAttribute env item
     topBottomAttribute = if selected then selectedAttr else statusAttribute
     leftAttribute = if selected then selectedAttr else statusAttribute
