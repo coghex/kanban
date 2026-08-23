@@ -1045,6 +1045,10 @@ def mark_ready_for_review(root: Path, repo: str, number: int) -> None:
 
 
 def restore_draft(root: Path, repo: str, number: int) -> None:
+    # No publication path calls this: publish_results' failure handler below
+    # records why a ready transition is never rolled back. It remains the
+    # coordinator's draft-restoring command surface, and the draft-transition
+    # suite asserts against it that no failure path invokes it.
     run(["gh", "pr", "ready", str(number), "-R", repo, "--undo"], cwd=root)
 
 
@@ -1176,7 +1180,6 @@ def publish_results(
         config_path=config_path,
     )
     post_comment(root, repo, number, body)
-    made_ready = False
     try:
         require_current_review_state(
             root,
@@ -1203,7 +1206,6 @@ def publish_results(
         )
         if verdict == "APPROVE" and not verified["ready_for_review"]:
             mark_ready_for_review(root, repo, number)
-            made_ready = True
             verified = verify_publication(
                 root,
                 repo,
@@ -1225,33 +1227,27 @@ def publish_results(
             clear_verdict_labels(root, repo, number, approval_label, changes_requested_label)
         except WorkflowError as cleanup_exc:
             cleanup_errors.append(f"verdict-label cleanup failed ({cleanup_exc})")
-        # made_ready is the only ownership evidence there is: it is set only
-        # after mark_ready_for_review returns. Deliberately no post-failure
-        # isDraft read here -- a failed ready command leaves no signal
-        # separating "ours applied, then reported failure" from "another actor
-        # marked it ready" (both act through the same credentials), so
-        # inferring ownership from the state would undo a concurrent actor's
-        # transition. Accepted residual, in exchange: when the command did
-        # apply before failing, the PR is left ready for review with both
+        # Publication never returns the PR to draft. Doing so would need
+        # positive evidence that this invocation created the ready
+        # transition, and the coordinator has none to read. The ready
+        # command's own draft check and its mutation are not atomic, so a
+        # normal return -- warning that the PR was already ready, or silent --
+        # is equally consistent with another actor having won the race, and
+        # both actors go through the same credentials. A post-failure isDraft
+        # read is that same inference by a different door, and is likewise
+        # absent. Accepted residual, in exchange: when the transition really
+        # was this invocation's, the PR is left ready for review with both
         # verdict labels cleared -- which the board classifies Reviewing and
         # the drainer, merging only approval-labelled PRs, leaves alone. Do
-        # not reintroduce the state read to "fix" that. This scopes the
-        # failed/outcome-uncertain path only: a ready command that succeeded
-        # as a no-op because another actor won the same race still sets
-        # made_ready, and is rolled back below.
-        if made_ready:
-            try:
-                restore_draft(root, repo, number)
-            except WorkflowError as cleanup_exc:
-                cleanup_errors.append(f"draft-state rollback failed ({cleanup_exc})")
+        # not reintroduce a rollback to "fix" that; it cannot tell the two
+        # cases apart, so it can only undo a transition that was never ours.
         if cleanup_errors:
             raise WorkflowError(
                 f"publication failed ({exc}); {'; '.join(cleanup_errors)}"
             ) from exc
-        cleanup = "both verdict labels were cleared"
-        if made_ready:
-            cleanup += " and draft state was restored"
-        raise WorkflowError(f"publication failed ({exc}); {cleanup}") from exc
+        raise WorkflowError(
+            f"publication failed ({exc}); both verdict labels were cleared"
+        ) from exc
     return 0, {
         **base,
         "status": "reviewed",

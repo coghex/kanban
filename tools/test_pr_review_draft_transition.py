@@ -3,12 +3,18 @@
 Both packaged coordinators publish through their own copy of review_pr.py, so
 the same behavioral contract is exercised against each copy. An approval must
 mark a draft ready for review and verify the new state; changes requested must
-leave draft state alone. Rollback is scoped to ownership: if publication
-becomes stale after the coordinator's own ready command succeeded, the
-coordinator restores the draft while clearing verdict labels, but a ready
-state whose ownership it cannot establish -- the case where its ready command
-failed, which is indistinguishable from a concurrent actor's transition -- is
-left exactly as it stands.
+leave draft state alone. Publication never restores the draft on its failure
+path: rollback would need positive evidence that this invocation created the
+ready transition, and no such evidence exists. The ready command's own draft
+check and its mutation are not atomic, so neither a normal return nor a failed
+one separates "ours applied" from "another actor marked it ready" -- both act
+through the same credentials. Every failure after the ready command therefore
+leaves the pull request's draft state exactly as it stands, clears only the
+verdict labels, and says so without claiming anything was restored.
+
+Each ready-command outcome -- a normal return, and a failure -- is staged twice
+over world states the coordinator cannot tell apart, and both stagings assert
+the same result.
 """
 
 from __future__ import annotations
@@ -186,7 +192,17 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                 restore.assert_not_called()
                 clear.assert_not_called()
 
-    def test_stale_publication_after_ready_restores_the_draft(self):
+    def test_stale_publication_after_ready_leaves_the_ready_state_alone(self):
+        """A ready transition outlives the publication that went stale after it.
+
+        This is the owned half of the successful-command pair: the
+        coordinator's own ready command made the transition, and the
+        verification that followed it went stale. The coordinator still has no
+        evidence that the transition was its own -- the concurrent case below
+        stages the identical observable sequence with another actor as the
+        author -- so it leaves the pull request ready for review and clears
+        only the verdict labels.
+        """
         for brand, module in self.modules.items():
             with self.subTest(brand=brand):
                 pr = self.pr(draft=True)
@@ -201,10 +217,21 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                     "APPROVE",
                     [before, module.WorkflowError("PR head changed after publication")],
                 )
+
+                def owned_transition(*_args, **_kwargs):
+                    # This invocation's own command applies the transition,
+                    # which is the one case a rollback would be entitled to
+                    # undo -- and it is indistinguishable from the concurrent
+                    # case below by anything the coordinator reads.
+                    pr["isDraft"] = False
+
+                ready.side_effect = owned_transition
+
                 with stack, self.assertRaises(module.WorkflowError) as excinfo:
                     self.publish(module, pr, "APPROVE")
 
                 ready.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
+                self.assertEqual(verify.call_count, 2)
                 clear.assert_called_once_with(
                     Path("/fake-repo"),
                     "coghex/kanban",
@@ -212,8 +239,61 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                     "reviewed:approve",
                     "reviewed:changes",
                 )
-                restore.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
-                self.assertIn("draft state was restored", str(excinfo.exception))
+                restore.assert_not_called()
+                self.assertFalse(pr["isDraft"])
+                self.assertNotIn("draft state was restored", str(excinfo.exception))
+
+    def test_successful_ready_command_leaves_a_concurrent_transition_alone(self):
+        """A ready command that succeeded as a no-op undoes nothing.
+
+        Another actor marks the pull request ready after the first
+        verification read a draft, so the coordinator's own ready command
+        returns successfully having changed nothing, and the verification
+        after it goes stale. That is the same sequence the owned case above
+        presents -- normal return, then a failure -- and `gh pr ready` cannot
+        close the gap, because its draft check and its mutation are not atomic
+        either. So publication leaves the external ready state standing.
+        """
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                pr = self.pr(draft=True)
+                before = {
+                    "comment_url": "https://example.test/comment",
+                    "labels": ["reviewed:approve"],
+                    "ready_for_review": False,
+                }
+                stack, verify, ready, restore, clear = self.publication_context(
+                    module,
+                    pr,
+                    "APPROVE",
+                    [before, module.WorkflowError("PR head changed after publication")],
+                )
+
+                def external_transition_then_no_op(*_args, **_kwargs):
+                    # The concurrency window itself: the verification above
+                    # observed a draft, then someone else marked the pull
+                    # request ready, so this command succeeds without applying
+                    # anything. Staged here and asserted below, so the fixture
+                    # proves the external ready state survives publication.
+                    pr["isDraft"] = False
+
+                ready.side_effect = external_transition_then_no_op
+
+                with stack, self.assertRaises(module.WorkflowError) as excinfo:
+                    self.publish(module, pr, "APPROVE")
+
+                ready.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
+                self.assertEqual(verify.call_count, 2)
+                clear.assert_called_once_with(
+                    Path("/fake-repo"),
+                    "coghex/kanban",
+                    89,
+                    "reviewed:approve",
+                    "reviewed:changes",
+                )
+                restore.assert_not_called()
+                self.assertFalse(pr["isDraft"])
+                self.assertNotIn("draft state was restored", str(excinfo.exception))
 
     def test_failed_ready_command_leaves_a_concurrent_transition_alone(self):
         """A ready state the coordinator cannot prove it created stays put.
