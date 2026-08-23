@@ -78,13 +78,12 @@ def repository_root(requested: Path) -> Path:
         raise InstallError(
             f"Install from the repository's main checkout, not a linked worktree: {root}"
         )
-    required = [
-        root / "tools" / "drain_prs.py",
-        root / "tools" / "drain_prs_service.py",
-        root / "tools" / "kanban_config.py",
-        root / "tools" / "kanban_models.py",
-        root / "tools" / "service_manager.py",
-    ]
+    # The same names `_MANAGED_LINK_NAMES` below enumerates, because they are
+    # the same set by construction: this installer links exactly the modules
+    # the installed controller resolves from beside itself, so a checkout
+    # missing one could only ever produce a link to nothing. Derived rather
+    # than restated so the two cannot drift apart.
+    required = [root / "tools" / name for name in _MANAGED_LINK_NAMES]
     missing = [str(item) for item in required if not item.is_file()]
     if missing:
         raise InstallError(
