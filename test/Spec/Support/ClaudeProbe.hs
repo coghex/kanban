@@ -49,8 +49,8 @@ data ClaudeWrapperLifetime
     -- rather than this one, since nothing could have censused the child
     -- through it. Pair it with a policy whose child outlives the wrapper --
     -- with 'ClaudeExitsCleanly' there would be nothing left to reparent,
-    -- and its tail would sit waiting on bytes the broken pipe can no longer
-    -- carry.
+    -- and its tail would sit waiting on bytes that never reach the stdin
+    -- this shape gives it.
     WrapperExitsMidSession
   deriving stock (Eq, Show)
 
@@ -109,7 +109,7 @@ withClaudeProbeFixture separateGroup wrapperLifetime signalPolicy transcript act
     createDirectoryIfMissing True binaryRoot
     ByteString.writeFile scriptPath (ByteString.unlines (fakeScriptBody scriptMarker separateGroup wrapperLifetime))
     setFileMode scriptPath 0o700
-    ByteString.writeFile claudePath (ByteString.unlines (fakeClaudeBody childMarker termMarker wrapperLifetime signalPolicy transcript))
+    ByteString.writeFile claudePath (ByteString.unlines (fakeClaudeBody childMarker termMarker signalPolicy transcript))
     setFileMode claudePath 0o700
     action (ClaudeProbeFixture scriptPath claudePath scriptMarker childMarker termMarker)
 
@@ -145,23 +145,40 @@ fakeScriptBody scriptMarkerPath separateGroup wrapperLifetime =
     "fi"
   ]
     <> ["set -m" | separateGroup]
-    <> [ "\"${probeCommand[@]}\" &",
+    <> [ "\"${probeCommand[@]}\"" <> childStandardInput <> " &",
          "childPid=$!"
        ]
     <> ["set +m" | separateGroup]
     <> case wrapperLifetime of
       WrapperWaitsForClaude -> ["wait \"$childPid\""]
-      -- One second is long enough for the probe to census the pair while
-      -- both are alive and related, and short enough to be well inside the
-      -- quiet period the capture waits out before it writes the exit
-      -- request -- so the wrapper is reliably gone by the time that write
-      -- happens, which is the failure this shape exists to produce.
+      -- One second is long enough for the probe to census the wrapper and
+      -- the child together, and short enough to be well inside the quiet
+      -- period the capture waits out before it writes the exit request --
+      -- so the wrapper is reliably gone by the time that write happens,
+      -- which is the failure this shape exists to produce.
       WrapperExitsMidSession -> ["sleep 1", "exit 0"]
+  where
+    -- A real `script` is the only reader of Kanban's end: it owns the
+    -- pseudo-terminal and hands the client a slave of its own, so the
+    -- client never holds the pipe and the wrapper's exit alone breaks it.
+    -- Here the child would inherit that very descriptor, and so would every
+    -- process the dialect's payload puts in between -- which is not a fixed
+    -- set. The util-linux payload runs through `/bin/sh`, and whether that
+    -- shell execs the command or stays around waiting for it is the shell's
+    -- own choice: bash execs, dash forks and waits, so on a dash host an
+    -- `sh -c` outlives the wrapper still holding the pipe open and the
+    -- write the shape exists to break instead succeeds. Handing the child
+    -- its own stdin restores the production shape exactly -- one reader,
+    -- the wrapper -- on any host and either dialect. The waiting shape
+    -- keeps the inherited descriptor, because its child is the one that has
+    -- to see the bytes Kanban writes.
+    childStandardInput = case wrapperLifetime of
+      WrapperWaitsForClaude -> ""
+      WrapperExitsMidSession -> " </dev/null"
 
 -- | Stands in for real `claude --safe-mode --ax-screen-reader` running
 -- inside `script`'s pty: records its own pid, emits whichever screen the
--- transcript names, lets go of the pseudo-terminal if `wrapperLifetime`
--- calls for it, then either drains the exact byte count Kanban's
+-- transcript names, then either drains the exact byte count Kanban's
 -- ESC+`/exit` writes before exiting on its own, or loops under whichever
 -- signal-ignoring trap the policy names.
 --
@@ -176,14 +193,13 @@ fakeScriptBody scriptMarkerPath separateGroup wrapperLifetime =
 -- fake that closed its output pipe any earlier would race a real Claude
 -- session's output never closing on its own, hitting a decode path this
 -- fixture is not testing.
-fakeClaudeBody :: FilePath -> FilePath -> ClaudeWrapperLifetime -> ClaudeSignalPolicy -> ClaudeTranscript -> [ByteString.ByteString]
-fakeClaudeBody childMarkerPath termMarkerPath wrapperLifetime signalPolicy transcript =
+fakeClaudeBody :: FilePath -> FilePath -> ClaudeSignalPolicy -> ClaudeTranscript -> [ByteString.ByteString]
+fakeClaudeBody childMarkerPath termMarkerPath signalPolicy transcript =
   [ "#!/bin/bash",
     "printf '%s' \"$$\" > " <> quoted childMarkerPath
   ]
     <> trapLines
     <> outputLines
-    <> detachLines
     <> tailLines
   where
     recordTermThenExit = "trap 'printf 1 > " <> quoted termMarkerPath <> "; exit 143' TERM"
@@ -209,20 +225,6 @@ fakeClaudeBody childMarkerPath termMarkerPath wrapperLifetime signalPolicy trans
         [ "printf '$\\n'",
           "printf 'Current session\\n5%% used\\nResets 8:40pm (America/Los_Angeles)\\n'",
           "printf 'Current week\\n10%% used\\nResets 9:40pm (America/Los_Angeles)\\n'"
-        ]
-    -- Kanban's end of the pseudo-terminal only breaks once every reader of
-    -- it is gone. In production that is `script` alone, which owns the pty
-    -- and hands the client a slave of its own; here the child inherited the
-    -- very same pipe, so it has to let go of its copy for the wrapper's exit
-    -- to close the pseudo-terminal the way a real one would. It drains the
-    -- seven bytes 'respondToScreen' writes for the "$" prompt first, so the
-    -- "/usage" request itself still lands and the screen above is still
-    -- produced the way every other shape produces it.
-    detachLines = case wrapperLifetime of
-      WrapperWaitsForClaude -> []
-      WrapperExitsMidSession ->
-        [ "dd bs=1 count=7 of=/dev/null 2>/dev/null",
-          "exec 0</dev/null"
         ]
     tailLines = case signalPolicy of
       -- 14 bytes: 'respondToScreen' answers the "$" prompt above with
