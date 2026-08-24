@@ -22,12 +22,12 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. The durable GitHub process-group record has no cross-process transaction boundary
+- [x] PRR-1. The durable GitHub process-group record has no cross-process transaction boundary — [#499]
 - [ ] PRR-2. Drainer status misclassifies the legacy stash name the drainer itself produced
 
 ## 1. GitHub process-group ownership across dashboard processes
 
-### PRR-1. The durable GitHub process-group record has no cross-process transaction boundary
+### [#499] PRR-1. The durable GitHub process-group record has no cross-process transaction boundary
 
 > **Captured note:** Give the repository's durable `gh` process-group record a
 > real cross-process check/register/update authority, or explicitly prevent a
