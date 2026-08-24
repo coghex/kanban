@@ -37,6 +37,12 @@ by being listed; the document assets are therefore reconciled against their own
 contract's declared set, and what the extractor recovers from each of them is
 pinned, so neither list can drift away from the other and neither can shrink to
 covering nothing.
+
+Issue #493 added a second, non-manifest property over two of those same assets:
+both brands' solve workflows must state the art policy PR #251 landed in the
+Claude asset alone, so a missing texture, icon, sprite, or animation stops the
+run in either brand. Its issue-drafting half lives in
+tools/test_drafting_workflow_contract.py.
 """
 
 import ast
@@ -1249,6 +1255,90 @@ def tool_surface_findings(executable_tokens, tools_dir=TOOLS_DIR):
 # loudly, which is the safe direction. The captured segment keeps its leading
 # slash so it compares against a `personal-path` manifest token exactly the
 # way the Haskell segments do.
+# The two solve assets that owe issue #493's art policy: the paired Kanban-
+# invoked /solve and $solve surfaces docs/agent-workflow-contract.md declares.
+# PR #251 made a missing texture, icon, sprite, or animation an explicit tracked
+# blocker with a user-owned supply-or-generate decision and landed it in the
+# Claude asset alone, adding no regression assertion, so nothing held the Codex
+# twin to it. The issue-drafting half of the same policy is guarded the same way
+# by tools/test_drafting_workflow_contract.py.
+ART_POLICY_SOLVE_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/solve.md",
+    "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
+)
+
+# Packaged assets that owe none of the rules below, so a rule broad enough to
+# match every Markdown file cannot pass vacuously. Neither bundle packages an
+# autosolve, so no packaged asset delegates to solve the way autoissue delegates
+# to issue; these four qualify instead by doing neither job. The issue-review
+# pair judges a filed issue and never drafts or implements, and the autoissue
+# pair delegates to its brand's issue-drafting workflow.
+ART_POLICY_CONTROL_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/issue-review.md",
+    "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
+    "claude-plugin/plugins/kanban/commands/autoissue.md",
+    "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
+)
+
+# Lowercase: compared against art_policy_canonical() output. Every fragment lies
+# inside a single sentence of the rule, because that canonicalization collapses
+# whitespace and drops `*` and backticks but keeps list markers -- a fragment
+# spanning a step boundary or carrying the step's own number could never match
+# both brands, which state the rule at different step numbers.
+#
+# The fragments are distinctive to the art policy rather than bare anchor words.
+# `texture` also appears in an unrelated example invocation in design-epic, and
+# `placeholder` in note-problem, process-design-doc, triage, and push-docs, in
+# both brands; a tuple keyed on either single word would make the negative
+# control fail against assets that owe this policy nothing.
+ART_POLICY_SOLVE_RULES = (
+    # Missing art stops the run rather than being worked around.
+    "art is a blocker, not a detail",
+    "if the issue needs a texture, icon, sprite, or animation that does not exist",
+    "stop and return to the user with the exact list of missing assets and what each is for",
+    # Art's own tracked lane, and whose decision the method is.
+    "art is tracked work: its own issue, its own pr, and the user's signoff",
+    "they decide whether to supply the file or have it generated",
+    # Stopping is the default absent a prior decision for that specific asset.
+    "stopping is the default",
+    "unless the user has already told you which method they want for that specific asset",
+    # The three non-resolutions.
+    "do not ship a placeholder or reused asset as if it were done",
+    "do not narrow the implementation to avoid the art",
+    # And what the solver still owes before it stops.
+    "build and test whatever does not depend on the missing asset before you stop",
+)
+
+
+def art_policy_canonical(text):
+    """Whitespace collapsed, markdown emphasis dropped, case folded.
+
+    Duplicated from tools/test_drafting_workflow_contract.py's canonical()
+    rather than imported. This module imports the standard library only, which
+    is what lets `python3 -m unittest tools.test_agent_workflow_contract` run
+    from the repository root; a sibling import would put that invocation on the
+    same ModuleNotFoundError footing as the plugin test modules, which must be
+    reached through discovery instead.
+    """
+    return re.sub(r"\s+", " ", text.replace("*", "").replace("`", "")).lower()
+
+
+def art_policy_findings(assets, rules):
+    """Every (asset, rule) pair whose canonicalized text omits the rule.
+
+    Factored out so the planted-removal check can drive the same predicate the
+    presence check drives. A mutation test that only re-greps its own mutated
+    string proves that str.replace removed a string, not that the enforced
+    assertion notices the edit.
+    """
+    findings = []
+    for path, text in assets.items():
+        for rule in rules:
+            if rule not in text:
+                findings.append(f"{path}: missing art-policy rule {rule!r}")
+    return findings
+
+
 _MARKDOWN_PATH_WORD = r'[^\s"\'`}$)\\<>/]+'
 MARKDOWN_HOME_PATH_RE = re.compile(
     r'(?:\$HOME|~)((?:/' + _MARKDOWN_PATH_WORD + r'(?: ' + _MARKDOWN_PATH_WORD + r')*)+)'
@@ -2854,6 +2944,68 @@ class AgentWorkflowContractTests(unittest.TestCase):
                         self.assertEqual(entry["files"][0], "src/Kanban/ManagedPaths.hs")
                     else:
                         self.assertEqual(entry["files"], files)
+
+
+class ArtPolicyTests(unittest.TestCase):
+    """Issue #493's art policy across both brands' solve assets.
+
+    PR #251 landed the policy in claude-plugin/plugins/kanban/commands/solve.md
+    and its /issue twin only, with no regression assertion, so the Codex solve
+    skill ran from implementation straight into test selection with no art
+    boundary at all. These assets are the program an agent executes, so the same
+    missing-art observation could stop the run and hand the user a tracked
+    blocker through one brand while producing a placeholder, a reused asset, or
+    a narrowed implementation through the other.
+
+    There is no behavioral prompt-testing harness here, so the reviewable
+    property is the asset text itself.
+    """
+
+    def setUp(self):
+        self.assets = {
+            path: art_policy_canonical((REPO_ROOT / path).read_text(encoding="utf-8"))
+            for path in ART_POLICY_SOLVE_ASSETS
+        }
+
+    def test_every_solve_asset_states_every_art_rule(self):
+        findings = art_policy_findings(self.assets, ART_POLICY_SOLVE_RULES)
+        self.assertEqual(findings, [], "\n".join(findings))
+
+    def test_removing_a_rule_from_either_brand_is_reported(self):
+        # The property under test is that a removal FAILS the enforced check,
+        # for each rule and each brand in turn, not merely that the text happens
+        # to be present today.
+        for path in ART_POLICY_SOLVE_ASSETS:
+            for rule in ART_POLICY_SOLVE_RULES:
+                with self.subTest(asset=path, rule=rule):
+                    mutated = dict(self.assets)
+                    mutated[path] = mutated[path].replace(rule, "")
+                    self.assertIn(
+                        f"{path}: missing art-policy rule {rule!r}",
+                        art_policy_findings(mutated, ART_POLICY_SOLVE_RULES),
+                        f"deleting {rule!r} from {path} left the art-policy "
+                        "check green, so it would not notice the edit",
+                    )
+
+    def test_the_art_rules_are_not_vacuous(self):
+        # A rule broad enough to match every packaged asset would pass the check
+        # above while asserting nothing. The control assets neither draft nor
+        # solve, so none of them may state these rules.
+        #
+        # Reported as a plain list rather than through assertIn: these assets
+        # canonicalize to thousands of characters, and a membership assertion
+        # would bury the one line that says what to do about the failure.
+        offenders = []
+        for path in ART_POLICY_CONTROL_ASSETS:
+            text = art_policy_canonical((REPO_ROOT / path).read_text(encoding="utf-8"))
+            for rule in ART_POLICY_SOLVE_RULES:
+                if rule in text:
+                    offenders.append(
+                        f"{path} now states {rule!r}; add it to "
+                        "ART_POLICY_SOLVE_ASSETS so the rule is enforced there "
+                        "rather than silently exempt"
+                    )
+        self.assertEqual(offenders, [], "\n".join(offenders))
 
 
 if __name__ == "__main__":
