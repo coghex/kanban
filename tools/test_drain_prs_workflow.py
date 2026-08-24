@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -401,60 +402,211 @@ class ControllerResolutionTests(unittest.TestCase):
 
 
 class RepositoryResolutionTests(unittest.TestCase):
-    """Requirement 8's first half: one resolution, announced before anything is
-    mutated, and no GitHub call to obtain it."""
+    """Requirement 8's first half: one resolution, through the remote the
+    controller itself resolves a drainer's identity through, announced before
+    anything is mutated, and with no GitHub call to obtain it.
 
-    def resolve(self, remote: str) -> tuple[str, str]:
-        fence = fence_containing(read(CLAUDE_ASSET), "REPO=")
-        script = fence + '\nprintf "%s\\n%s\\n" "$ROOT" "$REPO"\n'
+    The remote is the part a hardcoded `origin` gets wrong. A drainer's
+    identity comes from the shared Kanban configuration's `remote_name`, so on
+    a fork checkout whose board is pointed at upstream the two remotes name two
+    different canonical repositories and `--repo` built from `origin` is
+    refused by the controller on every invocation — correctly, and unusably.
+    The fixtures below run the rendered fences and assert which identity comes
+    out, so the rule is the behavior rather than the spelling.
+    """
+
+    def resolve(
+        self,
+        relative_path: str,
+        remotes: dict,
+        config: str | None = None,
+        install_module: bool = True,
+    ) -> tuple[str, str, str]:
+        """`($ROOT, $REMOTE, $REPO)` from running the three rendered fences.
+
+        Run in order and in one shell, because that is how the asset reads:
+        the repository identity depends on `$DRAINER`, which the controller
+        fence resolves, which is why this composes all three rather than the
+        last one alone.
+        """
+        text = read(relative_path)
+        script = "\n".join(
+            [
+                fence_containing(text, "ROOT="),
+                fence_containing(text, "CONTROL="),
+                fence_containing(text, "REPO="),
+                'printf "%s\\n%s\\n%s\\n" "$ROOT" "$REMOTE" "$REPO"',
+            ]
+        )
         with tempfile.TemporaryDirectory() as directory:
-            checkout = Path(directory) / "checkout"
+            base = Path(directory)
+            checkout = base / "checkout"
             checkout.mkdir()
-            for command in (
-                ["git", "init", "--quiet", "-b", "main"],
-                ["git", "remote", "add", "origin", remote],
-            ):
-                subprocess.run(
-                    command,
-                    cwd=checkout,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    check=True,
+            install = base / "install"
+            install.mkdir()
+            # The module the installer links beside the controller, which is
+            # where the asset reads the configured remote from. Omitted by one
+            # fixture below, because an installation whose links predate the
+            # module is a real state and must not strand the command.
+            if install_module:
+                shutil.copy(
+                    REPO_ROOT / "tools" / "kanban_config.py",
+                    install / "kanban_config.py",
                 )
+            config_home = base / "config" / "kanban"
+            config_home.mkdir(parents=True)
+            if config is not None:
+                (config_home / "config.toml").write_text(config, encoding="utf-8")
+            self.git(checkout, "init", "--quiet", "-b", "main")
+            for name, url in remotes.items():
+                self.git(checkout, "remote", "add", name, url)
             completed = subprocess.run(
                 ["sh", "-c", script],
-                cwd=checkout,
+                cwd=str(checkout),
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "HOME": str(base / "home"),
+                    "XDG_CONFIG_HOME": str(base / "config"),
+                    "XDG_DATA_HOME": "",
+                    "KANBAN_DRAINER_INSTALL_DIR": str(install),
+                },
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 check=True,
             )
-        root, repo = completed.stdout.strip().splitlines()
-        return root, repo
+        root, remote, repo = completed.stdout.strip().splitlines()
+        return root, remote, repo
 
-    def test_both_remote_spellings_yield_one_owner_name(self):
-        for remote in (
-            "https://github.com/example/demo.git",
-            "https://github.com/example/demo",
-            "git@github.com:example/demo.git",
-        ):
-            with self.subTest(remote=remote):
-                root, repo = self.resolve(remote)
+    def git(self, cwd: Path, *arguments: str) -> None:
+        subprocess.run(
+            ["git", *arguments],
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def test_every_remote_spelling_yields_one_owner_name(self):
+        for relative_path in RENDERED_ASSETS:
+            for url in (
+                "https://github.com/example/demo.git",
+                "https://github.com/example/demo",
+                "git@github.com:example/demo.git",
+            ):
+                with self.subTest(relative_path=relative_path, url=url):
+                    root, remote, repo = self.resolve(
+                        relative_path, {"origin": url}
+                    )
+                    self.assertEqual(repo, "example/demo")
+                    self.assertEqual(remote, "origin")
+                    self.assertTrue(root.endswith("checkout"), root)
+
+    def test_a_fork_checkout_asserts_the_configured_remote_s_identity(self):
+        # The regression fixture: two remotes naming two different canonical
+        # repositories, and a shared configuration that points the board — and
+        # therefore the drainer's identity — at the second. `origin` here is
+        # the wrong answer, and it is the answer a hardcoded remote gives.
+        remotes = {
+            "origin": "https://github.com/fork-owner/demo.git",
+            "upstream": "https://github.com/example/demo.git",
+        }
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(relative_path=relative_path):
+                _, remote, repo = self.resolve(
+                    relative_path, remotes, config='remote_name = "upstream"\n'
+                )
+                self.assertEqual(remote, "upstream")
+                self.assertEqual(
+                    repo,
+                    "example/demo",
+                    "the asserted identity must come from the configured "
+                    "remote, not from origin",
+                )
+                # The same checkout with the default configuration is the
+                # other identity, so the fixture is really discriminating
+                # between two live answers rather than reporting a constant.
+                _, default_remote, default_repo = self.resolve(
+                    relative_path, remotes
+                )
+                self.assertEqual(default_remote, "origin")
+                self.assertEqual(default_repo, "fork-owner/demo")
+
+    def test_an_explicit_origin_configuration_is_honoured_too(self):
+        remotes = {
+            "origin": "https://github.com/fork-owner/demo.git",
+            "upstream": "https://github.com/example/demo.git",
+        }
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(relative_path=relative_path):
+                _, remote, repo = self.resolve(
+                    relative_path, remotes, config='remote_name = "origin"\n'
+                )
+                self.assertEqual(remote, "origin")
+                self.assertEqual(repo, "fork-owner/demo")
+
+    def test_an_unreadable_configuration_falls_back_to_origin(self):
+        # The same fail-open the controller's own `configured_remote_name`
+        # has: a configuration that cannot be parsed must not leave `$REMOTE`
+        # empty, which would make `git remote get-url` fail and strand the
+        # whole command.
+        remotes = {"origin": "https://github.com/example/demo.git"}
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(relative_path=relative_path):
+                _, remote, repo = self.resolve(
+                    relative_path, remotes, config="this is not toml [\n"
+                )
+                self.assertEqual(remote, "origin")
                 self.assertEqual(repo, "example/demo")
-                self.assertTrue(root.endswith("checkout"), root)
+
+    def test_a_missing_configuration_module_falls_back_to_origin(self):
+        # An install directory whose links predate `kanban_config.py` -- the
+        # state this very machine's live install is in, since the module was
+        # linked later than the controller. The import has to fail open, or
+        # the block raises, `$REMOTE` is empty, and `git remote get-url` fails
+        # for every operation.
+        remotes = {
+            "origin": "https://github.com/fork-owner/demo.git",
+            "upstream": "https://github.com/example/demo.git",
+        }
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(relative_path=relative_path):
+                _, remote, repo = self.resolve(
+                    relative_path,
+                    remotes,
+                    config='remote_name = "upstream"\n',
+                    install_module=False,
+                )
+                self.assertEqual(remote, "origin")
+                self.assertEqual(repo, "fork-owner/demo")
+
+    def test_the_resolution_makes_no_github_call_of_its_own(self):
+        # `sed` over the remote URL rather than `gh repo view`, which would be
+        # a GitHub call made before the identity every invocation depends on
+        # exists — and this workflow makes none at all.
+        for relative_path in RENDERED_ASSETS:
+            fence = fence_containing(read(relative_path), "REPO=")
+            self.assertIn("git -C \"$ROOT\" remote get-url \"$REMOTE\"", fence)
+            self.assertIn("sed -E", fence)
+            self.assertNotIn("gh ", fence)
 
     def test_the_two_renderings_resolve_identically(self):
-        claude = fence_containing(read(CLAUDE_ASSET), "REPO=")
-        codex = fence_containing(read(CODEX_ASSET), "REPO=")
-        self.assertEqual(claude, codex)
+        for needle in ("ROOT=", "CONTROL=", "REPO="):
+            self.assertEqual(
+                fence_containing(read(CLAUDE_ASSET), needle),
+                fence_containing(read(CODEX_ASSET), needle),
+                needle,
+            )
 
     def test_the_announcement_precedes_every_controller_invocation(self):
         for relative_path in RENDERED_ASSETS:
             text = read(relative_path)
             self.assertIn(
                 "**Announce, then act:** name the resolved `$REPO` and the "
-                "`$ROOT` it was matched against before the first invocation.",
+                "`$ROOT` it was matched against before the first invocation, "
+                "and say which remote it came from when that remote is not "
+                "`origin`.",
                 flat(text),
                 relative_path,
             )

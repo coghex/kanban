@@ -20,27 +20,18 @@ It controls the same managed job Claude controls through `/kanban:drain-prs` —
 one drainer per repository, two control surfaces, never a second daemon.
 <!-- /brand -->
 
-## Resolve the repository and the controller
+## Resolve the checkout, the controller, and the repository
 
 The drainer is per repository, so every invocation names the checkout it
 controls **and** the `owner/name` this session believes that checkout is. Set
-both once, from the repository being controlled:
+the three values once, in this order — the repository identity depends on the
+controller's own installation, so it is resolved last.
+
+Start with the checkout:
 
 ```bash
 ROOT="$(git rev-parse --show-toplevel)"
-REPO="$(git -C "$ROOT" remote get-url origin | sed -E 's#\.git$##; s#.*(/|:)([^/:]+/[^/:]+)$#\2#')"
 ```
-
-`--path "$ROOT"` selects the repository; `--repo "$REPO"` asserts which one you
-believe it is, and the controller refuses the pair when the checkout's remote
-says otherwise. Both go on every invocation below. `$ROOT` is a path and
-`$REPO` is an `owner/name`; neither substitutes for the other, and the path
-variable is not called `REPO`.
-
-**Announce, then act:** name the resolved `$REPO` and the `$ROOT` it was matched
-against before the first invocation. Reporting what was resolved is what catches
-a wrong resolution, and it catches it only if it lands before anything has been
-installed, started, stopped, or acknowledged.
 
 Resolve the controller the way this repository documents it rather than from a
 hardcoded path, which would ignore an `--install-dir` install and find nothing
@@ -65,6 +56,52 @@ DATA_HOME="$HOME/.local/share"
   DRAINER="$HOME/Library/Application Support/kanban/pr-drainer"
 CONTROL="$DRAINER/drain_prs_service.py"
 ```
+
+Then the repository identity — and **not from `origin` unconditionally.** A
+drainer's identity is resolved through the remote the shared Kanban
+configuration's `remote_name` names. That is `origin` by default, but a fork
+checkout whose board is pointed at upstream sets it to `upstream`, and there the
+two remotes name two different canonical repositories. Asserting the origin
+identity would make the controller refuse every invocation below — correctly,
+and unusably. So read the remote from the same configuration module the
+controller resolves it through, which the installer links beside the controller.
+That module already defaults `remote_name` to `origin`, so the only fallback
+spelled here is the one it makes for itself: a configuration it cannot read at
+all leaves the remote at `origin` rather than empty.
+
+```bash
+REMOTE="$(python3 - "$DRAINER" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+remote = "origin"
+try:
+    import kanban_config
+except ImportError:
+    pass
+else:
+    try:
+        raw, _ = kanban_config.load_raw_config(None)
+    except kanban_config.KanbanConfigError:
+        pass
+    else:
+        remote = raw.remote_name
+print(remote)
+PY
+)"
+REPO="$(git -C "$ROOT" remote get-url "$REMOTE" | sed -E 's#\.git$##; s#.*(/|:)([^/:]+/[^/:]+)$#\2#')"
+```
+
+`--path "$ROOT"` selects the repository; `--repo "$REPO"` asserts which one you
+believe it is, and the controller refuses the pair when the checkout's remote
+says otherwise. Both go on every invocation below. `$ROOT` is a path and
+`$REPO` is an `owner/name`; neither substitutes for the other, and the path
+variable is not called `REPO`.
+
+**Announce, then act:** name the resolved `$REPO` and the `$ROOT` it was matched
+against before the first invocation, and say which remote it came from when that
+remote is not `origin`. Reporting what was resolved is what catches a wrong
+resolution, and it catches it only if it lands before anything has been
+installed, started, stopped, or acknowledged.
 
 An incident belongs to the repository whose drainer raised it — not to whichever
 repository surfaced it. The Kanban board displays every drainer's state, so an
