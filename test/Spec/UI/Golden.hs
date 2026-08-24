@@ -24,7 +24,7 @@
 module Spec.UI.Golden (spec) where
 
 import Brick (AttrMap)
-import Brick.AttrMap (attrMapLookup)
+import Brick.AttrMap (AttrName, attrMapLookup)
 import Brick.BChan (BChan, newBChan)
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.List (findIndex, intercalate, isInfixOf, isPrefixOf, nub)
@@ -197,45 +197,78 @@ spec = describe "golden frames" $ do
         cyan = attrMapLookup selectedAttr theme
         cyanTitle = attrMapLookup selectedTitleAttr theme
         status = attrMapLookup approvedAttr theme
-        (top, left) = selectedCardCorner theme frame
-        right = columnOf frame top left '╮'
-        bottom = rowOf frame top left '╰'
-        edge = [top + 1 .. bottom - 1]
-        cells rowIndex columns = [cellAt frame rowIndex columnIndex | columnIndex <- columns]
-        edgeCells columnIndex = [cellAt frame rowIndex columnIndex | rowIndex <- edge]
+        card = cardShowing unicodeCardGlyphs frame selectedCardText
+        gutter = [cellAt frame card.cardTopRow (card.cardLeftColumn - 1)]
 
-    cellCharacters (cells top [left - 1]) `shouldBe` "▌"
-    cellAttributes (cells top [left - 1]) `shouldBe` [cyan]
+    -- Exactly one card in the frame draws a cyan corner, and it is the one
+    -- located from its own text above.
+    selectedCardCorner theme frame `shouldBe` (card.cardTopRow, card.cardLeftColumn)
 
-    cellCharacters (cells top [left, right]) `shouldBe` "╭╮"
-    cellCharacters (cells bottom [left, right]) `shouldBe` "╰╯"
-    cellAttributes (cells top [left]) `shouldBe` [cyan]
-    cellAttributes (cells bottom [left]) `shouldBe` [cyan]
-    cellAttributes (cells top [right]) `shouldBe` [status]
-    cellAttributes (cells bottom [right]) `shouldBe` [status]
+    cellCharacters gutter `shouldBe` "▌"
+    cellAttributes gutter `shouldBe` [cyan]
 
-    cellCharacters (edgeCells left) `shouldBe` map (const '│') edge
-    cellCharacters (edgeCells right) `shouldBe` map (const '│') edge
-    cellAttributes (edgeCells left) `shouldBe` map (const cyan) edge
-    cellAttributes (edgeCells right) `shouldBe` map (const status) edge
+    expectCardBorder "selected wide" unicodeCardGlyphs frame card cyan status
 
     -- The title is the card's first interior row, so its glyphs carry the
     -- selected-title attribute rather than the ordinary card-title one.
-    let titleCells = [cell | cell <- cells (top + 1) [left + 2 .. right - 2], frameCellCharacter cell /= ' ']
+    let titleCells =
+          [ cell
+          | columnIndex <- [card.cardLeftColumn + 2 .. card.cardRightColumn - 2],
+            let cell = cellAt frame (card.cardTopRow + 1) columnIndex,
+            frameCellCharacter cell /= ' '
+          ]
     null titleCells `shouldBe` False
     cellAttributes titleCells `shouldBe` map (const cyanTitle) titleCells
 
-    -- The runs between the corners are drawn by Brick's own 'hBorder', which
-    -- applies 'Brick.Widgets.Border.hBorderAttr' over whatever attribute the
-    -- card asked for. The theme names no @border@ attribute, so they land on
-    -- the attribute map's default instead of the cyan §10 asks for on a top
-    -- and bottom edge -- the same reason an unselected card's runs are not
-    -- its status color either. That is a rendering defect rather than
-    -- something this suite introduces, so it is recorded as it draws today;
-    -- these frames are what will show the repair when one lands.
-    let horizontal = cells top [left + 1 .. right - 1] <> cells bottom [left + 1 .. right - 1]
-    cellCharacters horizontal `shouldBe` map (const '─') horizontal
-    cellAttributes horizontal `shouldBe` map (const Vty.defAttr) horizontal
+  -- §10's other half: an unselected card has no cyan anywhere, so its whole
+  -- border -- horizontal runs included -- is its own status color. Three
+  -- cards with three different statuses, because a run that fell back to the
+  -- attribute map's default could otherwise pass on a card whose status
+  -- happened to be that default.
+  it "draws every unselected card's whole border in its own status attribute" $ do
+    frame <- renderCase wideCase
+    let theme = themeFor testOptions
+    mapM_
+      ( \(label, needle, attribute) ->
+          expectCardBorder
+            (label <> " wide")
+            unicodeCardGlyphs
+            frame
+            (cardShowing unicodeCardGlyphs frame needle)
+            (attrMapLookup attribute theme)
+            (attrMapLookup attribute theme)
+      )
+      unselectedCardCases
+
+  -- The split is a color contract, and --ascii changes only glyphs, so every
+  -- cell that was cyan or status-colored above still is. The runs are the
+  -- half that has to be checked here: a card's corners and edges are drawn
+  -- the same way in both modes, and its runs are the cells a border widget
+  -- used to draw for it.
+  it "keeps the selected split and the status borders when the glyphs are ASCII" $ do
+    frame <- renderCase (frameCaseNamed "board-ascii")
+    let theme = themeFor testOptions {optionAscii = True}
+        cyan = attrMapLookup selectedAttr theme
+        status = attrMapLookup approvedAttr theme
+        card = cardShowing asciiCardGlyphs frame selectedCardText
+        gutter = [cellAt frame card.cardTopRow (card.cardLeftColumn - 1)]
+
+    cellCharacters gutter `shouldBe` ">"
+    cellAttributes gutter `shouldBe` [cyan]
+
+    expectCardBorder "selected ascii" asciiCardGlyphs frame card cyan status
+
+    mapM_
+      ( \(label, needle, attribute) ->
+          expectCardBorder
+            (label <> " ascii")
+            asciiCardGlyphs
+            frame
+            (cardShowing asciiCardGlyphs frame needle)
+            (attrMapLookup attribute theme)
+            (attrMapLookup attribute theme)
+      )
+      unselectedCardCases
 
   it "colors the pull-request cards red, amber and green by readiness" $ do
     frame <- renderCase wideCase
@@ -1202,6 +1235,96 @@ cellAt :: [[FrameCell]] -> Int -> Int -> FrameCell
 cellAt frame rowIndex columnIndex = case drop columnIndex (frameRow frame rowIndex) of
   cell : _ -> cell
   [] -> error ("the frame has no cell at row " <> show rowIndex <> ", column " <> show columnIndex)
+
+-- | The text the selected fixture card draws, short enough to stay on one
+-- row in every frame width this suite renders.
+selectedCardText :: Text
+selectedCardText = "#812 Modal input leaks"
+
+-- | Three unselected fixture cards whose statuses colour them differently,
+-- each named by text that stays on one row at every frame width here and
+-- each drawn whole -- corners included -- inside the shortest frame these
+-- assertions render.
+unselectedCardCases :: [(String, Text, AttrName)]
+unselectedCardCases =
+  [ ("neutral issue", "#711 Adopt the", neutralAttr),
+    ("conflicted pull request", "PR #851 Resolve save", problemAttr),
+    ("ready pull request", "PR #823 Fix modal scroll", readyAttr)
+  ]
+
+-- | The six glyphs a card frame draws itself with. §10's border contract is a
+-- statement about the attributes those cells carry, not about the glyphs, so
+-- both modes are here: --ascii keeps the whole contract and changes only
+-- which characters it lands on.
+data CardGlyphs = CardGlyphs
+  { cardTopLeftGlyph :: Char,
+    cardTopRightGlyph :: Char,
+    cardBottomLeftGlyph :: Char,
+    cardBottomRightGlyph :: Char,
+    cardHorizontalGlyph :: Char,
+    cardVerticalGlyph :: Char
+  }
+  deriving stock (Eq, Show)
+
+unicodeCardGlyphs :: CardGlyphs
+unicodeCardGlyphs = CardGlyphs '╭' '╮' '╰' '╯' '─' '│'
+
+asciiCardGlyphs :: CardGlyphs
+asciiCardGlyphs = CardGlyphs '+' '+' '+' '+' '-' '|'
+
+-- | Where one card's own frame runs in a rendered frame.
+data CardExtent = CardExtent
+  { cardTopRow :: Int,
+    cardBottomRow :: Int,
+    cardLeftColumn :: Int,
+    cardRightColumn :: Int
+  }
+  deriving stock (Eq, Show)
+
+-- | The card that draws @needle@, located from that text rather than from a
+-- corner glyph: under --ascii every corner is '+', which the shell border,
+-- the board rules and the sidebar controls draw too, so a frame-wide glyph
+-- search cannot tell a card from anything else. The card's own left edge is
+-- the nearest vertical run left of the text, and the frame is bounded from
+-- the first corner above that edge.
+cardShowing :: CardGlyphs -> [[FrameCell]] -> Text -> CardExtent
+cardShowing glyphs frame needle = CardExtent top (rowOf frame top left glyphs.cardBottomLeftGlyph) left (columnOf frame top left glyphs.cardTopRightGlyph)
+  where
+    (textRow, textColumn) = frameTextAt frame needle
+    left = case [columnIndex | (columnIndex, cell) <- take textColumn (zip [0 ..] (frameRow frame textRow)), frameCellCharacter cell == glyphs.cardVerticalGlyph] of
+      columns@(_ : _) -> last columns
+      [] -> error ("no card edge left of " <> Data.Text.unpack needle)
+    top = case [rowIndex | rowIndex <- [textRow - 1, textRow - 2 .. 0], frameCellCharacter (cellAt frame rowIndex left) == glyphs.cardTopLeftGlyph] of
+      rowIndex : _ -> rowIndex
+      [] -> error ("no card corner above " <> Data.Text.unpack needle)
+
+-- | §10's border contract for one card, cell by cell: the left edge, both
+-- horizontal runs and the two left corners under @leftAttribute@, the right
+-- edge and the two right corners under @rightAttribute@. The two attributes
+-- are the same on an unselected card and differ on the selected one, which is
+-- the whole of what the split means. @label@ travels into every failure so a
+-- table of cards says which row failed.
+expectCardBorder :: String -> CardGlyphs -> [[FrameCell]] -> CardExtent -> Vty.Attr -> Vty.Attr -> Expectation
+expectCardBorder label glyphs frame extent leftAttribute rightAttribute = do
+  expect "top-left corner" [cellAt frame extent.cardTopRow extent.cardLeftColumn] glyphs.cardTopLeftGlyph leftAttribute
+  expect "bottom-left corner" [cellAt frame extent.cardBottomRow extent.cardLeftColumn] glyphs.cardBottomLeftGlyph leftAttribute
+  expect "top-right corner" [cellAt frame extent.cardTopRow extent.cardRightColumn] glyphs.cardTopRightGlyph rightAttribute
+  expect "bottom-right corner" [cellAt frame extent.cardBottomRow extent.cardRightColumn] glyphs.cardBottomRightGlyph rightAttribute
+  expect "left edge" (edgeCells extent.cardLeftColumn) glyphs.cardVerticalGlyph leftAttribute
+  expect "right edge" (edgeCells extent.cardRightColumn) glyphs.cardVerticalGlyph rightAttribute
+  expect "top run" (runCells extent.cardTopRow) glyphs.cardHorizontalGlyph leftAttribute
+  expect "bottom run" (runCells extent.cardBottomRow) glyphs.cardHorizontalGlyph leftAttribute
+  where
+    interior = [extent.cardTopRow + 1 .. extent.cardBottomRow - 1]
+    run = [extent.cardLeftColumn + 1 .. extent.cardRightColumn - 1]
+    edgeCells columnIndex = [cellAt frame rowIndex columnIndex | rowIndex <- interior]
+    runCells rowIndex = [cellAt frame rowIndex columnIndex | columnIndex <- run]
+    expect what cells character attribute = do
+      -- An empty run would let every assertion below pass without looking at
+      -- a single cell, so the cells being there is itself part of the check.
+      (label <> " " <> what <> " is drawn", null cells) `shouldBe` (label <> " " <> what <> " is drawn", False)
+      (label <> " " <> what <> " glyphs", cellCharacters cells) `shouldBe` (label <> " " <> what <> " glyphs", map (const character) cells)
+      (label <> " " <> what <> " attributes", cellAttributes cells) `shouldBe` (label <> " " <> what <> " attributes", map (const attribute) cells)
 
 -- | The one card drawn with a selected top-left corner. More than one would
 -- mean the frame shows two selections, which is itself worth failing on.
