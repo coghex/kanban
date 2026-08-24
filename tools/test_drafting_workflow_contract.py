@@ -183,11 +183,14 @@ ART_POLICY_ISSUE_RULES = (
     # Where the gap is recorded, and where it is not resolved.
     "record it as an explicit blocker in the issue body",
     "rather than resolving it in the draft",
-    # Art's own tracked lane, and whose decision the method is.
-    "art gets its own issue, its own pr, and the user's signoff",
+    # Art's own tracked lane, signoff scoped per texture rather than once for
+    # the arc, and whose decision the supply-or-generate method is.
+    "art gets its own issue, its own pr, and the user's signoff on every texture",
     "they decide whether they supply the file or have it generated",
-    # What the draft must instruct when the user has not decided.
-    "the issue must tell the solver to stop and ask",
+    # What the draft must instruct, and the condition that governs it: the
+    # instruction is owed only where the user has not already chosen, so the
+    # condition is asserted with it rather than separately.
+    "unless they have already said which, the issue must tell the solver to stop and ask",
     # And the three non-resolutions.
     "never assume a placeholder, a reused asset, or a narrowed scope resolves the gap",
 )

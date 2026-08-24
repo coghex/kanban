@@ -1296,9 +1296,13 @@ ART_POLICY_SOLVE_RULES = (
     "art is a blocker, not a detail",
     "if the issue needs a texture, icon, sprite, or animation that does not exist",
     "stop and return to the user with the exact list of missing assets and what each is for",
-    # Art's own tracked lane, and whose decision the method is.
-    "art is tracked work: its own issue, its own pr, and the user's signoff",
+    # Art's own tracked lane, signoff scoped per texture rather than once for
+    # the arc, and whose decision the supply-or-generate method is -- asserted
+    # in both directions, since the solver choosing for the user is the failure
+    # the positive form alone would not catch.
+    "art is tracked work: its own issue, its own pr, and the user's signoff on every texture",
     "they decide whether to supply the file or have it generated",
+    "do not choose that path yourself",
     # Stopping is the default absent a prior decision for that specific asset.
     "stopping is the default",
     "unless the user has already told you which method they want for that specific asset",
