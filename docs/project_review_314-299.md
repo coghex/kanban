@@ -23,7 +23,7 @@ concrete precondition
 ## Status
 
 - [x] PRR-1. The durable GitHub process-group record has no cross-process transaction boundary — [#499]
-- [ ] PRR-2. Drainer status misclassifies the legacy stash name the drainer itself produced
+- [x] PRR-2. Drainer status misclassifies the legacy stash name the drainer itself produced — [#508]
 
 ## 1. GitHub process-group ownership across dashboard processes
 
@@ -113,7 +113,7 @@ start or update concurrently.
 
 ## 2. Legacy drainer-stash recognition
 
-### PRR-2. Drainer status misclassifies the legacy stash name the drainer itself produced
+### [#508] PRR-2. Drainer status misclassifies the legacy stash name the drainer itself produced
 
 > **Captured note:** Recognize the exact legacy
 > `drain-prs-autostash-<epoch>` payload in the read-only status inventory. It
