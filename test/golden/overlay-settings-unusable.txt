@@ -22,21 +22,21 @@
 ║┃                          ┃┃ ▌╭─────────────────────────────────┃ Log directory: /fixture/logs                                     ┃                    │ ┃  │ Routes Shift-wheel through the     │ ┃║
 ║┃                          ┃┃  │ #812 Modal input leaks through  ┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃of the native       │ ┃  │ same modal-aware ownership path as │ ┃║
 ║┃                          ┃┃  │ overlay                         ┃ Agent models                                                     ┃e membership        │ ┃  │ ordinary wheel events.             │ ┃║
-║┃                          ┃┃  │  reviewed:approve   bug   ui    ┃ model roster /fixture/home/.config/kanban/models.toml is         ┃                    │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4h ago     ┃ invalid: roles.pr_review.codex names model "gpt-5.9", which is   ┃calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ Empty modal areas currently allo┃ not in that provider's models list                               ┃────────────────────╯ ┃                                         ┃║
-║┃                          ┃┃  │ pointer events to reach lower   ┃                                                                  ┃                      ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃  │ pages. This is visible when a…  ┃ Press d to replace the file's contents with the compiled         ┃                      ┃  │ PR #861 Adopt the envelope in the  │ ┃║
-║┃                          ┃┃  ╰─────────────────────────────────┃ defaults. The current models.toml, including any custom agents,  ┃                      ┃  │ snapshot loader                    │ ┃║
-║┃                          ┃┃                                    ┃ catalogs, and assignments, is not kept.                          ┃                      ┃  │  reviewed:approve   feature        │ ┃║
-║┃                          ┃┃  ╭─────────────────────────────────┃                                                                  ┃                      ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  │  reviewed:approve   bug   ui    ┃ Operating mode: no-agent · set by agents in models.toml          ┃                    │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago     ┃ model roster /fixture/home/.config/kanban/models.toml is         ┃calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ Empty modal areas currently allo┃ invalid: roles.pr_review.codex names model "gpt-5.9", which is   ┃────────────────────╯ ┃                                         ┃║
+║┃                          ┃┃  │ pointer events to reach lower   ┃ not in that provider's models list                               ┃                      ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  │ pages. This is visible when a…  ┃                                                                  ┃                      ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃  ╰─────────────────────────────────┃ Press d to replace the file's contents with the compiled         ┃                      ┃  │ snapshot loader                    │ ┃║
+║┃                          ┃┃                                    ┃ defaults. The current models.toml, including any custom agents,  ┃                      ┃  │  reviewed:approve   feature        │ ┃║
+║┃                          ┃┃  ╭─────────────────────────────────┃ catalogs, and assignments, is not kept.                          ┃                      ┃  │ #901 · agent-name → master ·       │ ┃║
 ║┃                          ┃┃  │ #756 Define the persistence     ┃                                                                  ┃                      ┃  │ updated 3h ago                     │ ┃║
 ║┃                          ┃┃  │ contract                        ┃                                                                  ┃                      ┃  │ Reads the cache through the        │ ┃║
-║┃                          ┃┃  │  architecture                   ┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃                      ┃  │ versioned envelope and reports a   │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4h ago     ┃ j/k rows  h/l model  [/] effort  d reset  1/2/3 chat  Esc close  ┃                      ┃  │ truncated payload.                 │ ┃║
-║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ Document root owners, snapshot  ┃                                                                  ┃                      ┃  │ ◐ CI 9/12 · behind                 │ ┃║
-║┃ ┃ approve_issues.py ┃    ┃┃  │ barriers, and the versioned     ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                      ┃  ╰────────────────────────────────────╯ ┃║
-║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ envelope before implementation…     │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │  architecture                   ┃                                                                  ┃                      ┃  │ versioned envelope and reports a   │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago     ┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃                      ┃  │ truncated payload.                 │ ┃║
+║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ Document root owners, snapshot  ┃ j/k rows  h/l model  [/] effort  d reset  1/2/3 chat  Esc close  ┃                      ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃ ┃ approve_issues.py ┃    ┃┃  │ barriers, and the versioned     ┃                                                                  ┃                      ┃  ╰────────────────────────────────────╯ ┃║
+║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ envelope before implementation… ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                      ┃                                         ┃║
 ║┃ off                      ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
 ║┃ ┏━━━━━━━━━━━━━━┓         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃ ┃ drain_prs.py ┃         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║

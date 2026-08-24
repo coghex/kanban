@@ -42,6 +42,7 @@ module Kanban.UI.Settings
     -- * The wording the screen and its notices share
     issueGateCaution,
     noProvidersMessage,
+    operatingModeLine,
     rosterRecoveryHint,
     settingsFooterHint,
   )
@@ -57,6 +58,7 @@ import qualified Graphics.Vty as Vty
 import Kanban.Models
   ( Assignment (..),
     ModelRoster (..),
+    OperatingMode,
     ProviderCatalog (..),
     ProviderName (..),
     RoleName (..),
@@ -64,6 +66,7 @@ import Kanban.Models
     allRoles,
     assignmentFor,
     defaultRoster,
+    operatingModeLabel,
     providerKey,
     roleKey,
   )
@@ -377,8 +380,15 @@ undeclaredDefaultMessage role provider compiled catalog =
     <> compiled.assignmentEffort
     <> " cannot be written; declare it in models.toml first"
 
--- | The one thing that moves 'appModelRoster', and only on a save that
--- succeeded.
+-- | The one thing that moves 'appModelRoster' after startup, and only on a
+-- save that succeeded.
+--
+-- Through 'Kanban.UI.Types.withModelRoster', so the retained operating mode
+-- moves with it. Only one write can change the loaded provider set at all —
+-- @d@ replacing an unusable file with the compiled defaults, which takes a
+-- no-agent dashboard to dual — because @agents@ is not editable from this
+-- screen (D-10). That one is enough: a screen still naming no-agent over the
+-- defaults it just wrote would be showing the file it replaced.
 --
 -- A failed write leaves the roster, the focused row, and therefore every
 -- displayed assignment exactly as they were, and reports the diagnostic
@@ -390,9 +400,8 @@ undeclaredDefaultMessage role provider compiled catalog =
 applyRosterWrite :: Either Text () -> RosterWrite -> AppState -> AppState
 applyRosterWrite (Left message) _ state = state {appNotice = Just message}
 applyRosterWrite (Right ()) write state =
-  state
-    { appModelRoster = Right write.rosterWriteRoster,
-      appSettingsFocus = write.rosterWriteFocus,
+  (withModelRoster (Right write.rosterWriteRoster) state)
+    { appSettingsFocus = write.rosterWriteFocus,
       appNotice = if write.rosterWriteCaution then Just issueGateCaution else Nothing
     }
 
@@ -420,6 +429,16 @@ issueGateCaution :: Text
 issueGateCaution =
   "Changing `issue_gate` may make existing issue approvals stale; reconciliation can request rereview. \
   \Environment overrides or accepted historical reviewer routes may keep some approvals current."
+
+-- | The read-only line naming the operating mode the roster in force derives
+-- (D-8).
+--
+-- Shown and never set, and it says where it is set instead: the mode follows
+-- the @agents@ list, which is a deliberate file edit (D-10) and the one part
+-- of the roster this screen does not offer a key for. Short enough for the
+-- panel's 64-cell interior at every one of the three labels.
+operatingModeLine :: OperatingMode -> Text
+operatingModeLine mode = "Operating mode: " <> operatingModeLabel mode <> " · set by agents in models.toml"
 
 -- | A valid roster that loads no provider at all. There is nothing to focus
 -- and nothing to edit from this screen — @agents@ is a file edit — so the

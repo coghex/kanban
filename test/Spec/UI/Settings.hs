@@ -25,15 +25,17 @@ import Kanban.Models
     RosterDefect (..),
     RosterFailure (..),
     RosterLoadError (..),
+    OperatingMode (..),
     allRoles,
     defaultRoster,
+    operatingModeFor,
     rosterErrorMessage,
   )
 import Kanban.Settings (ChatVerbosity (..))
 import Kanban.UI.Overlay (drawOverlay)
 import Kanban.UI.Settings
 import Kanban.UI.Theme (themeFor)
-import Kanban.UI.Types (AppEvent, AppState (..), Name (..), Overlay (..))
+import Kanban.UI.Types (AppEvent, AppState (..), Name (..), Overlay (..), withModelRoster)
 import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures (fixtureBoard, testOptions)
 import Spec.Support.Render (renderWidgetLines)
@@ -125,6 +127,42 @@ spec = describe "the settings overlay's model roster" $ do
       -- And no fabricated rows beside it: not one compiled model is named.
       section `shouldSatisfy` (not . Data.Text.isInfixOf "gpt-5.4")
       section `shouldSatisfy` (not . Data.Text.isInfixOf "claude-")
+
+  -- Requirement 5 of #486: the mode is shown here and set nowhere here. The
+  -- line is read off the drawn panel rather than off 'operatingModeLine', so
+  -- a line the overlay stopped drawing — or drew from a mode the roster does
+  -- not derive — fails rather than passing on the wording alone.
+  describe "the operating-mode line" $ do
+    it "names the mode the roster in force derives, once per mode" $ do
+      board <- testAppState (fixtureBoard [])
+      let modeLineOf = filter (Data.Text.isPrefixOf "Operating mode:") . interiorOf
+      modeLineOf (withRoster defaults board) `shouldBe` [operatingModeLine DualMode]
+      modeLineOf (withRoster (Right claudeOnly) board) `shouldBe` [operatingModeLine SingleAgentMode]
+      modeLineOf (withRoster (Right noAgentRoster) board) `shouldBe` [operatingModeLine NoAgentMode]
+      -- A file that will not load derives no-agent too, and still shows its
+      -- defect below the line rather than instead of it.
+      modeLineOf (withRoster (Left unusableRoster) board) `shouldBe` [operatingModeLine NoAgentMode]
+
+    it "names the mode and where it is set, inside the panel's interior" $ do
+      map operatingModeLine [DualMode, SingleAgentMode, NoAgentMode]
+        `shouldBe` [ "Operating mode: dual · set by agents in models.toml",
+                     "Operating mode: single-agent · set by agents in models.toml",
+                     "Operating mode: no-agent · set by agents in models.toml"
+                   ]
+      -- Every label fits unwrapped, which is what keeps it one row.
+      map (Data.Text.length . operatingModeLine) [DualMode, SingleAgentMode, NoAgentMode]
+        `shouldSatisfy` all (<= settingsInteriorWidth)
+
+    -- The screen shows it and offers no key for it: `agents` is a file edit
+    -- (D-10), so no input this panel decodes can move the mode.
+    it "offers no input that changes it" $ do
+      let recovery = outcome SettingsResetAssignment (Left unusableRoster) Nothing
+      map (\input -> fmap (.rosterAgents) (writtenRoster (outcome input defaults (Just (SolveRole, CodexProvider)))))
+        [SettingsCycleModel 1, SettingsCycleModel (-1), SettingsCycleEffort 1, SettingsCycleEffort (-1)]
+        `shouldSatisfy` all (`elem` [Nothing, Just defaultRoster.rosterAgents])
+      -- The one write that does move the loaded set is the recovery, and it
+      -- moves it to the compiled defaults, which is dual.
+      fmap (operatingModeFor) (writtenRoster recovery) `shouldBe` Just DualMode
 
   describe "the keys it decodes" $ do
     it "moves a row on j, k, and the arrows" $ do
@@ -312,6 +350,12 @@ wheel button target = MouseDown target button [] (Location (0, 0))
 press :: Name -> BrickEvent Name AppEvent
 press target = MouseDown target Vty.BLeft [] (Location (0, 0))
 
+-- | The roster an outcome would write, or 'Nothing' when it writes none.
+writtenRoster :: SettingsOutcome -> Maybe ModelRoster
+writtenRoster settingsResult = case settingsResult of
+  SettingsRosterWrite write -> Just write.rosterWriteRoster
+  _ -> Nothing
+
 -- | The roster this write proposes. Anything but a write is a failure of the
 -- expectation rather than a value to carry on with.
 proposed :: SettingsInput -> Either RosterLoadError ModelRoster -> (RoleName, ProviderName) -> ModelRoster
@@ -335,8 +379,11 @@ cautionFor input roster cell = case settingsOutcome input roster (Just cell) of
   SettingsRosterWrite write -> Just write.rosterWriteCaution
   _ -> Nothing
 
+-- | Show the overlay over another roster. Through
+-- 'Kanban.UI.Types.withModelRoster', so the retained operating mode is the
+-- one this roster derives rather than the fixture's compiled dual.
 withRoster :: Either RosterLoadError ModelRoster -> AppState -> AppState
-withRoster roster state = openSettings state {appModelRoster = roster}
+withRoster roster = openSettings . withModelRoster roster
 
 -- | The overlay's interior rows, drawn through the same composition the
 -- dashboard hands Brick rather than by calling the roster's own drawing
@@ -346,14 +393,20 @@ interiorOf state =
   map (Data.Text.strip . Data.Text.filter (/= '┃'))
     (renderWidgetLines (themeFor testOptions) (settingsInteriorWidth + 4) (drawOverlay state SettingsOverlay))
 
--- | Just the roster section: everything the panel drew between its heading
--- and the rule above the footer, with the viewport's unused rows dropped.
+-- | Just the roster rows: everything the panel drew between its heading and
+-- the rule above the footer, with the viewport's unused rows and the
+-- read-only operating-mode line dropped.
+--
+-- The mode line sits inside this section and is not one of its rows, so a
+-- count or an elision assertion here would otherwise read it as an
+-- assignment.
 rosterSectionOf :: AppState -> [Text]
 rosterSectionOf state =
-  filter (not . Data.Text.null)
+  filter (\row -> not (Data.Text.null row) && not (isModeLine row))
     (takeWhile (not . isRule) (drop 1 (dropWhile (/= "Agent models") (interiorOf state))))
   where
     isRule row = not (Data.Text.null row) && Data.Text.all (== '━') row
+    isModeLine = Data.Text.isPrefixOf "Operating mode:"
 
 -- | The cells the 68-wide panel leaves for a row: two border columns and the
 -- one column of padding on each side.
