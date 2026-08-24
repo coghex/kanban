@@ -60,16 +60,20 @@ created above it.
   chat-output verbosity: `j`/`k` or Up/Down pick an assignment, `h`/`l` or
   Left/Right cycle its model, `[`/`]` cycle its effort, and `d` restores the
   picked assignment's default — or repairs a roster too broken to launch
-  anything. An edit is saved to `~/.config/kanban/models.toml`, and the
-  running board moves to it only once that write succeeds.
+  anything. An edit is saved to `models.toml` under Kanban's XDG
+  configuration directory — `~/.config/kanban/models.toml` unless
+  `XDG_CONFIG_HOME` names another root — and the running board moves to what
+  was saved only once that write succeeds.
 - The usage sidebar's percentage row stays inside the sidebar whatever it has
   to show: a provider label too wide for its field is cut with the same
   ellipsis a card's elided line carries, rather than pushing the bar and the
   percentage off the edge, and the percentage is right-aligned so one, two,
   and three digits share a column and `100%` still reads in full.
-- A card's whole border now takes its status color, and the selection color
-  when the card is selected. The top and bottom runs used to be drawn in the
-  terminal's default while the corners at their ends were colored.
+- A card's top and bottom border runs are drawn in color rather than the
+  terminal's default, so the whole border now follows the rule its corners
+  already did: an unselected card's border is its status color throughout,
+  and on the selected card the left, top, and bottom edges take the selection
+  color while the right edge and the corners on it keep the status color.
 
 ## 1.0.0.0
 
