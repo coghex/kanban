@@ -260,6 +260,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
     "codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/project-review/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
@@ -293,6 +294,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/retriage.md",
     "claude-plugin/plugins/kanban/commands/backlog-review.md",
     "claude-plugin/plugins/kanban/commands/project-review.md",
+    "claude-plugin/plugins/kanban/commands/drain-prs.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
@@ -431,6 +433,28 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "git",
         "sed",
         "awk",
+    },
+}
+
+# Issue #511's drainer control surface, pinned the same way and for the
+# inverted reason: this is the one vendored workflow that makes no GitHub call
+# at all, so `gh`'s *absence* is the assertion, and an absence is only
+# meaningful while the extractor is really recovering something from the file.
+# `python3` is the whole of its reach -- every operation is a subcommand of the
+# installed controller -- while `git` and `sed` fill `$ROOT` and `$REPO`, the
+# two values requirement 8 puts on every one of those invocations. The two
+# files are rendered from one source, so they are pinned to the same set: a
+# brand block that leaked a command into one and not the other fails here.
+DRAIN_PRS_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/drain-prs.md": {
+        "git",
+        "sed",
+        "python3",
+    },
+    "codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md": {
+        "git",
+        "sed",
+        "python3",
     },
 }
 
@@ -2086,6 +2110,93 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 )
                 self.assertIn(row["id"], {"gh-cli", "git-cli", "sed-cli", "awk-cli"})
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_drain_prs_asset_command_discovery_is_not_vacuous(self):
+        # The counterpart of the three pins above for the one vendored
+        # workflow that reaches GitHub not at all. Issue #511's requirement 9
+        # is an absence -- no `gh` invocation in either rendered file -- and
+        # tools/test_drain_prs_workflow.py asserts exactly that, but an
+        # absence proves nothing while the extractor might be recovering
+        # nothing from the file at all. So what each file *does* invoke is
+        # pinned exactly: `python3` because the installed controller is its
+        # entire reach, and `git` with `sed` because they are what `$ROOT` and
+        # `$REPO` are resolved from before the first invocation. A rewrite
+        # that reached for `gh repo view` instead of the remote would drop
+        # `sed` here rather than passing quietly.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path, expected in sorted(
+            DRAIN_PRS_SURFACE_EXPECTED_COMMANDS.items()
+        ):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            self.assertNotIn("gh", found, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+            # Grounded in the manifest from the other side too: being scanned
+            # is not the same as being declared, and these three rows are
+            # where a reader looks to find out which assets speak each tool.
+            for name in sorted(expected):
+                row = next(
+                    row
+                    for row in self.manifest
+                    if row["kind"] == "executable" and row["token"] == name
+                )
+                self.assertIn(row["id"], {"git-cli", "sed-cli", "python3-cli"})
+                self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_every_drain_prs_asset_home_relative_path_is_documented(self):
+        # Requirement 13: the two rendered assets name the drainer install
+        # directory in both platform spellings, so they are reached by the
+        # same home-relative scan the document workflows get rather than left
+        # undiscovered. The declaring rows are named exactly, because the
+        # point of the requirement is that these two assets joined
+        # `drainer-install-dir` and `drainer-install-dir-xdg` -- a scan
+        # satisfied by any `personal-path` row would pass on an asset that had
+        # been repointed at some other managed directory entirely.
+        by_id = {row["id"]: row for row in self.manifest}
+        declaring = ("drainer-install-dir", "drainer-install-dir-xdg")
+        personal_tokens = [
+            row["token"] for row in self.manifest if row["kind"] == "personal-path"
+        ]
+        for relative_path in sorted(DRAIN_PRS_SURFACE_EXPECTED_COMMANDS):
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            segments = markdown_home_relative_segments(content)
+            self.assertTrue(
+                segments,
+                f"{relative_path} names no user-scoped path, so this scan "
+                "would pass without checking anything",
+            )
+            for segment in segments:
+                self.assertTrue(
+                    any(segment in token or token in segment for token in personal_tokens),
+                    f"{relative_path} names an undocumented user-scoped path "
+                    f"segment {segment!r}; declare it in the manifest",
+                )
+            for row_id in declaring:
+                self.assertIn(row_id, by_id)
+                self.assertIn(
+                    relative_path,
+                    by_id[row_id]["files"],
+                    f"{row_id} does not declare {relative_path}",
+                )
+                token = by_id[row_id]["token"]
+                self.assertTrue(
+                    any(segment in token or token in segment for segment in segments),
+                    f"{relative_path} declares {row_id} but names none of its "
+                    f"token {token!r}",
+                )
 
     def test_the_codex_plugin_cache_root_is_declared_for_the_rereview_skill(self):
         # The Codex rereview skill is the first declared drafting asset to
