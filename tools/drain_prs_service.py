@@ -54,15 +54,19 @@ DRAIN_STATE_CLEANUP_VERSIONS = frozenset({3, DRAIN_STATE_VERSION})
 # The private namespace the drainer anchors an autostash snapshot under, and the
 # two stash messages its own writes produce -- mirrored from `drain_prs` for the
 # same reason the state version above is, and pinned against the messages the
-# drainer really writes by a test. The namespace prefix is used whole rather
-# than as `.../*`, exactly as the drainer's own enumeration does, so no anchor
-# below it can be missed.
+# drainer really writes by a test. The legacy tuple further down is not
+# mirrored from anything, because it names what an older drainer wrote. The
+# namespace prefix is used whole rather than as `.../*`, exactly as the
+# drainer's own enumeration does, so no anchor below it can be missed.
 SNAPSHOT_ANCHOR_NAMESPACE = "refs/drain-prs/autostash"
-# Matched in full, never as a prefix: `drain-prs-autostash-notes` is a user's
-# entry that merely looks like one of these. Git records no creator identity, so
-# a hand-forged exact payload is indistinguishable and counts as drainer-named.
-# Both object-format widths are accepted because a sha256 repository names the
-# same snapshot in 64 hex digits.
+# Both tuples below are matched in full, never as a prefix:
+# `drain-prs-autostash-notes` is a user's entry that merely looks like one of
+# them. What a match establishes is that the message is one this project
+# reserves, not who wrote it -- Git records no creator for a stash entry, so a
+# hand-forged exact payload is indistinguishable from a drainer's own and is
+# claimed as one, and an entry a drainer wrote under any other message is not
+# claimed at all. Both object-format widths are accepted because a sha256
+# repository names the same snapshot in 64 hex digits.
 DRAINER_STASH_MESSAGES = (
     # From a pass whose snapshot could not be prepared: the message it passed
     # to `git stash create` is the one it stores the orphaned commit under.
@@ -70,10 +74,26 @@ DRAINER_STASH_MESSAGES = (
     # From a pass whose `git stash apply --index` restore conflicted.
     re.compile(r"drain-prs-autostash-recovery (?:[0-9a-f]{40}|[0-9a-f]{64})"),
 )
-# Git's display wrapper on an entry pushed with `git stash push -m`. The drainer
-# only ever uses `git stash store -m`, which records the payload verbatim, so
-# this is stripped before the payload above is compared. A branch name can hold
-# no colon, which is what makes the prefix unambiguous.
+# The reserved messages no current code writes and an upgraded installation can
+# hold anyway. Declared apart from the writer set above, and pinned by its own
+# test, so a change to what the drainer writes cannot silently drop a form an
+# older drainer left behind: such an entry is somebody's possibly-sole copy of
+# some work whichever version stored it, and the field exists to name it.
+# Recognizing one is read-only -- `drain_prs.RECOVERY_STASH_MESSAGE_RE` is the
+# only payload the retirement pass considers, so nothing here becomes eligible
+# for disposal.
+LEGACY_DRAINER_STASH_MESSAGES = (
+    # Before `7fb2c25` (2026-07-19) the failed-preparation path named its
+    # snapshot with the epoch alone. Digits to the end of the message and
+    # therefore disjoint from the epoch-plus-PID form above, which no
+    # digits-only full match can reach.
+    re.compile(r"drain-prs-autostash-[0-9]+"),
+)
+# Git's display wrapper on an entry pushed with `git stash push -m`. The current
+# drainer only ever uses `git stash store -m`, which records the payload
+# verbatim, but the legacy form above was pushed, so a real one of those carries
+# this wrapper. It is stripped before either tuple is compared. A branch name
+# can hold no colon, which is what makes the prefix unambiguous.
 STASH_BRANCH_WRAPPER = re.compile(r"On [^:]+: ")
 # The fixed fields of both inventory reads below. They are checked rather than
 # assumed because those reads answer whether any copy of someone's work is
@@ -1628,21 +1648,30 @@ def _stash_rows(repo_path: Path) -> list[tuple[str, str, str, str]] | None:
 
 
 def drainer_stash_message(message: str) -> str | None:
-    """The reserved payload a stash entry carries if the drainer wrote it, or
-    None for a user's own entry.
+    """The reserved payload a stash entry carries, or None when its message is
+    not one this project reserves.
 
-    The stash is the user's; only the entries the drainer itself stored are
-    reported, and nothing here is ever a reason to touch one.
+    Reserved-message classification is the whole test, because it is all Git
+    supports: an exactly forged payload is claimed, and an entry a drainer
+    wrote under some other message is not. Both the messages the current
+    drainer writes and the legacy form an older one left behind are reserved --
+    an upgraded installation can be holding either, and either can be the only
+    copy of some work. The stash is still the user's, and nothing here is ever
+    a reason to touch an entry.
     """
     payload = STASH_BRANCH_WRAPPER.sub("", message, count=1)
-    if any(pattern.fullmatch(payload) for pattern in DRAINER_STASH_MESSAGES):
+    if any(
+        pattern.fullmatch(payload)
+        for pattern in (*DRAINER_STASH_MESSAGES, *LEGACY_DRAINER_STASH_MESSAGES)
+    ):
         return payload
     return None
 
 
 def autostash_inventory(repo_path: Path) -> dict[str, list[dict[str, Any]] | None]:
     """The local copies of work this checkout's autostash lifecycle left
-    behind: anchors the drainer kept, and the stash entries it created itself.
+    behind: anchors the drainer kept, and the stash entries carrying a message
+    this project reserves for one.
 
     Both are otherwise visible only in one log line per startup sweep, which
     repeats identically every pass — so work that exists nowhere else waits for

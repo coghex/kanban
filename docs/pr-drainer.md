@@ -419,15 +419,32 @@ makes it the only copy. Its whole life:
 - **Reported** by `status` for exactly as long as it is kept, carrying those
   same four facts in a `kept_autostash_anchors` field — so an anchor holding
   the only copy of some work does not wait for someone to read a service log.
-  Beside it, `drainer_stashes` names every `git stash list` entry the drainer
-  itself stored: `drain-prs-autostash-<epoch>-<pid>` from a pass whose snapshot
-  could not be prepared, and `drain-prs-autostash-recovery <sha>` from one
-  whose restore conflicted, each with its `stash@{n}` selector and its date.
-  Entries you pushed yourself are never listed — the stash is yours. Both
-  fields are `[]` when they were read and held nothing and `null` when that
-  collection could not be read at all, which is not the same answer. Reading
-  them takes no lock, runs no sweep, and creates, deletes, or reorders no ref
-  and no stash entry.
+  Beside it, `drainer_stashes` names every `git stash list` entry carrying one
+  of the reserved autostash messages, each with its `stash@{n}` selector and
+  its date:
+
+  - `drain-prs-autostash-<epoch>-<pid>` from a pass whose snapshot could not
+    be prepared.
+  - `drain-prs-autostash-recovery <sha>` from a pass whose restore conflicted.
+  - `drain-prs-autostash-<epoch>` — the epoch with no PID after it — which no
+    current code writes. It is recognized for compatibility with entries a
+    drainer released before 2026-07-19 left behind, because an installation
+    upgraded past that release can still be holding one and it can still be
+    the only copy of some work. That form was pushed rather than stored, so a
+    real one carries Git's `On <branch>: ` display wrapper; the wrapper is
+    stripped before the message is classified, and both spellings are listed.
+
+  Classification is by reserved message, which is all Git supports: a stash
+  entry records nothing about who created it. So an entry you pushed yourself
+  under one of these exact messages is listed, and an entry a drainer wrote
+  under any other message is not — this field names reserved messages, not
+  proven authorship. Ordinary entries of yours are untouched by it either way,
+  the stash is yours, and recognizing any of these forms opens no disposal
+  path: only the `drain-prs-autostash-recovery <sha>` form is ever retired,
+  by the pass described below. Both fields are `[]` when they were read and
+  held nothing and `null` when that collection could not be read at all, which
+  is not the same answer. Reading them takes no lock, runs no sweep, and
+  creates, deletes, or reorders no ref and no stash entry.
 
 #### Retiring a recovery stash entry
 
@@ -445,8 +462,10 @@ all of this holds:
 - **Its message is the exact reserved form**, `drain-prs-autostash-recovery
   <sha>`, matched in full against the entry's own raw payload. A prefixed,
   wrapped, trailing-text, or otherwise near-miss spelling is a different
-  message, and the `drain-prs-autostash-<epoch>-<pid>` form is never retired at
-  all. The `<sha>` must be the entry's own full-length object ID. That form is
+  message, and neither the `drain-prs-autostash-<epoch>-<pid>` form nor the
+  legacy `drain-prs-autostash-<epoch>` one is ever retired at all — `status`
+  reports both, and reporting is the whole of what it does with them. The
+  `<sha>` must be the entry's own full-length object ID. The recovery form is
   a reserved convention rather than a record of who wrote the entry: git stores
   no creator identity for a stash entry, so one you write yourself with that
   exact message and a matching object ID is eligible, and nothing here claims
