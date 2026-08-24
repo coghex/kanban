@@ -21,6 +21,12 @@ user signoff, resubmission that refuses an unchanged spec, and verdict
 publication and label mutation left entirely to the backend — along with the
 brand-specific routing each issue-review asset now owes it.
 
+Issue #493 added the art policy PR #251 landed in the Claude assets alone: both
+brands' issue-drafting assets must state that missing art is tracked work with
+its own issue, PR, and user signoff, recorded as an explicit blocker rather than
+resolved in the draft. Its solve-asset half lives in
+tools/test_agent_workflow_contract.py.
+
 Also guards issue #116's scope gate: the canonical document and the five
 assets that perform or drive discretionary candidate discovery must state the
 same gate and exemption rules, every gate instruction must be conditional on
@@ -135,6 +141,58 @@ WRITE_LOCATION_RULES = (
     "resolve it by branch, never a hard-coded path",
     # And the repositories that do not use the convention at all.
     "a repository with no docs-wip worktree does not use this convention",
+)
+
+# The two issue-drafting assets that owe issue #493's art policy: the paired
+# /issue and $issue surfaces §2 declares. PR #251 made missing art an explicit
+# tracked blocker with a user-owned supply-or-generate decision and landed it in
+# the Claude asset alone, adding no regression assertion, so nothing held the
+# Codex twin to it and the two brands drifted apart on a product decision.
+#
+# Claude-only /draft-issues is deliberately not a member even though it drafts
+# to the same hand-off bar and IS a member of WRITE_LOCATION_ASSETS above: §3.2
+# declares it the breadth workflow with no Codex counterpart, so it carries no
+# cross-brand split for this policy to close. Its omission is a scope boundary
+# rather than an oversight, and stating the policy there is separate work.
+#
+# autoissue is exempt by delegation exactly as it is for WRITE_LOCATION_RULES,
+# and is this tuple's negative control through DELEGATING_ASSETS.
+ART_POLICY_ISSUE_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/issue.md",
+    "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
+)
+
+# Lowercase: compared against canonical() output. Every fragment lies inside a
+# single sentence of the rule, because canonical() collapses whitespace and
+# drops `*` and backticks but keeps list markers and em dashes -- Claude states
+# the rule as numbered item 7 and Codex as a `-` bullet, and §4 of issue #493
+# preserves both, so a fragment spanning an item boundary could never match both
+# brands at once.
+#
+# The fragments are distinctive to the art policy rather than bare anchor words.
+# `texture` also appears in an unrelated example invocation in design-epic, and
+# `placeholder` in note-problem, process-design-doc, triage, and push-docs, in
+# both brands; a tuple keyed on either single word would make the negative
+# control below fail against assets that owe this policy nothing.
+ART_POLICY_ISSUE_RULES = (
+    # Art is tracked work rather than something the draft quietly resolves.
+    "art is tracked work, not an implementation detail",
+    # What counts as art, and naming each gap explicitly.
+    "if the change needs a texture, icon, sprite, or animation that does not exist",
+    "name each missing asset and what it is for",
+    # Where the gap is recorded, and where it is not resolved.
+    "record it as an explicit blocker in the issue body",
+    "rather than resolving it in the draft",
+    # Art's own tracked lane, signoff scoped per texture rather than once for
+    # the arc, and whose decision the supply-or-generate method is.
+    "art gets its own issue, its own pr, and the user's signoff on every texture",
+    "they decide whether they supply the file or have it generated",
+    # What the draft must instruct, and the condition that governs it: the
+    # instruction is owed only where the user has not already chosen, so the
+    # condition is asserted with it rather than separately.
+    "unless they have already said which, the issue must tell the solver to stop and ask",
+    # And the three non-resolutions.
+    "never assume a placeholder, a reused asset, or a narrowed scope resolves the gap",
 )
 
 AUTOISSUE_ASSETS = {
@@ -321,6 +379,22 @@ def canonical(text: str) -> str:
     where the same rule legitimately starts a sentence in one and appears
     mid-sentence in another."""
     return normalized(text).lower()
+
+
+def art_policy_findings(assets, rules):
+    """Every (asset, rule) pair whose canonicalized text omits the rule.
+
+    Factored out so the planted-removal check can drive the same predicate the
+    presence check drives. A mutation test that only re-greps its own mutated
+    string proves that str.replace removed a string, not that the enforced
+    assertion notices the edit.
+    """
+    findings = []
+    for path, text in assets.items():
+        for rule in rules:
+            if rule not in text:
+                findings.append(f"{path}: missing art-policy rule {rule!r}")
+    return findings
 
 
 def parse_declared_assets():
@@ -631,6 +705,72 @@ class WriteLocationTests(unittest.TestCase):
                     offenders.append(
                         f"{path} now states {rule!r}; add it to "
                         "WRITE_LOCATION_ASSETS so the rule is enforced there "
+                        "rather than silently exempt"
+                    )
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+
+class ArtPolicyTests(unittest.TestCase):
+    """Issue #493's art policy across both brands' issue-drafting assets.
+
+    PR #251 made a missing texture, icon, sprite, or animation an explicit
+    tracked blocker with a user-owned supply-or-generate decision, and landed it
+    in claude-plugin's /issue and /solve only. It added no regression assertion,
+    so the Codex twins drifted silently: the same missing-art observation
+    produced a tracked blocker and a stop-for-the-user through one brand, and
+    could produce a silently omitted blocker, a placeholder, a reused asset, or
+    a narrowed scope through the other.
+
+    These assets are the program an agent executes and there is no behavioral
+    prompt-testing harness here, so the reviewable property is the asset text
+    itself, exactly as WriteLocationTests and ScopeGateTests treat their own
+    contracts. The solve half of the same policy is guarded the same way by
+    tools/test_agent_workflow_contract.py.
+    """
+
+    def setUp(self):
+        self.assets = {
+            path: canonical((REPO_ROOT / path).read_text(encoding="utf-8"))
+            for path in ART_POLICY_ISSUE_ASSETS
+        }
+
+    def test_every_issue_asset_states_every_art_rule(self):
+        findings = art_policy_findings(self.assets, ART_POLICY_ISSUE_RULES)
+        self.assertEqual(findings, [], "\n".join(findings))
+
+    def test_removing_a_rule_from_either_brand_is_reported(self):
+        # The property under test is that a removal FAILS the enforced check,
+        # for each rule and each brand in turn, not merely that the text happens
+        # to be present today.
+        for path in ART_POLICY_ISSUE_ASSETS:
+            for rule in ART_POLICY_ISSUE_RULES:
+                with self.subTest(asset=path, rule=rule):
+                    mutated = dict(self.assets)
+                    mutated[path] = mutated[path].replace(rule, "")
+                    self.assertIn(
+                        f"{path}: missing art-policy rule {rule!r}",
+                        art_policy_findings(mutated, ART_POLICY_ISSUE_RULES),
+                        f"deleting {rule!r} from {path} left the art-policy "
+                        "check green, so it would not notice the edit",
+                    )
+
+    def test_the_art_rules_are_not_vacuous(self):
+        # A rule broad enough to match every packaged asset would pass the check
+        # above while asserting nothing. Both autoissue assets delegate to their
+        # brand's /issue and must not restate the policy, so they are the same
+        # negative control WriteLocationTests uses.
+        #
+        # Reported as a plain list rather than through assertIn for the same
+        # reason: these assets canonicalize to thousands of characters, and a
+        # membership assertion buries the one line that says what to do.
+        offenders = []
+        for path in DELEGATING_ASSETS:
+            text = canonical((REPO_ROOT / path).read_text(encoding="utf-8"))
+            for rule in ART_POLICY_ISSUE_RULES:
+                if rule in text:
+                    offenders.append(
+                        f"{path} now states {rule!r}; add it to "
+                        "ART_POLICY_ISSUE_ASSETS so the rule is enforced there "
                         "rather than silently exempt"
                     )
         self.assertEqual(offenders, [], "\n".join(offenders))
