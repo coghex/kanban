@@ -23,10 +23,10 @@ rendered into either bundle directory becomes an invokable command; VEND-0
 vendored none, and `FixtureIsNotShippedTests` still holds `fixture-command` to
 that. Since VEND-1 (issue #393) the registry also holds `triage`, since
 issue #410 `push-docs`, since VEND-2 (issue #427) `retriage`, since
-VEND-3 (issue #430) `backlog-review`, and since VEND-4 (issue #462)
-`project-review`, all five of which do render into both bundles, so the same
-class pins the shipped sets at twenty and nineteen and pins which registered
-source belongs to which kind.
+VEND-3 (issue #430) `backlog-review`, since VEND-4 (issue #462)
+`project-review`, and since VEND-5 (issue #511) `drain-prs`, all six of which do
+render into both bundles, so the same class pins the shipped sets at twenty-one
+and twenty and pins which registered source belongs to which kind.
 """
 
 from __future__ import annotations
@@ -45,17 +45,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_COMMANDS_PREFIX = "claude-plugin/plugins/kanban/commands"
 CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 
-# The shipped sets: Claude's twenty names, and Codex's the same set minus
+# The shipped sets: Claude's twenty-one names, and Codex's the same set minus
 # Claude-only `draft-issues`. Pinned as counts and as the one documented
 # difference rather than as a third copy of the name list, which
 # tools/test_claude_plugin.py and tools/test_codex_plugin.py already assert.
 # Both grew by one in VEND-1, which added the first source that ships, by
 # one more when issue #410 vendored `push-docs`, by one more again in
 # VEND-2, which vendored `retriage`, by one more in VEND-3, which vendored
-# `backlog-review`, and by one more in VEND-4, which vendored
-# `project-review`.
-SHIPPED_CLAUDE_COUNT = 20
-SHIPPED_CODEX_COUNT = 19
+# `backlog-review`, by one more in VEND-4, which vendored `project-review`,
+# and by one more in VEND-5, which vendored `drain-prs`.
+SHIPPED_CLAUDE_COUNT = 21
+SHIPPED_CODEX_COUNT = 20
 CLAUDE_ONLY_WORKFLOW = "draft-issues"
 
 # The registered sources that render into the two bundles rather than under
@@ -67,6 +67,7 @@ SHIPPING_SOURCE_NAMES = {
     "retriage",
     "backlog-review",
     "project-review",
+    "drain-prs",
 }
 
 FIXTURE_SOURCE = "tools/command_sources/fixture-command.md"

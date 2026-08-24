@@ -21,15 +21,15 @@ with a Claude counterpart, and issue #240 added /issue-rereview, the drafting
 contract's repair loop for a changes-requested issue. Issue #241 added the
 design pair /design-epic and /process-design-doc, transposed from the
 post-#239 tracked Codex skills; issue #328 completed the report side with
-/draft-report and /note-problem; and issues #393, #410, #427, #430, and #462
-vendored the rendered /triage roadmap, its /retriage refresh, the /push-docs
-documentation-landing workflow, the /backlog-review backlog audit, and the
-/project-review history audit.
+/draft-report and /note-problem; and issues #393, #410, #427, #430, #462, and
+#511 vendored the rendered /triage roadmap, its /retriage refresh, the
+/push-docs documentation-landing workflow, the /backlog-review backlog audit,
+the /project-review history audit, and the /drain-prs drainer control surface.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all twenty); HASKELL_PARITY_COMMAND_NAMES is the
+commands directory (all twenty-one); HASKELL_PARITY_COMMAND_NAMES is the
 strictly smaller set Kanban's own Haskell code spawns by name (the five
 above). The drafting, document, roadmap, documentation-landing,
-backlog-audit, and history-audit workflows
+backlog-audit, history-audit, and drainer-control workflows
 are user- or daemon-invoked and are deliberately excluded from that parity
 pinning; see
 docs/drafting-workflow-contract.md and docs/document-workflow-contract.md,
@@ -186,6 +186,15 @@ BACKLOG_COMMAND_NAMES = {"backlog-review"}
 # tools/test_project_review_workflow.py.
 PROJECT_REVIEW_COMMAND_NAMES = {"project-review"}
 
+# The drainer control surface vendored by issue #511, slice VEND-5. Rendered
+# from tools/command_sources/drain-prs.md the way the four sets above are, and
+# like them user-invoked and excluded from Haskell name parity. It is its own
+# category rather than another audit name because it reaches no tracker at all:
+# it makes no `gh` call, and its whole surface is the installed PR-drainer
+# controller. Its behavioral assertions live in
+# tools/test_drain_prs_workflow.py.
+DRAINER_COMMAND_NAMES = {"drain-prs"}
+
 # What a Claude Code installation must actually discover in commands/.
 EXPECTED_COMMAND_NAMES = (
     HASKELL_PARITY_COMMAND_NAMES
@@ -195,6 +204,7 @@ EXPECTED_COMMAND_NAMES = (
     | PUBLICATION_COMMAND_NAMES
     | BACKLOG_COMMAND_NAMES
     | PROJECT_REVIEW_COMMAND_NAMES
+    | DRAINER_COMMAND_NAMES
 )
 
 # Keys that would let a packaged command's frontmatter or manifest silently
@@ -338,7 +348,8 @@ class CommandDiscoveryTests(unittest.TestCase):
             | ROADMAP_COMMAND_NAMES
             | PUBLICATION_COMMAND_NAMES
             | BACKLOG_COMMAND_NAMES
-            | PROJECT_REVIEW_COMMAND_NAMES,
+            | PROJECT_REVIEW_COMMAND_NAMES
+            | DRAINER_COMMAND_NAMES,
         )
         self.assertEqual(DRAFTING_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
         self.assertEqual(ROADMAP_COMMAND_NAMES & DRAFTING_COMMAND_NAMES, set())
@@ -366,6 +377,18 @@ class CommandDiscoveryTests(unittest.TestCase):
                 | ROADMAP_COMMAND_NAMES
                 | PUBLICATION_COMMAND_NAMES
                 | BACKLOG_COMMAND_NAMES
+            ),
+            set(),
+        )
+        self.assertEqual(
+            DRAINER_COMMAND_NAMES
+            & (
+                DRAFTING_COMMAND_NAMES
+                | DOCUMENT_COMMAND_NAMES
+                | ROADMAP_COMMAND_NAMES
+                | PUBLICATION_COMMAND_NAMES
+                | BACKLOG_COMMAND_NAMES
+                | PROJECT_REVIEW_COMMAND_NAMES
             ),
             set(),
         )

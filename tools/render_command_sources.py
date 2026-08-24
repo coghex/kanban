@@ -243,6 +243,22 @@ COMMAND_SOURCES = (
             "above did not."
         ),
     ),
+    CommandSource(
+        name="drain-prs",
+        source="tools/command_sources/drain-prs.md",
+        claude_commands_dir=CLAUDE_COMMANDS_DIR,
+        codex_skills_dir=CODEX_SKILLS_DIR,
+        note=(
+            "VEND-5, the first vendored workflow whose reconciliation is "
+            "mostly against this repository rather than against the other "
+            "brand: both personal copies described a drainer that no longer "
+            "exists, so five stale claims were dropped and the controller's "
+            "hardcoded macOS path replaced by the portable resolution "
+            "docs/pr-drainer.md documents. Design D-7 resolved the subcommand "
+            "gap in the richer Claude copy's favour, so both brands now "
+            "document all nine control operations."
+        ),
+    ),
 )
 
 
