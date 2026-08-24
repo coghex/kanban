@@ -48,6 +48,28 @@ created above it.
   on macOS, a systemd user unit on Linux — it repeatedly advances the open
   backlog one bounded pass at a time, and Kanban discovers and monitors the
   installation beside the drainer's.
+- Press `a`, or click the `approve_issues.py` control the sidebar draws beside
+  the drainer's, to start or stop that approval service from the board, the
+  same way `d` starts and stops the PR drainer.
+- Two Kanban processes on one machine no longer lose each other's usage
+  numbers. A cached refresh is merged into whatever the snapshot file already
+  holds, under a lock taken for that read-merge-write alone, so a slow probe
+  in one process cannot roll back a window another process just recorded, and
+  an older reading never replaces a newer one.
+- The settings overlay `o` opens now edits the model roster as well as
+  chat-output verbosity: `j`/`k` or Up/Down pick an assignment, `h`/`l` or
+  Left/Right cycle its model, `[`/`]` cycle its effort, and `d` restores the
+  picked assignment's default — or repairs a roster too broken to launch
+  anything. An edit is saved to `~/.config/kanban/models.toml`, and the
+  running board moves to it only once that write succeeds.
+- The usage sidebar's percentage row stays inside the sidebar whatever it has
+  to show: a provider label too wide for its field is cut with the same
+  ellipsis a card's elided line carries, rather than pushing the bar and the
+  percentage off the edge, and the percentage is right-aligned so one, two,
+  and three digits share a column and `100%` still reads in full.
+- A card's whole border now takes its status color, and the selection color
+  when the card is selected. The top and bottom runs used to be drawn in the
+  terminal's default while the corners at their ends were colored.
 
 ## 1.0.0.0
 
