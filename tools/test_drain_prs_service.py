@@ -3626,7 +3626,9 @@ class AutostashInventoryTests(RedirectedControllerTestCase):
 
         self.assertEqual(self.inventory()["kept_autostash_anchors"], [])
 
-    def test_both_drainer_message_forms_are_reported(self):
+    def test_both_forms_the_current_drainer_writes_are_reported(self):
+        # The two the running drainer produces; the legacy form an older one
+        # left behind has its own cases below.
         _, prepared = self.anchored_snapshot("line3-unprepared")
         _, recovered = self.anchored_snapshot("line3-conflicted")
         self.store("drain-prs-autostash-1700000000-4242", prepared)
@@ -3650,7 +3652,7 @@ class AutostashInventoryTests(RedirectedControllerTestCase):
             ],
         )
 
-    def test_a_user_entry_is_never_reported(self):
+    def test_an_entry_outside_the_reserved_messages_is_not_reported(self):
         _, sha = self.anchored_snapshot("line3-conflicted")
         self.store(f"drain-prs-autostash-recovery {sha}", sha)
         self.push_user_stash("user-manual-stash")
@@ -3658,8 +3660,10 @@ class AutostashInventoryTests(RedirectedControllerTestCase):
 
         reported = self.inventory()["drainer_stashes"]
 
-        # The stash is the user's. Only what the drainer itself stored is
-        # named, and the rest is not this report's business.
+        # The stash is the user's. Only entries carrying a reserved message
+        # are named, and the rest is not this report's business -- which is a
+        # statement about the message, not about who wrote the entry, since
+        # Git records nothing that would support the latter.
         self.assertEqual(
             [entry["message"] for entry in reported],
             [f"drain-prs-autostash-recovery {sha}"],
@@ -3672,10 +3676,13 @@ class AutostashInventoryTests(RedirectedControllerTestCase):
         for message in (
             "drain-prs-autostash-notes",
             "drain-prs-autostash-",
-            "drain-prs-autostash-1700000000",
             "drain-prs-autostash-1700000000-4242-extra",
             "before drain-prs-autostash-1700000000-4242",
             "drain-prs-autostash-1700000000-4242 after",
+            # The legacy epoch-only form is reserved, so its own near misses
+            # are the surrounding-text ones rather than the payload itself.
+            "before drain-prs-autostash-1700000000",
+            "drain-prs-autostash-1700000000 after",
             "drain-prs-autostash-recovery",
             "drain-prs-autostash-recovery " + "z" * 40,
             "drain-prs-autostash-recovery " + "a" * 39,
@@ -3702,6 +3709,142 @@ class AutostashInventoryTests(RedirectedControllerTestCase):
         self.assertEqual(
             [entry["message"] for entry in reported],
             [f"drain-prs-autostash-recovery {sha}"],
+        )
+
+    def test_a_stored_legacy_entry_is_reported(self):
+        # Before `7fb2c25` a failed preparation named its snapshot with the
+        # epoch alone. An installation upgraded past that commit can still be
+        # holding one, and it is as much a possibly-sole copy of somebody's
+        # work as the forms written now.
+        _, sha = self.anchored_snapshot("line3-legacy")
+        self.store("drain-prs-autostash-1700000000", sha)
+
+        reported = self.inventory()["drainer_stashes"]
+
+        self.assertEqual(
+            reported,
+            [
+                {
+                    "stash": "stash@{0}",
+                    "message": "drain-prs-autostash-1700000000",
+                    "date": self.commit_date(sha),
+                }
+            ],
+        )
+
+    def test_a_pushed_legacy_entry_is_reported_through_its_wrapper(self):
+        # The legacy form was written with `git stash push -m` rather than the
+        # `git stash store -m` used since, so a real one carries Git's branch
+        # wrapper and the raw payload alone would miss every one of them.
+        self.push_user_stash("drain-prs-autostash-1700000000")
+        self.assertIn(
+            "On master: drain-prs-autostash-1700000000",
+            self.git("stash", "list").stdout,
+        )
+        sha = self.git("stash", "list", "--format=%H").stdout.strip()
+
+        reported = self.inventory()["drainer_stashes"]
+
+        self.assertEqual(
+            reported,
+            [
+                {
+                    "stash": "stash@{0}",
+                    "message": "drain-prs-autostash-1700000000",
+                    "date": self.commit_date(sha),
+                }
+            ],
+        )
+
+    def test_every_reserved_form_is_reported_beside_the_others(self):
+        # One upgraded checkout can hold all three at once: nothing retires a
+        # legacy entry, so an old one outlives however many newer passes.
+        _, legacy = self.anchored_snapshot("line3-legacy")
+        self.store("drain-prs-autostash-1700000000", legacy)
+        _, prepared = self.anchored_snapshot("line3-orphaned")
+        self.store("drain-prs-autostash-1700000000-4242", prepared)
+        _, recovered = self.anchored_snapshot("line3-conflicted")
+        self.store(f"drain-prs-autostash-recovery {recovered}", recovered)
+        self.push_user_stash("user-manual-stash")
+
+        reported = self.inventory()["drainer_stashes"]
+
+        # Newest first, each with the selector and date its own recovery
+        # needs -- and the user's own entry is still not this report's
+        # business.
+        self.assertEqual(
+            reported,
+            [
+                {
+                    "stash": "stash@{1}",
+                    "message": f"drain-prs-autostash-recovery {recovered}",
+                    "date": self.commit_date(recovered),
+                },
+                {
+                    "stash": "stash@{2}",
+                    "message": "drain-prs-autostash-1700000000-4242",
+                    "date": self.commit_date(prepared),
+                },
+                {
+                    "stash": "stash@{3}",
+                    "message": "drain-prs-autostash-1700000000",
+                    "date": self.commit_date(legacy),
+                },
+            ],
+        )
+
+    def test_the_legacy_payloads_are_declared_apart_from_what_is_written_now(self):
+        """The legacy grammar is its own declaration, pinned on its own.
+
+        The two sets answer different questions -- what a drainer writes today,
+        and what an older one left behind that this must keep naming -- so an
+        edit to the writer set cannot reach this one. Folding the legacy
+        grammar into the writer tuple is exactly the silent drop this pins
+        against, and it would still leave every behavioral case above passing.
+        """
+        legacy = "drain-prs-autostash-1700000000"
+
+        self.assertEqual(
+            [
+                pattern.pattern
+                for pattern in drain_prs_service.LEGACY_DRAINER_STASH_MESSAGES
+            ],
+            [r"drain-prs-autostash-[0-9]+"],
+        )
+        # Recognized, and recognized by the legacy declaration alone.
+        self.assertEqual(drain_prs_service.drainer_stash_message(legacy), legacy)
+        self.assertTrue(
+            any(
+                pattern.fullmatch(legacy)
+                for pattern in drain_prs_service.LEGACY_DRAINER_STASH_MESSAGES
+            )
+        )
+        self.assertFalse(
+            any(
+                pattern.fullmatch(legacy)
+                for pattern in drain_prs_service.DRAINER_STASH_MESSAGES
+            )
+        )
+        # And disjoint the other way, so neither set is doing the other's job.
+        for written in (
+            "drain-prs-autostash-1700000000-4242",
+            "drain-prs-autostash-recovery " + "a" * 40,
+        ):
+            with self.subTest(written=written):
+                self.assertFalse(
+                    any(
+                        pattern.fullmatch(written)
+                        for pattern in drain_prs_service.LEGACY_DRAINER_STASH_MESSAGES
+                    )
+                )
+
+    def test_a_legacy_entry_is_still_ineligible_for_retirement(self):
+        # Recognition is a read-only report and opens no disposal path: the
+        # retirement pass considers one payload, and it is not this one.
+        self.assertIsNone(
+            drain_prs.RECOVERY_STASH_MESSAGE_RE.fullmatch(
+                "drain-prs-autostash-1700000000"
+            )
         )
 
     def test_a_sha256_recovery_payload_is_a_drainer_entry(self):
@@ -3882,22 +4025,39 @@ class AutostashInventoryTests(RedirectedControllerTestCase):
 
     def test_reading_the_inventory_changes_no_ref_and_no_stash_entry(self):
         _, kept = self.anchored_snapshot("line3-orphaned")
+        _, legacy = self.anchored_snapshot("line3-legacy")
+        self.store("drain-prs-autostash-1700000000", legacy)
         _, recovered = self.anchored_snapshot("line3-conflicted")
         self.store(f"drain-prs-autostash-recovery {recovered}", recovered)
         self.push_user_stash("user-manual-stash")
         before = self.repository_state()
+        git_dir = sorted(path.name for path in (self.repo / ".git").iterdir())
+        self.commands.clear()
 
         for _ in range(3):
             self.inventory()
 
         # Not one ref deleted or created, and the stash keeps its order, its
-        # entries, and its reflog. Reporting is all this may ever do.
+        # entries, and its reflog. Reporting is all this may ever do, and a
+        # legacy entry becoming visible changes none of that: it is never
+        # reaped, retired, reordered, or rewritten.
         self.assertEqual(self.repository_state(), before)
         self.assertIn(kept, before[0])
+        # Two read-only queries per read and nothing else -- no write
+        # subcommand, and no lock file left beside the queue state.
+        self.assertEqual(
+            [args[3] for args in self.commands],
+            ["for-each-ref", "stash"] * 3,
+        )
+        self.assertEqual(
+            sorted(path.name for path in (self.repo / ".git").iterdir()), git_dir
+        )
 
     def test_a_status_call_reports_both_collections(self):
         self.write_status(self.job, self.repo)
         _, kept = self.anchored_snapshot("line3-orphaned")
+        _, legacy = self.anchored_snapshot("line3-legacy")
+        self.store("drain-prs-autostash-1700000000", legacy)
         _, recovered = self.anchored_snapshot("line3-conflicted")
         self.store(f"drain-prs-autostash-recovery {recovered}", recovered)
 
@@ -3906,9 +4066,22 @@ class AutostashInventoryTests(RedirectedControllerTestCase):
         self.assertEqual(
             [entry["commit"] for entry in snapshot["kept_autostash_anchors"]], [kept]
         )
+        # The field an operator actually reads, in one record shape whichever
+        # drainer wrote the entry.
         self.assertEqual(
-            [entry["message"] for entry in snapshot["drainer_stashes"]],
-            [f"drain-prs-autostash-recovery {recovered}"],
+            snapshot["drainer_stashes"],
+            [
+                {
+                    "stash": "stash@{0}",
+                    "message": f"drain-prs-autostash-recovery {recovered}",
+                    "date": self.commit_date(recovered),
+                },
+                {
+                    "stash": "stash@{1}",
+                    "message": "drain-prs-autostash-1700000000",
+                    "date": self.commit_date(legacy),
+                },
+            ],
         )
 
     def test_the_cleanup_projection_survives_an_inventory_that_fails(self):
