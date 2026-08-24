@@ -20,7 +20,7 @@ concrete precondition
 ## Processing status
 
 - [x] EPIC. Toggle any open overlay fullscreen and make session input modal — [#512]
-- [ ] OVF-1. Rebind the card filter from `f` to `F`
+- [x] OVF-1. Rebind the card filter from `f` to `F` — [#513]
 - [ ] OVF-2. Give session overlays a vim-style normal/insert focus model
 - [ ] OVF-4. Make the base footer the context-aware hotkey row
 - [ ] OVF-3. Add the `f` fullscreen toggle for open overlays
