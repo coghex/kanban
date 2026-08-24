@@ -57,6 +57,7 @@ import Kanban.UI.SessionCore (sessionInputHelp)
 import Kanban.UI.Settings
   ( RosterRow (..),
     noProvidersMessage,
+    operatingModeLine,
     resolvedSettingsFocus,
     rosterRowCell,
     rosterRowText,
@@ -183,6 +184,7 @@ drawSettings state =
       withAttr dimAttr (txtWrap ("Log directory: " <> Text.pack state.appLogRoot)),
       hBorder,
       withAttr cardTitleAttr (txt "Agent models"),
+      withAttr dimAttr (txtWrap (operatingModeLine state.appOperatingMode)),
       drawRoster state,
       hBorder,
       withAttr footerAttr (txt settingsFooterHint)

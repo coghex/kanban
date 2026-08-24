@@ -78,7 +78,7 @@ import Kanban.UI.Settings
     settingsOutcome,
   )
 import Kanban.UI.Solve (failSolveLaunch)
-import Kanban.UI.Types (AgentSession (..), AppEvent (..), AppState (..), Name, PullRequestDetail (..), SolveDetail (..), SolvePhase (..))
+import Kanban.UI.Types (AgentSession (..), AppEvent (..), AppState (..), Name, PullRequestDetail (..), SolveDetail (..), SolvePhase (..), withModelRoster)
 import Kanban.UI.Util (launchAssignment, resolvedRosterCellFor)
 import Kanban.UI.Worker (recoveredAutoSolveParentSession, recoveredPullRequestSession, recoveredSolveSession)
 import Kanban.Worker
@@ -205,7 +205,7 @@ spec = do
     -- so nothing is left for the reuse predicate to hand back.
     it "refuses a pull-request press before any session exists" $ do
       state <- testAppState (fixtureBoard [])
-      let rostered = state {appModelRoster = Right codexOnlyRoster}
+      let rostered = withModelRoster (Right codexOnlyRoster) state
       pullRequestStartRefusal rostered PullRequestCodex PullRequestReview
         `shouldSatisfy` maybe False (Data.Text.isInfixOf "claude")
       -- Revision runs on the pull request's own Codex brand, which this

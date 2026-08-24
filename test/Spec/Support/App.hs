@@ -31,7 +31,7 @@ import Kanban.ApprovalService
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Filter (defaultFilterCriteria)
 import Kanban.GitHub (newHistoryTraversal)
-import Kanban.Models (defaultRoster)
+import Kanban.Models (defaultRoster, loadedOperatingMode)
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Settings (defaultSettings)
@@ -84,8 +84,11 @@ testAppState board = do
         appSidebarVisible = True,
         appSettings = defaultSettings,
         -- The pure compiled value, not a load: a test state must not read
-        -- the developer's real XDG configuration.
+        -- the developer's real XDG configuration. A test naming another
+        -- roster moves it with 'Kanban.UI.Types.withModelRoster', which is
+        -- what keeps the mode below agreeing with it.
         appModelRoster = Right defaultRoster,
+        appOperatingMode = loadedOperatingMode (Right defaultRoster),
         appSettingsFocus = Nothing,
         appLogRoot = "/tmp/example-project/logs",
         appProcessSelection = ProcessSelection Nothing 0,

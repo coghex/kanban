@@ -1,6 +1,7 @@
 -- | The model roster: compiled defaults, the tracked example, the TOML
--- round trip, the D-3 validation matrix — one asserted arm per cause — and
--- the XDG file the roster loads from and saves to.
+-- round trip, the D-3 validation matrix — one asserted arm per cause — the
+-- operating mode the loaded provider set derives (D-8), and the XDG file the
+-- roster loads from and saves to.
 module Spec.Config.Models (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
@@ -11,6 +12,7 @@ import qualified Data.Text.IO as TextIO
 import Kanban.Models
   ( Assignment (..),
     ModelRoster (..),
+    OperatingMode (..),
     ProviderCatalog (..),
     ProviderName (..),
     RoleName (..),
@@ -23,12 +25,16 @@ import Kanban.Models
     defaultRoster,
     encodeRoster,
     loadModelRoster,
+    loadedOperatingMode,
+    operatingModeFor,
+    operatingModeLabel,
     roleApplicability,
     rosterErrorMessage,
     rosterPath,
     saveModelRoster,
   )
 import Spec.Support.Env (permissionsOf, withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.Roster (claudeOnlyRoster, codexOnlyRoster, noAgentRoster)
 import System.Directory (createDirectory, createDirectoryIfMissing)
 import System.FilePath ((</>), takeDirectory)
 import System.Posix.Files (createNamedPipe, createSymbolicLink)
@@ -90,6 +96,55 @@ spec = do
       contents <- TextIO.readFile "models.toml.example"
       let withoutAgents = Text.unlines (filter (not . Text.isPrefixOf "agents") (Text.lines contents))
       decodeRoster withoutAgents `shouldBe` Right defaultRoster
+
+  -- Every provider-set size the schema accepts, and the one roster state
+  -- that has no provider set to count at all. The four successful sizes are
+  -- asserted through 'decodeRoster' rather than on the fixtures alone, so
+  -- what derives the mode is the set a real file loads.
+  describe "the operating mode" $ do
+    it "derives dual from two loaded providers" $ do
+      operatingModeFor defaultRoster `shouldBe` DualMode
+      fmap operatingModeFor (decodeRoster (encodeRoster defaultRoster)) `shouldBe` Right DualMode
+
+    -- D-10's absent-means-both, read as a mode: a file with no agents line
+    -- is dual, not no-agent.
+    it "derives dual from a file with no agents key" $ do
+      contents <- TextIO.readFile "models.toml.example"
+      let withoutAgents = Text.unlines (filter (not . Text.isPrefixOf "agents") (Text.lines contents))
+      fmap operatingModeFor (decodeRoster withoutAgents) `shouldBe` Right DualMode
+
+    -- Both singletons, because Codex and Claude are the whole compiled
+    -- registry and one arm would leave half of single-agent unasserted.
+    it "derives single-agent from either loaded provider on its own" $ do
+      operatingModeFor codexOnlyRoster `shouldBe` SingleAgentMode
+      operatingModeFor claudeOnlyRoster `shouldBe` SingleAgentMode
+      fmap operatingModeFor (decodeRoster (encodeRoster codexOnlyRoster)) `shouldBe` Right SingleAgentMode
+      fmap operatingModeFor (decodeRoster (encodeRoster claudeOnlyRoster)) `shouldBe` Right SingleAgentMode
+
+    it "derives no-agent from an empty agents list" $ do
+      operatingModeFor noAgentRoster `shouldBe` NoAgentMode
+      fmap operatingModeFor (decodeRoster (encodeRoster noAgentRoster)) `shouldBe` Right NoAgentMode
+
+    it "carries a loaded roster's own mode through the startup projection" $ do
+      loadedOperatingMode (Right defaultRoster) `shouldBe` DualMode
+      loadedOperatingMode (Right claudeOnlyRoster) `shouldBe` SingleAgentMode
+      loadedOperatingMode (Right noAgentRoster) `shouldBe` NoAgentMode
+
+    -- A file that will not load has no agents list to count. It derives
+    -- no-agent rather than a fourth case, and the defect stays readable
+    -- beside it: the mode is a projection of the load, never a replacement
+    -- for it.
+    it "derives no-agent from a roster that would not load, without erasing the defect" $ do
+      let failure = RosterInvalid [UnknownModel PrReviewRole CodexProvider "gpt-5.9"]
+          loadError = RosterLoadError "/home/example/.config/kanban/models.toml" failure
+          loaded = Left loadError :: Either RosterLoadError ModelRoster
+      loadedOperatingMode loaded `shouldBe` NoAgentMode
+      either Just (const Nothing) loaded `shouldBe` Just loadError
+
+    it "names each mode the way the file's own comment does" $ do
+      operatingModeLabel DualMode `shouldBe` "dual"
+      operatingModeLabel SingleAgentMode `shouldBe` "single-agent"
+      operatingModeLabel NoAgentMode `shouldBe` "no-agent"
 
   describe "the round trip" $ do
     it "is identity for the defaults" $

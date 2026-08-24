@@ -36,6 +36,7 @@ module Kanban.UI.Types
     SolvePhase (..),
     SolveSession,
     openDataView,
+    withModelRoster,
     withSessionDetail,
   )
 where
@@ -97,7 +98,7 @@ import Kanban.Solve
     SolveWorkflow (..),
     SolverBrand (..)
     )
-import Kanban.Models (ModelRoster, ProviderName, RecordedAssignment, RoleName, RosterLoadError)
+import Kanban.Models (ModelRoster, OperatingMode, ProviderName, RecordedAssignment, RoleName, RosterLoadError, loadedOperatingMode)
 import Kanban.Settings
   ( Settings (..)
     )
@@ -489,6 +490,17 @@ openDataView Nothing freshness = case freshness of
   Unavailable reason -> OpenDataUnavailable reason
   Unsupported reason -> OpenDataUnavailable reason
 
+-- | Seat a roster and the operating mode it derives, together.
+--
+-- The one way 'appModelRoster' moves after startup, so no state can hold a
+-- mode its roster does not derive: 'Kanban.UI.Settings.applyRosterWrite'
+-- routes a successful save through this, and the dashboard's own startup
+-- record is built from 'Kanban.Models.loadedOperatingMode' over the same
+-- load. Fixtures use it for the same reason.
+withModelRoster :: Either RosterLoadError ModelRoster -> AppState -> AppState
+withModelRoster roster state =
+  state {appModelRoster = roster, appOperatingMode = loadedOperatingMode roster}
+
 -- | The card filter panel, while it is on screen.
 --
 -- Presentation state and nothing else: it says which checkbox the panel's own
@@ -640,6 +652,23 @@ data AppState = AppState
     -- defaults. A resume of a session that already recorded its assignment
     -- reads neither half (MODEL-7); see 'Kanban.UI.Util.launchAssignment'.
     appModelRoster :: Either RosterLoadError ModelRoster,
+    -- | The operating mode the roster beside it derives (D-8): dual for two
+    -- loaded providers, single-agent for one, no-agent for none or for a
+    -- roster that would not load at all.
+    --
+    -- Retained rather than derived per read because it is a property of the
+    -- roster in force, and 'withModelRoster' is what keeps the pair honest:
+    -- the startup load seats both, and the one edit that can move the roster
+    -- to a different provider set — @d@ replacing an unusable file with the
+    -- compiled defaults — moves both through the same function. A mode that
+    -- disagreed with 'appModelRoster' would be a lie on the very screen that
+    -- shows it.
+    --
+    -- Nothing branches on it yet. The settings overlay reads it to draw one
+    -- read-only line and nothing else does; the spawn, draw, and
+    -- key-visibility decisions keyed on the mode are later slices of epic
+    -- #412, which thread it to where they need it.
+    appOperatingMode :: OperatingMode,
     -- | Which roster assignment the settings overlay has focused, or
     -- 'Nothing' when it has no row to focus: an unusable roster, or a valid
     -- one that loads no provider. Presentation state like every other

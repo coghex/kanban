@@ -8,7 +8,7 @@ import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..)
 import Kanban.UI.Session (reusableSolveSession)
 import Kanban.UI.SessionCore (newAgentSession)
 import Kanban.UI.Solve (SolveStartDecision (..), solveStartDecision)
-import Kanban.UI.Types (AgentSession (..), AppState (..), ChatTranscript (..), SolveDetail (..), SolvePhase (..), SolveSession)
+import Kanban.UI.Types (AgentSession (..), AppState (..), ChatTranscript (..), SolveDetail (..), SolvePhase (..), SolveSession, withModelRoster)
 import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures (baseIssue, epoch, fixtureBoard)
 import Spec.Support.Roster (claudeOnlyRoster)
@@ -69,7 +69,7 @@ spec = do
     it "refuses a solver the roster cannot supply, and still offers the one it can" $ do
       state <- testAppState (fixtureBoard [])
       let issue = baseIssue 40 []
-          rostered = state {appModelRoster = Right claudeOnlyRoster}
+          rostered = withModelRoster (Right claudeOnlyRoster) state
           decisionFor brand = solveStartDecision rostered issue SolveOnly brand
       case decisionFor CodexSolver of
         SolveStartRefused notice -> notice `shouldSatisfy` Data.Text.isInfixOf "codex"

@@ -42,6 +42,7 @@ module Kanban.Models
     Assignment (..),
     RecordedAssignment (..),
     ModelRoster (..),
+    OperatingMode (..),
     RosterDefect (..),
     RosterFailure (..),
     RosterLoadError (..),
@@ -61,6 +62,9 @@ module Kanban.Models
     loadModelRoster,
     saveModelRoster,
     assignmentFor,
+    operatingModeFor,
+    loadedOperatingMode,
+    operatingModeLabel,
     recordAssignment,
     recordedAssignmentCell,
     rosterDefectMessage,
@@ -228,15 +232,61 @@ recordedAssignmentCell recorded =
     }
 
 -- | A complete roster. 'rosterAgents' is the loaded provider set (D-10) —
--- and therefore, in a later slice, the operating mode — kept in file order;
--- validation enforces its set semantics by refusing a repeated entry. Only
--- this list changes what is loaded: editing a provider table never does.
+-- and therefore the 'OperatingMode' below — kept in file order; validation
+-- enforces its set semantics by refusing a repeated entry. Only this list
+-- changes what is loaded: editing a provider table never does.
 data ModelRoster = ModelRoster
   { rosterAgents :: [ProviderName],
     rosterProviders :: Map ProviderName ProviderCatalog,
     rosterAssignments :: Map (RoleName, ProviderName) Assignment
   }
   deriving stock (Eq, Show)
+
+-- | The operating mode, derived from the loaded provider set and never set
+-- (D-8). Two providers is dual, one is single-agent, zero is no-agent, and
+-- there is no fourth state: an unusable @models.toml@ derives 'NoAgentMode'
+-- through 'loadedOperatingMode' rather than leaving the mode undefined.
+--
+-- Counted rather than matched pair by pair, so a third compiled provider
+-- widens dual instead of falling through to a mode it does not mean.
+--
+-- Which single provider is loaded is deliberately not carried here. Both
+-- singleton sets are one mode, and a consumer that needs the brand reads
+-- 'rosterAgents' from the roster it already holds.
+data OperatingMode
+  = -- | Two or more providers: today's cross-brand pipeline, unchanged.
+    DualMode
+  | -- | Exactly one provider: every role resolves through that brand.
+    SingleAgentMode
+  | -- | No provider at all: a board-only Kanban that spawns nothing.
+    NoAgentMode
+  deriving stock (Eq, Show)
+
+-- | The mode a roster's own @agents@ list derives.
+operatingModeFor :: ModelRoster -> OperatingMode
+operatingModeFor roster = case length roster.rosterAgents of
+  0 -> NoAgentMode
+  1 -> SingleAgentMode
+  _ -> DualMode
+
+-- | The mode a startup load derives, which is the projection the dashboard
+-- retains ('Kanban.UI.Types.appModelRoster').
+--
+-- A 'Left' is 'NoAgentMode': a file that will not load has no @agents@ list
+-- to count, and giving that state one total value is what keeps every later
+-- consumer to three cases. The defect is not erased by this — the roster
+-- itself still holds the 'RosterLoadError' — so a consumer that must tell a
+-- defect-derived no-agent from a declared one reads it there.
+loadedOperatingMode :: Either RosterLoadError ModelRoster -> OperatingMode
+loadedOperatingMode = either (const NoAgentMode) operatingModeFor
+
+-- | What the mode is called wherever one is shown, in the vocabulary
+-- @models.toml.example@ and the design already use.
+operatingModeLabel :: OperatingMode -> Text
+operatingModeLabel mode = case mode of
+  DualMode -> "dual"
+  SingleAgentMode -> "single-agent"
+  NoAgentMode -> "no-agent"
 
 -- | The version 'encodeRoster' stamps on every file written and the only one
 -- 'decodeRoster' accepts. Unlike the settings file, a foreign version is a

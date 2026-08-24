@@ -593,7 +593,12 @@ model roster (`src/Kanban/Models.hs`), read at startup from
 `models.toml.example` mirrors. The settings overlay is the other way it
 changes: an assignment edited there is written back to that same file, and the
 roster the dashboard holds moves to what was saved only once the write
-succeeds, so a running process never resolves a cell that is not on disk.
+succeeds, so a running process never resolves a cell that is not on disk. That
+file's `agents` list is the loaded provider set, and the size of that set is
+the operating mode: two providers is dual, one is single-agent, and zero is
+no-agent — as is a `models.toml` that will not load at all, which has no list
+to count. Settings names the derived mode on a read-only line, because moving
+it is an edit to that one key in the file rather than a key on the screen.
 Review and rereview read `pr_review`, revision and repair read `pr_revise`,
 solve reads `solve`, the embedded issue-review thread reads
 `issue_review.codex`, and `kanban_run_claude` reads `issue_revise.claude`;

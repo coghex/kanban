@@ -62,7 +62,7 @@ import Kanban.Process (killManagedProcess, managedProcessStopsWithDashboard)
 import Kanban.Review
   ( stopReviewClient
   )
-import Kanban.Models (loadModelRoster)
+import Kanban.Models (loadModelRoster, loadedOperatingMode)
 import Kanban.Settings
   ( loadSettings
     )
@@ -139,6 +139,9 @@ runDashboard options config repository = do
             appSidebarVisible = True,
             appSettings = initialSettings,
             appModelRoster = modelRoster,
+            -- Derived here, from the same load, and afterwards moved only
+            -- with the roster itself ('Kanban.UI.Types.withModelRoster').
+            appOperatingMode = loadedOperatingMode modelRoster,
             -- Presentation state: the settings overlay seats this on its
             -- first roster row when it opens, and no launch restores a
             -- previous session's.

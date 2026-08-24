@@ -65,6 +65,7 @@ import Kanban.Models
     RosterFailure (..),
     RosterLoadError (..),
     defaultRoster,
+    loadedOperatingMode,
   )
 import Kanban.Settings (defaultSettings)
 import Kanban.UI (drawApplication)
@@ -107,11 +108,13 @@ import Kanban.UI.Types
     Overlay (..),
     ProcessSelection (..),
     ReviewBackend (..),
+    withModelRoster,
   )
 import Spec.Support.Board (inertRefreshCoordinator)
 import Spec.Support.Fixtures (itemNumber, testOptions, testResolvedConfig)
 import Spec.Support.Golden (attributeGrid, expectGolden, goldenPath)
 import Spec.Support.Render (FrameCell (..), frameRowText, renderFrameCells)
+import Spec.Support.Roster (claudeOnlyRoster, noAgentRoster)
 import Test.Hspec
 
 spec :: Spec
@@ -689,8 +692,14 @@ frameCases =
 
 -- | The settings overlay, once per roster state §7's @o@ row promises a
 -- different screen for: the compiled roster with every cell at its default,
--- the same roster with one cell edited off it, and a @models.toml@ that will
--- not load at all.
+-- the same roster with one cell edited off it, a @models.toml@ that will not
+-- load at all, and the two reduced provider sets.
+--
+-- The last three are also the mode coverage. Each of the three
+-- 'Kanban.Models.OperatingMode' labels is drawn by at least one frame here —
+-- dual by the first two, single-agent by the Claude-only roster, and no-agent
+-- by both the empty provider set and the unusable file that derives the same
+-- mode — so a line naming the wrong one cannot pass.
 --
 -- The edited frame is produced by the overlay's own transitions rather than
 -- by writing an assignment into the record, so no frame can show a roster the
@@ -718,6 +727,20 @@ settingsCases =
         frameCaseHeight = 48,
         frameCaseSummary = "an unusable models.toml: its defect and what d would write, instead of roster rows",
         frameCaseState = openSettings . unusableRoster
+      },
+    FrameCase
+      { frameCaseName = "overlay-settings-single-agent",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "a roster loading Claude alone: single-agent on the mode line, and only that brand's rows",
+        frameCaseState = openSettings . withModelRoster (Right claudeOnlyRoster)
+      },
+    FrameCase
+      { frameCaseName = "overlay-settings-no-agent",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "a roster loading no provider: no-agent on the mode line, and no rows to edit",
+        frameCaseState = openSettings . withModelRoster (Right noAgentRoster)
       }
   ]
 
@@ -740,15 +763,14 @@ editedRosterCell state = foldl press (openSettings state) [SettingsMoveRow 1, Se
 -- | A present @models.toml@ the loader refused, which is the one roster state
 -- no interaction can produce: it is what the startup load answered.
 unusableRoster :: AppState -> AppState
-unusableRoster state =
-  state
-    { appModelRoster =
-        Left
-          ( RosterLoadError
-              "/fixture/home/.config/kanban/models.toml"
-              (RosterInvalid [UnknownModel PrReviewRole CodexProvider "gpt-5.9"])
-          )
-    }
+unusableRoster =
+  withModelRoster
+    ( Left
+        ( RosterLoadError
+            "/fixture/home/.config/kanban/models.toml"
+            (RosterInvalid [UnknownModel PrReviewRole CodexProvider "gpt-5.9"])
+        )
+    )
 
 -- | §7's two blocking panels at every setting the populated board is captured
 -- at, because a panel that replaces the board has to survive the same
@@ -1124,8 +1146,11 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       appSidebarVisible = True,
       appSettings = defaultSettings,
       -- The pure compiled value, not a load: a golden frame must not read
-      -- the developer's real XDG configuration.
+      -- the developer's real XDG configuration. A frame drawn over another
+      -- roster moves it with 'Kanban.UI.Types.withModelRoster', so no frame
+      -- can name a mode its roster does not derive.
       appModelRoster = Right defaultRoster,
+      appOperatingMode = loadedOperatingMode (Right defaultRoster),
       appSettingsFocus = Nothing,
       appLogRoot = "/fixture/logs",
       appProcessSelection = ProcessSelection Nothing 0,
