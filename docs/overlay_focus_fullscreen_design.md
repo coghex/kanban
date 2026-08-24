@@ -19,9 +19,9 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Toggle any open overlay fullscreen and make session input modal
-- [ ] OVF-1. Rebind the card filter from `f` to `F`
-- [ ] OVF-2. Give session overlays a vim-style normal/insert focus model
+- [x] EPIC. Toggle any open overlay fullscreen and make session input modal — [#512]
+- [x] OVF-1. Rebind the card filter from `f` to `F` — [#513]
+- [x] OVF-2. Give session overlays a vim-style normal/insert focus model — [#515]
 - [ ] OVF-4. Make the base footer the context-aware hotkey row
 - [ ] OVF-3. Add the `f` fullscreen toggle for open overlays
 
@@ -456,18 +456,26 @@ promoted.
   (the `F` filter row, the `s` search row, the `f` fullscreen row, the Esc
   and session rows) must land with its `bindingContract`/`HelpEntry`
   counterpart in the same PR, in both directions.
-- Golden frames: new fullscreen variants beside the existing
-  `overlay-details`/`overlay-help` frames, plus a session overlay frame
-  showing the mode indicator; the existing windowed frames must not change.
+- Golden frames: new fullscreen variants beside the seven existing overlay
+  frames — `overlay-details`, `overlay-help`, and the five
+  `overlay-settings` variants — plus a session overlay frame showing the
+  mode indicator; the existing windowed frames must not change.
 - The incidents fixed-width elision suite
   (`test/Spec/UI/Incidents.hs:631-660`) extends to the fullscreen width,
   and §11's fixed-width sentence is amended with it.
 - `sessionInputEvent` stays a pure function, so mode transitions (normal
   `i` → insert, insert Esc → normal, mode-aware printables and digits) get
   ordinary unit tests without an `EventM` harness.
-- Live acceptance passes through the established tmux flow with the
-  snapshot-cache fixture board, exercising `f` in a details overlay, a
-  session overlay in both modes, and the reset-on-close behavior.
+- Live acceptance passes through the established tmux flow, exercising `f`
+  in a details overlay, a session overlay in both modes, and the
+  reset-on-close behavior. There is no snapshot-cache fixture board to run
+  it against: open cards are live-only (design.md §13), and
+  `src/Kanban/Cache.hs:181-183` records that the dashboard neither loads a
+  repository snapshot at startup nor persists one afterwards. So the board
+  populates from a real refresh, and the run is isolated instead by
+  redirecting `HOME` to a scratch directory — through a wrapper script the
+  session launches rather than `tmux new-session -e` — which moves the
+  config, cache, and managed-component records with it.
 
 ## Delivery plan
 
