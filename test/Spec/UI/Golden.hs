@@ -60,6 +60,7 @@ import Kanban.Fixture (fixtureBoard, fixtureCompletedHistory, fixtureSnapshot, f
 import Kanban.GitHub (HistoryTraversal, RefreshCoordinator, newHistoryTraversal)
 import Kanban.Models
   ( ProviderName (..),
+    RecordedAssignment,
     RoleName (..),
     RosterDefect (..),
     RosterFailure (..),
@@ -67,6 +68,7 @@ import Kanban.Models
     defaultRoster,
     loadedOperatingMode,
   )
+import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..), solveAssignment)
 import Kanban.Settings (defaultSettings)
 import Kanban.UI (drawApplication)
 import Kanban.UI.Approval (approvalStatusApplied, approvalTogglePress)
@@ -99,6 +101,9 @@ import Kanban.UI.Theme
     selectedTitleAttr,
     themeFor,
   )
+import Kanban.UI.SessionCore (newAgentSession)
+import Kanban.UI.Solve (freshSolveTranscript)
+import Kanban.UI.State (plainTranscript)
 import Kanban.UI.Types
   ( AppEvent,
     AppState (..),
@@ -108,13 +113,16 @@ import Kanban.UI.Types
     Overlay (..),
     ProcessSelection (..),
     ReviewBackend (..),
+    SolveDetail (..),
+    SolvePhase (..),
+    SolveSession,
     withModelRoster,
   )
 import Spec.Support.Board (inertRefreshCoordinator)
 import Spec.Support.Fixtures (itemNumber, testOptions, testResolvedConfig)
 import Spec.Support.Golden (attributeGrid, expectGolden, goldenPath)
 import Spec.Support.Render (FrameCell (..), frameRowText, renderFrameCells)
-import Spec.Support.Roster (claudeOnlyRoster, noAgentRoster)
+import Spec.Support.Roster (cellOf, claudeOnlyRoster, distinctDisplays, noAgentRoster)
 import Test.Hspec
 
 spec :: Spec
@@ -688,7 +696,94 @@ frameCases =
     <> openDataCases
     <> filterCases
     <> settingsCases
+    <> solveModelCases
     <> approvalCases
+
+-- | The three surfaces that draw a model name (MODEL-3), which no frame
+-- covered before this slice: the chooser's two rows, a solve session's header
+-- and reviewer line, and what a surface shows when it cannot resolve its cell
+-- at all.
+--
+-- Every one of them is drawn over a roster whose @display@ values were moved
+-- explicitly. 'Spec.Support.Roster.rerosteredDefaults' cannot serve here --
+-- it rotates model and effort and leaves @display@ alone, so a frame drawn
+-- over it would be byte-identical to one drawn over the compiled defaults and
+-- would prove nothing about where the text came from.
+solveModelCases :: [FrameCase]
+solveModelCases =
+  [ FrameCase
+      { frameCaseName = "overlay-solve-chooser",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "the solve chooser over a roster whose solve displays were moved off the defaults",
+        frameCaseState = withModelRoster (Right distinctDisplays) . chooserOpen
+      },
+    FrameCase
+      { frameCaseName = "overlay-solve-session",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "a solve session replaying a recorded assignment the live roster no longer carries",
+        frameCaseState = recordedSolveSession
+      },
+    FrameCase
+      { frameCaseName = "overlay-solve-chooser-unavailable",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "the chooser over a models.toml that will not load: no model named on either row",
+        frameCaseState = unusableRoster . chooserOpen
+      }
+  ]
+
+-- | The chooser as the autosolve key opens it, before any refusal: the roster
+-- is not consulted until a digit is pressed, which is why the frame above can
+-- draw this overlay over a roster no solve could start on.
+chooserOpen :: AppState -> AppState
+chooserOpen state = state {appOverlay = Just (SolveChooser AutoSolve (fixtureIssue solveFrameIssue))}
+
+-- | A solve session in exactly the state its first launch leaves it in: the
+-- transcript the fresh start wrote, and the assignment that launch resolved
+-- and recorded back onto it ('Kanban.UI.Solve.launchAssignedSolveInvocation').
+--
+-- The live roster is left at the compiled defaults while the recorded cell
+-- comes from a roster that moved every display, so the header and the
+-- reviewer line beneath it cannot have come from the same place: the header
+-- is the record, and the reviewer line is the live @pr_review@ cell of the
+-- opposite brand.
+recordedSolveSession :: AppState -> AppState
+recordedSolveSession state =
+  state
+    { appOverlay = Just (SolveOverlay solveFrameIssue),
+      appSolveSessions = Map.singleton solveFrameIssue session
+    }
+  where
+    brand = ClaudeSolver
+    recorded = cellOf (solveAssignment distinctDisplays brand) :: RecordedAssignment
+    session :: SolveSession
+    session =
+      newAgentSession
+        0
+        SolveRunning
+        "solving"
+        (Just goldenNow)
+        (plainTranscript (freshSolveTranscript state.appModelRoster AutoSolve brand))
+        SolveDetail
+          { solveSessionIssue = fixtureIssue solveFrameIssue,
+            solveSessionWorkflow = AutoSolve,
+            solveSessionBrand = brand,
+            solveSessionId = Nothing,
+            solveSessionAutoProgress = Nothing,
+            solveSessionResumeProvenance = ResumeAnswer,
+            solveSessionAssignment = Just recorded
+          }
+
+-- | The fixture issue all three frames are drawn for.
+solveFrameIssue :: Int
+solveFrameIssue = 812
+
+fixtureIssue :: Int -> Issue
+fixtureIssue number = case fixtureItem number of
+  IssueItem issue -> issue
+  PullRequestItem _ -> error ("the fixture board's #" <> show number <> " is a pull request, not an issue")
 
 -- | The settings overlay, once per roster state §7's @o@ row promises a
 -- different screen for: the compiled roster with every cell at its default,

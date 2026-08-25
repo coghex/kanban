@@ -66,7 +66,7 @@ import Kanban.Review
     )
 import Kanban.Solve
   ( SolveWorkflow (..),
-    solverLabel
+    solveAssignment
   )
 import Kanban.Text (sanitizeText)
 import Kanban.Worker
@@ -146,7 +146,7 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
       [ AgentSessionEntry
           { agentSessionRef = SolveAgent issueNumber,
             agentSessionLabel = Text.toLower (workflowTitle session.sessionDetail.solveSessionWorkflow) <> " #" <> showText issueNumber,
-            agentSessionProvider = solverLabel session.sessionDetail.solveSessionBrand,
+            agentSessionProvider = solveSessionLabel state.appModelRoster session,
             agentSessionStatus = persistentProcessStatus state.appNow worker (solveProcessStatus session.sessionPhase),
             agentSessionActivity = timedActivity state.appNow isLive session.sessionActivityStartedAt session.sessionActivity,
             agentSessionId = shortSessionId <$> session.sessionDetail.solveSessionId,
@@ -161,7 +161,13 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
       [ AgentSessionEntry
           { agentSessionRef = PullRequestAgent number,
             agentSessionLabel = "pr " <> pullRequestActionText session.sessionDetail.pullRequestSessionAction <> " #" <> showText number,
-            agentSessionProvider = pullRequestAgentLabel session.sessionDetail.pullRequestSessionAction session.sessionDetail.pullRequestSessionBrand,
+            agentSessionProvider =
+              pullRequestSessionLabel
+                session.sessionDetail.pullRequestSessionAssignment
+                session.sessionDetail.pullRequestSessionOrigin
+                session.sessionDetail.pullRequestSessionAction
+                session.sessionDetail.pullRequestSessionBrand
+                state.appModelRoster,
             agentSessionStatus = persistentProcessStatus state.appNow worker (solveProcessStatus session.sessionPhase),
             agentSessionActivity = timedActivity state.appNow isLive session.sessionActivityStartedAt session.sessionActivity,
             agentSessionId = shortSessionId <$> session.sessionDetail.pullRequestSessionId,
@@ -184,7 +190,7 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
       [ AgentSessionEntry
           { agentSessionRef = WorkerAgent identifier,
             agentSessionLabel = workerTaskLabel descriptor.workerDescriptorSpec.workerTask,
-            agentSessionProvider = workerTaskProvider descriptor.workerDescriptorSpec.workerTask,
+            agentSessionProvider = workerTaskProvider descriptor.workerDescriptorSpec,
             agentSessionStatus = persistentProcessStatus state.appNow (Just descriptor) "starting",
             agentSessionActivity = "waiting for board metadata",
             agentSessionId = Nothing,
@@ -199,8 +205,23 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
       PullRequestWorkerTaskKind task -> Map.member task.pullRequestWorkerNumber state.appPullRequestReviewSessions
     workerTaskLabel (SolveWorkerTaskKind task) = Text.toLower (workflowTitle task.solveWorkerWorkflow) <> " #" <> showText task.solveWorkerIssueNumber
     workerTaskLabel (PullRequestWorkerTaskKind task) = "pr " <> pullRequestActionText task.pullRequestWorkerAction <> " #" <> showText task.pullRequestWorkerNumber
-    workerTaskProvider (SolveWorkerTaskKind task) = solverLabel task.solveWorkerBrand
-    workerTaskProvider (PullRequestWorkerTaskKind task) = pullRequestAgentLabel task.pullRequestWorkerAction (agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction)
+    -- Read from the whole specification, not just its task: the row names
+    -- the assignment that worker recorded, and only a specification written
+    -- before that field existed falls through to the live cell.
+    workerTaskProvider spec = case spec.workerTask of
+      SolveWorkerTaskKind task ->
+        agentSessionLabelFor
+          task.solveWorkerBrand
+          spec.workerAssignment
+          (`solveAssignment` task.solveWorkerBrand)
+          state.appModelRoster
+      PullRequestWorkerTaskKind task ->
+        pullRequestSessionLabel
+          spec.workerAssignment
+          task.pullRequestWorkerOrigin
+          task.pullRequestWorkerAction
+          (agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction)
+          state.appModelRoster
 
 -- | Resolves a processes-overlay selection against the current entries: if
 -- the tracked identity is still present, follow it to its (possibly

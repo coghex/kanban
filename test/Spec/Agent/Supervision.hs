@@ -9,7 +9,7 @@ import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Text
-import Kanban.Models (defaultRoster)
+import Kanban.Models (Assignment (..), defaultRoster)
 import Kanban.Process (killManagedProcess)
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Review
@@ -24,6 +24,7 @@ import Kanban.Review
     releaseToolSlot,
     reserveToolSlot,
     githubCommandBounds,
+    issueReviseAssignment,
     runGitHubIssueTool,
     stopReviewClient,
     withReservedToolSlot
@@ -47,6 +48,7 @@ import Kanban.Worker (workerDeadlineReason)
 import Spec.Support.Env (waitForFileToExist, withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (requireJust, requireLeft, requireRight, shouldMention, shouldNotMention)
 import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch)
+import Spec.Support.Roster (cellOf)
 import Spec.Support.Process
   ( canonicalSessionLogText,
     managedProcessFor,
@@ -406,7 +408,7 @@ spec = do
       withFakeClaudeCli ["echo $$ > \"$CLAUDE_CHILD_MARKER\"", "sleep 30"] injectedBounds $ \markerPath client -> do
         result <- runBoundedClaudeCall boundedCallMicros client "review this"
         message <- requireLeft "expected a claude reviewer past its deadline to time out" result
-        message `shouldBe` "Claude Sonnet 5 revision agent timed out after ten minutes"
+        message `shouldBe` ("Claude " <> claudeRevisionDisplay <> " revision agent timed out after ten minutes")
         markerPath `shouldRecordASweptProcess` "the claude reviewer that outlived its deadline"
 
     it "still succeeds unchanged when only claude's stderr is held open past the grace" $
@@ -418,7 +420,7 @@ spec = do
       withFakeClaudeCli ["sleep 30 &", "printf 'boom\\n' >&2", "exit 3"] injectedBounds $ \_ client -> do
         result <- runBoundedClaudeCall boundedCallMicros client "review this"
         message <- requireLeft "expected a nonzero claude exit to stay a nonzero-exit failure" result
-        message `shouldMention` "Claude Sonnet 5 exited with status 3"
+        message `shouldMention` ("Claude " <> claudeRevisionDisplay <> " exited with status 3")
         message `shouldMention` "boom"
         message `shouldNotMention` "Incomplete output"
         message `shouldNotMention` "timed out"
@@ -509,3 +511,10 @@ spec = do
         (\phase -> sessionAlreadyResolved 826 (pullRequestSessionsWith phase) `shouldBe` False)
         [SolveStarting, SolveRunning, SolveInterrupting, SolveAttention]
       sessionAlreadyResolved 999 (pullRequestSessionsWith SolveFinished) `shouldBe` False
+
+-- | The display the fake-CLI client's own roster assigns
+-- @issue_revise.claude@, which is the cell @kanban_run_claude@ resolves.
+-- Read from the roster rather than restated, so a roster edit moves the
+-- diagnostics and these assertions together (issue #482, requirement 7).
+claudeRevisionDisplay :: Data.Text.Text
+claudeRevisionDisplay = (cellOf (issueReviseAssignment defaultRoster)).assignmentDisplay

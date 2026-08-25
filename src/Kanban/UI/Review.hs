@@ -12,6 +12,7 @@ module Kanban.UI.Review
     cancelReviewSession,
     canonicalLaunchOutcome,
     canonicalReviewActivity,
+    claudeTranscriptStart,
     canonicalReviewCompletionSuperseded,
     canonicalReviewNotice,
     deferredRevisionLaunches,
@@ -820,12 +821,12 @@ applyReviewEvent reviewEvent = case reviewEvent of
               sessionActivity = "waiting for approval"
             }
       )
-  ReviewClaudeStarted threadId -> do
+  ReviewClaudeStarted threadId display -> do
+    let started = claudeTranscriptStart display
     modifyReviewSessionByThread threadId
       ( \session ->
           session
-            { sessionTranscript =
-                appendTranscript session.sessionTranscript "\n[sonnet] Starting authenticated Sonnet 5 high…\n",
+            { sessionTranscript = appendTranscript session.sessionTranscript started,
               sessionActivity = "running Claude reviewer"
             }
       )
@@ -978,3 +979,21 @@ armReviewTick = armSessionTick reviewSessionOps
 applyReviewAnimationTick :: Int -> Int -> EventM Name AppState ()
 applyReviewAnimationTick = applySessionTick reviewSessionOps
 
+-- | The line the review transcript opens a @kanban_run_claude@ run with.
+--
+-- The @[sonnet]@ channel tag is unversioned and stays (docs\/design.md §7,
+-- requirement 2); only the model-and-effort portion comes from the roster,
+-- and it is @issue_revise.claude@ -- the very cell the tool this line
+-- announces has already resolved in order to spawn.
+--
+-- The display is the event's own, resolved by
+-- 'Kanban.Review.claudeStartedEvent' from the client actually running the
+-- call, and nothing here consults application state. That is what makes the
+-- line right whatever has happened to the backend in between: the tool runs
+-- in a fork, so a stop or a restart can be applied before this event, and
+-- resolving at this point would name a replacement client's assignment -- or
+-- none at all -- for a call running on the roster the emitting client
+-- captured.
+claudeTranscriptStart :: Text -> Text
+claudeTranscriptStart display =
+  "\n[sonnet] Starting authenticated " <> display <> "…\n"

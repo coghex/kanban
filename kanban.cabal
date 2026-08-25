@@ -221,6 +221,7 @@ test-suite kanban-test
   other-modules:
     Spec.ApprovalService
     Spec.Agent.Capture
+    Spec.Agent.Compatibility
     Spec.Agent.IssueReviewer
     Spec.Agent.ManagedProcess
     Spec.Agent.ManagedProcess.Deadline

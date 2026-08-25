@@ -1,6 +1,12 @@
--- | Every literal the embedded review session hands to the Codex
--- app-server: the developer instructions, the opening prompt, the three
--- dynamic tools' names and JSON schemas, and the final output schema.
+-- | Everything the embedded review session hands to the Codex app-server:
+-- the developer instructions, the opening prompt, the three dynamic tools'
+-- names and JSON schemas, and the final output schema.
+--
+-- Literal but for the two model names it states. Those are read out of the
+-- roster it is given — the coordinator's own @issue_review.codex@ and the
+-- @issue_revise.claude@ agent @kanban_run_claude@ runs — because prose that
+-- named a model the operator had replaced would be telling the reviewing
+-- model it is something it is not (MODEL-3).
 --
 -- Held apart from the client because nothing here is logic — no other
 -- module's behavior depends on these strings, and keeping them together
@@ -23,6 +29,13 @@ import Data.Aeson (Value, object, (.=))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain (WorkflowConfig (..))
+import Kanban.Models
+  ( ModelRoster,
+    ProviderName (..),
+    RoleName (..),
+    assignmentFor,
+  )
+import Kanban.Review.Diagnostics (claudeRevisionAgent, reviewAssignmentDisplay)
 import Kanban.Review.Types (reviewWorkflowLabels)
 
 questionToolName :: Text
@@ -76,14 +89,30 @@ questionTool =
     stringSchema = object ["type" .= ("string" :: Text)]
     booleanSchema = object ["type" .= ("boolean" :: Text)]
 
-claudeTool :: Value
-claudeTool =
+-- | The agent the @kanban_run_claude@ tool runs, as this thread's prose
+-- names it: @issue_revise.claude@ (docs\/design.md §7). Resolved from the
+-- roster the client holds rather than restated, and stated as unavailable
+-- rather than defaulted when a valid Codex-only roster cannot supply it --
+-- which 'Kanban.Review.Tools.runAuthenticatedClaude' already refuses on.
+claudeRevisionName :: ModelRoster -> Text
+claudeRevisionName roster =
+  claudeRevisionAgent (reviewAssignmentDisplay (assignmentFor roster IssueReviseRole ClaudeProvider))
+
+-- | The coordinator's own identity: @issue_review.codex@, which
+-- 'Kanban.Review.startReviewClient' has already refused to start without.
+coordinatorName :: ModelRoster -> Text
+coordinatorName roster =
+  reviewAssignmentDisplay (assignmentFor roster IssueReviewRole CodexProvider)
+
+claudeTool :: ModelRoster -> Value
+claudeTool roster =
   object
     [ "type" .= ("function" :: Text),
       "name" .= claudeToolName,
       "description"
-        .= ( "Run the authenticated Claude Sonnet 5 high specification-revision agent through Kanban outside the Codex command sandbox. Provide a standalone prompt containing the issue, effective specification, repository evidence, blockers, and exact requested amendment output."
-               :: Text
+        .= ( "Run the authenticated "
+               <> claudeRevisionName roster
+               <> " specification-revision agent through Kanban outside the Codex command sandbox. Provide a standalone prompt containing the issue, effective specification, repository evidence, blockers, and exact requested amendment output."
            ),
       "inputSchema"
         .= object
@@ -126,8 +155,8 @@ githubTool workflowConfig =
           "uniqueItems" .= True
         ]
 
-reviewDeveloperInstructions :: WorkflowConfig -> Text
-reviewDeveloperInstructions workflowConfig =
+reviewDeveloperInstructions :: WorkflowConfig -> ModelRoster -> Text
+reviewDeveloperInstructions workflowConfig roster =
   Text.unlines
     [ "You are the interactive issue-review and specification-revision coordinator embedded inside the Kanban terminal dashboard.",
       "Never run ~/work/approve-issues.py, the installed tools/approve_issues.py backend from any path, or any background approval daemon.",
@@ -137,13 +166,21 @@ reviewDeveloperInstructions workflowConfig =
       "Read the live GitHub issue, all of its comments in chronological order, and its labels. The effective specification is the issue body plus canonical issue-comment amendments, with explicit later amendments superseding earlier conflicting text.",
       "Find the hidden <!-- issue-origin:claude --> or <!-- issue-origin:codex --> marker in the issue body.",
       "You MUST use kanban_github_issue for every GitHub issue read, comment, or review-label mutation. Never invoke gh, curl, or a GitHub API through a shell or command tool. The Kanban tool is already authenticated and its update operation is restricted to one issue comment and the three review workflow labels.",
-      "Whenever revision requires Claude Sonnet 5 high, you MUST call kanban_run_claude. Never invoke claude, claude-code, or another Claude executable through a shell or command tool. The Kanban tool owns authenticated execution and returns Sonnet's text.",
+      "Whenever revision requires "
+        <> claudeRevisionName roster
+        <> ", you MUST call kanban_run_claude. Never invoke claude, claude-code, or another Claude executable through a shell or command tool. The Kanban tool owns authenticated execution and returns Sonnet's text.",
       "The kanban_run_claude prompt must be standalone: include the issue body, relevant chronological comments/effective specification, repository evidence, blockers, and request exact amendment content. Sonnet runs in plan mode and must not be asked to edit files, post comments, or change labels.",
       "Choose the one stage from live labels: reviewed:revised means REREVIEW; otherwise "
         <> workflowConfig.changesRequestedLabel
         <> " means REVISION; otherwise INITIAL REVIEW.",
       "INITIAL REVIEW and REREVIEW are owned by the canonical approve-issues.py v2 backend and must never be performed in this app-server thread. This thread performs REVISION only.",
-      "REVISION switches back to the issue author's brand: Codex-origin amendment content is authored by you as GPT-5.4 high; Claude-origin amendment content is authored by Claude Sonnet 5 high; unmarked issues default to you as GPT-5.4 high.",
+      "REVISION switches back to the issue author's brand: Codex-origin amendment content is authored by you as "
+        <> coordinatorName roster
+        <> "; Claude-origin amendment content is authored by "
+        <> claudeRevisionName roster
+        <> "; unmarked issues default to you as "
+        <> coordinatorName roster
+        <> ".",
       "During REVISION, classify every latest review blocker. Resolve mechanical, repository-verifiable, or clearly implied omissions without asking. If two or more reasonable answers would change behavior, compatibility, scope, policy, migration semantics, or user-visible outcomes, ask the user through kanban_prompt_user before proceeding.",
       "After resolving every blocker during REVISION, post exactly one canonical issue comment headed '## Specification amendment'. State that it supplements the issue body, list the normative clarifications and acceptance/test changes, and end with <!-- kanban-spec-amendment -->.",
       "After posting the amendment, ensure the repository has a reviewed:revised label (create it with purple color 8250DF if missing), add it to the issue, and remove "

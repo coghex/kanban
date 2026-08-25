@@ -134,7 +134,15 @@ data ReviewEvent
   | ReviewOutput Text ReviewOutputKind Text
   | ReviewQuestionRequested Text ReviewRequestId ReviewQuestion
   | ReviewApprovalRequested Text ReviewRequestId ReviewApproval
-  | ReviewClaudeStarted Text
+  | -- | A @kanban_run_claude@ call has started, carrying the thread and the
+    -- @display@ of the @issue_revise.claude@ cell it resolved.
+    --
+    -- The display travels /with/ the event rather than being looked up when
+    -- it is handled. The tool runs in a fork, so a backend teardown or
+    -- restart can be handled first: a consumer that resolved the cell at
+    -- handling time would name a replacement client's assignment, or none at
+    -- all, for a call that is running on the roster this one captured.
+    ReviewClaudeStarted Text Text
   | ReviewClaudeFinished Text (Either Text ())
   | ReviewGitHubStarted Text Text
   | ReviewGitHubFinished Text (Either Text Text)

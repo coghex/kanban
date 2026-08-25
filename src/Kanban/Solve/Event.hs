@@ -19,13 +19,10 @@ module Kanban.Solve.Event
     UnknownStreamCategory (..),
     UnknownStreamKey (..),
     agentOutcome,
-    codexSolverModel,
-    claudeSolverModel,
-    codexReviewerModel,
-    claudeReviewerModel,
+    assignmentLabel,
     renderAgentEvent,
     solveOutcome,
-    solverLabel,
+    solverBrandName,
   )
 where
 
@@ -107,21 +104,23 @@ data UnknownStreamCategory = UnknownTopLevel | UnknownCodexItem | UnknownClaudeC
 data UnknownStreamKey = UnknownStreamKey UnknownStreamCategory (Maybe Text)
   deriving stock (Eq, Ord, Show)
 
-codexSolverModel :: Text
-codexSolverModel = "gpt-5.4 high"
+-- | The provider a brand runs through, as this module's surfaces name it.
+-- Unversioned (docs\/design.md §7): it identifies the brand rather than an
+-- assignment, so no roster edit can falsify it.
+solverBrandName :: SolverBrand -> Text
+solverBrandName CodexSolver = "codex"
+solverBrandName ClaudeSolver = "claude"
 
-claudeSolverModel :: Text
-claudeSolverModel = "Sonnet 5 high"
-
-codexReviewerModel :: Text
-codexReviewerModel = "GPT-5.6-Terra xhigh"
-
-claudeReviewerModel :: Text
-claudeReviewerModel = "Opus 5 xhigh"
-
-solverLabel :: SolverBrand -> Text
-solverLabel CodexSolver = "codex · " <> codexSolverModel
-solverLabel ClaudeSolver = "claude · " <> claudeSolverModel
+-- | How every surface that names one agent spells it: the brand, then the
+-- @display@ of the assignment actually in force.
+--
+-- The display is a parameter rather than resolved here because the caller
+-- is the only one that knows /which/ assignment is in force — a session
+-- replaying a recorded one, a chooser row resolving a live cell, or a
+-- refusal with no assignment at all — and because a resolution inside this
+-- composition would be one more place that could reach for a default.
+assignmentLabel :: SolverBrand -> Text -> Text
+assignmentLabel brand display = solverBrandName brand <> " · " <> display
 
 renderAgentEvent :: ChatVerbosity -> AgentEvent -> Maybe Text
 renderAgentEvent verbosity event

@@ -36,6 +36,8 @@ module Kanban.Review
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
     claudeCommandBounds,
+    claudeStartedEvent,
+    claudeTool,
     decodeCanonicalIssueReviewResult,
     decodeClaudeToolPrompt,
     decodeGitHubIssueToolRequest,
@@ -54,10 +56,12 @@ module Kanban.Review
     issueReviewerNotFoundMessage,
     issueReviewerRecordFromBytes,
     issueReviewerRecordPath,
+    issueReviseDisplay,
     killReviewTools,
     killThreadToolProcesses,
     newRecordingReviewClientForTesting,
     newReviewClientForTesting,
+    reviewDeveloperInstructions,
     newToolRegistry,
     outcomeUnknownDiagnostic,
     releaseToolSlot,
@@ -165,6 +169,7 @@ import Kanban.Review.Tools
     githubIssueViewArguments,
     githubLabelCreateArguments,
     issueReviseAssignment,
+    issueReviseDisplay,
     runAuthenticatedClaude,
     runGitHubIssueTool,
   )
@@ -214,6 +219,20 @@ import System.Timeout (timeout)
 -- | The cell the embedded issue-review thread itself runs on. Only Codex is
 -- read: the Claude embedded-review backend is MODEL-13's, so
 -- @issue_review.claude@ stays unconsulted here even when the roster loads it.
+-- | The event announcing a @kanban_run_claude@ call, carrying the display of
+-- the cell /this/ client resolves it from.
+--
+-- Resolved here, at emission, and never again. The client keeps the roster
+-- snapshot it was started on for its whole life while the dashboard's own
+-- moves with the settings overlay, so the two diverge the moment a cell is
+-- edited; and because the call runs in a fork, a consumer can handle a
+-- backend stop or restart before this event and would then read a
+-- replacement client's roster, or no client at all. Binding the value to the
+-- client that is actually running the call closes both.
+claudeStartedEvent :: ReviewClient -> Text -> ReviewEvent
+claudeStartedEvent client threadId =
+  ReviewClaudeStarted threadId (issueReviseDisplay client.reviewModelRoster)
+
 issueReviewAssignment :: ModelRoster -> Either Text Assignment
 issueReviewAssignment roster =
   either (Left . assignmentUnavailableMessage) Right (assignmentFor roster IssueReviewRole CodexProvider)
@@ -420,8 +439,8 @@ beginIssueReview client issueNumber = case issueReviewAssignment client.reviewMo
           "approvalPolicy" .= ("on-request" :: Text),
           "sandbox" .= ("read-only" :: Text),
           "ephemeral" .= False,
-          "developerInstructions" .= reviewDeveloperInstructions client.reviewWorkflowConfig,
-          "dynamicTools" .= [questionTool, claudeTool, githubTool client.reviewWorkflowConfig]
+          "developerInstructions" .= reviewDeveloperInstructions client.reviewWorkflowConfig client.reviewModelRoster,
+          "dynamicTools" .= [questionTool, claudeTool client.reviewModelRoster, githubTool client.reviewWorkflowConfig]
         ]
 
 sendReviewMessage :: ReviewClient -> Text -> Maybe Text -> Text -> IO (Either Text ())
@@ -742,7 +761,7 @@ sendDynamicToolSuccess client (ReviewRequestId requestId) output =
 
 runClaudeToolCall :: ReviewClient -> Text -> ReviewRequestId -> ClaudeToolRequest -> IO ()
 runClaudeToolCall client threadId requestId request = do
-  client.reviewEventSink (ReviewClaudeStarted threadId)
+  client.reviewEventSink (claudeStartedEvent client threadId)
   result <- withReservedToolSlot client threadId (\key -> runAuthenticatedClaude client key request.claudeToolPrompt)
   sent <- case result of
     Left message -> sendDynamicToolFailure client requestId message

@@ -11,6 +11,7 @@
 module Main (main) where
 
 import qualified Spec.Agent.Capture as Capture
+import qualified Spec.Agent.Compatibility as Compatibility
 import qualified Spec.ApprovalService as ApprovalService
 import qualified Spec.Agent.IssueReviewer as IssueReviewer
 import qualified Spec.Agent.ManagedProcess as ManagedProcess
@@ -124,6 +125,7 @@ suiteGroups =
     SuiteGroup "Spec.Agent.Transcript" PingLane Transcript.spec,
     SuiteGroup "Spec.Agent.PullRequestFlow" PingLane PullRequestFlow.spec, -- 1.9s
     SuiteGroup "Spec.Agent.Roster" LifecycleLane AgentRoster.spec,
+    SuiteGroup "Spec.Agent.Compatibility" PingLane Compatibility.spec,
     SuiteGroup "Spec.UI.ReviewSession" PingLane ReviewSession.spec,
     SuiteGroup "Spec.UI.SessionCore" PingLane SessionCore.spec,
     SuiteGroup "Spec.Repository.Identity" PingLane RepositoryIdentity.spec,

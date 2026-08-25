@@ -5,7 +5,7 @@ module Kanban.UI.Overlay
     helpLines,
     mouseHelpEntries,
     reviewPhaseLabel,
-    solveReviewerLabel,
+    solveChooserDisplay,
   )
 where
 
@@ -30,11 +30,7 @@ import Kanban.Review
 import Kanban.Solve
   ( SolveWorkflow (..),
     SolverBrand (..),
-    claudeReviewerModel,
-    claudeSolverModel,
-    codexReviewerModel,
-    codexSolverModel,
-    solverLabel
+    solveAssignment
   )
 import Kanban.Settings
   ( ChatVerbosity (..),
@@ -42,7 +38,7 @@ import Kanban.Settings
     verbosityDescription,
     verbosityLabel
   )
-import Kanban.Models (rosterErrorMessage)
+import Kanban.Models (ModelRoster, RecordedAssignment (..), RosterLoadError, rosterErrorMessage)
 import Kanban.Text (sanitizeText)
 import Kanban.UI.Keys
   ( BoardAction (..),
@@ -89,7 +85,7 @@ drawOverlay state overlay =
       IncidentsOverlay -> drawIncidents state
       DetailsOverlay item -> viewport DetailsViewport Vertical (drawDetails (detailsEnv state) item)
       ReviewOverlay issueNumber -> drawReview state issueNumber
-      SolveChooser _ issue -> drawSolveChooser issue
+      SolveChooser _ issue -> drawSolveChooser state issue
       SolveOverlay issueNumber -> drawSolve state issueNumber
       PullRequestReviewOverlay number -> drawPullRequestReview state number
   where
@@ -418,18 +414,33 @@ drainerSourceSummary source = case source of
   DrainerSourceChecking -> "PR drainer: checking for open incidents…"
   DrainerSourceUnavailable detail -> "PR drainer: open incidents unavailable · " <> sanitizeText detail
 
-drawSolveChooser :: Issue -> Widget Name
-drawSolveChooser issue =
+-- | The two brands a solve may be started on, each under the @solve@ cell it
+-- would actually run: row 1 @solve.codex@, row 2 @solve.claude@.
+--
+-- Drawn before any refusal, which is why each row resolves independently and
+-- neither falls back to the compiled default. A roster that will not load, or
+-- one that loads only the other brand, reaches this overlay unchanged --
+-- 'Kanban.UI.Solve.solveStartDecision' refuses on the digit press, not on the
+-- key that opened the chooser -- so the row for the brand it cannot supply
+-- says so rather than naming a model no spawn would use.
+drawSolveChooser :: AppState -> Issue -> Widget Name
+drawSolveChooser state issue =
   vBox
     [ withAttr cardTitleAttr (txtWrap (sanitizeText issue.issueTitle)),
       txt "",
       txt "1) codex",
-      withAttr dimAttr (txt ("   " <> codexSolverModel)),
+      withAttr dimAttr (txt ("   " <> solveChooserDisplay state.appModelRoster CodexSolver)),
       txt "2) claude",
-      withAttr dimAttr (txt ("   " <> claudeSolverModel)),
+      withAttr dimAttr (txt ("   " <> solveChooserDisplay state.appModelRoster ClaudeSolver)),
       txt "",
       withAttr footerAttr (txt "Esc cancel")
     ]
+
+-- | One chooser row's model line: the @solve@ cell that row's brand would
+-- run, resolved live because no session exists yet to have recorded one.
+solveChooserDisplay :: Either RosterLoadError ModelRoster -> SolverBrand -> Text
+solveChooserDisplay rosterResult brand =
+  liveAssignmentDisplay (.recordedAssignmentDisplay) (`solveAssignment` brand) rosterResult
 
 drawSolve :: AppState -> Int -> Widget Name
 drawSolve state issueNumber = case Map.lookup issueNumber state.appSolveSessions of
@@ -439,11 +450,11 @@ drawSolve state issueNumber = case Map.lookup issueNumber state.appSolveSessions
      in
     vBox
       [ drawSessionTabs solveSessionAttribute (solvePhaseGlyph state) issueNumber state.appSolveSessions,
-        withAttr (solveSessionAttribute session) (txt (solvePhaseLabel session)),
+        withAttr (solveSessionAttribute session) (txt (solvePhaseLabel state.appModelRoster session)),
         drawLiveActivity state (Map.member issueNumber state.appSolveProcesses) session.sessionSpinnerFrame session.sessionActivityStartedAt session.sessionActivity,
         case session.sessionDetail.solveSessionWorkflow of
           SolveOnly -> emptyWidget
-          AutoSolve -> withAttr dimAttr (txt ("reviewer: " <> solveReviewerLabel session.sessionDetail.solveSessionBrand)),
+          AutoSolve -> withAttr dimAttr (txt ("reviewer: " <> solveReviewerDisplay state.appModelRoster session.sessionDetail.solveSessionBrand)),
         maybe emptyWidget (withAttr dimAttr . txt . ("full log: " <>) . Text.pack) session.sessionLogPath,
         txt "",
         vLimit 19
@@ -458,10 +469,10 @@ drawSolve state issueNumber = case Map.lookup issueNumber state.appSolveSessions
         withAttr footerAttr (txt "Esc hide  Tab next session  Ctrl-C interrupt  Enter answer  arrows/wheel scroll")
       ]
 
-solvePhaseLabel :: SolveSession -> Text
-solvePhaseLabel session = case session.sessionPhase of
-  SolveStarting -> "Starting " <> workflowTitle session.sessionDetail.solveSessionWorkflow <> " with " <> solverLabel session.sessionDetail.solveSessionBrand <> "…"
-  SolveRunning -> solverLabel session.sessionDetail.solveSessionBrand <> " is " <> workflowActivity session.sessionDetail.solveSessionWorkflow
+solvePhaseLabel :: Either RosterLoadError ModelRoster -> SolveSession -> Text
+solvePhaseLabel rosterResult session = case session.sessionPhase of
+  SolveStarting -> "Starting " <> workflowTitle session.sessionDetail.solveSessionWorkflow <> " with " <> solveSessionLabel rosterResult session <> "…"
+  SolveRunning -> solveSessionLabel rosterResult session <> " is " <> workflowActivity session.sessionDetail.solveSessionWorkflow
   SolveInterrupting -> "Interrupting the current solver turn…"
   SolveAttention -> "Needs your input"
   SolveFinished -> "Solve workflow finished"
@@ -472,10 +483,6 @@ solvePhaseLabel session = case session.sessionPhase of
 workflowActivity :: SolveWorkflow -> Text
 workflowActivity SolveOnly = "solving"
 workflowActivity AutoSolve = "autosolving"
-
-solveReviewerLabel :: SolverBrand -> Text
-solveReviewerLabel CodexSolver = claudeReviewerModel
-solveReviewerLabel ClaudeSolver = codexReviewerModel
 
 drawSolveInput :: SolveSession -> Widget Name
 drawSolveInput session
@@ -504,7 +511,7 @@ drawPullRequestReview state number = case Map.lookup number state.appPullRequest
       [ drawSessionTabs pullRequestSessionAttribute (pullRequestPhaseGlyph state) number state.appPullRequestReviewSessions,
         withAttr (pullRequestSessionAttribute session) (txt (pullRequestPhaseLabel session)),
         drawLiveActivity state (Map.member number state.appPullRequestProcesses) session.sessionSpinnerFrame session.sessionActivityStartedAt session.sessionActivity,
-        withAttr dimAttr (txt ("agent: " <> pullRequestAgentLabel session.sessionDetail.pullRequestSessionAction session.sessionDetail.pullRequestSessionBrand)),
+        withAttr dimAttr (txt ("agent: " <> pullRequestSessionLabel session.sessionDetail.pullRequestSessionAssignment session.sessionDetail.pullRequestSessionOrigin session.sessionDetail.pullRequestSessionAction session.sessionDetail.pullRequestSessionBrand state.appModelRoster)),
         maybe emptyWidget (withAttr dimAttr . txt . ("full log: " <>) . Text.pack) session.sessionLogPath,
         txt "",
         vLimit 19 . clickable PullRequestReviewViewport . viewport PullRequestReviewViewport Vertical . padRight Max $

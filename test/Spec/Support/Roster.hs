@@ -10,6 +10,7 @@
 -- accepts and today's brand routing can still miss.
 module Spec.Support.Roster
   ( cellOf,
+    distinctDisplays,
     rerosteredDefaults,
     claudeOnlyRoster,
     codexOnlyRoster,
@@ -28,6 +29,8 @@ import Kanban.Models
     ProviderName (..),
     assignmentUnavailableMessage,
     defaultRoster,
+    providerKey,
+    roleKey,
   )
 
 -- | The cell a spec's expectation is written against. A fixture that cannot
@@ -63,6 +66,26 @@ rerosteredDefaults =
           { assignmentModel = successorIn catalog.catalogModels assignment.assignmentModel,
             assignmentEffort = successorIn catalog.catalogEfforts assignment.assignmentEffort
           }
+
+-- | A valid roster whose every cell's @display@ names that cell and nothing
+-- else, so an assertion reading one proves the surface resolved /that/ cell.
+--
+-- 'rerosteredDefaults' cannot do this job: it rotates model and effort and
+-- leaves @display@ alone, and the compiled defaults deliberately share
+-- displays across cells -- @solve.codex@, @pr_revise.codex@ and
+-- @issue_review.codex@ are all @gpt-5.4 high@, and @solve.claude@ and
+-- @issue_revise.claude@ are both @Sonnet 5 high@ -- so a surface reading the
+-- wrong one of those pairs would pass against defaults.
+--
+-- Only the display moves: the models and efforts stay the compiled ones, so
+-- this remains a roster 'Kanban.Models.decodeRoster' accepts and nothing here
+-- depends on a display having any particular relationship to its model.
+distinctDisplays :: ModelRoster
+distinctDisplays =
+  defaultRoster {rosterAssignments = Map.mapWithKey nameAfterCell defaultRoster.rosterAssignments}
+  where
+    nameAfterCell (role, provider) assignment =
+      assignment {assignmentDisplay = "display:" <> roleKey role <> "." <> providerKey provider}
 
 -- | The entry after @value@, wrapping at the end. Identity for a list that
 -- does not carry the value or carries nothing else, which a validated roster

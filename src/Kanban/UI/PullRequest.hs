@@ -6,6 +6,7 @@ module Kanban.UI.PullRequest
     drainerErrorStatus,
     drainerTogglePress,
     failPullRequestLaunch,
+    freshPullRequestTranscript,
     interruptPullRequestSession,
     mergeItemDoneCard,
     mergeSelectedDoneCard,
@@ -49,7 +50,7 @@ import Kanban.Drainer
     runDirectMerge,
     setDrainerRunning
   )
-import Kanban.Models (RecordedAssignment)
+import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
 import Kanban.Preflight
   ( PreflightAction (..)
     )
@@ -111,6 +112,17 @@ pullRequestStartRefusal state origin action =
     Left message -> Just (pullRequestActionText action <> " did not start: " <> message)
     Right _ -> Nothing
 
+-- | The header a fresh pull-request session opens its transcript with.
+-- Nothing is recorded yet, so it resolves the live cell its origin and action
+-- select; see 'Kanban.UI.Solve.freshSolveTranscript'.
+freshPullRequestTranscript :: Either RosterLoadError ModelRoster -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Text
+freshPullRequestTranscript rosterResult origin action brand =
+  "action: "
+    <> pullRequestActionText action
+    <> "\nagent: "
+    <> pullRequestSessionLabel Nothing origin action brand rosterResult
+    <> "\n\n"
+
 startPullRequestReviewWithOptions :: (WorkflowConfig -> PullRequest -> PullRequestAction) -> Bool -> Bool -> PullRequest -> EventM Name AppState ()
 startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullRequest = case originFromBody pullRequest.pullRequestBody of
   Left message -> setNotice message
@@ -132,7 +144,7 @@ startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullReques
                 SolveStarting
                 "starting"
                 (Just state.appNow)
-                (plainTranscript ("action: " <> pullRequestActionText action <> "\nagent: " <> pullRequestAgentLabel action brand <> "\n\n"))
+                (plainTranscript (freshPullRequestTranscript state.appModelRoster origin action brand))
                 PullRequestDetail
                   { pullRequestSessionPullRequest = pullRequest,
                     pullRequestSessionOrigin = origin,
