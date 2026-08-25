@@ -21,6 +21,7 @@ module Kanban.UI.Review
     forcedToNormalBy,
     numberedChoicePrompt,
     resolveReviewCancelAction,
+    reviewDigitActionFor,
     resolveReviewDigitAction,
     reviewSessionsNeedingArm,
     startItemReview,
@@ -158,13 +159,30 @@ forcedToNormalBy :: Bool -> ReviewSession -> ReviewSession
 forcedToNormalBy False session = session
 forcedToNormalBy True session = setSessionMode SessionNormal session
 
+-- | The action a digit press means for one review session, if the map still
+-- holds it: the whole decision 'chooseReviewOption' carries out, mode
+-- included.
+--
+-- Pulled out for the reason 'resolveReviewDigitAction' already was, and
+-- extended to cover the mode because that is where the two could disagree.
+-- The mode is 'reviewSessionMode', never the stored field: a session can
+-- settle into a phase with no reader while its own mode still says insert and
+-- a pending interaction is still on it -- 'ReviewClientStopped' marks a
+-- session 'ReviewFailed' without clearing the interaction. The decoder reads
+-- such a session as normal, so taking the raw field here would answer the
+-- same press differently and type the digit into a draft that can never be
+-- sent.
+reviewDigitActionFor :: Maybe ReviewSession -> Int -> ReviewDigitAction
+reviewDigitActionFor session choiceIndex =
+  resolveReviewDigitAction
+    (maybe SessionNormal reviewSessionMode session)
+    (session >>= (.sessionDetail.reviewSessionPending))
+    choiceIndex
+
 chooseReviewOption :: Int -> Int -> EventM Name AppState ()
 chooseReviewOption issueNumber choiceIndex = do
   state <- get
-  let session = Map.lookup issueNumber state.appReviewSessions
-      pending = session >>= (.sessionDetail.reviewSessionPending)
-      mode = maybe SessionNormal (.sessionMode) session
-  case resolveReviewDigitAction mode pending choiceIndex of
+  case reviewDigitActionFor (Map.lookup issueNumber state.appReviewSessions) choiceIndex of
     ReviewDigitAppend -> modifyReviewSession issueNumber (insertSessionInput (toEnum (fromEnum '1' + choiceIndex)))
     ReviewDigitIgnored -> pure ()
     ReviewDigitSelectChoice requestId choice -> submitQuestionAnswer issueNumber requestId (ReviewAnswer [choice.reviewChoiceId] Nothing) choice.reviewChoiceLabel

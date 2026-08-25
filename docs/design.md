@@ -324,17 +324,24 @@ not the send is accepted. The arrows scroll in both modes, and `Tab`,
 `Esc` stages rather than chains: insert to normal, normal to hidden, and never
 on to the dashboard's guarded quit.
 
-Insert mode stays reachable while an agent is working, so a steer can be
-drafted mid-turn. A numbered-choice question or any approval request forces its
-own session — and only its own — back to normal so the digits answer it,
-leaving that session's draft and undelivered queue untouched; a free-text-only
-question leaves the mode alone. A session with nothing left to read what it
-types sits permanently in normal mode and treats `i` as a no-op: that is every
-terminal solve phase, every terminal review phase, and every canonical review
-stage in any phase, with one exception — an interrupted app-server revision
-stays resumable and so keeps its input. `Tab`, `q`, `Esc`, and every scroll key
-keep working on such a session. Each overlay shows the session's current mode
-as `[N]`, or `[I]` in green where color is enabled.
+A session with nothing left to read what it types sits permanently in normal
+mode and treats `i` as a no-op, whatever mode it was last left in. `Tab`, `q`,
+`Esc`, and every scroll key keep working on it, and it still shows `[N]`. A
+review session reads typed text throughout its turn, so insert mode stays
+reachable while the agent is working and a steer drafted mid-turn queues rather
+than being lost; it stops reading once the stage settles, and a canonical stage
+— which runs the gate as a subprocess and holds no app-server thread — never
+reads it in any phase. The one exception is an interrupted app-server revision,
+which stays resumable and so keeps its input. A solve or PR session reads typed
+text only while it is waiting for input, which is also the only phase that
+draws its draft line; there is no queue behind those two to hold a mid-turn
+draft.
+
+A numbered-choice question or any approval request forces its own session — and
+only its own — back to normal so the digits answer it, leaving that session's
+draft and undelivered queue untouched; a free-text-only question leaves the
+mode alone. Each overlay shows the session's current mode as `[N]`, or `[I]` in
+green where color is enabled.
 
 Mouse interaction is intentionally complete but narrow:
 

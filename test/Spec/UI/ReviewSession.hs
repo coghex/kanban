@@ -25,7 +25,8 @@ import Kanban.UI.Reconcile (reconcileReviewSessions)
 import Kanban.UI.Review
   (
     forcedToNormalBy,
-    numberedChoicePrompt, ReviewCancelAction (..),
+    numberedChoicePrompt,
+    reviewDigitActionFor, ReviewCancelAction (..),
     ReviewDigitAction (..),
     canonicalReviewCompletionSuperseded,
     epicReviewRefusalNotice,
@@ -49,14 +50,17 @@ import Kanban.UI.Session
     selectedReviewTarget,
   )
 import Kanban.UI.SessionCore
-  ( SessionTickArm (..),
+  ( SessionFocus (..),
+    SessionInputEvent (..),
+    SessionTickArm (..),
     SessionTickFire (..),
     decideSessionTickArm,
     decideSessionTickFire,
     newAgentSession,
+    sessionInputEvent,
     transcriptScrollKey,
   )
-import Kanban.UI.SessionEvents (reviewTickEligible)
+import Kanban.UI.SessionEvents (SessionOps (..), reviewSessionOps, reviewTickEligible)
 import Kanban.UI.Theme (reviewPhaseAttribute, revisedAttr)
 import Kanban.UI.Transcript
   ( TranscriptEnd (..),
@@ -87,6 +91,7 @@ import Kanban.UI.Types
   )
 import Kanban.Worker (WorkerId (..))
 import Spec.Support.App (testAppState, testReviewSession)
+import Kanban.UI.Session (reviewSessionMode)
 import Spec.Support.Fixtures
   ( baseIssue,
     basePullRequest,
@@ -171,6 +176,65 @@ spec = do
 
     it "appends digits when nothing is pending" $
       resolveReviewDigitAction SessionInsert Nothing 4 `shouldBe` ReviewDigitAppend
+
+  describe "the mode the digit path reads" $ do
+    -- PR #523 round 1: 'chooseReviewOption' read the stored 'sessionMode'
+    -- while the decoder read the derived one, so the two could answer the
+    -- same press differently. 'ReviewClientStopped' settles a session to
+    -- 'ReviewFailed' without clearing a pending interaction, and a free-text
+    -- question leaves the session in insert -- so a digit pressed on the
+    -- result decoded as a normal-mode choice and was then typed into a draft
+    -- that can never be sent.
+    let settledMidQuestion =
+          withSessionDetail
+            ( \detail ->
+                detail
+                  { reviewSessionStage = IssueRevision,
+                    reviewSessionPending =
+                      Just
+                        ( PendingReviewQuestion
+                            (ReviewRequestId "req-1")
+                            ReviewQuestion
+                              { reviewQuestionId = "scope",
+                                reviewQuestionHeader = "SCOPE",
+                                reviewQuestionText = "Which contract?",
+                                reviewQuestionKind = QuestionText,
+                                reviewQuestionChoices = [],
+                                reviewQuestionAllowOther = True,
+                                reviewQuestionMultiple = False
+                              }
+                        )
+                  }
+            )
+            (testReviewSession (baseIssue 7 []) ReviewFailed) {sessionMode = SessionInsert}
+
+    it "derives it from the session's liveness, not from the stored field" $ do
+      settledMidQuestion.sessionMode `shouldBe` SessionInsert
+      reviewSessionMode settledMidQuestion `shouldBe` SessionNormal
+
+    it "types nothing when a settled session's stale insert mode meets a digit" $ do
+      -- Asked of the whole call-site decision, not of the resolver alone: the
+      -- bug was that this step read the stored field, so a test that passed
+      -- the derived mode in by hand could not see it. Reading
+      -- `settledMidQuestion.sessionMode` here instead returns
+      -- ReviewDigitAppend, and only this input distinguishes the two.
+      reviewDigitActionFor (Just settledMidQuestion) 0 `shouldBe` ReviewDigitIgnored
+      -- And the decoder agrees the press is a normal-mode choice, which is
+      -- the disagreement itself.
+      sessionInputEvent
+        (SessionFocus reviewSessionOps.sessionOpsCaps settledMidQuestion.sessionMode False)
+        (Vty.EvKey (Vty.KChar '1') [])
+        `shouldBe` Just (SessionInputChoice 0)
+
+    it "still answers a live session's own insert mode as insert" $ do
+      -- The derivation must not simply pin every session to normal: a
+      -- revision still reading text keeps whichever mode it is in.
+      let live = settledMidQuestion {sessionPhase = ReviewRunning}
+      reviewSessionMode live `shouldBe` SessionInsert
+      reviewDigitActionFor (Just live) 0 `shouldBe` ReviewDigitAppend
+
+    it "reads a session the map no longer holds as normal" $
+      reviewDigitActionFor Nothing 0 `shouldBe` ReviewDigitIgnored
 
   describe "a prompt whose answer is a digit" $ do
     -- issue #515 requirement 10: the agent presenting a numbered choice puts

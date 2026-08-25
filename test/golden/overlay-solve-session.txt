@@ -33,7 +33,7 @@
 ║┃                          ┃┃  │ #756 Define the persis┃                                                                                      ┃            ┃  │ updated 3h ago                     │ ┃║
 ║┃                          ┃┃  │ contract              ┃                                                                                      ┃            ┃  │ Reads the cache through the        │ ┃║
 ║┃                          ┃┃  │  architecture         ┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃            ┃  │ versioned envelope and reports a   │ ┃║
-║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ unassigned · updated 4┃ Esc/q hide  i insert  Tab next session  Ctrl-C interrupt  j/k g/G Ctrl-D/U scroll    ┃            ┃  │ truncated payload.                 │ ┃║
+║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ unassigned · updated 4┃ Esc/q hide  Tab next session  Ctrl-C interrupt  j/k g/G Ctrl-D/U scroll              ┃            ┃  │ truncated payload.                 │ ┃║
 ║┃ ┃ approve_issues.py ┃    ┃┃  │ Document root owners, ┃                                                                                      ┃            ┃  │ ◐ CI 9/12 · behind                 │ ┃║
 ║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ barriers, and the vers┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛            ┃  ╰────────────────────────────────────╯ ┃║
 ║┃ off                      ┃┃  │ envelope before implementation…     │ ┃                                         ┃                                         ┃                                         ┃║

@@ -449,7 +449,7 @@ drawSolve state issueNumber = case Map.lookup issueNumber state.appSolveSessions
     let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.sessionTranscript
      in
     vBox
-      [ drawSessionMode (solveSessionInputLive session.sessionPhase) session.sessionMode
+      [ drawSessionMode (solveSessionMode session)
           <+> txt "  "
           <+> drawSessionTabs solveSessionAttribute (solvePhaseGlyph state) issueNumber state.appSolveSessions,
         withAttr (solveSessionAttribute session) (txt (solvePhaseLabel state.appModelRoster session)),
@@ -510,7 +510,7 @@ drawPullRequestReview state number = case Map.lookup number state.appPullRequest
     let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.sessionTranscript
      in
     vBox
-      [ drawSessionMode (solveSessionInputLive session.sessionPhase) session.sessionMode
+      [ drawSessionMode (solveSessionMode session)
           <+> txt "  "
           <+> drawSessionTabs pullRequestSessionAttribute (pullRequestPhaseGlyph state) number state.appPullRequestReviewSessions,
         withAttr (pullRequestSessionAttribute session) (txt (pullRequestPhaseLabel session)),
@@ -545,7 +545,7 @@ drawReview state issueNumber = case Map.lookup issueNumber state.appReviewSessio
     let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.sessionTranscript
      in
     vBox
-      [ drawSessionMode (reviewInputLive session) session.sessionMode
+      [ drawSessionMode (reviewSessionMode session)
           <+> txt "  "
           <+> drawSessionTabs (reviewPhaseAttribute . (.sessionPhase)) (reviewPhaseGlyph state) issueNumber state.appReviewSessions,
         txt "",
@@ -566,12 +566,12 @@ drawReview state issueNumber = case Map.lookup issueNumber state.appReviewSessio
       ]
 
 -- | The mode badge every session overlay carries for the session it is
--- showing (issue #515). Drawn from the /effective/ mode, so a session with
--- nothing left to read what it types shows @[N]@ whatever its stored mode
--- holds -- the same derivation the key decoder uses, rather than a second
--- opinion about it.
-drawSessionMode :: Bool -> SessionMode -> Widget Name
-drawSessionMode liveInput mode = case liveSessionMode liveInput mode of
+-- showing (issue #515). Its argument comes from 'solveSessionMode' or
+-- 'reviewSessionMode', so a session with nothing left to read what it types
+-- shows @[N]@ whatever its stored mode holds -- the same derivation the key
+-- decoder and the digit path use, rather than a third opinion about it.
+drawSessionMode :: SessionMode -> Widget Name
+drawSessionMode = \case
   SessionNormal -> withAttr dimAttr (txt "[N]")
   SessionInsert -> withAttr insertModeAttr (txt "[I]")
 

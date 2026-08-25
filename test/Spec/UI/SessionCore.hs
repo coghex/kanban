@@ -30,6 +30,7 @@ import Kanban.UI.SessionCore
     insertSessionInput,
     liveSessionMode,
     nextSessionKey,
+    noSessionInputCaps,
     removeSessionInputCharacter,
     sessionHalfPage,
     sessionInputEvent,
@@ -37,7 +38,7 @@ import Kanban.UI.SessionCore
     sessionModeAfter,
     setSessionMode,
   )
-import Kanban.UI.Session (reviewSessionInputLive, solveSessionInputLive)
+import Kanban.UI.Session (reviewSessionInputLive, solveSessionInputLive, solveSessionMode)
 import Kanban.UI.SessionEvents
   ( SessionOps (..),
     pullRequestSessionOps,
@@ -317,11 +318,26 @@ spec = do
   describe "which sessions still read what they type" $ do
     -- The phase and stage halves of issue #515 requirement 12, asked of the
     -- predicates the overlays and the decoder both consult.
-    it "keeps a solve or PR session's input until its workflow resolves" $ do
-      map solveSessionInputLive [SolveStarting, SolveRunning, SolveInterrupting, SolveAttention]
-        `shouldBe` replicate 4 True
+    it "gives a solve or PR session input only while it waits for it" $ do
+      -- 'submitSolveInput' refuses every other phase and 'drawSolveInput'
+      -- draws the line in this one alone, so insert mode anywhere else would
+      -- edit a draft that is neither visible nor sendable. Unlike review,
+      -- there is no undelivered queue behind these two to hold a mid-turn
+      -- draft (PR #523 round 1).
+      solveSessionInputLive SolveAttention `shouldBe` True
+      map solveSessionInputLive [SolveStarting, SolveRunning, SolveInterrupting]
+        `shouldBe` replicate 3 False
       map solveSessionInputLive [SolveFinished, SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
         `shouldBe` replicate 4 False
+
+    it "pins a working solve session to normal mode whatever its stored mode" $ do
+      -- The derived answer, which is what the overlay draws and the decoder
+      -- reads; the stored field is never consulted on its own.
+      let working = (testSolveSession (baseIssue 1 []) SolveRunning) {sessionMode = SessionInsert}
+      solveSessionMode working `shouldBe` SessionNormal
+      solveSessionMode working {sessionPhase = SolveAttention} `shouldBe` SessionInsert
+      sessionInputEvent (SessionFocus noSessionInputCaps working.sessionMode (solveSessionInputLive working.sessionPhase)) (Vty.EvKey (Vty.KChar 'i') [])
+        `shouldBe` Nothing
 
     it "gives a canonical review stage no input in any phase" $
       -- It runs approve_issues.py as a subprocess and carries no app-server
@@ -576,8 +592,8 @@ spec = do
       -- The badge is per session, so cycling to a session left in insert has
       -- to bring that session's mode with it (issue #515 requirement 2).
       state <-
-        withSolveSession (baseIssue 7 []) SolveRunning
-          . withSolveSession (baseIssue 12 []) SolveRunning
+        withSolveSession (baseIssue 7 []) SolveAttention
+          . withSolveSession (baseIssue 12 []) SolveAttention
           <$> testAppState emptyBoard
       let inserted =
             state
@@ -587,18 +603,30 @@ spec = do
       filter (Text.isInfixOf "[I]") (overlayRows inserted (SolveOverlay 7)) `shouldBe` []
       filter (Text.isInfixOf "[I]") (overlayRows inserted (SolveOverlay 12)) `shouldNotBe` []
 
-    it "pins a settled session to the normal badge whatever its stored mode" $ do
+    it "pins a session with no reader to the normal badge whatever its stored mode" $ do
       -- Requirement 12: such a session sits permanently in normal mode, so a
-      -- mode left behind by a phase that has since resolved cannot show.
+      -- mode left behind by a phase that has since moved on cannot show. Both
+      -- shapes: a resolved workflow, and one still running with no draft line
+      -- and no submit path (PR #523 round 1).
       state <-
         withSolveSession (baseIssue 7 []) SolveFinished
+          <$> testAppState emptyBoard
+      running <-
+        withSolveSession (baseIssue 9 []) SolveRunning
           <$> testAppState emptyBoard
       let stranded =
             state
               { appSolveSessions = Map.adjust (setSessionMode SessionInsert) 7 state.appSolveSessions
               }
           rows = overlayRows stranded (SolveOverlay 7)
+          workingRows =
+            overlayRows
+              running {appSolveSessions = Map.adjust (setSessionMode SessionInsert) 9 running.appSolveSessions}
+              (SolveOverlay 9)
       filter (Text.isInfixOf "[N]") rows `shouldNotBe` []
       filter (Text.isInfixOf "[I]") rows `shouldBe` []
-      -- And the hint drops the i it cannot honour.
+      filter (Text.isInfixOf "[N]") workingRows `shouldNotBe` []
+      filter (Text.isInfixOf "[I]") workingRows `shouldBe` []
+      -- And the hint drops the i neither of them can honour.
       filter (Text.isInfixOf "i insert") rows `shouldBe` []
+      filter (Text.isInfixOf "i insert") workingRows `shouldBe` []
