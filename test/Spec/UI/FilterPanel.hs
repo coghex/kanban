@@ -95,7 +95,7 @@ panelState = do
         appCompletedStatus = CompletedHistoryCurrent
       }
 
--- | The same board with the panel showing and focused, as @f@ leaves it.
+-- | The same board with the panel showing and focused, as @F@ leaves it.
 shownPanel :: IO AppState
 shownPanel = toggleFilterPanel <$> panelState
 
@@ -434,9 +434,9 @@ compositionSpec = describe "composing with the column search" $ do
     focusedFilterPanel both `shouldNotBe` Nothing
     focusedSearch both `shouldBe` Nothing
 
-  -- §7: `s` from the panel focuses search, and lowercase `f` from search
+  -- §7: `s` from the panel focuses search, and uppercase `F` from search
   -- focuses the panel without clearing the query.
-  it "hands the keyboard to search on s and takes it back on f" $ do
+  it "hands the keyboard to search on s and takes it back on F" $ do
     shown <- shownPanel
     let searching = press (key 's') shown
         typed = applySearchInput (SearchInsert 'x') searching
