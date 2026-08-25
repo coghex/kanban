@@ -23,7 +23,7 @@ concrete precondition
 - [x] VEND-3. Vendor backlog-review — [#430]
 - [x] VEND-4. Vendor project-review — [#462]
 - [x] VEND-5. Vendor drain-prs — [#511]
-- [ ] VEND-6. Vendor janitor
+- [ ] VEND-6. Vendor janitor — [deferred]: reconciliation winner, the census and references assets, and the Codex copy's personal-path couplings undecided
 - [ ] VEND-7. Vendor finalize
 - [ ] VEND-8. Vendor autosolve
 
@@ -485,6 +485,25 @@ Arc-level signals:
 - **Open questions:** `None`
 
 ### VEND-6. Vendor janitor
+
+> **Deferred:** The Codex copy was rewritten hours after this design last synced
+> to it on 2026-08-20, and the recorded 23/25/8 divergence no longer describes
+> it. Its `SKILL.md` is 134 lines against Claude's 23, with 143 differing lines,
+> and it gained three untracked siblings totalling 730 lines —
+> `scripts/census.py`, `references/recovery-state.md`, and
+> `references/worktree-content.md`. The two are no longer two spellings of one
+> audit but two architectures: ten prose categories an agent walks by hand,
+> against a helper emitting a `janitor-census/v1` snapshot and a per-repository
+> retention ledger at `janitor-retain.json`. This slice's acceptance signal
+> describes only the Claude model, as VEND-4's did before D-9. `census.py` also
+> breaks the arc's genericity premise, hardcoding
+> `~/Library/Application Support/kanban/pr-drainer/drain_prs_service.py` rather
+> than the one Python resolution point, and depending on
+> `~/.codex/skills/test/scripts/test_coordinator.py`, a personal skill this arc
+> does not vendor. Clears when `/design-epic` records a decision for each: which
+> architecture survives, whether `census.py` and the two references ship and
+> through which lane given D-10, where the retention ledger's state lives, and
+> what becomes of the two personal-path couplings.
 
 - **Outcome:** `kanban:janitor` ships in both bundles; personal copies retire.
 - **Scope:** reconcile 8 differing lines; re-point its `/drain-prs` reference;
