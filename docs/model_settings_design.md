@@ -28,7 +28,7 @@ concrete precondition
 - [x] MODEL-5. Extend the settings screen to edit role assignments — [#484]
 - [x] MODEL-8. Derive the operating mode from the loaded provider set — [#486]
 - [x] MODEL-9. Implement no-agent mode: board-only UI and spawn refusal — [#521]
-- [ ] MODEL-12. Extract the provider adapter interface behind the agent flows
+- [x] MODEL-12. Extract the provider adapter interface behind the agent flows — [#522]
 - [ ] MODEL-13. Implement the Claude embedded-review backend
 - [ ] MODEL-10. Implement single-agent review routing in the Haskell flows
 - [ ] MODEL-11. Make the Python gates and plugin reviews single-agent aware
