@@ -14,6 +14,7 @@ module Kanban.UI.Theme
     footerAttr,
     headingAttr,
     innerBorderStyle,
+    insertModeAttr,
     itemHasAmberWarning,
     labelApprovalAttr,
     labelAttribute,
@@ -263,7 +264,8 @@ themeFor options
           (issuesAttr, foreground Vty.brightWhite),
           (activeAttr, foreground Vty.brightBlue),
           (reviewingAttr, foreground Vty.yellow),
-          (doneAttr, foreground Vty.brightGreen)
+          (doneAttr, foreground Vty.brightGreen),
+          (insertModeAttr, foreground Vty.brightGreen `Vty.withStyle` Vty.bold)
         ]
   where
     foreground = Vty.withForeColor Vty.defAttr
@@ -302,6 +304,7 @@ titleAttr, headingAttr, providerAttr, footerAttr, noticeAttr, dimAttr :: AttrNam
 neutralAttr, selectedAttr, approvedAttr, approvedInteriorAttr, pendingAttr, attentionAttr, readyAttr, problemAttr :: AttrName
 trackerAttr :: AttrName
 revisedAttr :: AttrName
+insertModeAttr :: AttrName
 cardTitleAttr, selectedTitleAttr, linkAttr, labelDefaultAttr, labelApprovalAttr, labelProblemAttr, labelUiAttr :: AttrName
 issuesAttr, activeAttr, reviewingAttr, doneAttr :: AttrName
 titleAttr = attrName "title"
@@ -320,6 +323,11 @@ readyAttr = attrName "status.ready"
 problemAttr = attrName "status.problem"
 trackerAttr = attrName "tracker"
 revisedAttr = attrName "status.revised"
+-- | The @[I]@ badge a session overlay draws while its focused session is in
+-- insert mode, and nothing else. Its own name rather than a borrowed status
+-- colour, so 'themeFor' can drop it to the default under @--color never@
+-- alongside every other attribute (issue #515).
+insertModeAttr = attrName "session.insert"
 cardTitleAttr = attrName "card.title"
 selectedTitleAttr = attrName "card.title.selected"
 linkAttr = attrName "link"
@@ -350,6 +358,7 @@ allAttributeNames =
     problemAttr,
     trackerAttr,
     revisedAttr,
+    insertModeAttr,
     cardTitleAttr,
     selectedTitleAttr,
     linkAttr,

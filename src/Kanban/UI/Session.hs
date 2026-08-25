@@ -24,6 +24,7 @@ module Kanban.UI.Session
     reviewIncidentPhase,
     reviewOverlayVisible,
     reviewSessionActive,
+    reviewSessionInputLive,
     reviewSessionLive,
     reviewSessionReusable,
     reviewTurnInterruptible,
@@ -33,6 +34,7 @@ module Kanban.UI.Session
     sessionAlreadyResolved,
     solveIncidentPhase,
     solvePhaseActive,
+    solveSessionInputLive,
     solveProcessStatus,
     solveWorkerFor,
   )
@@ -680,6 +682,38 @@ isResolvedSolvePhase phase = phase `elem` [SolveFinished, SolveFailedPhase, Solv
 -- byte-identical functions, so one polymorphic definition serves both.
 sessionAlreadyResolved :: Int -> Map Int (AgentSession SolvePhase detail) -> Bool
 sessionAlreadyResolved key sessions = maybe False (isResolvedSolvePhase . (.sessionPhase)) (Map.lookup key sessions)
+
+-- | Whether a solve or pull-request session still has something behind it to
+-- read text typed into its draft (issue #515). This is what pins a session to
+-- normal mode and makes @i@ a no-op on it, and it is exactly
+-- 'isResolvedSolvePhase' read from the other side: once a workflow has
+-- finished, failed, been killed, or orphaned its children, 'submitSolveInput'
+-- has nothing to resume and the draft is unreachable. Every other phase keeps
+-- its input, including while the agent is working, so a steer can be drafted
+-- mid-turn.
+solveSessionInputLive :: SolvePhase -> Bool
+solveSessionInputLive = not . isResolvedSolvePhase
+
+-- | The same question for a review session, which takes /two/ answers rather
+-- than one because its stage decides as much as its phase.
+--
+-- A canonical stage never reads typed text at all: it runs
+-- @approve_issues.py@ as a subprocess and has no app-server thread, so it
+-- carries no thread id for 'sendReviewFeedback' to send on and can never be
+-- handed a question or an approval. Ctrl-C kills its process and only a fresh
+-- @r@ starts another.
+--
+-- An app-server revision reads text until it settles — with one exception
+-- that is the whole reason this is not just a terminal-phase list.
+-- 'reviewSessionReusable' deliberately keeps an interrupted revision
+-- resumable, and §7 promises guidance after an interrupt, so
+-- 'ReviewInterrupted' is terminal for a canonical stage and merely paused for
+-- a revision.
+reviewSessionInputLive :: ReviewStage -> ReviewPhase -> Bool
+reviewSessionInputLive stage phase
+  | stage /= IssueRevision = False
+  | phase == ReviewInterrupted = True
+  | otherwise = phase `notElem` [ReviewFinished, ReviewNeedsChanges, ReviewFailed, ReviewRevised]
 
 reviewPhaseActive :: ReviewPhase -> Bool
 reviewPhaseActive phase = phase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting]

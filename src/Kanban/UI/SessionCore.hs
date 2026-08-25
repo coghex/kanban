@@ -15,6 +15,7 @@
 -- what submitting, interrupting, or resuming actually does.
 module Kanban.UI.SessionCore
   ( PhaseGlyph (..),
+    SessionFocus (..),
     SessionInputCaps (..),
     SessionInputEvent (..),
     SessionTickArm (..),
@@ -25,17 +26,21 @@ module Kanban.UI.SessionCore
     decideSessionTickArm,
     decideSessionTickFire,
     insertSessionInput,
+    liveSessionMode,
     newAgentSession,
     nextSessionKey,
     noSessionInputCaps,
     priorTickGeneration,
     removeSessionInputCharacter,
     renderPhaseGlyph,
+    sessionHalfPage,
     sessionInputEvent,
     sessionInputHelp,
     sessionInputLimit,
+    sessionModeAfter,
     sessionsNeedingArm,
     setSessionActivity,
+    setSessionMode,
     spinnerGlyph,
     transcriptScrollKey,
   )
@@ -78,6 +83,7 @@ newAgentSession priorGeneration phase activity startedAt transcript detail =
       sessionLogPath = Nothing,
       sessionTranscript = transcript,
       sessionInput = "",
+      sessionMode = SessionNormal,
       sessionSpinnerFrame = 0,
       sessionTickGeneration = priorGeneration + 1,
       sessionTickArmed = False,
@@ -123,6 +129,14 @@ insertSessionInput character session =
 
 removeSessionInputCharacter :: AgentSession phase detail -> AgentSession phase detail
 removeSessionInputCharacter session = session {sessionInput = Text.dropEnd 1 session.sessionInput}
+
+-- | Move one session between modes, leaving its draft, transcript, and
+-- undelivered queue exactly where they are. Every mode change goes through
+-- here -- the key presses that stage 'SessionInsert' and 'SessionNormal', and
+-- the numbered-choice prompt that forces a session back to normal -- so no
+-- call site has to remember that switching modes is /only/ a mode change.
+setSessionMode :: SessionMode -> AgentSession phase detail -> AgentSession phase detail
+setSessionMode mode session = session {sessionMode = mode}
 
 -- | How one phase renders as a badge: the running spinner, or a fixed pair
 -- of glyphs, unicode first and its ASCII-mode substitute second. Keeping the
@@ -225,11 +239,23 @@ nextSessionKey current keys = do
 -- and in what carrying the action out means.
 data SessionInputEvent
   = SessionInputScroll Int
+  | -- | @g@ and @G@: the whole transcript, not a relative amount, so follow
+    -- state is re-derived from the end the view actually lands on rather
+    -- than from a guess at how far away it was.
+    SessionInputScrollTop
+  | SessionInputScrollBottom
   | SessionInputBackspace
   | SessionInputInsert Char
   | SessionInputSubmit
   | SessionInputCycle
   | SessionInputInterrupt
+  | -- | @i@: start editing the draft.
+    SessionInputEnterInsert
+  | -- | @Esc@ from insert: stop editing, keeping the draft.
+    SessionInputLeaveInsert
+  | -- | @q@ or @Esc@ from normal: hide the overlay. Never the application's
+    -- own quit, which is what the board's @q@ still means.
+    SessionInputClose
   | -- | A digit key resolved to a 0-based choice index, for a kind that
     -- offers numbered choices at all.
     SessionInputChoice Int
@@ -237,9 +263,7 @@ data SessionInputEvent
 
 -- | Which of the optional bindings a kind adds to the shared table.
 data SessionInputCaps = SessionInputCaps
-  { -- | Ctrl-J / Ctrl-K as extra transcript scrolling.
-    sessionCapsScrollChords :: Bool,
-    -- | @1@..@9@ answer a pending numbered question or approval instead of
+  { -- | @1@..@9@ answer a pending numbered question or approval instead of
     -- typing a digit.
     sessionCapsChoiceDigits :: Bool,
     -- | Ctrl-X as a second interrupt binding beside Ctrl-C.
@@ -248,14 +272,45 @@ data SessionInputCaps = SessionInputCaps
   deriving stock (Eq, Show)
 
 noSessionInputCaps :: SessionInputCaps
-noSessionInputCaps = SessionInputCaps False False False
+noSessionInputCaps = SessionInputCaps False False
 
--- | The help overlay's rows for the two bindings above that §7 lists. They
--- live here, beside 'sessionInputEvent', because that is where the keys
--- themselves are decided: the overlay renders these rather than keeping a
--- second copy of the same facts. The rest of the shared table — backspace,
--- the arrows, printable characters, and the capability-gated chords — is
--- ordinary text entry that §7 does not enumerate.
+-- | Everything the shared decoder needs to know about the one session a key
+-- press is landing on. The caps are the kind's, the other two are the
+-- session's own, which is what makes the mode travel with the session rather
+-- than with the overlay showing it.
+data SessionFocus = SessionFocus
+  { sessionFocusCaps :: SessionInputCaps,
+    sessionFocusMode :: SessionMode,
+    -- | Whether anything is still left to read text typed into this session.
+    -- False for every phase and stage with no reader behind it, which is what
+    -- pins such a session to normal mode and makes @i@ a no-op on it.
+    sessionFocusLiveInput :: Bool
+  }
+  deriving stock (Eq, Show)
+
+-- | The mode a session actually behaves and draws in, which is its own mode
+-- only while something is still there to read what it types. Deriving it
+-- rather than trusting the stored field is what keeps a phase settling
+-- underneath an insert-mode session from stranding it: the transition that
+-- ends the session's input does not have to remember to reset a mode, and a
+-- session it forgot could otherwise swallow @q@, @j@, and @k@ forever.
+liveSessionMode :: Bool -> SessionMode -> SessionMode
+liveSessionMode True mode = mode
+liveSessionMode False _ = SessionNormal
+
+-- | How far Ctrl-D and Ctrl-U move a transcript. Vim's half page is half the
+-- window; a session transcript's viewport is a fixed 17-19 rows inside the
+-- overlay, so one constant covers all three kinds.
+sessionHalfPage :: Int
+sessionHalfPage = 16
+
+-- | The help overlay's rows for the bindings above that §7 lists. They live
+-- here, beside 'sessionInputEvent', because that is where the keys themselves
+-- are decided: the overlay renders these rather than keeping a second copy of
+-- the same facts. What is deliberately /not/ here is the rest of insert mode
+-- — backspace, the arrows, printable characters, and the capability-gated
+-- chords — which is ordinary text entry that §7 does not enumerate.
+--
 -- Ctrl-C is not the single promise its old help row made. A resumable
 -- session takes guidance afterwards, but a canonical review stage's process
 -- is killed outright and lands in an interrupted terminal state that only a
@@ -273,31 +328,122 @@ sessionInputHelp =
       [chord (Vty.KChar 'c') [Vty.MCtrl]]
       Nothing
       "interrupt agent turn; guidance resumes it, r restarts canonical review"
-      (Just "Interrupt the current turn in an open live-agent overlay — a resumable session then accepts user guidance; a canonical review stage's process is killed instead, landing the session in its interrupted terminal state, and restarts fresh via `r`")
+      (Just "Interrupt the current turn in an open live-agent overlay — a resumable session then accepts user guidance; a canonical review stage's process is killed instead, landing the session in its interrupted terminal state, and restarts fresh via `r`"),
+    HelpEntry
+      [chord (Vty.KChar 'i') []]
+      Nothing
+      "session overlay: type into the draft (insert mode)"
+      (Just "In an open live-agent overlay, put the focused session into insert mode, where printable keys and Backspace edit its draft; a no-op on a session with nothing left to read what it types"),
+    HelpEntry
+      [chord (Vty.KChar 'j') [], chord (Vty.KChar 'k') []]
+      Nothing
+      "session overlay normal mode: scroll transcript one line"
+      (Just "In an open live-agent overlay's normal mode, scroll the focused session's transcript down or up one line"),
+    HelpEntry
+      [chord (Vty.KChar 'g') [], chord (Vty.KChar 'G') []]
+      Nothing
+      "session overlay normal mode: transcript beginning / live tail"
+      (Just "In an open live-agent overlay's normal mode, jump the focused session's transcript to its beginning or back to its live tail"),
+    HelpEntry
+      [chord (Vty.KChar 'd') [Vty.MCtrl], chord (Vty.KChar 'u') [Vty.MCtrl]]
+      Nothing
+      "session overlay normal mode: scroll transcript sixteen lines"
+      (Just "In an open live-agent overlay's normal mode, scroll the focused session's transcript down or up sixteen lines"),
+    HelpEntry
+      [chord (Vty.KChar 'q') []]
+      Nothing
+      "session overlay normal mode: hide the overlay"
+      (Just "In an open live-agent overlay's normal mode, hide the overlay without interrupting its work and without quitting the dashboard")
   ]
 
-sessionInputEvent :: SessionInputCaps -> Vty.Event -> Maybe SessionInputEvent
-sessionInputEvent caps event = case event of
+-- | What one key press means in an open session overlay.
+--
+-- The table is modal (docs\/design.md section 7). A few bindings are outside
+-- the modes entirely because they are about the /session/ rather than about
+-- its draft: @Tab@, the interrupt chords, @Esc@, and @Enter@. Everything else
+-- splits — in insert a printable character is text, in normal it is a
+-- command.
+sessionInputEvent :: SessionFocus -> Vty.Event -> Maybe SessionInputEvent
+sessionInputEvent focus event = case event of
   Vty.EvKey (Vty.KChar '\t') [] -> Just SessionInputCycle
   Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl] -> Just SessionInputInterrupt
   Vty.EvKey (Vty.KChar 'x') [Vty.MCtrl]
     | caps.sessionCapsCancelChord -> Just SessionInputInterrupt
-  Vty.EvKey Vty.KBS [] -> Just SessionInputBackspace
-  Vty.EvKey Vty.KEnter [] -> Just SessionInputSubmit
-  Vty.EvKey (Vty.KChar character) []
-    | caps.sessionCapsChoiceDigits, character >= '1', character <= '9' ->
-        Just (SessionInputChoice (fromEnum character - fromEnum '1'))
-    | isPrint character -> Just (SessionInputInsert character)
-  _ -> SessionInputScroll <$> transcriptScrollKey caps.sessionCapsScrollChords event
+  -- Esc stages rather than chaining: it leaves insert, and from normal it
+  -- hides the overlay. It never reaches the application's guarded quit, which
+  -- is the board's own Esc and q.
+  Vty.EvKey Vty.KEsc []
+    | mode == SessionInsert -> Just SessionInputLeaveInsert
+    | otherwise -> Just SessionInputClose
+  -- Enter sends whatever the draft holds and drops the session back to
+  -- normal. Declined outright where nothing is left to read it, so a settled
+  -- session cannot take a follow-up.
+  Vty.EvKey Vty.KEnter []
+    | focus.sessionFocusLiveInput -> Just SessionInputSubmit
+  _ -> case mode of
+    SessionInsert -> insertModeEvent
+    SessionNormal -> normalModeEvent
+  where
+    caps = focus.sessionFocusCaps
+    mode = liveSessionMode focus.sessionFocusLiveInput focus.sessionFocusMode
 
--- | The relative transcript scroll a key press asks for, if any.
--- 'reviewChords' enables the review overlay's additional Ctrl-J/Ctrl-K
--- bindings, which the solve and PR overlays do not offer. Pure so every
--- binding that can change follow state is unit-testable without an
--- 'EventM' harness; the wheel equivalents come from 'overlayMouseAction'.
-transcriptScrollKey :: Bool -> Vty.Event -> Maybe Int
-transcriptScrollKey _ (Vty.EvKey Vty.KDown []) = Just 1
-transcriptScrollKey _ (Vty.EvKey Vty.KUp []) = Just (-1)
-transcriptScrollKey True (Vty.EvKey (Vty.KChar 'j') [Vty.MCtrl]) = Just 1
-transcriptScrollKey True (Vty.EvKey (Vty.KChar 'k') [Vty.MCtrl]) = Just (-1)
-transcriptScrollKey _ _ = Nothing
+    insertModeEvent = case event of
+      Vty.EvKey Vty.KBS [] -> Just SessionInputBackspace
+      Vty.EvKey (Vty.KChar character) []
+        | isPrint character -> Just (SessionInputInsert character)
+      _ -> SessionInputScroll <$> transcriptScrollKey event
+
+    normalModeEvent = case event of
+      Vty.EvKey (Vty.KChar 'i') []
+        | focus.sessionFocusLiveInput -> Just SessionInputEnterInsert
+      Vty.EvKey (Vty.KChar 'q') [] -> Just SessionInputClose
+      Vty.EvKey (Vty.KChar 'j') [] -> Just (SessionInputScroll 1)
+      Vty.EvKey (Vty.KChar 'k') [] -> Just (SessionInputScroll (-1))
+      Vty.EvKey (Vty.KChar 'd') [Vty.MCtrl] -> Just (SessionInputScroll sessionHalfPage)
+      Vty.EvKey (Vty.KChar 'u') [Vty.MCtrl] -> Just (SessionInputScroll (-sessionHalfPage))
+      Vty.EvKey (Vty.KChar 'g') [] -> Just SessionInputScrollTop
+      Vty.EvKey (Vty.KChar 'G') [] -> Just SessionInputScrollBottom
+      Vty.EvKey (Vty.KChar character) []
+        | caps.sessionCapsChoiceDigits, character >= '1', character <= '9' ->
+            Just (SessionInputChoice (fromEnum character - fromEnum '1'))
+      _ -> SessionInputScroll <$> transcriptScrollKey event
+
+-- | The mode one decoded event leaves its session in.
+--
+-- Total over 'SessionInputEvent' on purpose: the mode is a projection of the
+-- whole table rather than a side effect remembered at three of its arms, so a
+-- binding added later cannot be given a behavior without its mode being
+-- decided in the same place. Only three arms move it — @i@ in, @Esc@ back
+-- out, and @Enter@, which §7 makes return to normal on the keypress whether
+-- or not the send that follows is accepted.
+--
+-- Nothing here touches the draft: leaving insert keeps what was typed, and
+-- what a refused submission does with the line is the submitting hook's own
+-- existing business.
+sessionModeAfter :: SessionInputEvent -> SessionMode -> SessionMode
+sessionModeAfter = \case
+  SessionInputEnterInsert -> const SessionInsert
+  SessionInputLeaveInsert -> const SessionNormal
+  SessionInputSubmit -> const SessionNormal
+  SessionInputScroll _ -> id
+  SessionInputScrollTop -> id
+  SessionInputScrollBottom -> id
+  SessionInputBackspace -> id
+  SessionInputInsert _ -> id
+  -- Tab moves which session is shown; each keeps the mode it was left in, so
+  -- the one being left behind keeps its own too.
+  SessionInputCycle -> id
+  SessionInputInterrupt -> id
+  SessionInputClose -> id
+  SessionInputChoice _ -> id
+
+-- | The relative transcript scroll a key press asks for, if any. The arrows
+-- alone: they scroll in both modes, because an arrow is not text in either.
+-- The review overlay's Ctrl-J\/Ctrl-K retired with the modes that replaced
+-- them — plain @j@ and @k@ do that job for every kind now (issue #515).
+-- Pure so every binding that can change follow state is unit-testable without
+-- an 'EventM' harness; the wheel equivalents come from 'overlayMouseAction'.
+transcriptScrollKey :: Vty.Event -> Maybe Int
+transcriptScrollKey (Vty.EvKey Vty.KDown []) = Just 1
+transcriptScrollKey (Vty.EvKey Vty.KUp []) = Just (-1)
+transcriptScrollKey _ = Nothing

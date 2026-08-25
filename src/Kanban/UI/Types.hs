@@ -32,6 +32,7 @@ module Kanban.UI.Types
     ReviewDetail (..),
     ReviewPhase (..),
     ReviewSession,
+    SessionMode (..),
     SolveDetail (..),
     SolvePhase (..),
     SolveSession,
@@ -200,6 +201,18 @@ data ChatTranscript = ChatTranscript
   }
   deriving stock (Eq, Show)
 
+-- | Which of a session overlay's two input modes the session is in.
+--
+-- Normal is where a plain letter is a command — scrolling the transcript,
+-- closing the overlay, entering insert — and insert is where it is text for
+-- the agent. The value is per /session/ rather than per overlay, so @Tab@
+-- shows the next session in whatever mode that session was left in, beside
+-- the draft the mode governs (docs\/design.md section 7).
+data SessionMode
+  = SessionNormal
+  | SessionInsert
+  deriving stock (Eq, Show)
+
 -- | One agent session, whatever kind of agent it runs.
 --
 -- Everything above 'sessionDetail' is the shared core the three kinds used to
@@ -221,6 +234,13 @@ data AgentSession phase detail = AgentSession
     sessionLogPath :: Maybe FilePath,
     sessionTranscript :: ChatTranscript,
     sessionInput :: Text,
+    -- | Whether a printable key edits 'sessionInput' or acts as a normal-mode
+    -- command. Every session opens in 'SessionNormal'. A session with nothing
+    -- left to read typed text behaves as normal whatever this holds, so a
+    -- phase settling underneath an insert-mode session cannot strand it in a
+    -- mode its overlay no longer honours -- see
+    -- 'Kanban.UI.SessionCore.liveSessionMode'.
+    sessionMode :: SessionMode,
     sessionSpinnerFrame :: Int,
     -- | Identifies the current tick chain. A fired tick only advances the
     -- frame and reschedules itself when it still carries this generation;

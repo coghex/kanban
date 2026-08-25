@@ -23,7 +23,9 @@ import Kanban.UI.Events (OverlayMouseAction (..), overlayMouseAction)
 import Kanban.UI.Overlay (reviewPhaseLabel)
 import Kanban.UI.Reconcile (reconcileReviewSessions)
 import Kanban.UI.Review
-  ( ReviewCancelAction (..),
+  (
+    forcedToNormalBy,
+    numberedChoicePrompt, ReviewCancelAction (..),
     ReviewDigitAction (..),
     canonicalReviewCompletionSuperseded,
     epicReviewRefusalNotice,
@@ -57,9 +59,11 @@ import Kanban.UI.SessionCore
 import Kanban.UI.SessionEvents (reviewTickEligible)
 import Kanban.UI.Theme (reviewPhaseAttribute, revisedAttr)
 import Kanban.UI.Transcript
-  ( TranscriptGeometry (..),
+  ( TranscriptEnd (..),
+    TranscriptGeometry (..),
     TranscriptSession (..),
     displayedTranscript,
+    followAfterJump,
     followAfterScroll,
     followAfterTurnStarted,
     transcriptShouldTail,
@@ -78,10 +82,11 @@ import Kanban.UI.Types
     ReviewDetail (..),
     ReviewPhase (..),
     ReviewSession,
+    SessionMode (..),
     withSessionDetail,
   )
 import Kanban.Worker (WorkerId (..))
-import Spec.Support.App (testAppState)
+import Spec.Support.App (testAppState, testReviewSession)
 import Spec.Support.Fixtures
   ( baseIssue,
     basePullRequest,
@@ -119,34 +124,105 @@ spec = do
             }
         approval = ReviewApproval Nothing Nothing False
 
+    -- Every case below is asked in both modes. The mode is not a filter over
+    -- the answers: a digit only ever picks a pending numbered choice, and in
+    -- normal mode -- the only mode the decoder routes a digit here from --
+    -- everything that used to fall through to typing is nothing at all
+    -- (issue #515 requirement 9).
     it "appends free-text digits instead of treating them as choice selections" $ do
       -- A QuestionText pending interaction must take precedence over any
       -- choices/allowOther it happens to carry (issue #3 spec addition).
-      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (textQuestion False))) 2 `shouldBe` ReviewDigitAppend
-      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (textQuestion True))) 8 `shouldBe` ReviewDigitAppend
+      resolveReviewDigitAction SessionInsert (Just (PendingReviewQuestion requestId (textQuestion False))) 2 `shouldBe` ReviewDigitAppend
+      resolveReviewDigitAction SessionInsert (Just (PendingReviewQuestion requestId (textQuestion True))) 8 `shouldBe` ReviewDigitAppend
+
+    it "types nothing for a normal-mode digit no numbered choice claims" $ do
+      -- The whole set that used to append: a free-text question, an
+      -- out-of-range digit a question would take as text, and no pending
+      -- interaction at all.
+      resolveReviewDigitAction SessionNormal (Just (PendingReviewQuestion requestId (textQuestion False))) 2 `shouldBe` ReviewDigitIgnored
+      resolveReviewDigitAction SessionNormal (Just (PendingReviewQuestion requestId (choiceQuestion True))) 5 `shouldBe` ReviewDigitIgnored
+      resolveReviewDigitAction SessionNormal Nothing 4 `shouldBe` ReviewDigitIgnored
 
     it "selects an in-range choice by its 1-based digit" $ do
-      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (choiceQuestion False))) 0
+      resolveReviewDigitAction SessionNormal (Just (PendingReviewQuestion requestId (choiceQuestion False))) 0
         `shouldBe` ReviewDigitSelectChoice requestId (ReviewChoice "keep" "Keep compatibility" "Preserve callers")
-      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (choiceQuestion False))) 1
+      resolveReviewDigitAction SessionNormal (Just (PendingReviewQuestion requestId (choiceQuestion False))) 1
         `shouldBe` ReviewDigitSelectChoice requestId (ReviewChoice "break" "Break compatibility" "")
 
     it "appends an out-of-range choice digit when free text is also accepted" $
-      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (choiceQuestion True))) 5 `shouldBe` ReviewDigitAppend
+      resolveReviewDigitAction SessionInsert (Just (PendingReviewQuestion requestId (choiceQuestion True))) 5 `shouldBe` ReviewDigitAppend
 
     it "reports an out-of-range choice digit unavailable when free text is not accepted" $
-      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (choiceQuestion False))) 5
-        `shouldBe` ReviewDigitUnavailable "That review choice is not available"
+      -- A choice /is/ pending, so this stays a notice in either mode rather
+      -- than becoming the silent normal-mode no-op above.
+      mapM_
+        ( \mode ->
+            resolveReviewDigitAction mode (Just (PendingReviewQuestion requestId (choiceQuestion False))) 5
+              `shouldBe` ReviewDigitUnavailable "That review choice is not available"
+        )
+        [SessionNormal, SessionInsert]
 
     it "keeps approval digit handling exactly as before" $ do
-      resolveReviewDigitAction (Just (PendingReviewApproval requestId approval)) 0 `shouldBe` ReviewDigitApprovalOnce requestId
-      resolveReviewDigitAction (Just (PendingReviewApproval requestId approval)) 1 `shouldBe` ReviewDigitApprovalSession requestId
-      resolveReviewDigitAction (Just (PendingReviewApproval requestId approval)) 2 `shouldBe` ReviewDigitApprovalDecline requestId
-      resolveReviewDigitAction (Just (PendingReviewApproval requestId approval)) 5
+      resolveReviewDigitAction SessionNormal (Just (PendingReviewApproval requestId approval)) 0 `shouldBe` ReviewDigitApprovalOnce requestId
+      resolveReviewDigitAction SessionNormal (Just (PendingReviewApproval requestId approval)) 1 `shouldBe` ReviewDigitApprovalSession requestId
+      resolveReviewDigitAction SessionNormal (Just (PendingReviewApproval requestId approval)) 2 `shouldBe` ReviewDigitApprovalDecline requestId
+      resolveReviewDigitAction SessionNormal (Just (PendingReviewApproval requestId approval)) 5
         `shouldBe` ReviewDigitUnavailable "That approval choice is not available"
 
     it "appends digits when nothing is pending" $
-      resolveReviewDigitAction Nothing 4 `shouldBe` ReviewDigitAppend
+      resolveReviewDigitAction SessionInsert Nothing 4 `shouldBe` ReviewDigitAppend
+
+  describe "a prompt whose answer is a digit" $ do
+    -- issue #515 requirement 10: the agent presenting a numbered choice puts
+    -- its own session back into normal mode so the digits answer it, rather
+    -- than being typed into a draft the user is mid-way through.
+    let choices =
+          [ ReviewChoice "keep" "Keep compatibility" "Preserve callers",
+            ReviewChoice "break" "Break compatibility" ""
+          ]
+        question kind offered allowOther =
+          ReviewQuestion
+            { reviewQuestionId = "scope",
+              reviewQuestionHeader = "SCOPE",
+              reviewQuestionText = "Which contract?",
+              reviewQuestionKind = kind,
+              reviewQuestionChoices = offered,
+              reviewQuestionAllowOther = allowOther,
+              reviewQuestionMultiple = False
+            }
+
+    it "recognizes a question by whether it offers numbered choices at all" $ do
+      numberedChoicePrompt (question QuestionChoice choices False) `shouldBe` True
+      numberedChoicePrompt (question QuestionChoice choices True) `shouldBe` True
+      -- A free-text-only request has no digits to answer with, so requirement
+      -- 10 does not reach it and an already-typing user keeps typing.
+      numberedChoicePrompt (question QuestionText [] True) `shouldBe` False
+      numberedChoicePrompt (question QuestionChoice [] False) `shouldBe` False
+
+    it "forces the session to normal for a prompt that offers them" $ do
+      let drafting = (testReviewSession (baseIssue 7 []) ReviewRunning) {sessionMode = SessionInsert}
+      (forcedToNormalBy True drafting).sessionMode `shouldBe` SessionNormal
+      (forcedToNormalBy True drafting {sessionMode = SessionNormal}).sessionMode `shouldBe` SessionNormal
+
+    it "leaves the mode alone for a prompt that does not" $ do
+      let drafting = (testReviewSession (baseIssue 7 []) ReviewRunning) {sessionMode = SessionInsert}
+      (forcedToNormalBy False drafting).sessionMode `shouldBe` SessionInsert
+
+    it "erases neither the draft nor the undelivered queue it forces past" $ do
+      -- The user still has to send both, so the only thing the prompt may
+      -- take is the mode.
+      let waiting =
+            withSessionDetail
+              (\detail -> detail {reviewSessionUndelivered = ["an earlier rejected steer"]})
+              (testReviewSession (baseIssue 7 []) ReviewRunning)
+                { sessionMode = SessionInsert,
+                  sessionInput = "half typed"
+                }
+          forced = forcedToNormalBy True waiting
+      forced.sessionInput `shouldBe` ("half typed" :: Data.Text.Text)
+      forced.sessionDetail.reviewSessionUndelivered `shouldBe` (["an earlier rejected steer"] :: [Data.Text.Text])
+      forced.sessionTranscript `shouldBe` waiting.sessionTranscript
+      forced.sessionPhase `shouldBe` waiting.sessionPhase
 
   describe "review overlay Ctrl-C cancel dispatch" $ do
     -- issue #31: canonical review stages (InitialReview/IssueRereview) have
@@ -724,23 +800,52 @@ spec = do
       followAfterScroll True Nothing (-3) `shouldBe` True
       followAfterScroll False Nothing 3 `shouldBe` False
 
-    it "recognizes the arrow bindings every transcript overlay shares" $
+    -- issue #515 requirement 8's two absolute gestures. Unlike the relative
+    -- scrolls above, these land on a known end, so the follow state comes
+    -- from which end rather than from where an offset happened to stop.
+    it "disengages following when g reaches the beginning of a scrollable transcript" $ do
+      let scrollable = Just (TranscriptGeometry {transcriptTop = 40, transcriptHeight = 20, transcriptContentHeight = 400})
+      followAfterJump TranscriptBeginning scrollable `shouldBe` False
+      -- Even from a transcript that was following its tail a moment ago: the
+      -- beginning of a scrollable transcript is not its tail.
+      followAfterJump TranscriptBeginning (Just (TranscriptGeometry {transcriptTop = 380, transcriptHeight = 20, transcriptContentHeight = 400}))
+        `shouldBe` False
+
+    it "keeps following when g reaches the beginning of a transcript with no scrollback" $ do
+      -- Content shorter than the viewport shows both ends at once, so `g`
+      -- moves nothing and must not silently stop the live tail.
+      followAfterJump TranscriptBeginning (Just (TranscriptGeometry {transcriptTop = 0, transcriptHeight = 20, transcriptContentHeight = 5}))
+        `shouldBe` True
+      followAfterJump TranscriptBeginning (Just (TranscriptGeometry {transcriptTop = 0, transcriptHeight = 20, transcriptContentHeight = 20}))
+        `shouldBe` True
+      -- A viewport that has never been rendered has no scrollback either.
+      followAfterJump TranscriptBeginning Nothing `shouldBe` True
+
+    it "re-engages following when G reaches the live tail, whatever the geometry" $
       mapM_
-        ( \reviewChords -> do
-            transcriptScrollKey reviewChords (Vty.EvKey Vty.KDown []) `shouldBe` Just 1
-            transcriptScrollKey reviewChords (Vty.EvKey Vty.KUp []) `shouldBe` Just (-1)
-        )
-        [False, True]
+        (\geometry -> followAfterJump TranscriptTail geometry `shouldBe` True)
+        [ Nothing,
+          Just (TranscriptGeometry {transcriptTop = 0, transcriptHeight = 20, transcriptContentHeight = 400}),
+          Just (TranscriptGeometry {transcriptTop = 40, transcriptHeight = 20, transcriptContentHeight = 400}),
+          Just (TranscriptGeometry {transcriptTop = 0, transcriptHeight = 20, transcriptContentHeight = 5})
+        ]
 
-    it "recognizes Ctrl-J/Ctrl-K only for the review transcript, which alone binds them" $ do
-      transcriptScrollKey True (Vty.EvKey (Vty.KChar 'j') [Vty.MCtrl]) `shouldBe` Just 1
-      transcriptScrollKey True (Vty.EvKey (Vty.KChar 'k') [Vty.MCtrl]) `shouldBe` Just (-1)
-      transcriptScrollKey False (Vty.EvKey (Vty.KChar 'j') [Vty.MCtrl]) `shouldBe` Nothing
-      transcriptScrollKey False (Vty.EvKey (Vty.KChar 'k') [Vty.MCtrl]) `shouldBe` Nothing
+    it "recognizes the arrow bindings every transcript overlay shares" $ do
+      transcriptScrollKey (Vty.EvKey Vty.KDown []) `shouldBe` Just 1
+      transcriptScrollKey (Vty.EvKey Vty.KUp []) `shouldBe` Just (-1)
 
+    -- issue #515 retired Ctrl-J/Ctrl-K along with the capability that gated
+    -- them: plain `j` and `k` do that job for every kind now, in normal mode,
+    -- and this is the only layer that ever answered the chords.
+    it "no longer recognizes the review overlay's retired Ctrl-J/Ctrl-K chords" $ do
+      transcriptScrollKey (Vty.EvKey (Vty.KChar 'j') [Vty.MCtrl]) `shouldBe` Nothing
+      transcriptScrollKey (Vty.EvKey (Vty.KChar 'k') [Vty.MCtrl]) `shouldBe` Nothing
+
+    -- The arrows alone: `j` and `k` are modal and so are decided a layer up,
+    -- by 'sessionInputEvent', which is where the mode is known.
     it "leaves typing and the overlays' other bindings out of the scroll path" $
       mapM_
-        (\event -> mapM_ (\reviewChords -> transcriptScrollKey reviewChords event `shouldBe` Nothing) [False, True])
+        (\event -> transcriptScrollKey event `shouldBe` Nothing)
         [ Vty.EvKey (Vty.KChar 'j') [],
           Vty.EvKey (Vty.KChar 'k') [],
           Vty.EvKey (Vty.KChar '\t') [],

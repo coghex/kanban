@@ -8,14 +8,14 @@
 ║┃ Claude         3h 0m old ┃┃     │ A1 · tracker #700                │ ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
 ║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the versioned save    │ ┃     │ #712 Migrate the terrain cache  │ ┃  │ #833 · agent-name → master ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
 ║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope                         │ ┃     │ reader                          │ ┃  │ updated 3h ago                     │ ┃  │ updated 3h ago                     │ ┃║
-║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature           ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ SOLVE #812 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ into     │ ┃  │ Updates the branch after the       │ ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature           ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ REVISION #812 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ into     │ ┃  │ Updates the branch after the       │ ┃║
 ║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · update┃                                                                                      ┃rving the │ ┃  │ persistence registry changed on    │ ┃║
-║┃ ┏━━━┓                    ┃┃     │ Write the envelope ┃ [N]  #812 ⠋                                                                          ┃          │ ┃  │ master.                            │ ┃║
-║┃ ┃ ↻ ┃                    ┃┃     │ of the payload so a┃ claude · display:solve.claude is autosolving                                         ┃          │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃ ┗━━━┛                    ┃┃     │ write is detectable┃ reviewer: GPT-5.6-Terra xhigh                                                        ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃     ╰────────────────────┃ workflow: autosolve                                                                  ┃            ┃                                         ┃║
-║┃                          ┃┃                          ┃ solver: claude · Sonnet 5 high                                                       ┃──────────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃                          ┃ reviewer: GPT-5.6-Terra xhigh                                                        ┃ve        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
+║┃ ┏━━━┓                    ┃┃     │ Write the envelope ┃ [I]  #812 ⠋                                                                          ┃          │ ┃  │ master.                            │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃     │ of the payload so a┃ revision in progress                                                                 ┃          │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃ ┗━━━┛                    ┃┃     │ write is detectable┃ Reading the issue body and the code it names…                                        ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃     ╰────────────────────┃                                                                                      ┃            ┃                                         ┃║
+║┃                          ┃┃                          ┃                                                                                      ┃──────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                          ┃                                                                                      ┃ve        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
 ║┃                          ┃┃  ▸ #701  Input routing ha┃                                                                                      ┃          │ ┃  │  reviewed:approve   input   ui     │ ┃║
 ║┃                          ┃┃  complete                ┃                                                                                      ┃          │ ┃  │ #812 · agent-name → master ·       │ ┃║
 ║┃                          ┃┃  STANDALONE              ┃                                                                                      ┃r ·       │ ┃  │ updated 3h ago                     │ ┃║
@@ -29,13 +29,13 @@
 ║┃                          ┃┃    │ pages. This is visib┃                                                                                      ┃            ┃  │ PR #861 Adopt the envelope in the  │ ┃║
 ║┃                          ┃┃    ╰─────────────────────┃                                                                                      ┃            ┃  │ snapshot loader                    │ ┃║
 ║┃                          ┃┃                          ┃                                                                                      ┃            ┃  │  reviewed:approve   feature        │ ┃║
-║┃                          ┃┃  ╭───────────────────────┃                                                                                      ┃            ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  ╭───────────────────────┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃            ┃  │ #901 · agent-name → master ·       │ ┃║
 ║┃                          ┃┃  │ #756 Define the persis┃                                                                                      ┃            ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃  │ contract              ┃                                                                                      ┃            ┃  │ Reads the cache through the        │ ┃║
-║┃                          ┃┃  │  architecture         ┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃            ┃  │ versioned envelope and reports a   │ ┃║
-║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ unassigned · updated 4┃ Esc/q hide  i insert  Tab next session  Ctrl-C interrupt  j/k g/G Ctrl-D/U scroll    ┃            ┃  │ truncated payload.                 │ ┃║
-║┃ ┃ approve_issues.py ┃    ┃┃  │ Document root owners, ┃                                                                                      ┃            ┃  │ ◐ CI 9/12 · behind                 │ ┃║
-║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ barriers, and the vers┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛            ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ contract              ┃ > Check the retry path too█                                                          ┃            ┃  │ Reads the cache through the        │ ┃║
+║┃                          ┃┃  │  architecture         ┃ Esc normal  Tab next session  Ctrl-C interrupt  Enter send  arrows/wheel scroll      ┃            ┃  │ versioned envelope and reports a   │ ┃║
+║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ unassigned · updated 4┃                                                                                      ┃            ┃  │ truncated payload.                 │ ┃║
+║┃ ┃ approve_issues.py ┃    ┃┃  │ Document root owners, ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛            ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ barriers, and the versioned         │ ┃                                         ┃                                         ┃  ╰────────────────────────────────────╯ ┃║
 ║┃ off                      ┃┃  │ envelope before implementation…     │ ┃                                         ┃                                         ┃                                         ┃║
 ║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
 ║┃ ┃ drain_prs.py ┃         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║

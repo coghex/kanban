@@ -1,11 +1,14 @@
 module Kanban.UI.Transcript
-  ( TranscriptGeometry (..),
+  ( TranscriptEnd (..),
+    TranscriptGeometry (..),
     TranscriptSession (..),
     displayedTranscript,
+    followAfterJump,
     followAfterScroll,
     followAfterTurnStarted,
     presentTranscriptTail,
     scrollTranscript,
+    scrollTranscriptToEnd,
     tailDisplayedTranscript,
     tailReviewThread,
     tailTranscript,
@@ -133,6 +136,42 @@ scrollTranscript session amount = do
   geometry <- fmap viewportGeometry <$> lookupViewport name
   vScrollBy (viewportScroll name) amount
   modify (\state -> setTranscriptFollowing session (followAfterScroll (transcriptFollowing state session) geometry amount) state)
+
+-- | Which end of a transcript a jump asks for: @g@ and @G@ (issue #515).
+data TranscriptEnd
+  = TranscriptBeginning
+  | TranscriptTail
+  deriving stock (Eq, Show)
+
+-- | The follow state a jump to one end leaves behind, decided the way
+-- 'followAfterScroll' decides a relative one but from the end rather than
+-- from an offset.
+--
+-- The tail /is/ the live tail, so reaching it always re-engages following
+-- whatever the geometry says. The beginning of a scrollable transcript is by
+-- definition not its tail, so it always disengages; a transcript shorter than
+-- its viewport is showing both ends at once and following stands. With no
+-- geometry the viewport has never been rendered, and a never-rendered
+-- transcript has nothing above its tail either.
+followAfterJump :: TranscriptEnd -> Maybe TranscriptGeometry -> Bool
+followAfterJump TranscriptTail _ = True
+followAfterJump TranscriptBeginning geometry = not (any scrollableGeometry geometry)
+
+-- | Jump a transcript to one end and re-derive its follow state from the end
+-- it landed on, the counterpart to 'scrollTranscript' for a gesture that is
+-- an absolute position rather than an amount.
+scrollTranscriptToEnd :: TranscriptEnd -> TranscriptSession -> EventM Name AppState ()
+scrollTranscriptToEnd end session = do
+  let name = transcriptViewport session
+  geometry <- fmap viewportGeometry <$> lookupViewport name
+  case end of
+    TranscriptBeginning -> vScrollToBeginning (viewportScroll name)
+    TranscriptTail -> vScrollToEnd (viewportScroll name)
+  modify (setTranscriptFollowing session (followAfterJump end geometry))
+
+-- | Whether a rendered viewport has anywhere to scroll to at all.
+scrollableGeometry :: TranscriptGeometry -> Bool
+scrollableGeometry geometry = geometry.transcriptContentHeight > geometry.transcriptHeight
 
 viewportGeometry :: Viewport -> TranscriptGeometry
 viewportGeometry viewportState =

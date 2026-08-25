@@ -29,6 +29,7 @@ module Kanban.UI.SessionEvents
     pullRequestSessionOps,
     reviewSessionOps,
     reviewTickEligible,
+    sessionFocusFor,
     sessionKeys,
     solveSessionOps,
     solveTickEligible,
@@ -46,7 +47,7 @@ import qualified Data.Map.Strict as Map
 import Kanban.Domain (ItemId (..))
 import Kanban.UI.Types
 import Kanban.UI.Filter (readOnlyHistoryRefusalFor)
-import Kanban.UI.State (setNotice)
+import Kanban.UI.State (closeOverlay, setNotice)
 import Kanban.UI.SessionCore
 import Kanban.UI.Session
 import Kanban.UI.Transcript
@@ -66,7 +67,11 @@ data SessionOps phase detail = SessionOps
     sessionOpsOverlay :: Int -> Overlay,
     sessionOpsTick :: Int -> Int -> AppEvent,
     sessionOpsEligible :: AppState -> Int -> AgentSession phase detail -> Bool,
-    sessionOpsCaps :: SessionInputCaps
+    sessionOpsCaps :: SessionInputCaps,
+    -- | Whether this session still has something behind it to read text typed
+    -- into its draft. Per session rather than per kind, because it is the
+    -- phase -- and, for review, the stage -- that decides it (issue #515).
+    sessionOpsLiveInput :: AgentSession phase detail -> Bool
   }
 
 solveSessionOps :: SessionOps SolvePhase SolveDetail
@@ -81,7 +86,8 @@ solveSessionOps =
       -- process is actually registered for the issue, whatever is on screen.
       sessionOpsEligible = \state issueNumber session ->
         solveTickEligible session.sessionPhase && Map.member issueNumber state.appSolveProcesses,
-      sessionOpsCaps = noSessionInputCaps
+      sessionOpsCaps = noSessionInputCaps,
+      sessionOpsLiveInput = solveSessionInputLive . (.sessionPhase)
     }
 
 pullRequestSessionOps :: SessionOps SolvePhase PullRequestDetail
@@ -94,7 +100,8 @@ pullRequestSessionOps =
       sessionOpsTick = PullRequestAnimationTick,
       -- Unchanged from the pre-#51 PR tick, which was driven by phase alone.
       sessionOpsEligible = \_ _ session -> solveTickEligible session.sessionPhase,
-      sessionOpsCaps = noSessionInputCaps
+      sessionOpsCaps = noSessionInputCaps,
+      sessionOpsLiveInput = solveSessionInputLive . (.sessionPhase)
     }
 
 reviewSessionOps :: SessionOps ReviewPhase ReviewDetail
@@ -109,10 +116,11 @@ reviewSessionOps =
         reviewTickEligible (reviewOverlayVisible state.appOverlay) session.sessionPhase,
       sessionOpsCaps =
         SessionInputCaps
-          { sessionCapsScrollChords = True,
-            sessionCapsChoiceDigits = True,
+          { sessionCapsChoiceDigits = True,
             sessionCapsCancelChord = True
-          }
+          },
+      sessionOpsLiveInput = \session ->
+        reviewSessionInputLive session.sessionDetail.reviewSessionStage session.sessionPhase
     }
 
 -- | Whether a review session in this phase should be animating, given
@@ -261,6 +269,16 @@ noSessionInputHooks =
       sessionHookSubject = IssueId
     }
 
+-- | How the shared decoder sees one session of this kind: the kind's caps
+-- and that session's own mode and input state. A key press arriving for a
+-- session the map no longer holds still has to be answered -- the overlay is
+-- drawing "no longer available" and @Esc@ or @q@ must close it -- so a
+-- missing session reads as a settled one rather than as nothing at all.
+sessionFocusFor :: SessionOps phase detail -> Int -> AppState -> SessionFocus
+sessionFocusFor ops key state = case Map.lookup key (ops.sessionOpsSessions state) of
+  Nothing -> SessionFocus ops.sessionOpsCaps SessionNormal False
+  Just session -> SessionFocus ops.sessionOpsCaps session.sessionMode (ops.sessionOpsLiveInput session)
+
 -- | The whole key table every session overlay answers, dispatched once.
 handleSessionOverlayEvent ::
   SessionOps phase detail ->
@@ -269,7 +287,9 @@ handleSessionOverlayEvent ::
   BrickEvent Name AppEvent ->
   EventM Name AppState ()
 handleSessionOverlayEvent ops hooks key event = case event of
-  VtyEvent vtyEvent -> mapM_ (handleSessionInputEvent ops hooks key) (sessionInputEvent ops.sessionOpsCaps vtyEvent)
+  VtyEvent vtyEvent -> do
+    focus <- sessionFocusFor ops key <$> get
+    mapM_ (handleSessionInputEvent ops hooks key) (sessionInputEvent focus vtyEvent)
   _ -> pure ()
 
 handleSessionInputEvent ::
@@ -278,14 +298,32 @@ handleSessionInputEvent ::
   Int ->
   SessionInputEvent ->
   EventM Name AppState ()
-handleSessionInputEvent ops hooks key = \case
-  SessionInputScroll amount -> scrollTranscript (ops.sessionOpsTranscript key) amount
-  SessionInputBackspace -> modifySession ops key removeSessionInputCharacter
-  SessionInputInsert character -> modifySession ops key (insertSessionInput character)
-  SessionInputSubmit -> whenWorkIsLive (hooks.sessionHookSubmit key)
-  SessionInputCycle -> cycleSession ops key
-  SessionInputInterrupt -> whenWorkIsLive (hooks.sessionHookInterrupt key)
-  SessionInputChoice choiceIndex -> whenWorkIsLive (hooks.sessionHookChoice key choiceIndex)
+handleSessionInputEvent ops hooks key inputEvent = do
+  -- The mode is the keypress's own, and settled before anything the press
+  -- goes on to do: §7 promises Enter leaves the session in normal mode, and a
+  -- hook that refuses -- a settled card, a disconnected backend, an empty
+  -- draft -- must not leave it in insert as if the press had not happened.
+  modifySession ops key (\session -> setSessionMode (sessionModeAfter inputEvent session.sessionMode) session)
+  case inputEvent of
+    SessionInputScroll amount -> scrollTranscript (ops.sessionOpsTranscript key) amount
+    SessionInputScrollTop -> scrollTranscriptToEnd TranscriptBeginning (ops.sessionOpsTranscript key)
+    SessionInputScrollBottom -> scrollTranscriptToEnd TranscriptTail (ops.sessionOpsTranscript key)
+    SessionInputBackspace -> modifySession ops key removeSessionInputCharacter
+    SessionInputInsert character -> modifySession ops key (insertSessionInput character)
+    -- Whatever the hook declines to send stays on the line under the hook's
+    -- own existing behavior; only the mode has already moved.
+    SessionInputSubmit -> whenWorkIsLive (hooks.sessionHookSubmit key)
+    SessionInputCycle -> cycleSession ops key
+    SessionInputInterrupt -> whenWorkIsLive (hooks.sessionHookInterrupt key)
+    -- Both modes are entered by the write above, so these two arms have
+    -- nothing left of their own to do.
+    SessionInputEnterInsert -> pure ()
+    SessionInputLeaveInsert -> pure ()
+    -- Hiding the overlay, never the application's guarded quit: the work
+    -- behind the session keeps running and `r` reopens it, exactly as Esc
+    -- always did here.
+    SessionInputClose -> closeOverlay
+    SessionInputChoice choiceIndex -> whenWorkIsLive (hooks.sessionHookChoice key choiceIndex)
   where
     -- The launch and termination boundary for a session left open across a
     -- refresh. A session can sit on screen for as long as the user leaves the

@@ -20,32 +20,42 @@ import Kanban.UI.Board
   )
 import Kanban.UI.Overlay (drawOverlay)
 import Kanban.UI.SessionCore
-  ( SessionInputCaps (..),
+  ( SessionFocus (..),
+    SessionInputCaps (..),
     SessionInputEvent (..),
     SessionTickArm (..),
     SessionTickFire (..),
     decideSessionTickArm,
     decideSessionTickFire,
     insertSessionInput,
+    liveSessionMode,
     nextSessionKey,
     removeSessionInputCharacter,
+    sessionHalfPage,
     sessionInputEvent,
     sessionInputLimit,
+    sessionModeAfter,
+    setSessionMode,
   )
+import Kanban.UI.Session (reviewSessionInputLive, solveSessionInputLive)
 import Kanban.UI.SessionEvents
   ( SessionOps (..),
     pullRequestSessionOps,
     reviewSessionOps,
     reviewTickEligible,
+    sessionFocusFor,
     solveSessionOps,
     solveTickEligible,
   )
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Transcript (TranscriptSession (..))
+import Kanban.Review (ReviewStage (..))
 import Kanban.UI.Types
   ( AgentSession (..),
+    AppState (..),
     Overlay (..),
     ReviewPhase (..),
+    SessionMode (..),
     SolvePhase (..),
   )
 import Spec.Support.App
@@ -65,6 +75,21 @@ import Test.Hspec
 -- their own session maps.
 emptyBoard :: Board
 emptyBoard = Board Map.empty
+
+-- | Every review phase, written out because 'ReviewPhase' is not an 'Enum'.
+-- A phase added without being listed here leaves the canonical-stage sweep
+-- below silently narrower than the claim it makes.
+everyReviewPhase :: [ReviewPhase]
+everyReviewPhase =
+  [ ReviewStarting,
+    ReviewRunning,
+    ReviewWaiting,
+    ReviewFinished,
+    ReviewNeedsChanges,
+    ReviewFailed,
+    ReviewRevised,
+    ReviewInterrupted
+  ]
 
 spec :: Spec
 spec = do
@@ -111,57 +136,261 @@ spec = do
       pullRequestSessionOps.sessionOpsTranscript 12 `shouldBe` PullRequestTranscript 12
       reviewSessionOps.sessionOpsTranscript 12 `shouldBe` ReviewTranscript 12
 
-    it "leaves each session's own draft alone, so switching tabs preserves it" $ do
-      -- Drafts are per-session state, so cycling — which only changes which
-      -- session is displayed — cannot touch them.
-      let drafted = (testSolveSession (baseIssue 7 []) SolveRunning) {sessionInput = "half typed"}
+    it "leaves each session's own draft and mode alone, so switching tabs preserves both" $ do
+      -- Drafts and modes are per-session state, so cycling — which only
+      -- changes which session is displayed — cannot touch them. issue #515
+      -- makes the mode travel with the session for exactly this reason: Tab
+      -- has to show the next session in whatever mode it was left in.
+      let drafted =
+            (testSolveSession (baseIssue 7 []) SolveRunning)
+              {sessionInput = "half typed", sessionMode = SessionInsert}
           other = testSolveSession (baseIssue 12 []) SolveRunning
           sessions = Map.fromList [(7 :: Int, drafted), (12, other)]
       fmap (.sessionInput) (Map.lookup 7 sessions) `shouldBe` Just ("half typed" :: Text)
       fmap (.sessionInput) (Map.lookup 12 sessions) `shouldBe` Just ("" :: Text)
+      fmap (.sessionMode) (Map.lookup 7 sessions) `shouldBe` Just SessionInsert
+      fmap (.sessionMode) (Map.lookup 12 sessions) `shouldBe` Just SessionNormal
+      -- Cycling reads the key set and nothing else, so neither session's own
+      -- state is an input to where Tab goes.
+      nextSessionKey 7 (Map.keys sessions) `shouldBe` Just 12
+      sessionModeAfter SessionInputCycle SessionInsert `shouldBe` SessionInsert
 
   describe "shared session overlay key table" $ do
     -- The three overlays each had their own near-identical case table; the
     -- differences between them are now exactly 'SessionInputCaps', so the
-    -- same events are run through all three below.
+    -- same events are run through all three below. Since issue #515 the table
+    -- is also modal, so every kind is asked in both modes.
     let solveCaps = solveSessionOps.sessionOpsCaps
         pullRequestCaps = pullRequestSessionOps.sessionOpsCaps
         reviewCaps = reviewSessionOps.sessionOpsCaps
         allCaps = [("solve" :: Text, solveCaps), ("pull request", pullRequestCaps), ("review", reviewCaps)]
+        normal caps = SessionFocus caps SessionNormal True
+        insert caps = SessionFocus caps SessionInsert True
         forEveryKind check = mapM_ (\(label, caps) -> (label, check caps) `shouldBe` (label, True)) allCaps
 
-    it "gives every kind Tab, Enter, Ctrl-C, backspace, and printable insertion" $ do
-      forEveryKind (\caps -> sessionInputEvent caps (Vty.EvKey (Vty.KChar '\t') []) == Just SessionInputCycle)
-      forEveryKind (\caps -> sessionInputEvent caps (Vty.EvKey Vty.KEnter []) == Just SessionInputSubmit)
-      forEveryKind (\caps -> sessionInputEvent caps (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) == Just SessionInputInterrupt)
-      forEveryKind (\caps -> sessionInputEvent caps (Vty.EvKey Vty.KBS []) == Just SessionInputBackspace)
-      forEveryKind (\caps -> sessionInputEvent caps (Vty.EvKey (Vty.KChar 'z') []) == Just (SessionInputInsert 'z'))
+    it "keeps Tab, Ctrl-C, and Enter outside the modes for every kind" $ do
+      -- These are about the session rather than about its draft, so a mode
+      -- cannot take them away.
+      forEveryKind (\caps -> all (\mode -> sessionInputEvent (mode caps) (Vty.EvKey (Vty.KChar '\t') []) == Just SessionInputCycle) [normal, insert])
+      forEveryKind (\caps -> all (\mode -> sessionInputEvent (mode caps) (Vty.EvKey Vty.KEnter []) == Just SessionInputSubmit) [normal, insert])
+      forEveryKind (\caps -> all (\mode -> sessionInputEvent (mode caps) (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) == Just SessionInputInterrupt) [normal, insert])
 
-    it "gives every kind the arrow scroll bindings" $ do
-      forEveryKind (\caps -> sessionInputEvent caps (Vty.EvKey Vty.KDown []) == Just (SessionInputScroll 1))
-      forEveryKind (\caps -> sessionInputEvent caps (Vty.EvKey Vty.KUp []) == Just (SessionInputScroll (-1)))
+    it "edits the draft in insert mode for every kind" $ do
+      forEveryKind (\caps -> sessionInputEvent (insert caps) (Vty.EvKey Vty.KBS []) == Just SessionInputBackspace)
+      forEveryKind (\caps -> sessionInputEvent (insert caps) (Vty.EvKey (Vty.KChar 'z') []) == Just (SessionInputInsert 'z'))
+      -- The letters normal mode claims are ordinary text here, which is the
+      -- whole point of having two modes.
+      forEveryKind
+        ( \caps ->
+            map (sessionInputEvent (insert caps) . (\character -> Vty.EvKey (Vty.KChar character) [])) "ijkgGq"
+              == map (Just . SessionInputInsert) "ijkgGq"
+        )
+
+    it "gives every kind the arrow scroll bindings, in both modes" $ do
+      -- An arrow is not text in either mode, so unlike j/k it never splits.
+      forEveryKind (\caps -> all (\mode -> sessionInputEvent (mode caps) (Vty.EvKey Vty.KDown []) == Just (SessionInputScroll 1)) [normal, insert])
+      forEveryKind (\caps -> all (\mode -> sessionInputEvent (mode caps) (Vty.EvKey Vty.KUp []) == Just (SessionInputScroll (-1))) [normal, insert])
+
+    it "gives every kind the normal-mode transcript commands" $ do
+      forEveryKind (\caps -> sessionInputEvent (normal caps) (Vty.EvKey (Vty.KChar 'j') []) == Just (SessionInputScroll 1))
+      forEveryKind (\caps -> sessionInputEvent (normal caps) (Vty.EvKey (Vty.KChar 'k') []) == Just (SessionInputScroll (-1)))
+      forEveryKind (\caps -> sessionInputEvent (normal caps) (Vty.EvKey (Vty.KChar 'd') [Vty.MCtrl]) == Just (SessionInputScroll sessionHalfPage))
+      forEveryKind (\caps -> sessionInputEvent (normal caps) (Vty.EvKey (Vty.KChar 'u') [Vty.MCtrl]) == Just (SessionInputScroll (-sessionHalfPage)))
+      forEveryKind (\caps -> sessionInputEvent (normal caps) (Vty.EvKey (Vty.KChar 'g') []) == Just SessionInputScrollTop)
+      forEveryKind (\caps -> sessionInputEvent (normal caps) (Vty.EvKey (Vty.KChar 'G') []) == Just SessionInputScrollBottom)
+      sessionHalfPage `shouldBe` 16
+
+    it "stages Esc rather than chaining it" $ do
+      -- Insert returns to normal; normal hides the overlay. Neither reaches
+      -- the application's own quit, which is why 'SessionInputClose' is a
+      -- distinct event rather than a board action.
+      forEveryKind (\caps -> sessionInputEvent (insert caps) (Vty.EvKey Vty.KEsc []) == Just SessionInputLeaveInsert)
+      forEveryKind (\caps -> sessionInputEvent (normal caps) (Vty.EvKey Vty.KEsc []) == Just SessionInputClose)
+
+    it "makes q an overlay close in normal mode and a character in insert" $ do
+      forEveryKind (\caps -> sessionInputEvent (normal caps) (Vty.EvKey (Vty.KChar 'q') []) == Just SessionInputClose)
+      forEveryKind (\caps -> sessionInputEvent (insert caps) (Vty.EvKey (Vty.KChar 'q') []) == Just (SessionInputInsert 'q'))
+
+    it "enters insert from normal with i, and never from insert" $ do
+      forEveryKind (\caps -> sessionInputEvent (normal caps) (Vty.EvKey (Vty.KChar 'i') []) == Just SessionInputEnterInsert)
+      forEveryKind (\caps -> sessionInputEvent (insert caps) (Vty.EvKey (Vty.KChar 'i') []) == Just (SessionInputInsert 'i'))
 
     it "keeps the review overlay's extra bindings to the review overlay" $ do
-      -- Ctrl-J/Ctrl-K scrolling, numbered choices, and Ctrl-X as a second
-      -- interrupt are review's alone, exactly as before.
-      (solveCaps, pullRequestCaps) `shouldBe` (SessionInputCaps False False False, SessionInputCaps False False False)
-      reviewCaps `shouldBe` SessionInputCaps True True True
-      sessionInputEvent reviewCaps (Vty.EvKey (Vty.KChar 'j') [Vty.MCtrl]) `shouldBe` Just (SessionInputScroll 1)
-      sessionInputEvent reviewCaps (Vty.EvKey (Vty.KChar 'k') [Vty.MCtrl]) `shouldBe` Just (SessionInputScroll (-1))
-      sessionInputEvent solveCaps (Vty.EvKey (Vty.KChar 'j') [Vty.MCtrl]) `shouldBe` Nothing
-      sessionInputEvent pullRequestCaps (Vty.EvKey (Vty.KChar 'k') [Vty.MCtrl]) `shouldBe` Nothing
-      sessionInputEvent reviewCaps (Vty.EvKey (Vty.KChar 'x') [Vty.MCtrl]) `shouldBe` Just SessionInputInterrupt
-      sessionInputEvent solveCaps (Vty.EvKey (Vty.KChar 'x') [Vty.MCtrl]) `shouldBe` Nothing
+      -- Numbered choices and Ctrl-X as a second interrupt are review's alone.
+      -- Ctrl-J/Ctrl-K and the capability that gated them are gone: plain j and
+      -- k scroll every kind now (issue #515 requirement 8).
+      (solveCaps, pullRequestCaps) `shouldBe` (SessionInputCaps False False, SessionInputCaps False False)
+      reviewCaps `shouldBe` SessionInputCaps True True
+      mapM_
+        ( \(label, caps) ->
+            (label, map (\mode -> sessionInputEvent (mode caps) (Vty.EvKey (Vty.KChar 'j') [Vty.MCtrl])) [normal, insert])
+              `shouldBe` (label, [Nothing, Nothing])
+        )
+        allCaps
+      mapM_
+        ( \(label, caps) ->
+            (label, map (\mode -> sessionInputEvent (mode caps) (Vty.EvKey (Vty.KChar 'k') [Vty.MCtrl])) [normal, insert])
+              `shouldBe` (label, [Nothing, Nothing])
+        )
+        allCaps
+      sessionInputEvent (normal reviewCaps) (Vty.EvKey (Vty.KChar 'x') [Vty.MCtrl]) `shouldBe` Just SessionInputInterrupt
+      sessionInputEvent (insert reviewCaps) (Vty.EvKey (Vty.KChar 'x') [Vty.MCtrl]) `shouldBe` Just SessionInputInterrupt
+      sessionInputEvent (normal solveCaps) (Vty.EvKey (Vty.KChar 'x') [Vty.MCtrl]) `shouldBe` Nothing
 
-    it "routes a digit to the pending choice only where choices exist, and types it elsewhere" $ do
-      sessionInputEvent reviewCaps (Vty.EvKey (Vty.KChar '3') []) `shouldBe` Just (SessionInputChoice 2)
-      sessionInputEvent solveCaps (Vty.EvKey (Vty.KChar '3') []) `shouldBe` Just (SessionInputInsert '3')
-      sessionInputEvent pullRequestCaps (Vty.EvKey (Vty.KChar '3') []) `shouldBe` Just (SessionInputInsert '3')
+    it "routes a normal-mode digit to the pending choice only where choices exist" $ do
+      sessionInputEvent (normal reviewCaps) (Vty.EvKey (Vty.KChar '3') []) `shouldBe` Just (SessionInputChoice 2)
+      sessionInputEvent (normal solveCaps) (Vty.EvKey (Vty.KChar '3') []) `shouldBe` Nothing
+      sessionInputEvent (normal pullRequestCaps) (Vty.EvKey (Vty.KChar '3') []) `shouldBe` Nothing
       -- '0' is not a choice digit even in the review overlay.
-      sessionInputEvent reviewCaps (Vty.EvKey (Vty.KChar '0') []) `shouldBe` Just (SessionInputInsert '0')
+      sessionInputEvent (normal reviewCaps) (Vty.EvKey (Vty.KChar '0') []) `shouldBe` Nothing
 
-    it "ignores keys none of the overlays bind" $
-      forEveryKind (\caps -> sessionInputEvent caps (Vty.EvKey (Vty.KFun 5) []) == Nothing)
+    it "types every digit as literal text in insert mode, review included" $
+      forEveryKind
+        ( \caps ->
+            map (sessionInputEvent (insert caps) . (\character -> Vty.EvKey (Vty.KChar character) [])) "0123456789"
+              == map (Just . SessionInputInsert) "0123456789"
+        )
+
+    it "ignores keys none of the overlays bind, in either mode" $
+      forEveryKind (\caps -> all (\mode -> sessionInputEvent (mode caps) (Vty.EvKey (Vty.KFun 5) []) == Nothing) [normal, insert])
+
+  describe "session overlays with nothing left to read what they type" $ do
+    -- issue #515 requirement 12. A settled session is pinned to normal mode
+    -- however its own field reads, which is what keeps a phase settling
+    -- underneath an insert-mode session from stranding it: its stored mode is
+    -- never consulted again, so `q`, `j`, and Esc keep working.
+    let settled mode = SessionFocus reviewSessionOps.sessionOpsCaps mode False
+        bothModes = [SessionNormal, SessionInsert]
+
+    it "derives the mode a settled session behaves and draws in" $ do
+      map (liveSessionMode True) bothModes `shouldBe` bothModes
+      map (liveSessionMode False) bothModes `shouldBe` [SessionNormal, SessionNormal]
+
+    it "makes i a no-op on it, from either stored mode" $
+      map (\mode -> sessionInputEvent (settled mode) (Vty.EvKey (Vty.KChar 'i') [])) bothModes
+        `shouldBe` [Nothing, Nothing]
+
+    it "takes no Enter follow-up on it" $
+      map (\mode -> sessionInputEvent (settled mode) (Vty.EvKey Vty.KEnter [])) bothModes
+        `shouldBe` [Nothing, Nothing]
+
+    it "types nothing into it, even from a stored insert mode" $ do
+      map (\mode -> sessionInputEvent (settled mode) (Vty.EvKey (Vty.KChar 'z') [])) bothModes
+        `shouldBe` [Nothing, Nothing]
+      map (\mode -> sessionInputEvent (settled mode) (Vty.EvKey Vty.KBS [])) bothModes
+        `shouldBe` [Nothing, Nothing]
+
+    it "keeps Tab, q, Esc, and every scroll key working on it" $ do
+      let answers key = map (\mode -> sessionInputEvent (settled mode) key) bothModes
+      answers (Vty.EvKey (Vty.KChar '\t') []) `shouldBe` [Just SessionInputCycle, Just SessionInputCycle]
+      answers (Vty.EvKey (Vty.KChar 'q') []) `shouldBe` [Just SessionInputClose, Just SessionInputClose]
+      answers (Vty.EvKey Vty.KEsc []) `shouldBe` [Just SessionInputClose, Just SessionInputClose]
+      answers (Vty.EvKey (Vty.KChar 'j') []) `shouldBe` [Just (SessionInputScroll 1), Just (SessionInputScroll 1)]
+      answers (Vty.EvKey (Vty.KChar 'k') []) `shouldBe` [Just (SessionInputScroll (-1)), Just (SessionInputScroll (-1))]
+      answers (Vty.EvKey (Vty.KChar 'g') []) `shouldBe` [Just SessionInputScrollTop, Just SessionInputScrollTop]
+      answers (Vty.EvKey (Vty.KChar 'G') []) `shouldBe` [Just SessionInputScrollBottom, Just SessionInputScrollBottom]
+      answers (Vty.EvKey Vty.KDown []) `shouldBe` [Just (SessionInputScroll 1), Just (SessionInputScroll 1)]
+      answers (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) `shouldBe` [Just SessionInputInterrupt, Just SessionInputInterrupt]
+
+    it "still answers a pending numbered choice on it" $
+      -- An approval or question is exactly the state a canonical stage cannot
+      -- reach, but a revision that settles while one is on screen still has
+      -- digits worth answering with.
+      map (\mode -> sessionInputEvent (settled mode) (Vty.EvKey (Vty.KChar '2') [])) bothModes
+        `shouldBe` [Just (SessionInputChoice 1), Just (SessionInputChoice 1)]
+
+  describe "a key press for a session the map no longer holds" $
+    -- The overlay is drawing "session is no longer available" and Esc still
+    -- has to close it. Before issue #515 that worked because Esc was
+    -- short-circuited above the session table; now the table answers it, so
+    -- the absent session has to reach the decoder as a settled one.
+    it "still closes the overlay and scrolls, and offers no input" $ do
+      state <- testAppState emptyBoard
+      let absent = sessionFocusFor solveSessionOps 7 state
+      Map.lookup 7 (solveSessionOps.sessionOpsSessions state) `shouldBe` Nothing
+      sessionInputEvent absent (Vty.EvKey Vty.KEsc []) `shouldBe` Just SessionInputClose
+      sessionInputEvent absent (Vty.EvKey (Vty.KChar 'q') []) `shouldBe` Just SessionInputClose
+      sessionInputEvent absent (Vty.EvKey (Vty.KChar 'j') []) `shouldBe` Just (SessionInputScroll 1)
+      sessionInputEvent absent (Vty.EvKey (Vty.KChar 'i') []) `shouldBe` Nothing
+      sessionInputEvent absent (Vty.EvKey Vty.KEnter []) `shouldBe` Nothing
+
+  describe "which sessions still read what they type" $ do
+    -- The phase and stage halves of issue #515 requirement 12, asked of the
+    -- predicates the overlays and the decoder both consult.
+    it "keeps a solve or PR session's input until its workflow resolves" $ do
+      map solveSessionInputLive [SolveStarting, SolveRunning, SolveInterrupting, SolveAttention]
+        `shouldBe` replicate 4 True
+      map solveSessionInputLive [SolveFinished, SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
+        `shouldBe` replicate 4 False
+
+    it "gives a canonical review stage no input in any phase" $
+      -- It runs approve_issues.py as a subprocess and carries no app-server
+      -- thread, so there has never been anywhere for typed text to go.
+      sequence_
+        [ (stage, phase, reviewSessionInputLive stage phase) `shouldBe` (stage, phase, False)
+          | stage <- [InitialReview, IssueRereview],
+            phase <- everyReviewPhase
+        ]
+
+    it "keeps an app-server revision's input until it settles" $ do
+      map (reviewSessionInputLive IssueRevision) [ReviewStarting, ReviewRunning, ReviewWaiting]
+        `shouldBe` replicate 3 True
+      map (reviewSessionInputLive IssueRevision) [ReviewFinished, ReviewNeedsChanges, ReviewFailed, ReviewRevised]
+        `shouldBe` replicate 4 False
+
+    it "keeps an interrupted revision resumable, unlike an interrupted canonical stage" $ do
+      -- docs/design.md section 7 promises guidance after an interrupt, and
+      -- 'reviewSessionReusable' reopens an interrupted revision rather than
+      -- launching a fresh one. Only a canonical stage's interrupt is terminal.
+      reviewSessionInputLive IssueRevision ReviewInterrupted `shouldBe` True
+      map (`reviewSessionInputLive` ReviewInterrupted) [InitialReview, IssueRereview] `shouldBe` [False, False]
+
+  describe "what a decoded session event does to the mode" $ do
+    -- The mode is a projection of the whole table rather than a side effect
+    -- remembered at three arms, so this is asked of every constructor.
+    it "moves into insert on i and back out on Esc" $ do
+      sessionModeAfter SessionInputEnterInsert SessionNormal `shouldBe` SessionInsert
+      sessionModeAfter SessionInputEnterInsert SessionInsert `shouldBe` SessionInsert
+      sessionModeAfter SessionInputLeaveInsert SessionInsert `shouldBe` SessionNormal
+      sessionModeAfter SessionInputLeaveInsert SessionNormal `shouldBe` SessionNormal
+
+    it "returns to normal on Enter, whatever the submission then does" $ do
+      -- The mode is the keypress's, not the send's: a hook that refuses an
+      -- empty draft or a disconnected backend must not leave the session in
+      -- insert as if nothing had been pressed.
+      sessionModeAfter SessionInputSubmit SessionInsert `shouldBe` SessionNormal
+      sessionModeAfter SessionInputSubmit SessionNormal `shouldBe` SessionNormal
+
+    it "leaves the mode alone for every other event" $
+      sequence_
+        [ (inputEvent, sessionModeAfter inputEvent mode) `shouldBe` (inputEvent, mode)
+          | inputEvent <-
+              [ SessionInputScroll 1,
+                SessionInputScroll (-1),
+                SessionInputScrollTop,
+                SessionInputScrollBottom,
+                SessionInputBackspace,
+                SessionInputInsert 'z',
+                SessionInputCycle,
+                SessionInputInterrupt,
+                SessionInputClose,
+                SessionInputChoice 0
+              ],
+            mode <- [SessionNormal, SessionInsert]
+        ]
+
+    it "leaves the draft where it is on every mode change" $ do
+      -- Leaving insert keeps what was typed; entering it does not clear the
+      -- line either.
+      let drafted = (testReviewSession (baseIssue 7 []) ReviewRunning) {sessionInput = "half typed"}
+      (setSessionMode SessionInsert drafted).sessionInput `shouldBe` ("half typed" :: Text)
+      (setSessionMode SessionNormal drafted {sessionMode = SessionInsert}).sessionInput `shouldBe` ("half typed" :: Text)
+      (setSessionMode SessionNormal drafted).sessionTranscript `shouldBe` drafted.sessionTranscript
+
+    it "opens every kind in normal mode" $ do
+      (testSolveSession (baseIssue 1 []) SolveRunning).sessionMode `shouldBe` SessionNormal
+      (testPullRequestSession (basePullRequest 2 [] False []) SolveRunning).sessionMode `shouldBe` SessionNormal
+      (testReviewSession (baseIssue 3 []) ReviewRunning).sessionMode `shouldBe` SessionNormal
 
   describe "shared session input editing" $ do
     -- One bounded editor for all three kinds, where there were three.
@@ -330,9 +559,46 @@ spec = do
 
     it "still draws every overlay's footer, so the added strip clipped nothing off" $ do
       -- A solve session waiting for input is the tallest layout: phase line,
-      -- activity, reviewer, log path, transcript, prompt, and footer.
+      -- activity, reviewer, log path, transcript, prompt, and footer. The
+      -- hint the footer draws is now the focused session's mode, so both are
+      -- asked for -- a clipped footer would take either with it.
       state <-
         withSolveSession (baseIssue 7 []) SolveAttention
           <$> testAppState emptyBoard
-      let rows = overlayRows state (SolveOverlay 7)
-      filter (Text.isInfixOf "arrows/wheel scroll") rows `shouldNotBe` []
+      let inserting current =
+            current
+              { appSolveSessions = Map.adjust (setSessionMode SessionInsert) 7 current.appSolveSessions
+              }
+      filter (Text.isInfixOf "i insert") (overlayRows state (SolveOverlay 7)) `shouldNotBe` []
+      filter (Text.isInfixOf "Enter answer") (overlayRows (inserting state) (SolveOverlay 7)) `shouldNotBe` []
+
+    it "shows the focused session's mode badge, and only its own" $ do
+      -- The badge is per session, so cycling to a session left in insert has
+      -- to bring that session's mode with it (issue #515 requirement 2).
+      state <-
+        withSolveSession (baseIssue 7 []) SolveRunning
+          . withSolveSession (baseIssue 12 []) SolveRunning
+          <$> testAppState emptyBoard
+      let inserted =
+            state
+              { appSolveSessions = Map.adjust (setSessionMode SessionInsert) 12 state.appSolveSessions
+              }
+      filter (Text.isInfixOf "[N]") (overlayRows inserted (SolveOverlay 7)) `shouldNotBe` []
+      filter (Text.isInfixOf "[I]") (overlayRows inserted (SolveOverlay 7)) `shouldBe` []
+      filter (Text.isInfixOf "[I]") (overlayRows inserted (SolveOverlay 12)) `shouldNotBe` []
+
+    it "pins a settled session to the normal badge whatever its stored mode" $ do
+      -- Requirement 12: such a session sits permanently in normal mode, so a
+      -- mode left behind by a phase that has since resolved cannot show.
+      state <-
+        withSolveSession (baseIssue 7 []) SolveFinished
+          <$> testAppState emptyBoard
+      let stranded =
+            state
+              { appSolveSessions = Map.adjust (setSessionMode SessionInsert) 7 state.appSolveSessions
+              }
+          rows = overlayRows stranded (SolveOverlay 7)
+      filter (Text.isInfixOf "[N]") rows `shouldNotBe` []
+      filter (Text.isInfixOf "[I]") rows `shouldBe` []
+      -- And the hint drops the i it cannot honour.
+      filter (Text.isInfixOf "i insert") rows `shouldBe` []

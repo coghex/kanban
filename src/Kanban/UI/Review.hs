@@ -18,6 +18,8 @@ module Kanban.UI.Review
     deferredRevisionLaunches,
     chooseReviewOption,
     epicReviewRefusalNotice,
+    forcedToNormalBy,
+    numberedChoicePrompt,
     resolveReviewCancelAction,
     resolveReviewDigitAction,
     reviewSessionsNeedingArm,
@@ -107,6 +109,11 @@ import Kanban.UI.PullRequest
 -- 'EventM' harness.
 data ReviewDigitAction
   = ReviewDigitAppend
+  | -- | A normal-mode digit that no pending numbered choice claims. §7 makes
+    -- it nothing at all rather than text: normal mode is where the digits are
+    -- commands, and a command with no subject does not quietly type itself
+    -- into a draft the user cannot see (issue #515).
+    ReviewDigitIgnored
   | ReviewDigitSelectChoice ReviewRequestId ReviewChoice
   | ReviewDigitApprovalOnce ReviewRequestId
   | ReviewDigitApprovalSession ReviewRequestId
@@ -114,28 +121,52 @@ data ReviewDigitAction
   | ReviewDigitUnavailable Text
   deriving stock (Eq, Show)
 
-resolveReviewDigitAction :: Maybe PendingReviewInteraction -> Int -> ReviewDigitAction
-resolveReviewDigitAction pending choiceIndex = case pending of
-  Just (PendingReviewQuestion requestId question)
-    | question.reviewQuestionKind == QuestionText -> ReviewDigitAppend
-    | otherwise -> case safeIndex choiceIndex question.reviewQuestionChoices of
-        Just choice -> ReviewDigitSelectChoice requestId choice
-        Nothing
-          | question.reviewQuestionAllowOther -> ReviewDigitAppend
-          | otherwise -> ReviewDigitUnavailable "That review choice is not available"
-  Just (PendingReviewApproval requestId _approval) -> case choiceIndex of
-    0 -> ReviewDigitApprovalOnce requestId
-    1 -> ReviewDigitApprovalSession requestId
-    2 -> ReviewDigitApprovalDecline requestId
-    _ -> ReviewDigitUnavailable "That approval choice is not available"
-  Nothing -> ReviewDigitAppend
+resolveReviewDigitAction :: SessionMode -> Maybe PendingReviewInteraction -> Int -> ReviewDigitAction
+resolveReviewDigitAction mode pending choiceIndex = case (mode, claimed) of
+  (SessionNormal, ReviewDigitAppend) -> ReviewDigitIgnored
+  _ -> claimed
+  where
+    claimed = case pending of
+      Just (PendingReviewQuestion requestId question)
+        | question.reviewQuestionKind == QuestionText -> ReviewDigitAppend
+        | otherwise -> case safeIndex choiceIndex question.reviewQuestionChoices of
+            Just choice -> ReviewDigitSelectChoice requestId choice
+            Nothing
+              | question.reviewQuestionAllowOther -> ReviewDigitAppend
+              | otherwise -> ReviewDigitUnavailable "That review choice is not available"
+      Just (PendingReviewApproval requestId _approval) -> case choiceIndex of
+        0 -> ReviewDigitApprovalOnce requestId
+        1 -> ReviewDigitApprovalSession requestId
+        2 -> ReviewDigitApprovalDecline requestId
+        _ -> ReviewDigitUnavailable "That approval choice is not available"
+      Nothing -> ReviewDigitAppend
+
+-- | Whether a question the agent just asked offers numbered choices at all.
+-- A free-text-only request does not, so it leaves the session's mode alone
+-- and an already-typing user keeps typing; anything with a numbered list is
+-- what §7 makes normal mode's digits answer.
+numberedChoicePrompt :: ReviewQuestion -> Bool
+numberedChoicePrompt question = not (null question.reviewQuestionChoices)
+
+-- | Drop one session back to normal mode for a prompt whose answer is a
+-- digit, so the digit answers it instead of being typed into the draft
+-- (issue #515). Only the mode moves: the draft and the undelivered-steer
+-- queue behind it are exactly what the user still has to send afterwards, and
+-- only this session is touched -- prompts arrive per thread and a background
+-- tab's mode is none of their business.
+forcedToNormalBy :: Bool -> ReviewSession -> ReviewSession
+forcedToNormalBy False session = session
+forcedToNormalBy True session = setSessionMode SessionNormal session
 
 chooseReviewOption :: Int -> Int -> EventM Name AppState ()
 chooseReviewOption issueNumber choiceIndex = do
   state <- get
-  let pending = Map.lookup issueNumber state.appReviewSessions >>= (.sessionDetail.reviewSessionPending)
-  case resolveReviewDigitAction pending choiceIndex of
+  let session = Map.lookup issueNumber state.appReviewSessions
+      pending = session >>= (.sessionDetail.reviewSessionPending)
+      mode = maybe SessionNormal (.sessionMode) session
+  case resolveReviewDigitAction mode pending choiceIndex of
     ReviewDigitAppend -> modifyReviewSession issueNumber (insertSessionInput (toEnum (fromEnum '1' + choiceIndex)))
+    ReviewDigitIgnored -> pure ()
     ReviewDigitSelectChoice requestId choice -> submitQuestionAnswer issueNumber requestId (ReviewAnswer [choice.reviewChoiceId] Nothing) choice.reviewChoiceLabel
     ReviewDigitApprovalOnce requestId -> submitApprovalAnswer issueNumber requestId True False "Allowed this action once"
     ReviewDigitApprovalSession requestId -> submitApprovalAnswer issueNumber requestId True True "Allowed similar actions for this review session"
@@ -808,18 +839,20 @@ applyReviewEvent reviewEvent = case reviewEvent of
   ReviewQuestionRequested threadId requestId question ->
     modifyReviewSessionByThread threadId
       ( \session ->
-          (withPendingInteraction (Just (PendingReviewQuestion requestId question)) session)
-            { sessionPhase = ReviewWaiting,
-              sessionActivity = "waiting for answer"
-            }
+          forcedToNormalBy (numberedChoicePrompt question)
+            (withPendingInteraction (Just (PendingReviewQuestion requestId question)) session)
+              { sessionPhase = ReviewWaiting,
+                sessionActivity = "waiting for answer"
+              }
       )
   ReviewApprovalRequested threadId requestId approval ->
     modifyReviewSessionByThread threadId
       ( \session ->
-          (withPendingInteraction (Just (PendingReviewApproval requestId approval)) session)
-            { sessionPhase = ReviewWaiting,
-              sessionActivity = "waiting for approval"
-            }
+          forcedToNormalBy True
+            (withPendingInteraction (Just (PendingReviewApproval requestId approval)) session)
+              { sessionPhase = ReviewWaiting,
+                sessionActivity = "waiting for approval"
+              }
       )
   ReviewClaudeStarted threadId display -> do
     let started = claudeTranscriptStart display
