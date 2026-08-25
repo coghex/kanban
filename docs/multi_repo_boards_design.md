@@ -20,7 +20,7 @@ concrete precondition
 ## Processing status
 
 - [x] EPIC. Run one Kanban session over several repositories — [#354]
-- [ ] MRB-1. Add a configured repository roster with per-repo paths
+- [x] MRB-1. Add a configured repository roster with per-repo paths — [#524]
 - [ ] MRB-2. Hold per-repository board state behind an active-board pointer
 - [ ] MRB-3. Add the repository tab bar and amend the design contract
 - [ ] MRB-4. Show workflow state in the repository tabs
