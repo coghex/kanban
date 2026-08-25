@@ -113,6 +113,7 @@ library
     Kanban.Provider
     Kanban.PullRequestFlow
     Kanban.Repository
+    Kanban.Repository.Authority
     Kanban.Repository.Lease
     Kanban.Review
     Kanban.Settings
@@ -250,6 +251,7 @@ test-suite kanban-test
     Spec.GitHub.PullRequestStatus
     Spec.GitHub.RefreshCoordinator
     Spec.ManagedPaths
+    Spec.Repository.Authority
     Spec.Repository.Identity
     Spec.Repository.Lease
     Spec.Repository.State

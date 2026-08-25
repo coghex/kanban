@@ -38,6 +38,7 @@ import qualified Spec.GitHub.History as GitHubHistory
 import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.ManagedPaths as ManagedPaths
+import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
 import qualified Spec.Repository.Lease as RepositoryLease
 import qualified Spec.Repository.State as RepositoryState
@@ -126,6 +127,7 @@ suiteGroups =
     SuiteGroup "Spec.UI.ReviewSession" PingLane ReviewSession.spec,
     SuiteGroup "Spec.UI.SessionCore" PingLane SessionCore.spec,
     SuiteGroup "Spec.Repository.Identity" PingLane RepositoryIdentity.spec,
+    SuiteGroup "Spec.Repository.Authority" PingLane RepositoryAuthority.spec,
     SuiteGroup "Spec.UI.Text" PingLane UIText.spec,
     SuiteGroup "Spec.Board.Workflow" PingLane Workflow.spec,
     SuiteGroup "Spec.Board.Tracker" PingLane Tracker.spec,
@@ -158,7 +160,7 @@ suiteGroups =
     SuiteGroup "Spec.UI.Usage" PingLane UIUsage.spec,
     SuiteGroup "Spec.UI.Keys" PingLane Keys.spec,
     SuiteGroup "Spec.UI.Settings" PingLane UISettings.spec,
-    SuiteGroup "Spec.Design.Witnesses" PingLane DesignWitnesses.spec,
+    SuiteGroup "Spec.Design.Witnesses" UsageLane DesignWitnesses.spec,
     SuiteGroup "Spec.UI.Search" PingLane Search.spec,
     SuiteGroup "Spec.Agent.Ping" PingLane Ping.spec, -- 46.1s
     SuiteGroup "Spec.Agent.Preflight" SupervisionLane Preflight.spec -- 5.8s

@@ -10,6 +10,7 @@ module Kanban.Process
     checkGroupMembershipWith,
     checkIdentityPresence,
     checkIdentityPresenceWith,
+    currentProcessIdentity,
     defaultProcessSnapshot,
     descendantProcesses,
     identityForPid,
@@ -43,6 +44,7 @@ import GHC.Generics (Generic)
 import Kanban.CommandCapture (decodeCommandText, readProcessBytes)
 import System.Exit (ExitCode (..))
 import System.IO.Error (isDoesNotExistError)
+import System.Posix.Process (getProcessID)
 import System.Posix.Types (CPid)
 import System.Posix.Signals (Signal, sigINT, sigKILL, sigTERM, signalProcess, signalProcessGroup)
 import System.Process (ProcessHandle, getPid, proc, terminateProcess, waitForProcess)
@@ -79,7 +81,24 @@ data OwnedProcessGroup = OwnedProcessGroup
     -- and — the failure mode this flag exists to prevent — must never be
     -- handed to a group check that would find its empty membership
     -- vacuously absent and call the survivor reclaimed.
-    ownedProcessGroupCensused :: Bool
+    ownedProcessGroupCensused :: Bool,
+    -- | The dashboard process that wrote this entry, when it could be
+    -- captured.
+    --
+    -- Informational and nothing more. It is not consulted by
+    -- 'matchingIdentities', by 'membersStillInGroup', by any signalling
+    -- decision, or by any judgement about whether the group may be reclaimed:
+    -- the census and the recorded member identities remain the whole of that,
+    -- and an owner that is present adds no authority to them. What it is for
+    -- is saying /whose/ leftover a message is talking about.
+    --
+    -- 'Nothing' has two entirely ordinary causes and neither weakens anything:
+    -- an entry written before this field existed decodes without it, and a
+    -- process snapshot that could not be taken at startup leaves the running
+    -- dashboard with no identity to record. A board with no captured identity
+    -- still holds the repository lease, so a missing owner never admits a
+    -- second board.
+    ownedProcessGroupOwner :: Maybe ProcessIdentity
   }
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
@@ -206,6 +225,22 @@ data IdentityPresence = IdentityPresent | IdentityAbsent | IdentitySnapshotFaile
 -- liveness check in this module, exposed so callers in other modules (e.g.
 -- 'Kanban.Worker') can build their own retrying defaults on top of the same
 -- source rather than each hard-coding the retry count.
+-- | This process's own entry in a fresh process snapshot.
+--
+-- Read from the same @ps@ census every other identity here comes from, so the
+-- start time recorded for the dashboard is directly comparable with the ones
+-- recorded for the processes it started. 'Nothing' when the snapshot cannot be
+-- taken or does not list this PID, which is a fact about the census rather
+-- than about the process: every caller of this treats an absent identity as
+-- ordinary.
+currentProcessIdentity :: IO (Maybe ProcessIdentity)
+currentProcessIdentity = do
+  pid <- getProcessID
+  snapshot <- defaultProcessSnapshot
+  pure $ case snapshot of
+    Left _ -> Nothing
+    Right processes -> identityForPid (fromIntegral pid) processes
+
 defaultProcessSnapshot :: IO (Either Text [ProcessIdentity])
 defaultProcessSnapshot = readProcessSnapshotRetrying snapshotRetryAttempts
 

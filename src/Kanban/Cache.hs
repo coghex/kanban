@@ -7,14 +7,20 @@ module Kanban.Cache
     GhGroupRecordLoad (..),
     UsageCacheLoad (..),
     UsageCommit (..),
+    canonicalRepositoryKey,
     commitUsageSnapshots,
     completedCacheSchemaVersion,
     ghGroupRecordPath,
+    ghGroupRecordSchemaVersion,
+    legacyGhGroupRecordCandidates,
     loadCompletedCache,
     loadGhGroupRecord,
     loadRepositoryCache,
     loadUsageCache,
+    mergeGhGroups,
     mergeUsageSnapshots,
+    migrateGhGroupRecord,
+    normalizedRepositoryIdentity,
     removeGhGroupRecord,
     repositoryCachePath,
     repositoryCacheSchemaVersion,
@@ -57,8 +63,10 @@ import Kanban.Paths (createPrivateDirectory)
 import Kanban.Process (OwnedProcessGroup)
 import System.Directory
   ( XdgDirectory (XdgCache),
+    doesDirectoryExist,
     doesFileExist,
     getXdgDirectory,
+    listDirectory,
     removeFile,
     renameFile,
   )
@@ -229,10 +237,76 @@ usageCacheLockPath = do
   cacheRoot <- getXdgDirectory XdgCache "kanban"
   pure (cacheRoot </> "usage.lock")
 
-ghGroupRecordPath :: Repository -> IO FilePath
-ghGroupRecordPath repository = do
+-- | The one durable key a repository's board authority is spelled with.
+--
+-- @safeKey@ over @owner\/name@, which every other durable path here still
+-- uses, is neither canonical nor injective, and the @gh@ record is the one
+-- path where being both is load-bearing:
+--
+--   * It preserves case, so @Coghex\/Kanban@ and @coghex\/kanban@ -- one
+--     GitHub repository, since GitHub's identity is case-insensitive -- resolve
+--     two files, and a board opened under the second spelling would miss a
+--     possibly-live @gh@ the first recorded.
+--   * It replaces @\/@ with @-@ without escaping the @-@ already there, so
+--     @coghex-kan\/ban@ and @coghex\/kan-ban@ -- two distinct repositories --
+--     resolve one file and would contend over each other's entries.
+--
+-- ASCII-lowercasing closes the first: it is exactly the equality
+-- @docs\/multi_repo_boards_design.md@ D-10 selects for repository identity.
+-- @%2F@ closes the second: 'Kanban.Repository.isIdentityCharacter' admits only
+-- ASCII letters, digits, @.@, @_@ and @-@ inside an owner or a name, so @%@
+-- cannot occur in either component and the separator cannot be forged from
+-- one. The mapping is therefore injective over every identity Kanban accepts,
+-- and it cannot collide with a legacy basename either, for the same reason.
+--
+-- Deliberately not applied to 'repositoryCachePath', the worker directories,
+-- or anything else: those are snapshots and scratch state, where two spellings
+-- resolving two files costs a refetch rather than an unaccounted process.
+canonicalRepositoryKey :: Repository -> Text
+canonicalRepositoryKey repository =
+  asciiLowercase repository.repositoryOwner <> "%2F" <> asciiLowercase repository.repositoryName
+
+-- | The @owner\/name@ a record envelope carries and ownership is decided by.
+--
+-- The same ASCII-lowercasing 'canonicalRepositoryKey' applies, so the envelope
+-- agrees with the path it is written at rather than recording whichever
+-- spelling the invocation happened to use.
+normalizedRepositoryIdentity :: Repository -> Text
+normalizedRepositoryIdentity repository =
+  asciiLowercase repository.repositoryOwner <> "/" <> asciiLowercase repository.repositoryName
+
+-- | ASCII case folding, and only ASCII.
+--
+-- 'Data.Text.toLower' is Unicode-aware, which is the wrong tool for an
+-- identity GitHub compares as ASCII: it would fold characters the repository
+-- grammar does not admit anyway, and a locale-sensitive fold has no business
+-- deciding which file a durable record lives at.
+asciiLowercase :: Text -> Text
+asciiLowercase = Text.map fold
+  where
+    fold character
+      | character >= 'A' && character <= 'Z' = toEnum (fromEnum character + 32)
+      | otherwise = character
+
+-- | The directory the @gh@ record and the lease that guards it share.
+ghGroupDirectory :: IO FilePath
+ghGroupDirectory = do
   cacheRoot <- getXdgDirectory XdgCache "kanban"
-  pure (cacheRoot </> "gh-groups" </> Text.unpack (safeKey (repositoryIdentity repository)) <> ".json")
+  pure (cacheRoot </> "gh-groups")
+
+-- | The one derivation both of the repository's authority paths come from.
+--
+-- Written once rather than twice because the record and the lease are only
+-- coherent while they name the same repository by the same rule: a lease keyed
+-- differently from the record it protects would guard a file nobody else was
+-- writing.
+ghGroupPath :: Repository -> String -> IO FilePath
+ghGroupPath repository extension = do
+  directory <- ghGroupDirectory
+  pure (directory </> (Text.unpack (canonicalRepositoryKey repository) <> extension))
+
+ghGroupRecordPath :: Repository -> IO FilePath
+ghGroupRecordPath repository = ghGroupPath repository ".json"
 
 -- | The file one repository's cross-process authority is taken on.
 --
@@ -249,10 +323,189 @@ ghGroupRecordPath repository = do
 -- file over the name, which would leave two processes locking different
 -- inodes under one path. This one carries no payload: nothing reads it,
 -- nothing writes it, and nothing but the lease opens it.
+--
+-- It sits beside the record rather than under a directory of its own so that
+-- one key, one derivation and one directory cover the pair.
 repositoryLeasePath :: Repository -> IO FilePath
-repositoryLeasePath repository = do
-  cacheRoot <- getXdgDirectory XdgCache "kanban"
-  pure (cacheRoot </> "leases" </> Text.unpack (safeKey (repositoryIdentity repository)) <> ".lock")
+repositoryLeasePath repository = ghGroupPath repository ".lock"
+
+-- | The basename a release before the canonical key wrote this repository's
+-- record at, spelled from the normalized identity.
+--
+-- Compared case-insensitively by 'legacyGhGroupRecordCandidates', which is
+-- what makes a record written under @Coghex\/Kanban@ discoverable by a board
+-- opened as @coghex\/kanban@.
+legacyGhGroupRecordName :: Repository -> Text
+legacyGhGroupRecordName repository = safeKey (normalizedRepositoryIdentity repository) <> ".json"
+
+-- | Every flat @.json@ file in the @gh@ record directory that a release
+-- predating the canonical key could have written for this repository.
+--
+-- Deliberately a basename comparison rather than a decode: the file has to be
+-- /found/ before anything can be said about what is in it, and the old key was
+-- lossy, so a match here means "this could be ours" and never "this is
+-- ours". 'migrateGhGroupRecord' settles that from the envelope.
+--
+-- Two things this must not do, both of which would be safe-looking mistakes:
+--
+--   * It never opens a @.lock@. A POSIX record lock is released the moment the
+--     holding process closes /any/ descriptor on the file, so a scan that
+--     opened this repository's own lease file would silently drop the
+--     authority the caller had just acquired. The comparison is against a
+--     whole @.json@ basename, which no lease file can match.
+--   * It never descends. The old layout was flat, so a directory entry that is
+--     not a file is not a record this project wrote -- but it is also not
+--     something that can be proved to hold no live group, so it is offered as
+--     a candidate and fails the decode, rather than being skipped quietly.
+legacyGhGroupRecordCandidates :: Repository -> IO (Either Text [FilePath])
+legacyGhGroupRecordCandidates repository = do
+  directory <- ghGroupDirectory
+  canonical <- ghGroupRecordPath repository
+  present <- doesDirectoryExist directory
+  if not present
+    then pure (Right [])
+    else do
+      listed <- try @IOException (listDirectory directory)
+      pure $ case listed of
+        Left exception ->
+          Left ("the gh group record directory " <> Text.pack directory <> " could not be read: " <> Text.pack (show exception))
+        Right names ->
+          Right
+            [ candidate
+              | name <- names,
+                asciiLowercase (Text.pack name) == asciiLowercase (legacyGhGroupRecordName repository),
+                let candidate = directory </> name,
+                candidate /= canonical
+            ]
+
+-- | Brings every @gh@ group a release before the canonical key recorded for
+-- this repository under the canonical record, and clears the files it took
+-- them from.
+--
+-- Run once, by the dashboard that holds the repository's lease, before the
+-- first refresh. Under the lease no other board can be writing either file,
+-- which is what makes a read-merge-write across two paths safe at all.
+--
+-- The order is the whole safety argument. Canonical state is written -- and
+-- the write reported success through 'writeCacheFile', whose rename is atomic
+-- -- before any legacy file is unlinked, and a legacy file is unlinked only
+-- once every entry it held is in that canonical state. An interruption
+-- anywhere therefore leaves at worst two discoverable copies of an entry,
+-- which the next run merges away, and never zero copies of a @gh@ that may
+-- still be running.
+--
+-- 'Left' fails startup. Two cases reach it, and both are the same judgement:
+-- a candidate that could be this repository's and cannot be read is a file
+-- that cannot be shown to hold no live group, and a canonical record in that
+-- state cannot be merged into without discarding whatever it holds. 'Right'
+-- carries notices for what went wrong without threatening an entry -- a legacy
+-- file that would not unlink is one, since its contents are by then also
+-- canonical and the next run will simply merge and try again.
+migrateGhGroupRecord :: Repository -> IO (Either Text [Text])
+migrateGhGroupRecord repository = do
+  discovered <- legacyGhGroupRecordCandidates repository
+  case discovered of
+    Left message -> pure (Left message)
+    Right [] -> pure (Right [])
+    Right candidates -> do
+      canonicalLoad <- loadGhGroupRecord repository
+      canonical <- ghGroupRecordPath repository
+      case canonicalLoad of
+        GhGroupRecordUnusable message ->
+          pure
+            ( Left
+                ( "the gh group record at "
+                    <> Text.pack canonical
+                    <> " cannot be read ("
+                    <> message
+                    <> "), so an older record beside it cannot be merged into it; remove or repair that file and start again"
+                )
+            )
+        _ -> do
+          let existing = case canonicalLoad of
+                GhGroupRecordLoaded groups -> groups
+                _ -> []
+          readings <- traverse (readLegacyGhGroupRecord repository) candidates
+          case sequence readings of
+            Left message -> pure (Left message)
+            Right owned -> do
+              let ours = [(path, groups) | (path, Just groups) <- zip candidates owned]
+                  merged = foldl mergeGhGroups existing (map snd ours)
+              written <-
+                if merged == existing
+                  then pure (Right ())
+                  else writeGhGroupRecord repository merged
+              case written of
+                Left message ->
+                  pure
+                    ( Left
+                        ( "an older gh group record could not be brought under "
+                            <> Text.pack canonical
+                            <> " ("
+                            <> message
+                            <> "), so it was left where it is"
+                        )
+                    )
+                Right () -> Right . concat <$> traverse (clearLegacyGhGroupRecord . fst) ours
+
+-- | One legacy candidate, resolved into this repository's entries, somebody
+-- else's file, or a refusal.
+--
+-- The envelope decides ownership, not the path: the old key was lossy, so a
+-- basename match is exactly as much evidence as a collision would produce.
+-- @Nothing@ is a readable version-1 record naming a different repository --
+-- left alone, contributing nothing, and never unlinked.
+readLegacyGhGroupRecord :: Repository -> FilePath -> IO (Either Text (Maybe [OwnedProcessGroup]))
+readLegacyGhGroupRecord repository path = do
+  decoded <- try @IOException (eitherDecodeFileStrict' path :: IO (Either String GhGroupEnvelope))
+  pure $ case decoded of
+    Left exception -> Left (unreadable (Text.pack (show exception)))
+    Right (Left message) -> Left (unreadable (Text.pack message))
+    Right (Right envelope)
+      | envelope.ghGroupSchemaVersion /= ghGroupRecordSchemaVersion -> Left (unreadable "unsupported schema version")
+      | asciiLowercase envelope.ghGroupRepositoryKey == normalizedRepositoryIdentity repository -> Right (Just envelope.ghGroupGroups)
+      | otherwise -> Right Nothing
+  where
+    -- Names the file and says what clears the refusal. This one happens before
+    -- Brick draws, so §17 renders no notice that could carry the repair, and a
+    -- startup message that only announced a wedge would leave the board
+    -- unopenable with nothing to act on.
+    unreadable detail =
+      "an older gh group record at "
+        <> Text.pack path
+        <> " may belong to this repository and cannot be read ("
+        <> detail
+        <> "); Kanban cannot rule out a gh still running from it, so remove or repair that file and start again"
+
+-- | Adds entries to a record without losing one.
+--
+-- Exact equality is the only duplicate. Two entries that share a pgid but
+-- differ in members or in whether they were censused are two different claims
+-- about that group, and a pgid-keyed merge would silently drop one of them --
+-- including the censused one, whose members are what make the group killable
+-- at all. Keeping both is coherent because reclaim verifies every entry
+-- independently and clears the record only once all of them are accounted for.
+mergeGhGroups :: [OwnedProcessGroup] -> [OwnedProcessGroup] -> [OwnedProcessGroup]
+mergeGhGroups = foldl add
+  where
+    add accumulated group
+      | group `elem` accumulated = accumulated
+      | otherwise = accumulated <> [group]
+
+-- | Unlinks one migrated legacy record, reporting rather than failing.
+--
+-- Its entries are canonical by the time this runs, so a file that will not
+-- unlink threatens nothing: the next start merges it again, finds every entry
+-- already present, writes nothing, and tries the unlink once more. Failing
+-- startup over it would wedge the board out of an unopenable state for a
+-- reason that costs nothing to carry.
+clearLegacyGhGroupRecord :: FilePath -> IO [Text]
+clearLegacyGhGroupRecord path = do
+  removed <- try @IOException (removeFile path)
+  pure $ case removed of
+    Left exception ->
+      ["an older gh group record at " <> Text.pack path <> " was merged but could not be removed (" <> Text.pack (show exception) <> ")"]
+    Right () -> []
 
 loadGhGroupRecord :: Repository -> IO GhGroupRecordLoad
 loadGhGroupRecord repository = do
@@ -267,13 +520,22 @@ loadGhGroupRecord repository = do
         Right (Left message) -> GhGroupRecordUnusable ("gh group record unreadable: " <> Text.pack message)
         Right (Right envelope)
           | envelope.ghGroupSchemaVersion /= ghGroupRecordSchemaVersion -> GhGroupRecordUnusable "gh group record unreadable: unsupported schema version"
-          | envelope.ghGroupRepositoryKey /= repositoryIdentity repository -> GhGroupRecordUnusable "gh group record unreadable: repository identity mismatch"
+          -- Case-folded, because the envelope may have been written by a
+          -- release that recorded whichever spelling the invocation used --
+          -- and, since 'migrateGhGroupRecord' rewrites such a record at the
+          -- canonical path, that spelling can be sitting at this path right
+          -- now. Comparing exactly would read the board's own migrated record
+          -- as somebody else's.
+          | asciiLowercase envelope.ghGroupRepositoryKey /= normalizedRepositoryIdentity repository -> GhGroupRecordUnusable "gh group record unreadable: repository identity mismatch"
           | otherwise -> GhGroupRecordLoaded envelope.ghGroupGroups
 
 writeGhGroupRecord :: Repository -> [OwnedProcessGroup] -> IO (Either Text ())
 writeGhGroupRecord repository groups = do
   path <- ghGroupRecordPath repository
-  writeCacheFile path (GhGroupEnvelope ghGroupRecordSchemaVersion (repositoryIdentity repository) groups)
+  -- The normalized identity rather than the resolved spelling: the envelope
+  -- and the path it lives at have to agree about which repository this is, and
+  -- the path is canonical.
+  writeCacheFile path (GhGroupEnvelope ghGroupRecordSchemaVersion (normalizedRepositoryIdentity repository) groups)
 
 -- | Drops the record once every group in it has been confirmed gone. A
 -- missing file is success: there is nothing left to refuse a fetch over.

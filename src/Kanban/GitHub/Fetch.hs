@@ -204,7 +204,7 @@ fetchGitHubSnapshot guard observeRate pageSeconds workflowConfig repository = do
     Left message -> pure (Left (ProviderError RequestFailed message))
     Right () -> fetchPages initialState
   where
-    reclaimInterrupted = Left "reclaiming a gh process group left by an earlier GitHub refresh did not run to completion"
+    reclaimInterrupted = Left "reclaiming a recorded gh process group did not run to completion"
 
     initialState = FetchState [] [] Nothing Nothing True True True []
 
@@ -252,7 +252,7 @@ fetchHistoryPage guard observeRate pageSeconds repository initial = do
     Left message -> pure (Left (ProviderError RequestFailed message))
     Right () -> fetchOnce initial
   where
-    reclaimInterrupted = Left "reclaiming a gh process group left by an earlier GitHub refresh did not run to completion"
+    reclaimInterrupted = Left "reclaiming a recorded gh process group did not run to completion"
 
     fetchOnce state = do
       timedPage <- timeout (pageSeconds * 1000000) (fetchPage guard observeRate repository (historyRequest state))

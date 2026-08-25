@@ -3,7 +3,7 @@ module Main (main) where
 import Control.Monad (unless)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
-import Kanban.CLI (Options (..), optionsParserInfo)
+import Kanban.CLI (LaunchMode (..), Options (..), launchMode, optionsParserInfo)
 import Kanban.Config (RawConfig (..), cacheEnabled, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
@@ -32,24 +32,28 @@ main = do
         hPutStrLn stderr ("kanban: " <> Text.unpack message)
         exitFailure
       Right brand -> pure (Just brand)
-  case parsedOptions.optionWorkerSpec of
-    Just workerSpec -> do
+  -- Selected by 'launchMode' rather than by a cascade of guards here, so that
+  -- the one decision about which invocations become a board -- and therefore
+  -- which of them take the repository's lease -- lives where the test suite
+  -- can reach it. This module is not built by @test-suite kanban-test@.
+  case launchMode parsedOptions of
+    WorkerMode workerSpec -> do
       result <- runWorker workerSpec
       case result of
         Left message -> hPutStrLn stderr ("kanban worker: " <> Text.unpack message) >> exitFailure
         Right () -> pure ()
-    Nothing | parsedOptions.optionGlyphTest -> runGlyphTest
+    GlyphTestMode -> runGlyphTest
     -- Read-only, and deliberately ahead of configuration and repository
     -- resolution: a fresh clone with no configured remote still needs to be
     -- able to ask why an AI action would not start.
-    Nothing | parsedOptions.optionDoctor -> do
+    DoctorMode -> do
       environment <- gatherPreflightEnvironment parsedOptions.optionPath
       mapM_ TextIO.putStrLn (doctorLines environment)
       unless (doctorReady environment) exitFailure
     -- Configuration but no repository: usage is global (§14), so this answers
     -- from a directory that is not a checkout at all, while still honoring an
     -- explicit --config and the global timeout and cache settings it carries.
-    Nothing | parsedOptions.optionUsage -> do
+    UsageQueryMode -> do
       absoluteConfigPath <- resolveConfigPathOption parsedOptions.optionConfig
       configResult <- loadRawConfig absoluteConfigPath
       case configResult of
@@ -75,7 +79,7 @@ main = do
     -- Last of the run-and-exit modes, and deliberately so: it is the only one
     -- that spends the user's quota (§14), so every observational mode above
     -- wins over it and an invocation naming one of them pings nothing.
-    Nothing | Just brand <- pingBrand -> do
+    PingQueryMode | Just brand <- pingBrand -> do
       absoluteConfigPath <- resolveConfigPathOption parsedOptions.optionConfig
       configResult <- loadRawConfig absoluteConfigPath
       case configResult of
@@ -101,7 +105,12 @@ main = do
                       }
               succeeded <- runPingMode mode resolvedConfig
               unless succeeded exitFailure
-    Nothing -> do
+    -- Unreachable: 'PingQueryMode' is exactly a non-empty @--ping@, and every
+    -- such invocation either resolved a brand above or was refused before any
+    -- mode ran. It is written out rather than folded into the dashboard case
+    -- so that a ping can never fall through and open a board.
+    PingQueryMode -> pure ()
+    DashboardMode -> do
       -- An explicit --config is resolved against kanban's own launch
       -- directory here, then threaded onward (canonical issue-review and
       -- pull-request workers, spawned from the target repository's

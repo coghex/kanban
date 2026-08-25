@@ -108,7 +108,7 @@ killGhGroup processHandle = do
         -- recorded uncensused: a later run may watch that pgid until it is
         -- empty, but must never signal it, because by then the PIDs could
         -- belong to anything.
-        Left message -> pure (Left (message, OwnedProcessGroup groupPid [] False))
+        Left message -> pure (Left (message, OwnedProcessGroup groupPid [] False Nothing))
         Right processes -> case identityForPid groupPid processes of
           -- A live gh that is not its own group leader means @create_group@
           -- did not take effect, and its pgid now names processes this fetch
@@ -120,7 +120,7 @@ killGhGroup processHandle = do
                 pure
                   ( Left
                       ( "gh is not the leader of its own process group, so its group cannot be terminated safely",
-                        OwnedProcessGroup groupPid [leader] False
+                        OwnedProcessGroup groupPid [leader] False Nothing
                       )
                   )
           _ -> case groupMembers groupPid processes of
@@ -129,11 +129,11 @@ killGhGroup processHandle = do
             [] -> pure (Right True)
             members
               | passesLeft <= 0 ->
-                  pure (Left ("gh's process group kept gaining members faster than they could be terminated", OwnedProcessGroup groupPid members True))
+                  pure (Left ("gh's process group kept gaining members faster than they could be terminated", OwnedProcessGroup groupPid members True Nothing))
               | otherwise -> do
                   result <- killVerifiedGroup groupPid members
                   case result of
-                    Left message -> pure (Left (message, OwnedProcessGroup groupPid members True))
+                    Left message -> pure (Left (message, OwnedProcessGroup groupPid members True Nothing))
                     Right () -> escalate groupPid (passesLeft - 1)
 
 -- | How many census-then-escalate rounds a group gets before its survivors

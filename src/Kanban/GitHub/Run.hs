@@ -163,7 +163,7 @@ runGh guard repository arguments = afterLaunch $ do
         -- about.
         Left (message, survivors) -> do
           setCleanupFailure guard (GhCleanupFailure message GuardInMemoryOnly)
-          void (recordGhGroup guard repository (OwnedProcessGroup groupPid survivors True))
+          void (recordGhGroup guard repository (OwnedProcessGroup groupPid survivors True Nothing))
           recorded <- ghGroupIsRecorded guard repository groupPid
           setCleanupFailure guard (GhCleanupFailure message (if recorded then GuardRecorded else GuardInMemoryOnly))
           -- Deliberately not reaped. Reaping is what frees the PID and with

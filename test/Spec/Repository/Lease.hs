@@ -34,27 +34,46 @@ module Spec.Repository.Lease (spec) where
 import qualified Data.ByteString.Char8 as ByteString
 import Data.List (isPrefixOf, sort)
 import Data.Text (Text)
+import qualified Data.Text as Text
+import Data.Aeson (encode, object, (.=))
+import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Kanban.Cache
-  ( ghGroupRecordPath,
+  ( GhGroupRecordLoad (..),
+    ghGroupRecordPath,
+    ghGroupRecordSchemaVersion,
+    loadGhGroupRecord,
+    migrateGhGroupRecord,
     repositoryCachePath,
     repositoryLeasePath,
     usageCacheLockPath,
   )
 import Kanban.Domain (Repository (..))
-import Kanban.Repository.Lease (LeaseAcquisition (..), acquireRepositoryLease, releaseRepositoryLease)
+import Kanban.Process (OwnedProcessGroup (..))
+import Kanban.Repository.Lease
+  ( BoardLeaseOutcome (..),
+    LeaseAcquisition (..),
+    LeaseHolder (..),
+    acquireBoardLease,
+    acquireBoardLeaseWith,
+    acquireRepositoryLease,
+    boardLeaseAttempts,
+    releaseRepositoryLease,
+  )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.LeaseProbes
   ( LeaseProbe (..),
     LeaseProbeOutcome (..),
     awaitLeaseOutcome,
     killLeaseHolder,
+    leaseHolderPid,
     leaseProbeEnvironment,
     leaseProbeVariable,
     openLeaseGate,
     releaseLeaseHolder,
     withLeaseProbes,
   )
-import System.Directory (createDirectoryIfMissing)
+import Data.IORef (newIORef, readIORef, writeIORef)
+import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath (takeDirectory, (</>))
 import System.Posix.Files (setFileMode)
 import Test.Hspec
@@ -276,6 +295,197 @@ spec = do
             LeaseUnusable reported _ -> reported `shouldBe` path
             other -> expectationFailure ("expected the lease to be unusable, and it was " <> show other)
 
+  -- The authority a dashboard actually takes: the same lock, plus the answer a
+  -- refusal has to be built from. Every example below needs a second process
+  -- for the same reason the ones above do -- a POSIX record lock belongs to
+  -- the process, so a holder asked about its own lock is told nobody holds it.
+  describe "a dashboard taking its repository" $ do
+    -- The canonical key seen from where it matters. Two spellings of one
+    -- GitHub repository, two independent processes, one lock: exactly one may
+    -- be told it acquired. Under the case-preserving key this replaced, both
+    -- would have been.
+    it "makes two spellings of one repository contend" $
+      withTemporaryCacheRoot $ \root ->
+        withLeaseProbes
+          (root </> "probes")
+          [ LeaseProbe "upper" upperSpelling (root </> "cache") "both",
+            LeaseProbe "lower" lowerSpelling (root </> "cache") "both"
+          ]
+          $ \probes -> do
+            openLeaseGate probes "both"
+            upper <- awaitLeaseOutcome probes "upper"
+            lower <- awaitLeaseOutcome probes "lower"
+            sort [upper, lower] `shouldBe` [ProbeAcquired, ProbeHeld]
+
+    -- The other half of the key. These two repositories are the pair the old
+    -- lossy mapping collapsed onto one file, so under it this example would
+    -- have watched two unrelated boards refuse each other.
+    it "does not make two repositories the old key confused contend" $
+      withTemporaryCacheRoot $ \root ->
+        withLeaseProbes
+          (root </> "probes")
+          [ LeaseProbe "owner" hyphenOwner (root </> "cache") "both",
+            LeaseProbe "name" hyphenName (root </> "cache") "both"
+          ]
+          $ \probes -> do
+            openLeaseGate probes "both"
+            owner <- awaitLeaseOutcome probes "owner"
+            name <- awaitLeaseOutcome probes "name"
+            [owner, name] `shouldBe` [ProbeAcquired, ProbeAcquired]
+
+    -- The refusal itself, made by this process against a holder it can name
+    -- independently. The PID is the harness's record of the child it started,
+    -- so what is compared is what @F_GETLK@ reported against who is really
+    -- there.
+    it "names the process holding the repository" $
+      withTemporaryCacheRoot $ \root ->
+        withEnvironmentValue "XDG_CACHE_HOME" (root </> "cache") $
+          withLeaseProbes
+            (root </> "probes")
+            [LeaseProbe "holder" boardRepository (root </> "cache") "holder"]
+            $ \probes -> do
+              openLeaseGate probes "holder"
+              awaitLeaseOutcome probes "holder" `shouldReturn` ProbeAcquired
+              holder <- leaseHolderPid probes "holder"
+              path <- repositoryLeasePath boardRepository
+              acquireBoardLease boardRepository `shouldReturn` BoardLeaseContended path holder
+
+    -- The same refusal reached from the other spelling, which is what the
+    -- two-terminal acceptance check does.
+    it "names the holder even when the two boards spell the repository differently" $
+      withTemporaryCacheRoot $ \root ->
+        withEnvironmentValue "XDG_CACHE_HOME" (root </> "cache") $
+          withLeaseProbes
+            (root </> "probes")
+            [LeaseProbe "holder" upperSpelling (root </> "cache") "holder"]
+            $ \probes -> do
+              openLeaseGate probes "holder"
+              awaitLeaseOutcome probes "holder" `shouldReturn` ProbeAcquired
+              holder <- leaseHolderPid probes "holder"
+              path <- repositoryLeasePath lowerSpelling
+              acquireBoardLease lowerSpelling `shouldReturn` BoardLeaseContended path holder
+
+    -- A fresh installation has no gh-groups directory at all, and the lease
+    -- file is the first thing ever written into it. Without the acquisition
+    -- creating that directory the board would refuse to open on every machine
+    -- it had never run on.
+    it "opens on a cache root that has never held a record" $
+      withTemporaryCacheRoot $ \root ->
+        withEnvironmentValue "XDG_CACHE_HOME" (root </> "cache") $ do
+          path <- repositoryLeasePath boardRepository
+          doesFileExist path `shouldReturn` False
+          outcome <- acquireBoardLease boardRepository
+          case outcome of
+            BoardLeaseAcquired lease -> do
+              doesFileExist path `shouldReturn` True
+              releaseRepositoryLease lease
+            other -> expectationFailure ("expected the repository to be taken, and it was " <> show other)
+
+    -- The migration runs under the lease and scans the directory the lease
+    -- file lives in. POSIX drops every lock a process holds on a file the
+    -- moment it closes any descriptor on it, so a scan that so much as opened
+    -- the lock would free the repository silently -- and the only way to see
+    -- that is to ask another process afterwards.
+    it "still holds the repository after migrating an older record beside it" $
+      withTemporaryCacheRoot $ \root ->
+        withEnvironmentValue "XDG_CACHE_HOME" (root </> "cache") $ do
+          taken <- acquireBoardLease boardRepository
+          case taken of
+            BoardLeaseAcquired lease -> do
+              record <- ghGroupRecordPath boardRepository
+              writeLegacyRecord (takeDirectory record) "coghex-kanban.json"
+              migrateGhGroupRecord boardRepository `shouldReturn` Right []
+              loadGhGroupRecord boardRepository `shouldReturn` GhGroupRecordLoaded [OwnedProcessGroup 4242 [] False Nothing]
+              withLeaseProbes
+                (root </> "probes")
+                [LeaseProbe "intruder" boardRepository (root </> "cache") "intruder"]
+                $ \probes -> do
+                  openLeaseGate probes "intruder"
+                  awaitLeaseOutcome probes "intruder" `shouldReturn` ProbeHeld
+              releaseRepositoryLease lease
+            other -> expectationFailure ("expected the repository to be taken, and it was " <> show other)
+
+    -- Acceptance 6 at the startup level: an unusable lease is not a board.
+    it "reports a lease it cannot open as unusable rather than as a second board" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          path <- repositoryLeasePath boardRepository
+          createDirectoryIfMissing True (takeDirectory path)
+          ByteString.writeFile path ""
+          setFileMode path 0o000
+          outcome <- acquireBoardLease boardRepository
+          case outcome of
+            BoardLeaseUnusable reported _ -> reported `shouldBe` path
+            other -> expectationFailure ("expected the lease to be unusable, and it was " <> show other)
+
+  -- The race between the refusal and the question it raises. @F_SETLK@ says
+  -- "somebody" and @F_GETLK@ is asked "who", and a holder that let go in
+  -- between makes the second answer "nobody" -- which is neither a refusal to
+  -- print nor a lease to assume is free. Both answers are supplied here
+  -- because staging that interleaving against a real holder would be waiting
+  -- for a coincidence.
+  describe "a conflict whose holder has already gone" $ do
+    it "attempts the lock again rather than refusing without a holder" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          attempts <- newIORef (0 :: Int)
+          path <- repositoryLeasePath boardRepository
+          -- The third attempt is a real acquisition, so what the retry ends in
+          -- is a lease that was actually taken rather than a value assembled
+          -- for the example.
+          let attempt = do
+                taken <- readIORef attempts
+                writeIORef attempts (taken + 1)
+                if taken >= 2 then acquireRepositoryLease boardRepository else pure (LeaseHeld path)
+          outcome <- acquireBoardLeaseWith boardLeaseAttempts attempt (const (pure (Right HeldByNobody)))
+          case outcome of
+            BoardLeaseAcquired lease -> releaseRepositoryLease lease
+            other -> expectationFailure ("expected the retry to end in an acquisition, and it was " <> show other)
+          readIORef attempts `shouldReturn` 3
+
+    -- Bounded, and what exhausting the bound costs. Startup fails, because a
+    -- board that never established the lease has not established that it is
+    -- alone -- and the message is an acquisition failure, never a refusal with
+    -- nothing in the parentheses.
+    it "fails the acquisition once the bound is spent, without naming a holder" $ do
+      attempts <- newIORef (0 :: Int)
+      let attempt = do
+            taken <- readIORef attempts
+            writeIORef attempts (taken + 1)
+            pure (LeaseHeld "/tmp/board.lock")
+      outcome <- acquireBoardLeaseWith 3 attempt (const (pure (Right HeldByNobody)))
+      case outcome of
+        BoardLeaseUnusable path detail -> do
+          path `shouldBe` "/tmp/board.lock"
+          detail `shouldSatisfy` Text.isInfixOf "no holder could be identified"
+        other -> expectationFailure ("expected the acquisition to fail, and it was " <> show other)
+      readIORef attempts `shouldReturn` 3
+
+    it "stops the moment a holder can be named" $ do
+      attempts <- newIORef (0 :: Int)
+      let attempt = do
+            taken <- readIORef attempts
+            writeIORef attempts (taken + 1)
+            pure (LeaseHeld "/tmp/board.lock")
+      outcome <- acquireBoardLeaseWith boardLeaseAttempts attempt (const (pure (Right (HeldBy 4812))))
+      outcome `shouldBe` BoardLeaseContended "/tmp/board.lock" 4812
+      readIORef attempts `shouldReturn` 1
+
+    -- Every acquisition error other than confirmed contention is fatal, and a
+    -- query that cannot answer is one of them.
+    it "treats a holder query that fails as an unusable lease" $ do
+      outcome <- acquireBoardLeaseWith boardLeaseAttempts (pure (LeaseHeld "/tmp/board.lock")) (const (pure (Left "getLock refused")))
+      outcome `shouldBe` BoardLeaseUnusable "/tmp/board.lock" "getLock refused"
+
+    -- A board inside this process is not "another Kanban board", and saying
+    -- so would put this process's own PID in a message telling the user to
+    -- close it.
+    it "treats a lease this process already holds as unusable, not as contention" $ do
+      outcome <- acquireBoardLeaseWith boardLeaseAttempts (pure (LeaseHeld "/tmp/board.lock")) (const (pure (Right HeldByThisProcess)))
+      case outcome of
+        BoardLeaseUnusable _ detail -> detail `shouldSatisfy` Text.isInfixOf "a board in this process"
+        other -> expectationFailure ("expected the acquisition to fail, and it was " <> show other)
+
   -- Requirement 8. A probe is the suite binary run again, so the environment
   -- it is handed decides which branch of @main@ it takes. Carrying the
   -- parent's markers onward would let a probe re-enter the lane runner or
@@ -300,6 +510,29 @@ spec = do
 boardRepository, otherRepository :: Repository
 boardRepository = repositoryNamed "coghex" "kanban"
 otherRepository = repositoryNamed "someone" "elses"
+
+-- | One GitHub repository under two spellings, and the two repositories the
+-- key this replaced mapped onto one file.
+upperSpelling, lowerSpelling, hyphenOwner, hyphenName :: Repository
+upperSpelling = repositoryNamed "Coghex" "Kanban"
+lowerSpelling = repositoryNamed "coghex" "kanban"
+hyphenOwner = repositoryNamed "coghex-kan" "ban"
+hyphenName = repositoryNamed "coghex" "kan-ban"
+
+-- | A record exactly as a release before the canonical key wrote one.
+writeLegacyRecord :: FilePath -> FilePath -> IO ()
+writeLegacyRecord directory name = do
+  createDirectoryIfMissing True directory
+  LazyByteString.writeFile
+    (directory </> name)
+    ( encode
+        ( object
+            [ "ghGroupSchemaVersion" .= ghGroupRecordSchemaVersion,
+              "ghGroupRepositoryKey" .= ("coghex/kanban" :: Text),
+              "ghGroupGroups" .= [OwnedProcessGroup 4242 [] False Nothing]
+            ]
+        )
+    )
 
 -- | The lease resolves from the identity and the cache root alone, so the
 -- checkout path is deliberately one that does not exist: an example that

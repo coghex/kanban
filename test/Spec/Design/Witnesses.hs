@@ -42,6 +42,7 @@
 -- are true or false together. Each declaration still states its own rationale.
 module Spec.Design.Witnesses (spec) where
 
+import Control.Exception (SomeException, try)
 import Data.Aeson (Value (Object), toJSON)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -101,6 +102,14 @@ import Spec.Design.Entries
     excludedDistributionPaths,
   )
 import Spec.Support.App (testAppState)
+import Spec.Support.Env (withTemporaryCacheRoot)
+import Spec.Support.LeaseProbes
+  ( LeaseProbe (..),
+    LeaseProbeOutcome (..),
+    awaitLeaseOutcome,
+    openLeaseGate,
+    withLeaseProbes,
+  )
 import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, fixtureBoard)
 import System.Directory (doesDirectoryExist, doesPathExist, listDirectory)
 import System.FilePath (takeExtension, (</>))
@@ -422,6 +431,19 @@ declarations =
               factCheck = do
                 claims <- pointerClaims
                 pure (everyFault [boardActionInventory, claims, singleRepositoryDataset])
+            }
+      ),
+    Declaration
+      3
+      "Concurrent dashboard processes for one GitHub repository. Dashboard mode holds a repository-scoped lease for its lifetime and refuses a second dashboard before drawing."
+      ( Witnessed
+          WitnessedFact
+            { factStatement =
+                "Two independent OS processes going for the lease under one cache root, released together from one rendezvous, are told between them exactly one acquisition and one refusal when they spell the same GitHub repository `Coghex/Kanban` and `coghex/kanban` — and are both told they acquired when they name `coghex-kan/ban` and `coghex/kan-ban`, the two distinct repositories the durable key this replaced mapped onto one file.",
+              factRationale =
+                "The entry is about processes, and nothing staged inside one can witness it: a POSIX record lock belongs to the process, so a second request from a holder is granted rather than refused and a threaded fixture would watch every contention it staged quietly succeed. Two real processes and one lock is the fact itself. The second half is what keeps the first from passing vacuously as a machine-wide lock would: the refusal has to be scoped to the repository, or a board would refuse to open beside an unrelated one.",
+              factReads = [],
+              factCheck = boardLeaseWitness
             }
       ),
     Declaration
@@ -1099,3 +1121,61 @@ dedupe = foldr (\value seen -> value : filter (/= value) seen) []
 
 showText :: (Show value) => value -> Text
 showText = Text.pack . show
+
+-- | Two boards, one repository, two processes — and the same again for two
+-- repositories that are not one.
+--
+-- Run rather than inspected, because the entry it witnesses is about what the
+-- operating system does when two processes want the same lock, and there is no
+-- artefact in the tree that states the answer. The harness is
+-- "Spec.Support.LeaseProbes", the same one issue #501's acceptance rests on;
+-- every probe is the suite binary run again, and each attempts the lease
+-- exactly once and holds whatever it took until the parent lets it go, so
+-- which of them is refused is decided by the kernel rather than by timing.
+--
+-- Every failure the harness raises is a broken witness rather than a crashed
+-- example: a probe that never started says nothing about the lease, and this
+-- must report that rather than let it stand as a pass.
+boardLeaseWitness :: IO (Maybe Text)
+boardLeaseWitness = do
+  attempted <- try @SomeException $
+    withTemporaryCacheRoot $ \root -> do
+      let cache = root </> "cache"
+      sameRepository <-
+        withLeaseProbes
+          (root </> "same")
+          [ LeaseProbe "upper" (leaseWitnessRepository "Coghex" "Kanban") cache "both",
+            LeaseProbe "lower" (leaseWitnessRepository "coghex" "kanban") cache "both"
+          ]
+          $ \probes -> do
+            openLeaseGate probes "both"
+            upper <- awaitLeaseOutcome probes "upper"
+            lower <- awaitLeaseOutcome probes "lower"
+            pure (sort [upper, lower])
+      distinctRepositories <-
+        withLeaseProbes
+          (root </> "distinct")
+          [ LeaseProbe "owner" (leaseWitnessRepository "coghex-kan" "ban") cache "both",
+            LeaseProbe "name" (leaseWitnessRepository "coghex" "kan-ban") cache "both"
+          ]
+          $ \probes -> do
+            openLeaseGate probes "both"
+            owner <- awaitLeaseOutcome probes "owner"
+            name <- awaitLeaseOutcome probes "name"
+            pure [owner, name]
+      pure (sameRepository, distinctRepositories)
+  pure $ case attempted of
+    Left problem -> Just ("the lease probes could not be run (" <> Text.pack (show problem) <> ")")
+    Right (sameRepository, distinctRepositories)
+      | sameRepository /= [ProbeAcquired, ProbeHeld] ->
+          Just ("two spellings of one repository were told " <> Text.pack (show sameRepository))
+      | distinctRepositories /= [ProbeAcquired, ProbeAcquired] ->
+          Just ("two distinct repositories were told " <> Text.pack (show distinctRepositories))
+      | otherwise -> Nothing
+
+-- | A repository for the probes above. The checkout path is deliberately one
+-- that does not exist: the lease resolves from the identity and the cache root
+-- alone, so a witness that started to depend on this machine would fail rather
+-- than quietly read it.
+leaseWitnessRepository :: Text -> Text -> Repository
+leaseWitnessRepository = Repository "/nonexistent/checkout"
