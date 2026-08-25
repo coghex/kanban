@@ -361,6 +361,14 @@ meanings must still be expressed as a single contract row in
 for a deliberately plain-key binding set. `f` was avoided: open issue #348
 claims it for the filter panel.
 
+Correcting note: that last sentence is stale. #513 moved the filter panel
+from `f` to capital `F` across the board binding, the panel's own hide key,
+and the search box's transfer key, so #348 no longer claims lowercase `f`.
+The key is not free either — `overlay_focus_fullscreen_design.md` D-3 records
+the rebind and its later slice claims lowercase `f` for the overlay
+fullscreen toggle — so the signed-off `[`/`]` and digit bindings above stand
+unchanged, and the avoidance still holds for a different reason.
+
 ### D-14. One row, full width, at the very top
 
 User signoff 2026-08-16. The tab row is a single unboxed row spanning the
