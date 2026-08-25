@@ -662,8 +662,13 @@ of an unfinished earlier publication. Eligibility is the one part that is not
 the same question in every repository, and the helper answers it rather than
 you: for `coghex/kanban` it is §7 as the publication branch itself carries it,
 and for every other owner it is that repository's own
-`workflow.coordination_paths` declaration, which is empty until the repository
-sets it. Do not reimplement, precede, or compensate for any part of it. Act
+`workflow.direct_publication_paths` declaration, which is empty until the
+repository sets it — and NOT `workflow.coordination_paths`, which is the PR
+drainer's merge exception and grants no publication lane. An empty lane is the
+ordinary, intended configuration: it yields `not-published`, the approved
+mutation is applied to the working copy and recorded, and the edits accumulate
+in the docs worktree for a human to land in one batch. Do not treat that as a
+failure of the run, and never publish by hand to compensate for it. Do not reimplement, precede, or compensate for any part of it. Act
 on the one structured result it returns:
 
 - **`"status": "published"`.** Say so, and quote the commit it reports together

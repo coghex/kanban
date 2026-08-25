@@ -28,8 +28,15 @@ identical and holds every asset's lookup to a bundled one.
 What does *not* travel with it is the eligibility decision. §7 of
 docs/agent-workflow-contract.md is Kanban's statement about Kanban, so for any
 other owner the direct-publication lane is whatever that repository declares
-through `workflow.coordination_paths` — and declaring none is the ordinary
-`not-published` outcome rather than an error.
+through `workflow.direct_publication_paths` — and declaring none is the
+ordinary `not-published` outcome rather than an error.
+
+That key is deliberately not `workflow.coordination_paths`, which is the PR
+drainer's merge exception and nothing else. Reading the drainer's key here made
+one declaration grant two unrelated permissions, so a repository that wanted
+its docs merged past without a branch update also got one unattended
+default-branch push per approved disposition — the outcome the empty default
+below exists to prevent.
 
 It is a module rather than shell in those assets because the mechanism was
 first written that way, where twelve review rounds found twenty defects and
@@ -77,7 +84,9 @@ from pathlib import Path, PurePosixPath
 
 # §7 is Kanban's own statement about Kanban, so it can only ever authorize
 # publication to Kanban itself. Any other owner's lane is the one it declares
-# for itself, in `workflow.coordination_paths` (issue #370).
+# for itself, in `workflow.direct_publication_paths` (issue #370 established
+# the lane; the key was split off the drainer's `coordination_paths` so that
+# declaring a merge exception no longer authorizes unattended publication).
 CANONICAL_REPOSITORY = "coghex/kanban"
 
 CLASSIFICATION_PATH = "docs/agent-workflow-contract.md"
@@ -491,10 +500,17 @@ def kanban_config_module():
     return module
 
 
-def declared_coordination_paths(owner: str) -> tuple[frozenset[str], list[str]]:
-    """The coordination declarations `owner` makes for itself — exact
+def declared_publication_paths(owner: str) -> tuple[frozenset[str], list[str]]:
+    """The direct-publication declarations `owner` makes for itself — exact
     repository-relative file paths, or directories through a trailing-slash
     entry — and whatever the loader warned about on the way.
+
+    This reads `workflow.direct_publication_paths` and NOT
+    `workflow.coordination_paths`. The second is the PR drainer's merge
+    exception; reading it here meant a repository could not declare "merge past
+    my docs without a branch update" without also declaring "every document
+    workflow may push my default branch unattended". Those are different
+    permissions, they are declared separately, and neither implies the other.
 
     Missing configuration is an empty set — the documented default, and the
     reason a consuming repository that declares nothing gets an ordinary
@@ -504,20 +520,20 @@ def declared_coordination_paths(owner: str) -> tuple[frozenset[str], list[str]]:
     locally for a document its owner really did declare publishable.
 
     The warnings travel because an empty lane and a misspelled key produce the
-    same outcome, and only the warning tells them apart: `coordination_path`
-    for `coordination_paths` is an unknown key, not an error, so a run that
-    dropped the warning would report a document as having no lane while the
-    line declaring it sat in the file.
+    same outcome, and only the warning tells them apart: `direct_publication_path`
+    for `direct_publication_paths` is an unknown key, not an error, so a run
+    that dropped the warning would report a document as having no lane while
+    the line declaring it sat in the file.
     """
     module = kanban_config_module()
     try:
         raw, warnings = module.load_raw_config(None)
-        declared = module.resolve_config(owner, raw).workflow.coordination_paths
+        declared = module.resolve_config(owner, raw).workflow.direct_publication_paths
     except Exception as error:  # noqa: BLE001 - reported, never raised bare
         raise PublishError(
-            "coordination-config-unreadable",
-            f"the Kanban configuration declaring {owner}'s coordination paths "
-            f"could not be read ({error}); whether {owner} has a direct "
+            "publication-config-unreadable",
+            f"the Kanban configuration declaring {owner}'s direct publication "
+            f"paths could not be read ({error}); whether {owner} has a direct "
             "publication lane cannot be decided, so nothing is written or "
             "published",
         ) from error
@@ -535,25 +551,32 @@ def eligibility(root: Path, owner: str, tip: str, document: str) -> tuple[bool, 
     it, and never from configuration: the classification is tracked beside the
     documents it classifies, so it holds whether or not an operator ever copied
     config.toml.example. Every other owner's lane is that owner's own
-    `workflow.coordination_paths` declaration, which is where a repository that
-    does not track §7 says what its coordination documents are (issue #370) —
-    exact file paths, or whole directories through a trailing-slash entry
-    covering descendants by whole path component, decided by the same
-    kanban_config predicate the drainer's base-advance decision reads. A
-    declaration whose empty component prefix would cover every path (`/`
-    alone) is invalid configuration rather than a broad lane, and fails closed
-    like configuration that cannot be read: silently honouring it would
-    publish anything, and silently dropping it would strand a document its
-    owner meant to declare.
+    `workflow.direct_publication_paths` declaration, which is where a
+    repository that does not track §7 says which documents an agent may push
+    unattended (issue #370) — exact file paths, or whole directories through a
+    trailing-slash entry covering descendants by whole path component, decided
+    by the same kanban_config predicate the drainer's base-advance decision
+    uses for its own key. A declaration whose empty component prefix would
+    cover every path (`/` alone) is invalid configuration rather than a broad
+    lane, and fails closed like configuration that cannot be read: silently
+    honouring it would publish anything, and silently dropping it would strand
+    a document its owner meant to declare.
+
+    Declaring nothing is the ordinary, supported case and the safe default: an
+    approved mutation is applied to the working copy and recorded, and the
+    edits accumulate for a human to land in one batch. It is emphatically NOT
+    read from `workflow.coordination_paths`, whose entries exist so the drainer
+    may merge past a docs-only base advance; a repository that wants that must
+    not thereby be signed up for one default-branch push per disposition.
     """
     if owner != CANONICAL_REPOSITORY:
-        declared, warnings = declared_coordination_paths(owner)
+        declared, warnings = declared_publication_paths(owner)
         config = kanban_config_module()
         invalid = config.empty_prefix_coordination_declarations(declared)
         if invalid:
             raise PublishError(
-                "coordination-config-invalid",
-                f"{owner}'s workflow.coordination_paths declares "
+                "publication-config-invalid",
+                f"{owner}'s workflow.direct_publication_paths declares "
                 f"{invalid}, whose empty component prefix would cover every "
                 "path in the repository; the declaration grants no lane, and "
                 "nothing is written or published until it is corrected",
@@ -563,10 +586,10 @@ def eligibility(root: Path, owner: str, tip: str, document: str) -> tuple[bool, 
             return True, ""
         noted = f" (configuration warnings: {'; '.join(warnings)})" if warnings else ""
         return False, (
-            f"{owner} declares no coordination lane for {document}; §7 classifies "
-            f"{CANONICAL_REPOSITORY} and nothing else, and this repository's "
-            f"workflow.coordination_paths names {sorted(declared) or 'no path'}"
-            f"{noted}"
+            f"{owner} declares no direct publication lane for {document}; §7 "
+            f"classifies {CANONICAL_REPOSITORY} and nothing else, and this "
+            f"repository's workflow.direct_publication_paths names "
+            f"{sorted(declared) or 'no path'}{noted}"
         )
     proc = git(["show", f"{tip}:{CLASSIFICATION_PATH}"], cwd=root, check=False)
     if proc.returncode != 0:

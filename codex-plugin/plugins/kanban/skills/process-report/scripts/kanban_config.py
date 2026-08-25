@@ -20,11 +20,16 @@ only. See default_issue_review_install_dir(), default_drainer_install_dir(),
 and the resolvers below each.
 
 Issue #370 gave it a third home. `publish_coordination_doc.py` reads a
-repository's declared `workflow.coordination_paths` through this loader so a
-consuming repository's publication lane means exactly what the drainer and the
-dashboard already take it to mean; byte-identical copies of all three modules
-therefore ship in both tracked plugin bundles, held identical by
-tools/test_document_workflow_contract.py.
+repository's declared publication lane through this loader; byte-identical
+copies of all three modules therefore ship in both tracked plugin bundles, held
+identical by tools/test_document_workflow_contract.py.
+
+That lane is `workflow.direct_publication_paths`, and it is deliberately NOT
+`workflow.coordination_paths`. #370 originally reused the drainer's key, which
+made one declaration answer two unrelated permissions -- "the drainer may merge
+past this path" and "an agent may push this document unattended" -- so a
+repository could not have the first without the second. The two keys share an
+entry grammar and the coverage predicate below; they share nothing else.
 """
 
 from __future__ import annotations
@@ -368,15 +373,37 @@ class WorkflowConfig:
     # file path, or a directory ending in `/` that covers every descendant by
     # whole path component -- `docs/notes/` covers `docs/notes/a.md` and never
     # a sibling such as `docs/notes-old/a.md`; no globs, no string prefixes.
-    # drain_prs.py may merge a candidate whose only distance from the default
-    # branch is a change to covered paths, and since issue #370
-    # publish_coordination_doc.py takes them as the direct-publication lane of
-    # any repository docs/agent-workflow-contract.md §7 does not classify --
-    # which is every repository but this one. Both consumers decide coverage
-    # through coordination_path_covers below, so an entry means one thing
-    # everywhere. Empty by default, which is no lane and no merge exception,
-    # and is today's behavior everywhere.
+    #
+    # This key answers ONE question: may drain_prs.py merge a candidate whose
+    # only distance from the default branch is a change to covered paths,
+    # without a branch update? It does NOT grant an agent a publication lane.
+    # Until this split it did both (issue #370 reused it as the lane), and the
+    # collision was live: declaring a path so the drainer could merge past it
+    # also authorized every document workflow to publish it unattended, one
+    # default-branch push per disposition -- and each push made the drainer
+    # merge master into every approved PR, restarting that PR's CI under
+    # cancel-in-progress. Publication now reads direct_publication_paths below.
+    # Empty by default, which is no merge exception.
     coordination_paths: frozenset[str] = frozenset()
+    # The AGENT PUBLICATION lane, and the only key publish_coordination_doc.py
+    # reads: which documents a workflow may push straight to the publication
+    # branch in the run that approves the mutation. Same entry grammar and the
+    # same coordination_paths_cover predicate as above -- an entry means one
+    # thing everywhere -- but a separate declaration, because "the drainer may
+    # merge past this" and "an agent may publish this unattended" are different
+    # permissions with different costs.
+    #
+    # Empty by default, and that default is the safe one: a workflow whose
+    # document is not covered applies its approved mutation to the working copy,
+    # records it in refs/kanban/applied-locally/*, reports not-published, and
+    # lets the edits accumulate for a human to land in one batch. Declaring a
+    # path here opts that document into unattended pushes; leaving this key out
+    # entirely is a deliberate, supported configuration.
+    #
+    # Kanban's own lane never comes from here: it comes from
+    # docs/agent-workflow-contract.md §7, tracked beside the documents it
+    # classifies, so configuration can neither open nor close it.
+    direct_publication_paths: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -431,6 +458,7 @@ class WorkflowOverride:
     problem_style_labels: frozenset[str] | None = None
     ui_style_labels: frozenset[str] | None = None
     coordination_paths: frozenset[str] | None = None
+    direct_publication_paths: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -477,11 +505,13 @@ class ResolvedConfig:
 
 # --------------------------------------------- coordination-path coverage --
 #
-# The one definition of what a `workflow.coordination_paths` entry covers.
-# drain_prs.py's base-advance decision and publish_coordination_doc.py's
-# consuming-repository eligibility both call these, which is what keeps "is
-# this path coordination?" one question with one answer: a path the drainer
-# would merge past is exactly a path the document workflows would publish.
+# The one definition of what a declared path entry covers, shared by BOTH
+# `workflow.coordination_paths` and `workflow.direct_publication_paths`.
+# drain_prs.py's base-advance decision reads the first and
+# publish_coordination_doc.py's consuming-repository eligibility reads the
+# second; they call these helpers so an entry is written and read the same way
+# in either key. Sharing the grammar is not sharing the permission -- the keys
+# answer different questions and a path in one implies nothing about the other.
 
 
 def coordination_path_covers(declared: str, path: str) -> bool:
@@ -788,6 +818,9 @@ def _parse_workflow_override(value: dict, path: str, warnings: list[str]) -> Wor
     problem_style_labels = _pop_str_list(table, "problem_style_labels", path)
     ui_style_labels = _pop_str_list(table, "ui_style_labels", path)
     coordination_paths = _pop_str_list(table, "coordination_paths", path)
+    direct_publication_paths = _pop_str_list(
+        table, "direct_publication_paths", path
+    )
     _collect_unknown(table, path, warnings)
     return WorkflowOverride(
         approval_label=approval_label,
@@ -805,6 +838,11 @@ def _parse_workflow_override(value: dict, path: str, warnings: list[str]) -> Wor
         ui_style_labels=frozenset(ui_style_labels) if ui_style_labels is not None else None,
         coordination_paths=(
             frozenset(coordination_paths) if coordination_paths is not None else None
+        ),
+        direct_publication_paths=(
+            frozenset(direct_publication_paths)
+            if direct_publication_paths is not None
+            else None
         ),
     )
 

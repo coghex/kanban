@@ -1602,7 +1602,7 @@ class TrackerTransactionTests(TrackerFixture):
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(
             '[repositories."otherorg/product".workflow]\n'
-            'coordination_paths = ["docs/ui-bugs.md"]\n',
+            'direct_publication_paths = ["docs/ui-bugs.md"]\n',
             encoding="utf-8",
         )
         self.addCleanup(config.unlink, missing_ok=True)
