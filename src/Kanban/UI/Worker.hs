@@ -21,6 +21,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain
+import Kanban.Models (ModelRoster, RosterLoadError)
 import Kanban.Process (managedProcessGroup )
 import Kanban.PullRequestFlow
   ( PullRequestFlowEvent (..),
@@ -31,7 +32,7 @@ import Kanban.Solve
     SolveEvent (..),
     SolveOutcome (..),
     SolveWorkflow (..),
-    solverLabel
+    solveAssignment
   )
 import Kanban.Worker
   ( ProcessIdentity,
@@ -230,7 +231,7 @@ ensureWorkerSession descriptor = do
                     { appPullRequestReviewSessions =
                         Map.insert
                           task.pullRequestWorkerNumber
-                          (recoveredPullRequestSession (priorTickGeneration task.pullRequestWorkerNumber state.appPullRequestReviewSessions) descriptor pullRequest task)
+                          (recoveredPullRequestSession state.appModelRoster (priorTickGeneration task.pullRequestWorkerNumber state.appPullRequestReviewSessions) descriptor pullRequest task)
                           current.appPullRequestReviewSessions
                     }
               )
@@ -247,7 +248,11 @@ recoveredSolveSession state descriptor issue task =
           ( "reattached persistent "
               <> Text.toLower (workflowTitle task.solveWorkerWorkflow)
               <> " worker\nsolver: "
-              <> solverLabel task.solveWorkerBrand
+              <> agentSessionLabelFor
+                task.solveWorkerBrand
+                descriptor.workerDescriptorSpec.workerAssignment
+                (`solveAssignment` task.solveWorkerBrand)
+                state.appModelRoster
               <> "\n\n"
           )
       )
@@ -273,15 +278,27 @@ recoveredSolveSession state descriptor issue task =
   )
     {sessionLogPath = descriptor.workerDescriptorSpec.workerExistingLogPath}
 
-recoveredPullRequestSession :: Int -> WorkerDescriptor -> PullRequest -> PullRequestWorkerTask -> PullRequestReviewSession
-recoveredPullRequestSession priorGeneration descriptor pullRequest task =
+recoveredPullRequestSession :: Either RosterLoadError ModelRoster -> Int -> WorkerDescriptor -> PullRequest -> PullRequestWorkerTask -> PullRequestReviewSession
+recoveredPullRequestSession rosterResult priorGeneration descriptor pullRequest task =
   let brand = agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction
    in ( newAgentSession
           priorGeneration
           SolveStarting
           "reattaching persistent worker"
           (Just descriptor.workerDescriptorSpec.workerCreatedAt)
-          (plainTranscript ("reattached persistent PR " <> pullRequestActionText task.pullRequestWorkerAction <> " worker\nagent: " <> pullRequestAgentLabel task.pullRequestWorkerAction brand <> "\n\n"))
+          ( plainTranscript
+              ( "reattached persistent PR "
+                  <> pullRequestActionText task.pullRequestWorkerAction
+                  <> " worker\nagent: "
+                  <> pullRequestSessionLabel
+                    descriptor.workerDescriptorSpec.workerAssignment
+                    task.pullRequestWorkerOrigin
+                    task.pullRequestWorkerAction
+                    brand
+                    rosterResult
+                  <> "\n\n"
+              )
+          )
           PullRequestDetail
             { pullRequestSessionPullRequest = pullRequest,
               pullRequestSessionOrigin = task.pullRequestWorkerOrigin,

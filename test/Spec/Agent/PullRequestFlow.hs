@@ -201,7 +201,7 @@ spec = do
     it "reattaches a persisted repair worker as a repair session on the PR's own brand" $ do
       let task = PullRequestWorkerTask 900 PullRequestClaude PullRequestRepair
           descriptor = repairWorkerDescriptor task
-          session = recoveredPullRequestSession 0 descriptor approvedFixture task
+          session = recoveredPullRequestSession (Right defaultRoster) 0 descriptor approvedFixture task
       session.sessionDetail.pullRequestSessionAction `shouldBe` PullRequestRepair
       session.sessionDetail.pullRequestSessionOrigin `shouldBe` PullRequestClaude
       session.sessionDetail.pullRequestSessionBrand `shouldBe` ClaudeSolver

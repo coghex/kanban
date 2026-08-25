@@ -10,6 +10,7 @@ module Kanban.PullRequestFlow
     agentForAction,
     authoredOnOwnBrand,
     directPullRequestAction,
+    expectedPullRequestOrigin,
     flowOutcome,
     labelPullRequestAction,
     originFromBody,
@@ -19,6 +20,7 @@ module Kanban.PullRequestFlow
     pullRequestVerdictForLabels,
     runPullRequestFlow,
     runPullRequestFlowWith,
+    solveReviewerAssignment,
   )
 where
 
@@ -174,6 +176,29 @@ pullRequestAssignment roster origin action =
   recordAssignment provider <$> assignmentFor roster (pullRequestRole action) provider
   where
     provider = providerForBrand (agentForAction origin action)
+
+-- | The origin marker the pull request a solve of this brand opens will
+-- carry, and therefore the routing every later action on it takes.
+--
+-- Declared here rather than beside the autosolve loop that reads it: it is
+-- the same origin-to-brand routing 'agentForAction' inverts, and a second
+-- copy is how the reviewer a session /names/ could come to disagree with the
+-- reviewer it later spawns.
+expectedPullRequestOrigin :: SolverBrand -> PullRequestOrigin
+expectedPullRequestOrigin CodexSolver = PullRequestCodex
+expectedPullRequestOrigin ClaudeSolver = PullRequestClaude
+
+-- | The cell an autosolve run's review step will resolve: the opposite
+-- brand's @pr_review@ assignment, reached through 'expectedPullRequestOrigin'
+-- and 'pullRequestAssignment' rather than by naming the other brand here.
+--
+-- Resolved live wherever it is shown. The reviewer has no worker of its own
+-- yet -- it is the assignment a review this run has not started would take --
+-- so there is nothing recorded to replay, and a roster edited between the
+-- solve and its review is honestly reflected by the line changing with it.
+solveReviewerAssignment :: ModelRoster -> SolverBrand -> Either AssignmentUnavailable RecordedAssignment
+solveReviewerAssignment roster brand =
+  pullRequestAssignment roster (expectedPullRequestOrigin brand) PullRequestReview
 
 -- | The brand is an argument rather than 'agentForAction' applied here: the
 -- supervisor spawns whichever provider its recorded assignment names, and

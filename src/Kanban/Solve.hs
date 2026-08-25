@@ -10,6 +10,7 @@ module Kanban.Solve
     UnknownStreamCategory (..),
     UnknownStreamKey (..),
     agentOutcome,
+    assignmentLabel,
     brandForProvider,
     codexSolverModel,
     claudeSolverModel,
@@ -29,6 +30,7 @@ module Kanban.Solve
     solveArguments,
     solveAssignment,
     solveOutcome,
+    solverBrandName,
     solverLabel,
     unknownNoticeSamples,
   )
@@ -52,6 +54,8 @@ import Kanban.Models
     RecordedAssignment,
     RoleName (..),
     assignmentFor,
+    assignmentUnavailableMessage,
+    defaultRoster,
     recordAssignment,
   )
 import Kanban.Process (managedProcess)
@@ -66,13 +70,10 @@ import Kanban.Solve.Event
     UnknownStreamCategory (..),
     UnknownStreamKey (..),
     agentOutcome,
-    claudeReviewerModel,
-    claudeSolverModel,
-    codexReviewerModel,
-    codexSolverModel,
+    assignmentLabel,
     renderAgentEvent,
     solveOutcome,
-    solverLabel,
+    solverBrandName,
   )
 import Kanban.Solve.Parse (parseSolveOutputLine)
 import Kanban.Solve.Unknown
@@ -129,6 +130,49 @@ solveAssignment roster brand =
   where
     provider = providerForBrand brand
 
+-- | The display of a compiled-default cell, for the deprecated shims below
+-- and nothing else.
+--
+-- Total without restating a model: 'defaultRoster' assigns every cell the
+-- shims name, so the 'Left' arm is unreachable, and it answers with the
+-- shared refusal text rather than a display, so a later roster edit that did
+-- make it reachable could never silently reintroduce the duplicated literal
+-- this slice removed.
+defaultRosterDisplay :: RoleName -> ProviderName -> Text
+defaultRosterDisplay role provider =
+  either assignmentUnavailableMessage (.assignmentDisplay) (assignmentFor defaultRoster role provider)
+
+{-# DEPRECATED codexSolverModel, claudeSolverModel, codexReviewerModel, claudeReviewerModel, solverLabel "Render the display of the assignment actually in force -- 'assignmentFor' on the operator's roster, or the session's recorded assignment -- rather than a compiled default." #-}
+
+-- | Retained for the released @v1.0.0.0@ 'Kanban.Solve' API only (MODEL-3),
+-- derived from 'defaultRoster' rather than duplicating its values.
+--
+-- No production surface reads these. A surface names the assignment /its/
+-- routing resolved, which the operator's @models.toml@ and a session's
+-- recorded assignment can both move off the compiled default; answering
+-- from the default is exactly the stale label this slice exists to end.
+codexSolverModel :: Text
+codexSolverModel = defaultRosterDisplay SolveRole CodexProvider
+
+-- | See 'codexSolverModel'.
+claudeSolverModel :: Text
+claudeSolverModel = defaultRosterDisplay SolveRole ClaudeProvider
+
+-- | See 'codexSolverModel'.
+codexReviewerModel :: Text
+codexReviewerModel = defaultRosterDisplay PrReviewRole CodexProvider
+
+-- | See 'codexSolverModel'.
+claudeReviewerModel :: Text
+claudeReviewerModel = defaultRosterDisplay PrReviewRole ClaudeProvider
+
+-- | See 'codexSolverModel'. Built through 'defaultRosterDisplay' rather than
+-- through the shims above, so no deprecated binding is used to define
+-- another.
+solverLabel :: SolverBrand -> Text
+solverLabel CodexSolver = assignmentLabel CodexSolver (defaultRosterDisplay SolveRole CodexProvider)
+solverLabel ClaudeSolver = assignmentLabel ClaudeSolver (defaultRosterDisplay SolveRole ClaudeProvider)
+
 runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Assignment -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (SolveEvent -> IO ()) -> IO ()
 runSolve = runSolveWith (const handleReadLine)
 
@@ -149,7 +193,7 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
     Left message -> eventSink (SolveDiagnostic issueNumber message) >> pure Nothing
     Right value -> do
       eventSink (SolveLogOpened issueNumber value.sessionLogPath)
-      logMessage value "invocation-started" (solverLabel brand <> " · " <> workflowLogName workflow)
+      logMessage value "invocation-started" (assignmentLabel brand assignment.assignmentDisplay <> " · " <> workflowLogName workflow)
       pure (Just value)
   executable <- findExecutable executableName
   case executable of
@@ -258,7 +302,7 @@ solveArguments issueNumber workflow CodexSolver configPath repository config ass
         "model_reasoning_summary=\"detailed\"",
         "--dangerously-bypass-approvals-and-sandbox",
         "--json",
-        Text.unpack (initialSolvePrompt issueNumber workflow CodexSolver configPath repository)
+        Text.unpack (initialSolvePrompt issueNumber workflow CodexSolver assignment configPath repository)
       ]
     Just sessionId ->
       [ "exec",
@@ -289,7 +333,7 @@ solveArguments issueNumber workflow ClaudeSolver configPath repository config as
     "--verbose"
   ]
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
-    <> [Text.unpack (if existingSession == Nothing then initialSolvePrompt issueNumber workflow ClaudeSolver configPath repository else resumeSolvePrompt config workflow ClaudeSolver repository provenance userMessage)]
+    <> [Text.unpack (if existingSession == Nothing then initialSolvePrompt issueNumber workflow ClaudeSolver assignment configPath repository else resumeSolvePrompt config workflow ClaudeSolver repository provenance userMessage)]
 
 -- | Codex takes its effort as a @-c@ style override rather than a flag, so
 -- the assignment's effort is quoted into the same @model_reasoning_effort@
@@ -297,11 +341,11 @@ solveArguments issueNumber workflow ClaudeSolver configPath repository config as
 codexEffortOption :: Assignment -> String
 codexEffortOption assignment = Text.unpack ("model_reasoning_effort=\"" <> assignment.assignmentEffort <> "\"")
 
-initialSolvePrompt :: Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> Repository -> Text
-initialSolvePrompt issueNumber workflow brand configPath repository =
+initialSolvePrompt :: Int -> SolveWorkflow -> SolverBrand -> Assignment -> Maybe FilePath -> Repository -> Text
+initialSolvePrompt issueNumber workflow brand assignment configPath repository =
   Text.unlines
     ( [ "Run the " <> workflowName workflow brand <> " workflow for GitHub issue #" <> Text.pack (show issueNumber) <> " in this repository.",
-        "You are the canonical " <> solverLabel brand <> " solver selected explicitly by the user.",
+        "You are the canonical " <> assignmentLabel brand assignment.assignmentDisplay <> " solver selected explicitly by the user.",
         workflowContract,
         interruptedWorktreeRecovery,
         "Do not run issue-review, issue-rereview, or --review/--rereview against approve-issues.py, its legacy ~/work/approve-issues.py symlink, or the installed tools/approve_issues.py backend, from this solve session. Kanban's r workflow owns that gate. Run only the required read-only v2 gate check; if it is not approved, stop with KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry."

@@ -633,6 +633,24 @@ onto a different model, and a resume still starts when the file has since
 become unusable. A session whose worker predates the record resolves once on
 its first resume and records the result.
 
+Every model name Kanban displays is the `display` value of the assignment
+actually in force, never a value written down beside the roster. A surface
+that belongs to a session — its header, its transcript's opening lines, its
+row in the processes overlay, and the row an unattached worker gets before its
+session attaches — shows the assignment that session recorded, so the name on
+screen survives an edit to `models.toml` and stays the one its supervisor is
+really running; only a session with no recorded assignment, which is a fresh
+one before its first launch and one recovered from a worker specification
+written before the record existed, resolves the live cell instead. A surface
+that belongs to no session resolves live because there is nothing to replay:
+the chooser's two rows are `solve.codex` and `solve.claude`, and the reviewer
+line an autosolve session carries is the opposite brand's `pr_review`, which
+is the cell that review will run on when it starts. A surface whose cell
+cannot be resolved names no model at all — it says the model roster is
+unavailable, dimmed where the name was its own dimmed text — and never falls
+back to the compiled defaults; review prose, which cannot be dimmed, states
+the same thing in words.
+
 A missing or contradictory `pr-origin` marker fails visibly rather than
 guessing.
 

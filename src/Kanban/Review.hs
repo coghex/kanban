@@ -36,6 +36,7 @@ module Kanban.Review
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
     claudeCommandBounds,
+    claudeTool,
     decodeCanonicalIssueReviewResult,
     decodeClaudeToolPrompt,
     decodeGitHubIssueToolRequest,
@@ -58,6 +59,7 @@ module Kanban.Review
     killThreadToolProcesses,
     newRecordingReviewClientForTesting,
     newReviewClientForTesting,
+    reviewDeveloperInstructions,
     newToolRegistry,
     outcomeUnknownDiagnostic,
     releaseToolSlot,
@@ -420,8 +422,8 @@ beginIssueReview client issueNumber = case issueReviewAssignment client.reviewMo
           "approvalPolicy" .= ("on-request" :: Text),
           "sandbox" .= ("read-only" :: Text),
           "ephemeral" .= False,
-          "developerInstructions" .= reviewDeveloperInstructions client.reviewWorkflowConfig,
-          "dynamicTools" .= [questionTool, claudeTool, githubTool client.reviewWorkflowConfig]
+          "developerInstructions" .= reviewDeveloperInstructions client.reviewWorkflowConfig client.reviewModelRoster,
+          "dynamicTools" .= [questionTool, claudeTool client.reviewModelRoster, githubTool client.reviewWorkflowConfig]
         ]
 
 sendReviewMessage :: ReviewClient -> Text -> Maybe Text -> Text -> IO (Either Text ())

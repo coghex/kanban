@@ -12,6 +12,7 @@ module Kanban.UI.Review
     cancelReviewSession,
     canonicalLaunchOutcome,
     canonicalReviewActivity,
+    claudeTranscriptStart,
     canonicalReviewCompletionSuperseded,
     canonicalReviewNotice,
     deferredRevisionLaunches,
@@ -49,7 +50,7 @@ import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.Drainer (normalizedRepositoryIdentity)
-import Kanban.Models (ProviderName (..), RoleName (..), assignmentFor)
+import Kanban.Models (Assignment (..), ModelRoster, ProviderName (..), RoleName (..), RosterLoadError, assignmentFor)
 import Kanban.Preflight
   ( PreflightAction (..),
     issueOriginFromBody,
@@ -74,6 +75,7 @@ import Kanban.Review
     approveReviewAction,
     beginIssueReview,
     interruptReview,
+    issueReviseAssignment,
     killReviewTools,
     outcomeUnknownDiagnostic,
     reviewStageForLabels,
@@ -821,11 +823,12 @@ applyReviewEvent reviewEvent = case reviewEvent of
             }
       )
   ReviewClaudeStarted threadId -> do
+    state <- get
+    let started = claudeTranscriptStart state.appModelRoster
     modifyReviewSessionByThread threadId
       ( \session ->
           session
-            { sessionTranscript =
-                appendTranscript session.sessionTranscript "\n[sonnet] Starting authenticated Sonnet 5 high…\n",
+            { sessionTranscript = appendTranscript session.sessionTranscript started,
               sessionActivity = "running Claude reviewer"
             }
       )
@@ -978,3 +981,14 @@ armReviewTick = armSessionTick reviewSessionOps
 applyReviewAnimationTick :: Int -> Int -> EventM Name AppState ()
 applyReviewAnimationTick = applySessionTick reviewSessionOps
 
+-- | The line the review transcript opens a @kanban_run_claude@ run with.
+--
+-- The @[sonnet]@ channel tag is unversioned and stays (docs\/design.md §7,
+-- requirement 2); only the model-and-effort portion comes from the roster,
+-- and it is @issue_revise.claude@ -- the very cell the tool this line
+-- announces has already resolved in order to spawn.
+claudeTranscriptStart :: Either RosterLoadError ModelRoster -> Text
+claudeTranscriptStart rosterResult =
+  "\n[sonnet] Starting authenticated "
+    <> liveAssignmentDisplay (.assignmentDisplay) issueReviseAssignment rosterResult
+    <> "…\n"

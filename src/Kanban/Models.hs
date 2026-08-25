@@ -71,6 +71,7 @@ module Kanban.Models
     rosterFailureMessage,
     rosterErrorMessage,
     assignmentUnavailableMessage,
+    unavailableAssignmentDisplay,
   )
 where
 
@@ -437,6 +438,17 @@ assignmentFor roster role provider
   | provider `notElem` roleApplicability role = Left (InapplicableRole role provider)
   | otherwise =
       maybe (Left (UnassignedCell role provider)) Right (Map.lookup (role, provider) roster.rosterAssignments)
+
+-- | What a surface shows where a model name would go when the roster
+-- cannot supply the cell it needs.
+--
+-- Deliberately not a model: a surface that cannot resolve its assignment
+-- must say so rather than name the compiled default, which is the same
+-- silent-old-model path D-3 forbids at a spawn boundary. Held here, beside
+-- 'assignmentUnavailableMessage', so the terminal widgets, the session
+-- transcripts, and the review prose all spell one phrase.
+unavailableAssignmentDisplay :: Text
+unavailableAssignmentDisplay = "model roster unavailable"
 
 -- | The refusal text every spawn boundary shares for an unavailable cell,
 -- naming the cell the way 'rosterDefectMessage' names a defective one.

@@ -1,6 +1,7 @@
 module Kanban.UI.Util
   ( absoluteTime,
     agentFailureNotice,
+    agentSessionLabelFor,
     allColumns,
     cacheEnabled,
     columnName,
@@ -17,12 +18,13 @@ module Kanban.UI.Util
     itemMetadata,
     itemStatusText,
     launchAssignment,
+    liveAssignmentDisplay,
     mergeText,
     outstandingDirectMergeReport,
     overflowText,
     primaryTrackerNumber,
     pullRequestActionText,
-    pullRequestAgentLabel,
+    pullRequestSessionLabel,
     relativeAge,
     resolvedRosterCellFor,
     rightOrNothing,
@@ -31,6 +33,8 @@ module Kanban.UI.Util
     selectedRow,
     shortSessionId,
     showText,
+    solveReviewerDisplay,
+    solveSessionLabel,
     timedActivity,
     unknownAssigneesText,
     unknownLinksText,
@@ -49,25 +53,28 @@ import Kanban.Domain
 import Kanban.Models
   ( AssignmentUnavailable,
     ModelRoster,
-    RecordedAssignment,
+    RecordedAssignment (..),
     RosterLoadError,
     assignmentUnavailableMessage,
     rosterErrorMessage,
+    unavailableAssignmentDisplay,
   )
 import Kanban.Preflight
   ( preflightDiagnosticDetail
     )
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
-    authoredOnOwnBrand
+    PullRequestOrigin,
+    pullRequestAssignment,
+    solveReviewerAssignment
     )
 import Kanban.Solve
   ( SolveOutcome (..),
     SolveWorkflow (..),
     SolverBrand (..),
-    claudeReviewerModel,
-    codexReviewerModel,
-    solverLabel
+    assignmentLabel,
+    brandForProvider,
+    solveAssignment
   )
 import Kanban.Text (sanitizeText)
 import Kanban.Workflow (itemLifecycleBadge)
@@ -159,10 +166,90 @@ pullRequestActionText PullRequestRevision = "revision"
 pullRequestActionText PullRequestRereview = "rereview"
 pullRequestActionText PullRequestRepair = "repair"
 
-pullRequestAgentLabel :: PullRequestAction -> SolverBrand -> Text
-pullRequestAgentLabel action brand | authoredOnOwnBrand action = solverLabel brand
-pullRequestAgentLabel _ CodexSolver = "codex · " <> codexReviewerModel
-pullRequestAgentLabel _ ClaudeSolver = "claude · " <> claudeReviewerModel
+-- | The model-and-effort portion a surface shows for a cell it resolves
+-- live, or the shared stand-in when the roster cannot supply it.
+--
+-- For the surfaces that name no session: a chooser row offering a brand,
+-- and the autosolve reviewer line naming a review that has not started. A
+-- session's own surfaces go through 'agentSessionLabelFor' instead, because
+-- a session may hold a recorded assignment that outranks the live cell.
+--
+-- Polymorphic in the cell so the one that carries its provider
+-- ('Kanban.Models.RecordedAssignment', from the task-routing resolvers) and
+-- the bare 'Kanban.Models.Assignment' the review cells yield share this
+-- resolution rather than each getting a near-copy of it.
+liveAssignmentDisplay ::
+  (cell -> Text) ->
+  (ModelRoster -> Either AssignmentUnavailable cell) ->
+  Either RosterLoadError ModelRoster ->
+  Text
+liveAssignmentDisplay display cell =
+  either (const unavailableAssignmentDisplay) (display . snd) . resolvedRosterCellFor cell
+
+-- | What a session surface calls its agent: the brand, then the display of
+-- the assignment actually in force.
+--
+-- The assignment is 'launchAssignment''s, so the ordering is the launch's
+-- own (D-7): a recorded assignment is replayed whatever the roster now says,
+-- and only a session that has none -- a fresh one before its first launch,
+-- or one recovered from a specification written before the field existed --
+-- resolves the live cell.
+--
+-- The brand comes from the resolved assignment wherever there is one, since
+-- a record carries the provider it was read for and that is what the
+-- supervisor actually spawns. The routing's own brand stands in only for the
+-- refusal, which has no assignment to read a provider from; requirement 6
+-- keeps the surrounding text, so only the model-and-effort portion is
+-- replaced.
+agentSessionLabelFor ::
+  SolverBrand ->
+  Maybe RecordedAssignment ->
+  (ModelRoster -> Either AssignmentUnavailable RecordedAssignment) ->
+  Either RosterLoadError ModelRoster ->
+  Text
+agentSessionLabelFor brand recorded cell rosterResult =
+  case launchAssignment recorded cell rosterResult of
+    Left _ -> assignmentLabel brand unavailableAssignmentDisplay
+    Right resolved ->
+      assignmentLabel
+        (brandForProvider resolved.recordedAssignmentProvider)
+        resolved.recordedAssignmentDisplay
+
+-- | 'agentSessionLabelFor' for a pull-request session, whose cell is chosen
+-- by origin and action: @pr_review@ for the canonical review and rereview,
+-- @pr_revise@ for the author-side revision and repair. That split is
+-- 'Kanban.PullRequestFlow.pullRequestRole''s, consulted here rather than
+-- restated, so the label can no longer name the solve assignment for an
+-- own-brand action the flow actually runs on @pr_revise@.
+pullRequestSessionLabel ::
+  Maybe RecordedAssignment ->
+  PullRequestOrigin ->
+  PullRequestAction ->
+  SolverBrand ->
+  Either RosterLoadError ModelRoster ->
+  Text
+pullRequestSessionLabel recorded origin action brand =
+  agentSessionLabelFor brand recorded (\roster -> pullRequestAssignment roster origin action)
+
+-- | The assignment naming a solve session's own agent: the one its last
+-- worker recorded, and only for a session that has none the live @solve@
+-- cell its brand selects.
+solveSessionLabel :: Either RosterLoadError ModelRoster -> SolveSession -> Text
+solveSessionLabel rosterResult session =
+  agentSessionLabelFor
+    brand
+    session.sessionDetail.solveSessionAssignment
+    (`solveAssignment` brand)
+    rosterResult
+  where
+    brand = session.sessionDetail.solveSessionBrand
+
+-- | The reviewer an autosolve run will hand its pull request to: the
+-- opposite brand's @pr_review@ display, resolved live because that review
+-- has no worker yet to have recorded anything.
+solveReviewerDisplay :: Either RosterLoadError ModelRoster -> SolverBrand -> Text
+solveReviewerDisplay rosterResult brand =
+  liveAssignmentDisplay (.recordedAssignmentDisplay) (`solveReviewerAssignment` brand) rosterResult
 
 -- | An activity line with its elapsed time, for a live session that keeps an
 -- activity clock at all. A kind that records no start time shows the bare

@@ -2,6 +2,7 @@ module Kanban.UI.Solve
   ( SolveStartDecision (..),
     applySolveEvent,
     failSolveLaunch,
+    freshSolveTranscript,
     interruptSolveSession,
     issueFromBoard,
     launchSolveInvocation,
@@ -30,7 +31,7 @@ import qualified Data.Text as Text
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
-import Kanban.Models (RecordedAssignment)
+import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
 import Kanban.Preflight
   ( PreflightAction (..),
     actionReport,
@@ -45,8 +46,7 @@ import Kanban.Solve
     SolveOutcome (..),
     SolveWorkflow (..),
     SolverBrand (..),
-    solveAssignment,
-    solverLabel
+    solveAssignment
   )
 import Kanban.Text (sanitizeText)
 import Kanban.Worker
@@ -65,7 +65,6 @@ import Kanban.UI.Transcript
 import Kanban.UI.Selection
 import Kanban.UI.Session
 import Kanban.UI.SessionEvents
-import Kanban.UI.Overlay
 import Kanban.UI.Refresh
 
 openSelectedSolveChooser :: SolveWorkflow -> EventM Name AppState ()
@@ -148,6 +147,27 @@ startIssueSolve issue workflow brand = do
     SolveStartReopen -> openExistingSolveOverlay issue.issueNumber
     SolveStartFresh -> startFreshIssueSolve issue workflow brand
 
+-- | The header a fresh solve session opens its transcript with.
+--
+-- Nothing is recorded yet, so both lines resolve live: the solver names the
+-- @solve@ cell this launch is about to resolve and record, and an autosolve
+-- run also names the @pr_review@ cell the opposite brand will review on. A
+-- refusal is impossible for the solver line by the time a chooser digit gets
+-- here -- 'solveStartDecision' has already resolved that very cell -- but the
+-- reviewer's is a different cell and may genuinely be unavailable, which it
+-- says rather than defaults.
+freshSolveTranscript :: Either RosterLoadError ModelRoster -> SolveWorkflow -> SolverBrand -> Text
+freshSolveTranscript rosterResult workflow brand =
+  "workflow: "
+    <> Text.toLower (workflowTitle workflow)
+    <> "\nsolver: "
+    <> agentSessionLabelFor brand Nothing (`solveAssignment` brand) rosterResult
+    <> ( case workflow of
+           SolveOnly -> ""
+           AutoSolve -> "\nreviewer: " <> solveReviewerDisplay rosterResult brand
+       )
+    <> "\n\n"
+
 startFreshIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState ()
 startFreshIssueSolve issue workflow brand = do
   state <- get
@@ -158,17 +178,7 @@ startFreshIssueSolve issue workflow brand = do
           SolveStarting
           "starting"
           (Just state.appNow)
-          ( plainTranscript $
-              "workflow: "
-                <> Text.toLower (workflowTitle workflow)
-                <> "\nsolver: "
-                <> solverLabel brand
-                <> ( case workflow of
-                       SolveOnly -> ""
-                       AutoSolve -> "\nreviewer: " <> solveReviewerLabel brand
-                   )
-                <> "\n\n"
-          )
+          (plainTranscript (freshSolveTranscript state.appModelRoster workflow brand))
           SolveDetail
             { solveSessionIssue = issue,
               solveSessionWorkflow = workflow,

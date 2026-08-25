@@ -42,8 +42,8 @@ import qualified Data.Text as Text
 import Data.Time (UTCTime, addUTCTime)
 import Kanban.Domain
 import Kanban.PullRequestFlow
-  ( PullRequestOrigin (..),
-    PullRequestVerdict (..),
+  ( PullRequestVerdict (..),
+    expectedPullRequestOrigin,
     originFromBody,
     pullRequestVerdictForLabels,
   )
@@ -310,10 +310,6 @@ autoSolveRevisionPrompt config configPath repository brand pullRequestNumber rev
 
 autoSolveReviewLimit :: Int
 autoSolveReviewLimit = 5
-
-expectedPullRequestOrigin :: SolverBrand -> PullRequestOrigin
-expectedPullRequestOrigin CodexSolver = PullRequestCodex
-expectedPullRequestOrigin ClaudeSolver = PullRequestClaude
 
 findSnapshotPullRequest :: RepoSnapshot -> Int -> Maybe PullRequest
 findSnapshotPullRequest snapshot number =

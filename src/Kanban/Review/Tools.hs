@@ -16,6 +16,7 @@ module Kanban.Review.Tools
     githubIssueViewArguments,
     githubLabelCreateArguments,
     authenticatedClaudeArguments,
+    claudeReviewerTimeoutMessage,
     issueReviseAssignment,
     runAuthenticatedClaude,
     runGitHubIssueTool,
@@ -52,7 +53,8 @@ import Kanban.Models
 import Kanban.Process (killManagedProcess, managedProcess)
 import Kanban.Review.Client (ReviewClient (..), attachToolProcess)
 import Kanban.Review.Diagnostics
-  ( decodeClaudeBytes,
+  ( claudeRevisionAgent,
+    decodeClaudeBytes,
     exceptionText,
     outcomeUnknownMessage,
     renderClaudeFailureDetails,
@@ -365,7 +367,7 @@ runResolvedAuthenticatedClaude client key prompt assignment = do
               written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 prompt) >> hClose inputHandle) :: IO (Either IOException ())
               result <- case written of
                 Left exception -> pure (Left ("Could not send the reviewer prompt to Claude: " <> exceptionText exception))
-                Right () -> renderClaudeResult bounds <$> awaitCommandOutcome bounds processHandle outputCapture errorCapture
+                Right () -> renderClaudeResult bounds assignment.assignmentDisplay <$> awaitCommandOutcome bounds processHandle outputCapture errorCapture
               releaseCapture outputCapture
               releaseCapture errorCapture
               killManagedProcess managed
@@ -402,20 +404,27 @@ runResolvedAuthenticatedClaude client key prompt assignment = do
 -- ('githubVerificationRemedy',
 -- 'Kanban.Review.Canonical.canonicalVerificationRemedy') would be telling
 -- the model to verify something that cannot have changed.
-renderClaudeResult :: CommandBounds -> CommandOutcome -> Either Text Text
-renderClaudeResult bounds outcome = case outcome of
-  CommandUnfinished -> Left claudeReviewerTimeoutMessage
+--
+-- Every arm that names the agent takes the @display@ of the assignment this
+-- run resolved rather than a literal. The display is a parameter, not a
+-- roster lookup, because this is only ever reached from
+-- 'runResolvedAuthenticatedClaude', which already holds the resolved cell --
+-- so there is no unavailable case to render here.
+renderClaudeResult :: CommandBounds -> Text -> CommandOutcome -> Either Text Text
+renderClaudeResult bounds display outcome = case outcome of
+  CommandUnfinished -> Left (claudeReviewerTimeoutMessage display)
   CommandExited exitCode output errors -> case (exitCode, output, errors) of
     (_, StreamUnreadable exception, _) -> Left ("Could not read Claude reviewer output: " <> exceptionText exception)
     (_, _, StreamUnreadable exception) -> Left ("Could not read Claude reviewer diagnostics: " <> exceptionText exception)
     (ExitFailure code, _, _) ->
       Left
-        ( "Claude Sonnet 5 exited with status "
+        ( claudeRevisionAgent display
+            <> " exited with status "
             <> Text.pack (show code)
             <> renderClaudeFailureDetails (capturedBytes output) (capturedBytes errors)
         )
     (ExitSuccess, StreamTruncated outputBytes, _) ->
-      Right (renderIncompleteClaudeOutput bounds (decodeClaudeBytes outputBytes))
+      Right (renderIncompleteClaudeOutput bounds display (decodeClaudeBytes outputBytes))
     (ExitSuccess, StreamComplete outputBytes, _)
       | Text.null renderedOutput -> Left "Claude returned no reviewer output"
       | otherwise -> Right renderedOutput
@@ -427,27 +436,33 @@ renderClaudeResult bounds outcome = case outcome of
 -- before the grace expired is kept -- it is the answer, just an unfinished
 -- one -- and an empty prefix says so rather than claiming Claude produced
 -- no output, which is what a discarded capture would look like.
-renderIncompleteClaudeOutput :: CommandBounds -> Text -> Text
-renderIncompleteClaudeOutput bounds captured
+renderIncompleteClaudeOutput :: CommandBounds -> Text -> Text -> Text
+renderIncompleteClaudeOutput bounds display captured
   | Text.null captured =
-      "[Incomplete output: Claude Sonnet 5 exited successfully, but nothing had been captured from its output "
+      "[Incomplete output: "
+        <> claudeRevisionAgent display
+        <> " exited successfully, but nothing had been captured from its output "
         <> grace
         <> "]"
   | otherwise =
       captured
-        <> "\n\n[Incomplete output: Claude Sonnet 5 exited successfully, but its output was still incomplete "
+        <> "\n\n[Incomplete output: "
+        <> claudeRevisionAgent display
+        <> " exited successfully, but its output was still incomplete "
         <> grace
         <> " The text above is the part that was captured.]"
   where
     grace = "after " <> renderWindow bounds.commandCaptureGraceMicros <> "."
 
 -- | The diagnostic a Claude reviewer run that outlived its own process
--- deadline has always returned. Held as a constant, and phrased for the
--- production deadline, because 'claudeCommandBounds' is what production
--- runs under; the injected bounds behind it exist only so a test can reach
--- this path without waiting ten minutes for it.
-claudeReviewerTimeoutMessage :: Text
-claudeReviewerTimeoutMessage = "Claude Sonnet 5 revision agent timed out after ten minutes"
+-- deadline has always returned, over the @display@ of the assignment it was
+-- spawned on. Phrased for the production deadline, because
+-- 'claudeCommandBounds' is what production runs under; the injected bounds
+-- behind it exist only so a test can reach this path without waiting ten
+-- minutes for it.
+claudeReviewerTimeoutMessage :: Text -> Text
+claudeReviewerTimeoutMessage display =
+  claudeRevisionAgent display <> " revision agent timed out after ten minutes"
 
 -- | Production bounds for the authenticated Claude reviewer: the same
 -- ten-minute process deadline as before, with capture bounded separately
