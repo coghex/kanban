@@ -23,7 +23,7 @@ concrete precondition
 - [x] OVF-1. Rebind the card filter from `f` to `F` — [#513]
 - [x] OVF-2. Give session overlays a vim-style normal/insert focus model — [#515]
 - [x] OVF-4. Make the base footer the context-aware hotkey row — [#525]
-- [ ] OVF-3. Add the `f` fullscreen toggle for open overlays
+- [ ] OVF-3. Add the `f` fullscreen toggle for open overlays — [deferred]: #525 must merge first
 
 ## Epic contract
 
@@ -550,6 +550,17 @@ promoted.
 - **Open questions:** None
 
 ### OVF-3. Add the `f` fullscreen toggle for open overlays
+
+> **Deferred 2026-08-25.** #525 (OVF-4) is filed but unmerged, so the base
+> footer row this slice's height budget is measured against does not yet exist
+> in its final shape. `drawFooter` still draws two or three rows — the hint
+> line, the freshness line, and a notice row present only while `appNotice` is
+> set — and D-10's "the terminal minus the tab row above and the footer row
+> below" cannot be turned into exact acceptance until #525 fixes what the
+> bottom of the screen holds. Everything else this slice needs is already
+> verifiable on `master`: the `drawOverlay` geometry seam, the five interior
+> viewport limits still hard-coded against 32, the 29 `appOverlay` assignment
+> sites, and the incidents fixed-width suite. **Precondition: #525 merged.**
 
 - **Outcome:** `f` toggles every overlay except the solve chooser between
   its windowed box and the most-of-the-screen layout of D-10; interiors
