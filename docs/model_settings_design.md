@@ -29,7 +29,7 @@ concrete precondition
 - [x] MODEL-8. Derive the operating mode from the loaded provider set — [#486]
 - [x] MODEL-9. Implement no-agent mode: board-only UI and spawn refusal — [#521]
 - [x] MODEL-12. Extract the provider adapter interface behind the agent flows — [#522]
-- [ ] MODEL-13. Implement the Claude embedded-review backend
+- [ ] MODEL-13. Implement the Claude embedded-review backend — [deferred]: Q-12 must carry a signed-off decision in this document
 - [ ] MODEL-10. Implement single-agent review routing in the Haskell flows
 - [ ] MODEL-11. Make the Python gates and plugin reviews single-agent aware
 - [ ] MODEL-6. Package the defaults and document the roster surface
@@ -929,6 +929,11 @@ concrete proposal before any implementation.
 - **Open questions:** None
 
 ### MODEL-13. Implement the Claude embedded-review backend
+
+> **Deferred 2026-08-25.** Q-12's CLI investigation was performed during
+> processing, but choosing the mechanism is a design decision this workflow
+> may not take inside an issue. Precondition: Q-12 resolved as a signed-off
+> decision here.
 
 - **Outcome:** the embedded issue review runs on Claude through its adapter
   backend, with the review tool registry (the `gh` runner; the nested
