@@ -223,7 +223,7 @@ filterInput (Just _) (Vty.EvKey key modifiers)
       Vty.KRight -> Just (FilterMoveGroup 1)
       Vty.KChar ' ' -> Just FilterToggleBox
       Vty.KChar 'd' -> Just FilterRestoreDefaults
-      Vty.KChar 'f' -> Just FilterHide
+      Vty.KChar 'F' -> Just FilterHide
       Vty.KEsc -> Just FilterHide
       Vty.KChar 's' -> Just FilterFocusSearch
       -- Left for the guarded dashboard quit, exactly as search leaves it.
@@ -252,7 +252,7 @@ toggleFilterPanel state
   | otherwise = focusFilterPanel state
 
 -- | Show the panel and give it the keyboard, leaving a live query untouched.
--- This is what lowercase @f@ reaches from an open search box.
+-- This is what uppercase @F@ reaches from an open search box.
 --
 -- A panel still on screen keeps the box it was on, so taking the keyboard back
 -- from a search carries on from where it left off; one that was hidden opens

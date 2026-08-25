@@ -90,7 +90,7 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `l` / Right | Next column |
 | `g` / `G` | First or last visible card |
 | `s` | Search a column, starting with Issues |
-| `f` | Show or hide the card filter |
+| `F` | Show or hide the card filter |
 | `Enter` | Open details |
 | `Esc` | Close the current window |
 | `e` | Expand or collapse an epic |
@@ -117,9 +117,9 @@ column has.
 
 While the box is open, letters and digits are typed into it rather than being
 shortcuts — so `r`, `S`, and `u` do nothing but add a character. The exceptions
-are `s`, which closes the search, a lowercase `f`, which moves you to the filter
-and leaves what you have typed alone, and `q`, which still quits. An uppercase
-`F` is an ordinary character and goes into the query. Chords keep working too:
+are `s`, which closes the search, an uppercase `F`, which moves you to the filter
+and leaves what you have typed alone, and `q`, which still quits. A lowercase
+`f` is an ordinary character and goes into the query. Chords keep working too:
 `Ctrl-C` quits and `Ctrl-L` repaints.
 
 A card matches on the `#number` and title shown on the card, ignoring case.
@@ -150,8 +150,8 @@ mouse wheel always just scrolls the column under the pointer.
 
 ## Filtering the board
 
-Press `f` to open the filter. It appears across the top of the board, above the
-column headings, and the cards move down to make room for it. `f` again — or
+Press `F` to open the filter. It appears across the top of the board, above the
+column headings, and the cards move down to make room for it. `F` again — or
 `Esc` — puts it away without changing anything you set.
 
 The filter has four groups of checkboxes:
@@ -176,14 +176,14 @@ cannot honestly give yet — because a load has not finished — shows as `…` 
 how much has loaded so far.
 
 The filter and the search work together. `s` from the filter takes you to the
-search box, and a lowercase `f` from the search box brings you back with your
+search box, and an uppercase `F` from the search box brings you back with your
 query intact. The filter decides which cards are eligible and the search then
 narrows that result, so neither clears the other.
 
 Your choices last until you quit. They survive putting the filter away, opening
 and closing anything, and every refresh, and they are never saved — a fresh
 start always begins with the same defaults. While the filter is put away and you
-have changed something, the footer shows `f filter*` so a board that is showing
+have changed something, the footer shows `F filter*` so a board that is showing
 only part of its work always says so.
 
 ### Closed cards and the history load
