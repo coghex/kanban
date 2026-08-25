@@ -68,8 +68,11 @@ import Kanban.PullRequestFlow
   )
 import Kanban.Review
   ( CommandBounds (..),
+    ReviewClient,
+    ReviewEvent (..),
     authenticatedClaudeArguments,
     beginIssueReview,
+    claudeStartedEvent,
     claudeTool,
     issueReviseAssignment,
     reviewDeveloperInstructions,
@@ -97,7 +100,7 @@ import Kanban.UI.Settings
     settingsOutcome,
   )
 import Kanban.UI.Solve (failSolveLaunch, freshSolveTranscript)
-import Kanban.UI.Types (AgentSession (..), AgentSessionEntry (..), AppEvent (..), AppState (..), ChatTranscript (..), Name, PullRequestDetail (..), ReviewBackend (..), SolveDetail (..), SolvePhase (..), SolveSession, withModelRoster)
+import Kanban.UI.Types (AgentSession (..), AgentSessionEntry (..), AppEvent (..), AppState (..), ChatTranscript (..), Name, PullRequestDetail (..), SolveDetail (..), SolvePhase (..), SolveSession, withModelRoster)
 import Kanban.UI.Util (launchAssignment, pullRequestSessionLabel, resolvedRosterCellFor, solveReviewerDisplay, solveSessionLabel)
 import Kanban.UI.Worker (recoveredAutoSolveParentSession, recoveredPullRequestSession, recoveredSolveSession)
 import Kanban.Worker
@@ -644,25 +647,47 @@ spec = do
 
     -- The backend keeps the roster it was started on for its whole life while
     -- the settings overlay moves what the dashboard holds, so the two diverge
-    -- the moment a cell is edited mid-session. The transcript line announcing
-    -- a tool call has to name what that tool will really spawn, which is the
-    -- client's snapshot; it takes no dashboard state at all.
-    it "opens the Claude transcript on the review client's own snapshot, not the dashboard's" $ do
+    -- the moment a cell is edited mid-session. The line announcing a tool call
+    -- has to name what that tool will really spawn, which is the snapshot of
+    -- the client running it.
+    it "announces the tool call on the roster of the client actually running it" $ do
       withRecordingReviewClientUsing distinctDisplays $ \client _ _ -> do
-        claudeTranscriptStart (ReviewBackendReady client)
-          `shouldMention` ("Starting authenticated " <> displayOf IssueReviseRole ClaudeProvider)
-        claudeTranscriptStart (ReviewBackendReady client) `shouldMention` "[sonnet]"
+        claudeStartDisplay client `shouldBe` displayOf IssueReviseRole ClaudeProvider
         -- The dashboard's own roster carries a different display for that
-        -- same cell, and none of it reaches the line.
-        claudeTranscriptStart (ReviewBackendReady client)
-          `shouldNotMention` (cellOf (issueReviseAssignment defaultRoster)).assignmentDisplay
-      -- It says unavailable on exactly the rosters the tool refuses on...
+        -- same cell, and none of it reaches the event.
+        claudeStartDisplay client
+          `shouldNotBe` (cellOf (issueReviseAssignment defaultRoster)).assignmentDisplay
+      -- It says unavailable on exactly the rosters the tool refuses on.
       withRecordingReviewClientUsing codexOnlyRoster $ \client _ _ -> do
-        claudeTranscriptStart (ReviewBackendReady client) `shouldMention` "model roster unavailable"
-        mapM_ (claudeTranscriptStart (ReviewBackendReady client) `shouldNotMention`) namedModels
+        claudeStartDisplay client `shouldBe` "model roster unavailable"
         issueReviseAssignment codexOnlyRoster `shouldSatisfy` either (const True) (const False)
-      -- ...and names no model with no client to read a snapshot off at all.
-      claudeTranscriptStart ReviewBackendStopped `shouldMention` "model roster unavailable"
+
+    -- The tool runs in a fork, so the stop or restart of a backend can be
+    -- applied before the start event it raced. A line that resolved the cell
+    -- when the event was /handled/ would then name a replacement client's
+    -- assignment, or none at all, for a call still running on the roster the
+    -- emitting client captured. Binding the display at emission is what makes
+    -- the interleaving unobservable.
+    it "keeps the announced assignment through a backend torn down or replaced under it" $
+      withRecordingReviewClientUsing distinctDisplays $ \running _ _ ->
+        withRecordingReviewClientUsing defaultRoster $ \replacement _ _ -> do
+          let started = claudeStartedEvent running "thread-1"
+          -- The two clients really do disagree, so the assertion can tell them
+          -- apart at all.
+          claudeStartDisplay replacement `shouldNotBe` claudeStartDisplay running
+          case started of
+            ReviewClaudeStarted thread display -> do
+              thread `shouldBe` "thread-1"
+              -- Whatever the backend has become by the time this is handled --
+              -- stopped, failed, or this second client -- the event still
+              -- carries the first one's cell, and the line renders that.
+              display `shouldBe` displayOf IssueReviseRole ClaudeProvider
+              claudeTranscriptStart display
+                `shouldMention` ("Starting authenticated " <> displayOf IssueReviseRole ClaudeProvider)
+              claudeTranscriptStart display `shouldMention` "[sonnet]"
+              claudeTranscriptStart display `shouldNotMention` claudeStartDisplay replacement
+              claudeTranscriptStart display `shouldNotMention` "model roster unavailable"
+            other -> expectationFailure ("expected a Claude start event, got " <> show other)
 
     it "renders the recorded cell on a solve session's own surfaces, fresh and recovered" $ do
       let recorded = cellOf (solveAssignment distinctDisplays ClaudeSolver)
@@ -814,7 +839,7 @@ spec = do
       pullRequestSessionLabel Nothing PullRequestClaude PullRequestReview CodexSolver defaults
         `shouldBe` "codex · GPT-5.6-Terra xhigh"
       withRecordingReviewClientUsing defaultRoster $ \client _ _ ->
-        claudeTranscriptStart (ReviewBackendReady client)
+        claudeTranscriptStart (claudeStartDisplay client)
           `shouldBe` "\n[sonnet] Starting authenticated Sonnet 5 high…\n"
       -- The PR-revision label is the correction: the flow has always spawned
       -- pr_revise, while the label read solve.claude and said "Sonnet 5 high".
@@ -829,6 +854,14 @@ spec = do
       encodedValue (claudeTool defaultRoster)
         `shouldMention` "Run the authenticated Claude Sonnet 5 high specification-revision agent"
 
+
+-- | The display the event 'Kanban.Review.claudeStartedEvent' raises carries,
+-- read back out of the event itself rather than recomputed, so these
+-- assertions cannot pass against a payload the emitter never built.
+claudeStartDisplay :: ReviewClient -> Text
+claudeStartDisplay client = case claudeStartedEvent client "thread-probe" of
+  ReviewClaudeStarted _ display -> display
+  other -> error ("expected a Claude start event, got " <> show other)
 
 -- | A solve session on one brand, optionally carrying a recorded assignment,
 -- which is the only thing its label surfaces read besides the roster.
