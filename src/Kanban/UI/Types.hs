@@ -506,7 +506,7 @@ withModelRoster roster state =
 -- Presentation state and nothing else: it says which checkbox the panel's own
 -- keys act on, never which cards the board is showing. The criteria are
 -- 'AppState.appFilterCriteria' and outlive every panel this record stands
--- for, which is what lets @f@ hide the panel without changing the view.
+-- for, which is what lets @F@ hide the panel without changing the view.
 data FilterPanel = FilterPanel
   { filterPanelBox :: FilterBox,
     -- | Whether the panel has handed focus to a live search.

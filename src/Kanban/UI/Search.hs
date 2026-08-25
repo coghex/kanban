@@ -440,13 +440,13 @@ searchInput Nothing _ = Nothing
 searchInput (Just _) (Vty.EvKey key modifiers)
   | any (`elem` modifiers) [Vty.MCtrl, Vty.MMeta, Vty.MAlt] = Nothing
   | otherwise = case key of
-      -- The three printable keys search does not take: `s` closes it, `f`
+      -- The three printable keys search does not take: `s` closes it, `F`
       -- moves the keyboard to the filter panel with the query intact, and `q`
       -- falls through to the guarded dashboard quit -- which is why neither
-      -- letter can be typed into a query. Uppercase `F` is claimed below as
-      -- ordinary text, exactly as every other printable key is.
+      -- can be typed into a query. Lowercase `f` is claimed below as ordinary
+      -- text, exactly as every other printable key is.
       Vty.KChar 's' -> Just SearchClose
-      Vty.KChar 'f' -> Just SearchFocusFilter
+      Vty.KChar 'F' -> Just SearchFocusFilter
       Vty.KChar 'q' -> Nothing
       Vty.KChar character | isPrint character -> Just (SearchInsert character)
       Vty.KBS -> Just SearchBackspace

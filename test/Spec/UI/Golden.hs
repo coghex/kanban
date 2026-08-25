@@ -421,8 +421,8 @@ spec = describe "golden frames" $ do
   it "marks the footer chip while a non-default criteria set is hidden" $ do
     hidden <- frameText <$> renderCase (frameCaseNamed "filter-hidden-active")
     plain <- frameText <$> renderCase wideCase
-    (isInfixOf "f filter*" hidden, isInfixOf "FILTER" hidden) `shouldBe` (True, False)
-    (isInfixOf "f filter*" plain, isInfixOf "f filter" plain) `shouldBe` (False, True)
+    (isInfixOf "F filter*" hidden, isInfixOf "FILTER" hidden) `shouldBe` (True, False)
+    (isInfixOf "F filter*" plain, isInfixOf "F filter" plain) `shouldBe` (False, True)
     -- The criteria are still in force behind the hidden panel: PR #823 is a
     -- pull request, and Kind now admits only issues.
     isInfixOf "PR #823" hidden `shouldBe` False
@@ -865,7 +865,7 @@ filterCases =
              frameCaseWidth = 200,
              frameCaseHeight = 64,
              frameCaseSummary = "the panel and a live query stacked, the panel holding the keyboard",
-             -- Exactly §7's transfer: lowercase `f` from an open search box
+             -- Exactly §7's transfer: uppercase `F` from an open search box
              -- moves the keyboard to the panel and leaves the query alone.
              frameCaseState = focusFilterPanel . searching "envelope"
            },
@@ -873,7 +873,7 @@ filterCases =
            { frameCaseName = "filter-hidden-active",
              frameCaseWidth = 200,
              frameCaseHeight = 64,
-             frameCaseSummary = "a non-default criteria set with the panel hidden, marked f filter* in the footer",
+             frameCaseSummary = "a non-default criteria set with the panel hidden, marked F filter* in the footer",
              frameCaseState = hidingPanel (withBoxes [KindBox KindPullRequests])
            },
          FrameCase

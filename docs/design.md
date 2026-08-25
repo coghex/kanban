@@ -219,7 +219,7 @@ scrollable four-column board.
 ║ ┃ drain_prs.py ┃         ║              ║              ║              ║              ║
 ║ ┗━━━━━━━━━━━━━━┛         ║              ║              ║              ║              ║
 ╚══════════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
- j/Down next  k/Up previous  x kill  h/l column  s search  f filter  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  a approvals  d drainer  c sidebar  o options  ? help  q/Ctrl-C quit
+ j/Down next  k/Up previous  x kill  h/l column  s search  F filter  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  a approvals  d drainer  c sidebar  o options  ? help  q/Ctrl-C quit
 ```
 
 The two service controls sit at the foot of the sidebar as one stack, the
@@ -264,7 +264,7 @@ Responsive behavior:
   ```
 
   ```text
-  j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  f/esc close
+  j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  F/esc close
   ```
 
 ## 7. Keyboard interaction
@@ -280,8 +280,8 @@ Initial bindings:
 | `l` / Right | Select next column |
 | `g` | Select first visible item in the column |
 | `G` | Select last visible item in the column |
-| `s` | Open the card search on the Issues column; printable keys including h and l filter it, Left and Right move it to another column, f focuses the filter panel, and Esc or s closes it |
-| `f` | Show or hide the card filter panel; j/k or Up/Down move between boxes, Left/Right between groups, Space toggles the focused box, d restores the defaults, s focuses the card search, and f or Esc hides the panel leaving the criteria unchanged |
+| `s` | Open the card search on the Issues column; printable keys including h and l filter it, Left and Right move it to another column, F focuses the filter panel, and Esc or s closes it |
+| `F` | Show or hide the card filter panel; j/k or Up/Down move between boxes, Left/Right between groups, Space toggles the focused box, d restores the defaults, s focuses the card search, and F or Esc hides the panel leaving the criteria unchanged |
 | `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
 | `Esc` | Close an overlay or dismiss a transient error |
@@ -346,10 +346,10 @@ search declines:
 
 - A printable character typed without Ctrl, Meta, or Alt appends to the query,
   so `r`, `S`, `u`, `d`, and every other letter is text rather than a shortcut.
-  The three exceptions are `s`, which closes search, lowercase `f`, which moves
+  The three exceptions are `s`, which closes search, uppercase `F`, which moves
   the keyboard to the filter panel with the query intact, and `q`, which reaches
-  the guarded dashboard quit — so neither `q` nor a lowercase `f` can be typed
-  into a query. Uppercase `F` is an ordinary query character.
+  the guarded dashboard quit — so neither `q` nor an uppercase `F` can be typed
+  into a query. Lowercase `f` is an ordinary query character.
 - Backspace removes one Unicode code point. The query stops accepting printable
   input at 256 code points and accepts it again once a Backspace makes room.
 - Any chord carrying Ctrl, Meta, or Alt keeps its ordinary board meaning, so
@@ -434,7 +434,7 @@ and never restored on restart.
 
 ### Card filter panel
 
-`f` shows the card filter panel and gives it the keyboard; `f` or `Esc` hides it
+`F` shows the card filter panel and gives it the keyboard; `F` or `Esc` hides it
 again, leaving the criteria exactly as they are. The panel spans the board above
 the column headings, the search box, and the cards, described in section 6. It
 is part of the board region's own layout flow rather than an overlay, so it
@@ -463,10 +463,10 @@ the panel has the keyboard:
   group and clamping it to a shorter group's last option.
 - Space toggles the focused box and `d` restores the defaults.
 - `s` moves the keyboard to the column search, opening one on Issues if none is
-  live, and lowercase `f` from an open search box moves it back to the panel
+  live, and uppercase `F` from an open search box moves it back to the panel
   without clearing the query. Neither surface clears the other: filter chooses
   the eligible cards and search narrows that result.
-- `f` or `Esc` hides the panel. Every other key keeps its board meaning, so `?`,
+- `F` or `Esc` hides the panel. Every other key keeps its board meaning, so `?`,
   `u`, `q`, and `Ctrl-C` are as usable as they always were.
 - A left click toggles the box it lands on and moves the panel's focus there,
   wherever the chips wrapped at the current width.
@@ -483,7 +483,7 @@ Criteria persist for exactly one application process. They survive hiding the
 panel, every overlay, both refresh generations, and every search change, and are
 never written to the cache, the settings file, or the configuration; a new
 process starts at the defaults. While the panel is hidden and the criteria are
-not the defaults, the footer marks its filter chip as `f filter*`, which is the
+not the defaults, the footer marks its filter chip as `F filter*`, which is the
 one report a board quietly showing a subset of its work gets.
 
 The footer's freshness row also states where the completed generation stands —

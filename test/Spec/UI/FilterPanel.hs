@@ -321,9 +321,9 @@ transitionSpec = describe "showing, hiding, and editing" $ do
     hidden.appVisibleBoard `shouldBe` edited.appVisibleBoard
     criteriaAreFiltering hidden `shouldBe` True
 
-  it "hides on Esc as well as on f" $ do
+  it "hides on Esc as well as on F" $ do
     shown <- shownPanel
-    map (\event -> (press event shown).appFilterPanel) [key 'f', Vty.EvKey Vty.KEsc []]
+    map (\event -> (press event shown).appFilterPanel) [key 'F', Vty.EvKey Vty.KEsc []]
       `shouldBe` [Nothing, Nothing]
 
   it "moves between boxes along the whole inventory, clamped at both ends" $ do
@@ -493,8 +493,8 @@ itemNumberOf entry = case entry of
 
 bindingSpec :: Spec
 bindingSpec = describe "bindings" $ do
-  it "reaches the panel from the board's own f" $
-    boardAction BoardScope (key 'f') `shouldBe` Just ShowFilter
+  it "reaches the panel from the board's own F" $
+    boardAction BoardScope (key 'F') `shouldBe` Just ShowFilter
 
   it "decodes every key the panel answers" $ do
     shown <- shownPanel
@@ -510,7 +510,7 @@ bindingSpec = describe "bindings" $ do
             (Vty.EvKey Vty.KRight [], FilterMoveGroup 1),
             (key ' ', FilterToggleBox),
             (key 'd', FilterRestoreDefaults),
-            (key 'f', FilterHide),
+            (key 'F', FilterHide),
             (Vty.EvKey Vty.KEsc [], FilterHide),
             (key 's', FilterFocusSearch)
           ]
@@ -531,7 +531,7 @@ bindingSpec = describe "bindings" $ do
             Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl],
             Vty.EvKey (Vty.KChar 'l') [Vty.MCtrl],
             Vty.EvKey (Vty.KChar 'd') [Vty.MCtrl],
-            Vty.EvKey (Vty.KChar 'f') [Vty.MAlt]
+            Vty.EvKey (Vty.KChar 'F') [Vty.MAlt]
           ]
       ]
     -- ...and each of those still resolves to the board action it always did.
@@ -539,24 +539,32 @@ bindingSpec = describe "bindings" $ do
     boardAction BoardScope (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) `shouldBe` Just QuitDashboard
     boardAction BoardScope (key '?') `shouldBe` Just ShowHelp
 
+  -- Requirement 5: lowercase `f` is left deliberately unbound rather than
+  -- reassigned, so it decodes to nothing on the board and nothing in a focused
+  -- panel until #512's fullscreen slice claims it.
+  it "leaves lowercase f unbound on the board and in a focused panel" $ do
+    shown <- shownPanel
+    boardAction BoardScope (key 'f') `shouldBe` Nothing
+    filterInput (focusedFilterPanel shown) (key 'f') `shouldBe` Nothing
+
   it "decodes nothing at all while the panel is hidden or unfocused" $ do
     state <- panelState
     filterInput (focusedFilterPanel state) (key ' ') `shouldBe` Nothing
     shown <- shownPanel
     filterInput (focusedFilterPanel (press (key 's') shown)) (key ' ') `shouldBe` Nothing
 
-  -- §7: lowercase `f` moves the keyboard; uppercase `F` is text.
-  it "claims lowercase f from a search box and leaves uppercase F as text" $ do
+  -- §7: uppercase `F` moves the keyboard; lowercase `f` is text.
+  it "claims uppercase F from a search box and leaves lowercase f as text" $ do
     let live = Just (ColumnSearch Issues "")
-    searchInput live (key 'f') `shouldBe` Just SearchFocusFilter
-    searchInput live (key 'F') `shouldBe` Just (SearchInsert 'F')
+    searchInput live (key 'F') `shouldBe` Just SearchFocusFilter
+    searchInput live (key 'f') `shouldBe` Just (SearchInsert 'f')
     searchInput live (key 's') `shouldBe` Just SearchClose
     searchInput live (key 'q') `shouldBe` Nothing
 
-  it "types an uppercase F into the query it is pressed in" $ do
+  it "types a lowercase f into the query it is pressed in" $ do
     shown <- shownPanel
-    let typed = applySearchInput (SearchInsert 'F') (press (key 's') shown)
-    (.searchQuery) <$> typed.appSearch `shouldBe` Just "F"
+    let typed = applySearchInput (SearchInsert 'f') (press (key 's') shown)
+    (.searchQuery) <$> typed.appSearch `shouldBe` Just "f"
 
 -- ---------------------------------------------------------------------------
 -- The completed-history blocker
@@ -806,8 +814,8 @@ presentationSpec = describe "what the board says about the criteria" $ do
 
   it "marks the footer chip only while the criteria are hiding cards" $ do
     boardFooterHintLine False `shouldBe` footerHintLine
-    ("f filter*" `Text.isInfixOf` boardFooterHintLine True) `shouldBe` True
-    ("f filter*" `Text.isInfixOf` footerHintLine) `shouldBe` False
+    ("F filter*" `Text.isInfixOf` boardFooterHintLine True) `shouldBe` True
+    ("F filter*" `Text.isInfixOf` footerHintLine) `shouldBe` False
     -- One chip marked, and the line's inventory otherwise unchanged.
     length (Text.splitOn "  " (boardFooterHintLine True))
       `shouldBe` length (Text.splitOn "  " footerHintLine)
@@ -823,7 +831,7 @@ presentationSpec = describe "what the board says about the criteria" $ do
   it "names none of the board's own column keys on the panel's line" $
     sequence_
       [ (fragment, fragment `Text.isInfixOf` filterFooterHintLine) `shouldBe` (fragment, True)
-      | fragment <- ["j/k", "←/→ group", "space toggle", "d defaults", "s search", "f/esc close"]
+      | fragment <- ["j/k", "←/→ group", "space toggle", "d defaults", "s search", "F/esc close"]
       ]
 
   -- Requirement 8: the five words, off a state rather than off a notice.

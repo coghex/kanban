@@ -453,7 +453,7 @@ drawBoard state = case drawFilterPanel state of
 -- carry a count, no viewport holding a stale board underneath, and no partial
 -- page set anything could have put there. The sidebar, the filter panel, the
 -- footer, and every key that is not a card action stay exactly as they are, so
--- @f@, @u@, @q@, @Ctrl-C@, help, and options remain operable while one is up.
+-- @F@, @u@, @q@, @Ctrl-C@, help, and options remain operable while one is up.
 drawCardArea :: AppState -> Widget Name
 drawCardArea state = case cardSurfaceFor state of
   CardSurfaceLoadingOpen -> drawCenteredPanel state openDataLoadingHeading openLoadingBody
@@ -1134,7 +1134,7 @@ filterFooterHintLine =
       "space toggle",
       "d defaults",
       "s search",
-      "f/esc close"
+      "F/esc close"
     ]
 
 -- | Every base-board binding, as one hint chip each, projected from the table
