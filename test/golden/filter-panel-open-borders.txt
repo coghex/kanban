@@ -43,6 +43,6 @@
  ┗━━━━━━━━━━━━━━┛               │ #756 Define the           │     │ 4h ago                    │                                       │ #901 · agent-name →       │
  off                            │ persistence contract      │     │ Make the fresh-install    │                                       │ master · updated 3h ago   │
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  f/esc close
+ j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  F/esc close
  board: updated 3h ago · history: current
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

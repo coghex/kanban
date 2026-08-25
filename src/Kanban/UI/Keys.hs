@@ -181,13 +181,13 @@ binding action = case action of
   -- printable key there is text rather than a shortcut.
   OpenSearch ->
     KeyBinding action [key 's'] [BoardScope] Nothing "search" "search a column; h/l type into the query, Left/Right move the search"
-      "Open the card search on the Issues column; printable keys including h and l filter it, Left and Right move it to another column, f focuses the filter panel, and Esc or s closes it"
+      "Open the card search on the Issues column; printable keys including h and l filter it, Left and Right move it to another column, F focuses the filter panel, and Esc or s closes it"
   -- Only the key that shows the panel is a binding. Everything typed into a
   -- focused panel is decoded by "Kanban.UI.Filter" ahead of this table,
   -- because `d` there restores the defaults rather than toggling the drainer.
   ShowFilter ->
-    KeyBinding action [key 'f'] [BoardScope] Nothing "filter" "filter cards; j/k move, Left/Right change group, space toggles, d defaults"
-      "Show or hide the card filter panel; j/k or Up/Down move between boxes, Left/Right between groups, Space toggles the focused box, d restores the defaults, s focuses the card search, and f or Esc hides the panel leaving the criteria unchanged"
+    KeyBinding action [key 'F'] [BoardScope] Nothing "filter" "filter cards; j/k move, Left/Right change group, space toggles, d defaults"
+      "Show or hide the card filter panel; j/k or Up/Down move between boxes, Left/Right between groups, Space toggles the focused box, d restores the defaults, s focuses the card search, and F or Esc hides the panel leaving the criteria unchanged"
   ToggleEpic ->
     KeyBinding action [key 'e'] [BoardScope] Nothing "epic" "expand / collapse focused epic"
       "Expand or collapse the focused epic"

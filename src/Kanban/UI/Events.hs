@@ -199,7 +199,7 @@ handleEvent event = do
     -- key presses ahead of the table, so a printable key edits a checkbox or
     -- types into the query instead of firing the binding that letter
     -- ordinarily carries. The panel outranks the search because focus moves
-    -- between the two explicitly -- `s` yields it and `f` takes it back --
+    -- between the two explicitly -- `s` yields it and `F` takes it back --
     -- rather than being inferred from which is on screen. Neither claims
     -- anything carrying Ctrl, Meta, or Alt, and nothing either declines
     -- reaches the table below with anything but its ordinary meaning.
@@ -478,7 +478,7 @@ dispatchBoardAction = \case
 -- | Carries out one decoded search key press. Every input is a pure
 -- transition: 'applySearchInput' decides all but Enter, which is
 -- 'openSearchResult' because opening a card's details is the board's own
--- transition and search only ends beneath it, and @f@, which is the filter
+-- transition and search only ends beneath it, and @F@, which is the filter
 -- panel's own transition for the same reason.
 handleSearchInput :: SearchInput -> EventM Name AppState ()
 handleSearchInput SearchOpenDetails = modify openSearchResult

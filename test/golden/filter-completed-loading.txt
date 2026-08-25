@@ -33,7 +33,7 @@
 ║┃                          ┃                                                           │ Fetching every closed issue and completed pull   │                                                           ║
 ║┃                          ┃                                                           │ request.                                         │                                                           ║
 ║┃                          ┃                                                           │ 46 of 149 loaded                                 │                                                           ║
-║┃                          ┃                                                           │ press f and uncheck Closed to return to the open │                                                           ║
+║┃                          ┃                                                           │ press F and uncheck Closed to return to the open │                                                           ║
 ║┃                          ┃                                                           │ board                                            │                                                           ║
 ║┃                          ┃                                                           └──────────────────────────────────────────────────┘                                                           ║
 ║┃                          ┃                                                                                                                                                                          ║
@@ -59,6 +59,6 @@
 ║┃ ┗━━━━━━━━━━━━━━┛         ┃                                                                                                                                                                          ║
 ║┃ off                      ┃                                                                                                                                                                          ║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛                                                                                                                                                                          ║
-║ j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  f/esc close                                                                                                                              ║
+║ j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  F/esc close                                                                                                                              ║
 ║ board: updated 3h ago · history: loading 46/149                                                                                                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
