@@ -162,7 +162,10 @@ handleEvent event = do
     (Just ProcessesOverlay, _) -> pure ()
     (overlay, incidentEvent)
       | Just action <- incidentsAction overlay incidentEvent -> handleIncidentsAction action
-    (Just (ReviewOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
+    -- The three live-agent overlays no longer answer Esc here. It is modal
+    -- inside them -- from insert it returns to normal, from normal it hides
+    -- the overlay -- so it is decoded beside the rest of the session table by
+    -- 'sessionInputEvent' rather than short-circuited above it (issue #515).
     (Just (ReviewOverlay issueNumber), mouseEvent)
       | Just action <- overlayMouseAction ReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (ReviewTranscript issueNumber)) action
     (Just (ReviewOverlay issueNumber), reviewInputEvent) ->
@@ -171,12 +174,10 @@ handleEvent event = do
     (Just (SolveChooser workflow issue), VtyEvent (Vty.EvKey (Vty.KChar '2') [])) -> startIssueSolve issue workflow ClaudeSolver
     (Just (SolveChooser _ _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
     (Just (SolveChooser _ _), _) -> pure ()
-    (Just (SolveOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
     (Just (SolveOverlay issueNumber), mouseEvent)
       | Just action <- overlayMouseAction SolvePanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (SolveTranscript issueNumber)) action
     (Just (SolveOverlay issueNumber), solveInputEvent) ->
       handleSessionOverlayEvent solveSessionOps solveInputHooks issueNumber solveInputEvent
-    (Just (PullRequestReviewOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
     (Just (PullRequestReviewOverlay number), mouseEvent)
       | Just action <- overlayMouseAction PullRequestReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (PullRequestTranscript number)) action
     (Just (PullRequestReviewOverlay number), inputEvent) ->

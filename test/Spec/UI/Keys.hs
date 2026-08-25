@@ -18,7 +18,8 @@ import qualified Graphics.Vty as Vty
 import Kanban.UI.Board (footerHintLine, searchFooterHintLine)
 import Kanban.UI.Keys
 import Kanban.UI.Overlay (helpLines, mouseHelpEntries)
-import Kanban.UI.SessionCore (noSessionInputCaps, sessionInputEvent, sessionInputHelp)
+import Kanban.UI.Types (SessionMode (..))
+import Kanban.UI.SessionCore (SessionFocus (..), SessionInputEvent (..), noSessionInputCaps, sessionInputEvent, sessionInputHelp)
 import Test.Hspec
 
 spec :: Spec
@@ -175,13 +176,31 @@ spec = describe "keybinding table" $ do
         ]
       nub gutters `shouldBe` take 1 gutters
 
-  describe "session overlay bindings" $
+  describe "session overlay bindings" $ do
+    -- Every documented session key is answered from the mode §7 documents it
+    -- in, with the caps of the kind that offers the fewest optional bindings:
+    -- a row the decoder only honours for the review overlay would be a help
+    -- entry the solve and PR overlays cannot back.
     it "declares only keys its own decoder answers" $
       sequence_
-        [ (helpEntryDescription entry, fmap (const ()) (sessionInputEvent noSessionInputCaps (bindingEvent pressed)))
+        [ (helpEntryDescription entry, fmap (const ()) (sessionInputEvent normalFocus (bindingEvent pressed)))
             `shouldBe` (helpEntryDescription entry, Just ())
           | entry <- sessionInputHelp,
             pressed <- entry.helpEntryKeys
+        ]
+
+    -- The mode split is the point of the rows, so the normal-mode ones must
+    -- not also answer from insert -- otherwise `q` would close an overlay
+    -- mid-word and `j` would refuse to type.
+    it "keeps the normal-mode rows out of insert mode" $
+      sequence_
+        [ (helpEntryDescription entry, sessionInputEvent insertFocus (bindingEvent pressed))
+            `shouldBe` (helpEntryDescription entry, Just (SessionInputInsert character))
+          | entry <- sessionInputHelp,
+            pressed <- entry.helpEntryKeys,
+            Vty.KChar character <- [pressed.bindingKeyKey],
+            null pressed.bindingKeyModifiers,
+            character /= '\t'
         ]
 
   describe "docs/design.md §7" $ do
@@ -198,6 +217,12 @@ spec = describe "keybinding table" $ do
       let documentedOnly = filter (`notElem` declaredBindings) documented
           declaredOnly = filter (`notElem` documented) declaredBindings
       (documentedOnly, declaredOnly) `shouldBe` ([], [])
+
+-- | The two modes a session key is decoded in, with no optional binding
+-- enabled and something still there to read what the session types.
+normalFocus, insertFocus :: SessionFocus
+normalFocus = SessionFocus noSessionInputCaps SessionNormal True
+insertFocus = SessionFocus noSessionInputCaps SessionInsert True
 
 -- | Every help row the overlay is allowed to show, from the definitions that
 -- back them rather than from a copy of the overlay's own output.

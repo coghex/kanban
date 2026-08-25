@@ -49,7 +49,7 @@ import Kanban.UI.Keys
     gestureHelpEntry,
     helpRows,
   )
-import Kanban.UI.SessionCore (sessionInputHelp)
+import Kanban.UI.SessionCore (liveSessionMode, sessionInputHelp)
 import Kanban.UI.Settings
   ( RosterRow (..),
     noProvidersMessage,
@@ -449,7 +449,9 @@ drawSolve state issueNumber = case Map.lookup issueNumber state.appSolveSessions
     let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.sessionTranscript
      in
     vBox
-      [ drawSessionTabs solveSessionAttribute (solvePhaseGlyph state) issueNumber state.appSolveSessions,
+      [ drawSessionMode (solveSessionMode session)
+          <+> txt "  "
+          <+> drawSessionTabs solveSessionAttribute (solvePhaseGlyph state) issueNumber state.appSolveSessions,
         withAttr (solveSessionAttribute session) (txt (solvePhaseLabel state.appModelRoster session)),
         drawLiveActivity state (Map.member issueNumber state.appSolveProcesses) session.sessionSpinnerFrame session.sessionActivityStartedAt session.sessionActivity,
         case session.sessionDetail.solveSessionWorkflow of
@@ -466,7 +468,7 @@ drawSolve state issueNumber = case Map.lookup issueNumber state.appSolveSessions
             else txtWrap transcript,
         hBorder,
         drawSolveInput session,
-        withAttr footerAttr (txt "Esc hide  Tab next session  Ctrl-C interrupt  Enter answer  arrows/wheel scroll")
+        withAttr footerAttr (txt (sessionHintLine "answer" (solveSessionInputLive session.sessionPhase) session.sessionMode))
       ]
 
 solvePhaseLabel :: Either RosterLoadError ModelRoster -> SolveSession -> Text
@@ -508,7 +510,9 @@ drawPullRequestReview state number = case Map.lookup number state.appPullRequest
     let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.sessionTranscript
      in
     vBox
-      [ drawSessionTabs pullRequestSessionAttribute (pullRequestPhaseGlyph state) number state.appPullRequestReviewSessions,
+      [ drawSessionMode (solveSessionMode session)
+          <+> txt "  "
+          <+> drawSessionTabs pullRequestSessionAttribute (pullRequestPhaseGlyph state) number state.appPullRequestReviewSessions,
         withAttr (pullRequestSessionAttribute session) (txt (pullRequestPhaseLabel session)),
         drawLiveActivity state (Map.member number state.appPullRequestProcesses) session.sessionSpinnerFrame session.sessionActivityStartedAt session.sessionActivity,
         withAttr dimAttr (txt ("agent: " <> pullRequestSessionLabel session.sessionDetail.pullRequestSessionAssignment session.sessionDetail.pullRequestSessionOrigin session.sessionDetail.pullRequestSessionAction session.sessionDetail.pullRequestSessionBrand state.appModelRoster)),
@@ -520,7 +524,7 @@ drawPullRequestReview state number = case Map.lookup number state.appPullRequest
         if session.sessionPhase == SolveAttention
           then padTop (Pad 1) . withAttr attentionAttr . txtWrap $ "> " <> session.sessionInput <> "█"
           else emptyWidget,
-        withAttr footerAttr (txt "Esc hide  Tab next session  Ctrl-C interrupt  Enter answer  arrows/wheel scroll")
+        withAttr footerAttr (txt (sessionHintLine "answer" (solveSessionInputLive session.sessionPhase) session.sessionMode))
       ]
 
 pullRequestPhaseLabel :: PullRequestReviewSession -> Text
@@ -541,7 +545,9 @@ drawReview state issueNumber = case Map.lookup issueNumber state.appReviewSessio
     let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.sessionTranscript
      in
     vBox
-      [ drawSessionTabs (reviewPhaseAttribute . (.sessionPhase)) (reviewPhaseGlyph state) issueNumber state.appReviewSessions,
+      [ drawSessionMode (reviewSessionMode session)
+          <+> txt "  "
+          <+> drawSessionTabs (reviewPhaseAttribute . (.sessionPhase)) (reviewPhaseGlyph state) issueNumber state.appReviewSessions,
         txt "",
         withAttr (reviewPhaseAttribute session.sessionPhase) (txt (reviewPhaseLabel session)),
         txt "",
@@ -556,8 +562,31 @@ drawReview state issueNumber = case Map.lookup issueNumber state.appReviewSessio
         drawPendingInteraction session,
         drawUndeliveredSteers session,
         drawReviewInput session,
-        withAttr footerAttr (txt "Esc hide  Tab next session  Enter send  Ctrl-C interrupt  arrows/wheel scroll")
+        withAttr footerAttr (txt (sessionHintLine "send" (reviewInputLive session) session.sessionMode))
       ]
+
+-- | The mode badge every session overlay carries for the session it is
+-- showing (issue #515). Its argument comes from 'solveSessionMode' or
+-- 'reviewSessionMode', so a session with nothing left to read what it types
+-- shows @[N]@ whatever its stored mode holds -- the same derivation the key
+-- decoder and the digit path use, rather than a third opinion about it.
+drawSessionMode :: SessionMode -> Widget Name
+drawSessionMode = \case
+  SessionNormal -> withAttr dimAttr (txt "[N]")
+  SessionInsert -> withAttr insertModeAttr (txt "[I]")
+
+-- | A session overlay's in-box hint line, which has to describe the mode the
+-- overlay is actually in: in normal mode Enter sends nothing and a printable
+-- key is a command, and a line that said otherwise would be a key hint for a
+-- mode the user is not in. @sendLabel@ is the kind's own word for what Enter
+-- does with the draft. The base footer replaces these entirely in #512's
+-- phase 3; until then they stay, and stay truthful.
+sessionHintLine :: Text -> Bool -> SessionMode -> Text
+sessionHintLine sendLabel liveInput mode = case liveSessionMode liveInput mode of
+  SessionInsert -> "Esc normal  Tab next session  Ctrl-C interrupt  Enter " <> sendLabel <> "  arrows/wheel scroll"
+  SessionNormal
+    | liveInput -> "Esc/q hide  i insert  Tab next session  Ctrl-C interrupt  j/k g/G Ctrl-D/U scroll"
+    | otherwise -> "Esc/q hide  Tab next session  Ctrl-C interrupt  j/k g/G Ctrl-D/U scroll"
 
 -- | The strip of tabs every session overlay carries, one per in-memory
 -- session of that kind, in the same ascending numeric order @Tab@ cycles
@@ -608,7 +637,7 @@ drawPendingInteraction session = case session.sessionDetail.reviewSessionPending
           txtWrap question.reviewQuestionText
         ]
           <> zipWith drawChoice [1 :: Int ..] question.reviewQuestionChoices
-          <> [withAttr dimAttr (txt "Press a choice number, or type a response when permitted.")]
+          <> [withAttr dimAttr (txt "Press a choice number, or i to type a response when permitted.")]
       )
   Just (PendingReviewApproval _ approval) ->
     vBox
@@ -639,6 +668,13 @@ drawUndeliveredSteers session = case session.sessionDetail.reviewSessionUndelive
       ( withAttr problemAttr (txt "NOT DELIVERED — sending the current message brings the next one back")
           : map (txtWrap . ("  " <>)) messages
       )
+
+-- | Whether this review session still reads typed text, asked of both halves
+-- that decide it. Spelled once here because the overlay asks it for the mode
+-- badge and again for the hint line.
+reviewInputLive :: ReviewSession -> Bool
+reviewInputLive session =
+  reviewSessionInputLive session.sessionDetail.reviewSessionStage session.sessionPhase
 
 drawReviewInput :: ReviewSession -> Widget Name
 drawReviewInput session =

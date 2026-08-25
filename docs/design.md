@@ -284,7 +284,7 @@ Initial bindings:
 | `F` | Show or hide the card filter panel; j/k or Up/Down move between boxes, Left/Right between groups, Space toggles the focused box, d restores the defaults, s focuses the card search, and F or Esc hides the panel leaving the criteria unchanged |
 | `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
-| `Esc` | Close an overlay or dismiss a transient error |
+| `Esc` | Close an overlay or dismiss a transient error; in a live-agent overlay it is modal, returning an insert-mode session to normal and only then hiding the overlay, and it never reaches the dashboard's own quit |
 | `r` | Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session; a no-op on a collapsed or childless epic header |
 | `S` | Choose Codex or Claude and start/reopen an issue solve through PR creation |
 | `A` | Choose Codex or Claude and start/reopen the full autosolve review loop |
@@ -300,11 +300,48 @@ Initial bindings:
 | `Ctrl-L` | Force a terminal repaint without a network request |
 | `Tab` | In an open solve, PR, or review overlay, show the next in-memory session of that kind |
 | `Ctrl-C` | Interrupt the current turn in an open live-agent overlay — a resumable session then accepts user guidance; a canonical review stage's process is killed instead, landing the session in its interrupted terminal state, and restarts fresh via `r` |
-| `q` / `Ctrl-C` | Quit and restore the terminal |
+| `i` | In an open live-agent overlay, put the focused session into insert mode, where printable keys and Backspace edit its draft; a no-op on a session with nothing left to read what it types |
+| `j` / `k` | In an open live-agent overlay's normal mode, scroll the focused session's transcript down or up one line |
+| `g` / `G` | In an open live-agent overlay's normal mode, jump the focused session's transcript to its beginning or back to its live tail |
+| `Ctrl-D` / `Ctrl-U` | In an open live-agent overlay's normal mode, scroll the focused session's transcript down or up sixteen lines |
+| `q` | In an open live-agent overlay's normal mode, hide the overlay without interrupting its work and without quitting the dashboard |
+| `q` / `Ctrl-C` | Quit and restore the terminal from the board, a card's details overlay, or the help overlay; a live-agent overlay's normal-mode `q` hides that overlay instead and never quits |
 
 Refresh keys are ignored for a provider that already has a request in flight.
 Keybindings can become configurable later, but the first release should keep a
 small fixed set.
+
+The three live-agent overlays are modal, vim-style. Each solve, PR, and review
+session carries its own mode and opens in normal, so `Tab` shows the next
+session in whatever mode that session was left in, beside its own draft. In
+normal mode a plain letter is a command: `i` starts insert, `q` or `Esc` hides
+the overlay, `j`/`k`, `g`/`G`, and `Ctrl-D`/`Ctrl-U` scroll the transcript, and
+`1`-`9` pick a pending numbered choice — doing nothing when none is pending.
+In insert mode printable keys and Backspace edit the draft, `Esc` returns to
+normal, and `Enter` sends it and returns to normal on the keypress whether or
+not the send is accepted. The arrows scroll in both modes, and `Tab`,
+`Ctrl-C`, and the review overlay's `Ctrl-X` are outside the modes entirely.
+`Esc` stages rather than chains: insert to normal, normal to hidden, and never
+on to the dashboard's guarded quit.
+
+A session with nothing left to read what it types sits permanently in normal
+mode and treats `i` as a no-op, whatever mode it was last left in. `Tab`, `q`,
+`Esc`, and every scroll key keep working on it, and it still shows `[N]`. A
+review session reads typed text throughout its turn, so insert mode stays
+reachable while the agent is working and a steer drafted mid-turn queues rather
+than being lost; it stops reading once the stage settles, and a canonical stage
+— which runs the gate as a subprocess and holds no app-server thread — never
+reads it in any phase. The one exception is an interrupted app-server revision,
+which stays resumable and so keeps its input. A solve or PR session reads typed
+text only while it is waiting for input, which is also the only phase that
+draws its draft line; there is no queue behind those two to hold a mid-turn
+draft.
+
+A numbered-choice question or any approval request forces its own session — and
+only its own — back to normal so the digits answer it, leaving that session's
+draft and undelivered queue untouched; a free-text-only question leaves the
+mode alone. Each overlay shows the session's current mode as `[N]`, or `[I]` in
+green where color is enabled.
 
 Mouse interaction is intentionally complete but narrow:
 
@@ -734,12 +771,15 @@ approval prompt.
 
 Review overlays contain a bounded, mouse-wheel-scrollable transcript, one-line
 input, structured questions, command approvals, and tabs for all in-memory
-sessions. `Esc` or an outside click hides the overlay without interrupting work;
-selecting the issue
+sessions. `Esc` from normal mode, a normal-mode `q`, or an outside click hides
+the overlay without interrupting work; selecting the issue
 and pressing `r` reopens it. `Tab` switches sessions, Enter sends feedback or a
-follow-up turn, and Ctrl-C interrupts the active turn. Only running turns chain
-short spinner ticks; completed, hidden, and idle sessions schedule no redraws.
-Quitting terminates the owned app-server process.
+follow-up turn, and Ctrl-C interrupts the active turn. Enter is live only while
+something is still there to read the draft: a session in a terminal phase, and
+a canonical review stage in any phase, takes no follow-up at all, while an
+interrupted app-server revision remains resumable and does. Only running turns
+chain short spinner ticks; completed, hidden, and idle sessions schedule no
+redraws. Quitting terminates the owned app-server process.
 
 Solve, PR, and review overlays are three presentations of one session record.
 Everything not specific to the kind of agent behind them — status derivation,

@@ -34,6 +34,7 @@ import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime, utc)
 import qualified Graphics.Vty.Attributes as Vty
+import qualified Graphics.Vty.Input.Events as VtyInput
 import Kanban.ApprovalService
   ( ApprovalActivity (..),
     ApprovalBackend (..),
@@ -44,7 +45,7 @@ import Kanban.ApprovalService
     approvalBarrierSummary,
     decodeApprovalStatus,
   )
-import Kanban.CLI (BorderPolicy (..), Options (..))
+import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
 import Data.IORef (IORef, newIORef)
 import Kanban.Card (displayWidth)
 import Kanban.Domain
@@ -91,8 +92,11 @@ import Kanban.UI.Settings
     openSettings,
     settingsOutcome,
   )
+import Kanban.Review (ReviewStage (..))
 import Kanban.UI.Theme
   ( approvedAttr,
+    dimAttr,
+    insertModeAttr,
     neutralAttr,
     pendingAttr,
     problemAttr,
@@ -101,11 +105,23 @@ import Kanban.UI.Theme
     selectedTitleAttr,
     themeFor,
   )
-import Kanban.UI.SessionCore (newAgentSession)
+import Kanban.UI.SessionCore
+  ( SessionFocus (..),
+    SessionInputEvent (..),
+    insertSessionInput,
+    newAgentSession,
+    removeSessionInputCharacter,
+    sessionInputEvent,
+    sessionModeAfter,
+    setSessionMode,
+  )
+import Kanban.UI.Session (reviewSessionInputLive)
+import Kanban.UI.SessionEvents (SessionOps (..), reviewSessionOps)
 import Kanban.UI.Solve (freshSolveTranscript)
 import Kanban.UI.State (plainTranscript)
 import Kanban.UI.Types
-  ( AppEvent,
+  ( AgentSession (..),
+    AppEvent,
     AppState (..),
     BoardRefreshOutcome,
     CompletedHistoryStatus (..),
@@ -113,6 +129,9 @@ import Kanban.UI.Types
     Overlay (..),
     ProcessSelection (..),
     ReviewBackend (..),
+    ReviewDetail (..),
+    ReviewPhase (..),
+    ReviewSession,
     SolveDetail (..),
     SolvePhase (..),
     SolveSession,
@@ -494,6 +513,36 @@ spec = describe "golden frames" $ do
     approvalDetailText frame `shouldBe` "off"
     interiorRow frame drainerColumn (drainerRow + 2) `shouldBe` "off"
 
+  -- issue #515 requirement 11's other half. The @.txt@ frames above carry the
+  -- badge's text; only this carries its colour, and the colour is the whole
+  -- difference between the two badges beyond one letter.
+  it "draws the insert badge green and the normal badge dim, and neither under --color never" $ do
+    let theme = themeFor testOptions
+        badgeAttributes name badge = do
+          frame <- renderCase (frameCaseNamed name)
+          pure (cellAttributes (badgeCells frame badge))
+    insert <- badgeAttributes "overlay-session-insert" "[I]"
+    normal <- badgeAttributes "overlay-session-normal" "[N]"
+    length insert `shouldBe` 3
+    length normal `shouldBe` 3
+    nub insert `shouldBe` [attrMapLookup insertModeAttr theme]
+    nub normal `shouldBe` [attrMapLookup dimAttr theme]
+    -- The two are genuinely different attributes, so a badge drawn in the
+    -- wrong one cannot pass by both resolving to the same value.
+    nub insert `shouldNotBe` nub normal
+
+  it "leaves the insert badge colourless under --color never, like every attribute" $ do
+    -- §10's colour policy, which 'themeFor' implements by mapping every name
+    -- to the default rather than by omitting them.
+    frame <-
+      renderCase
+        (frameCaseNamed "overlay-session-insert")
+          { frameCaseState =
+              withOptions (\options -> options {optionColor = ColorNever})
+                . (frameCaseNamed "overlay-session-insert").frameCaseState
+          }
+    nub (cellAttributes (badgeCells frame "[I]")) `shouldBe` [Vty.defAttr]
+
   -- Requirement 2, which no @.txt@ golden can carry: the frames record
   -- characters and these record the colour each 'ApprovalState' is drawn in.
   -- Every constructor is covered, so a mapping cannot be added or repointed
@@ -697,6 +746,7 @@ frameCases =
     <> filterCases
     <> settingsCases
     <> solveModelCases
+    <> sessionModeCases
     <> approvalCases
 
 -- | The three surfaces that draw a model name (MODEL-3), which no frame
@@ -733,6 +783,80 @@ solveModelCases =
         frameCaseState = unusableRoster . chooserOpen
       }
   ]
+
+-- | The mode indicator §7 puts on every session overlay, once per mode
+-- (issue #515 requirement 15). Two cases rather than one because a
+-- 'FrameCase' has a single state and a session is in a single mode, so one
+-- frame could only ever show one of the two badges.
+--
+-- Drawn on a review revision because that is the kind whose input line is on
+-- screen in every phase: the badge and the draft it governs are then in the
+-- same frame, and the insert case can show text that only insert mode could
+-- have produced.
+sessionModeCases :: [FrameCase]
+sessionModeCases =
+  [ FrameCase
+      { frameCaseName = "overlay-session-normal",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "a live session overlay in normal mode, where a plain letter is a command",
+        frameCaseState = revisionSession id
+      },
+    FrameCase
+      { frameCaseName = "overlay-session-insert",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "the same overlay after i and a typed draft, in insert mode",
+        frameCaseState = revisionSession (typedIntoSession "iCheck the retry path too")
+      }
+  ]
+
+-- | An interactive issue-revision session, which is the review stage that
+-- talks to the app-server and therefore the one that reads typed text.
+revisionSession :: (ReviewSession -> ReviewSession) -> AppState -> AppState
+revisionSession press state =
+  state
+    { appOverlay = Just (ReviewOverlay solveFrameIssue),
+      appReviewSessions = Map.singleton solveFrameIssue (press session)
+    }
+  where
+    session :: ReviewSession
+    session =
+      newAgentSession
+        0
+        ReviewRunning
+        "thinking"
+        Nothing
+        (plainTranscript "Reading the issue body and the code it names…\n")
+        ReviewDetail
+          { reviewSessionIssue = fixtureIssue solveFrameIssue,
+            reviewSessionStage = IssueRevision,
+            reviewSessionThreadId = Just "thread-515",
+            reviewSessionTurnId = Nothing,
+            reviewSessionPending = Nothing,
+            reviewSessionUndelivered = []
+          }
+
+-- | Replay a run of key presses through the overlay's own decoder and the
+-- pure half of its dispatch, so the insert frame draws a state real presses
+-- reach rather than one written into the record. A press the decoder declines
+-- leaves the session alone, exactly as the dashboard would.
+typedIntoSession :: String -> ReviewSession -> ReviewSession
+typedIntoSession pressed session = foldl' press session pressed
+  where
+    press :: ReviewSession -> Char -> ReviewSession
+    press current character =
+      let caps = reviewSessionOps.sessionOpsCaps
+          liveInput = reviewSessionInputLive current.sessionDetail.reviewSessionStage current.sessionPhase
+          pressFocus = SessionFocus caps current.sessionMode liveInput
+       in case sessionInputEvent pressFocus (VtyInput.EvKey (VtyInput.KChar character) []) of
+            Nothing -> current
+            Just inputEvent ->
+              let moved = setSessionMode (sessionModeAfter inputEvent current.sessionMode) current
+               in case inputEvent of
+                    SessionInputInsert typed -> insertSessionInput typed moved
+                    SessionInputBackspace -> removeSessionInputCharacter moved
+                    _ -> moved
 
 -- | The chooser as the autosolve key opens it, before any refusal: the roster
 -- is not consulted until a digit is pressed, which is why the frame above can
@@ -1345,6 +1469,22 @@ cellCharacters = map frameCellCharacter
 
 cellAttributes :: [FrameCell] -> [Vty.Attr]
 cellAttributes = map frameCellAttribute
+
+-- | The cells of the one session-mode badge a frame draws, located by the
+-- text itself rather than by a written-down row and column, so the overlay's
+-- layout can move without this pointing at whatever took its place.
+badgeCells :: [[FrameCell]] -> Text -> [FrameCell]
+badgeCells frame badge = case matches of
+  cells : _ -> cells
+  [] -> error ("no row of the frame draws " <> Data.Text.unpack badge)
+  where
+    width = Data.Text.length badge
+    matches =
+      [ take width (drop column row)
+      | row <- frame,
+        column <- [0 .. length row - width],
+        Data.Text.pack (cellCharacters (take width (drop column row))) == badge
+      ]
 
 frameRow :: [[FrameCell]] -> Int -> [FrameCell]
 frameRow frame rowIndex = case drop rowIndex frame of

@@ -196,7 +196,7 @@ binding action = case action of
       "Open the selected card's details overlay"
   DismissOrClose ->
     KeyBinding action [plain Vty.KEsc] [BoardScope, DetailsScope, HelpScope] Nothing "close" "close overlay or dismiss a notice"
-      "Close an overlay or dismiss a transient error"
+      "Close an overlay or dismiss a transient error; in a live-agent overlay it is modal, returning an insert-mode session to normal and only then hiding the overlay, and it never reaches the dashboard's own quit"
   ReviewSelection ->
     KeyBinding action [key 'r'] [BoardScope, DetailsScope] Nothing "review/revise" "review/revise/repair selected issue or PR"
       "Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session; a no-op on a collapsed or childless epic header"
@@ -242,7 +242,7 @@ binding action = case action of
       "Force a terminal repaint without a network request"
   QuitDashboard ->
     KeyBinding action [key 'q', chord (Vty.KChar 'c') [Vty.MCtrl]] [BoardScope, DetailsScope, HelpScope] Nothing "quit" "quit"
-      "Quit and restore the terminal"
+      "Quit and restore the terminal from the board, a card's details overlay, or the help overlay; a live-agent overlay's normal-mode `q` hides that overlay instead and never quits"
   where
     key character = chord (Vty.KChar character) []
     plain named = chord named []

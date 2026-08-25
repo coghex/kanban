@@ -24,7 +24,9 @@ module Kanban.UI.Session
     reviewIncidentPhase,
     reviewOverlayVisible,
     reviewSessionActive,
+    reviewSessionInputLive,
     reviewSessionLive,
+    reviewSessionMode,
     reviewSessionReusable,
     reviewTurnInterruptible,
     selectedReviewIssue,
@@ -33,6 +35,8 @@ module Kanban.UI.Session
     sessionAlreadyResolved,
     solveIncidentPhase,
     solvePhaseActive,
+    solveSessionInputLive,
+    solveSessionMode,
     solveProcessStatus,
     solveWorkerFor,
   )
@@ -76,6 +80,7 @@ import Kanban.Worker
     WorkerSpec (..),
     WorkerTask (..)
     )
+import Kanban.UI.SessionCore (liveSessionMode)
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.Selection
@@ -680,6 +685,56 @@ isResolvedSolvePhase phase = phase `elem` [SolveFinished, SolveFailedPhase, Solv
 -- byte-identical functions, so one polymorphic definition serves both.
 sessionAlreadyResolved :: Int -> Map Int (AgentSession SolvePhase detail) -> Bool
 sessionAlreadyResolved key sessions = maybe False (isResolvedSolvePhase . (.sessionPhase)) (Map.lookup key sessions)
+
+-- | Whether a solve or pull-request session still has something behind it to
+-- read text typed into its draft (issue #515). This is what pins a session to
+-- normal mode and makes @i@ a no-op on it.
+--
+-- These two kinds read typed text in exactly one phase. 'submitSolveInput' and
+-- its pull-request counterpart refuse every phase but 'SolveAttention' —
+-- "this solve session is not waiting for input" — and 'drawSolveInput' draws
+-- the @>@ line in that phase alone. So a running or interrupting session has
+-- no more of a reader than a finished one does: insert mode there would edit
+-- a draft that is neither visible nor sendable. Unlike a review session, there
+-- is no undelivered-steer queue behind these to hold a mid-turn draft
+-- ('applyUndeliveredSteer' is the app-server path and belongs to review), so
+-- the answer is the phase that waits for input and nothing else.
+solveSessionInputLive :: SolvePhase -> Bool
+solveSessionInputLive phase = phase == SolveAttention
+
+-- | The mode a solve or pull-request session actually behaves and draws in.
+-- One spelling of the derivation, so the overlay's badge, its hint line, and
+-- the decoder cannot end up with two opinions about the same session.
+solveSessionMode :: AgentSession SolvePhase detail -> SessionMode
+solveSessionMode session = liveSessionMode (solveSessionInputLive session.sessionPhase) session.sessionMode
+
+-- | The same for a review session, whose liveness needs its stage too.
+reviewSessionMode :: ReviewSession -> SessionMode
+reviewSessionMode session =
+  liveSessionMode
+    (reviewSessionInputLive session.sessionDetail.reviewSessionStage session.sessionPhase)
+    session.sessionMode
+
+-- | The same question for a review session, which takes /two/ answers rather
+-- than one because its stage decides as much as its phase.
+--
+-- A canonical stage never reads typed text at all: it runs
+-- @approve_issues.py@ as a subprocess and has no app-server thread, so it
+-- carries no thread id for 'sendReviewFeedback' to send on and can never be
+-- handed a question or an approval. Ctrl-C kills its process and only a fresh
+-- @r@ starts another.
+--
+-- An app-server revision reads text until it settles — with one exception
+-- that is the whole reason this is not just a terminal-phase list.
+-- 'reviewSessionReusable' deliberately keeps an interrupted revision
+-- resumable, and §7 promises guidance after an interrupt, so
+-- 'ReviewInterrupted' is terminal for a canonical stage and merely paused for
+-- a revision.
+reviewSessionInputLive :: ReviewStage -> ReviewPhase -> Bool
+reviewSessionInputLive stage phase
+  | stage /= IssueRevision = False
+  | phase == ReviewInterrupted = True
+  | otherwise = phase `notElem` [ReviewFinished, ReviewNeedsChanges, ReviewFailed, ReviewRevised]
 
 reviewPhaseActive :: ReviewPhase -> Bool
 reviewPhaseActive phase = phase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting]
