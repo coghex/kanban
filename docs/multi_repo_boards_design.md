@@ -21,7 +21,7 @@ concrete precondition
 
 - [x] EPIC. Run one Kanban session over several repositories — [#354]
 - [x] MRB-1. Add a configured repository roster with per-repo paths — [#524]
-- [ ] MRB-2. Hold per-repository board state behind an active-board pointer
+- [ ] MRB-2. Hold per-repository board state behind an active-board pointer — [deferred]: D-11 must classify every AppState field and decide board-addressed events
 - [ ] MRB-3. Add the repository tab bar and amend the design contract
 - [ ] MRB-4. Show workflow state in the repository tabs
 - [ ] MRB-5. Route workflow actions to the active repository
@@ -551,6 +551,36 @@ Raised in the 2026-08-16 pre-processing audit of MRB-3. Resolved by D-18.
 - **Open questions:** None
 
 ### MRB-2. Hold per-repository board state behind an active-board pointer
+
+> **Deferred 2026-08-25.** D-11's ten-item enumeration no longer covers
+> `AppState`, which carries 61 fields, and this slice's scope is that
+> enumeration. Three gaps block a scoped issue.
+>
+> No `AppEvent` constructor carries a board identity — all 25 address "the"
+> board (`src/Kanban/UI/Types.hs:576-600`) — while one `monitorDrainer` and
+> one `monitorApprovalService` thread write into the single `appEventChannel`
+> (`src/Kanban/UI.hs:348-367`). D-11 puts the drainer controller, refresh
+> coordinator, and live sessions per board, and D-12 keeps an inactive board's
+> work running, so every event must become board-addressed. Neither decision
+> says so, and no reading of D-11 supplies it.
+>
+> The seven approval-service fields (`appApprovalController` through
+> `appApprovalResult`) landed in `81504ae` on 2026-08-17, a day after D-11's
+> signoff, and are repository-derived by construction
+> (`discoverApprovalController :: Repository -> IO …`,
+> `src/Kanban/ApprovalService.hs:1010`). `appConfig :: ResolvedConfig` comes
+> from `resolveConfig ownerName rawConfig` (`app/Main.hs:135`) and is unnamed:
+> left session-global, every board would run under the launch repository's
+> override table. Seven further fields are undetermined either way —
+> `appFilterPanel`, `appEnsureSelectionVisible`, `appSidebarVisible`,
+> `appProcessSelection`, `appIncidentSelection`, `appOverlay`,
+> `appReviewBackend`.
+>
+> **Precondition:** `/design-epic` amends D-11 to classify every `AppState`
+> field and records a decision on board-addressed events. The same pass should
+> refresh D-10's and D-11's citations: `Config.hs:291-300` → `:324-338`,
+> `Cache.hs:195-198` → `:214-218`, `UI.hs:82`/`:84` → `:112`/`:117`,
+> `design.md:1930` → `:2103`.
 
 - **Outcome:** `AppState` holds a board-state map keyed by the
   ASCII-lowercased repository identity with an active pointer; all reads go
