@@ -97,7 +97,7 @@ import Kanban.UI.Settings
     settingsOutcome,
   )
 import Kanban.UI.Solve (failSolveLaunch, freshSolveTranscript)
-import Kanban.UI.Types (AgentSession (..), AgentSessionEntry (..), AppEvent (..), AppState (..), ChatTranscript (..), Name, PullRequestDetail (..), SolveDetail (..), SolvePhase (..), SolveSession, withModelRoster)
+import Kanban.UI.Types (AgentSession (..), AgentSessionEntry (..), AppEvent (..), AppState (..), ChatTranscript (..), Name, PullRequestDetail (..), ReviewBackend (..), SolveDetail (..), SolvePhase (..), SolveSession, withModelRoster)
 import Kanban.UI.Util (launchAssignment, pullRequestSessionLabel, resolvedRosterCellFor, solveReviewerDisplay, solveSessionLabel)
 import Kanban.UI.Worker (recoveredAutoSolveParentSession, recoveredPullRequestSession, recoveredSolveSession)
 import Kanban.Worker
@@ -457,6 +457,14 @@ spec = do
       -- The resumable id and the cell have to name the same agent.
       (restored.sessionDetail.solveSessionAssignment, restored.sessionDetail.solveSessionId)
         `shouldBe` (parent.workerParentSolverAssignment, parent.workerParentSolverSession)
+      -- ...and so does the text this session opens with. The detail is
+      -- overridden after the shared builder runs, so a transcript built from
+      -- the descriptor would keep naming the reviewer while everything else
+      -- named the solver -- which the assertion above cannot see.
+      restored.sessionTranscript.fullTranscript
+        `shouldMention` ("solver: claude · " <> solverCell.recordedAssignmentDisplay)
+      restored.sessionTranscript.fullTranscript
+        `shouldNotMention` reviewerCell.recordedAssignmentDisplay
       -- ...and the revision this restart is heading for replays exactly that.
       launchAssignment restored.sessionDetail.solveSessionAssignment (`solveAssignment` ClaudeSolver) (Left unusableRoster)
         `shouldBe` Right solverCell
@@ -478,7 +486,7 @@ spec = do
       solveDescriptor <- descriptorForSpec legacySolve
       pullRequestDescriptor <- descriptorForSpec legacyPullRequest
       -- What the reattach reads off each legacy specification.
-      (recoveredSolveSession state solveDescriptor (baseIssue 848 []) solveTask).sessionDetail.solveSessionAssignment
+      (recoveredSolveSession state legacySolve.workerAssignment solveDescriptor (baseIssue 848 []) solveTask).sessionDetail.solveSessionAssignment
         `shouldBe` Nothing
       (recoveredPullRequestSession state.appModelRoster 0 pullRequestDescriptor (basePullRequest 849 [] False []) pullRequestTask).sessionDetail.pullRequestSessionAssignment
         `shouldBe` Nothing
@@ -634,10 +642,27 @@ spec = do
       encodedValue (claudeTool distinctDisplays)
         `shouldMention` ("Claude " <> displayOf IssueReviseRole ClaudeProvider)
 
-      -- And the transcript line the tool's own start writes.
-      claudeTranscriptStart roster
-        `shouldMention` ("Starting authenticated " <> displayOf IssueReviseRole ClaudeProvider)
-      claudeTranscriptStart roster `shouldMention` "[sonnet]"
+    -- The backend keeps the roster it was started on for its whole life while
+    -- the settings overlay moves what the dashboard holds, so the two diverge
+    -- the moment a cell is edited mid-session. The transcript line announcing
+    -- a tool call has to name what that tool will really spawn, which is the
+    -- client's snapshot; it takes no dashboard state at all.
+    it "opens the Claude transcript on the review client's own snapshot, not the dashboard's" $ do
+      withRecordingReviewClientUsing distinctDisplays $ \client _ _ -> do
+        claudeTranscriptStart (ReviewBackendReady client)
+          `shouldMention` ("Starting authenticated " <> displayOf IssueReviseRole ClaudeProvider)
+        claudeTranscriptStart (ReviewBackendReady client) `shouldMention` "[sonnet]"
+        -- The dashboard's own roster carries a different display for that
+        -- same cell, and none of it reaches the line.
+        claudeTranscriptStart (ReviewBackendReady client)
+          `shouldNotMention` (cellOf (issueReviseAssignment defaultRoster)).assignmentDisplay
+      -- It says unavailable on exactly the rosters the tool refuses on...
+      withRecordingReviewClientUsing codexOnlyRoster $ \client _ _ -> do
+        claudeTranscriptStart (ReviewBackendReady client) `shouldMention` "model roster unavailable"
+        mapM_ (claudeTranscriptStart (ReviewBackendReady client) `shouldNotMention`) namedModels
+        issueReviseAssignment codexOnlyRoster `shouldSatisfy` either (const True) (const False)
+      -- ...and names no model with no client to read a snapshot off at all.
+      claudeTranscriptStart ReviewBackendStopped `shouldMention` "model roster unavailable"
 
     it "renders the recorded cell on a solve session's own surfaces, fresh and recovered" $ do
       let recorded = cellOf (solveAssignment distinctDisplays ClaudeSolver)
@@ -646,7 +671,7 @@ spec = do
           fixture = (workerFixtureSpec repository (WorkerId "solve-853") 853) {workerTask = SolveWorkerTaskKind task, workerAssignment = Just recorded}
       state <- withModelRoster roster <$> testAppState (fixtureBoard [])
       descriptor <- descriptorForSpec fixture
-      let recovered = recoveredSolveSession state descriptor (baseIssue 853 []) task
+      let recovered = recoveredSolveSession state fixture.workerAssignment descriptor (baseIssue 853 []) task
       recovered.sessionTranscript.fullTranscript
         `shouldMention` ("solver: claude · " <> displayOf SolveRole ClaudeProvider)
       -- The header over that recovered session says the same thing.
@@ -724,8 +749,7 @@ spec = do
               solveSessionLabel (Right claudeOnlyRoster) (solveSessionOn CodexSolver Nothing),
               pullRequestSessionLabel Nothing PullRequestClaude PullRequestReview CodexSolver (Right claudeOnlyRoster),
               freshSolveTranscript (Left unusableRoster) AutoSolve CodexSolver,
-              freshPullRequestTranscript (Right claudeOnlyRoster) PullRequestClaude PullRequestReview CodexSolver,
-              claudeTranscriptStart (Right codexOnlyRoster)
+              freshPullRequestTranscript (Right claudeOnlyRoster) PullRequestClaude PullRequestReview CodexSolver
             ]
       mapM_ (`shouldMention` "model roster unavailable") unresolvable
       mapM_ (\rendered -> mapM_ (rendered `shouldNotMention`) namedModels) unresolvable
@@ -789,7 +813,9 @@ spec = do
       solveReviewerDisplay defaults ClaudeSolver `shouldBe` "GPT-5.6-Terra xhigh"
       pullRequestSessionLabel Nothing PullRequestClaude PullRequestReview CodexSolver defaults
         `shouldBe` "codex · GPT-5.6-Terra xhigh"
-      claudeTranscriptStart defaults `shouldBe` "\n[sonnet] Starting authenticated Sonnet 5 high…\n"
+      withRecordingReviewClientUsing defaultRoster $ \client _ _ ->
+        claudeTranscriptStart (ReviewBackendReady client)
+          `shouldBe` "\n[sonnet] Starting authenticated Sonnet 5 high…\n"
       -- The PR-revision label is the correction: the flow has always spawned
       -- pr_revise, while the label read solve.claude and said "Sonnet 5 high".
       pullRequestSessionLabel Nothing PullRequestClaude PullRequestRevision ClaudeSolver defaults

@@ -55,10 +55,12 @@ module Kanban.Review
     issueReviewerNotFoundMessage,
     issueReviewerRecordFromBytes,
     issueReviewerRecordPath,
+    issueReviseDisplay,
     killReviewTools,
     killThreadToolProcesses,
     newRecordingReviewClientForTesting,
     newReviewClientForTesting,
+    reviewClientRoster,
     reviewDeveloperInstructions,
     newToolRegistry,
     outcomeUnknownDiagnostic,
@@ -167,6 +169,7 @@ import Kanban.Review.Tools
     githubIssueViewArguments,
     githubLabelCreateArguments,
     issueReviseAssignment,
+    issueReviseDisplay,
     runAuthenticatedClaude,
     runGitHubIssueTool,
   )
@@ -216,6 +219,15 @@ import System.Timeout (timeout)
 -- | The cell the embedded issue-review thread itself runs on. Only Codex is
 -- read: the Claude embedded-review backend is MODEL-13's, so
 -- @issue_review.claude@ stays unconsulted here even when the roster loads it.
+-- | The roster snapshot this client resolves every cell from, which is the
+-- one taken when the backend started rather than whatever the dashboard now
+-- holds. Exposed because a surface describing what a tool of this client is
+-- doing has to name the roster that tool will actually run on: a settings
+-- edit between the two would otherwise make the two disagree. The record
+-- itself stays abstract.
+reviewClientRoster :: ReviewClient -> ModelRoster
+reviewClientRoster client = client.reviewModelRoster
+
 issueReviewAssignment :: ModelRoster -> Either Text Assignment
 issueReviewAssignment roster =
   either (Left . assignmentUnavailableMessage) Right (assignmentFor roster IssueReviewRole CodexProvider)

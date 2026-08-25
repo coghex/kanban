@@ -18,6 +18,7 @@ module Kanban.Review.Tools
     authenticatedClaudeArguments,
     claudeReviewerTimeoutMessage,
     issueReviseAssignment,
+    issueReviseDisplay,
     runAuthenticatedClaude,
     runGitHubIssueTool,
   )
@@ -49,6 +50,7 @@ import Kanban.Models
     RoleName (..),
     assignmentFor,
     assignmentUnavailableMessage,
+    unavailableAssignmentDisplay,
   )
 import Kanban.Process (killManagedProcess, managedProcess)
 import Kanban.Review.Client (ReviewClient (..), attachToolProcess)
@@ -331,6 +333,16 @@ runAuthenticatedClaude client key prompt = case issueReviseAssignment client.rev
 -- one it can run on.
 issueReviseAssignment :: ModelRoster -> Either AssignmentUnavailable Assignment
 issueReviseAssignment roster = assignmentFor roster IssueReviseRole ClaudeProvider
+
+-- | How a surface names the cell @kanban_run_claude@ runs, from the same
+-- roster 'runAuthenticatedClaude' resolves against.
+--
+-- The stand-in is returned for exactly the rosters that make the tool refuse,
+-- so a transcript can never announce a model on a roster the tool will not
+-- spawn on -- and never a model at all when it cannot resolve one.
+issueReviseDisplay :: ModelRoster -> Text
+issueReviseDisplay roster =
+  either (const unavailableAssignmentDisplay) (.assignmentDisplay) (issueReviseAssignment roster)
 
 -- | The argv @kanban_run_claude@ spawns, from a resolved assignment.
 authenticatedClaudeArguments :: Assignment -> [String]

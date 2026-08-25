@@ -21,7 +21,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain
-import Kanban.Models (ModelRoster, RosterLoadError)
+import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
 import Kanban.Process (managedProcessGroup )
 import Kanban.PullRequestFlow
   ( PullRequestFlowEvent (..),
@@ -215,7 +215,7 @@ ensureWorkerSession descriptor = do
                   { appSolveSessions =
                       Map.insert
                         task.solveWorkerIssueNumber
-                        (recoveredSolveSession current descriptor issue task)
+                        (recoveredSolveSession current descriptor.workerDescriptorSpec.workerAssignment descriptor issue task)
                         current.appSolveSessions
                   }
             )
@@ -237,8 +237,17 @@ ensureWorkerSession descriptor = do
               )
       ensureRecoveredAutoSolve descriptor task
 
-recoveredSolveSession :: AppState -> WorkerDescriptor -> Issue -> SolveWorkerTask -> SolveSession
-recoveredSolveSession state descriptor issue task =
+-- | A solve session restored from a running worker.
+--
+-- The recorded assignment is a /parameter/ rather than something read out of
+-- the descriptor here, because one caller's descriptor is not the solver's:
+-- 'recoveredAutoSolveParentSession' restores the solver's session from the
+-- pull-request worker's descriptor, whose assignment is the reviewer's. A
+-- builder that reached into the descriptor for it would put the reviewer's
+-- agent in the solver's transcript, and overriding the detail afterwards
+-- cannot take it back out of the text already written.
+recoveredSolveSession :: AppState -> Maybe RecordedAssignment -> WorkerDescriptor -> Issue -> SolveWorkerTask -> SolveSession
+recoveredSolveSession state assignment descriptor issue task =
   ( newAgentSession
       (priorTickGeneration task.solveWorkerIssueNumber state.appSolveSessions)
       SolveStarting
@@ -250,7 +259,7 @@ recoveredSolveSession state descriptor issue task =
               <> " worker\nsolver: "
               <> agentSessionLabelFor
                 task.solveWorkerBrand
-                descriptor.workerDescriptorSpec.workerAssignment
+                assignment
                 (`solveAssignment` task.solveWorkerBrand)
                 state.appModelRoster
               <> "\n\n"
@@ -273,7 +282,9 @@ recoveredSolveSession state descriptor issue task =
           -- that rather than resolving against a roster this process may
           -- have loaded differently. 'Nothing' is a specification written
           -- before the field existed, and the first resume resolves once.
-          solveSessionAssignment = descriptor.workerDescriptorSpec.workerAssignment
+          -- One field, set from the parameter the transcript above was built
+          -- from, so the two cannot name different agents.
+          solveSessionAssignment = assignment
         }
   )
     {sessionLogPath = descriptor.workerDescriptorSpec.workerExistingLogPath}
@@ -337,12 +348,14 @@ ensureRecoveredAutoSolve descriptor task = case descriptor.workerDescriptorSpec.
 -- restores beside the pull-request one.
 --
 -- The descriptor names the pull-request agent, so every value that
--- identifies the solver is taken from 'WorkerParent' and overrides what
--- 'recoveredSolveSession' read out of that descriptor: the session id, the
--- log path, the brand, and — this is the one a resume runs on — the recorded
--- model assignment. Leaving the last of those to the descriptor would hand
--- the solver the reviewer's cell, so a revision launched after a restart
--- would replay the wrong provider against the solver's own session id.
+-- identifies the solver is taken from 'WorkerParent': the session id and the
+-- log path override what 'recoveredSolveSession' read out of that
+-- descriptor, while the brand and — this is the one a resume runs on — the
+-- recorded model assignment are passed /in/ rather than overridden after the
+-- fact. Leaving the assignment to the descriptor would hand the solver the
+-- reviewer's cell, so a revision launched after a restart would replay the
+-- wrong provider against the solver's own session id, and the session's
+-- transcript would open by naming that reviewer as its solver.
 --
 -- Lifted out of 'ensureRecoveredAutoSolve' rather than left inline because
 -- that arm runs in brick's 'EventM', which no unit test here can drive; this
@@ -353,11 +366,16 @@ recoveredAutoSolveParentSession state descriptor issue parent task =
     ( \detail ->
         detail
           { solveSessionId = parent.workerParentSolverSession,
-            solveSessionAssignment = parent.workerParentSolverAssignment,
             solveSessionAutoProgress = Just progress
           }
     )
-    (recoveredSolveSession state descriptor issue (SolveWorkerTask parent.workerParentIssueNumber AutoSolve parent.workerParentSolverBrand))
+    ( recoveredSolveSession
+        state
+        parent.workerParentSolverAssignment
+        descriptor
+        issue
+        (SolveWorkerTask parent.workerParentIssueNumber AutoSolve parent.workerParentSolverBrand)
+    )
       { sessionPhase = SolveRunning,
         sessionActivity = "PR agent is running",
         sessionLogPath = parent.workerParentSolverLogPath

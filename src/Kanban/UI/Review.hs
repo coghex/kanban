@@ -50,7 +50,7 @@ import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.Drainer (normalizedRepositoryIdentity)
-import Kanban.Models (Assignment (..), ModelRoster, ProviderName (..), RoleName (..), RosterLoadError, assignmentFor)
+import Kanban.Models (ProviderName (..), RoleName (..), assignmentFor, unavailableAssignmentDisplay)
 import Kanban.Preflight
   ( PreflightAction (..),
     issueOriginFromBody,
@@ -75,9 +75,10 @@ import Kanban.Review
     approveReviewAction,
     beginIssueReview,
     interruptReview,
-    issueReviseAssignment,
+    issueReviseDisplay,
     killReviewTools,
     outcomeUnknownDiagnostic,
+    reviewClientRoster,
     reviewStageForLabels,
     renderCanonicalIssueReviewResult,
     runCanonicalIssueReview,
@@ -824,7 +825,7 @@ applyReviewEvent reviewEvent = case reviewEvent of
       )
   ReviewClaudeStarted threadId -> do
     state <- get
-    let started = claudeTranscriptStart state.appModelRoster
+    let started = claudeTranscriptStart state.appReviewBackend
     modifyReviewSessionByThread threadId
       ( \session ->
           session
@@ -987,8 +988,21 @@ applyReviewAnimationTick = applySessionTick reviewSessionOps
 -- requirement 2); only the model-and-effort portion comes from the roster,
 -- and it is @issue_revise.claude@ -- the very cell the tool this line
 -- announces has already resolved in order to spawn.
-claudeTranscriptStart :: Either RosterLoadError ModelRoster -> Text
-claudeTranscriptStart rosterResult =
-  "\n[sonnet] Starting authenticated "
-    <> liveAssignmentDisplay (.assignmentDisplay) issueReviseAssignment rosterResult
-    <> "…\n"
+--
+-- Read off the /client's/ roster rather than the dashboard's. The two are
+-- the same value at startup and can diverge afterwards: the backend keeps
+-- the snapshot it was started on for its whole life, while the settings
+-- overlay moves what the dashboard holds. A line drawn from the dashboard's
+-- would name whatever was saved most recently, which is not what the tool it
+-- is announcing is about to spawn.
+--
+-- A backend that is not ready has no client and therefore no snapshot, which
+-- no running tool call can actually be in; it names no model rather than
+-- reaching for one.
+claudeTranscriptStart :: ReviewBackend -> Text
+claudeTranscriptStart backend =
+  "\n[sonnet] Starting authenticated " <> display <> "…\n"
+  where
+    display = case backend of
+      ReviewBackendReady client -> issueReviseDisplay (reviewClientRoster client)
+      _ -> unavailableAssignmentDisplay
