@@ -8,7 +8,7 @@ import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Maybe (isJust)
 import qualified Data.Text
-import Kanban.Cache (ghGroupRecordPath, writeGhGroupRecord)
+import Kanban.Cache (GhGroupRecordLoad (..), ghGroupRecordPath, loadGhGroupRecord, writeGhGroupRecord)
 import Kanban.Domain
 import Kanban.GitHub
   ( FetchState (..),
@@ -19,7 +19,12 @@ import Kanban.GitHub
     confirmsOwnGroupLeadership,
     ghBehindBarrier,
     groupConfirmedEmpty,
-    graphqlArguments
+    graphqlArguments,
+    newGhFetchGuard,
+    newGhRecordLock,
+    newGhRecordLockOwnedBy,
+    reclaimRecordedGhGroups,
+    recordGhGroup
   )
 import Kanban.Process
   ( OwnedProcessGroup (..),
@@ -56,7 +61,7 @@ import Spec.Support.Locale
     unicodeIssueTitles,
     withLocaleProbe
   )
-import Spec.Support.Process (withNonLeaderProcess, withSurvivingGroupLeader)
+import Spec.Support.Process (withNonLeaderProcess, withSurvivingGroupLeader, withVacatedGroupLeader)
 import System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
@@ -430,7 +435,7 @@ spec = do
               Right identities -> do
                 let members = filter ((== survivorPid) . processIdentityGroupPid) identities
                 members `shouldNotBe` []
-                writeGhGroupRecord repository [OwnedProcessGroup survivorPid members True] `shouldReturn` Right ()
+                writeGhGroupRecord repository [OwnedProcessGroup survivorPid members True Nothing] `shouldReturn` Right ()
             withFakeGh
               temporaryRoot
               [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
@@ -480,7 +485,7 @@ spec = do
           case snapshot of
             Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
             Right identities ->
-              writeGhGroupRecord repository [OwnedProcessGroup leaderPid (filter ((== leaderPid) . processIdentityGroupPid) identities) True]
+              writeGhGroupRecord repository [OwnedProcessGroup leaderPid (filter ((== leaderPid) . processIdentityGroupPid) identities) True Nothing]
                 `shouldReturn` Right ()
           withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
             (outcome, _) <- captureBoardRefresh temporaryRoot 30
@@ -511,7 +516,7 @@ spec = do
               Left message -> fail (Data.Text.unpack message)
               Right identity -> pure identity
             identity.processIdentityGroupPid `shouldNotBe` nonLeaderPid
-            writeGhGroupRecord repository [OwnedProcessGroup nonLeaderPid [identity] False] `shouldReturn` Right ()
+            writeGhGroupRecord repository [OwnedProcessGroup nonLeaderPid [identity] False Nothing] `shouldReturn` Right ()
             withFakeGh
               temporaryRoot
               [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
@@ -548,7 +553,7 @@ spec = do
         -- vacuously, while it is plainly still running.
         withSurvivingGroupLeader $ \survivorPid ->
           withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-            writeGhGroupRecord repository [OwnedProcessGroup survivorPid [] False] `shouldReturn` Right ()
+            writeGhGroupRecord repository [OwnedProcessGroup survivorPid [] False Nothing] `shouldReturn` Right ()
             withFakeGh
               temporaryRoot
               [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
@@ -576,7 +581,7 @@ spec = do
               Left message -> fail (Data.Text.unpack message)
               Right identity -> do
                 withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-                  writeGhGroupRecord repository [OwnedProcessGroup survivorPid [identity] False] `shouldReturn` Right ()
+                  writeGhGroupRecord repository [OwnedProcessGroup survivorPid [identity] False Nothing] `shouldReturn` Right ()
                   withFakeGh
                     temporaryRoot
                     [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
@@ -779,8 +784,8 @@ spec = do
                   membersOf secondPid `shouldNotBe` []
                   writeGhGroupRecord
                     repository
-                    [ OwnedProcessGroup survivorPid (membersOf survivorPid) True,
-                      OwnedProcessGroup secondPid (membersOf secondPid) True
+                    [ OwnedProcessGroup survivorPid (membersOf survivorPid) True Nothing,
+                      OwnedProcessGroup secondPid (membersOf secondPid) True Nothing
                     ]
                     `shouldReturn` Right ()
               withFakeGh
@@ -837,8 +842,8 @@ spec = do
                   ours `shouldNotBe` []
                   writeGhGroupRecord
                     repository
-                    [ OwnedProcessGroup ourPid ours True,
-                      OwnedProcessGroup squatterPid [departed] True
+                    [ OwnedProcessGroup ourPid ours True Nothing,
+                      OwnedProcessGroup squatterPid [departed] True Nothing
                     ]
                     `shouldReturn` Right ()
               withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
@@ -1030,7 +1035,7 @@ spec = do
                       processIdentityStartedAt = "Thu Jan 1 00:00:00 1970",
                       processIdentityCommand = "gh api graphql"
                     }
-            writeGhGroupRecord repository [OwnedProcessGroup squatterPid [departed] True] `shouldReturn` Right ()
+            writeGhGroupRecord repository [OwnedProcessGroup squatterPid [departed] True Nothing] `shouldReturn` Right ()
             withFakeGh
               temporaryRoot
               [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
@@ -1071,3 +1076,108 @@ spec = do
       -- does not produce a notice at all.
       inMemory `shouldMention` "check for a stray gh process"
       mapM_ (`shouldNotMention` "restarting is safe") [recorded, inMemory]
+
+  -- Whose leftover a refusal is about. A board under the repository lease is
+  -- the only current one, so whatever the record held at its first read was
+  -- written by a board that has since died — and whatever appears afterwards,
+  -- in this process, is its own. The owner an entry carries can name that dead
+  -- board, and is allowed to do nothing else.
+  describe "the board a recorded gh belonged to" $ do
+    it "describes an entry it found in the record as a dead predecessor's" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withSurvivingGroupLeader $ \squatterPid ->
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            let repository = Repository temporaryRoot "coghex" "kanban"
+            writeGhGroupRecord repository [OwnedProcessGroup squatterPid [departedIn squatterPid] True Nothing]
+              `shouldReturn` Right ()
+            guard <- newGhRecordLock >>= newGhFetchGuard
+            refused <- reclaimRecordedGhGroups guard repository
+            refusal refused `shouldMention` "a gh left by a previous Kanban board"
+            -- Without owner metadata there is no board to name, and one is not
+            -- invented: an entry an earlier release wrote carries no identity.
+            refusal refused `shouldNotMention` "(pid "
+
+    it "names the predecessor when the entry it left says which board it was" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withSurvivingGroupLeader $ \squatterPid ->
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            let repository = Repository temporaryRoot "coghex" "kanban"
+                predecessor = departedIn 4812
+            writeGhGroupRecord
+              repository
+              [OwnedProcessGroup squatterPid [departedIn squatterPid] True (Just predecessor)]
+              `shouldReturn` Right ()
+            guard <- newGhRecordLock >>= newGhFetchGuard
+            refused <- reclaimRecordedGhGroups guard repository
+            refusal refused `shouldMention` "a gh left by a previous Kanban board (pid 4812)"
+
+    -- The other side of the same signal, and the one owner presence cannot
+    -- decide: this board's own new entry carries an owner too.
+    it "describes an entry it wrote itself as this board's" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withSurvivingGroupLeader $ \squatterPid ->
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            let repository = Repository temporaryRoot "coghex" "kanban"
+            recordLock <- newGhRecordLockOwnedBy (Just (departedIn 4812))
+            guard <- newGhFetchGuard recordLock
+            -- The first reclaim is what settles the question, and it happens
+            -- before this board has written anything — exactly as it does in
+            -- a real refresh, where nothing is spawned until reclaim returns.
+            reclaimRecordedGhGroups guard repository `shouldReturn` Right ()
+            recordGhGroup guard repository (OwnedProcessGroup squatterPid [departedIn squatterPid] True Nothing)
+              `shouldReturn` Right ()
+            refused <- reclaimRecordedGhGroups guard repository
+            refusal refused `shouldMention` "a gh this board started"
+            refusal refused `shouldNotMention` "previous Kanban board"
+
+    -- Owner data is informational, and this is what that has to mean: a live
+    -- process named as an entry's owner is not signalled, not censused, and
+    -- not what keeps the entry alive. The record clears because the group is
+    -- empty, and the owner is still running afterwards.
+    it "never signals or consults the process an entry names as its owner" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withSurvivingGroupLeader $ \ownerPid ->
+          withVacatedGroupLeader $ \departedPgid ->
+            withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+              let repository = Repository temporaryRoot "coghex" "kanban"
+                  owner = departedIn ownerPid
+              -- A group whose own pgid is established as empty, owned by a
+              -- process that is very much alive. If the owner were a liveness
+              -- predicate the record would be kept; if it were a signalling
+              -- target the process would die.
+              writeGhGroupRecord repository [OwnedProcessGroup departedPgid [departedIn departedPgid] True (Just owner)]
+                `shouldReturn` Right ()
+              guard <- newGhRecordLock >>= newGhFetchGuard
+              reclaimRecordedGhGroups guard repository `shouldReturn` Right ()
+              (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
+              alive <- readProcessSnapshot
+              case alive of
+                Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+                Right identities -> identityForPid ownerPid identities `shouldSatisfy` isJust
+
+    it "stamps every entry it writes with the board's own identity" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository temporaryRoot "coghex" "kanban"
+              board = departedIn 4812
+          recordLock <- newGhRecordLockOwnedBy (Just board)
+          guard <- newGhFetchGuard recordLock
+          -- Written without an owner by the caller, so what ends up in the
+          -- record is the record's doing rather than the call site's.
+          recordGhGroup guard repository (OwnedProcessGroup 4200 [] False Nothing) `shouldReturn` Right ()
+          loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [OwnedProcessGroup 4200 [] False (Just board)]
+
+-- | A recorded member identity for a PID, with a start time far enough in the
+-- past that nothing running now can match it.
+departedIn :: Int -> ProcessIdentity
+departedIn processId =
+  ProcessIdentity
+    { processIdentityPid = processId,
+      processIdentityParentPid = 1,
+      processIdentityGroupPid = processId,
+      processIdentityStartedAt = "Thu Jan 1 00:00:00 1970",
+      processIdentityCommand = "gh api graphql"
+    }
+
+refusal :: Either Data.Text.Text () -> Data.Text.Text
+refusal = either id (const "")

@@ -1,6 +1,7 @@
 -- | Managed process, worker and review client harnesses.
 module Spec.Support.Process
   ( withSurvivingGroupLeader,
+    withVacatedGroupLeader,
     withNonLeaderProcess,
     withManagedShell,
     managedProcessFor,
@@ -139,6 +140,7 @@ import System.Process
     createProcess,
     getPid,
     proc,
+    terminateProcess,
     waitForProcess
   )
 import System.Timeout (timeout)
@@ -163,6 +165,35 @@ withSurvivingGroupLeader =
       leaderPid <- maybe (fail "surviving fixture reported no PID") (pure . fromIntegral) =<< getPid leader
       threadDelay 200000
       pure (leaderPid :: Int, leader)
+
+-- | A process group id nothing occupies, established rather than guessed.
+--
+-- A record entry naming a group that is genuinely empty is the only shape in
+-- which reclaim /clears/ rather than refuses, and picking a number and hoping
+-- would make every example resting on that a coin toss. So a real group leader
+-- is started, killed, and — crucially — reaped, because a zombie still holds
+-- its PID and still appears in @ps@; the group is then confirmed empty from a
+-- fresh census before the number is handed on.
+withVacatedGroupLeader :: (Int -> IO result) -> IO result
+withVacatedGroupLeader action = do
+  (_, _, _, leader) <-
+    createProcess (proc "sh" ["-c", "exec sleep 30"]) {create_group = True}
+  leaderPid <- maybe (fail "vacated fixture reported no PID") (pure . fromIntegral) =<< getPid leader
+  terminateProcess leader
+  void (timeout 5000000 (waitForProcess leader))
+  awaitVacated (leaderPid :: Int) (50 :: Int)
+  action leaderPid
+  where
+    awaitVacated groupPid remaining = do
+      snapshot <- readProcessSnapshot
+      case snapshot of
+        Left message -> fail ("could not snapshot processes: " <> Data.Text.unpack message)
+        Right identities
+          | not (any ((== groupPid) . processIdentityGroupPid) identities),
+            Nothing <- identityForPid groupPid identities ->
+              pure ()
+          | remaining <= 0 -> fail ("process group " <> show groupPid <> " never emptied")
+          | otherwise -> threadDelay 100000 >> awaitVacated groupPid (remaining - 1)
 
 -- | Like 'withSurvivingGroupLeader', but deliberately /not/ its own group
 -- leader — it stays in this test process's group — so its PID and its PGID

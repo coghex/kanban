@@ -71,6 +71,9 @@ other explicit mutations.
   copy of any of that, and merges nothing that path would refuse.
 - Multi-repository aggregation in one running board. Each invocation represents
   one repository selected by its path.
+- Concurrent dashboard processes for one GitHub repository. Dashboard mode holds
+  a repository-scoped lease for its lifetime and refuses a second dashboard
+  before drawing.
 
 ## 4. Technology
 
@@ -2039,9 +2042,47 @@ above are unchanged, and persistence the user switched off is not a failure.
   pull-request action requires — so two requests arriving together resolve to
   one owner, neither can spawn `gh` while the other holds it, and no
   interleaving of the record's read-modify-write updates can lose an entry.
-  Scope is one coordinator per repository within one dashboard process. Nothing
-  here schedules across processes; the durable record and the restart-time
-  reclaim refusal remain what covers that.
+  Scope is one coordinator per repository within one dashboard process, and one
+  such process is all there can be: dashboard mode takes a repository-scoped
+  POSIX write lease on
+  `$XDG_CACHE_HOME/kanban/gh-groups/<canonical-key>.lock` before it draws a
+  frame, starts a refresh, or reads the durable record, holds it for the
+  process lifetime, and refuses a second dashboard by naming the repository and
+  the holding PID and exiting non-zero. The canonical key is
+  `asciiLowercase(owner) + "%2F" + asciiLowercase(name)`, which is also the key
+  the durable `gh` record is written under, so the lease's authority and the
+  record's cover exactly the same repositories: two spellings of one GitHub
+  repository contend, and two repositories the old lossy key confused do not.
+  The lease has no staleness rule of Kanban's own — no PID file, no heartbeat,
+  no timeout, no reaper — because the kernel releases a dead holder's locks,
+  which is the whole recovery story. Only dashboard mode takes it: `--worker`,
+  `--glyph-test`, `--doctor`, `--usage` and `--ping` do not, having no board
+  and no durable record to serialise against. Any acquisition failure other
+  than confirmed contention fails startup rather than proceeding unheld, since
+  a board that could not establish the lease has not established that it is
+  alone. The durable record and the restart-time reclaim refusal remain what
+  covers a board that has exited.
+- Holding that lease, and before its first refresh, a dashboard brings any `gh`
+  record an earlier release left at the old case-preserving, lossy path under
+  the canonical one. A legacy file is claimed only when the `repositoryKey` in
+  its envelope matches this repository under ASCII case folding; one naming a
+  repository the old key collided with is left untouched and contributes
+  nothing, and one that could be this repository's and cannot be decoded fails
+  startup naming that file, rather than being passed over as though it held no
+  live `gh`. Canonical state is written before any legacy file is removed and a
+  legacy file is removed only once every entry it held is canonical, so an
+  interruption can leave a duplicate that the next start merges away but can
+  never leave a possibly-live `gh` unrecorded. Entries keep schema version 1
+  throughout.
+- Every entry a board writes carries that board's own process identity when a
+  process snapshot can supply one. It is informational: it says whose leftover
+  a later reclaim message is describing and nothing more, taking no part in
+  censusing a group, proving one owned, signalling it, or deciding to refuse
+  over it, and an entry without one — written before the field existed, or by a
+  board whose snapshot failed — is treated exactly as an entry with one. What
+  separates a leftover from a board's own work is not the owner but the record
+  the board found at its first reclaim, since under the lease nothing else
+  could have written it.
 - The coordinator schedules typed jobs rather than one anonymous refresh: a
   foreground open job and a background history job. When both are runnable the
   open job runs first; a history job never starts or resumes while an open job

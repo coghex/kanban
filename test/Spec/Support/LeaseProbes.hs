@@ -52,6 +52,7 @@ module Spec.Support.LeaseProbes
     LeaseProbes,
     awaitLeaseOutcome,
     killLeaseHolder,
+    leaseHolderPid,
     leaseProbeEnvironment,
     leaseProbeVariable,
     openLeaseGate,
@@ -258,6 +259,15 @@ releaseLeaseHolder probes name = do
   child <- probeNamed probes name
   touch (releasePath probes.leaseProbesRoot child.runningProbe)
   awaitState probes name "release the lease" (releasedPath probes.leaseProbesRoot child.runningProbe)
+
+-- | The operating-system PID of one running probe.
+--
+-- Needed by exactly one kind of assertion and worth the export for it: a
+-- refusal that names a holder can only be checked against the holder's own
+-- PID, and comparing it with anything this harness derived a second way would
+-- be checking the derivation rather than the refusal.
+leaseHolderPid :: LeaseProbes -> String -> IO Pid
+leaseHolderPid probes name = runningPid <$> probeNamed probes name
 
 -- | Kills a holder outright, and returns once the kernel has taken it down.
 --

@@ -20,6 +20,7 @@ module Kanban.GitHub.Guard
     holdBackUnrecordedGroup,
     newGhFetchGuard,
     newGhRecordLock,
+    newGhRecordLockOwnedBy,
     reclaimRecordedGhGroups,
     recordGhGroup,
     registerSpawnedGh,
@@ -33,14 +34,16 @@ import Control.Concurrent (forkIOWithUnmask)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, putMVar, takeMVar, tryPutMVar, withMVar)
 import Control.Exception (IOException, finally, try, uninterruptibleMask_)
 import Control.Monad (unless, void, when)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe, isJust)
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Cache (GhGroupRecordLoad (..), loadGhGroupRecord, removeGhGroupRecord, writeGhGroupRecord)
 import Kanban.Domain
 import Kanban.GitHub.Group (forceKillGhGroup, freezeThenKillOwnedGroup, groupCleanupPasses, groupConfirmedEmpty, groupMembers, ignoreIOException, killGhGroup)
-import Kanban.Process (OwnedProcessGroup (..), defaultProcessSnapshot, matchingIdentities, membersStillInGroup)
+import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..), defaultProcessSnapshot, matchingIdentities, membersStillInGroup)
 import System.IO (Handle, hClose)
 import System.Process (ProcessHandle, getPid, waitForProcess)
 import System.Timeout (timeout)
@@ -83,11 +86,44 @@ data GhRecordLock = GhRecordLock
     -- next one to spawn freely. Every job the coordinator schedules shares
     -- this lock, so a refusal recorded here outlives the guard that earned it
     -- and reaches every later fetch, whatever kind of job makes it.
-    ghRecordHeldBack :: IORef (Maybe Text)
+    ghRecordHeldBack :: IORef (Maybe Text),
+    -- | The dashboard process this record's new entries belong to, when it
+    -- could be identified.
+    --
+    -- Written into every entry this board records and read by nothing that
+    -- decides anything. It is not a liveness test, not part of
+    -- @provablyOurs@, and never a signalling target: the census and the
+    -- recorded member identities remain the whole of that. What it buys is a
+    -- message that can say which board left a group behind.
+    ghRecordOwner :: Maybe ProcessIdentity,
+    -- | The groups this record already held when this process first reclaimed
+    -- it, by pgid.
+    --
+    -- The one signal that separates an entry this board wrote from one it
+    -- inherited, and deliberately not owner presence: this board's own entries
+    -- carry an owner too, so owner presence answers a different question.
+    -- Under the repository lease no other current board can have been writing
+    -- this record, so whatever was in it at the first reclaim was written by a
+    -- process that is no longer running — and anything appearing after that,
+    -- in this process, is this board's own.
+    --
+    -- 'Nothing' until that first reclaim, which is why it is an 'IORef' and
+    -- not a field settled at construction: the record is not read until then.
+    ghRecordInherited :: IORef (Maybe (Set Int))
   }
 
 newGhRecordLock :: IO GhRecordLock
-newGhRecordLock = GhRecordLock <$> newMVar () <*> newIORef Nothing
+newGhRecordLock = newGhRecordLockOwnedBy Nothing
+
+-- | The record lock a board takes for a repository it holds, carrying the
+-- identity its entries are stamped with.
+--
+-- Separate from 'newGhRecordLock' rather than replacing it because an absent
+-- owner is a supported state — a process snapshot that could not be taken
+-- leaves the board with no identity and no less authority — and because most
+-- callers have nothing to say about ownership at all.
+newGhRecordLockOwnedBy :: Maybe ProcessIdentity -> IO GhRecordLock
+newGhRecordLockOwnedBy owner = GhRecordLock <$> newMVar () <*> newIORef Nothing <*> pure owner <*> newIORef Nothing
 
 -- | Serializes one read-modify-write of the durable record.
 withRecordLock :: GhFetchGuard -> IO result -> IO result
@@ -287,7 +323,7 @@ registerSpawnedGh guard repository (_, _, _, processHandle) = do
     Nothing -> pure (Left "gh reported no process id, so no guard could be written for it")
     Just pid -> do
       let groupPid = fromIntegral pid
-      written <- recordGhGroup guard repository (OwnedProcessGroup groupPid [] False)
+      written <- recordGhGroup guard repository (OwnedProcessGroup groupPid [] False Nothing)
       pure (groupPid <$ written)
 
 -- | Replaces whatever is recorded for a group with `group`, keeping every
@@ -299,7 +335,13 @@ registerSpawnedGh guard repository (_, _, _, processHandle) = do
 recordGhGroup :: GhFetchGuard -> Repository -> OwnedProcessGroup -> IO (Either Text ())
 recordGhGroup guard repository group = withRecordLock guard $ do
   existing <- recordedGhGroups repository
-  writeGhGroupRecord repository (group : withoutGroup group.ownedProcessGroupPid existing)
+  -- Stamped here rather than by each caller, because this is the one way a
+  -- new entry reaches the record and the callers that build one are describing
+  -- a process group, not deciding whose board it belongs to. Every entry this
+  -- process writes therefore carries its identity, and no entry it inherited
+  -- is ever rewritten to claim it.
+  let owned = group {ownedProcessGroupOwner = guard.ghGuardRecordLock.ghRecordOwner}
+  writeGhGroupRecord repository (owned : withoutGroup group.ownedProcessGroupPid existing)
 
 dropGhGroup :: GhFetchGuard -> Repository -> Int -> IO ()
 dropGhGroup guard repository groupPid = withRecordLock guard $ do
@@ -347,17 +389,32 @@ reclaimRecordedGhGroups guard repository = do
     reclaimRecorded = do
       recordLoad <- loadGhGroupRecord repository
       case recordLoad of
-        GhGroupRecordAbsent -> pure (Right ())
+        -- Settled on the first record this process /reads/, not on the first
+        -- one that turns out to hold something. Every fetch reclaims before it
+        -- spawns anything, so the first read happens before this board has
+        -- written a single entry -- and an absent record therefore establishes
+        -- that this board inherited nothing. Deferring the answer to the first
+        -- non-empty read would settle it after this board's own first entry
+        -- was already in the file, and classify that entry as a predecessor's.
+        GhGroupRecordAbsent -> do
+          _ <- rememberInherited guard []
+          pure (Right ())
+        -- Deliberately not remembered. Nothing can be said about a record that
+        -- will not decode, and nothing needs to be: this refuses the fetch, so
+        -- no gh is spawned and no entry is written, and the first read that
+        -- does succeed still sees exactly what the predecessor left.
         GhGroupRecordUnusable message -> refuse message
-        GhGroupRecordLoaded groups -> reclaimGroups groups
+        GhGroupRecordLoaded groups -> do
+          inherited <- rememberInherited guard groups
+          reclaimGroups inherited groups
 
-    reclaimGroups groups = do
+    reclaimGroups inherited groups = do
       -- A record exists from here on, so every exit other than clearing it
       -- has to leave the guard set. It is set now, pessimistically, because
       -- the exits that matter most are the ones that never reach a `case`:
       -- the budget expiring, or this whole reclaim being abandoned.
       setCleanupFailure guard (GhCleanupFailure (refusalText interrupted) GuardRecorded)
-      outcomes <- traverse reclaimGhGroup groups
+      outcomes <- traverse (reclaimGhGroup inherited) groups
       case [message | Left message <- outcomes] of
         [] -> do
           -- Under the record lock like every other rewrite, even though the
@@ -377,7 +434,45 @@ reclaimRecordedGhGroups guard repository = do
 
     interrupted = "reclaiming it did not run to completion"
 
-    refusalText message = "a gh process from an earlier GitHub refresh could not be confirmed stopped (" <> message <> "); refusing to start another until it is"
+    -- Says what happened and refuses; it says nothing about whose gh it was.
+    -- It wraps both kinds of refusal — a group this process is holding back on
+    -- nothing but its own word, and a recorded one it inherited — and a
+    -- wrapper that named a predecessor would be claiming one for the first
+    -- kind, which never has one. Which board a leftover belongs to is said by
+    -- the per-entry message inside the parentheses, which is the only text
+    -- that knows.
+    refusalText message = "a gh process could not be confirmed stopped (" <> message <> "); refusing to start another until it is"
+
+-- | Records which of a repository's entries this process inherited, the first
+-- time it reads the record, and answers that question afterwards.
+--
+-- Written once and only once: a later read of the same record can contain
+-- entries this board wrote, and letting the answer move would reclassify its
+-- own leftovers as a predecessor's. 'atomicModifyIORef'' keeps the first
+-- writer's set even though every caller already holds the record lock, because
+-- what it must be is decided once, not decided under whichever lock happens to
+-- be held.
+rememberInherited :: GhFetchGuard -> [OwnedProcessGroup] -> IO (Set Int)
+rememberInherited guard groups =
+  atomicModifyIORef' guard.ghGuardRecordLock.ghRecordInherited $ \remembered ->
+    case remembered of
+      Just already -> (Just already, already)
+      Nothing ->
+        let first = Set.fromList (map ownedProcessGroupPid groups)
+         in (Just first, first)
+
+-- | How a message should describe one entry's provenance.
+--
+-- Three spellings for three genuinely different facts, and the missing-owner
+-- one is not a degraded version of the second: it is what an entry written
+-- before owner metadata existed truthfully supports, and inventing a board for
+-- it would be worse than saying less.
+entryOrigin :: Set Int -> OwnedProcessGroup -> Text
+entryOrigin inherited group
+  | not (Set.member group.ownedProcessGroupPid inherited) = "a gh this board started"
+  | Just owner <- group.ownedProcessGroupOwner =
+      "a gh left by a previous Kanban board (pid " <> Text.pack (show owner.processIdentityPid) <> ")"
+  | otherwise = "a gh left by a previous Kanban board"
 
 -- | One recorded group's second chance.
 --
@@ -387,10 +482,16 @@ reclaimRecordedGhGroups guard repository = do
 -- refuses the fetch instead of being signalled blind, and — crucially — an
 -- uncensused entry is never handed to the group check, whose empty
 -- membership would read as vacuously absent and clear a live survivor.
-reclaimGhGroup :: OwnedProcessGroup -> IO (Either Text ())
-reclaimGhGroup group = go group.ownedProcessGroupMembers groupCleanupPasses
+--
+-- @inherited@ reaches only the two messages. Nothing about which board wrote
+-- an entry changes what is done to it: the reclaim below is identical either
+-- way, which is what keeps owner metadata informational.
+reclaimGhGroup :: Set Int -> OwnedProcessGroup -> IO (Either Text ())
+reclaimGhGroup inherited group = go group.ownedProcessGroupMembers groupCleanupPasses
   where
     groupPid = group.ownedProcessGroupPid
+
+    origin = entryOrigin inherited group
 
     -- `known` grows as the reclaim proceeds, and it is what every signal is
     -- justified by. A flag saying "ownership was proven earlier" would not
@@ -439,13 +540,15 @@ reclaimGhGroup group = go group.ownedProcessGroupMembers groupCleanupPasses
         && not (null (membersStillInGroup groupPid processes known))
 
     unprovable surviving =
-      "a gh from an earlier GitHub refresh (pgid "
+      origin
+        <> " (pgid "
         <> Text.pack (show groupPid)
         <> ") still accounts for "
         <> Text.pack (show surviving)
         <> " running process(es) that cannot be identified as this repository's, so they cannot be signalled from here"
 
     exhausted =
-      "a gh process group from an earlier GitHub refresh (pgid "
+      origin
+        <> " (pgid "
         <> Text.pack (show groupPid)
         <> ") kept gaining members faster than they could be terminated"

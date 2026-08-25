@@ -58,10 +58,16 @@
 -- mistake being fixed: @newGhRecordLock@ mints an 'Control.Concurrent.MVar.MVar'
 -- per board coordinator, and two coordinators therefore share no lock at all.
 module Kanban.Repository.Lease
-  ( LeaseAcquisition (..),
+  ( BoardLeaseOutcome (..),
+    LeaseAcquisition (..),
+    LeaseHolder (..),
     RepositoryLease,
+    acquireBoardLease,
+    acquireBoardLeaseWith,
     acquireRepositoryLease,
+    boardLeaseAttempts,
     leaseFile,
+    queryLeaseHolder,
     releaseRepositoryLease,
   )
 where
@@ -90,10 +96,11 @@ import System.Posix.IO
     OpenMode (ReadWrite),
     closeFd,
     defaultFileFlags,
+    getLock,
     openFd,
     setLock,
   )
-import System.Posix.Types (Fd)
+import System.Posix.Types (Fd, ProcessID)
 
 -- | A lease this process holds.
 --
@@ -285,3 +292,129 @@ conflictErrnos = [code | Errno code <- [eACCES, eAGAIN, eWOULDBLOCK]]
 
 diagnostic :: IOException -> Text
 diagnostic exception = Text.pack (show exception)
+
+-- | Who holds a lease, asked in the one way that cannot disturb it.
+--
+-- The three cases are not a convenience. @F_GETLK@ needs a descriptor on the
+-- file, and opening one is exactly what a process that /already holds/ the
+-- lease must never do: POSIX drops every lock a process holds on a file the
+-- moment that process closes any descriptor referring to it, so an
+-- open-ask-close here would silently free the very authority the caller is
+-- asking about. 'HeldByThisProcess' is therefore answered from 'heldLeases'
+-- with the file untouched.
+data LeaseHolder
+  = -- | A board inside this process holds it. Nothing was opened to find out.
+    HeldByThisProcess
+  | -- | Another process holds it, and this is the PID @F_GETLK@ named.
+    HeldBy ProcessID
+  | -- | Nobody holds it. A caller that had just been refused is looking at a
+    -- holder that let go in between, not at a lease it may assume is free.
+    HeldByNobody
+  deriving stock (Eq, Show)
+
+-- | How a dashboard's attempt on its repository turned out.
+--
+-- 'acquireRepositoryLease' answers "is it free?"; this answers the question a
+-- startup refusal has to be built from, which is "and if not, whose is it?".
+-- Contention is the only outcome that names a PID, and it is reached only from
+-- a @F_GETLK@ that actually named one -- so no refusal can ever be printed
+-- without a holder, and no failure to establish the lease can be reported as
+-- another board holding it.
+data BoardLeaseOutcome
+  = BoardLeaseAcquired RepositoryLease
+  | -- | Another process holds the repository. The path and its holder's PID.
+    BoardLeaseContended FilePath ProcessID
+  | -- | The lease could not be established, for a reason that is not another
+    -- board holding it.
+    BoardLeaseUnusable FilePath Text
+  deriving stock (Eq, Show)
+
+-- | How many times a startup acquisition will re-attempt a conflict that has
+-- vanished by the time its holder is asked for.
+--
+-- Bounded, because the retry exists for one narrow race -- a holder releasing
+-- between this process's @F_SETLK@ and its @F_GETLK@ -- and that race resolves
+-- on the next attempt. An unbounded retry would turn a repository being taken
+-- and dropped in a loop into a startup that never finishes and never says why.
+-- Exhausting the bound is an acquisition failure like any other, never a
+-- refusal with no PID in it.
+boardLeaseAttempts :: Int
+boardLeaseAttempts = 5
+
+-- | Takes the repository for this dashboard, or says who has it.
+acquireBoardLease :: Repository -> IO BoardLeaseOutcome
+acquireBoardLease repository =
+  acquireBoardLeaseWith
+    boardLeaseAttempts
+    (acquireRepositoryLease repository)
+    queryLeaseHolder
+
+-- | The decision above with its two effects supplied, so that the race it
+-- exists for can be staged rather than waited for.
+--
+-- A conflict that disappears between the lock attempt and the holder query is
+-- a real interleaving and a rare one; injecting the two answers is the only
+-- way to assert what happens on the third possibility -- that it retries,
+-- rather than printing a refusal with nothing in the parentheses.
+acquireBoardLeaseWith ::
+  Int ->
+  IO LeaseAcquisition ->
+  (FilePath -> IO (Either Text LeaseHolder)) ->
+  IO BoardLeaseOutcome
+acquireBoardLeaseWith attempts attempt holderOf = go attempts
+  where
+    go remaining = do
+      acquisition <- attempt
+      case acquisition of
+        LeaseAcquired lease -> pure (BoardLeaseAcquired lease)
+        LeaseUnusable path detail -> pure (BoardLeaseUnusable path detail)
+        LeaseHeld path -> do
+          holder <- holderOf path
+          case holder of
+            Left detail -> pure (BoardLeaseUnusable path detail)
+            Right (HeldBy pid) -> pure (BoardLeaseContended path pid)
+            -- Not contention, and deliberately not reported as it. A board in
+            -- this process already holding the repository is this application
+            -- opening two boards on one repository, which the register refused
+            -- and which no message about "another Kanban board" would describe.
+            Right HeldByThisProcess -> pure (BoardLeaseUnusable path heldHere)
+            Right HeldByNobody
+              | remaining > 1 -> go (remaining - 1)
+              | otherwise -> pure (BoardLeaseUnusable path vanished)
+
+    heldHere = "a board in this process already holds this repository"
+
+    vanished =
+      "the lease was refused "
+        <> Text.pack (show attempts)
+        <> " times and no holder could be identified for any of those refusals"
+
+-- | Asks the kernel who holds the lease at @path@, without ever opening a file
+-- this process already holds a lock on.
+--
+-- The register is consulted first and under its own lock, so the answer for a
+-- path this process holds is settled before any descriptor exists. For every
+-- other path a descriptor is opened, asked, and closed — safe precisely
+-- because this process holds no lock on it, so there is none for the close to
+-- drop.
+--
+-- The region asked about is the one 'acquireRepositoryLease' takes, because
+-- @F_GETLK@ reports a conflicting lock rather than any lock: asking about a
+-- different region could answer "nobody" while the whole-file lock was held.
+queryLeaseHolder :: FilePath -> IO (Either Text LeaseHolder)
+queryLeaseHolder path = modifyMVar heldLeases $ \register ->
+  if Map.member path register.registerHeld
+    then pure (register, Right HeldByThisProcess)
+    else do
+      queried <- try @IOException $ mask_ $ do
+        descriptor <- openLeaseFile path
+        held <- getLock descriptor wholeFileLock `onException` closeFd descriptor
+        closeFd descriptor
+        pure held
+      pure
+        ( register,
+          case queried of
+            Left exception -> Left (diagnostic exception)
+            Right Nothing -> Right HeldByNobody
+            Right (Just (pid, _)) -> Right (HeldBy pid)
+        )

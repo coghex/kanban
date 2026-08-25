@@ -43,8 +43,10 @@ module Kanban.GitHub
     initialHistoryFetchState,
     newGhFetchGuard,
     newGhRecordLock,
+    newGhRecordLockOwnedBy,
     paginationDecision,
     reclaimRecordedGhGroups,
+    recordGhGroup,
     setCleanupFailure,
     snapshotWarnings,
 
@@ -150,7 +152,7 @@ import Kanban.GitHub.History
     newHistoryTraversal,
     runCompletedHistoryPage,
   )
-import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, ghFetchCleanupFailure, newGhFetchGuard, newGhRecordLock, reclaimRecordedGhGroups, setCleanupFailure)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, ghFetchCleanupFailure, newGhFetchGuard, newGhRecordLock, newGhRecordLockOwnedBy, reclaimRecordedGhGroups, recordGhGroup, setCleanupFailure)
 import Kanban.GitHub.Message (classifyFailure, compactError)
 import Kanban.GitHub.Rate (HistoryRateVerdict (..), RateSample (..), foregroundRateReserve, historyRateVerdict, rateSampleFromResponse, usableRateSample)
 import Kanban.GitHub.Run (GhFailurePhase (..), ghBehindBarrier, ghFailureKind)

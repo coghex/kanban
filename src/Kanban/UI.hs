@@ -31,6 +31,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time (UTCTime, getCurrentTime, getCurrentTimeZone )
 import qualified Graphics.Vty as Vty
 import Kanban.ApprovalService
@@ -59,6 +60,7 @@ import Kanban.Drainer
     )
 import Kanban.GitHub (newHistoryTraversal)
 import Kanban.Process (killManagedProcess, managedProcessStopsWithDashboard)
+import Kanban.Repository.Authority (BoardAuthority (..), acquireBoardAuthority)
 import Kanban.Review
   ( stopReviewClient
   )
@@ -68,6 +70,8 @@ import Kanban.Settings
     )
 import Kanban.Transcript (transcriptRoot)
 import Kanban.Workflow (deriveBoard )
+import System.Exit (exitFailure)
+import System.IO (hPutStrLn, stderr)
 import Kanban.Worker
   ( discoverWorkers
     )
@@ -86,6 +90,22 @@ import Kanban.UI.Approval (monitorApprovalService)
 
 runDashboard :: Options -> ResolvedConfig -> Repository -> IO ()
 runDashboard options config repository = do
+  -- The first thing this process does for the repository, and the only thing
+  -- ahead of it is having resolved which repository it is. Nothing below may
+  -- run without it: 'loadStartupCaches' reads durable state, the coordinator
+  -- owns the durable @gh@ record, and Brick draws — and a second board doing
+  -- any of those beside a first is exactly what the lease refuses. §3's
+  -- non-goal is this line.
+  authority <- acquireBoardAuthority repository
+  case authority of
+    Left message -> do
+      hPutStrLn stderr ("kanban: " <> Text.unpack message)
+      exitFailure
+    Right held -> runHeldDashboard held options config repository
+
+-- | The dashboard proper, with the repository already this process's.
+runHeldDashboard :: BoardAuthority -> Options -> ResolvedConfig -> Repository -> IO ()
+runHeldDashboard authority options config repository = do
   now <- getCurrentTime
   timeZone <- getCurrentTimeZone
   (usageCacheLoad, completedCacheLoad) <- loadStartupCaches options config repository
@@ -109,7 +129,7 @@ runDashboard options config repository = do
   -- pull-request action requires -- converges on 'startBoardRefresh' or
   -- 'requireBoardRefresh', so routing those two through it routes all of
   -- them (§15).
-  refreshCoordinator <- newBoardRefreshCoordinator config repository historyTraversal eventChannel
+  refreshCoordinator <- newBoardRefreshCoordinator authority.authorityOwner config repository historyTraversal eventChannel
   let (initialUsage, initialUsageFreshness, usageNotice) = initialUsageState usageCacheLoad
       (initialHistory, historyNotice) = initialCompletedHistory completedCacheLoad
   let initialState =
@@ -156,6 +176,12 @@ runDashboard options config repository = do
                     <> maybe "" (" · " <>) usageNotice
                     <> maybe "" (" · " <>) historyNotice
                     <> maybe "" (" · " <>) settingsNotice
+                    -- What acquiring the repository had to say for itself. A
+                    -- refusal never reaches here — it exited — so anything
+                    -- carried this far is something the board opened in spite
+                    -- of, and the same notice line the other startup problems
+                    -- use is where it belongs.
+                    <> foldMap (" · " <>) authority.authorityNotices
                 ),
             -- Nothing has been fetched and nothing was restored, which is
             -- exactly what §7's loading panel stands for. 'startApplication'

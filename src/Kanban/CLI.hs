@@ -1,7 +1,10 @@
 module Kanban.CLI
   ( BorderPolicy (..),
     ColorPolicy (..),
+    LaunchMode (..),
     Options (..),
+    acquiresRepositoryLease,
+    launchMode,
     optionsParserInfo,
   )
 where
@@ -35,6 +38,58 @@ data Options = Options
     optionWorkerSpec :: Maybe FilePath
   }
   deriving stock (Eq, Show)
+
+-- | Which of @kanban@'s modes an invocation selects.
+--
+-- One decision rather than a cascade of guards in @main@, and in the library
+-- rather than beside it, because two things now turn on it and neither can be
+-- asserted about a module the test suite does not build:
+-- @test-suite kanban-test@ compiles @test\/@ against the library and declares
+-- no build-tool dependency on @executable kanban@, so a mode selection written
+-- only in @app\/Main.hs@ is unreachable from every example.
+--
+-- The order is @main@'s, and it is not arbitrary: a worker is not a dashboard
+-- at all, the observational modes answer without needing configuration or a
+-- repository, and a ping — the only one that spends quota — yields to every
+-- one of them (§5). 'DashboardMode' is what is left, which is why it is last.
+data LaunchMode
+  = -- | @--worker@, carrying the spec path it names.
+    WorkerMode FilePath
+  | -- | @--glyph-test@.
+    GlyphTestMode
+  | -- | @--doctor@.
+    DoctorMode
+  | -- | @--usage@.
+    UsageQueryMode
+  | -- | @--ping@, still unvalidated: 'Kanban.Ping.resolvePingBrand' decides
+    -- whether the occurrences name one brand, and a malformed one refuses
+    -- ahead of every mode here.
+    PingQueryMode
+  | -- | The dashboard.
+    DashboardMode
+  deriving stock (Eq, Show)
+
+launchMode :: Options -> LaunchMode
+launchMode options = case options.optionWorkerSpec of
+  Just workerSpec -> WorkerMode workerSpec
+  Nothing
+    | options.optionGlyphTest -> GlyphTestMode
+    | options.optionDoctor -> DoctorMode
+    | options.optionUsage -> UsageQueryMode
+    | not (null options.optionPing) -> PingQueryMode
+    | otherwise -> DashboardMode
+
+-- | Whether this invocation takes the repository's board lease.
+--
+-- Only the dashboard does. Every other mode either never resolves a repository
+-- (a worker is handed its own spec; @--glyph-test@ and @--doctor@ answer from
+-- the terminal and the environment) or resolves one without becoming a board
+-- (@--usage@ is global, and @--ping@ starts a quota window and exits). None of
+-- them writes the durable @gh@ record, so none of them has anything to
+-- serialise against — and a mode that took the lease would refuse to run
+-- beside an open board for no reason at all.
+acquiresRepositoryLease :: Options -> Bool
+acquiresRepositoryLease = (== DashboardMode) . launchMode
 
 optionsParserInfo :: ParserInfo Options
 optionsParserInfo =
