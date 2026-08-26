@@ -326,8 +326,9 @@ drainer's merge exception and grants no publication lane. An empty lane is the
 ordinary, intended configuration: it yields `not-published`, the approved
 mutation is applied to the working copy and recorded, and the edits accumulate
 in the docs worktree for a human to land in one batch. Do not treat that as a
-failure of the run, and never publish by hand to compensate for it. Do not reimplement, precede, or compensate for any part of it. Act
-on the one structured result it returns:
+failure of the run, and never publish by hand to compensate for it. Do not
+reimplement, precede, or compensate for any part of it. Act on the one
+structured result it returns:
 
 - **`"status": "published"`.** Say so, and quote the commit it reports together
   with its changed-line summary. Check that summary against the observation you
@@ -336,8 +337,9 @@ on the one structured result it returns:
   the summary is what makes the difference visible.
 - **`"status": "not-published"`.** The document is not direct-publication
   eligible — it is `pr-atomic`, matched no §7 row, is not yet tracked, or
-  belongs to a repository that declares no coordination path for it. The
-  approved mutation is not lost: the helper reports `approved_blob`,
+  belongs to a repository whose `workflow.direct_publication_paths` does not
+  cover it. The approved mutation is not lost: the helper reports
+  `approved_blob`,
   recoverable with `git cat-file -p`, and `document_written` says whether it
   also applied it to the document. `write_outcome` names which of the four
   cases the write was, rather than leaving `document_written` to stand for all

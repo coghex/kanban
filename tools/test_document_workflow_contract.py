@@ -567,6 +567,12 @@ PUBLICATION_CLAUSES = {
     "does-not-reimplement-the-mechanism": (
         "do not reimplement, precede, or compensate for any part of it"
     ),
+    # Issue #526 split the publisher's declaration from the drainer's. Pin the
+    # fail-closed explanation in every publishing asset so the old key cannot
+    # silently return as the reason a consuming repository has no lane.
+    "undeclared-direct-publication-path-is-not-published": (
+        "whose workflow.direct_publication_paths does not cover it"
+    ),
     "checks-the-changed-line-summary": (
         "an unintended rewrite of the rest of it changes the same single path a "
         "correct publication does, and the summary is what makes the difference "

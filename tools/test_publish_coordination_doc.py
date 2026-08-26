@@ -2068,8 +2068,8 @@ class PublishTests(PublishFixture):
 
     def test_a_consuming_repository_publishes_a_path_it_declares(self):
         # The lane a repository that does not track §7 declares for itself.
-        # Read through kanban_config.resolve_config, so it is the same
-        # declaration the drainer already honours rather than a second one.
+        # Read through kanban_config.resolve_config, but kept separate from the
+        # drainer's coordination-only base-advance permission.
         self.write_config(
             '[repositories."coghex/synarchy".workflow]\n'
             'direct_publication_paths = ["docs/ui-bugs.md"]\n'
