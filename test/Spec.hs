@@ -39,6 +39,7 @@ import qualified Spec.GitHub.History as GitHubHistory
 import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.ManagedPaths as ManagedPaths
+import qualified Spec.OperatingMode as OperatingMode
 import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
 import qualified Spec.Repository.Lease as RepositoryLease
@@ -145,6 +146,7 @@ suiteGroups =
     SuiteGroup "Spec.Agent.IssueReviewer" PingLane IssueReviewer.spec,
     SuiteGroup "Spec.Drainer" PingLane Drainer.spec, -- 17.6s
     SuiteGroup "Spec.ManagedPaths" PingLane ManagedPaths.spec,
+    SuiteGroup "Spec.OperatingMode" PingLane OperatingMode.spec,
     SuiteGroup "Spec.ApprovalService" DeadlineLane ApprovalService.spec, -- 8.9s
     SuiteGroup "Spec.Repository.State" PingLane RepositoryState.spec,
     SuiteGroup "Spec.GitHub.PullRequestStatus" PingLane PullRequestStatus.spec,

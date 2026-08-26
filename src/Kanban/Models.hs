@@ -65,12 +65,14 @@ module Kanban.Models
     operatingModeFor,
     loadedOperatingMode,
     operatingModeLabel,
+    agentsLoaded,
     recordAssignment,
     recordedAssignmentCell,
     rosterDefectMessage,
     rosterFailureMessage,
     rosterErrorMessage,
     assignmentUnavailableMessage,
+    noAgentModeMessage,
     unavailableAssignmentDisplay,
   )
 where
@@ -281,6 +283,22 @@ operatingModeFor roster = case length roster.rosterAgents of
 loadedOperatingMode :: Either RosterLoadError ModelRoster -> OperatingMode
 loadedOperatingMode = either (const NoAgentMode) operatingModeFor
 
+-- | Whether the mode has any provider loaded to reach at all.
+--
+-- The one spelling of that question, because more than one surface keys on
+-- it and they must agree: the usage probes and the sidebar's provider blocks
+-- ("Kanban.UI.Refresh", "Kanban.UI.Board"), the agent bindings' visibility
+-- and refusal ('Kanban.UI.Keys.availableIn'), and the @--usage@ and @--ping@
+-- run-and-exit modes ('Kanban.CLI.launchModeRefusal') all ask it here.
+--
+-- Total in 'OperatingMode' on purpose: a mode added to that type cannot reach
+-- any of those surfaces without a decision about whether it has a provider.
+agentsLoaded :: OperatingMode -> Bool
+agentsLoaded mode = case mode of
+  DualMode -> True
+  SingleAgentMode -> True
+  NoAgentMode -> False
+
 -- | What the mode is called wherever one is shown, in the vocabulary
 -- @models.toml.example@ and the design already use.
 operatingModeLabel :: OperatingMode -> Text
@@ -471,6 +489,20 @@ assignmentUnavailableMessage unavailable = case unavailable of
       <> " assignment"
   where
     quotedKey text = "\"" <> text <> "\""
+
+-- | The refusal every surface that needs a loaded provider shares while the
+-- roster loads none, naming the mode and the key that selects it the way
+-- 'Kanban.UI.Settings.operatingModeLine' already names them on screen.
+--
+-- One phrase rather than one per surface, for the same reason
+-- 'assignmentUnavailableMessage' is one: the board's six agent bindings, the
+-- board card's right click, and the @--usage@ and @--ping@ refusals all say
+-- this, and an operator who meets it twice must not be told two things.
+noAgentModeMessage :: Text
+noAgentModeMessage =
+  "model roster loads no provider, so this is "
+    <> operatingModeLabel NoAgentMode
+    <> " mode · set by agents in models.toml"
 
 rosterDefectMessage :: RosterDefect -> Text
 rosterDefectMessage defect = case defect of

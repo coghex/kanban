@@ -39,6 +39,13 @@ module Kanban.UI.Keys
     boardAction,
     scopeBindings,
 
+    -- * The operating mode
+    requiresLoadedAgent,
+    availableIn,
+    modeBoardBindings,
+    modeScopeBindings,
+    agentSurfaceRefusal,
+
     -- * Projections
     HelpEntry (..),
     bindingHelpEntry,
@@ -57,6 +64,7 @@ import Data.List (find, nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as Vty
+import Kanban.Models (OperatingMode (..), agentsLoaded, noAgentModeMessage)
 
 -- | One physical key press: the Vty key and the exact set of modifiers that
 -- has to be held with it. Build one with 'chord', which normalizes the
@@ -255,6 +263,86 @@ boardBindings = map binding [minBound .. maxBound]
 -- | The bindings live in one scope, in table order.
 scopeBindings :: BindingScope -> [KeyBinding]
 scopeBindings scope = filter (elem scope . (.bindingScopes)) boardBindings
+
+-- | Whether the action drives an agent, and so needs the roster to load a
+-- provider before it can do anything at all.
+--
+-- Total in 'BoardAction' for the same reason
+-- 'Kanban.UI.Events.mutatesSelectedWork' is: a binding added to the table
+-- above cannot reach the board without a decision about whether a Kanban that
+-- spawns nothing may offer it.
+--
+-- @a@ is here with the five obvious ones because @approve_issues.py@ resolves
+-- @issue_gate@ models and can do nothing without a provider, so its control is
+-- an agent surface exactly as the solve and review keys are. @d@ is not: the
+-- PR drainer merges pull requests and spawns no model, and @i@ is not either,
+-- because a fail-closed drainer incident is the one thing a no-agent board
+-- still has to be able to show.
+requiresLoadedAgent :: BoardAction -> Bool
+requiresLoadedAgent = \case
+  ReviewSelection -> True
+  SolveSelection -> True
+  AutoSolveSelection -> True
+  KillWorking -> True
+  ShowProcesses -> True
+  ToggleApproval -> True
+  NextCard -> False
+  PreviousCard -> False
+  PreviousColumn -> False
+  NextColumn -> False
+  FirstItem -> False
+  LastItem -> False
+  OpenSearch -> False
+  ShowFilter -> False
+  ToggleEpic -> False
+  ShowDetails -> False
+  DismissOrClose -> False
+  ShowIncidents -> False
+  RefreshAll -> False
+  ToggleDrainer -> False
+  MergeDoneCard -> False
+  ToggleSidebar -> False
+  ShowSettings -> False
+  ShowHelp -> False
+  RepaintTerminal -> False
+  QuitDashboard -> False
+
+-- | Whether the operating mode leaves this action's binding usable.
+--
+-- The one decision behind both halves of the mode's effect on the base board:
+-- the footer and the help overlay project only the bindings it admits
+-- ('modeScopeBindings', 'modeBoardBindings'), and dispatch refuses the ones it
+-- does not ('agentSurfaceRefusal'). Writing them from one predicate is what
+-- keeps a hidden binding and a refused binding the same set.
+--
+-- Only the loaded provider set is asked, through 'agentsLoaded'. Single-agent
+-- mode hides nothing here: which brand a role runs on is that mode's own
+-- question and is decided at the spawn boundary, not on the footer.
+availableIn :: OperatingMode -> BoardAction -> Bool
+availableIn mode action = agentsLoaded mode || not (requiresLoadedAgent action)
+
+-- | The whole table as one mode leaves it, in 'BoardAction' order.
+modeBoardBindings :: OperatingMode -> [KeyBinding]
+modeBoardBindings mode = filter (availableIn mode . (.bindingAction)) boardBindings
+
+-- | The bindings one mode leaves live in one scope, in table order.
+modeScopeBindings :: OperatingMode -> BindingScope -> [KeyBinding]
+modeScopeBindings mode scope = filter (elem scope . (.bindingScopes)) (modeBoardBindings mode)
+
+-- | What to say instead of dispatching, when the mode has put this action out
+-- of reach.
+--
+-- A hidden binding is still dispatched: 'boardAction' resolves it from the
+-- unfiltered table, because a key that silently did nothing would be
+-- indistinguishable from a broken board. This is what it does instead.
+--
+-- 'noAgentModeMessage' is the only refusal because no-agent is the only mode
+-- 'availableIn' hides anything in; a mode that hides a different set later
+-- brings its own wording here rather than reusing this one.
+agentSurfaceRefusal :: OperatingMode -> BoardAction -> Maybe Text
+agentSurfaceRefusal mode action
+  | availableIn mode action = Nothing
+  | otherwise = Just noAgentModeMessage
 
 -- | The action a key press means in a scope, or 'Nothing' when the table
 -- claims nothing there and the press belongs to whatever comes next.

@@ -11,15 +11,17 @@
 module Spec.UI.Keys (spec) where
 
 import Data.List (nub, sort)
+import Data.Maybe (isNothing)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import qualified Graphics.Vty as Vty
 import Kanban.Domain (BoardItem (..), Issue (..), PullRequest (..))
+import Kanban.Models (OperatingMode (..), noAgentModeMessage)
 import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (SolveWorkflow (..))
-import Kanban.UI.Board (boardHintLine, filterFooterHintLine, footerHintLine, overlayHintChips, searchFooterHintLine)
+import Kanban.UI.Board (boardFooterHintLine, boardHintLine, filterFooterHintLine, footerHintLine, overlayHintChips, searchFooterHintLine)
 import Kanban.UI.Filter (toggleFilterPanel)
 import Kanban.UI.Keys
 import Kanban.UI.Overlay (drawOverlay, helpLines, mouseHelpEntries)
@@ -259,22 +261,22 @@ spec = describe "keybinding table" $ do
           | fragment <- ["h/l type into the query", "Left/Right move the search"]
         ]
       sequence_
-        [ (fragment, any (Text.isInfixOf fragment) helpLines) `shouldBe` (fragment, True)
+        [ (fragment, any (Text.isInfixOf fragment) (helpLines DualMode)) `shouldBe` (fragment, True)
           | fragment <- ["h/l type into the query", "Left/Right move the search"]
         ]
 
   describe "help projection" $ do
     it "renders exactly one row per declared entry, in declaration order" $
-      helpLines `shouldBe` helpRows (map bindingHelpEntry boardBindings <> sessionInputHelp <> mouseHelpEntries)
+      helpLines DualMode `shouldBe` helpRows (map bindingHelpEntry boardBindings <> sessionInputHelp <> mouseHelpEntries)
 
     it "leaves no key-hint row that no binding backs" $
       sequence_
         [ (row, any ((== row) . rowOf) declaredEntries) `shouldBe` (row, True)
-          | row <- helpLines
+          | row <- helpLines DualMode
         ]
 
     it "gives every base-board and session binding a row of its own" $
-      length helpLines `shouldBe` length boardBindings + length sessionInputHelp + length mouseHelpEntries
+      length (helpLines DualMode) `shouldBe` length boardBindings + length sessionInputHelp + length mouseHelpEntries
 
     it "keeps the rows no binding backs to mouse prose" $
       sequence_
@@ -284,15 +286,15 @@ spec = describe "keybinding table" $ do
 
     it "names the help overlay's own binding, which the hand-written list omitted" $
       sequence_
-        [ (name, any (Text.isInfixOf name) helpLines) `shouldBe` (name, True)
+        [ (name, any (Text.isInfixOf name) (helpLines DualMode)) `shouldBe` (name, True)
           | name <- ["this help overlay", "close overlay or dismiss a notice"]
         ]
 
     it "ends every row with its own description, all starting at one column" $ do
-      let gutters = [Text.length row - Text.length entry.helpEntryDescription | (entry, row) <- zip declaredEntries helpLines]
+      let gutters = [Text.length row - Text.length entry.helpEntryDescription | (entry, row) <- zip declaredEntries (helpLines DualMode)]
       sequence_
         [ (row, Text.isSuffixOf entry.helpEntryDescription row) `shouldBe` (row, True)
-          | (entry, row) <- zip declaredEntries helpLines
+          | (entry, row) <- zip declaredEntries (helpLines DualMode)
         ]
       nub gutters `shouldBe` take 1 gutters
 
@@ -323,6 +325,103 @@ spec = describe "keybinding table" $ do
             character /= '\t'
         ]
 
+  -- Issue #521. A board whose roster loads no provider spawns nothing, so the
+  -- six bindings that drive an agent come off the footer and out of the help
+  -- overlay instead of being advertised and then refused. Both surfaces
+  -- project from 'modeBoardBindings', which is why one group covers them, and
+  -- every expectation below is built from the table rather than from a second
+  -- copy of the line -- the same rule the rest of this module keeps.
+  describe "operating mode" $ do
+    it "hides exactly the six bindings §7's paragraph names, and no others" $ do
+      filter requiresLoadedAgent (map (.bindingAction) boardBindings) `shouldBe` agentBindings
+      map (.bindingAction) (modeBoardBindings NoAgentMode)
+        `shouldBe` filter (`notElem` agentBindings) (map (.bindingAction) boardBindings)
+
+    it "leaves dual and single-agent mode the whole table, in the order it has today" $
+      sequence_
+        [ (name, map (.bindingAction) (modeBoardBindings mode))
+            `shouldBe` (name, map (.bindingAction) boardBindings)
+          | (name, mode) <- loadedModes
+        ]
+
+    -- Visible and refused are one decision read two ways, so the two sets are
+    -- compared against each other in all three modes rather than each being
+    -- checked against its own list.
+    it "refuses exactly what it hides, in every mode" $
+      sequence_
+        [ (show mode, action, isNothing (agentSurfaceRefusal mode action))
+            `shouldBe` (show mode, action, action `elem` map (.bindingAction) (modeBoardBindings mode))
+          | mode <- [DualMode, SingleAgentMode, NoAgentMode],
+            action <- map (.bindingAction) boardBindings
+        ]
+
+    it "says the roster's own words when it refuses" $
+      sequence_
+        [ (action, agentSurfaceRefusal NoAgentMode action) `shouldBe` (action, Just noAgentModeMessage)
+          | action <- agentBindings
+        ]
+
+    it "drops each hidden binding's chip from the no-agent footer line" $
+      sequence_
+        [ (chip, chip `elem` Text.splitOn "  " noAgentFooterHintLine) `shouldBe` (chip, False)
+          | chip <- map (footerHint . binding) agentBindings
+        ]
+
+    -- The negative control. Without it a projection that hid every chip would
+    -- pass the assertion above by leaving nothing on the line at all.
+    it "keeps every chip it does not hide, in the order it had" $
+      Text.splitOn "  " noAgentFooterHintLine
+        `shouldBe` map footerHint (filter (not . requiresLoadedAgent . (.bindingAction)) (scopeBindings BoardScope))
+
+    it "leaves the footer line itself alone in dual and single-agent mode" $
+      sequence_
+        [ (name, boardFooterHintLine mode False) `shouldBe` (name, footerHintLine)
+          | (name, mode) <- loadedModes
+        ]
+
+    -- `x`, `r`, `S`, and `A` are live from a card's details overlay too, and
+    -- its footer is the same projection, so it hides them for the same reason.
+    it "hides the four a card's details overlay also carries" $ do
+      map (.bindingAction) (modeScopeBindings NoAgentMode DetailsScope)
+        `shouldBe` [DismissOrClose, MergeDoneCard, QuitDashboard]
+      sequence_
+        [ (name, map (.bindingAction) (modeScopeBindings mode DetailsScope))
+            `shouldBe` (name, map (.bindingAction) (scopeBindings DetailsScope))
+          | (name, mode) <- loadedModes
+        ]
+
+    it "drops each hidden binding's row from the no-agent help overlay" $
+      sequence_
+        [ (description, any (Text.isInfixOf description) (helpLines NoAgentMode))
+            `shouldBe` (description, False)
+          | description <- map ((.bindingDescription) . binding) agentBindings
+        ]
+
+    -- The help overlay's other two blocks are not the mode's to hide: the
+    -- session rows belong to a live-agent overlay's own decoder and the mouse
+    -- rows are prose about a policy no binding covers.
+    it "keeps every row it does not hide, including the session and mouse blocks" $ do
+      length (helpLines NoAgentMode)
+        `shouldBe` length boardBindings
+          - length agentBindings
+          + length sessionInputHelp
+          + length mouseHelpEntries
+      sequence_
+        [ (row, any ((== row) . rowOf) declaredEntries) `shouldBe` (row, True)
+          | row <- helpLines NoAgentMode
+        ]
+      sequence_
+        [ (entry.helpEntryDescription, any (Text.isInfixOf entry.helpEntryDescription) (helpLines NoAgentMode))
+            `shouldBe` (entry.helpEntryDescription, True)
+          | entry <- sessionInputHelp <> mouseHelpEntries
+        ]
+
+    it "leaves the help overlay itself alone in dual and single-agent mode" $
+      sequence_
+        [ (name, helpLines mode) `shouldBe` (name, helpLines DualMode)
+          | (name, mode) <- loadedModes
+        ]
+
   describe "docs/design.md §7" $ do
     it "states exactly the keys and actions the table declares" $ do
       documented <- documentedBindings
@@ -337,6 +436,30 @@ spec = describe "keybinding table" $ do
       let documentedOnly = filter (`notElem` declaredBindings) documented
           declaredOnly = filter (`notElem` documented) declaredBindings
       (documentedOnly, declaredOnly) `shouldBe` ([], [])
+
+-- | The two modes that load a provider, which hide nothing at all. Named
+-- rather than written @[DualMode, SingleAgentMode]@ inline so a failure says
+-- which one moved.
+loadedModes :: [(String, OperatingMode)]
+loadedModes = [("dual", DualMode), ("single-agent", SingleAgentMode)]
+
+-- | The six bindings issue #521 takes off a no-agent board, written out
+-- rather than filtered from 'requiresLoadedAgent', so a binding that quietly
+-- joined or left that predicate fails this module instead of moving the
+-- expectation with it.
+agentBindings :: [BoardAction]
+agentBindings =
+  [ KillWorking,
+    ReviewSelection,
+    SolveSelection,
+    AutoSolveSelection,
+    ShowProcesses,
+    ToggleApproval
+  ]
+
+-- | The board's footer line with no provider loaded and nothing filtering.
+noAgentFooterHintLine :: Text
+noAgentFooterHintLine = boardFooterHintLine NoAgentMode False
 
 -- | The two modes a session key is decoded in, with no optional binding
 -- enabled and something still there to read what the session types.

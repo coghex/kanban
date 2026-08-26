@@ -80,10 +80,12 @@ import Kanban.UI.Board
     drainerLabel,
     openDataLoadingHeading,
     openDataUnavailableHeading,
+    updateLabel,
     usageSidebarInterior,
+    usageSidebarWidth,
   )
 import Kanban.UI.Filter (focusFilterPanel, refreshVisibleBoard, toggleFilterBoxFromClick, toggleFilterPanel)
-import Kanban.UI.Keys (BoardAction (..), actionKeyText)
+import Kanban.UI.Keys (BoardAction (..), KeyBinding (..), actionKeyText, binding, footerHint)
 import Kanban.UI.Search (SearchInput (..), applySearchInput, openSearch)
 import Kanban.UI.Settings
   ( SettingsInput (..),
@@ -513,6 +515,68 @@ spec = describe "golden frames" $ do
     approvalDetailText frame `shouldBe` "off"
     interiorRow frame drainerColumn (drainerRow + 2) `shouldBe` "off"
 
+  -- Issue #521 requirement 4. The sidebar keeps its box, its heading, its
+  -- width, and the two controls that still mean something; the provider blocks
+  -- and the approval control go. Read off the drawn frame rather than off the
+  -- widget tree, because "not drawn" is exactly what closes the approval
+  -- control's click route: brick registers a clickable extent only for a
+  -- widget a frame actually contains.
+  it "keeps the sidebar's box, heading, width, and two live controls with no provider loaded" $ do
+    quiet <- renderCase (frameCaseNamed "board-wide-no-agent")
+    loaded <- renderCase wideCase
+    sequence_
+      [ (kept, kept `Data.Text.isInfixOf` sidebarText quiet) `shouldBe` (kept, True)
+      | kept <- [" USAGE ", Data.Text.strip updateLabel, Data.Text.strip drainerLabel]
+      ]
+    -- The 28 cells §6 fixes: the drainer control opens in the same column it
+    -- opens in on the loaded board, so the interior did not move.
+    snd (controlAt quiet drainerLabel) `shouldBe` snd (controlAt loaded drainerLabel)
+
+  it "draws neither provider block nor the approvals control with no provider loaded" $ do
+    quiet <- renderCase (frameCaseNamed "board-wide-no-agent")
+    loaded <- renderCase wideCase
+    sequence_
+      [ (gone, gone `Data.Text.isInfixOf` sidebarText quiet) `shouldBe` (gone, False)
+      | gone <- providerSidebarText
+      ]
+    -- The negative control: every one of them is really there on the loaded
+    -- board, so the absences above are the mode's doing rather than a fixture
+    -- that never drew them.
+    sequence_
+      [ (gone, gone `Data.Text.isInfixOf` sidebarText loaded) `shouldBe` (gone, True)
+      | gone <- providerSidebarText
+      ]
+
+  -- Requirement 1 on the two surfaces that name keys, over the whole drawn
+  -- frame rather than over the projections "Spec.UI.Keys" holds -- a chip
+  -- hidden from the line but still reaching the screen some other way would
+  -- pass there and fail here.
+  it "names none of the six agent bindings on a no-agent board or in its help overlay" $ do
+    board <- renderCase (frameCaseNamed "board-wide-no-agent")
+    help <- renderCase (frameCaseNamed "overlay-help-no-agent")
+    loadedBoard <- renderCase wideCase
+    loadedHelp <- renderCase (frameCaseNamed "overlay-help")
+    sequence_
+      [ (name, text, text `Data.Text.isInfixOf` frameLines frame) `shouldBe` (name, text, False)
+      | (name, frame, texts) <- [("board" :: String, board, agentFooterChips), ("help", help, agentHelpDescriptions)],
+        text <- texts
+      ]
+    -- The negative controls. Every help row really is drawn on a board that
+    -- loads a provider, so the absences above are the mode's doing rather
+    -- than text no frame ever carried.
+    sequence_
+      [ (description, description `Data.Text.isInfixOf` frameLines loadedHelp) `shouldBe` (description, True)
+      | description <- agentHelpDescriptions
+      ]
+    -- The footer's is the same control with the line's existing clip
+    -- accounted for: `txt` cuts the row at the terminal width (§6), and on
+    -- the 200-cell wide board `a approvals` already sits past it, so the five
+    -- chips ahead of the cut are what a loaded board draws at all.
+    filter (`Data.Text.isInfixOf` frameLines loadedBoard) agentFooterChips
+      `shouldBe` map
+        (footerHint . binding)
+        [KillWorking, ReviewSelection, SolveSelection, AutoSolveSelection, ShowProcesses]
+
   -- issue #515 requirement 11's other half. The @.txt@ frames above carry the
   -- badge's text; only this carries its colour, and the colour is the whole
   -- difference between the two badges beyond one letter.
@@ -748,6 +812,39 @@ frameCases =
     <> solveModelCases
     <> sessionModeCases
     <> approvalCases
+    <> operatingModeCases
+
+-- | Issue #521's two surfaces, drawn over a roster that loads no provider.
+--
+-- The wide board, because the footer and the sidebar both shorten and a frame
+-- is the only thing that shows the two together; and the help overlay, because
+-- it is the surface the mode shortens most and its box is sized from the list
+-- it draws, so a row hidden without the height following it would be a border
+-- drawn over its own contents.
+--
+-- Both are new files. Requirement 9 keeps every frame that already exists
+-- byte-identical: dual mode draws exactly what it drew, which is what the
+-- untouched frames beside these assert.
+operatingModeCases :: [FrameCase]
+operatingModeCases =
+  [ FrameCase
+      { frameCaseName = "board-wide-no-agent",
+        frameCaseWidth = 200,
+        frameCaseHeight = 64,
+        frameCaseSummary = "the wide board with no provider loaded: no agent chips, no provider blocks, no approvals control",
+        frameCaseState = noAgentBoard
+      },
+    FrameCase
+      { frameCaseName = "overlay-help-no-agent",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "the help overlay with no provider loaded: the six agent rows gone, the session and mouse rows kept",
+        frameCaseState = \state -> (noAgentBoard state) {appOverlay = Just HelpOverlay}
+      }
+  ]
+
+noAgentBoard :: AppState -> AppState
+noAgentBoard = withModelRoster (Right noAgentRoster)
 
 -- | The three surfaces that draw a model name (MODEL-3), which no frame
 -- covered before this slice: the chooser's two rows, a solve session's header
@@ -1672,6 +1769,36 @@ issuesColumnBounds frame = (left, columnOf frame boardTop left '┳')
 -- | Where one sidebar control's box is: the row its label is drawn on, and
 -- the column that box opens at. Located by the label the control is declared
 -- with rather than by a copy of it, so a renamed control moves these with it.
+-- | The sidebar's own columns of every row, which is where a provider block
+-- or a control is drawn and nowhere else. Read as one text so an assertion
+-- about the sidebar cannot pass or fail on a card's excerpt.
+sidebarText :: [[FrameCell]] -> Text
+sidebarText frame =
+  Data.Text.unlines
+    [ Data.Text.pack [frameCellCharacter (cellAt frame rowIndex columnIndex) | columnIndex <- [0 .. usageSidebarWidth]]
+    | rowIndex <- [0 .. length frame - 1]
+    ]
+
+-- | What the sidebar draws only while a provider is loaded: the two provider
+-- names, a window row that could only come from a snapshot, and the approval
+-- control's label.
+providerSidebarText :: [Text]
+providerSidebarText = ["Codex", "Claude", "5 hour", "week", Data.Text.strip approvalControlLabel]
+
+-- | Issue #521's six bindings, in table order.
+agentBindings :: [BoardAction]
+agentBindings = [KillWorking, ReviewSelection, SolveSelection, AutoSolveSelection, ShowProcesses, ToggleApproval]
+
+-- | The chip each of them puts on the footer, composed by the projection the
+-- footer itself uses rather than transcribed.
+agentFooterChips :: [Text]
+agentFooterChips = map (footerHint . binding) agentBindings
+
+-- | The description each of them puts on its help row, which is the other
+-- text a frame can be searched for.
+agentHelpDescriptions :: [Text]
+agentHelpDescriptions = map ((.bindingDescription) . binding) agentBindings
+
 controlAt :: [[FrameCell]] -> Text -> (Int, Int)
 controlAt frame label = (row, column - 2)
   where

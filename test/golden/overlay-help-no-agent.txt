@@ -1,0 +1,48 @@
+╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
+║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
+║┃ ┏━━━┓                    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┃ ↻ ┃                    ┃┃                                          ┃                                         ┃  STANDALONE                             ┃  STANDALONE                             ┃║
+║┃ ┗━━━┛                    ┃┃  ▾ #700  Persistence contract rollout    ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  1/2 complete                            ┃  1/2 complete                           ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
+║┃                          ┃┃  └─ ╭──────────────────────────────────╮ ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
+║┃                          ┃┃     │ A1 · tracker ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓     │ ┃  │  reviewed:approve                  │ ┃║
+║┃                          ┃┃     │ #711 Adopt th┃                                                                                                 ┃     │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
+║┃                          ┃┃     │ envelope     ┃ j / Down             next card                                                                  ┃     │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃     │  feature     ┃ k / Up               previous card                                                              ┃     │ ┃  │ Updates the branch after the       │ ┃║
+║┃                          ┃┃     │ unassigned · ┃ h / Left             previous column                                                            ┃ the │ ┃  │ persistence registry changed on    │ ┃║
+║┃                          ┃┃     │ Write the env┃ l / Right            next column                                                                ┃     │ ┃  │ master.                            │ ┃║
+║┃                          ┃┃     │ of the payloa┃ g                    first visible item in the column                                           ┃     │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃                          ┃┃     │ write is dete┃ G                    last visible item in the column                                            ┃─────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃     ╰──────────────┃ s                    search a column; h/l type into the query, Left/Right move the search       ┃       ┃                                         ┃║
+║┃                          ┃┃                    ┃ F                    filter cards; j/k move, Left/Right change group, space toggles, d defaults ┃─────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                    ┃ e                    expand / collapse focused epic                                             ┃     │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
+║┃                          ┃┃  ▸ #701  Input rout┃ Enter                details                                                                    ┃     │ ┃  │  reviewed:approve   input   ui     │ ┃║
+║┃                          ┃┃  complete          ┃ Esc                  close overlay or dismiss a notice                                          ┃     │ ┃  │ #812 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  STANDALONE        ┃ i                    everything needing attention; Enter goes to its work                       ┃     │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃ ▌╭─────────────────┃ u / click            update board and both usage providers                                      ┃     │ ┃  │ Routes Shift-wheel through the     │ ┃║
+║┃                          ┃┃  │ #812 Modal input┃ d / click            start or stop PR drainer                                                   ┃     │ ┃  │ same modal-aware ownership path as │ ┃║
+║┃                          ┃┃  │ overlay         ┃ m                    merge the selected approved PR in Done                                     ┃     │ ┃  │ ordinary wheel events.             │ ┃║
+║┃                          ┃┃  │  reviewed:approv┃ c                    collapse / expand sidebar                                                  ┃     │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
+║┃                          ┃┃  │ unassigned · upd┃ o                    settings                                                                   ┃     │ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ Empty modal area┃ ?                    this help overlay                                                          ┃─────╯ ┃                                         ┃║
+║┃                          ┃┃  │ pointer events t┃ Ctrl-L               repaint                                                                    ┃       ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  │ pages. This is v┃ q / Ctrl-C           quit                                                                       ┃       ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃  ╰─────────────────┃ Tab                  next session in an open solve/PR/review overlay                            ┃       ┃  │ snapshot loader                    │ ┃║
+║┃                          ┃┃                    ┃ Ctrl-C               interrupt agent turn; guidance resumes it, r restarts canonical review     ┃       ┃  │  reviewed:approve   feature        │ ┃║
+║┃                          ┃┃  ╭─────────────────┃ i                    session overlay: type into the draft (insert mode)                         ┃       ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  │ #756 Define the ┃ j / k                session overlay normal mode: scroll transcript one line                    ┃       ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ contract        ┃ g / G                session overlay normal mode: transcript beginning / live tail              ┃       ┃  │ Reads the cache through the        │ ┃║
+║┃                          ┃┃  │  architecture   ┃ Ctrl-D / Ctrl-U      session overlay normal mode: scroll transcript sixteen lines               ┃       ┃  │ versioned envelope and reports a   │ ┃║
+║┃                          ┃┃  │ unassigned · upd┃ q                    session overlay normal mode: hide the overlay                              ┃       ┃  │ truncated payload.                 │ ┃║
+║┃                          ┃┃  │ Document root ow┃ left click           select card; click selected card for details                               ┃       ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃                          ┃┃  │ barriers, and th┃ mouse wheel          scroll column under pointer                                                ┃       ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ envelope before ┃ right/outside click  close card details                                                         ┃       ┃                                         ┃║
+║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  ╰─────────────────┃                                                                                                 ┃       ┃                                         ┃║
+║┃ ┃ drain_prs.py ┃         ┃┃                    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       ┃                                         ┃║
+║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
+║┃ off                      ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
+║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
+║ esc close  q/Ctrl-C quit                                                                                                                                                                             ║
+║ board: updated 3h ago · history: current                                                                                                                                                             ║
+║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

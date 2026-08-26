@@ -5,6 +5,7 @@ module Kanban.UI.State
     findReviewSessionByThread,
     forceTerminalRepaint,
     modifyReviewSessionByThread,
+    noticeSet,
     plainTranscript,
     setNotice,
     transcriptFor,
@@ -32,7 +33,17 @@ import Kanban.UI.SessionCore
 import Kanban.UI.Util
 
 setNotice :: Text -> EventM Name AppState ()
-setNotice message = modify (\state -> state {appNotice = Just message})
+setNotice message = modify (noticeSet message)
+
+-- | The whole of what showing a notice does to the state: one field, and
+-- nothing else.
+--
+-- Split out from 'setNotice' rather than written twice, so a pure transition
+-- that has to leave the same mark -- a refused board press, a refused right
+-- click -- makes exactly the mark the 'EventM' arm makes, and the suite can
+-- take that transition without brick.
+noticeSet :: Text -> AppState -> AppState
+noticeSet message state = state {appNotice = Just message}
 
 -- | Repaint the terminal from scratch, with no network request. 'Vty.refresh'
 -- resets vty's assumed screen state and re-emits the current picture in full,

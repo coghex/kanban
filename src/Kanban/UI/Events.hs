@@ -1,5 +1,6 @@
 module Kanban.UI.Events
-  ( BoardMouseAction (..),
+  ( BoardActionGate (..),
+    BoardMouseAction (..),
     IncidentsAction (..),
     OverlayMouseAction (..),
     QuitDecision (..),
@@ -7,12 +8,15 @@ module Kanban.UI.Events
     applyIncidentsAction,
     applyRunningProcessClick,
     blockedByCompletedLoad,
+    boardActionGate,
     boardMouseAction,
     boardMousePress,
     handleEvent,
     incidentsAction,
     killSelectionNotice,
     mutatesSelectedWork,
+    runningProcessClickRefusal,
+    settleBoardAction,
     settledSessionRefusal,
     overlayMouseAction,
     quitDecision,
@@ -340,11 +344,54 @@ applyBoardMouseAction action = do
 applyBoardAction :: BoardAction -> EventM Name AppState ()
 applyBoardAction action = do
   state <- get
-  if completedCardsBlocked state && blockedByCompletedLoad action
-    then pure ()
-    else case readOnlyHistoryGate state action of
-      Just notice -> setNotice notice
-      Nothing -> dispatchBoardAction action
+  case boardActionGate state action of
+    DispatchBoardAction -> dispatchBoardAction action
+    IgnoreBoardAction -> pure ()
+    RefuseBoardAction notice -> setNotice notice
+
+-- | What happens to a press before 'dispatchBoardAction' could see it.
+data BoardActionGate
+  = -- | Nothing is in the way; the arm runs.
+    DispatchBoardAction
+  | -- | The press is inert and says nothing.
+    IgnoreBoardAction
+  | -- | The press is refused, with this notice instead.
+    RefuseBoardAction Text
+  deriving stock (Eq, Show)
+
+-- | Everything that can stand between a key press and its arm, as one pure
+-- decision, in the order the three are asked.
+--
+-- The operating mode is asked first, and that ordering is the contract rather
+-- than an accident: the two gates below it resolve the card in front of the
+-- user, and a board that spawns nothing must refuse `r`, `S`, `A`, and `x`
+-- with the reason that is actually true of it -- the roster loads no provider
+-- -- however the selection happens to be sitting. Settled history and the
+-- completed-history blocker are facts about /that card/, and they are the
+-- right answer only once there is a mode in which the key could work at all.
+--
+-- Pure, and the whole of what 'applyBoardAction' decides, so a press can be
+-- taken and inspected without a terminal.
+boardActionGate :: AppState -> BoardAction -> BoardActionGate
+boardActionGate state action
+  | Just refusal <- agentSurfaceRefusal state.appOperatingMode action = RefuseBoardAction refusal
+  | completedCardsBlocked state && blockedByCompletedLoad action = IgnoreBoardAction
+  | Just notice <- readOnlyHistoryGate state action = RefuseBoardAction notice
+  | otherwise = DispatchBoardAction
+
+-- | What a press the gate settled does to the state, and the whole of it.
+--
+-- A refusal writes one field and nothing else -- no session is inserted or
+-- reopened, no chooser or overlay opens, no process is spawned or killed, and
+-- the approval service is neither started nor stopped -- because that is what
+-- 'Kanban.UI.State.setNotice', the arm above, does. Written out here so the
+-- suite can take a populated dashboard through a refused press and hold every
+-- one of those to it.
+settleBoardAction :: BoardActionGate -> AppState -> AppState
+settleBoardAction gate = case gate of
+  DispatchBoardAction -> id
+  IgnoreBoardAction -> id
+  RefuseBoardAction notice -> noticeSet notice
 
 -- | Which bindings the completed-history blocker makes inert.
 --
@@ -1083,10 +1130,26 @@ applyCardClick column row state
 applyRunningProcessClick :: BoardColumn -> Int -> AppState -> AppState
 applyRunningProcessClick column row state = case clicked >>= runningProcessOverlay state . entryItem of
   Nothing -> selectedState
-  Just overlay -> closeSearchOn (anchorAt state column row) (selectedState {appOverlay = Just overlay})
+  Just overlay -> case runningProcessClickRefusal state of
+    -- The second route to the three live-agent overlays, refused with the
+    -- same words the keys are: the click still selects the card, and opens
+    -- nothing. A card with no live session is untouched -- that press was
+    -- never opening an agent overlay, so it keeps selecting and nothing else.
+    Just refusal -> noticeSet refusal selectedState
+    Nothing -> closeSearchOn (anchorAt state column row) (selectedState {appOverlay = Just overlay})
   where
     clicked = safeIndex row (entriesFor state column)
     selectedState = selectCardOnly column row state
+
+-- | The refusal a right click that would open a live agent session owes the
+-- operating mode.
+--
+-- Not a binding of its own, so it borrows the decision rather than restating
+-- it: a right click opens exactly the overlays `r`, `S`, `A`, and `p` open,
+-- and 'ReviewSelection' is one of them, so a mode that refuses that binding
+-- refuses this route with the same words.
+runningProcessClickRefusal :: AppState -> Maybe Text
+runningProcessClickRefusal state = agentSurfaceRefusal state.appOperatingMode ReviewSelection
 
 selectCardOnly :: BoardColumn -> Int -> AppState -> AppState
 selectCardOnly column row state =

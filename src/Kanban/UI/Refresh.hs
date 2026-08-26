@@ -14,6 +14,8 @@ module Kanban.UI.Refresh
     startBoardRefresh,
     startCompletedHistory,
     startQueuedBoardRefresh,
+    startUsageRefreshes,
+    usageRefreshProviders,
   )
 where
 
@@ -31,6 +33,7 @@ import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), UsageCommandConfig (..), UsageConfig (..))
 import Kanban.Domain
+import Kanban.Models (OperatingMode, agentsLoaded)
 import Kanban.GitHub
   ( CoordinatorNotice (..),
     GhFetchGuard,
@@ -64,10 +67,38 @@ startAllRefreshes = do
   startBoardRefresh
   startUsageRefreshes
 
+-- | The usage half of an update: one refresh per provider the operating mode
+-- has to observe.
+--
+-- Startup, @u@, and the sidebar's @↻@ all reach this, so gating it here is
+-- what keeps a board that loads no provider from spawning a usage probe on
+-- any of the three. The board half above is untouched: @u@ and @↻@ still
+-- update GitHub in every mode.
+--
+-- Which providers those are is 'usageRefreshProviders', a pure function,
+-- because an 'EventM' cannot be run outside brick and the suite has to be
+-- able to hold this arm to something.
 startUsageRefreshes :: EventM Name AppState ()
 startUsageRefreshes = do
-  startCodexRefresh
-  startClaudeRefresh
+  state <- get
+  mapM_ startProviderRefresh (usageRefreshProviders state.appOperatingMode)
+
+-- | The providers one update probes.
+--
+-- Both or neither today. Single-agent probes both deliberately: narrowing it
+-- to the loaded brand is that mode's own question, and this slice leaves
+-- single-agent exactly as it was.
+usageRefreshProviders :: OperatingMode -> [UsageProvider]
+usageRefreshProviders mode
+  | agentsLoaded mode = [Codex, Claude]
+  | otherwise = []
+
+-- | The refresh one provider starts. Total in 'UsageProvider', so a provider
+-- added to that type cannot be listed above without a refresh to start.
+startProviderRefresh :: UsageProvider -> EventM Name AppState ()
+startProviderRefresh provider = case provider of
+  Codex -> startCodexRefresh
+  Claude -> startClaudeRefresh
 
 -- | Whether a requested refresh can start a cycle now, or has to wait for the
 -- one in flight.

@@ -253,6 +253,7 @@ test-suite kanban-test
     Spec.GitHub.PullRequestStatus
     Spec.GitHub.RefreshCoordinator
     Spec.ManagedPaths
+    Spec.OperatingMode
     Spec.Repository.Authority
     Spec.Repository.Identity
     Spec.Repository.Lease
