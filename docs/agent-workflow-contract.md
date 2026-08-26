@@ -495,28 +495,39 @@ reimplement the removal, and `--check` remains read-only.
   claims approval or omits `label_removed`, an `unverified` carrying an
   `approved` Boolean or no `detail`, or any model invocation at all are refused
   rather than emitted.
-- **Failure semantics.** Fail closed. A missing backend, a GitHub read or write
-  failure, a malformed result, or an unverifiable post-mutation state is a
-  per-issue `unverified` entry or a non-zero exit with diagnostics on stderr and
-  no document a caller could read as success — never a claimed removal and never
-  an unverified readiness answer. An interruption is a failure for this mode
-  wherever in the run it lands, for the reason `--review-queue`'s is. A consumer
-  renders no readiness marker for an issue it could not verify, and never
-  presents such an issue as ready to solve.
+- **Failure semantics.** Fail closed outside the scoped `busy` liveness
+  exception. A missing backend, a GitHub read or write failure, a malformed
+  result, or an unverifiable post-mutation state is a per-issue `unverified`
+  entry or a non-zero exit with diagnostics on stderr and no document a caller
+  could read as success — never a claimed removal and never an unverified
+  readiness answer. An interruption is a failure for this mode wherever in the
+  run it lands, for the reason `--review-queue`'s is. A consumer renders no
+  readiness marker for an issue it could not verify, and never presents such an
+  issue as ready to solve. A validated top-level `busy` document is the sole
+  exception: although the backend read and mutated nothing under the held lock,
+  triage and retriage may render the document's non-empty `approval_label` from
+  their verified-complete open-issue snapshot. That display-only fallback
+  claims no reconciliation or removal; the later solve gate remains
+  authoritative and may refuse a stale label. Every other failure still closes,
+  including an invalid or missing `approval_label` in a `busy` document.
 - **Consumers.** The rendered triage assets
   (`claude-plugin/plugins/kanban/commands/triage.md`,
   `codex-plugin/plugins/kanban/skills/triage/SKILL.md`) are the first, and the
   rendered retriage assets
   (`claude-plugin/plugins/kanban/commands/retriage.md`,
-  `codex-plugin/plugins/kanban/skills/retriage/SKILL.md`) the second. All four
-  render their readiness marker from each entry's post-reconciliation
-  `approved` rather than issuing a second `--check`, which would reopen the
+  `codex-plugin/plugins/kanban/skills/retriage/SKILL.md`) the second. For a
+  `reconciled` document, all four render their readiness marker from each
+  entry's post-reconciliation `approved`. For a `busy` document requested with
+  no issue numbers, its empty `issues` array claims no reconciliation; the four
+  instead render exact matches for its validated `approval_label` from the
+  verified-complete open-issue snapshot. They may disclose that label-backed
+  fallback once per answer, but it remains advisory and display-only. Neither
+  outcome is followed by a second `--check`, which would reopen the
   read-then-decide window the lock closes. They pass no issue numbers and name
   no candidate label, so a repository configuring its own approval label is
   reconciled and rendered exactly as the default one is. Retriage additionally
   recomputes every marker on each run rather than carrying one forward from the
-  roadmap it is editing, which is the only way a *refresh* can avoid
-  re-asserting an approval this operation has since withdrawn.
+  roadmap it is editing, including during the `busy` fallback.
 
 ### 2.4 Incident/controller capability — the PR drainer
 

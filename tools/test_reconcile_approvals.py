@@ -1187,10 +1187,19 @@ class ManifestCoverageTests(unittest.TestCase):
 
     def test_the_contract_documents_the_reconciliation_authority(self):
         text = (REPO_ROOT / "docs/agent-workflow-contract.md").read_text(encoding="utf-8")
+        flat = " ".join(text.split())
         self.assertIn("--reconcile-approvals", text)
         self.assertIn("approve-issues-reconcile-approvals", text)
         for term in ("Locking", "Result", "Failure semantics", "Decision"):
             self.assertIn(term, text)
+        for busy_term in (
+            "scoped `busy` liveness exception",
+            "verified-complete open-issue snapshot",
+            "display-only fallback",
+            "solve gate remains",
+            "invalid or missing `approval_label` in a `busy` document",
+        ):
+            self.assertIn(busy_term, flat)
 
 
 class SchemaConstantTests(unittest.TestCase):
