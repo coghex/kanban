@@ -1845,6 +1845,9 @@ class PublishTests(PublishFixture):
         run(["git", "push", "-q", "origin", "master:master"], self.fx.primary)
         result = self.fx.publish("# UI\n\n- one\n- two\n")
         self.assertEqual(result["status"], "not-published")
+        # Kanban's own path, where the lane is §7's `coordination` class rather
+        # than a configured one -- the wording differs from a consuming
+        # repository's on purpose.
         self.assertIn("no coordination lane", result["reason"])
         self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
 
@@ -1863,7 +1866,7 @@ class PublishTests(PublishFixture):
             other = Fixture.create(Path(other_dir), origin_name="synarchy")
             result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
             self.assertEqual(result["status"], "not-published")
-            self.assertIn("no coordination lane", result["reason"])
+            self.assertIn("no direct publication lane", result["reason"])
             self.assertEqual(other.remote_content(), "# UI\n\n- one")
             # Its own document still receives the approved mutation.
             self.assertTrue(result["document_written"])
@@ -1872,7 +1875,7 @@ class PublishTests(PublishFixture):
     # -- successive dispositions of an unpublishable document (issue #385) ---
 
     def unpublishable(self, directory):
-        """A repository that declares no coordination lane for any path.
+        """A repository that declares no direct publication lane for any path.
 
         Its documents are therefore never published, always written locally,
         and landed by their owner out of band — which is the only place a
@@ -2065,11 +2068,11 @@ class PublishTests(PublishFixture):
 
     def test_a_consuming_repository_publishes_a_path_it_declares(self):
         # The lane a repository that does not track §7 declares for itself.
-        # Read through kanban_config.resolve_config, so it is the same
-        # declaration the drainer already honours rather than a second one.
+        # Read through kanban_config.resolve_config, but kept separate from the
+        # drainer's coordination-only base-advance permission.
         self.write_config(
             '[repositories."coghex/synarchy".workflow]\n'
-            'coordination_paths = ["docs/ui-bugs.md"]\n'
+            'direct_publication_paths = ["docs/ui-bugs.md"]\n'
         )
         with tempfile.TemporaryDirectory() as other_dir:
             other = Fixture.create(Path(other_dir), origin_name="synarchy")
@@ -2083,7 +2086,41 @@ class PublishTests(PublishFixture):
         # the global workflow table merged with any override for this slug.
         self.write_config(
             "[workflow]\n"
+            'direct_publication_paths = ["docs/ui-bugs.md"]\n'
+        )
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
+            result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertEqual(result["status"], "published")
+            self.assertIn("- two", other.remote_content())
+
+    def test_the_drainers_merge_exception_grants_no_publication_lane(self):
+        # THE regression this key split exists for. coordination_paths is the
+        # PR drainer's merge exception; until the split publish_coordination_doc
+        # read it as the publication lane too, so a repository that declared its
+        # docs so the drainer could merge past a docs-only advance was thereby
+        # signed up for one unattended default-branch push per approved
+        # disposition. Declaring the merge exception must leave the document
+        # unpublished, with its approved mutation applied locally instead.
+        self.write_config(
+            '[repositories."coghex/synarchy".workflow]\n'
             'coordination_paths = ["docs/ui-bugs.md"]\n'
+        )
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Fixture.create(Path(other_dir), origin_name="synarchy")
+            result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertEqual(result["status"], "not-published")
+            self.assertIn("no direct publication lane", result["reason"])
+            self.assertTrue(result["document_written"])
+            self.assertNotIn("- two", other.remote_content())
+
+    def test_the_two_keys_are_declared_and_read_independently(self):
+        # Both declared, each naming a different document: each key answers only
+        # its own question, so only the publication key's document publishes.
+        self.write_config(
+            '[repositories."coghex/synarchy".workflow]\n'
+            'coordination_paths = ["docs/drainer-bugs.md"]\n'
+            'direct_publication_paths = ["docs/ui-bugs.md"]\n'
         )
         with tempfile.TemporaryDirectory() as other_dir:
             other = Fixture.create(Path(other_dir), origin_name="synarchy")
@@ -2098,15 +2135,15 @@ class PublishTests(PublishFixture):
         # document its owner did not declare.
         self.write_config(
             "[workflow]\n"
-            'coordination_paths = ["docs/ui-bugs.md"]\n\n'
+            'direct_publication_paths = ["docs/ui-bugs.md"]\n\n'
             '[repositories."coghex/synarchy".workflow]\n'
-            'coordination_paths = ["docs/drainer-bugs.md"]\n'
+            'direct_publication_paths = ["docs/drainer-bugs.md"]\n'
         )
         with tempfile.TemporaryDirectory() as other_dir:
             other = Fixture.create(Path(other_dir), origin_name="synarchy")
             result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
             self.assertEqual(result["status"], "not-published")
-            self.assertIn("no coordination lane", result["reason"])
+            self.assertIn("no direct publication lane", result["reason"])
             self.assertTrue(result["document_written"])
 
     def seed_remote_document(self, fx, path, content):
@@ -2124,7 +2161,7 @@ class PublishTests(PublishFixture):
         # kanban_config predicate the drainer's base-advance decision reads.
         self.write_config(
             '[repositories."coghex/synarchy".workflow]\n'
-            'coordination_paths = ["docs/coordination/"]\n'
+            'direct_publication_paths = ["docs/coordination/"]\n'
         )
         with tempfile.TemporaryDirectory() as other_dir:
             other = Fixture.create(Path(other_dir), origin_name="synarchy")
@@ -2147,7 +2184,7 @@ class PublishTests(PublishFixture):
         # way, so a directory entry cannot become string-prefix matching.
         self.write_config(
             '[repositories."coghex/synarchy".workflow]\n'
-            'coordination_paths = ["docs/coordination/"]\n'
+            'direct_publication_paths = ["docs/coordination/"]\n'
         )
         with tempfile.TemporaryDirectory() as other_dir:
             other = Fixture.create(Path(other_dir), origin_name="synarchy")
@@ -2160,7 +2197,7 @@ class PublishTests(PublishFixture):
                 repo="coghex/synarchy",
             )
             self.assertEqual(result["status"], "not-published")
-            self.assertIn("no coordination lane", result["reason"])
+            self.assertIn("no direct publication lane", result["reason"])
             # The approved mutation still lands locally, as for any
             # undeclared document.
             self.assertTrue(result["document_written"])
@@ -2176,7 +2213,7 @@ class PublishTests(PublishFixture):
         # it is invalid configuration, refused before anything is written.
         self.write_config(
             '[repositories."coghex/synarchy".workflow]\n'
-            'coordination_paths = ["/"]\n'
+            'direct_publication_paths = ["/"]\n'
         )
         with tempfile.TemporaryDirectory() as other_dir:
             other = Fixture.create(Path(other_dir), origin_name="synarchy")
@@ -2214,7 +2251,7 @@ class PublishTests(PublishFixture):
             (Path(os.environ["XDG_CONFIG_HOME"]) / "kanban" / "config.toml").exists()
         )
         self.assertEqual(
-            publisher.declared_coordination_paths("coghex/synarchy"), (frozenset(), [])
+            publisher.declared_publication_paths("coghex/synarchy"), (frozenset(), [])
         )
 
     def test_a_misspelled_key_is_reported_rather_than_read_as_no_lane(self):
@@ -2238,7 +2275,7 @@ class PublishTests(PublishFixture):
         # config.toml.example -- and a configuration that named nothing must
         # not close a lane §7 opens.
         self.write_config(
-            '[repositories."coghex/kanban".workflow]\ncoordination_paths = []\n'
+            '[repositories."coghex/kanban".workflow]\ndirect_publication_paths = []\n'
         )
         result = self.fx.publish("# UI\n\n- one\n- two\n")
         self.assertEqual(result["status"], "published")
@@ -2250,7 +2287,7 @@ class PublishTests(PublishFixture):
         # document does not make it publishable.
         self.write_config(
             '[repositories."coghex/kanban".workflow]\n'
-            'coordination_paths = ["docs/design.md"]\n'
+            'direct_publication_paths = ["docs/design.md"]\n'
         )
         result = self.fx.publish("# Design\n\nchanged\n", path="docs/design.md")
         self.assertEqual(result["status"], "not-published")

@@ -19,9 +19,9 @@ def write(tmp: Path, text: str) -> Path:
 
 
 class CoordinationCoverageTests(unittest.TestCase):
-    """Issue #409: the one predicate deciding what a `coordination_paths`
-    entry covers, shared by the drainer's base-advance decision and the
-    publisher's consuming-repository eligibility."""
+    """Issue #409: the one path-coverage predicate shared by the drainer's
+    `coordination_paths` declarations and the publisher's separate
+    `direct_publication_paths` declarations."""
 
     def test_a_file_entry_covers_exactly_itself(self):
         self.assertTrue(kc.coordination_path_covers("docs/status.md", "docs/status.md"))
@@ -105,6 +105,7 @@ class MissingFileTests(unittest.TestCase):
         self.assertEqual(raw.workflow.problem_style_labels, frozenset())
         self.assertEqual(raw.workflow.ui_style_labels, frozenset())
         self.assertEqual(raw.workflow.coordination_paths, frozenset())
+        self.assertEqual(raw.workflow.direct_publication_paths, frozenset())
         self.assertEqual(raw.limits.excerpt_lines, 3)
         self.assertEqual(raw.timeouts.github_seconds, 30)
         self.assertEqual(raw.timeouts.codex_seconds, 10)
@@ -146,6 +147,7 @@ blocking_severity = "amber"
 problem_style_labels = ["defect"]
 ui_style_labels = ["interface", "input"]
 coordination_paths = ["docs/status.md", "ROADMAP.md"]
+direct_publication_paths = ["docs/published.md", "REPORT.md"]
 
 [limits]
 excerpt_lines = 7
@@ -170,6 +172,7 @@ approval_label = "acme:go"
 blocked_labels = ["only-this"]
 ui_style_labels = ["widget-ui"]
 coordination_paths = ["docs/widgets.md"]
+direct_publication_paths = ["docs/widget-published.md"]
 
 [repositories."acme/widgets".limits]
 excerpt_lines = 9
@@ -208,6 +211,10 @@ class FullFixtureTests(unittest.TestCase):
         self.assertEqual(
             raw.workflow.coordination_paths,
             frozenset({"docs/status.md", "ROADMAP.md"}),
+        )
+        self.assertEqual(
+            raw.workflow.direct_publication_paths,
+            frozenset({"docs/published.md", "REPORT.md"}),
         )
         self.assertEqual(raw.limits.excerpt_lines, 7)
         self.assertEqual(raw.timeouts.github_seconds, 11)
@@ -272,6 +279,17 @@ class MergeAndSelectionTests(unittest.TestCase):
         self.assertEqual(
             kc.resolve_config("acme/widgets", raw).workflow.coordination_paths,
             frozenset({"docs/widgets.md"}),
+        )
+
+    def test_direct_publication_paths_inherit_globally_and_are_replaced_per_repository(self):
+        raw = self._raw()
+        self.assertEqual(
+            kc.resolve_config("other/repo", raw).workflow.direct_publication_paths,
+            frozenset({"docs/published.md", "REPORT.md"}),
+        )
+        self.assertEqual(
+            kc.resolve_config("acme/widgets", raw).workflow.direct_publication_paths,
+            frozenset({"docs/widget-published.md"}),
         )
 
     def test_selection_normalizes_the_resolved_identity_to_lowercase(self):
@@ -379,6 +397,15 @@ class SemanticValidationErrorTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self._expect_error(text, "workflow.coordination_paths")
+
+    def test_invalid_direct_publication_paths_raise(self):
+        for text in (
+            '[workflow]\ndirect_publication_paths = [""]\n',
+            '[workflow]\ndirect_publication_paths = "docs/status.md"\n',
+            "[workflow]\ndirect_publication_paths = [1]\n",
+        ):
+            with self.subTest(text=text):
+                self._expect_error(text, "workflow.direct_publication_paths")
 
     def test_bad_blocking_severity_raises(self):
         self._expect_error(
@@ -591,6 +618,15 @@ class UnknownKeyWarningTests(unittest.TestCase):
         self.assertEqual(raw.workflow.approval_label, "reviewed:approve")
         self.assertEqual(len(warnings), 1)
         self.assertIn("workflow.not_a_real_field", warnings[0])
+
+    def test_misspelled_direct_publication_key_warns_and_grants_no_lane(self):
+        text = '[workflow]\ndirect_publication_path = ["docs/status.md"]\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(Path(tmp), text)
+            raw, warnings = kc.load_raw_config(str(path))
+        self.assertEqual(raw.workflow.direct_publication_paths, frozenset())
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("workflow.direct_publication_path", warnings[0])
 
     def test_unknown_key_inside_repository_table_warns_with_full_path(self):
         text = '[repositories."acme/widgets".workflow]\nnot_real = "x"\n'

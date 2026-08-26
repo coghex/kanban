@@ -2452,14 +2452,15 @@ human-readable answer to "which lane does this document take", and
 so placing a known document never requires reading the machine-readable table.
 
 This classification is Kanban's own. It describes this repository and nothing
-else. A consuming repository declares its own coordination paths through the
-drainer configuration key `workflow.coordination_paths`
-([pr-drainer.md](pr-drainer.md#merging-past-a-coordination-only-base-advance)),
-which ships empty — exact file paths, or whole directories through a
-trailing-slash entry matched by the same whole-component rule the rows below
-use; Kanban never infers a consuming repository's classes from
-file extension or directory, and never applies the rows below to another
-repository's tree.
+else. A consuming repository declares its own direct-publication lane through
+`workflow.direct_publication_paths`, which ships empty — exact file paths, or
+whole directories through a trailing-slash entry matched by the same
+whole-component rule the rows below use. The drainer's separate
+`workflow.coordination_paths` key
+([pr-drainer.md](pr-drainer.md#merging-past-a-coordination-only-base-advance))
+grants only its base-advance exception and never a publication lane. Kanban
+never infers a consuming repository's classes from file extension or
+directory, and never applies the rows below to another repository's tree.
 
 Machine-readable; parsed verbatim by `tools/test_document_classification.py`.
 Columns: `path | class | reasons`.

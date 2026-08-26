@@ -225,13 +225,17 @@ class ConsumingRepositoryTests(unittest.TestCase):
         return json.loads(proc.stdout) if proc.stdout.strip() else {}
 
     def declare(self, *paths):
-        """The consuming repository's own coordination lane."""
+        """The consuming repository's own direct-publication lane.
+
+        `direct_publication_paths`, never `coordination_paths`: the second is
+        the drainer's merge exception and grants no publication lane.
+        """
         target = self.config_home / "kanban" / "config.toml"
         target.parent.mkdir(parents=True, exist_ok=True)
         rendered = ", ".join(json.dumps(path) for path in paths)
         target.write_text(
             f'[repositories."{CONSUMING_REPOSITORY}".workflow]\n'
-            f"coordination_paths = [{rendered}]\n",
+            f"direct_publication_paths = [{rendered}]\n",
             encoding="utf-8",
         )
 

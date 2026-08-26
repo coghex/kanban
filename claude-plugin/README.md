@@ -237,10 +237,11 @@ copied into both bundles in the same change; the drift failure names the exact
 Eligibility does not travel with the mechanism. For `coghex/kanban` it stays
 [agent-workflow-contract.md §7](../docs/agent-workflow-contract.md#7-document-publication-classification)
 as the publication branch itself carries it; for every other repository it is
-that repository's own `workflow.coordination_paths` declaration, and declaring
-none is the ordinary `not-published` outcome — the approved mutation is still
-applied to the document, and the repository lands it through the pull-request
-lane it already has.
+that repository's own `workflow.direct_publication_paths` declaration.
+Declaring none is the ordinary `not-published` outcome — the approved mutation
+is still applied to the document, and the repository lands it through the
+pull-request lane it already has. The drainer's separate
+`workflow.coordination_paths` declaration grants no publication lane.
 
 `/issue-review` — and `/autoissue`'s immediate review handoff — resolve the
 same canonical backend the same portable way, probing the same two discovery

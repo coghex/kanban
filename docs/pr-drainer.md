@@ -779,16 +779,17 @@ than any list repeated here. Four of those rows are directories —
 and each covers every tracked Markdown file beneath it, so the documents those
 rows reach are more numerous than the rows themselves.
 
-The drainer is not the only reader. In a repository
+The drainer's `workflow.coordination_paths` declaration grants only this
+base-advance exception; it never grants a direct-publication lane. In a
+repository
 [agent-workflow-contract §7](agent-workflow-contract.md#7-document-publication-classification)
 does not classify — which is every repository but Kanban's own — the packaged
-document workflows take this same key as their direct-publication lane, so a
-path covered here is also one those workflows publish straight to the default
-branch (issue #370). That is the same statement about the same documents read
-twice, which is why it is one key: a document whose content cannot change a
-build result is a document a coordination mutation can land on its own. A
-repository that declares nothing keeps both defaults — a branch update for
-every advance, and the ordinary pull-request lane for every document.
+document workflows instead read the separate
+`workflow.direct_publication_paths` key before publishing a covered document
+straight to the default branch (issue #370). Both keys use the path grammar
+above, but neither grants the other's permission. A repository that declares
+neither keeps both defaults — a branch update for every advance, and the
+ordinary pull-request lane for every document.
 
 The drainer merges past an advance only when all of this holds:
 

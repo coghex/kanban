@@ -28,22 +28,38 @@ blocking_severity = "red"      # "red" or "amber"
 # "input"] restores the tints Kanban used to hardcode.
 problem_style_labels = []
 ui_style_labels = []
-# Paths whose content coordinates the pipeline rather than building it. The PR
-# drainer may merge a candidate whose only distance from the default branch is
-# a change to these, instead of first rebuilding it on a new base that cannot
-# change its result; and in a repository docs/agent-workflow-contract.md
-# section 7 does not classify -- which is every repository but Kanban's own --
-# the document workflows publish exactly these paths straight to the default
-# branch, leaving every other document to the ordinary pull-request lane.
-# Each entry is one case-sensitive, repository-relative path: an exact file,
-# or a directory declared with a trailing slash, which covers every descendant
-# by whole path component -- "docs/notes/" covers docs/notes/plan.md and never
-# a sibling directory such as docs/notes-old/. No globs, no string prefixes,
-# no extension matching, and a rename counts both endpoints, so a rename out
-# of a declared directory is not a covered advance. Empty by default, which
-# requests a branch update for every advance as before. Never list a document
-# a test parses -- a change to one really can fail CI.
+# Both keys below take the SAME entry grammar: one case-sensitive,
+# repository-relative path per entry -- an exact file, or a directory declared
+# with a trailing slash, which covers every descendant by whole path component
+# ("docs/notes/" covers docs/notes/plan.md and never a sibling directory such
+# as docs/notes-old/). No globs, no string prefixes, no extension matching.
+# They answer different questions, and a path in one implies nothing about the
+# other. Never list a document a test parses in either -- a change to one
+# really can fail CI.
+#
+# coordination_paths: the PR DRAINER's merge exception. The drainer may merge a
+# candidate whose only distance from the default branch is a change to these,
+# instead of first rebuilding it on a new base that cannot change its result. A
+# rename counts both endpoints, so a rename out of a declared directory is not a
+# covered advance. Empty by default, which requests a branch update for every
+# advance as before. This key grants NO publication lane.
 coordination_paths = []
+# direct_publication_paths: the AGENT PUBLICATION lane -- which documents a
+# document workflow may push straight to the default branch, unattended, in the
+# same run that approves the mutation. Read only by
+# tools/publish_coordination_doc.py, and only for a repository
+# docs/agent-workflow-contract.md section 7 does not classify, which is every
+# repository but Kanban's own; Kanban's lane comes from section 7 and
+# configuration can neither open nor close it.
+#
+# Empty by default, and leaving it out entirely is a supported, deliberate
+# configuration: a workflow whose document is not covered applies its approved
+# mutation to the working copy, records it, reports not-published, and the edits
+# accumulate for a human to land in one batch (tools/docs_land.sh). Declare a
+# path here only if you want an unattended default-branch push per approved
+# disposition -- and note that each such push is itself an advance the drainer
+# must then answer for every open approved PR.
+direct_publication_paths = []
 
 [limits]
 excerpt_lines = 3
@@ -113,6 +129,7 @@ ping_claude_seconds = 120
 # problem_style_labels = []
 # ui_style_labels = []
 # coordination_paths = []
+# direct_publication_paths = []
 
 [repositories."owner/name".limits]
 # excerpt_lines = 3

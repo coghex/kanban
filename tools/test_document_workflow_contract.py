@@ -293,8 +293,8 @@ CONTRACT_STATEMENTS = {
         "repository"
     ),
     "publication-other-owners-declare-their-own": (
-        "Every other owner declares its own lane, in the "
-        "workflow.coordination_paths key"
+        "Every other owner declares its own lane in "
+        "workflow.direct_publication_paths"
     ),
     "publication-kanban-never-consults-configuration": (
         "Kanban's own eligibility is decided from §7 as the publication tip "
@@ -566,6 +566,12 @@ PUBLICATION_CLAUSES = {
     ),
     "does-not-reimplement-the-mechanism": (
         "do not reimplement, precede, or compensate for any part of it"
+    ),
+    # Issue #526 split the publisher's declaration from the drainer's. Pin the
+    # fail-closed explanation in every publishing asset so the old key cannot
+    # silently return as the reason a consuming repository has no lane.
+    "undeclared-direct-publication-path-is-not-published": (
+        "whose workflow.direct_publication_paths does not cover it"
     ),
     "checks-the-changed-line-summary": (
         "an unintended rewrite of the rest of it changes the same single path a "
