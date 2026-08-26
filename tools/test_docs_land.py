@@ -2276,6 +2276,7 @@ PUSH_DOCS_RULES = (
     "do not ask for a second approval",
     "inspect the helper's -h output before using -l",
     "git compatibility inventory",
+    "must not misclassify upstream-only changes as local landing candidates",
     "never work around a refusal",
     "never pass -f",
 )
