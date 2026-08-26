@@ -1,0 +1,18 @@
+# The one spelling of a `path` fixture, read by test/Spec/Config/Loading.hs and
+# by tools/test_kanban_config.py. `path` is a documented key of both parsers,
+# so this file must decode through Kanban.Config and through
+# tools/kanban_config.py with an empty warning list from each; a key added on
+# one side only would make the other warn about a documented key.
+#
+# The paths below name nothing on any machine on purpose: whether a checkout
+# exists, is a Git repository, or agrees with its key is resolution's business
+# (Kanban.Repository.resolveRepositoryRoster), not the schema's.
+
+[repositories."acme/widgets"]
+path = "/srv/checkouts/widgets"
+
+[repositories."acme/widgets".workflow]
+approval_label = "ship-it"
+
+[repositories."other/repo"]
+path = "/srv/checkouts/other"

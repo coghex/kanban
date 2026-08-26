@@ -45,7 +45,12 @@ global values for that repository only. That key must be a canonical lowercase
 GitHub URL forms it always has — and anything else fails startup instead of
 sitting in the file never applying. The `owner/name` resolved from the remote
 or `--repo` is folded to lowercase to select the key, so a `Coghex/Kanban`
-clone still picks up a `coghex/kanban` override.
+clone still picks up a `coghex/kanban` override. One key under there is not an
+override: `path`, an absolute path to where that repository is checked out on
+this machine. It puts the table in the repository roster Kanban resolves at
+startup — a relative value fails startup, while a checkout that is missing or
+belongs to a different repository is only reported in the dashboard's own
+startup notice.
 
 The `[usage.codex]`/`[usage.claude]` `command` keys let a user-supplied
 executable replace the built-in Codex or Claude usage probe: when set, Kanban
