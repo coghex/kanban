@@ -531,7 +531,7 @@ def declared_publication_paths(owner: str) -> tuple[frozenset[str], list[str]]:
         declared = module.resolve_config(owner, raw).workflow.direct_publication_paths
     except Exception as error:  # noqa: BLE001 - reported, never raised bare
         raise PublishError(
-            "publication-config-unreadable",
+            "coordination-config-unreadable",
             f"the Kanban configuration declaring {owner}'s direct publication "
             f"paths could not be read ({error}); whether {owner} has a direct "
             "publication lane cannot be decided, so nothing is written or "
@@ -575,7 +575,7 @@ def eligibility(root: Path, owner: str, tip: str, document: str) -> tuple[bool, 
         invalid = config.empty_prefix_coordination_declarations(declared)
         if invalid:
             raise PublishError(
-                "publication-config-invalid",
+                "coordination-config-invalid",
                 f"{owner}'s workflow.direct_publication_paths declares "
                 f"{invalid}, whose empty component prefix would cover every "
                 "path in the repository; the declaration grants no lane, and "

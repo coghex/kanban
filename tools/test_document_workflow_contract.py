@@ -293,8 +293,8 @@ CONTRACT_STATEMENTS = {
         "repository"
     ),
     "publication-other-owners-declare-their-own": (
-        "Every other owner declares its own lane, in the "
-        "workflow.coordination_paths key"
+        "Every other owner declares its own lane in "
+        "workflow.direct_publication_paths"
     ),
     "publication-kanban-never-consults-configuration": (
         "Kanban's own eligibility is decided from §7 as the publication tip "

@@ -357,6 +357,29 @@ class CoordinationBaseAdvanceTests(unittest.TestCase):
         self.assertIsNone(approval)
         self.assertIn("both change", logged)
 
+    def test_direct_publication_paths_alone_grant_no_base_advance_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                '[workflow]\ndirect_publication_paths = ["docs/status.md"]\n',
+                encoding="utf-8",
+            )
+            raw, warnings = drain_prs.kanban_config.load_raw_config(str(path))
+        resolved = drain_prs.kanban_config.resolve_config(
+            "upstream-owner/kanban", raw
+        )
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            resolved.workflow.direct_publication_paths,
+            frozenset({"docs/status.md"}),
+        )
+        self.assertEqual(resolved.workflow.coordination_paths, frozenset())
+        approval, logged = self.decide(
+            resolved.workflow.coordination_paths, {"docs/status.md"}
+        )
+        self.assertIsNone(approval)
+        self.assertEqual(logged, "")
+
 
 class ApprovalIsNeverAddedTests(unittest.TestCase):
     """Issue #230: the drainer reads approval verdicts and never writes one.

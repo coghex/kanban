@@ -398,7 +398,8 @@ parses §2 and fails if:
 The mechanism's own behavior is not this module's subject:
 `tools/test_publish_coordination_doc.py` executes it against temporary
 repositories, and `tools/test_document_classification.py` owns §7's rows and the
-`coghex/kanban` `workflow.coordination_paths` example that mirrors them.
+`coghex/kanban` drainer-only `workflow.coordination_paths` example that
+independently mirrors them for base-advance coverage.
 
 Discovery, frontmatter, and no-personal-path coverage for these assets lives
 with the rest of each plugin's structural coverage in
@@ -541,7 +542,7 @@ Eligibility means exactly one thing: the resolved document's
 repository-relative path is declared a coordination path by the authority for
 its owner —
 [agent-workflow-contract.md §7](agent-workflow-contract.md#7-document-publication-classification)
-for `coghex/kanban`, and that repository's own `workflow.coordination_paths`
+for `coghex/kanban`, and that repository's own `workflow.direct_publication_paths`
 for every other owner, as the rest of this section sets out. **A path its own
 authority does not declare is never published directly** — `pr-atomic` is the
 fail-closed default for an unmatched path, so an unrecognized document is left
@@ -553,16 +554,19 @@ and stays unpublished.
 
 §7 is Kanban's own statement about Kanban, so it authorizes a `coordination`
 lane for `coghex/kanban` and for no other repository — a fork included. Every
-other owner declares its own lane, in the `workflow.coordination_paths` key §7
-already delegates a consuming repository's classification to: case-sensitive,
+other owner declares its own lane in `workflow.direct_publication_paths`:
+case-sensitive,
 repository-relative declarations — an exact file path, or a directory ending
 in `/` covering every descendant by whole path component, so `docs/notes/`
 declares `docs/notes/plan.md` and never a similarly prefixed sibling such as
 `docs/notes-old/plan.md` — read through the same resolved
-configuration `tools/drain_prs.py` reads, with the same global-then-repository
-merge, the same array replacement, and the same coverage predicate the
-drainer's base-advance decision uses. The two roots never mix in either
-direction. Kanban's own eligibility is decided from §7 as the publication tip
+configuration layer as the drainer's separate `workflow.coordination_paths`,
+with the same global-then-repository merge, the same array replacement, and
+the same coverage predicate. Publication reads only
+`direct_publication_paths`; `tools/drain_prs.py` reads only
+`coordination_paths`, and neither declaration grants the other's permission.
+The two roots never mix in either direction. Kanban's own eligibility is
+decided from §7 as the publication tip
 itself carries it and never from configuration, so it holds whether or not an
 operator ever copied `config.toml.example`; every other repository's is decided
 from its own declaration alone, so nothing here infers a lane from a file

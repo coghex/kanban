@@ -2220,7 +2220,7 @@ class PublishTests(PublishFixture):
             with self.assertRaises(publisher.PublishError) as caught:
                 other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
             self.assertEqual(
-                caught.exception.status, "publication-config-invalid"
+                caught.exception.status, "coordination-config-invalid"
             )
             self.assertEqual(other.remote_content(), "# UI\n\n- one")
             self.assertEqual(
@@ -2237,7 +2237,7 @@ class PublishTests(PublishFixture):
             other = Fixture.create(Path(other_dir), origin_name="synarchy")
             with self.assertRaises(publisher.PublishError) as caught:
                 other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
-            self.assertEqual(caught.exception.status, "publication-config-unreadable")
+            self.assertEqual(caught.exception.status, "coordination-config-unreadable")
             self.assertEqual(other.remote_content(), "# UI\n\n- one")
             self.assertEqual(
                 (other.docs / "docs" / "ui-bugs.md").read_text(), "# UI\n\n- one\n"

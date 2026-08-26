@@ -176,7 +176,8 @@ data WorkflowOverride = WorkflowOverride
     overrideBlockingSeverity :: Maybe BlockingSeverity,
     overrideProblemStyleLabels :: Maybe (Set Text),
     overrideUiStyleLabels :: Maybe (Set Text),
-    overrideCoordinationPaths :: Maybe (Set Text)
+    overrideCoordinationPaths :: Maybe (Set Text),
+    overrideDirectPublicationPaths :: Maybe (Set Text)
   }
   deriving stock (Eq, Show)
 
@@ -192,7 +193,8 @@ emptyWorkflowOverride =
       overrideBlockingSeverity = Nothing,
       overrideProblemStyleLabels = Nothing,
       overrideUiStyleLabels = Nothing,
-      overrideCoordinationPaths = Nothing
+      overrideCoordinationPaths = Nothing,
+      overrideDirectPublicationPaths = Nothing
     }
 
 newtype LimitsOverride = LimitsOverride
@@ -350,7 +352,9 @@ applyWorkflowOverride base override =
       blockingSeverity = fromMaybe base.blockingSeverity override.overrideBlockingSeverity,
       problemStyleLabels = fromMaybe base.problemStyleLabels override.overrideProblemStyleLabels,
       uiStyleLabels = fromMaybe base.uiStyleLabels override.overrideUiStyleLabels,
-      coordinationPaths = fromMaybe base.coordinationPaths override.overrideCoordinationPaths
+      coordinationPaths = fromMaybe base.coordinationPaths override.overrideCoordinationPaths,
+      directPublicationPaths =
+        fromMaybe base.directPublicationPaths override.overrideDirectPublicationPaths
     }
 
 applyLimitsOverride :: LimitsConfig -> LimitsOverride -> LimitsConfig
@@ -487,6 +491,7 @@ workflowOverrideParser = do
   problemStyleLabelsValue <- optKeyOf "problem_style_labels" parseLabelSet
   uiStyleLabelsValue <- optKeyOf "ui_style_labels" parseLabelSet
   coordinationPathsValue <- optKeyOf "coordination_paths" parseNonEmptyTextSet
+  directPublicationPathsValue <- optKeyOf "direct_publication_paths" parseNonEmptyTextSet
   pure
     WorkflowOverride
       { overrideApprovalLabel = approvalLabelValue,
@@ -498,7 +503,8 @@ workflowOverrideParser = do
         overrideBlockingSeverity = blockingSeverityValue,
         overrideProblemStyleLabels = problemStyleLabelsValue,
         overrideUiStyleLabels = uiStyleLabelsValue,
-        overrideCoordinationPaths = coordinationPathsValue
+        overrideCoordinationPaths = coordinationPathsValue,
+        overrideDirectPublicationPaths = directPublicationPathsValue
       }
 
 limitsOverrideParser :: ParseTable Position LimitsOverride

@@ -63,7 +63,8 @@ spec = do
             blockingSeverity = SeverityAmber,
             problemStyleLabels = Set.fromList ["defect"],
             uiStyleLabels = Set.fromList ["interface", "input"],
-            coordinationPaths = Set.fromList ["docs/status.md", "ROADMAP.md"]
+            coordinationPaths = Set.fromList ["docs/status.md", "ROADMAP.md"],
+            directPublicationPaths = Set.fromList ["docs/published.md", "REPORT.md"]
           }
       config.rawLimits `shouldBe` LimitsConfig 5
       config.rawTimeouts `shouldBe` TimeoutsConfig 60 20 90 130 140
@@ -83,6 +84,8 @@ spec = do
           resolved = resolveConfig "coghex/kanban" config
       resolved.resolvedWorkflow.approvalLabel `shouldBe` "ship-it"
       resolved.resolvedWorkflow.changesRequestedLabel `shouldBe` "needs-work"
+      resolved.resolvedWorkflow.directPublicationPaths
+        `shouldBe` Set.fromList ["docs/kanban-published.md"]
       resolved.resolvedLimits `shouldBe` LimitsConfig 7
       resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90 130 150
       resolved.resolvedCache `shouldBe` False
@@ -194,6 +197,23 @@ spec = do
       (resolveConfig "acme/widgets" config).resolvedWorkflow.coordinationPaths
         `shouldBe` Set.fromList ["docs/widgets.md"]
 
+    it "defaults direct-publication paths to empty and applies the usual repository replacement" $ do
+      let (defaults, defaultWarnings) = unsafeConfig (decodeConfigText "[workflow]\napproval_label = \"lgtm\"\n")
+          toml =
+            "[workflow]\n"
+              <> "direct_publication_paths = [\"docs/published.md\", \"REPORT.md\"]\n"
+              <> "[repositories.\"acme/widgets\".workflow]\n"
+              <> "direct_publication_paths = [\"docs/widgets.md\"]\n"
+          (config, warnings) = unsafeConfig (decodeConfigText toml)
+      defaultWarnings `shouldBe` []
+      defaultWorkflowConfig.directPublicationPaths `shouldBe` Set.empty
+      (resolveConfig "other/repo" defaults).resolvedWorkflow.directPublicationPaths `shouldBe` Set.empty
+      warnings `shouldBe` []
+      (resolveConfig "other/repo" config).resolvedWorkflow.directPublicationPaths
+        `shouldBe` Set.fromList ["docs/published.md", "REPORT.md"]
+      (resolveConfig "acme/widgets" config).resolvedWorkflow.directPublicationPaths
+        `shouldBe` Set.fromList ["docs/widgets.md"]
+
     it "rejects an invalid coordination-path value the way every other string array is rejected" $ do
       decodeConfigText "[workflow]\ncoordination_paths = [\"\"]\n"
         `shouldSatisfy` errorContains ["workflow", "coordination_paths"]
@@ -201,6 +221,14 @@ spec = do
         `shouldSatisfy` errorContains ["workflow", "coordination_paths"]
       decodeConfigText "[workflow]\ncoordination_paths = [1]\n"
         `shouldSatisfy` errorContains ["workflow", "coordination_paths"]
+
+    it "rejects invalid direct-publication paths with the full key" $ do
+      decodeConfigText "[workflow]\ndirect_publication_paths = [\"\"]\n"
+        `shouldSatisfy` errorContains ["workflow", "direct_publication_paths"]
+      decodeConfigText "[workflow]\ndirect_publication_paths = \"docs/status.md\"\n"
+        `shouldSatisfy` errorContains ["workflow", "direct_publication_paths"]
+      decodeConfigText "[workflow]\ndirect_publication_paths = [1]\n"
+        `shouldSatisfy` errorContains ["workflow", "direct_publication_paths"]
 
     it "rejects an empty label-styling entry the same way every other label list does" $ do
       decodeConfigText "[workflow]\nproblem_style_labels = [\"\"]\n"
@@ -280,6 +308,12 @@ spec = do
     it "warns, rather than fails, on an unrecognized key while still loading" $ do
       let (_, warnings) = unsafeConfig (decodeConfigText "[workflow]\nunexpected_field = 1\n")
       Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "unexpected_field"
+      Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "workflow"
+
+    it "warns on a misspelled direct-publication key rather than accepting it" $ do
+      let (config, warnings) = unsafeConfig (decodeConfigText "[workflow]\ndirect_publication_path = [\"docs/status.md\"]\n")
+      config.rawWorkflow.directPublicationPaths `shouldBe` Set.empty
+      Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "direct_publication_path"
       Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "workflow"
 
     -- The open-connection caps are gone from the schema, so a file that still

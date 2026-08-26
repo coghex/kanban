@@ -143,8 +143,8 @@ CONTRACT_STATEMENTS = {
     "unknown-is-never-direct-master": "never direct-master eligible",
     "classification-is-kanbans-own": "This classification is Kanban's own",
     "consumer-declares-its-own": (
-        "A consuming repository declares its own coordination paths through the "
-        "drainer configuration key workflow.coordination_paths"
+        "A consuming repository declares its own direct-publication lane through "
+        "workflow.direct_publication_paths"
     ),
     "no-inference-for-consumers": (
         "Kanban never infers a consuming repository's classes from file extension "

@@ -499,13 +499,20 @@ data WorkflowConfig = WorkflowConfig
     -- whose only distance from the default branch is a change to covered
     -- paths. Nothing in the dashboard reads them, and they default to empty,
     -- so a repository that configures nothing keeps today's behavior.
-    coordinationPaths :: Set Text
+    coordinationPaths :: Set Text,
+    -- | The separate direct-publication declaration carried by the shared
+    -- configuration schema. The dashboard does not publish documents, but it
+    -- must accept and preserve this key so every Haskell and Python consumer
+    -- resolves the same configuration without spurious unknown-key warnings.
+    -- It has the same path grammar and empty default as 'coordinationPaths',
+    -- but grants no drainer base-advance exception.
+    directPublicationPaths :: Set Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
 
 -- | Manual instance so a durable record written before the display-only
--- styling collections — or the drainer's coordination paths — existed still
+-- styling collections or either workflow-path collection existed still
 -- decodes: a worker spec persists a whole 'WorkflowConfig' (see
 -- 'Kanban.Worker.WorkerSpec'), and a legacy one simply has no opinion about
 -- either, which is exactly the empty default.
@@ -522,6 +529,7 @@ instance FromJSON WorkflowConfig where
       <*> object .:? "problemStyleLabels" .!= Set.empty
       <*> object .:? "uiStyleLabels" .!= Set.empty
       <*> object .:? "coordinationPaths" .!= Set.empty
+      <*> object .:? "directPublicationPaths" .!= Set.empty
 
 defaultWorkflowConfig :: WorkflowConfig
 defaultWorkflowConfig =
@@ -535,7 +543,8 @@ defaultWorkflowConfig =
       blockingSeverity = SeverityRed,
       problemStyleLabels = Set.empty,
       uiStyleLabels = Set.empty,
-      coordinationPaths = Set.empty
+      coordinationPaths = Set.empty,
+      directPublicationPaths = Set.empty
     }
 
 itemId :: BoardItem -> ItemId
