@@ -173,13 +173,15 @@ A refresh is where a stale approval marker does its damage. The roadmap being
 edited already carries markers, and carrying them forward re-asserts a
 readiness nothing has confirmed since — against a specification no reviewer
 saw. So every marker in the answer is recomputed on this run. None is copied
-from the previous roadmap, and none is read off an issue's labels.
+from the previous roadmap. Outside /triage's busy-lock fallback, none is
+read off an issue's labels; during that fallback, label-backed markers are
+recomputed from the verified-complete issue snapshot rather than carried over.
 
 /triage's **Approval Readiness** section is the whole rule: which label
-is a candidate rather than proof, what each reconciliation `outcome` renders
-as, and why a candidate label never earns a marker on its own. Read it and
-apply it as written; this section adds only the two things a refresh needs on
-top of it.
+is normally a candidate rather than proof, what each reconciliation `outcome`
+renders as, and why a top-level `busy` result is the one label-backed fallback.
+Read it and apply it as written; this section adds only the two things a refresh
+needs on top of it.
 
 Resolve the backend's install location the same way `Kanban.Review.resolveCanonicalIssueReviewer` does rather than a path relative to the repository being retriaged or any other personal path. The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path `tools/install_issue_review.py` recorded at a fixed location `--install-dir` cannot move, then — only when that record names none, which is how an installation predating the record looks — the directory the record itself lives in. That record has two locations, probed in one order on every platform: the XDG data directory's first, then `~/Library`'s. Whichever one exists is the installation, so no step here decides which platform it is on; when neither exists the XDG candidate supplies the answer and the diagnostic names both:
 
@@ -228,22 +230,29 @@ Then reconcile every candidate in **one** invocation, passing no issue numbers s
 python3 "$BACKEND" --path "$(git rev-parse --show-toplevel)" --repo "$REPO" --reconcile-approvals --legacy-policy dual --json
 ```
 
-One invocation, not one per issue: the backend takes the canonical approval lock at most once for the whole call, and selection is its own because only it has resolved the configured `approval_label`. The returned document names that label; use it when reporting, and treat every issue it reports as the complete candidate set. Do not follow it with a per-issue `--check` for an issue it already answered — two separate calls reopen the read-then-decide window the lock exists to close.
+One invocation, not one per issue: the backend takes the canonical approval lock at most once for the whole call, and selection is its own because only it has resolved the configured `approval_label`. The returned document names that label; use it when reporting. For a completed reconciliation, treat every issue it reports as the complete candidate set. For a top-level `busy` result, use /triage's verified-snapshot fallback instead of treating the empty `issues` array as the candidate set. Do not follow either result with a per-issue `--check` — two separate calls reopen the read-then-decide window the lock exists to close.
 
 Render each entry exactly as /triage's outcome table prescribes,
-including its `[needs canonical review]` and `[approval unverified]` notes. The
-refresh-specific consequence is subtraction: strip any marker the previous
-roadmap carried for an issue this document does not report as approved right
-now, and say so in the `Delta` line when the user asked what changed.
+including its `[needs canonical review]` and `[approval unverified]` notes. For
+a completed reconciliation, the refresh-specific consequence is subtraction:
+strip any marker the previous roadmap carried for an issue this document does
+not report as approved right now. For a top-level `busy` result, strip the old
+markers and then recompute them from the snapshot's exact `approval_label`
+matches. Say so in the `Delta` line when the user asked what changed.
 
-**Fail closed.** A missing or unresolvable backend, a `"busy"` document from
-lock contention, a GitHub read or write failure, a malformed document, or an
-unverifiable post-mutation state each mean what that section says they mean:
-render no approval marker for the affected issues, claim no successful
-removal, and mark each one `[approval unverified]` with the reason. The
-previous roadmap's marker is not a fallback — a run that could not verify
-drops it rather than carrying it, and never presents an unverified issue as
-ready to solve.
+**Busy lock.** Apply /triage's busy-lock fallback exactly: the current
+snapshot label, not the previous roadmap's marker, supplies each `✓`; do not
+retry, do not add `[approval unverified]` merely because the lock is busy, and
+claim no successful reconciliation or stale-label removal.
+
+**Fail closed outside the busy fallback.** A missing or unresolvable backend,
+a GitHub read or write failure, a malformed document, an invalid or missing
+`approval_label` in a busy document, or an unverifiable post-mutation state
+means what /triage says it means: render no approval marker for the
+affected issues, claim no successful removal, and mark each one
+`[approval unverified]` with the reason. The previous roadmap's marker is not a
+fallback — a run that could not verify drops it rather than carrying it, and
+never presents an unverified issue as ready to solve.
 
 ## Blank-Line Rules
 
@@ -286,9 +295,11 @@ itself:
   a snapshot that did not pass.
 - Confirm every previously listed issue that is now closed or otherwise not
   open is removed.
-- Confirm no approval marker was carried over: every one in the answer traces
-  to an entry of this run's reconciliation document, and every issue that
-  document did not report as approved right now has lost the marker it had.
+- Confirm no approval marker was carried over: every one in the answer was
+  recomputed from either an approved entry in this run's reconciliation
+  document or, only for a top-level `busy` result, an exact current-snapshot
+  match for that document's `approval_label`; every other prior marker was
+  removed.
 - Confirm every retained issue kept its previous relative position unless a
   rule in step 8 moved it, and that a difficulty estimate changed only where
   the issue's body or scope changed materially.

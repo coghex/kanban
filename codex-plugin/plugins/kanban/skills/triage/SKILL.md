@@ -70,7 +70,7 @@ gh issue view -R "$REPO" <number> --json number,title,state,closedAt,body,labels
 8. Build the Main Sequence dependency groups and the Anytime priority order using the rules below.
 9. Estimate every issue's implementation difficulty as `easy`, `medium`, or `hard` using the rubric below.
 10. Before final output, verify the classification covers every issue in the verified-complete open-issue snapshot, exactly once and with no duplicates.
-11. Verify approval readiness through the canonical backend, as **Approval Readiness** below specifies, and mark only confirmed-current approvals with `✓`. Put the marker immediately after the title and before any bracket note. This is display-only: it does not affect ordering, classification, in-flight status, or `Start with` eligibility.
+11. Verify approval readiness through the canonical backend, as **Approval Readiness** below specifies. Mark confirmed-current approvals with `✓`; when reconciliation is busy, use the label-backed fallback defined there. Put the marker immediately after the title and before any bracket note. This is display-only: it does not affect ordering, classification, in-flight status, or `Start with` eligibility.
 
 ## Complete Snapshots
 
@@ -114,7 +114,7 @@ warning.
 
 ## Approval Readiness
 
-A raw approval label is a **candidate**, not proof. Canonical approval binds an issue to the fingerprint of its current specification through the latest `issue-review:v2` marker, and nothing removes the label when that specification then changes — so a label alone can advertise readiness against a specification no reviewer ever saw. Render `✓` only for an issue the canonical backend confirms is approved right now.
+A raw approval label is normally a **candidate**, not proof. Canonical approval binds an issue to the fingerprint of its current specification through the latest `issue-review:v2` marker, and nothing removes the label when that specification then changes — so a label alone can advertise readiness against a specification no reviewer ever saw. Render `✓` for an issue the canonical backend confirms is approved right now, except for the explicit busy-lock fallback below.
 
 Which label that is belongs to the repository, not to this workflow. `reviewed:approve` is only the default: a repository may configure `workflow.approval_label` to something else, and a workflow that hard-coded the default would quietly reconcile nothing there and go on rendering the stale readiness this section exists to stop. So never name a candidate label here — ask the backend, which has already resolved the configured one, and read the label it reports back.
 
@@ -165,7 +165,7 @@ Then reconcile every candidate in **one** invocation, passing no issue numbers s
 python3 "$BACKEND" --path "$(git rev-parse --show-toplevel)" --repo "$REPO" --reconcile-approvals --legacy-policy dual --json
 ```
 
-Selection is the backend's because the candidate set is defined by the configured approval label it has already resolved, and because a set chosen before the lock could change before any decision runs. The returned document names that label in `approval_label`; use it when reporting, and treat every issue it reports as the complete candidate set.
+Selection is the backend's because the candidate set is defined by the configured approval label it has already resolved, and because a set chosen before the lock could change before any decision runs. The returned document names that label in `approval_label`; use it when reporting. For a completed reconciliation, treat every issue it reports as the complete candidate set. A top-level `busy` result is the exception described below: it reports no reconciled candidate entries, so its display fallback uses the verified-complete issue snapshot instead.
 
 One invocation, not one per issue: the backend takes the canonical approval lock at most once for the whole call, so a pass costs one process and one acquisition rather than one of each per candidate.
 
@@ -182,7 +182,9 @@ Read each entry of the returned document and render from it. Do **not** issue a 
 
 `current` with `approved` false is **not** a stale approval. The gate also refuses for reasons that leave the marker perfectly current — a blocking pipeline incident, an issue that is no longer open, or a present `reviewed:changes` label — and the backend deliberately mutates nothing in those cases. Report the entry's own `reasons`; do not describe such an issue as requiring canonical review.
 
-**Fail closed.** A missing or unresolvable backend, a `"busy"` document from lock contention, a GitHub read or write failure, a malformed document, or an unverifiable post-mutation state each mean the same thing: render no `✓` for the affected issues, claim no successful removal, and mark each one `[approval unverified]` with the reason. Never fall back to reading the raw label as readiness, and never present an unverified issue as ready to solve.
+**Busy-lock fallback.** If the returned document has top-level `outcome: "busy"`, do not retry and do not treat its empty `issues` array as an empty candidate set. When `approval_label` is a non-empty string, render `✓` for every issue in the verified-complete open-issue snapshot carrying that exact label. Do not add `[approval unverified]` to those label-backed entries. Issues without the label receive no `✓`. The answer may say once that reconciliation was busy and the displayed checkmarks reflect the current labels, but do not repeat that note on every issue. Claim no successful reconciliation or stale-label removal: the backend mutated nothing. This is the only case where the current approval label itself earns `✓`.
+
+**Fail closed outside the busy fallback.** A missing or unresolvable backend, a GitHub read or write failure, a malformed document, an invalid or missing `approval_label` in a busy document, or an unverifiable post-mutation state each mean the same thing: render no `✓` for the affected issues, claim no successful removal, and mark each one `[approval unverified]` with the reason. Never fall back to a guessed or hard-coded approval label, and never present an unverified issue as ready to solve.
 
 ## Ordering Heuristics
 
@@ -323,7 +325,7 @@ Important formatting rules:
 - Use `A01`, `A02` numbering in `Anytime List`.
 - Use `T01`, `T02` numbering in `Tracker Issues`.
 - Preserve issue numbers and concise titles.
-- Append `✓` only to an issue the canonical backend confirmed approved right now, immediately after its title and before bracket notes. A raw approval label never earns one on its own, whatever the repository configured it to be; see **Approval Readiness**.
+- Append `✓` immediately after the title and before bracket notes. Normally it requires a reconciliation entry whose `approved` is true. When reconciliation returns top-level `busy`, the exact configured approval label reported by that document earns `✓` through the busy-lock fallback; see **Approval Readiness**.
 - Append exactly one difficulty marker, `[easy]`, `[medium]`, or `[hard]`, after the title/checkmark and before status or placement notes.
 - Append `[assigned: @login]` for every assigned issue, listing all assignees when there is more than one. Also retain any applicable `[in-flight: PR #NNN]` and `[wip]` notes.
 - Do not include URLs unless asked.
@@ -336,7 +338,8 @@ Important formatting rules:
 Before answering:
 
 - Confirm both listings passed their completeness check before anything was classified from either, and that every open issue number the verified-complete snapshot returned appears once across the three lists.
-- Confirm every `✓` is backed by a reconciliation entry whose `approved` is true, and that no issue carries one on the strength of its label alone.
+- Confirm every `✓` is backed either by a reconciliation entry whose `approved` is true or, only for a top-level `busy` result, by the issue carrying the exact `approval_label` reported by that document in the verified-complete snapshot.
+- For a top-level `busy` result, confirm every snapshot issue carrying the reported approval label has `✓`, no unlabeled issue has `✓`, and no label-backed entry is marked `[approval unverified]` merely because the lock was busy.
 - Confirm every candidate the backend reported as `removed` or `unverified` is rendered without `✓` and carries its `[needs canonical review]` or `[approval unverified]` note, and that no such issue is presented as ready to solve or chosen as `Start with`.
 - Confirm every issue has exactly one valid difficulty marker.
 - Confirm every issue with assignees lists every current assignee, every unassigned issue lacks an assignment note, and no assigned/in-flight issue is `Start with`.
