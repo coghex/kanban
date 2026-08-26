@@ -4,13 +4,20 @@ module Spec.Config.Loading (spec) where
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text
+import qualified Data.Text.IO
 import Kanban.Config
 import Kanban.Domain
-import Kanban.Repository (resolveRepository)
+import Kanban.Repository
+  ( RepositoryRoster (..),
+    RosterEntry (..),
+    resolveRepository,
+    resolveRepositoryRoster,
+    rosterDegradationNotices,
+  )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (errorContains, isLeftText, isRight, rejectsWithGuidance, unsafeConfig)
 import Spec.Support.Fixtures (fullFixtureToml)
-import System.Directory (doesFileExist)
+import System.Directory (canonicalizePath, createDirectory, doesFileExist)
 import System.FilePath (isAbsolute, (</>))
 import System.Process (readProcessWithExitCode)
 import Test.Hspec
@@ -385,3 +392,164 @@ spec = do
           Right repository -> do
             repository.repositoryOwner `shouldBe` "coghex"
             repository.repositoryName `shouldBe` "kanban"
+
+  describe "repository roster" $ do
+    -- Requirement 1 and the schema-parity assertion in one place: the fixture
+    -- is a tracked file rather than a literal, because the same bytes have to
+    -- decode through `tools/kanban_config.py` with an empty warning list too
+    -- (`tools/test_kanban_config.py`). A `path` known to one parser only would
+    -- make the other warn about a documented key.
+    it "decodes the shared path fixture with no warnings and carries every declared checkout" $ do
+      fixture <- Data.Text.IO.readFile rosterFixturePath
+      let (config, warnings) = unsafeConfig (decodeConfigText fixture)
+      warnings `shouldBe` []
+      configuredRepositoryPaths config
+        `shouldBe` [ ("acme/widgets", "/srv/checkouts/widgets"),
+                     ("other/repo", "/srv/checkouts/other")
+                   ]
+      -- `path` sits beside the override tables rather than replacing them.
+      (resolveConfig "acme/widgets" config).resolvedWorkflow.approvalLabel `shouldBe` "ship-it"
+
+    -- Requirement 2, and the review's clarification that the string is judged
+    -- as written: nothing here expands `~`, so `~/work/repo` is a non-absolute
+    -- value rather than a home-relative one.
+    it "rejects a non-absolute path at load time, naming the full key path" $ do
+      let rejects value =
+            decodeConfigText ("[repositories.\"acme/widgets\"]\npath = " <> value <> "\n")
+              `shouldSatisfy` errorContains ["repositories.\"acme/widgets\".path"]
+      mapM_ rejects ["\"work/repo\"", "\"./work/repo\"", "\"../repo\"", "\"~/work/repo\"", "\"\""]
+      decodeConfigText "[repositories.\"acme/widgets\"]\npath = \"/srv/checkouts/widgets\"\n"
+        `shouldSatisfy` isRight
+
+    -- Requirement 3's second half: a table that sets no `path` keeps its
+    -- present meaning as an override for whichever repository the session
+    -- opens, so no existing configuration gains a roster entry on upgrade.
+    -- `fullFixtureToml` is exactly such a file.
+    it "gives a table without a path no roster entry" $ do
+      let (config, _) = unsafeConfig (decodeConfigText fullFixtureToml)
+      configuredRepositoryPaths config `shouldBe` []
+      Map.keys config.rawRepositories `shouldBe` ["coghex/kanban", "other/repo"]
+
+    -- Requirement 3's first half, with the review's clarification that a valid
+    -- entry is exercised against a remote differing from its key by ASCII case
+    -- alone: that is one repository, so the checkout stays usable and the
+    -- config key stays the identity.
+    it "resolves a configured entry whose remote differs from its key only by case" $
+      withTemporaryCacheRoot $ \root -> do
+        checkout <- gitCheckout root "widgets" "https://github.com/Acme/Widgets.git"
+        roster <- resolveRepositoryRoster "origin" [("acme/widgets", checkout)] (launchRepository root)
+        canonicalCheckout <- canonicalizePath checkout
+        map rosterEntryIdentity roster.rosterEntries `shouldBe` ["coghex/kanban", "acme/widgets"]
+        map rosterEntryCheckout roster.rosterEntries
+          `shouldBe` [Just (launchRepository root).repositoryRoot, Just canonicalCheckout]
+        rosterDegradationNotices roster `shouldBe` []
+
+    -- Requirement 5, with the review's correction that "absent" means the
+    -- declared target is missing rather than the key being omitted. Requirement
+    -- 6's "startup never refuses to launch" is the `Just` roster itself: this
+    -- returns a roster rather than an error.
+    it "keeps an entry whose path resolves to nothing, with no usable checkout" $
+      withTemporaryCacheRoot $ \root -> do
+        let absent = root </> "not-a-directory"
+        roster <- resolveRepositoryRoster "origin" [("acme/widgets", absent)] (launchRepository root)
+        map rosterEntryIdentity roster.rosterEntries `shouldBe` ["coghex/kanban", "acme/widgets"]
+        map rosterEntryCheckout roster.rosterEntries
+          `shouldBe` [Just (launchRepository root).repositoryRoot, Nothing]
+        case rosterDegradationNotices roster of
+          [notice] -> do
+            notice `shouldSatisfy` Data.Text.isInfixOf "repositories.\"acme/widgets\""
+            notice `shouldSatisfy` Data.Text.isInfixOf (Data.Text.pack absent)
+          notices -> expectationFailure ("expected one notice, got " <> show notices)
+
+    -- Requirement 4: the key wins. A mistyped key must not silently produce a
+    -- roster member for a repository the configuration never named.
+    it "keeps an entry whose checkout disagrees with its key, keyed by the key" $
+      withTemporaryCacheRoot $ \root -> do
+        checkout <- gitCheckout root "widgets" "https://github.com/other/repo.git"
+        roster <- resolveRepositoryRoster "origin" [("acme/widgets", checkout)] (launchRepository root)
+        map rosterEntryIdentity roster.rosterEntries `shouldBe` ["coghex/kanban", "acme/widgets"]
+        map rosterEntryCheckout roster.rosterEntries
+          `shouldBe` [Just (launchRepository root).repositoryRoot, Nothing]
+        case rosterDegradationNotices roster of
+          [notice] -> do
+            notice `shouldSatisfy` Data.Text.isInfixOf "repositories.\"acme/widgets\""
+            notice `shouldSatisfy` Data.Text.isInfixOf "other/repo"
+          notices -> expectationFailure ("expected one notice, got " <> show notices)
+
+    -- The review's clarification that the notice carries a diagnostic for
+    -- every degraded identity, not merely the first one found.
+    it "reports one notice fragment per degraded entry" $
+      withTemporaryCacheRoot $ \root -> do
+        mismatched <- gitCheckout root "widgets" "https://github.com/other/repo.git"
+        let absent = root </> "not-a-directory"
+        roster <-
+          resolveRepositoryRoster
+            "origin"
+            [("acme/widgets", mismatched), ("zed/tools", absent)]
+            (launchRepository root)
+        map rosterEntryIdentity roster.rosterEntries
+          `shouldBe` ["coghex/kanban", "acme/widgets", "zed/tools"]
+        let notices = rosterDegradationNotices roster
+        length notices `shouldBe` 2
+        zip notices ["acme/widgets", "zed/tools"]
+          `shouldSatisfy` all (\(notice, key) -> Data.Text.isInfixOf key notice)
+
+    -- Requirement 3's "always a member" and requirement 8's unchanged session:
+    -- with nothing configured the roster is exactly the launch repository.
+    it "resolves to the launch repository alone when nothing is configured" $
+      withTemporaryCacheRoot $ \root -> do
+        configuredRepositoryPaths defaultRawConfig `shouldBe` []
+        roster <- resolveRepositoryRoster "origin" [] (launchRepository root)
+        roster.rosterEntries
+          `shouldBe` [ RosterEntry
+                         { rosterEntryIdentity = "coghex/kanban",
+                           rosterEntryCheckout = Just (launchRepository root).repositoryRoot,
+                           rosterEntryDiagnostic = Nothing
+                         }
+                     ]
+        rosterDegradationNotices roster `shouldBe` []
+
+    -- Requirement 7: the launch checkout wins, silently, and membership folds
+    -- ASCII case -- a `Coghex/Kanban` clone and a `coghex/kanban` entry are one
+    -- entry. The configured path is a real checkout of a different repository,
+    -- so an entry resolved from it would be visible either as a second member
+    -- or as a degradation notice; neither appears.
+    it "gives the launch checkout the collision with its own configured entry" $
+      withTemporaryCacheRoot $ \root -> do
+        elsewhere <- gitCheckout root "elsewhere" "https://github.com/other/repo.git"
+        let launch = (launchRepository root) {repositoryOwner = "Coghex", repositoryName = "Kanban"}
+        roster <- resolveRepositoryRoster "origin" [("coghex/kanban", elsewhere)] launch
+        roster.rosterEntries
+          `shouldBe` [ RosterEntry
+                         { rosterEntryIdentity = "Coghex/Kanban",
+                           rosterEntryCheckout = Just launch.repositoryRoot,
+                           rosterEntryDiagnostic = Nothing
+                         }
+                     ]
+        rosterDegradationNotices roster `shouldBe` []
+
+-- | The tracked fixture both configuration parsers decode, relative to the
+-- repository root the suite runs from -- the same way
+-- @Spec.Agent.Capture@ reaches its own fixture.
+rosterFixturePath :: FilePath
+rosterFixturePath = "test" </> "fixtures" </> "repository-roster.toml"
+
+-- | A stand-in for the checkout the session was launched from. Roster
+-- resolution never runs git against it: it is already resolved by the time
+-- the roster is built, which is what requirement 7's collision rule rests on.
+launchRepository :: FilePath -> Repository
+launchRepository root =
+  Repository
+    { repositoryRoot = root </> "launch",
+      repositoryOwner = "coghex",
+      repositoryName = "kanban"
+    }
+
+-- | A temporary checkout with one @origin@ naming the given remote.
+gitCheckout :: FilePath -> FilePath -> String -> IO FilePath
+gitCheckout root name remote = do
+  let checkout = root </> name
+  createDirectory checkout
+  _ <- readProcessWithExitCode "git" ["-C", checkout, "init", "--quiet"] ""
+  _ <- readProcessWithExitCode "git" ["-C", checkout, "remote", "add", "origin", remote] ""
+  pure checkout

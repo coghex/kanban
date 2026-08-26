@@ -26,6 +26,8 @@ module Kanban.Config
     resolveConfig,
     resolveGlobalConfig,
     repositoryIdentity,
+    asciiLowercase,
+    configuredRepositoryPaths,
     resolveConfigPathOption,
     usageSolveRoundEstimate,
     usageSolveRoundEstimates,
@@ -53,7 +55,7 @@ import Kanban.Domain
     defaultWorkflowConfig,
   )
 import System.Directory (XdgDirectory (XdgConfig), doesFileExist, getXdgDirectory, makeAbsolute)
-import System.FilePath ((</>))
+import System.FilePath (isAbsolute, (</>))
 import Toml
   ( Position,
     Result (..),
@@ -229,11 +231,15 @@ emptyTimeoutsOverride =
 
 -- | A single '[repositories."owner/name"]' table. Only workflow, limits, and
 -- timeouts may be overridden per repository; 'cache', 'remote_name', and
--- 'usage' are global-only and rejected here.
+-- 'usage' are global-only and rejected here. The fourth key, 'path', is not
+-- an override at all: it declares where this repository is checked out on
+-- this machine, and is what makes the table a member of the repository
+-- roster ('configuredRepositoryPaths').
 data RepositoryOverride = RepositoryOverride
   { repositoryOverrideWorkflow :: WorkflowOverride,
     repositoryOverrideLimits :: LimitsOverride,
-    repositoryOverrideTimeouts :: TimeoutsOverride
+    repositoryOverrideTimeouts :: TimeoutsOverride,
+    repositoryOverridePath :: Maybe FilePath
   }
   deriving stock (Eq, Show)
 
@@ -242,7 +248,8 @@ emptyRepositoryOverride =
   RepositoryOverride
     { repositoryOverrideWorkflow = emptyWorkflowOverride,
       repositoryOverrideLimits = emptyLimitsOverride,
-      repositoryOverrideTimeouts = emptyTimeoutsOverride
+      repositoryOverrideTimeouts = emptyTimeoutsOverride,
+      repositoryOverridePath = Nothing
     }
 
 -- | The fully decoded configuration file: global defaults plus every
@@ -289,6 +296,25 @@ data ResolvedConfig = ResolvedConfig
 -- GitHub queries, cache paths, and display built from it.
 repositoryIdentity :: Text -> Text -> Text
 repositoryIdentity owner name = owner <> "/" <> name
+
+-- | The configured half of the repository roster: exactly the
+-- @[repositories."owner\/name"]@ tables that set a @path@, each paired with
+-- the absolute checkout the parser already accepted, in canonical key order.
+--
+-- A table that sets no @path@ contributes nothing here and keeps its present
+-- meaning -- an override table for whichever repository the session opens --
+-- so no existing configuration gains a roster entry on upgrade.  The keys
+-- are canonical lowercase by construction ('isCanonicalRepositoryKey'), and
+-- each one is the identity its entry is keyed, queried, and reported under;
+-- 'Kanban.Repository.resolveRepositoryRoster' is what turns this list into a
+-- roster, and the launch checkout's own membership is its business rather
+-- than the configuration's.
+configuredRepositoryPaths :: RawConfig -> [(Text, FilePath)]
+configuredRepositoryPaths raw =
+  [ (key, path)
+    | (key, override) <- Map.toList raw.rawRepositories,
+      Just path <- [override.repositoryOverridePath]
+  ]
 
 -- | ASCII-only case folding.  'Data.Text.toLower' would apply Unicode
 -- mappings that @tools\/kanban_config.py@ need not reproduce; under this
@@ -597,13 +623,35 @@ repositoryOverrideParser = do
   workflowOverride <- optKeyOf "workflow" (parseTableFromValue workflowOverrideParser)
   limitsOverride <- optKeyOf "limits" (parseTableFromValue limitsOverrideParser)
   timeoutsOverride <- optKeyOf "timeouts" (parseTableFromValue timeoutsOverrideParser)
+  checkoutPath <- optKeyOf "path" parseCheckoutPath
   mapM_ forbidRepositoryKey ["cache", "remote_name", "usage"]
   pure
     RepositoryOverride
       { repositoryOverrideWorkflow = fromMaybe emptyWorkflowOverride workflowOverride,
         repositoryOverrideLimits = fromMaybe emptyLimitsOverride limitsOverride,
-        repositoryOverrideTimeouts = fromMaybe emptyTimeoutsOverride timeoutsOverride
+        repositoryOverrideTimeouts = fromMaybe emptyTimeoutsOverride timeoutsOverride,
+        repositoryOverridePath = checkoutPath
       }
+
+-- | A roster @path@ names one checkout on this machine, and is validated as
+-- the literal string the file carries -- before any expansion or resolution,
+-- so @~\/work\/repo@ is a non-absolute value rather than a home-relative
+-- one, because nothing here expands it.  A relative value has no defensible
+-- meaning to degrade into: the file is read from a fixed XDG location but
+-- consumed by workers running from other directories, so the same file would
+-- name different checkouts depending on where kanban was launched --
+-- exactly the hazard 'resolveConfigPathOption' documents for @--config@.
+-- That is why this is the one roster mistake that is a load-time error
+-- rather than a degraded entry (section 16).  Everything else about the
+-- path -- whether it exists, is a Git checkout, or agrees with the key --
+-- is resolution's business, not the schema's.
+parseCheckoutPath :: Value' l -> Matcher l FilePath
+parseCheckoutPath value = do
+  text <- parseNonEmptyText value
+  let candidate = Text.unpack text
+  if isAbsolute candidate
+    then pure candidate
+    else failAt (valueAnn value) "must be an absolute path to a checkout"
 
 forbidRepositoryKey :: Text -> ParseTable Position ()
 forbidRepositoryKey key = do

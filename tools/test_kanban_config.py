@@ -12,6 +12,12 @@ from unittest import mock
 import kanban_config as kc
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# The one spelling of a `path` fixture, shared with test/Spec/Config/Loading.hs.
+ROSTER_FIXTURE_PATH = REPO_ROOT / "test" / "fixtures" / "repository-roster.toml"
+
+
 def write(tmp: Path, text: str) -> Path:
     path = tmp / "config.toml"
     path.write_text(text, encoding="utf-8")
@@ -557,6 +563,60 @@ class RepositoryGlobalOnlyKeyTests(unittest.TestCase):
             '[repositories."acme/widgets".usage]\n',
             'repositories."acme/widgets".usage',
         )
+
+
+class RepositoryRosterPathTests(unittest.TestCase):
+    """Kanban.Config's `path` key, mirrored here so the shared schema stays one
+    schema: a documented key must not warn as unknown on either side. Nothing
+    in Python reads a roster path -- the dashboard resolves the roster -- but
+    the loader has to decode it rather than warn about it."""
+
+    def test_the_shared_fixture_loads_with_no_warnings_from_this_parser(self):
+        # Spec.Config.Loading decodes this same file through Kanban.Config and
+        # asserts the same empty warning list. A `path` known to one parser
+        # only would make the other warn about a documented key.
+        raw, warnings = kc.load_raw_config(str(ROSTER_FIXTURE_PATH))
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            {key: override.path for key, override in raw.repositories.items()},
+            {
+                "acme/widgets": "/srv/checkouts/widgets",
+                "other/repo": "/srv/checkouts/other",
+            },
+        )
+        # `path` sits beside the override tables rather than replacing them.
+        self.assertEqual(
+            raw.repositories["acme/widgets"].workflow.approval_label, "ship-it"
+        )
+
+    def test_a_table_without_a_path_carries_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(
+                Path(tmp), '[repositories."acme/widgets".workflow]\napproval_label = "x"\n'
+            )
+            raw, warnings = kc.load_raw_config(str(path))
+        self.assertEqual(warnings, [])
+        self.assertIsNone(raw.repositories["acme/widgets"].path)
+
+    def test_a_non_absolute_path_raises_naming_the_full_key_path(self):
+        # Judged as written: nothing here expands `~`, so `~/work/repo` is a
+        # non-absolute value rather than a home-relative one.
+        for value in ('"work/repo"', '"./work/repo"', '"../repo"', '"~/work/repo"', '""'):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = write(
+                        Path(tmp), f'[repositories."acme/widgets"]\npath = {value}\n'
+                    )
+                    with self.assertRaises(kc.KanbanConfigError) as ctx:
+                        kc.load_raw_config(str(path))
+                self.assertIn('repositories."acme/widgets".path', str(ctx.exception))
+
+    def test_a_non_string_path_raises_naming_the_full_key_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(Path(tmp), '[repositories."acme/widgets"]\npath = 3\n')
+            with self.assertRaises(kc.KanbanConfigError) as ctx:
+                kc.load_raw_config(str(path))
+        self.assertIn('repositories."acme/widgets".path', str(ctx.exception))
 
 
 class RepositoryKeyGrammarTests(unittest.TestCase):
