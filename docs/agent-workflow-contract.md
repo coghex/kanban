@@ -2455,7 +2455,8 @@ The `coordination` documents are
 `docs/project_review_342-317.md`, `docs/project_review_386-361.md`,
 `docs/project_review_442-411.md`, `docs/project_review_456-446.md`,
 `docs/project_review_463-455.md`,
-`docs/public_release_design.md`, `docs/superagent_design.md`,
+`docs/public_release_design.md`,
+`docs/release_maintenance_design.md`, `docs/superagent_design.md`,
 `docs/ui-bugs.md`, `docs/usage_awareness_design.md`,
 `docs/workflow_audit_findings.md`,
 `docs/workflow_command_vendoring_design.md`, and — through its directory row,
@@ -2579,6 +2580,7 @@ docs/project_review_442-411.md | coordination | audit-report
 docs/project_review_456-446.md | coordination | audit-report
 docs/project_review_463-455.md | coordination | audit-report
 docs/public_release_design.md | coordination | audit-report
+docs/release_maintenance_design.md | coordination | audit-report
 docs/superagent_design.md | coordination | audit-report
 docs/ui-bugs.md | coordination | audit-report
 docs/usage_awareness_design.md | coordination | audit-report

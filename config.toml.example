@@ -212,6 +212,7 @@ coordination_paths = [
   "docs/project_review_456-446.md",
   "docs/project_review_463-455.md",
   "docs/public_release_design.md",
+  "docs/release_maintenance_design.md",
   "docs/superagent_design.md",
   "docs/ui-bugs.md",
   "docs/usage_awareness_design.md",
