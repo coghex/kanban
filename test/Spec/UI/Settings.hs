@@ -394,18 +394,23 @@ interiorOf state =
     (renderWidgetLines (themeFor testOptions) (settingsInteriorWidth + 4) (drawOverlay state SettingsOverlay))
 
 -- | Just the roster rows: everything the panel drew between its heading and
--- the rule above the footer, with the viewport's unused rows and the
--- read-only operating-mode line dropped.
+-- the end of the section, with the viewport's unused rows and the read-only
+-- operating-mode line dropped.
 --
 -- The mode line sits inside this section and is not one of its rows, so a
 -- count or an elision assertion here would otherwise read it as an
 -- assignment.
+--
+-- The section ends at the panel's own bottom border rather than at a rule:
+-- the rule that used to close it separated the roster from the overlay's own
+-- footer hint, and that hint is the base footer's row now (issue #525), so
+-- the roster is the last thing the box draws.
 rosterSectionOf :: AppState -> [Text]
 rosterSectionOf state =
   filter (\row -> not (Data.Text.null row) && not (isModeLine row))
-    (takeWhile (not . isRule) (drop 1 (dropWhile (/= "Agent models") (interiorOf state))))
+    (takeWhile (not . isSectionEnd) (drop 1 (dropWhile (/= "Agent models") (interiorOf state))))
   where
-    isRule row = not (Data.Text.null row) && Data.Text.all (== '━') row
+    isSectionEnd row = not (Data.Text.null row) && Data.Text.all (`elem` ("━┗┛" :: String)) row
     isModeLine = Data.Text.isPrefixOf "Operating mode:"
 
 -- | The cells the 68-wide panel leaves for a row: two border columns and the

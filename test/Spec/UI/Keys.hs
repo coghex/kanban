@@ -11,15 +11,36 @@
 module Spec.UI.Keys (spec) where
 
 import Data.List (nub, sort)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import qualified Graphics.Vty as Vty
-import Kanban.UI.Board (footerHintLine, searchFooterHintLine)
+import Kanban.Domain (BoardItem (..), Issue (..), PullRequest (..))
+import Kanban.Review (ReviewStage (..))
+import Kanban.Solve (SolveWorkflow (..))
+import Kanban.UI.Board (boardHintLine, filterFooterHintLine, footerHintLine, overlayHintChips, searchFooterHintLine)
+import Kanban.UI.Filter (toggleFilterPanel)
 import Kanban.UI.Keys
-import Kanban.UI.Overlay (helpLines, mouseHelpEntries)
-import Kanban.UI.Types (SessionMode (..))
-import Kanban.UI.SessionCore (SessionFocus (..), SessionInputEvent (..), noSessionInputCaps, sessionInputEvent, sessionInputHelp)
+import Kanban.UI.Overlay (drawOverlay, helpLines, mouseHelpEntries)
+import Kanban.UI.Search (openSearch)
+import Kanban.UI.Session (incidentsFooterHints, processesFooterHints)
+import Kanban.UI.Settings (settingsFooterHints)
+import Kanban.UI.Solve (solveChooserFooterHints)
+import Kanban.UI.Theme (themeFor)
+import Kanban.UI.Types
+  ( AgentSession (..),
+    AppState (..),
+    Overlay (..),
+    ReviewDetail (..),
+    ReviewPhase (..),
+    SessionMode (..),
+    SolvePhase (..),
+  )
+import Kanban.UI.SessionCore (SessionFocus (..), SessionInputEvent (..), noSessionInputCaps, sessionFooterHints, sessionInputEvent, sessionInputHelp)
+import Spec.Support.App (testAppState, testPullRequestSession, testReviewSession, testSolveSession)
+import Spec.Support.Fixtures (baseIssue, basePullRequest, fixtureBoard, testOptions)
+import Spec.Support.Render (renderWidgetLines)
 import Test.Hspec
 
 spec :: Spec
@@ -107,6 +128,105 @@ spec = describe "keybinding table" $ do
         [ (label, label `elem` Text.splitOn "  " footerHintLine) `shouldBe` (label, True)
           | label <- ["g first", "G last", "esc close", "m merge", "Ctrl-L repaint"]
         ]
+
+    -- Issue #525. The row along the bottom of the screen used to name the
+    -- board's keys whatever overlay was open over it, so it advertised keys
+    -- that were not live and named none of the ones that were. Every route
+    -- below is asked for its whole row, and the expected side is built from
+    -- the declaration sites themselves rather than from the routing in
+    -- "Kanban.UI.Board", so a route wired to the wrong list still fails.
+    it "shows an open overlay the chips that overlay's own declaration produces" $ do
+      base <- overlayBaseState
+      sequence_
+        [ (name, Text.splitOn "  " (boardHintLine state)) `shouldBe` (name, declared)
+          | (name, _, state, declared) <- overlayFooterCases base
+        ]
+
+    it "leaves no overlay hint chip that no declaration backs" $ do
+      base <- overlayBaseState
+      sequence_
+        [ (name, chip, chip `elem` declared) `shouldBe` (name, chip, True)
+          | (name, _, state, declared) <- overlayFooterCases base,
+            chip <- Text.splitOn "  " (boardHintLine state)
+        ]
+
+    it "draws every chip the open overlay declares" $ do
+      base <- overlayBaseState
+      sequence_
+        [ (name, chip, chip `elem` Text.splitOn "  " (boardHintLine state)) `shouldBe` (name, chip, True)
+          | (name, _, state, declared) <- overlayFooterCases base,
+            chip <- declared
+        ]
+
+    it "replaces the board's own line rather than leaving it on screen" $ do
+      base <- overlayBaseState
+      sequence_
+        [ (name, boardHintLine state == footerHintLine) `shouldBe` (name, False)
+          | (name, _, state, _) <- overlayFooterCases base
+        ]
+
+    -- Nothing clears a focused filter box or a live search when an overlay
+    -- opens over them, so both states can still be populated underneath one.
+    -- The keys reaching the keyboard are the overlay's either way.
+    it "lets an open overlay outrank a filter box or a search underneath it" $ do
+      base <- overlayBaseState
+      let latentFilter = toggleFilterPanel base
+          latentSearch = openSearch base
+      -- Each surface really does hold the row with no overlay open, which is
+      -- what makes the two assertions below about precedence rather than
+      -- about an empty state.
+      boardHintLine latentFilter `shouldBe` filterFooterHintLine
+      boardHintLine latentSearch `shouldBe` searchFooterHintLine
+      sequence_
+        [ (name, boardHintLine (withOverlay HelpOverlay state))
+            `shouldBe` (name, footerHintRow (map footerHint (scopeBindings HelpScope)))
+          | (name, state) <- [("filter panel" :: String, latentFilter), ("search box", latentSearch)]
+        ]
+
+  -- Issue #525 requirement 4: the seven overlays that drew a hint line inside
+  -- their own box no longer do, now that the base footer names their keys.
+  -- Rendered rather than read off the source, and asked of all seven -- the
+  -- processes, incidents, and PR review overlays have no golden frame of
+  -- their own, so nothing else here would notice one coming back.
+  describe "overlay hint relocation" $ do
+    it "accounts for every overlay the dashboard can open" $ do
+      base <- overlayBaseState
+      nub [overlayRoute overlay | (_, overlay, _, _) <- overlayFooterCases base]
+        `shouldMatchList` [ "help",
+                            "details",
+                            "settings",
+                            "processes",
+                            "incidents",
+                            "solve chooser",
+                            "solve",
+                            "pull request review",
+                            "issue review"
+                          ]
+
+    it "draws no overlay's hint chips inside its own box" $ do
+      base <- overlayBaseState
+      -- Each box really draws, so a frame that rendered nothing cannot pass
+      -- the absence assertion below by having nothing in it to find.
+      sequence_
+        [ (name, length (overlayBoxLines state overlay) > 4) `shouldBe` (name, True)
+          | (name, overlay, state, _) <- overlayFooterCases base,
+            drewItsOwnHint overlay
+        ]
+      sequence_
+        [ (name, chip, any (chip `Text.isInfixOf`) (overlayBoxLines state overlay))
+            `shouldBe` (name, chip, False)
+          | (name, overlay, state, _) <- overlayFooterCases base,
+            drewItsOwnHint overlay,
+            chip <- overlayHintChips state overlay
+        ]
+
+    -- The negative control. The details and help overlays never drew a hint
+    -- line, so they are the two the assertion above must skip, and naming
+    -- them keeps a predicate that skipped everything from passing it.
+    it "skips exactly the two overlays that never drew one" $ do
+      base <- overlayBaseState
+      nub [overlayRoute overlay | (_, overlay, _, _) <- overlayFooterCases base, not (drewItsOwnHint overlay)]
+        `shouldMatchList` ["help", "details"]
 
   -- §7 gives `h`, `l`, Left, and Right a different meaning while a search is
   -- open: the letters are text and the arrows move the search. The base line
@@ -282,3 +402,129 @@ documentedBindings = do
         . Text.splitOn "/"
         . Text.replace " or " "/"
         . firstCell
+
+-- | A dashboard with nothing open and no session in flight, which every
+-- overlay case below starts from.
+overlayBaseState :: IO AppState
+overlayBaseState = testAppState (fixtureBoard [])
+
+overlayIssue :: Issue
+overlayIssue = baseIssue 901 []
+
+overlayPullRequest :: PullRequest
+overlayPullRequest = basePullRequest 823 [901] False []
+
+withOverlay :: Overlay -> AppState -> AppState
+withOverlay overlay state = state {appOverlay = Just overlay}
+
+-- | Every distinct overlay route the footer answers: what to call it, the
+-- overlay itself, a state with it open, and the chips its own declaration
+-- site produces for that state.
+--
+-- Total over the routes rather than over 'Overlay' -- which carries payloads
+-- and so cannot be enumerated -- with 'overlayRoute' holding the inventory
+-- to nine. The three live-agent overlays appear more than once because the
+-- row follows the focused session's /effective/ mode, and the cases that
+-- pin that are the ones where the stored mode and the effective one differ.
+overlayFooterCases :: AppState -> [(String, Overlay, AppState, [Text])]
+overlayFooterCases base =
+  [ opened "help" HelpOverlay (map footerHint (scopeBindings HelpScope)),
+    opened "details" (DetailsOverlay (IssueItem overlayIssue)) (map footerHint (scopeBindings DetailsScope)),
+    opened "settings" SettingsOverlay settingsFooterHints,
+    opened "processes" ProcessesOverlay processesFooterHints,
+    opened "incidents" IncidentsOverlay incidentsFooterHints,
+    opened "solve chooser" (SolveChooser SolveOnly overlayIssue) solveChooserFooterHints,
+    solveCase "solve waiting for an answer" SolveAttention SessionNormal (focusOf SessionNormal True),
+    solveCase "solve in insert mode" SolveAttention SessionInsert (focusOf SessionInsert True),
+    solveCase "solve still running" SolveRunning SessionNormal (focusOf SessionNormal False),
+    -- The stored mode says insert and nothing is left to read what it types,
+    -- which is the state 'liveSessionMode' exists to pin to normal.
+    solveCase "solve left in insert mode with no reader" SolveRunning SessionInsert (focusOf SessionNormal False),
+    -- An overlay whose session the map no longer holds still answers Esc and
+    -- q, so the row has to name them rather than go blank.
+    ( "solve whose session is gone",
+      SolveOverlay (overlayIssue.issueNumber + 1),
+      withOverlay (SolveOverlay (overlayIssue.issueNumber + 1)) base,
+      sessionFooterHints "answer" (focusOf SessionNormal False)
+    ),
+    pullRequestCase "pull request review in insert mode" SolveAttention SessionInsert (focusOf SessionInsert True),
+    pullRequestCase "pull request review still running" SolveRunning SessionNormal (focusOf SessionNormal False),
+    reviewCase "issue review revision in insert mode" IssueRevision ReviewRunning SessionInsert (focusOf SessionInsert True),
+    reviewCase "issue review revision in normal mode" IssueRevision ReviewRunning SessionNormal (focusOf SessionNormal True),
+    -- A canonical stage runs a subprocess and never reads typed text, so the
+    -- row is the no-input one however the session was left.
+    reviewCase "canonical issue review" InitialReview ReviewRunning SessionInsert (focusOf SessionNormal False)
+  ]
+  where
+    opened name overlay declared = (name, overlay, withOverlay overlay base, declared)
+
+    focusOf mode liveInput = SessionFocus noSessionInputCaps mode liveInput
+
+    solveCase name phase mode sessionFocus =
+      ( name,
+        SolveOverlay overlayIssue.issueNumber,
+        (withOverlay (SolveOverlay overlayIssue.issueNumber) base)
+          { appSolveSessions =
+              Map.singleton overlayIssue.issueNumber ((testSolveSession overlayIssue phase) {sessionMode = mode})
+          },
+        sessionFooterHints "answer" sessionFocus
+      )
+
+    pullRequestCase name phase mode sessionFocus =
+      ( name,
+        PullRequestReviewOverlay overlayPullRequest.pullRequestNumber,
+        (withOverlay (PullRequestReviewOverlay overlayPullRequest.pullRequestNumber) base)
+          { appPullRequestReviewSessions =
+              Map.singleton
+                overlayPullRequest.pullRequestNumber
+                ((testPullRequestSession overlayPullRequest phase) {sessionMode = mode})
+          },
+        sessionFooterHints "answer" sessionFocus
+      )
+
+    reviewCase name reviewStage phase mode sessionFocus =
+      ( name,
+        ReviewOverlay overlayIssue.issueNumber,
+        (withOverlay (ReviewOverlay overlayIssue.issueNumber) base)
+          { appReviewSessions = Map.singleton overlayIssue.issueNumber staged
+          },
+        sessionFooterHints "send" sessionFocus
+      )
+      where
+        session = (testReviewSession overlayIssue phase) {sessionMode = mode}
+        staged = session {sessionDetail = session.sessionDetail {reviewSessionStage = reviewStage}}
+
+-- | What to call one overlay's footer route. Total in 'Overlay', so a new
+-- overlay cannot be added without deciding what its row says and adding a
+-- case above.
+overlayRoute :: Overlay -> String
+overlayRoute = \case
+  HelpOverlay -> "help"
+  DetailsOverlay _ -> "details"
+  SettingsOverlay -> "settings"
+  ProcessesOverlay -> "processes"
+  IncidentsOverlay -> "incidents"
+  SolveChooser _ _ -> "solve chooser"
+  SolveOverlay _ -> "solve"
+  PullRequestReviewOverlay _ -> "pull request review"
+  ReviewOverlay _ -> "issue review"
+
+-- | Whether this overlay used to draw a hint line inside its own box. Total
+-- for the same reason 'overlayRoute' is.
+drewItsOwnHint :: Overlay -> Bool
+drewItsOwnHint = \case
+  HelpOverlay -> False
+  DetailsOverlay _ -> False
+  SettingsOverlay -> True
+  ProcessesOverlay -> True
+  IncidentsOverlay -> True
+  SolveChooser _ _ -> True
+  SolveOverlay _ -> True
+  PullRequestReviewOverlay _ -> True
+  ReviewOverlay _ -> True
+
+-- | One overlay drawn through the real 'drawOverlay', so what is asserted
+-- absent is absent from the box a user actually sees rather than from the
+-- source that builds it.
+overlayBoxLines :: AppState -> Overlay -> [Text]
+overlayBoxLines state overlay = renderWidgetLines (themeFor testOptions) 120 (drawOverlay state overlay)

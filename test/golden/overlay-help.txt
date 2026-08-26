@@ -42,7 +42,7 @@
 ║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  ╭─────────────────┃ right/outside click  close card details                                                         ┃       ┃                                         ┃║
 ║┃ off                      ┃┃  │ #901 Add reposit┃                                                                                                 ┃       ┃                                         ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
-║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p processes  i atten ║
+║ esc close  q/Ctrl-C quit                                                                                                                                                                             ║
 ║ board: updated 3h ago · history: current                                                                                                                                                             ║
 ║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

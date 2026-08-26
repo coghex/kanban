@@ -44,7 +44,7 @@ module Kanban.UI.Settings
     noProvidersMessage,
     operatingModeLine,
     rosterRecoveryHint,
-    settingsFooterHint,
+    settingsFooterHints,
   )
 where
 
@@ -456,7 +456,19 @@ rosterRecoveryHint =
   "Press d to replace the file's contents with the compiled defaults. \
   \The current models.toml, including any custom agents, catalogs, and assignments, is not kept."
 
--- | The overlay's own footer. Short enough for the panel's interior, and a
--- cheat sheet rather than the §7 contract, exactly as every other panel's is.
-settingsFooterHint :: Text
-settingsFooterHint = "j/k rows  h/l model  [/] effort  d reset  1/2/3 chat  Esc close"
+-- | The chips the base footer shows while this overlay is open, declared
+-- here beside 'settingsInput' and 'settingsOutcome', which answer these keys.
+--
+-- A cheat sheet rather than the §7 contract, exactly as every other panel's
+-- is: §7 documents these keys inside the @o@ row's description and gains no
+-- rows of its own from them, so nothing here reaches 'helpLines' or the
+-- inventory 'Spec.UI.Keys' holds §7 to.
+settingsFooterHints :: [Text]
+settingsFooterHints =
+  [ "j/k rows",
+    "h/l model",
+    "[/] effort",
+    "d reset",
+    "1/2/3 chat",
+    "Esc close"
+  ]

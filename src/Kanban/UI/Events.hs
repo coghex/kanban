@@ -148,6 +148,9 @@ handleEvent event = do
     -- input, 'settingsOutcome' decides what it does, and only the roster
     -- write below reaches a file.
     (Just SettingsOverlay, settingsEvent) -> handleSettingsInput (settingsInput settingsEvent)
+    -- The keys these arms answer are named for the user by
+    -- 'processesFooterHints', which the base footer draws while the panel is
+    -- open (issue #525). A key added or dropped here owes that list a row.
     (Just ProcessesOverlay, VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
     (Just ProcessesOverlay, VtyEvent (Vty.EvKey Vty.KDown [])) -> moveProcessSelection 1
     (Just ProcessesOverlay, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> moveProcessSelection 1
@@ -659,6 +662,10 @@ data IncidentsAction
 -- dashboard's other bindings decide it — including the @i@ that opens the
 -- panel in the first place, which is a base-board binding like any other and
 -- is declared once in "Kanban.UI.Keys" rather than a second time here.
+--
+-- What this answers is named for the user by 'incidentsFooterHints', which
+-- the base footer draws while the panel is open (issue #525), so a key added
+-- or dropped here owes that list a row.
 incidentsAction :: Maybe Overlay -> BrickEvent Name AppEvent -> Maybe IncidentsAction
 incidentsAction (Just IncidentsOverlay) event = Just $ case event of
   VtyEvent (Vty.EvKey Vty.KEsc []) -> CloseIncidentsPanel

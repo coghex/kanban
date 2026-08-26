@@ -33,16 +33,16 @@
 ║┃                          ┃┃  │ #756 Define the persis┃                                                                                      ┃            ┃  │ updated 3h ago                     │ ┃║
 ║┃                          ┃┃  │ contract              ┃                                                                                      ┃            ┃  │ Reads the cache through the        │ ┃║
 ║┃                          ┃┃  │  architecture         ┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃            ┃  │ versioned envelope and reports a   │ ┃║
-║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ unassigned · updated 4┃ Esc/q hide  Tab next session  Ctrl-C interrupt  j/k g/G Ctrl-D/U scroll              ┃            ┃  │ truncated payload.                 │ ┃║
-║┃ ┃ approve_issues.py ┃    ┃┃  │ Document root owners, ┃                                                                                      ┃            ┃  │ ◐ CI 9/12 · behind                 │ ┃║
-║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ barriers, and the vers┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛            ┃  ╰────────────────────────────────────╯ ┃║
+║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ unassigned · updated 4┃                                                                                      ┃            ┃  │ truncated payload.                 │ ┃║
+║┃ ┃ approve_issues.py ┃    ┃┃  │ Document root owners, ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛            ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ barriers, and the versioned         │ ┃                                         ┃                                         ┃  ╰────────────────────────────────────╯ ┃║
 ║┃ off                      ┃┃  │ envelope before implementation…     │ ┃                                         ┃                                         ┃                                         ┃║
 ║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
 ║┃ ┃ drain_prs.py ┃         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
 ║┃ off                      ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
-║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p processes  i atten ║
+║ Esc/q hide  Tab next session  Ctrl-C interrupt  j/k g/G Ctrl-D/U scroll                                                                                                                              ║
 ║ board: updated 3h ago · history: current                                                                                                                                                             ║
 ║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

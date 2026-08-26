@@ -10,6 +10,7 @@ module Kanban.UI.Solve
     openSelectedSolveChooser,
     preflightBlocker,
     pullRequestFromBoard,
+    solveChooserFooterHints,
     solveStartDecision,
     startIssueSolve,
     submitSolveInput,
@@ -134,6 +135,24 @@ solveStartDecision state issue workflow brand = case readOnlyHistoryRefusal stat
     | otherwise -> case resolvedRosterCellFor (`solveAssignment` brand) state.appModelRoster of
         Left message -> SolveStartRefused ("Solve did not start: " <> message)
         Right _ -> SolveStartFresh
+
+-- | The chips the base footer shows while the solve chooser is open,
+-- declared beside 'startIssueSolve', which is what the two digits reach.
+--
+-- The chooser answers exactly three keys and this names all three. The rows
+-- inside the box label the same two digits with the model each brand would
+-- run, which is a different fact -- what the choice /is/ -- from what the
+-- footer states, which is that the digits are live at all.
+--
+-- Carries no @docs\/design.md@ §7 contract: §7 documents the chooser inside
+-- the @S@ and @A@ rows' descriptions, so nothing here reaches
+-- 'Kanban.UI.Overlay.helpLines'.
+solveChooserFooterHints :: [Text]
+solveChooserFooterHints =
+  [ "1 codex",
+    "2 claude",
+    "Esc cancel"
+  ]
 
 -- | The launch boundary, reached by picking an agent in the chooser. The
 -- refusal is asked again here rather than trusted from the press that opened

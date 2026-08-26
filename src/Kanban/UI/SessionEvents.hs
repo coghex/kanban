@@ -31,6 +31,7 @@ module Kanban.UI.SessionEvents
     reviewTickEligible,
     sessionFocusFor,
     sessionKeys,
+    sessionOverlayHints,
     solveSessionOps,
     solveTickEligible,
   )
@@ -44,6 +45,7 @@ import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Text (Text)
 import Kanban.Domain (ItemId (..))
 import Kanban.UI.Types
 import Kanban.UI.Filter (readOnlyHistoryRefusalFor)
@@ -71,7 +73,13 @@ data SessionOps phase detail = SessionOps
     -- | Whether this session still has something behind it to read text typed
     -- into its draft. Per session rather than per kind, because it is the
     -- phase -- and, for review, the stage -- that decides it (issue #515).
-    sessionOpsLiveInput :: AgentSession phase detail -> Bool
+    sessionOpsLiveInput :: AgentSession phase detail -> Bool,
+    -- | This kind's own word for what Enter does with a draft, which is the
+    -- only part of the footer's insert-mode row that differs between the
+    -- three overlays (issue #525). Declared beside the caps rather than at
+    -- the drawing site so the footer cannot end up naming one thing and
+    -- 'sessionHookSubmit' doing another.
+    sessionOpsSendLabel :: Text
   }
 
 solveSessionOps :: SessionOps SolvePhase SolveDetail
@@ -87,7 +95,8 @@ solveSessionOps =
       sessionOpsEligible = \state issueNumber session ->
         solveTickEligible session.sessionPhase && Map.member issueNumber state.appSolveProcesses,
       sessionOpsCaps = noSessionInputCaps,
-      sessionOpsLiveInput = solveSessionInputLive . (.sessionPhase)
+      sessionOpsLiveInput = solveSessionInputLive . (.sessionPhase),
+      sessionOpsSendLabel = "answer"
     }
 
 pullRequestSessionOps :: SessionOps SolvePhase PullRequestDetail
@@ -101,7 +110,8 @@ pullRequestSessionOps =
       -- Unchanged from the pre-#51 PR tick, which was driven by phase alone.
       sessionOpsEligible = \_ _ session -> solveTickEligible session.sessionPhase,
       sessionOpsCaps = noSessionInputCaps,
-      sessionOpsLiveInput = solveSessionInputLive . (.sessionPhase)
+      sessionOpsLiveInput = solveSessionInputLive . (.sessionPhase),
+      sessionOpsSendLabel = "answer"
     }
 
 reviewSessionOps :: SessionOps ReviewPhase ReviewDetail
@@ -120,7 +130,8 @@ reviewSessionOps =
             sessionCapsCancelChord = True
           },
       sessionOpsLiveInput = \session ->
-        reviewSessionInputLive session.sessionDetail.reviewSessionStage session.sessionPhase
+        reviewSessionInputLive session.sessionDetail.reviewSessionStage session.sessionPhase,
+      sessionOpsSendLabel = "send"
     }
 
 -- | Whether a review session in this phase should be animating, given
@@ -278,6 +289,18 @@ sessionFocusFor :: SessionOps phase detail -> Int -> AppState -> SessionFocus
 sessionFocusFor ops key state = case Map.lookup key (ops.sessionOpsSessions state) of
   Nothing -> SessionFocus ops.sessionOpsCaps SessionNormal False
   Just session -> SessionFocus ops.sessionOpsCaps session.sessionMode (ops.sessionOpsLiveInput session)
+
+-- | The footer chips for the session an open overlay of this kind is
+-- showing, from the same 'SessionFocus' the decoder below is handed.
+--
+-- Routed through 'sessionFocusFor' rather than through the session record so
+-- the footer answers the three cases the record alone cannot: a settled
+-- session, an insert-mode session with nothing left to read it, and an
+-- overlay whose session the map no longer holds. All three are normal mode
+-- with no live input, which is exactly what the keys then do.
+sessionOverlayHints :: SessionOps phase detail -> Int -> AppState -> [Text]
+sessionOverlayHints ops key state =
+  sessionFooterHints ops.sessionOpsSendLabel (sessionFocusFor ops key state)
 
 -- | The whole key table every session overlay answers, dispatched once.
 handleSessionOverlayEvent ::
