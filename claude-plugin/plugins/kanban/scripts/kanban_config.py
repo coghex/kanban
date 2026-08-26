@@ -480,6 +480,12 @@ class RepositoryOverride:
     workflow: WorkflowOverride = field(default_factory=WorkflowOverride)
     limits: LimitsOverride = field(default_factory=LimitsOverride)
     timeouts: TimeoutsOverride = field(default_factory=TimeoutsOverride)
+    # Kanban.Config.repositoryOverridePath. Not an override at all: it
+    # declares where this repository is checked out on this machine, and is
+    # what makes the table a member of the dashboard's repository roster.
+    # Carried here so the shared schema stays one schema -- a documented key
+    # must not warn as unknown -- but no Python worker reads it.
+    path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1003,13 +1009,31 @@ def _parse_repositories_table(
         if popped is not None:
             sub_value, sub_path = popped
             timeouts_override = _parse_timeouts_override(sub_value, sub_path, warnings)
+        checkout_path = _pop_checkout_path(repo_table, child_path)
         _collect_unknown(repo_table, child_path, warnings)
         repos[repo_key] = RepositoryOverride(
             workflow=workflow_override,
             limits=limits_override,
             timeouts=timeouts_override,
+            path=checkout_path,
         )
     return repos
+
+
+def _pop_checkout_path(table: dict, path: str) -> str | None:
+    """Kanban.Config.parseCheckoutPath. A roster `path` names one checkout on
+    this machine, and is validated as the literal string the file carries --
+    before any expansion or resolution, so `~/work/repo` is a non-absolute
+    value rather than a home-relative one, because nothing here expands it. A
+    relative value has no defensible meaning to degrade into: the file is read
+    from a fixed XDG location but consumed by workers running from other
+    directories, so the same file would name different checkouts depending on
+    where the reader was launched. That is why this is the one roster mistake
+    that is a load-time error rather than a degraded entry."""
+    value = _pop_nonempty_str(table, "path", path)
+    if value is not None and not os.path.isabs(value):
+        raise KanbanConfigError(f"{_join(path, 'path')} must be an absolute path to a checkout")
+    return value
 
 
 def _decode(data: dict) -> tuple[RawConfig, list[str]]:

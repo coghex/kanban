@@ -3022,6 +3022,39 @@ Defaults:
   override, and only for that selection: the identity used for GitHub queries,
   cache paths, and display keeps the case it resolved with. A canonical key
   naming a different repository stays silent and has no effect.
+- Admit one further key in a repository table, `path`, which is not an
+  override but a declaration of where that repository is checked out on this
+  machine. It is the membership rule for the repository roster the dashboard
+  resolves at startup: exactly the tables that set `path`, plus the repository
+  of the checkout the session was launched in, which is always a member
+  whether or not it is configured. A table that sets no `path` contributes no
+  roster entry and keeps its present meaning as an override table for
+  whichever repository the session opens, so no existing configuration gains
+  an entry on upgrade.
+- Require `path` to be absolute, judged as the literal string the file
+  carries: nothing expands it, so `~/work/repo` is a non-absolute value. A
+  non-absolute `path` is a decode-time configuration error naming the full key
+  path, like any other invalid value, and it is the one roster mistake that is
+  loud rather than degraded — the file is read from a fixed location but
+  consumed by workers running from other directories, so a relative value
+  would name a different checkout for each of them.
+- Keep a roster entry whose checkout cannot be used, rather than refusing the
+  launch. An entry whose declared `path` is missing, unusable, or not a Git
+  checkout stays in the roster with no usable checkout; so does one whose
+  checkout's remote yields an `owner/name` other than the key, because the key
+  wins — nothing is ever keyed, queried, or reported under an identity the
+  configuration does not name, and a mistyped key must not silently produce an
+  entry for an unnamed repository. A difference of ASCII case alone is the
+  same repository and stays usable, under the same fold that selects an
+  override table. Every degraded entry is named, with what was wrong with it,
+  in the same in-app startup notice the settings and board-authority
+  diagnostics use, one fragment per degraded identity, and never on the stderr
+  channel the terminal takeover paints over.
+- Give the launch checkout the collision when its repository is also
+  configured with a `path` naming a different checkout: the roster holds one
+  entry for that identity and it uses the launch checkout, silently. Actions
+  then target the checkout the operator is sitting in, which matters because
+  sessions are routinely launched from linked worktrees.
 
 Configurable repository semantics include:
 

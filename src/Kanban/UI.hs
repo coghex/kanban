@@ -60,6 +60,7 @@ import Kanban.Drainer
     )
 import Kanban.GitHub (newHistoryTraversal)
 import Kanban.Process (killManagedProcess, managedProcessStopsWithDashboard)
+import Kanban.Repository (RepositoryRoster, rosterDegradationNotices)
 import Kanban.Repository.Authority (BoardAuthority (..), acquireBoardAuthority)
 import Kanban.Review
   ( stopReviewClient
@@ -88,8 +89,8 @@ import Kanban.UI.PullRequest
 import Kanban.UI.Events
 import Kanban.UI.Approval (monitorApprovalService)
 
-runDashboard :: Options -> ResolvedConfig -> Repository -> IO ()
-runDashboard options config repository = do
+runDashboard :: Options -> ResolvedConfig -> Repository -> RepositoryRoster -> IO ()
+runDashboard options config repository roster = do
   -- The first thing this process does for the repository, and the only thing
   -- ahead of it is having resolved which repository it is. Nothing below may
   -- run without it: 'loadStartupCaches' reads durable state, the coordinator
@@ -101,11 +102,11 @@ runDashboard options config repository = do
     Left message -> do
       hPutStrLn stderr ("kanban: " <> Text.unpack message)
       exitFailure
-    Right held -> runHeldDashboard held options config repository
+    Right held -> runHeldDashboard held options config repository roster
 
 -- | The dashboard proper, with the repository already this process's.
-runHeldDashboard :: BoardAuthority -> Options -> ResolvedConfig -> Repository -> IO ()
-runHeldDashboard authority options config repository = do
+runHeldDashboard :: BoardAuthority -> Options -> ResolvedConfig -> Repository -> RepositoryRoster -> IO ()
+runHeldDashboard authority options config repository roster = do
   now <- getCurrentTime
   timeZone <- getCurrentTimeZone
   (usageCacheLoad, completedCacheLoad) <- loadStartupCaches options config repository
@@ -182,6 +183,12 @@ runHeldDashboard authority options config repository = do
                     -- of, and the same notice line the other startup problems
                     -- use is where it belongs.
                     <> foldMap (" · " <>) authority.authorityNotices
+                    -- One fragment per roster entry the configuration names
+                    -- but this machine cannot supply a checkout for. A
+                    -- degraded entry never refuses the launch, and with no
+                    -- `path` configured anywhere there are none of these, so
+                    -- the line reads exactly as it always has.
+                    <> foldMap (" · " <>) (rosterDegradationNotices roster)
                 ),
             -- Nothing has been fetched and nothing was restored, which is
             -- exactly what §7's loading panel stands for. 'startApplication'
