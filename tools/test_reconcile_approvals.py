@@ -872,6 +872,16 @@ class TriageAssetTests(unittest.TestCase):
                     "This is the only case where the current approval label itself earns `✓`",
                     text,
                 )
+                self.assertIn("The answer must say exactly once", text)
+                self.assertIn(
+                    "Approval reconciliation was busy; displayed `✓` markers reflect "
+                    "current labels rather than verified approvals.",
+                    text,
+                )
+                self.assertIn(
+                    "contains the required busy-disclosure sentence exactly once",
+                    text,
+                )
 
     def test_busy_fallback_does_not_weaken_other_failure_handling(self):
         for path in self.assets():
@@ -1109,6 +1119,21 @@ class RetriageAssetTests(unittest.TestCase):
                     flat,
                 )
 
+    def test_every_asset_discloses_the_busy_fallback_without_a_delta_request(self):
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                flat = " ".join(path.read_text(encoding="utf-8").split())
+                self.assertIn("required one-time busy-disclosure sentence", flat)
+                self.assertIn(
+                    "regardless of whether the user asked for a delta", flat
+                )
+                self.assertIn(
+                    "mandatory one-time disclosure is part of the fallback", flat
+                )
+                self.assertIn(
+                    "required busy-disclosure sentence exactly once", flat
+                )
+
     def test_every_asset_fails_closed_outside_the_busy_fallback(self):
         # The previous roadmap's marker is not a fallback for an actual
         # verification failure. Busy is handled separately above.
@@ -1198,6 +1223,7 @@ class ManifestCoverageTests(unittest.TestCase):
             "display-only fallback",
             "solve gate remains",
             "invalid or missing `approval_label` in a `busy` document",
+            "must disclose that label-backed fallback once per answer",
         ):
             self.assertIn(busy_term, flat)
 

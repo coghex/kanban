@@ -520,8 +520,9 @@ reimplement the removal, and `--check` remains read-only.
   entry's post-reconciliation `approved`. For a `busy` document requested with
   no issue numbers, its empty `issues` array claims no reconciliation; the four
   instead render exact matches for its validated `approval_label` from the
-  verified-complete open-issue snapshot. They may disclose that label-backed
-  fallback once per answer, but it remains advisory and display-only. Neither
+  verified-complete open-issue snapshot. They must disclose that label-backed
+  fallback once per answer, immediately after the repository/count line, while
+  it remains advisory and display-only. Neither
   outcome is followed by a second `--check`, which would reopen the
   read-then-decide window the lock closes. They pass no issue numbers and name
   no candidate label, so a repository configuring its own approval label is

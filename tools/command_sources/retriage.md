@@ -243,12 +243,16 @@ a completed reconciliation, the refresh-specific consequence is subtraction:
 strip any marker the previous roadmap carried for an issue this document does
 not report as approved right now. For a top-level `busy` result, strip the old
 markers and then recompute them from the snapshot's exact `approval_label`
-matches. Say so in the `Delta` line when the user asked what changed.
+matches. Include {{cmd:triage}}'s required one-time busy-disclosure sentence
+immediately after the repository/count line regardless of whether the user
+asked for a delta. When the user did ask what changed, also describe the marker
+recomputation in the `Delta` line.
 
 **Busy lock.** Apply {{cmd:triage}}'s busy-lock fallback exactly: the current
 snapshot label, not the previous roadmap's marker, supplies each `✓`; do not
 retry, do not add `[approval unverified]` merely because the lock is busy, and
-claim no successful reconciliation or stale-label removal.
+claim no successful reconciliation or stale-label removal. Its mandatory
+one-time disclosure is part of the fallback, even when no delta was requested.
 
 **Fail closed outside the busy fallback.** A missing or unresolvable backend,
 a GitHub read or write failure, a malformed document, an invalid or missing
@@ -305,6 +309,9 @@ itself:
   document or, only for a top-level `busy` result, an exact current-snapshot
   match for that document's `approval_label`; every other prior marker was
   removed.
+- For a top-level `busy` result, confirm the answer includes {{cmd:triage}}'s
+  required busy-disclosure sentence exactly once immediately after the
+  repository/count line, even when the user did not request a delta.
 - Confirm every retained issue kept its previous relative position unless a
   rule in step 8 moved it, and that a difficulty estimate changed only where
   the issue's body or scope changed materially.
