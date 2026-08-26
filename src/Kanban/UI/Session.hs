@@ -8,9 +8,11 @@ module Kanban.UI.Session
     drainerSourceState,
     incidentEntries,
     incidentSourceLabel,
+    incidentsFooterHints,
     itemReviewRefusal,
     liveReviewSessions,
     locateBoardWork,
+    processesFooterHints,
     pullRequestSessionReusable,
     pullRequestWorkerFor,
     resolveIncidentActivation,
@@ -227,6 +229,29 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
           task.pullRequestWorkerAction
           (agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction)
           state.appModelRoster
+
+-- | The chips the base footer shows while the processes overlay is open.
+--
+-- Declared here, beside the entry list and the selection resolver those keys
+-- move, rather than at the drawing site: @j@, @k@, and the arrows step the
+-- selection 'resolveProcessSelection' keeps, @Enter@ opens the session the
+-- selected row names, and @x@ kills its process tree. The arms that carry
+-- those out are in "Kanban.UI.Events" and name this list in their own
+-- comment, so a key added there has one row to add here and nowhere else.
+--
+-- Carries no @docs\/design.md@ §7 contract: §7 documents the panel's keys
+-- inside the @p@ row's description, and this is the cheat sheet for them, so
+-- it stays out of 'Kanban.UI.Overlay.helpLines' and out of the inventory
+-- 'Spec.UI.Keys' holds §7 to.
+processesFooterHints :: [Text]
+processesFooterHints =
+  [ "j/↓ next",
+    "k/↑ previous",
+    "Enter open session",
+    "x kill process tree",
+    "wheel scroll",
+    "Esc close"
+  ]
 
 -- | Resolves a processes-overlay selection against the current entries: if
 -- the tracked identity is still present, follow it to its (possibly
@@ -446,6 +471,21 @@ workSubject noun number title
 
 boardItemTitle :: Board -> ItemId -> Text
 boardItemTitle board target = maybe "" (\(_, _, item) -> itemTitle item) (findItem board target)
+
+-- | The chips the base footer shows while the incidents panel is open, for
+-- the same reason 'processesFooterHints' sits beside its own resolver.
+--
+-- The panel's whole key policy is 'Kanban.UI.Events.incidentsAction', which
+-- points back here; §7 documents these keys inside the @i@ row's description
+-- and gains no rows of its own from them.
+incidentsFooterHints :: [Text]
+incidentsFooterHints =
+  [ "j/↓ next",
+    "k/↑ previous",
+    "Enter go to the work",
+    "wheel scroll",
+    "Esc close"
+  ]
 
 -- | Resolves an incidents-panel selection against the current rows, exactly
 -- as 'resolveProcessSelection' does: follow the tracked identity to wherever

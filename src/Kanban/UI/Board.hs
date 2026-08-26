@@ -19,6 +19,8 @@ module Kanban.UI.Board
     footerHintLine,
     openDataLoadingHeading,
     openDataUnavailableHeading,
+    overlayHintChips,
+    overlayHintLine,
     searchFooterHintLine,
     pullRequestPhaseGlyph,
     pullRequestPhaseGlyphFor,
@@ -91,8 +93,12 @@ import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
 import Kanban.Usage.Render (usageResetCountdownText, usageResetLocalText, usageSnapshotAgeText, usageSolveRoundsLeft, usageSolveRoundsSuffix)
 import Kanban.Workflow (entryItem, isApproved, isProblem, itemLifecycleBadge, orderCardLabels )
 import Kanban.UI.Types
-import Kanban.UI.Keys (BindingScope (..), BoardAction (..), KeyBinding (..), actionKeyText, footerHint, scopeBindings)
+import Kanban.UI.Keys (BindingScope (..), BoardAction (..), KeyBinding (..), actionKeyText, footerHint, footerHintRow, scopeBindings)
 import Kanban.UI.SessionCore
+import Kanban.UI.Session (incidentsFooterHints, processesFooterHints)
+import Kanban.UI.SessionEvents (pullRequestSessionOps, reviewSessionOps, sessionOverlayHints, solveSessionOps)
+import Kanban.UI.Settings (settingsFooterHints)
+import Kanban.UI.Solve (solveChooserFooterHints)
 import Kanban.UI.Util
 import Kanban.UI.Theme
 import Kanban.UI.Search
@@ -1112,11 +1118,43 @@ drawFooter state =
 
 -- | Which hint line the footer is showing: the surface that currently has the
 -- keyboard names its own keys, and the board's line otherwise.
+--
+-- An open overlay outranks both of the others. Nothing clears a focused
+-- filter box or a live search when an overlay opens over them, so those two
+-- states can still be populated underneath one; whatever they hold, the keys
+-- reaching the keyboard are the overlay's, and the row has to name those.
 boardHintLine :: AppState -> Text
-boardHintLine state
-  | isJust (filterPanelFocusedBox state) = filterFooterHintLine
-  | isJust (focusedSearch state) = searchFooterHintLine
-  | otherwise = boardFooterHintLine (criteriaAreFiltering state)
+boardHintLine state = case state.appOverlay of
+  Just overlay -> overlayHintLine state overlay
+  Nothing
+    | isJust (filterPanelFocusedBox state) -> filterFooterHintLine
+    | isJust (focusedSearch state) -> searchFooterHintLine
+    | otherwise -> boardFooterHintLine (criteriaAreFiltering state)
+
+-- | The hint line an open overlay shows in place of the board's.
+overlayHintLine :: AppState -> Overlay -> Text
+overlayHintLine state = footerHintRow . overlayHintChips state
+
+-- | Each overlay's own hint chips, from the module that answers those keys.
+--
+-- This module writes none of that text. The details and help overlays are
+-- scopes of the table in "Kanban.UI.Keys" and project from it exactly as the
+-- board's line does; the other five declare their chips beside their own
+-- decoders, and the three live-agent overlays resolve theirs against the
+-- focused session so the row follows its effective mode. What is here is the
+-- routing and nothing else -- the same reason the help overlay's rows are
+-- assembled rather than transcribed.
+overlayHintChips :: AppState -> Overlay -> [Text]
+overlayHintChips state = \case
+  HelpOverlay -> map footerHint (scopeBindings HelpScope)
+  DetailsOverlay _ -> map footerHint (scopeBindings DetailsScope)
+  SettingsOverlay -> settingsFooterHints
+  ProcessesOverlay -> processesFooterHints
+  IncidentsOverlay -> incidentsFooterHints
+  SolveChooser _ _ -> solveChooserFooterHints
+  SolveOverlay issueNumber -> sessionOverlayHints solveSessionOps issueNumber state
+  PullRequestReviewOverlay number -> sessionOverlayHints pullRequestSessionOps number state
+  ReviewOverlay issueNumber -> sessionOverlayHints reviewSessionOps issueNumber state
 
 -- | The hint line a focused filter panel shows in place of the board's.
 --
@@ -1127,8 +1165,7 @@ boardHintLine state
 -- board's line would state both of them wrongly.
 filterFooterHintLine :: Text
 filterFooterHintLine =
-  Text.intercalate
-    "  "
+  footerHintRow
     [ "j/k/↑/↓ box",
       "←/→ group",
       "space toggle",
@@ -1158,7 +1195,7 @@ footerHintLine = boardFooterHintLine False
 -- say so somewhere that is always on screen. It marks the existing chip rather
 -- than adding one, so the line's inventory still comes from the table.
 boardFooterHintLine :: Bool -> Text
-boardFooterHintLine filtering = Text.intercalate "  " (map chip (scopeBindings BoardScope))
+boardFooterHintLine filtering = footerHintRow (map chip (scopeBindings BoardScope))
   where
     chip candidate
       | filtering, candidate.bindingAction == ShowFilter = footerHint candidate <> "*"
@@ -1173,8 +1210,7 @@ boardFooterHintLine filtering = Text.intercalate "  " (map chip (scopeBindings B
 -- @l/→ next column@ — so showing it here would state both of them wrongly.
 searchFooterHintLine :: Text
 searchFooterHintLine =
-  Text.intercalate
-    "  "
+  footerHintRow
     [ "h/l/any letter type",
       "backspace delete",
       "←/→ move search",

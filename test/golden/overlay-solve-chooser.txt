@@ -24,9 +24,9 @@
 ║┃                          ┃┃  │ overlay                             │ ┃  │ A ┃    display:solve.codex                 ┃tHub sub-issue membership        │ ┃  │ ordinary wheel events.             │ ┃║
 ║┃                          ┃┃  │  reviewed:approve   bug   ui        │ ┃  │ re┃ 2) claude                              ┃apter.                           │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
 ║┃                          ┃┃  │ unassigned · updated 4h ago         │ ┃  │ da┃    display:solve.claude                ┃CI unknown · calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ Empty modal areas currently allow   │ ┃  ╰───┃ Esc cancel                             ┃─────────────────────────────────╯ ┃                                         ┃║
-║┃                          ┃┃  │ pointer events to reach lower       │ ┃      ┃                                        ┃                                   ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃  │ pages. This is visible when a…      │ ┃  ╭───┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                                   ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃  │ Empty modal areas currently allow   │ ┃  ╰───┃                                        ┃─────────────────────────────────╯ ┃                                         ┃║
+║┃                          ┃┃  │ pointer events to reach lower       │ ┃      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                                   ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  │ pages. This is visible when a…      │ ┃  ╭────────────────────────────────────╮ ┃                                         ┃  │ PR #861 Adopt the envelope in the  │ ┃║
 ║┃                          ┃┃  ╰─────────────────────────────────────╯ ┃  │ #833 Improve notification category │ ┃                                         ┃  │ snapshot loader                    │ ┃║
 ║┃                          ┃┃                                          ┃  │ defaults                           │ ┃                                         ┃  │  reviewed:approve   feature        │ ┃║
 ║┃                          ┃┃  ╭─────────────────────────────────────╮ ┃  │  code-health                       │ ┃                                         ┃  │ #901 · agent-name → master ·       │ ┃║
@@ -42,7 +42,7 @@
 ║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
 ║┃ off                      ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
-║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p processes  i atten ║
+║ 1 codex  2 claude  Esc cancel                                                                                                                                                                        ║
 ║ board: updated 3h ago · history: current                                                                                                                                                             ║
 ║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

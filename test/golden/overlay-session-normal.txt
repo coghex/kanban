@@ -8,12 +8,12 @@
 ║┃ Claude         3h 0m old ┃┃     │ A1 · tracker #700                │ ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
 ║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the versioned save    │ ┃     │ #712 Migrate the terrain cache  │ ┃  │ #833 · agent-name → master ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
 ║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope                         │ ┃     │ reader                          │ ┃  │ updated 3h ago                     │ ┃  │ updated 3h ago                     │ ┃║
-║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature           ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ REVISION #812 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ into     │ ┃  │ Updates the branch after the       │ ┃║
-║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · update┃                                                                                      ┃rving the │ ┃  │ persistence registry changed on    │ ┃║
-║┃ ┏━━━┓                    ┃┃     │ Write the envelope ┃ [N]  #812 ⠋                                                                          ┃          │ ┃  │ master.                            │ ┃║
-║┃ ┃ ↻ ┃                    ┃┃     │ of the payload so a┃ revision in progress                                                                 ┃          │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃ ┗━━━┛                    ┃┃     │ write is detectable┃ Reading the issue body and the code it names…                                        ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃     ╰────────────────────┃                                                                                      ┃            ┃                                         ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature                         │ ┃     │  code-health                    │ ┃  │ Moves per-domain dispatch into     │ ┃  │ Updates the branch after the       │ ┃║
+║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · update┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ REVISION #812 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓rving the │ ┃  │ persistence registry changed on    │ ┃║
+║┃ ┏━━━┓                    ┃┃     │ Write the envelope ┃                                                                                      ┃          │ ┃  │ master.                            │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃     │ of the payload so a┃ [N]  #812 ⠋                                                                          ┃          │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃ ┗━━━┛                    ┃┃     │ write is detectable┃ revision in progress                                                                 ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃     ╰────────────────────┃ Reading the issue body and the code it names…                                        ┃            ┃                                         ┃║
 ║┃                          ┃┃                          ┃                                                                                      ┃──────────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃                          ┃                                                                                      ┃ve        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
 ║┃                          ┃┃  ▸ #701  Input routing ha┃                                                                                      ┃          │ ┃  │  reviewed:approve   input   ui     │ ┃║
@@ -29,10 +29,10 @@
 ║┃                          ┃┃    │ pages. This is visib┃                                                                                      ┃            ┃  │ PR #861 Adopt the envelope in the  │ ┃║
 ║┃                          ┃┃    ╰─────────────────────┃                                                                                      ┃            ┃  │ snapshot loader                    │ ┃║
 ║┃                          ┃┃                          ┃                                                                                      ┃            ┃  │  reviewed:approve   feature        │ ┃║
-║┃                          ┃┃  ╭───────────────────────┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃            ┃  │ #901 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  │ #756 Define the persis┃                                                                                      ┃            ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃  │ contract              ┃ > █                                                                                  ┃            ┃  │ Reads the cache through the        │ ┃║
-║┃                          ┃┃  │  architecture         ┃ Esc/q hide  i insert  Tab next session  Ctrl-C interrupt  j/k g/G Ctrl-D/U scroll    ┃            ┃  │ versioned envelope and reports a   │ ┃║
+║┃                          ┃┃  ╭───────────────────────┃                                                                                      ┃            ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  │ #756 Define the persis┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃            ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ contract              ┃                                                                                      ┃            ┃  │ Reads the cache through the        │ ┃║
+║┃                          ┃┃  │  architecture         ┃ > █                                                                                  ┃            ┃  │ versioned envelope and reports a   │ ┃║
 ║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ unassigned · updated 4┃                                                                                      ┃            ┃  │ truncated payload.                 │ ┃║
 ║┃ ┃ approve_issues.py ┃    ┃┃  │ Document root owners, ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛            ┃  │ ◐ CI 9/12 · behind                 │ ┃║
 ║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ barriers, and the versioned         │ ┃                                         ┃                                         ┃  ╰────────────────────────────────────╯ ┃║
@@ -42,7 +42,7 @@
 ║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
 ║┃ off                      ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
-║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p processes  i atten ║
+║ Esc/q hide  i insert  Tab next session  Ctrl-C interrupt  j/k g/G Ctrl-D/U scroll                                                                                                                    ║
 ║ board: updated 3h ago · history: current                                                                                                                                                             ║
 ║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

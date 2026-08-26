@@ -33,6 +33,7 @@ module Kanban.UI.SessionCore
     priorTickGeneration,
     removeSessionInputCharacter,
     renderPhaseGlyph,
+    sessionFooterHints,
     sessionHalfPage,
     sessionInputEvent,
     sessionInputHelp,
@@ -297,6 +298,50 @@ data SessionFocus = SessionFocus
 liveSessionMode :: Bool -> SessionMode -> SessionMode
 liveSessionMode True mode = mode
 liveSessionMode False _ = SessionNormal
+
+-- | The footer chips a live-agent overlay declares, which have to describe
+-- the mode the focused session is actually in: in normal mode Enter sends
+-- nothing and a printable key is a command, and a row that said otherwise
+-- would name keys for a mode the user is not in. @sendLabel@ is the kind's
+-- own word for what Enter does with the draft, which is why it is a
+-- parameter rather than a fourth line here.
+--
+-- Declared beside 'sessionInputEvent' because that is what answers these
+-- keys, and derived from the same 'SessionFocus' that decoder is handed: a
+-- session with nothing left to read what it types shows the normal-mode set
+-- whatever its stored mode holds, and so does an overlay whose session the
+-- map no longer has ('Kanban.UI.SessionEvents.sessionFocusFor' reads an
+-- absent session as settled). Nothing here is a second opinion about the
+-- mode.
+--
+-- Deliberately not the whole input table. Printable keys, Backspace, the
+-- review overlay's choice digits, and Ctrl-X are ordinary text entry and
+-- capability-gated extras that 'sessionInputHelp' does not enumerate either;
+-- the row names the shortcuts, and the help overlay behind @?@ stays the
+-- complete list.
+sessionFooterHints :: Text -> SessionFocus -> [Text]
+sessionFooterHints sendLabel focus = case liveSessionMode focus.sessionFocusLiveInput focus.sessionFocusMode of
+  SessionInsert ->
+    [ "Esc normal",
+      "Tab next session",
+      "Ctrl-C interrupt",
+      "Enter " <> sendLabel,
+      "arrows/wheel scroll"
+    ]
+  SessionNormal
+    | focus.sessionFocusLiveInput ->
+        [ "Esc/q hide",
+          "i insert",
+          "Tab next session",
+          "Ctrl-C interrupt",
+          "j/k g/G Ctrl-D/U scroll"
+        ]
+    | otherwise ->
+        [ "Esc/q hide",
+          "Tab next session",
+          "Ctrl-C interrupt",
+          "j/k g/G Ctrl-D/U scroll"
+        ]
 
 -- | How far Ctrl-D and Ctrl-U move a transcript. Vim's half page is half the
 -- window; a session transcript's viewport is a fixed 17-19 rows inside the

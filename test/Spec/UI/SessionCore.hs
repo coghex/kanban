@@ -14,7 +14,8 @@ import qualified Data.Text as Text
 import qualified Graphics.Vty as Vty
 import Kanban.Domain (Board (..))
 import Kanban.UI.Board
-  ( pullRequestPhaseGlyphFor,
+  ( boardHintLine,
+    pullRequestPhaseGlyphFor,
     reviewPhaseGlyphFor,
     solvePhaseGlyphFor,
   )
@@ -538,10 +539,14 @@ spec = do
   describe "session overlay tab strips" $ do
     -- docs/design.md section 7's "tabs for all in-memory sessions" was true
     -- of the review overlay alone. These draw each overlay through the same
-    -- 'drawOverlay' the dashboard uses, so both the strip and the footer hint
-    -- have to survive the overlay's fixed height rather than be clipped off
-    -- the bottom of it.
+    -- 'drawOverlay' the dashboard uses, so the strip has to survive the
+    -- overlay's fixed height rather than be clipped off the bottom of it.
+    --
+    -- The hint that used to sit inside the box beneath the strip is the base
+    -- footer's row now (issue #525), so it is asked of 'boardHintLine' with
+    -- that overlay open rather than of the box.
     let overlayRows state overlay = renderWidgetLines (themeFor testOptions) 100 (drawOverlay state overlay)
+        hintFor state overlay = boardHintLine state {appOverlay = Just overlay}
         rowMentioningBoth first second rows =
           [row | row <- rows, first `Text.isInfixOf` row, second `Text.isInfixOf` row]
 
@@ -552,7 +557,7 @@ spec = do
           <$> testAppState emptyBoard
       let rows = overlayRows state (SolveOverlay 7)
       rowMentioningBoth "#7" "#12" rows `shouldNotBe` []
-      filter (Text.isInfixOf "Tab next session") rows `shouldNotBe` []
+      ("Tab next session" `Text.isInfixOf` hintFor state (SolveOverlay 7)) `shouldBe` True
 
     it "lists every in-memory PR session, and offers Tab, in the PR overlay" $ do
       -- issue #51's headline regression: the PR overlay had neither.
@@ -562,22 +567,23 @@ spec = do
           <$> testAppState emptyBoard
       let rows = overlayRows state (PullRequestReviewOverlay 7)
       rowMentioningBoth "#7" "#12" rows `shouldNotBe` []
-      filter (Text.isInfixOf "Tab next session") rows `shouldNotBe` []
+      ("Tab next session" `Text.isInfixOf` hintFor state (PullRequestReviewOverlay 7)) `shouldBe` True
 
-    it "keeps the review overlay's own strip and hint unchanged" $ do
+    it "keeps the review overlay's own strip, and its hint on the footer" $ do
       state <-
         withReviewSession (baseIssue 7 []) ReviewRunning
           . withReviewSession (baseIssue 12 []) ReviewRunning
           <$> testAppState emptyBoard
       let rows = overlayRows state (ReviewOverlay 7)
       rowMentioningBoth "#7" "#12" rows `shouldNotBe` []
-      filter (Text.isInfixOf "Tab next session") rows `shouldNotBe` []
+      ("Tab next session" `Text.isInfixOf` hintFor state (ReviewOverlay 7)) `shouldBe` True
 
-    it "still draws every overlay's footer, so the added strip clipped nothing off" $ do
+    it "still draws the tallest overlay's input line, so the added strip clipped nothing off" $ do
       -- A solve session waiting for input is the tallest layout: phase line,
-      -- activity, reviewer, log path, transcript, prompt, and footer. The
-      -- hint the footer draws is now the focused session's mode, so both are
-      -- asked for -- a clipped footer would take either with it.
+      -- activity, reviewer, log path, transcript, and the prompt that used to
+      -- have the hint under it. The prompt is now what the box ends with, so
+      -- it is what a clipped box would take, and the mode-dependent hint is
+      -- asked of the footer beside it.
       state <-
         withSolveSession (baseIssue 7 []) SolveAttention
           <$> testAppState emptyBoard
@@ -585,8 +591,10 @@ spec = do
             current
               { appSolveSessions = Map.adjust (setSessionMode SessionInsert) 7 current.appSolveSessions
               }
-      filter (Text.isInfixOf "i insert") (overlayRows state (SolveOverlay 7)) `shouldNotBe` []
-      filter (Text.isInfixOf "Enter answer") (overlayRows (inserting state) (SolveOverlay 7)) `shouldNotBe` []
+      filter (Text.isInfixOf "█") (overlayRows state (SolveOverlay 7)) `shouldNotBe` []
+      filter (Text.isInfixOf "█") (overlayRows (inserting state) (SolveOverlay 7)) `shouldNotBe` []
+      ("i insert" `Text.isInfixOf` hintFor state (SolveOverlay 7)) `shouldBe` True
+      ("Enter answer" `Text.isInfixOf` hintFor (inserting state) (SolveOverlay 7)) `shouldBe` True
 
     it "shows the focused session's mode badge, and only its own" $ do
       -- The badge is per session, so cycling to a session left in insert has
@@ -619,14 +627,16 @@ spec = do
               { appSolveSessions = Map.adjust (setSessionMode SessionInsert) 7 state.appSolveSessions
               }
           rows = overlayRows stranded (SolveOverlay 7)
-          workingRows =
-            overlayRows
-              running {appSolveSessions = Map.adjust (setSessionMode SessionInsert) 9 running.appSolveSessions}
-              (SolveOverlay 9)
+          working = running {appSolveSessions = Map.adjust (setSessionMode SessionInsert) 9 running.appSolveSessions}
+          workingRows = overlayRows working (SolveOverlay 9)
       filter (Text.isInfixOf "[N]") rows `shouldNotBe` []
       filter (Text.isInfixOf "[I]") rows `shouldBe` []
       filter (Text.isInfixOf "[N]") workingRows `shouldNotBe` []
       filter (Text.isInfixOf "[I]") workingRows `shouldBe` []
-      -- And the hint drops the i neither of them can honour.
-      filter (Text.isInfixOf "i insert") rows `shouldBe` []
-      filter (Text.isInfixOf "i insert") workingRows `shouldBe` []
+      -- And the footer's row drops the i neither of them can honour, while
+      -- still naming the keys they do answer -- an empty row would satisfy
+      -- the absence on its own.
+      ("i insert" `Text.isInfixOf` hintFor stranded (SolveOverlay 7)) `shouldBe` False
+      ("i insert" `Text.isInfixOf` hintFor working (SolveOverlay 9)) `shouldBe` False
+      ("Esc/q hide" `Text.isInfixOf` hintFor stranded (SolveOverlay 7)) `shouldBe` True
+      ("Esc/q hide" `Text.isInfixOf` hintFor working (SolveOverlay 9)) `shouldBe` True
