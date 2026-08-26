@@ -17,15 +17,15 @@
 ║┃                          ┃┃                                          ┃                                         ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃                                          ┃  STANDALONE                             ┃  │ DRAFT #847 Prototype native        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
 ║┃                          ┃┃  ▸ #701  Input routing hardening  0/1    ┃  ╭────────────────────────────────────╮ ┃  │ sub-issue import                   │ ┃  │  reviewed:approve   input   ui     │ ┃║
-║┃                          ┃┃  complete                                ┃  │ #7┏━━━━━━━━━━━━ AUTOSOLVE #812 ━━━━━━━━━━━━┓xperimental                      │ ┃  │ #812 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  STANDALONE                              ┃  │ in┃                                        ┃56 · agent-name → master ·       │ ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃ ▌╭─────────────────────────────────────╮ ┃  │  b┃ Modal input leaks through overlay      ┃dated 3h ago                     │ ┃  │ Routes Shift-wheel through the     │ ┃║
-║┃                          ┃┃  │ #812 Modal input leaks through      │ ┃  │ @c┃ 1) codex                               ┃ early draft of the native       │ ┃  │ same modal-aware ownership path as │ ┃║
-║┃                          ┃┃  │ overlay                             │ ┃  │ A ┃    model roster unavailable            ┃tHub sub-issue membership        │ ┃  │ ordinary wheel events.             │ ┃║
-║┃                          ┃┃  │  reviewed:approve   bug   ui        │ ┃  │ re┃ 2) claude                              ┃apter.                           │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4h ago         │ ┃  │ da┃    model roster unavailable            ┃CI unknown · calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ Empty modal areas currently allow   │ ┃  ╰───┃                                        ┃─────────────────────────────────╯ ┃                                         ┃║
-║┃                          ┃┃  │ pointer events to reach lower       │ ┃      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                                   ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  complete                                ┃  │ #799 Repair stale world cache      │ ┃  │  experimental                      │ ┃  │ #812 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  STANDALONE                              ┃  │ invalidation                       │ ┃  │ #756 · agent-name → master ·       │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃ ▌╭─────────────────────────────────────╮ ┃  │  blocked   bug                     │ ┃  │ updated 3h ago                     │ ┃  │ Routes Shift-wheel through the     │ ┃║
+║┃                          ┃┃  │ #812 Modal input leaks through      │ ┃  │ @codex-agent · updated 4h ago      │ ┃  │ An early draft of the native       │ ┃  │ same modal-aware ownership path as │ ┃║
+║┃                          ┃┃  │ overlay                             │ ┃  │ A stale cache survives a save      │ ┃  │ GitHub sub-issue membership        │ ┃  │ ordinary wheel events.             │ ┃║
+║┃                          ┃┃  │  reviewed:approve   bug   ui        │ ┃  │ reload and exposes old terrain     │ ┃  │ adapter.                           │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago         │ ┃  │ data to the renderer.              │ ┃  │ ? CI unknown · calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ Empty modal areas currently allow   │ ┃  ╰────────────────────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃                                         ┃║
+║┃                          ┃┃  │ pointer events to reach lower       │ ┃                                         ┃                                         ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃  │ pages. This is visible when a…      │ ┃  ╭────────────────────────────────────╮ ┃                                         ┃  │ PR #861 Adopt the envelope in the  │ ┃║
 ║┃                          ┃┃  ╰─────────────────────────────────────╯ ┃  │ #833 Improve notification category │ ┃                                         ┃  │ snapshot loader                    │ ┃║
 ║┃                          ┃┃                                          ┃  │ defaults                           │ ┃                                         ┃  │  reviewed:approve   feature        │ ┃║
@@ -37,12 +37,28 @@
 ║┃                          ┃┃  │ Document root owners, snapshot      │ ┃  ╰────────────────────────────────────╯ ┃                                         ┃  │ ◐ CI 9/12 · behind                 │ ┃║
 ║┃                          ┃┃  │ barriers, and the versioned         │ ┃                                         ┃                                         ┃  ╰────────────────────────────────────╯ ┃║
 ║┃                          ┃┃  │ envelope before implementation…     │ ┃                                         ┃                                         ┃                                         ┃║
-║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │  feature                            │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago         │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ Load the last good GitHub snapshot  │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ at startup and replace it           │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ atomically after a successful…      │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┏━━━━━━━━━━━━━━┓         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃ ┃ drain_prs.py ┃         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
-║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
-║┃ off                      ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ off                      ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
-║ 1 codex  2 claude  Esc cancel                                                                                                                                                                        ║
+║ j/↓ next  k/↑ previous  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  esc close  i attention  u update  d drainer  m merge  c sidebar  o options  ?  ║
 ║ board: updated 3h ago · history: current                                                                                                                                                             ║
 ║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

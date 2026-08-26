@@ -29,6 +29,7 @@ module Kanban.UI.Board
     solvePhaseGlyph,
     solvePhaseGlyphFor,
     trackerHeaderText,
+    updateLabel,
     usageAgeText,
     usageBarWidth,
     usageLabelField,
@@ -93,7 +94,8 @@ import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
 import Kanban.Usage.Render (usageResetCountdownText, usageResetLocalText, usageSnapshotAgeText, usageSolveRoundsLeft, usageSolveRoundsSuffix)
 import Kanban.Workflow (entryItem, isApproved, isProblem, itemLifecycleBadge, orderCardLabels )
 import Kanban.UI.Types
-import Kanban.UI.Keys (BindingScope (..), BoardAction (..), KeyBinding (..), actionKeyText, footerHint, footerHintRow, scopeBindings)
+import Kanban.Models (OperatingMode (..), agentsLoaded)
+import Kanban.UI.Keys (BindingScope (..), BoardAction (..), KeyBinding (..), actionKeyText, footerHint, footerHintRow, modeScopeBindings)
 import Kanban.UI.SessionCore
 import Kanban.UI.Session (incidentsFooterHints, processesFooterHints)
 import Kanban.UI.SessionEvents (pullRequestSessionOps, reviewSessionOps, sessionOverlayHints, solveSessionOps)
@@ -161,16 +163,33 @@ drawUsage state
         . padLeftRight 1
         $ usageContents
   where
-    usageContents =
-      vBox
-        [ vBox [drawProvider state Codex, txt "", drawProvider state Claude],
-          drawUpdateButton state,
-          -- One padded stack rather than two, so the pair stays together at
-          -- the sidebar's foot: padding each separately would push the
-          -- approval control up to the update button and leave the gap
-          -- between two service controls that belong beside each other.
-          padTop Max (vBox [drawApprovalButton state, drawDrainerButton state])
-        ]
+    -- With no provider loaded there are no windows to draw and no issue
+    -- approval service to start, so §6's box, ` USAGE ` heading, and 28-cell
+    -- width keep only the two controls that still mean something: the update
+    -- `u` and `↻` share, which still refreshes the board, and the PR
+    -- drainer, which merges pull requests and spawns no model.
+    --
+    -- The approval control going with the provider blocks is what closes its
+    -- click route: brick registers a clickable extent only for a widget that
+    -- was drawn, so a press cannot reach 'ApprovalButton' when this branch
+    -- draws none -- and `a` itself refuses through
+    -- 'Kanban.UI.Keys.agentSurfaceRefusal' whether or not it is on screen.
+    usageContents
+      | not (agentsLoaded state.appOperatingMode) =
+          vBox
+            [ drawUpdateButton state,
+              padTop Max (drawDrainerButton state)
+            ]
+      | otherwise =
+          vBox
+            [ vBox [drawProvider state Codex, txt "", drawProvider state Claude],
+              drawUpdateButton state,
+              -- One padded stack rather than two, so the pair stays together at
+              -- the sidebar's foot: padding each separately would push the
+              -- approval control up to the update button and leave the gap
+              -- between two service controls that belong beside each other.
+              padTop Max (vBox [drawApprovalButton state, drawDrainerButton state])
+            ]
 
 -- | One nested sidebar control, drawn under §10's convention: its own box out
 -- of 'innerBorderStyle' rather than the label wrapped in Brick's
@@ -1129,7 +1148,7 @@ boardHintLine state = case state.appOverlay of
   Nothing
     | isJust (filterPanelFocusedBox state) -> filterFooterHintLine
     | isJust (focusedSearch state) -> searchFooterHintLine
-    | otherwise -> boardFooterHintLine (criteriaAreFiltering state)
+    | otherwise -> boardFooterHintLine state.appOperatingMode (criteriaAreFiltering state)
 
 -- | The hint line an open overlay shows in place of the board's.
 overlayHintLine :: AppState -> Overlay -> Text
@@ -1144,10 +1163,15 @@ overlayHintLine state = footerHintRow . overlayHintChips state
 -- focused session so the row follows its effective mode. What is here is the
 -- routing and nothing else -- the same reason the help overlay's rows are
 -- assembled rather than transcribed.
+--
+-- The two scopes of the base table follow the operating mode exactly as the
+-- board's own line does, and for the same reason: a details overlay whose
+-- footer named `r`, `S`, `A`, and `x` on a board that loads no provider would
+-- advertise four keys that answer with a refusal.
 overlayHintChips :: AppState -> Overlay -> [Text]
 overlayHintChips state = \case
-  HelpOverlay -> map footerHint (scopeBindings HelpScope)
-  DetailsOverlay _ -> map footerHint (scopeBindings DetailsScope)
+  HelpOverlay -> map footerHint (modeScopeBindings state.appOperatingMode HelpScope)
+  DetailsOverlay _ -> map footerHint (modeScopeBindings state.appOperatingMode DetailsScope)
   SettingsOverlay -> settingsFooterHints
   ProcessesOverlay -> processesFooterHints
   IncidentsOverlay -> incidentsFooterHints
@@ -1184,8 +1208,12 @@ filterFooterHintLine =
 -- and @m@ were all missing from it — so at narrow widths more of the tail is
 -- clipped. The help overlay behind @?@ is, as before, the complete list, and
 -- is the one that has to stay readable.
+--
+-- This is the dual-mode line, which is every chip the table declares. The mode
+-- is a parameter of 'boardFooterHintLine' rather than of this alias because a
+-- board that loads no provider draws a shorter one.
 footerHintLine :: Text
-footerHintLine = boardFooterHintLine False
+footerHintLine = boardFooterHintLine DualMode False
 
 -- | The same line with the filter chip marked while the criteria are hiding
 -- cards.
@@ -1194,8 +1222,15 @@ footerHintLine = boardFooterHintLine False
 -- is hidden, and a board that is quietly showing a subset of its work has to
 -- say so somewhere that is always on screen. It marks the existing chip rather
 -- than adding one, so the line's inventory still comes from the table.
-boardFooterHintLine :: Bool -> Text
-boardFooterHintLine filtering = footerHintRow (map chip (scopeBindings BoardScope))
+--
+-- The inventory follows the operating mode, through 'modeScopeBindings'
+-- rather than a second list here: a board that loads no provider offers none
+-- of the six agent bindings, so naming them along the bottom of the screen
+-- would advertise six keys that answer with a refusal. They are still
+-- dispatched -- 'Kanban.UI.Events.boardActionGate' is where a press on one
+-- lands -- so this hides a chip and never a key.
+boardFooterHintLine :: OperatingMode -> Bool -> Text
+boardFooterHintLine mode filtering = footerHintRow (map chip (modeScopeBindings mode BoardScope))
   where
     chip candidate
       | filtering, candidate.bindingAction == ShowFilter = footerHint candidate <> "*"

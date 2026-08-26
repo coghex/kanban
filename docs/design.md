@@ -189,6 +189,15 @@ rules, and an absent one leaves the global timeouts in force, so a ping still
 answers from a directory that is not a checkout or has no configured remote. A
 `--repo` that names no repository at all is reported rather than ignored.
 
+Both of those two modes refuse outright in the no-agent operating mode section
+7's `agents` list derives, an unusable `models.toml` included: with no provider
+loaded there is no account status to report and no window to start, so each
+prints the mode-naming message to stderr and exits non-zero without probing or
+spending anything. No other mode is refused — `--doctor` least of all, since
+saying why an AI action would not start is exactly what it is for. The question
+is asked after the malformed-`--ping` refusal, so an unknown or repeated brand
+is still reported as itself.
+
 ## 6. Layout
 
 The normal wide-screen layout is a 28-column usage sidebar plus a horizontally
@@ -224,11 +233,19 @@ scrollable four-column board.
 
 The two service controls sit at the foot of the sidebar as one stack, the
 issue approval service above the PR drainer, each drawing its own status detail
-line immediately beneath its box.
+line immediately beneath its box. In the no-agent operating mode the approval
+control is not drawn at all — `approve_issues.py` resolves `issue_gate` models
+and can do nothing with no provider loaded — leaving the drainer's control
+alone at the foot, and leaving no click target where the approval control's
+box would have been.
 
 Responsive behavior:
 
-- The sidebar is 28 columns by default and toggles with `c`.
+- The sidebar is 28 columns by default and toggles with `c`. In the no-agent
+  operating mode it keeps that width, its box, its ` USAGE ` heading, and both
+  the `↻` update and `drain_prs.py` controls with their click behavior
+  unchanged; the Codex and Claude provider blocks and the `approve_issues.py`
+  control are the only things it drops.
 - Board columns have a readable minimum width rather than being compressed
   until their contents become useless. The initial minimum is 32 cells per
   column.
@@ -321,6 +338,22 @@ Initial bindings:
 | `q` | In an open live-agent overlay's normal mode, hide the overlay without interrupting its work and without quitting the dashboard |
 | `q` / `Ctrl-C` | Quit and restore the terminal from the board, a card's details overlay, or the help overlay; a live-agent overlay's normal-mode `q` hides that overlay instead and never quits |
 
+In the no-agent operating mode — a `models.toml` whose `agents` list loads no
+provider, and equally one that will not load at all — the six bindings that
+drive an agent leave the screen: `x`, `r`, `S`, `A`, `p`, and `a` are absent
+from the footer hint line, from a card's details overlay footer, and from the
+help overlay. Every one of them is still dispatched. Pressing one produces a
+notice naming the mode and the `agents` list that selects it, and nothing else
+happens: no chooser opens, no session is inserted or reopened, no process is
+spawned or killed, no overlay opens, and the approval service is neither
+started nor stopped. That refusal is given ahead of the settled-history and
+completed-history answers below, so the reason on screen is the one that is
+actually true of the board. `u` still updates GitHub board data in this mode
+and spawns no usage provider — not at startup, not on the key, and not from
+the sidebar's `↻` — and every other binding in the table above behaves exactly
+as it does in the other two modes. The rows themselves are unchanged: this
+paragraph is what the mode changes, not the table.
+
 Refresh keys are ignored for a provider that already has a request in flight.
 Keybindings can become configurable later, but the first release should keep a
 small fixed set.
@@ -367,7 +400,11 @@ Mouse interaction is intentionally complete but narrow:
 - Left-clicking outside an open details panel closes it.
 - Right-clicking a board card opens its live issue-review, solve,
   autosolve-bound PR review, or direct PR session. With no live session it only
-  selects the card and never opens details.
+  selects the card and never opens details. In the no-agent operating mode a
+  press that would open one of those overlays selects the card and shows that
+  mode's refusal instead, because this gesture is a second route to the very
+  overlays `r`, `S`, `A`, and `p` open; a press with no live session under it
+  is unchanged, since it was never opening one.
 - Right-clicking anywhere while a details panel is open closes it.
 - The mouse wheel scrolls the board column under the pointer by three rows per
   wheel event.
@@ -1673,7 +1710,10 @@ the last good snapshot.
 ## 14. Usage acquisition
 
 Usage is global rather than repository-specific and refreshes once at startup
-and when the user presses `u`.
+and when the user presses `u`, in every operating mode but no-agent. That mode
+loads no provider, so it spawns no usage process at all: not at startup, not on
+`u`, and not from the sidebar's `↻`, each of which still updates the GitHub
+board data.
 
 Usage providers are best-effort observers of unstable interfaces. A failed or
 unsupported provider never affects the board or another provider, and each can
@@ -1888,12 +1928,18 @@ Reset and relative times are recomputed whenever a redraw happens for another
 reason, from the instant that redraw carries; the application never wakes on a
 timer to maintain a countdown.
 
+No provider block is drawn at all in the no-agent operating mode, since nothing
+is probed to fill one; section 6 describes what the sidebar keeps in its place.
+
 ### The `--usage` command-line surface
 
 `kanban --usage` answers the same question from a shell without starting the
 dashboard. It reports both providers and exits zero when at least one produced
 windows, non-zero when none did. A provider that fails prints its own line and
-never suppresses or replaces the other's.
+never suppresses or replaces the other's. In the no-agent operating mode it
+reports no provider at all: there is none loaded to report on, so it prints the
+mode-naming message to stderr and exits non-zero without probing, exactly as
+`--ping` does (section 5).
 
 ```text
 Codex

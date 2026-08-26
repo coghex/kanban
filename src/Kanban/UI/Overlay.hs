@@ -38,16 +38,16 @@ import Kanban.Settings
     verbosityDescription,
     verbosityLabel
   )
-import Kanban.Models (ModelRoster, RecordedAssignment (..), RosterLoadError, rosterErrorMessage)
+import Kanban.Models (ModelRoster, OperatingMode, RecordedAssignment (..), RosterLoadError, rosterErrorMessage)
 import Kanban.Text (sanitizeText)
 import Kanban.UI.Keys
   ( BoardAction (..),
     HelpEntry (..),
     actionKeyText,
     bindingHelpEntry,
-    boardBindings,
     gestureHelpEntry,
     helpRows,
+    modeBoardBindings,
   )
 import Kanban.UI.SessionCore (sessionInputHelp)
 import Kanban.UI.Settings
@@ -78,7 +78,7 @@ drawOverlay state overlay =
     . borderWithLabel (withAttr headingAttr (txt overlayTitle))
     . padAll 1
     $ case overlay of
-      HelpOverlay -> drawHelp
+      HelpOverlay -> drawHelp state
       SettingsOverlay -> drawSettings state
       ProcessesOverlay -> drawProcesses state
       IncidentsOverlay -> drawIncidents state
@@ -88,6 +88,11 @@ drawOverlay state overlay =
       SolveOverlay issueNumber -> drawSolve state issueNumber
       PullRequestReviewOverlay number -> drawPullRequestReview state number
   where
+    -- The rows the help overlay is about to draw, which is what both of its
+    -- dimensions are measured from. Taken once here rather than twice below,
+    -- because the list follows the operating mode and a box sized from a
+    -- different one would clip its own contents.
+    rows = helpLines state.appOperatingMode
     overlayWidth = case overlay of
       SolveChooser _ _ -> 42
       SettingsOverlay -> 68
@@ -97,7 +102,7 @@ drawOverlay state overlay =
       -- a description added to the table has to widen the box rather than be
       -- silently cut off inside it. A terminal narrower than this still clips
       -- the overlay, which is the overlay system's existing policy.
-      HelpOverlay -> maximum (1 : map Text.length helpLines) + 4
+      HelpOverlay -> maximum (1 : map Text.length rows) + 4
       _ -> 88
     overlayHeight = case overlay of
       SolveChooser _ _ -> 10
@@ -110,7 +115,7 @@ drawOverlay state overlay =
       -- Tall enough for the list it draws, so a binding added to the table
       -- cannot silently push a row past the border: the two rows 'padAll'
       -- adds and the two the border takes are the whole difference.
-      HelpOverlay -> length helpLines + 4
+      HelpOverlay -> length rows + 4
       _ -> 32
     panelExtent = case overlay of
       HelpOverlay -> id
@@ -140,8 +145,8 @@ reviewOverlayTitle state issueNumber = case (.sessionDetail.reviewSessionStage) 
   Just IssueRereview -> "REREVIEW"
   Nothing -> "REVIEW"
 
-drawHelp :: Widget Name
-drawHelp = vBox (map txt helpLines)
+drawHelp :: AppState -> Widget Name
+drawHelp state = vBox (map txt (helpLines state.appOperatingMode))
 
 -- | The complete binding list, in three blocks: every base-board binding in
 -- §7's order, then the bindings a live-agent overlay adds, then the mouse.
@@ -151,8 +156,19 @@ drawHelp = vBox (map txt helpLines)
 -- that answers them in "Kanban.UI.SessionCore", so the overlay cannot claim a
 -- binding that dispatch does not have — which is exactly how it came to omit
 -- @?@, its own binding, before this list was derived.
-helpLines :: [Text]
-helpLines = helpRows (map bindingHelpEntry boardBindings <> sessionInputHelp <> mouseHelpEntries)
+--
+-- The board block follows the operating mode through 'modeBoardBindings', so
+-- a board that loads no provider lists none of the six agent bindings here
+-- either -- the help overlay and the footer hide the same set, because both
+-- project from that one decision.
+--
+-- The session block does not, deliberately. Those keys belong to a live-agent
+-- overlay's own decoder rather than to the base board, and hiding a row that
+-- describes an overlay no press can open in that mode is a wider change than
+-- this one: the six bindings above are what the mode decides.
+helpLines :: OperatingMode -> [Text]
+helpLines mode =
+  helpRows (map bindingHelpEntry (modeBoardBindings mode) <> sessionInputHelp <> mouseHelpEntries)
 
 -- | The gestures no key covers, so no binding defines them. Mouse policy
 -- lives in @Kanban.UI.Events@ rather than in a table, and this is prose about

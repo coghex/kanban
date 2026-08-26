@@ -1,12 +1,13 @@
 module Main (main) where
 
-import Control.Monad (unless)
+import Control.Monad (unless, when)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
-import Kanban.CLI (LaunchMode (..), Options (..), launchMode, optionsParserInfo)
+import Kanban.CLI (LaunchMode (..), Options (..), launchMode, launchModeNeedsProvider, launchModeRefusal, optionsParserInfo)
 import Kanban.Config (RawConfig (..), cacheEnabled, configuredRepositoryPaths, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
+import Kanban.Models (loadModelRoster)
 import Kanban.Ping (PingMode (..), pingRepositoryIdentity, pingResolvedConfig, resolvePingBrand, runPingMode)
 import Kanban.Preflight (doctorLines, doctorReady, gatherPreflightEnvironment)
 import Kanban.Repository (resolveRepository, resolveRepositoryRoster)
@@ -36,7 +37,22 @@ main = do
   -- the one decision about which invocations become a board -- and therefore
   -- which of them take the repository's lease -- lives where the test suite
   -- can reach it. This module is not built by @test-suite kanban-test@.
-  case launchMode parsedOptions of
+  let selectedMode = launchMode parsedOptions
+  -- The operating mode gate (§14): a mode that reaches a provider has nothing
+  -- to reach when the roster loads none. Deliberately after the malformed
+  -- --ping refusal above, so an unknown or repeated brand is still reported as
+  -- itself; and asked only of the modes that need one, so the dashboard and
+  -- the worker do not read models.toml twice. The decision is
+  -- 'launchModeRefusal' in the library, which the suite covers; this reports
+  -- what it answered and nothing more.
+  when (launchModeNeedsProvider selectedMode) $ do
+    loadedRoster <- loadModelRoster
+    case launchModeRefusal selectedMode loadedRoster of
+      Nothing -> pure ()
+      Just message -> do
+        hPutStrLn stderr ("kanban: " <> Text.unpack message)
+        exitFailure
+  case selectedMode of
     WorkerMode workerSpec -> do
       result <- runWorker workerSpec
       case result of

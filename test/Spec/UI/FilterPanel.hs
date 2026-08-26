@@ -19,6 +19,7 @@ import qualified Data.Text as Text
 import qualified Graphics.Vty as Vty
 import Kanban.Domain
 import Kanban.Filter
+import Kanban.Models (OperatingMode (..))
 import Kanban.UI.Board
   ( boardFooterHintLine,
     boardHintLine,
@@ -813,11 +814,11 @@ presentationSpec = describe "what the board says about the criteria" $ do
     emptyColumnText emptied Issues `shouldBe` "No filter matches"
 
   it "marks the footer chip only while the criteria are hiding cards" $ do
-    boardFooterHintLine False `shouldBe` footerHintLine
-    ("F filter*" `Text.isInfixOf` boardFooterHintLine True) `shouldBe` True
+    boardFooterHintLine DualMode False `shouldBe` footerHintLine
+    ("F filter*" `Text.isInfixOf` boardFooterHintLine DualMode True) `shouldBe` True
     ("F filter*" `Text.isInfixOf` footerHintLine) `shouldBe` False
     -- One chip marked, and the line's inventory otherwise unchanged.
-    length (Text.splitOn "  " (boardFooterHintLine True))
+    length (Text.splitOn "  " (boardFooterHintLine DualMode True))
       `shouldBe` length (Text.splitOn "  " footerHintLine)
 
   it "shows each surface its own hint line" $ do
@@ -826,7 +827,7 @@ presentationSpec = describe "what the board says about the criteria" $ do
     boardHintLine state `shouldBe` footerHintLine
     boardHintLine shown `shouldBe` filterFooterHintLine
     boardHintLine (press (key 's') shown) `shouldBe` searchFooterHintLine
-    boardHintLine (withBoxes [KindBox KindIssues] state) `shouldBe` boardFooterHintLine True
+    boardHintLine (withBoxes [KindBox KindIssues] state) `shouldBe` boardFooterHintLine DualMode True
 
   it "names none of the board's own column keys on the panel's line" $
     sequence_

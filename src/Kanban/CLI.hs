@@ -5,10 +5,20 @@ module Kanban.CLI
     Options (..),
     acquiresRepositoryLease,
     launchMode,
+    launchModeNeedsProvider,
+    launchModeRefusal,
     optionsParserInfo,
   )
 where
 
+import Data.Text (Text)
+import Kanban.Models
+  ( ModelRoster,
+    RosterLoadError,
+    agentsLoaded,
+    loadedOperatingMode,
+    noAgentModeMessage,
+  )
 import Options.Applicative
 
 data ColorPolicy = ColorAuto | ColorTruecolor | Color256 | ColorNever
@@ -78,6 +88,48 @@ launchMode options = case options.optionWorkerSpec of
     | options.optionUsage -> UsageQueryMode
     | not (null options.optionPing) -> PingQueryMode
     | otherwise -> DashboardMode
+
+-- | Whether this mode reaches a model provider, and so has nothing to do when
+-- the roster loads none.
+--
+-- Total in 'LaunchMode', so a mode added above cannot run without a decision
+-- about whether a Kanban that spawns nothing may take it.
+--
+-- Only the two provider modes do. @--usage@ reads both providers' account
+-- status and @--ping@ spends quota on one, so both answer about something a
+-- no-agent install does not have. Nothing else is: a worker replays the
+-- assignment its own specification recorded and consults no roster at all,
+-- @--doctor@ is the read-only mode that exists to say /why/ an AI action would
+-- not start and so must answer in exactly this case, @--glyph-test@ asks the
+-- terminal rather than a provider, and the dashboard is a board-only Kanban in
+-- this mode rather than a refused one.
+launchModeNeedsProvider :: LaunchMode -> Bool
+launchModeNeedsProvider mode = case mode of
+  UsageQueryMode -> True
+  PingQueryMode -> True
+  WorkerMode _ -> False
+  GlyphTestMode -> False
+  DoctorMode -> False
+  DashboardMode -> False
+
+-- | What a mode says instead of running, given the roster the invocation
+-- loaded, or 'Nothing' when it may run.
+--
+-- The complete load result rather than a mode, because 'loadedOperatingMode'
+-- is where a @models.toml@ that will not load at all becomes no-agent: a
+-- @Left@ has no @agents@ list to count, and refusing it here is what keeps an
+-- unusable file from being answered as though it had loaded two providers.
+--
+-- A malformed @--ping@ never reaches this. @app\/Main.hs@ resolves the brand
+-- ahead of mode selection precisely so an unknown or repeated one is reported
+-- as itself (§5), and this decision is asked only after that refusal has had
+-- its chance.
+launchModeRefusal :: LaunchMode -> Either RosterLoadError ModelRoster -> Maybe Text
+launchModeRefusal mode loaded
+  | launchModeNeedsProvider mode,
+    not (agentsLoaded (loadedOperatingMode loaded)) =
+      Just noAgentModeMessage
+  | otherwise = Nothing
 
 -- | Whether this invocation takes the repository's board lease.
 --
