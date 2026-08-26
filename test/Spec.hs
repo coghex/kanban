@@ -10,6 +10,7 @@
 -- their @describe@ blocks have always run in.
 module Main (main) where
 
+import qualified Spec.Agent.Adapter as Adapter
 import qualified Spec.Agent.Capture as Capture
 import qualified Spec.Agent.Compatibility as Compatibility
 import qualified Spec.ApprovalService as ApprovalService
@@ -121,6 +122,7 @@ suiteGroups =
     SuiteGroup "Spec.Agent.Supervision" SupervisionLane Supervision.spec, -- 72.6s
     SuiteGroup "Spec.Agent.Protocol" LifecycleLane Protocol.spec, -- 8.5s
     SuiteGroup "Spec.Agent.Solve" LifecycleLane Solve.spec, -- 2.8s
+    SuiteGroup "Spec.Agent.Adapter" LifecycleLane Adapter.spec,
     SuiteGroup "Spec.Config.Settings" PingLane Settings.spec,
     SuiteGroup "Spec.Config.Models" PingLane Models.spec,
     SuiteGroup "Spec.Agent.Transcript" PingLane Transcript.spec,

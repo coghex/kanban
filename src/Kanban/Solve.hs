@@ -1,5 +1,7 @@
 module Kanban.Solve
   ( AgentEvent (..),
+    ProcessRequest (..),
+    ProviderAdapter (..),
     ResumeProvenance (..),
     SolveEvent (..),
     SolveOutcome (..),
@@ -9,6 +11,8 @@ module Kanban.Solve
     UnknownAggregator,
     UnknownStreamCategory (..),
     UnknownStreamKey (..),
+    adapterFor,
+    adapterForBrand,
     agentOutcome,
     assignmentLabel,
     brandForProvider,
@@ -59,6 +63,14 @@ import Kanban.Models
     recordAssignment,
   )
 import Kanban.Process (managedProcess)
+import Kanban.ProviderAdapter
+  ( ProcessRequest (..),
+    ProviderAdapter (..),
+    adapterFor,
+    adapterForBrand,
+    brandForProvider,
+    providerForBrand,
+  )
 import Kanban.Solve.Event
   ( AgentEvent (..),
     ResumeProvenance (..),
@@ -89,32 +101,7 @@ import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWi
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
 import System.IO (BufferMode (..), Handle, hSetBuffering)
-import System.Process
-  ( CreateProcess (..),
-    ProcessHandle,
-    StdStream (CreatePipe, NoStream),
-    createProcess,
-    cwd,
-    proc,
-    std_err,
-    std_out,
-    waitForProcess,
-  )
-
--- | Which provider's compiled adapter a solver brand runs through. The one
--- mapping between the two vocabularies: 'SolverBrand' names the executable
--- this layer spawns, 'ProviderName' names the roster table it reads.
-providerForBrand :: SolverBrand -> ProviderName
-providerForBrand CodexSolver = CodexProvider
-providerForBrand ClaudeSolver = ClaudeProvider
-
--- | 'providerForBrand' read the other way, which is what a replayed launch
--- needs: a recorded assignment names the provider it was resolved for, and
--- the supervisor has to reach the executable that provider's adapter spawns
--- without re-deriving it from the task's own routing (D-7).
-brandForProvider :: ProviderName -> SolverBrand
-brandForProvider CodexProvider = CodexSolver
-brandForProvider ClaudeProvider = ClaudeSolver
+import System.Process (ProcessHandle, createProcess, waitForProcess)
 
 -- | The roster cell a solve invocation runs on. The single declaration of
 -- solve's @(role, provider)@ selection, shared by the UI boundary that
@@ -188,7 +175,7 @@ runSolve = runSolveWith (const handleReadLine)
 -- the other's.
 runSolveWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Assignment -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (SolveEvent -> IO ()) -> IO ()
 runSolveWith readLineFor repository issueNumber workflow brand configPath config assignment existingSession existingLogPath provenance userMessage aggregator eventSink = do
-  logResult <- openSessionLog repository (workflowLogName workflow <> "-" <> solverName brand) issueNumber existingLogPath
+  logResult <- openSessionLog repository (workflowLogName workflow <> "-" <> solverBrandName brand) issueNumber existingLogPath
   sessionLog <- case logResult of
     Left message -> eventSink (SolveDiagnostic issueNumber message) >> pure Nothing
     Right value -> do
@@ -262,24 +249,20 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
     -- other cannot terminalize until that reporting is complete.
     flushAggregates = sealUnknownAggregates aggregator (eventSink . SolveOutput issueNumber)
     repositoryRoot = repository.repositoryRoot
-    executableName = case brand of
-      CodexSolver -> "codex"
-      ClaudeSolver -> "claude"
-    solverName CodexSolver = "codex"
-    solverName ClaudeSolver = "claude"
+    adapter = adapterForBrand brand
+    executableName = adapter.adapterExecutable
     finishWithoutProcess sessionLog outcome = closeWithOutcome sessionLog outcome
     closeWithOutcome sessionLog outcome = do
       flushAggregates
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (SolveProcessFinished issueNumber outcome)
     processSpec executablePath =
-      (proc executablePath (solveArguments issueNumber workflow brand configPath repository config assignment existingSession provenance userMessage))
-        { cwd = Just repositoryRoot,
-          std_out = CreatePipe,
-          std_err = CreatePipe,
-          std_in = NoStream,
-          create_group = True
-        }
+      adapter.adapterSolveProcess
+        ProcessRequest
+          { requestExecutable = executablePath,
+            requestArguments = solveArguments issueNumber workflow brand configPath repository config assignment existingSession provenance userMessage,
+            requestWorkingDirectory = repositoryRoot
+          }
 
 -- | The provider argv for one solve invocation.
 --

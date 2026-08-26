@@ -10,6 +10,7 @@
 module Kanban.Review
   ( CanonicalIssueReviewResult (..),
     CommandBounds (..),
+    EmbeddedReviewBackend (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
     IssueReviewerRecord (..),
@@ -45,6 +46,7 @@ module Kanban.Review
     decodeReviewResult,
     decodeReviewWireMessage,
     drainToolRegistry,
+    embeddedReviewProvider,
     githubCommandBounds,
     githubIssueCommentArguments,
     githubIssueEditArguments,
@@ -59,6 +61,7 @@ module Kanban.Review
     issueReviseDisplay,
     killReviewTools,
     killThreadToolProcesses,
+    missingEmbeddedReviewMessage,
     newRecordingReviewClientForTesting,
     newReviewClientForTesting,
     reviewDeveloperInstructions,
@@ -118,6 +121,11 @@ import Kanban.Models
     assignmentUnavailableMessage,
   )
 import Kanban.Process (killManagedProcess, managedProcess)
+import Kanban.ProviderAdapter
+  ( EmbeddedReviewBackend (..),
+    ProviderAdapter (..),
+    adapterFor,
+  )
 import Kanban.Review.Canonical
   ( IssueReviewerRecord (..),
     IssueReviewerSource (..),
@@ -147,14 +155,16 @@ import Kanban.Review.Client
     reserveToolSlot,
     withReservedToolSlot,
   )
-import Kanban.Review.Diagnostics (exceptionText, outcomeUnknownDiagnostic)
+import Kanban.Review.Diagnostics
+  ( exceptionText,
+    missingEmbeddedReviewMessage,
+    outcomeUnknownDiagnostic,
+  )
 import Kanban.Review.Prompts
   ( claudeTool,
     claudeToolName,
     finalOutputSchema,
-    githubTool,
     githubToolName,
-    questionTool,
     questionToolName,
     reviewDeveloperInstructions,
     reviewPrompt,
@@ -233,24 +243,40 @@ claudeStartedEvent :: ReviewClient -> Text -> ReviewEvent
 claudeStartedEvent client threadId =
   ReviewClaudeStarted threadId (issueReviseDisplay client.reviewModelRoster)
 
+-- | The provider Kanban's embedded issue review runs on, and so the adapter
+-- whose backend it starts and whose dynamic tools it registers.
+--
+-- Codex, unchanged: MODEL-12 makes the backend a field a provider may lack
+-- rather than a construction only Codex can be, but it routes nothing new.
+-- MODEL-13 is what fills Claude's, and MODEL-10 is what makes this a value
+-- the operator's mode can move.
+embeddedReviewProvider :: ProviderName
+embeddedReviewProvider = CodexProvider
+
 issueReviewAssignment :: ModelRoster -> Either Text Assignment
 issueReviewAssignment roster =
-  either (Left . assignmentUnavailableMessage) Right (assignmentFor roster IssueReviewRole CodexProvider)
+  either (Left . assignmentUnavailableMessage) Right (assignmentFor roster IssueReviewRole embeddedReviewProvider)
 
 startReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
 startReviewClient roster workflowConfig repository eventSink = case issueReviewAssignment roster of
   -- Resolved before the app-server is spawned, not after: a roster that
   -- loads no Codex provider must start no process at all, and the backend's
-  -- own failure surface already carries the reason to the UI.
+  -- own failure surface already carries the reason to the UI. The cell is
+  -- consulted first and the backend second, in that order, because that is
+  -- the order the refusals were already reached in: today's Codex-only
+  -- routing always finds a backend, so the second arm answers nothing an
+  -- install can currently ask.
   Left message -> pure (Left message)
-  Right _ -> startResolvedReviewClient roster workflowConfig repository eventSink
+  Right _ -> case (adapterFor embeddedReviewProvider).adapterEmbeddedReview of
+    Nothing -> pure (Left (missingEmbeddedReviewMessage embeddedReviewProvider))
+    Just backend -> startResolvedReviewClient backend roster workflowConfig repository eventSink
 
-startResolvedReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
-startResolvedReviewClient roster workflowConfig repository eventSink = do
+startResolvedReviewClient :: EmbeddedReviewBackend -> ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
+startResolvedReviewClient backend roster workflowConfig repository eventSink = do
   logResult <- openSessionLog repository "issue-revision-appserver" 0 Nothing
   sessionLog <- case logResult of
     Left message -> eventSink (ReviewProtocolWarning message) >> pure Nothing
-    Right value -> logMessage value "backend-started" "codex app-server" >> pure (Just value)
+    Right value -> logMessage value "backend-started" backend.backendLabel >> pure (Just value)
   started <- try (createProcess processSpec) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
   case started of
     Left exception -> closeReviewLog sessionLog >> pure (Left ("Could not start codex app-server: " <> exceptionText exception))
@@ -307,14 +333,7 @@ startResolvedReviewClient roster workflowConfig repository eventSink = do
     Right _ -> closeReviewLog sessionLog >> pure (Left "Codex app-server did not provide all three standard streams")
   where
     repositoryRoot = repository.repositoryRoot
-    processSpec =
-      (proc "codex" ["app-server", "--listen", "stdio://"])
-        { cwd = Just repositoryRoot,
-          std_in = CreatePipe,
-          std_out = CreatePipe,
-          std_err = CreatePipe,
-          create_group = True
-        }
+    processSpec = backend.backendProcess repositoryRoot
 
 -- | Builds a 'ReviewClient' without the app-server handshake 'startReviewClient'
 -- performs, so tests can exercise the tool-invocation and registry machinery
@@ -440,7 +459,7 @@ beginIssueReview client issueNumber = case issueReviewAssignment client.reviewMo
           "sandbox" .= ("read-only" :: Text),
           "ephemeral" .= False,
           "developerInstructions" .= reviewDeveloperInstructions client.reviewWorkflowConfig client.reviewModelRoster,
-          "dynamicTools" .= [questionTool, claudeTool client.reviewModelRoster, githubTool client.reviewWorkflowConfig]
+          "dynamicTools" .= (adapterFor embeddedReviewProvider).adapterReviewTools client.reviewModelRoster client.reviewWorkflowConfig
         ]
 
 sendReviewMessage :: ReviewClient -> Text -> Maybe Text -> Text -> IO (Either Text ())

@@ -10,10 +10,17 @@
 -- handed /to/ the reviewing model and the text handed /back/ by a tool name
 -- the same agent, and a second spelling of either is how a roster edit comes
 -- to move one and not the other.
+--
+-- 'missingEmbeddedReviewMessage' is here on the same terms: it is the second
+-- of the two refusals a launch of the embedded issue review can end in, and
+-- it is said beside the review's other shared vocabulary rather than at the
+-- launch boundary that happens to discover it. The first of the two stays
+-- 'Kanban.Models.assignmentUnavailableMessage', called where it always was.
 module Kanban.Review.Diagnostics
   ( claudeRevisionAgent,
     decodeClaudeBytes,
     exceptionText,
+    missingEmbeddedReviewMessage,
     outcomeUnknownDiagnostic,
     outcomeUnknownMessage,
     renderClaudeFailureDetails,
@@ -30,8 +37,25 @@ import Data.Text.Encoding.Error (lenientDecode)
 import Kanban.Models
   ( Assignment (..),
     AssignmentUnavailable,
+    ProviderName,
+    providerKey,
     unavailableAssignmentDisplay,
   )
+
+-- | The refusal a launch gets when the provider it resolved to has no
+-- embedded issue-review backend at all.
+--
+-- Distinct from 'Kanban.Models.assignmentUnavailableMessage', which the same
+-- launch consults first, because the causes are: that one says the operator's
+-- roster cannot supply a cell, this one says Kanban itself ships no backend
+-- for the provider. Only Claude answers to it, and only from MODEL-13
+-- onwards -- nothing in MODEL-12 routes the embedded review anywhere but
+-- Codex, so no install's behavior moves.
+missingEmbeddedReviewMessage :: ProviderName -> Text
+missingEmbeddedReviewMessage provider =
+  "Kanban has no embedded issue-review backend for provider \""
+    <> providerKey provider
+    <> "\""
 
 -- | How every review string names the agent @kanban_run_claude@ runs: the
 -- unversioned brand, then the model-and-effort of the @issue_revise.claude@

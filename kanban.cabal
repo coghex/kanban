@@ -168,6 +168,7 @@ library
     Kanban.ServiceProcess
     Kanban.Preflight.Environment
     Kanban.Preflight.Readiness
+    Kanban.ProviderAdapter
     Kanban.Review.Canonical
     Kanban.Review.Client
     Kanban.Review.Diagnostics
@@ -221,6 +222,7 @@ test-suite kanban-test
   main-is: Spec.hs
   other-modules:
     Spec.ApprovalService
+    Spec.Agent.Adapter
     Spec.Agent.Capture
     Spec.Agent.Compatibility
     Spec.Agent.IssueReviewer

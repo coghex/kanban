@@ -126,9 +126,17 @@ Modules live in `src/Kanban/`; search the group that matches the change.
   (lifecycles), `UI.Transcript`, `UI.Refresh` and `UI.Reconcile` (refresh),
   `UI.AutoSolve`, the autosolve loop as pure functions, and `UI.Util`.
 - `Worker` with `Worker.*`, `Solve` with `Solve.*`, `Review` with `Review.*`,
-  `PullRequestFlow`, `Codex`, `Claude`, `Process`, `Transcript`, `Preflight` with
-  `Preflight.*`, `Provider`, `StreamReader`, `CommandCapture` —
-  the agent execution layer. `Review` itself is the Codex app-server client and the
+  `PullRequestFlow`, `ProviderAdapter`, `Codex`, `Claude`, `Process`, `Transcript`,
+  `Preflight` with `Preflight.*`, `Provider`, `StreamReader`, `CommandCapture` —
+  the agent execution layer. `ProviderAdapter` is the one place a provider's
+  agent-session processes are built: `Solve`, `PullRequestFlow`, `Review`, and
+  `Review.Tools` read the executable, the process spec, the embedded-review
+  backend, and the registered review tools off one compiled record per provider
+  instead of constructing their own, and
+  `tools/test_agent_workflow_contract.py`'s `ProviderAdapterBoundaryTests` holds
+  that boundary against the whole of `src/`. `Ping`, `Codex`, `Claude`, and
+  `Preflight.Environment` stay outside it: none is an agent session.
+  `Review` itself is the Codex app-server client and the
   compatibility facade every consumer imports; its seams live beside it —
   `Review.Types` (wire and result payloads), `Review.Client` (the `ReviewClient`
   record and its tool registry), `Review.Tools` (the `gh` and `claude` tool runners),
