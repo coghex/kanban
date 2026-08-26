@@ -45,6 +45,7 @@ module Kanban.UI.Keys
     gestureHelpEntry,
     helpRows,
     footerHint,
+    footerHintRow,
     footerKeyText,
     helpKeyText,
     actionKeyText,
@@ -320,6 +321,16 @@ helpEntryKeyText entry =
 -- | A binding's chip on the footer hint line.
 footerHint :: KeyBinding -> Text
 footerHint candidate = footerKeyText candidate.bindingKeys <> " " <> candidate.bindingLabel
+
+-- | The footer's hint row, built from the chips whichever surface currently
+-- has the keyboard declares.
+--
+-- The separator is a fact about the row rather than about any one surface, so
+-- it is spelled here once: the board projects its chips from the table above,
+-- and an overlay declares its own beside the code that answers those keys,
+-- but both are joined by this and read back apart by it.
+footerHintRow :: [Text] -> Text
+footerHintRow = Text.intercalate "  "
 
 -- | How the footer names a set of keys: compact, with arrow glyphs, because
 -- the hint line is a single row clipped at the terminal width.

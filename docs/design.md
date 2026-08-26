@@ -255,7 +255,10 @@ Responsive behavior:
   be aimed at, and the board below moves down by exactly the height it took. It
   is never an overlay: it sits beside the usage sidebar rather than over it, and
   never reaches the footer.
-- While a search or the filter panel has the keyboard, the footer's hint line is
+- The footer's hint line always names the keys the surface that currently has
+  the keyboard answers, so it is the dashboard's one context-aware hotkey row
+  rather than a fixed list of the board's keys.
+- While a search or the filter panel has the keyboard, the board's line is
   replaced by that surface's own, because the board's line names `h`/`l`, `d`,
   and the arrows for meanings neither surface gives them:
 
@@ -266,6 +269,17 @@ Responsive behavior:
   ```text
   j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  F/esc close
   ```
+
+- An open overlay replaces it in the same way, and outranks a filter box or a
+  search still focused underneath it. A card's details overlay and the help
+  overlay name the bindings section 7 gives their scope; the settings,
+  process, incident, and solve-chooser overlays name the keys each answers
+  itself; and a live-agent overlay names what its focused session answers in
+  the mode that session is effectively in — insert or normal — so the row
+  changes with the mode badge beside it. No overlay repeats those keys inside
+  its own box: the row along the bottom of the terminal is where they are
+  named. None of that adds rows to section 7's table or to the help overlay,
+  which stay the complete list of the bindings they already document.
 
 ## 7. Keyboard interaction
 
