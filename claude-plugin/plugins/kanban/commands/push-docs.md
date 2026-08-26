@@ -1,6 +1,6 @@
 ---
-description: Land documentation from the docs worktree straight onto master through the tracked tools/docs_land.sh helper — named paths land exactly, and no arguments produces an inventory to choose from. Use when the user invokes /push-docs or asks to land, publish, or batch documentation from the docs-wip worktree.
-argument-hint: "[docs/<file>.md ...] — repository-relative Markdown paths; empty for the inventory"
+description: Land documentation from the docs worktree straight onto master through the tracked tools/docs_land.sh helper — named paths land exactly, an explicit all-docs request lands every eligible candidate, and a request with no selection produces an inventory to choose from. Use when the user invokes /push-docs or asks to land, publish, or batch documentation from the docs-wip worktree.
+argument-hint: "[docs/<file>.md ... | all docs] — repository-relative Markdown paths, an explicit broad selection, or empty for the inventory"
 ---
 
 # Push Docs
@@ -40,6 +40,14 @@ before the session reads this file: whitespace-separated, repository-relative
 Markdown paths. When it is non-empty, that list is the approved selection;
 when it is empty, use the inventory mode below.
 
+Before choosing a mode, distinguish an absent selection from an explicit broad
+one. Phrases such as **all docs**, **every pending document**, **land the docs
+worktree**, and **batch everything in docs-wip** are an approved selection of
+all eligible documentation candidates found by the inventory procedure below.
+Do not ask for a second approval after resolving that scope to exact paths. A
+bare invocation with no named paths and no such scope is inventory-only and
+still requires the selection stop below.
+
 1. Compose a concise commit subject describing the documents being landed,
    for example `docs: land the model settings design update`.
 2. Dry-run first and show the reported plan — subject, per-path action,
@@ -59,22 +67,47 @@ when it is empty, use the inventory mode below.
    `docs-wip` still carries unpushed local commits, and whether the primary
    checkout fast-forwarded or was skipped as dirty.
 
-## No arguments: inventory and selection
+## Inventory
 
-1. Produce the inventory of landable documents:
+1. Inspect the helper's `-h` output before using `-l`; do not discover option
+   support by deliberately invoking an unknown flag. If the help advertises
+   `-l` as an inventory/list option, produce the authoritative inventory with:
 
    ```bash
    "$ROOT/tools/docs_land.sh" -l
    ```
 
-2. Present it readably: each path with its tracked status, modification
-   state, whether it differs from `origin/master`, its §7 row and lane, and
-   its refusal reason when it has one. Highlight the paths that actually
-   differ — they are the landing candidates.
-3. Obtain the user's explicit approval of the exact path list to land. Never
-   land the whole worktree unprompted, and treat an empty, ambiguous, or
-   declined selection as landing nothing.
-4. Land only the approved paths through the named-path steps above.
+2. If the helper does not advertise `-l`, use a read-only Git inventory rather
+   than treating the older helper as broken. Resolve the worktree whose branch
+   is `refs/heads/docs-wip`, then take the union of:
+
+   ```bash
+   git -C "$DOCS_WT" diff --name-only -z origin/master --
+   git -C "$DOCS_WT" ls-files --others --exclude-standard -z --
+   ```
+
+   Parse those outputs as NUL-delimited path records. Retain only
+   repository-recognized documentation paths (normally Markdown under
+   `docs/` plus root instruction documents); exclude implementation, test,
+   configuration, generated binary, and asset paths. The named-path dry run
+   remains the authority for whether the older helper can land each retained
+   path.
+3. Present the inventory readably. When `-l` supplied classification data,
+   include each path's tracked status, modification state, whether it differs
+   from `origin/master`, its §7 row and lane, and any refusal reason. With the
+   Git fallback, identify it as a compatibility inventory and show the exact
+   candidate paths. In either mode, highlight the paths that actually differ.
+4. Resolve the selection:
+   - If the user explicitly requested all docs, every pending document, the
+     whole docs batch, or an equivalent broad scope, select every eligible
+     candidate and continue immediately through the named-path steps. **All
+     docs is an approved selection**; do not ask for a second approval.
+   - If the user supplied no selection, obtain explicit approval of the exact
+     path list. Treat an empty, ambiguous, or declined response as landing
+     nothing.
+5. Land only the resulting paths through the named-path steps above. If a
+   broad selection contains no eligible candidate, report that there is
+   nothing to land.
 
 ## Rules
 
@@ -89,8 +122,12 @@ when it is empty, use the inventory mode below.
 - A warning that dirty files also changed upstream, or that a named path
   changed upstream, is a stop: report it and let the user decide. Never pass
   `-f` unless the user explicitly directs it after seeing that warning.
-- Landing requires the explicit approval of the exact path list — either the
-  paths the user named when invoking this workflow, or the selection they
-  approved from the inventory. Nothing else may land.
-- If the helper exits nonzero at any step, report its output verbatim and
-  stop rather than retrying with different flags.
+- Landing requires either explicit approval of exact named paths or an
+  explicit broad scope such as all pending docs. A bare invocation is not a
+  broad scope and must stop for selection after inventory; an explicit broad
+  scope must not stop for redundant path-by-path approval.
+- If the helper exits nonzero while showing help, producing an advertised
+  inventory, dry-running, or landing, report its output verbatim and stop
+  rather than retrying with different flags. The Git compatibility inventory
+  is used only when help establishes that `-l` is unsupported; it never
+  replaces or bypasses the helper for a dry run or landing.

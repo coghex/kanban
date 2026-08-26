@@ -2272,8 +2272,10 @@ PUSH_DOCS_NEGATIVE_CONTROLS = (
 # rendering; compared over canonical() text.
 PUSH_DOCS_RULES = (
     "tools/docs_land.sh",
-    "never land the whole worktree unprompted",
-    "explicit approval of the exact path list",
+    "all docs is an approved selection",
+    "do not ask for a second approval",
+    "inspect the helper's -h output before using -l",
+    "git compatibility inventory",
     "never work around a refusal",
     "never pass -f",
 )
@@ -2319,6 +2321,22 @@ class PushDocsWorkflowAssetTests(unittest.TestCase):
                         f"{path} states {rule!r}; a rule that matches "
                         "unrelated assets asserts nothing here")
         self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_broad_selection_and_bare_invocation_remain_distinct(self):
+        required = (
+            "a bare invocation with no named paths and no such scope is "
+            "inventory-only",
+            "an explicit broad scope must not stop for redundant "
+            "path-by-path approval",
+            "the git compatibility inventory is used only when help "
+            "establishes that -l is unsupported",
+        )
+        missing = []
+        for path, text in self.assets.items():
+            for rule in required:
+                if rule not in text:
+                    missing.append(f"{path}: missing mode boundary {rule!r}")
+        self.assertEqual(missing, [], "\n".join(missing))
 
 
 if __name__ == "__main__":
