@@ -1,14 +1,16 @@
 """Hermetic tests for `--reconcile-approvals` and the roadmap readiness rule.
 
-Issue #391. A raw `reviewed:approve` label is not evidence of a current
+Issue #391. A raw `reviewed:approve` label is normally not evidence of a current
 approval, and until an issue enters `process_issue` nothing removes a stale one
--- so a label-only reader advertises readiness against a specification no
-reviewer saw. These cover the bounded backend operation that corrects it and the
-two rendered roadmap contracts that consume it: triage, and since issue #427
-the retriage refresh that re-renders triage's output. Retriage is the harder
-consumer of the two and gets its own class below, because a refresh starts from
-a document that already carries markers, so "do not mark an unverified issue"
-is not enough on its own -- it must also unmark one it can no longer verify.
+-- so an unconditional label-only reader advertises readiness against a
+specification no reviewer saw. The roadmap contract has one deliberate liveness
+exception: when the canonical reconciliation lock is busy, it displays the
+configured approval label already present in the complete snapshot rather than
+hiding all readiness. These cover the bounded backend operation and the two
+rendered roadmap contracts that consume it: triage, and since issue #427 the
+retriage refresh that re-renders triage's output. Retriage is the harder
+consumer because it must recompute even the busy fallback instead of carrying
+markers from the prior roadmap.
 
 No GitHub account and no model invocation: `get_issue`, `get_comments`, the
 label mutation, and the lock are patched, while the decision itself -- the real
@@ -54,10 +56,10 @@ BRAND_SIGILS = {
     REPO_ROOT / "codex-plugin/plugins/kanban/skills/retriage/SKILL.md": "$",
 }
 
-# The readiness rule the retired personal copies stated and the vendored
-# command must not: a raw approval label rendering a marker on its own. Held as
-# the retired sentences plus the shape of the claim, so a reworded revival
-# fails too.
+# The unconditional, default-label readiness rules the retired personal copies
+# stated and the vendored commands must not revive. The busy fallback instead
+# uses the configured label returned by the backend and is scoped to one
+# top-level outcome.
 RETIRED_RAW_LABEL_RULES = (
     "every issue carrying the exact `reviewed:approve` label gets `✓`",
     "Confirm every `reviewed:approve` issue has exactly one `✓`",
@@ -853,7 +855,58 @@ class TriageAssetTests(unittest.TestCase):
                 self.assertIn("Fail closed", text)
                 self.assertIn("ready to solve", text)
 
-    def test_no_asset_still_equates_the_raw_label_with_readiness(self):
+    def test_every_asset_uses_the_reported_label_when_reconciliation_is_busy(self):
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn('top-level `outcome: "busy"`', text)
+                self.assertIn("verified-complete open-issue snapshot", text)
+                self.assertIn(
+                    "render `✓` for every issue in the verified-complete", text
+                )
+                self.assertIn(
+                    "Do not add `[approval unverified]` to those label-backed entries",
+                    text,
+                )
+                self.assertIn(
+                    "This is the only case where the current approval label itself earns `✓`",
+                    text,
+                )
+                self.assertIn("The answer must say exactly once", text)
+                self.assertIn(
+                    "Approval reconciliation was busy; displayed `✓` markers reflect "
+                    "current labels rather than verified approvals.",
+                    text,
+                )
+                self.assertIn(
+                    "contains the required busy-disclosure sentence exactly once",
+                    text,
+                )
+
+    def test_busy_fallback_does_not_weaken_other_failure_handling(self):
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("Fail closed outside the busy fallback", text)
+                self.assertIn(
+                    "invalid or missing `approval_label` in a busy document", text
+                )
+                self.assertIn("guessed or hard-coded approval label", text)
+
+    def test_the_delegating_retriage_assets_do_not_duplicate_the_full_rule(self):
+        # Negative control for the rule assertions above: retriage owes the
+        # behavior but delegates the complete algorithm back to triage.
+        triage_only_rule = (
+            "render `✓` for every issue in the verified-complete open-issue "
+            "snapshot carrying that exact label"
+        )
+        for path in [RETRIAGE_SOURCE, *RENDERED_RETRIAGE]:
+            with self.subTest(asset=path.name):
+                self.assertNotIn(
+                    triage_only_rule, path.read_text(encoding="utf-8")
+                )
+
+    def test_no_asset_hard_codes_the_default_label_as_readiness(self):
         for path in self.assets():
             with self.subTest(asset=path.name):
                 text = path.read_text(encoding="utf-8")
@@ -1023,10 +1076,10 @@ class RetriageAssetTests(unittest.TestCase):
                 self.assertNotIn("**Anytime List**", text)
                 self.assertNotIn("**Tracker Issues**", text)
 
-    def test_no_asset_lets_a_raw_label_earn_a_marker(self):
-        # Requirement 6's live regression: the retired copies said so twice,
-        # and a refresh that revived either would re-add the markers issue #391
-        # removed. Nothing in these files may name a candidate label at all.
+    def test_no_asset_hard_codes_the_default_label_as_readiness(self):
+        # The retired copies named the default label unconditionally. The busy
+        # fallback must use the configured label returned by the backend, so no
+        # retriage asset may name a candidate label itself.
         for path in self.assets():
             with self.subTest(asset=path.name):
                 text = path.read_text(encoding="utf-8")
@@ -1052,37 +1105,70 @@ class RetriageAssetTests(unittest.TestCase):
                 for path in tracked:
                     self.assertNotIn(retired, path.read_text(encoding="utf-8"))
 
-    def test_every_asset_fails_closed_and_drops_an_unverifiable_marker(self):
-        # Requirement 6's fail-closed list, plus the consequence unique to a
-        # refresh: the previous roadmap's marker is not a fallback.
+    def test_every_asset_recomputes_busy_markers_from_the_snapshot_label(self):
         for path in self.assets():
             with self.subTest(asset=path.name):
                 text = path.read_text(encoding="utf-8")
-                self.assertIn("**Fail closed.**", text)
+                flat = " ".join(text.split())
+                self.assertIn("**Busy lock.**", flat)
+                self.assertIn("busy-lock fallback", flat)
+                self.assertIn("current snapshot label", flat)
+                self.assertIn("not the previous roadmap's marker", flat)
+                self.assertIn(
+                    "do not add `[approval unverified]` merely because the lock is busy",
+                    flat,
+                )
+
+    def test_every_asset_discloses_the_busy_fallback_without_a_delta_request(self):
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                flat = " ".join(path.read_text(encoding="utf-8").split())
+                self.assertIn("required one-time busy-disclosure sentence", flat)
+                self.assertIn(
+                    "regardless of whether the user asked for a delta", flat
+                )
+                self.assertIn(
+                    "mandatory one-time disclosure is part of the fallback", flat
+                )
+                self.assertIn(
+                    "required busy-disclosure sentence exactly once", flat
+                )
+
+    def test_every_asset_fails_closed_outside_the_busy_fallback(self):
+        # The previous roadmap's marker is not a fallback for an actual
+        # verification failure. Busy is handled separately above.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                flat = " ".join(text.split())
+                self.assertIn("**Fail closed outside the busy fallback.**", flat)
                 for cause in (
                     "missing or unresolvable backend",
-                    '`"busy"` document from',
-                    "lock contention",
                     "GitHub read or write failure",
                     "malformed document",
+                    "invalid or missing",
                     "unverifiable post-mutation state",
                 ):
-                    self.assertIn(cause, text)
-                self.assertIn("[approval unverified]", text)
-                self.assertIn("[needs canonical review]", text)
-                self.assertIn("is not a fallback", text)
-                self.assertIn("ready to solve", text)
+                    self.assertIn(cause, flat)
+                self.assertIn("[approval unverified]", flat)
+                self.assertIn("[needs canonical review]", flat)
+                self.assertIn("is not a fallback", flat)
+                self.assertIn("ready to solve", flat)
 
     def test_every_asset_recomputes_rather_than_carries_a_marker_forward(self):
-        # The refresh-specific rule requirement 6 forces once readiness stops
-        # coming from a label: the roadmap being edited already has markers.
+        # The roadmap being edited already has markers, so even the deliberate
+        # busy-label fallback must be recomputed rather than copied.
         for path in self.assets():
             with self.subTest(asset=path.name):
                 text = path.read_text(encoding="utf-8")
                 self.assertIn("recomputed on this run", text)
                 self.assertIn("None is copied", text)
-                self.assertIn("none is read off an issue's labels", text)
+                self.assertIn("Outside", text)
+                self.assertIn("none is", text)
+                self.assertIn("read off an issue's labels", text)
+                self.assertIn("verified-complete issue snapshot", text)
                 self.assertIn("no approval marker was carried over", text)
+                self.assertIn("an exact current-snapshot", text)
 
 
 class ManifestCoverageTests(unittest.TestCase):
@@ -1126,10 +1212,20 @@ class ManifestCoverageTests(unittest.TestCase):
 
     def test_the_contract_documents_the_reconciliation_authority(self):
         text = (REPO_ROOT / "docs/agent-workflow-contract.md").read_text(encoding="utf-8")
+        flat = " ".join(text.split())
         self.assertIn("--reconcile-approvals", text)
         self.assertIn("approve-issues-reconcile-approvals", text)
         for term in ("Locking", "Result", "Failure semantics", "Decision"):
             self.assertIn(term, text)
+        for busy_term in (
+            "scoped `busy` liveness exception",
+            "verified-complete open-issue snapshot",
+            "display-only fallback",
+            "solve gate remains",
+            "invalid or missing `approval_label` in a `busy` document",
+            "must disclose that label-backed fallback once per answer",
+        ):
+            self.assertIn(busy_term, flat)
 
 
 class SchemaConstantTests(unittest.TestCase):
