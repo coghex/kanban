@@ -80,12 +80,12 @@ still requires the selection stop below.
 2. If the helper does not advertise `-l`, use a read-only Git inventory rather
    than treating the older helper as broken. Resolve the worktree whose branch
    is `refs/heads/docs-wip`, then take the union of its committed-ahead paths,
-   dirty tracked paths, and untracked paths:
+   dirty tracked paths, and untracked paths, including ignored files:
 
    ```bash
    git -C "$DOCS_WT" diff --name-only -z origin/master...HEAD --
    git -C "$DOCS_WT" diff --name-only -z HEAD --
-   git -C "$DOCS_WT" ls-files --others --exclude-standard -z --
+   git -C "$DOCS_WT" ls-files --others -z --
    ```
 
    The three-dot comparison is deliberate: a docs worktree behind master must

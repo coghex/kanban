@@ -2201,6 +2201,17 @@ class WorktreeResolutionTests(DocsLandCase):
         self.assertIn("docs-wip", done.stderr)
 
 
+class HelpTests(unittest.TestCase):
+    def test_help_advertises_the_inventory_option(self):
+        done = subprocess.run(
+            ["bash", str(SCRIPT), "-h"], cwd=REPO_ROOT,
+            capture_output=True, text=True)
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("tools/docs_land.sh -l", done.stdout)
+        self.assertIn("inventory of landable docs", done.stdout)
+
+
 # ---------------------------------------------------------------------
 # macOS Bash 3.2 compatibility
 # ---------------------------------------------------------------------
@@ -2276,6 +2287,8 @@ PUSH_DOCS_RULES = (
     "do not ask for a second approval",
     "inspect the helper's -h output before using -l",
     "git compatibility inventory",
+    "untracked paths, including ignored files",
+    'git -c "$docs_wt" ls-files --others -z --',
     "must not misclassify upstream-only changes as local landing candidates",
     "never work around a refusal",
     "never pass -f",

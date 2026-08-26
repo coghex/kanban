@@ -53,6 +53,7 @@
 # Exit codes: 0 landed (or nothing to land); 1 environment failure; 2 usage;
 # 3 predicted conflict without -f; 4 rebase or reconcile stopped; 5 push not
 # verified; 6 a named path was refused by validation or classification.
+# End help text.
 set -euo pipefail
 
 DRY=0
@@ -69,7 +70,7 @@ while getopts "m:nflaRh" opt; do
     l) LIST=1 ;;
     a) AUTO=1 ;;
     R) RECONCILE=0 ;;
-    h) sed -n '2,40p' "$0"; exit 0 ;;
+    h) sed -n '2,/^# End help text\.$/p' "$0"; exit 0 ;;
     *) exit 2 ;;
   esac
 done
