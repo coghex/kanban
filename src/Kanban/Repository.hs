@@ -2,6 +2,10 @@ module Kanban.Repository
   ( parseRemoteRepository,
     parseRepositoryName,
     resolveRepository,
+    RosterEntry (..),
+    RepositoryRoster (..),
+    resolveRepositoryRoster,
+    rosterDegradationNotices,
   )
 where
 
@@ -14,6 +18,7 @@ import qualified Data.Text as Text
 import qualified GHC.Foreign
 import GHC.IO.Encoding (getFileSystemEncoding)
 import Kanban.CommandCapture (decodeCommandText, readProcessBytes)
+import Kanban.Config (asciiLowercase, repositoryIdentity)
 import Kanban.Domain (Repository (..))
 import System.Directory (canonicalizePath)
 import System.Exit (ExitCode (..))
@@ -86,6 +91,130 @@ decodeRepositoryPath :: ByteString.ByteString -> IO FilePath
 decodeRepositoryPath bytes = do
   encoding <- getFileSystemEncoding
   ByteString.useAsCStringLen bytes (GHC.Foreign.peekCStringLen encoding)
+
+--------------------------------------------------------------------------------
+-- The repository roster
+
+-- | One member of the repository roster.
+--
+-- An entry that degraded stays a member rather than failing the launch: it
+-- is a repository the configuration names, whose checkout this machine
+-- cannot currently supply.  'rosterEntryCheckout' and
+-- 'rosterEntryDiagnostic' are the two halves of exactly that: one is present
+-- precisely when the other is absent.
+data RosterEntry = RosterEntry
+  { -- | The identity this entry is keyed, queried, and reported under: a
+    -- configured entry's own @[repositories."owner\/name"]@ key, or the
+    -- launch checkout's resolved @owner\/name@.  Never a remote's answer for
+    -- a configured entry, so nothing is ever keyed under an identity the
+    -- configuration does not name.
+    rosterEntryIdentity :: Text,
+    -- | Where this entry's checkout is, absent exactly when the entry
+    -- degraded.
+    rosterEntryCheckout :: Maybe FilePath,
+    -- | What was wrong, present exactly when 'rosterEntryCheckout' is
+    -- absent.  It reaches the operator through the in-app startup notice
+    -- rather than stderr, which Brick paints over the instant it starts.
+    rosterEntryDiagnostic :: Maybe Text
+  }
+  deriving stock (Eq, Show)
+
+-- | The launch checkout's repository followed by every configured entry, in
+-- canonical key order.
+newtype RepositoryRoster = RepositoryRoster {rosterEntries :: [RosterEntry]}
+  deriving stock (Eq, Show)
+
+-- | Resolves the roster: exactly the configured tables that declared a
+-- @path@ ('Kanban.Config.configuredRepositoryPaths'), plus the launch
+-- checkout's repository, which is always a member whether or not it is
+-- configured.
+--
+-- The launch checkout wins a collision with its own configured entry,
+-- silently and without resolving that entry's path: two entries for one
+-- @owner\/name@ are never held, and the checkout the operator is actually
+-- sitting in is the one the session acts through -- which matters because
+-- sessions are routinely launched from linked worktrees.  Membership is
+-- compared under 'asciiLowercase', the same fold 'Kanban.Config.resolveConfig'
+-- applies when selecting an override table, so a @Coghex\/Kanban@ clone and a
+-- @coghex\/kanban@ entry are one entry.
+--
+-- Every configured path is resolved through 'resolveRepository' with the
+-- configured remote name and no @--repo@ override: @--repo@ is the launch
+-- checkout's escape hatch for the repository the operator named on this
+-- invocation, and applying it to a roster entry would give every entry that
+-- one identity.
+--
+-- Nothing here acquires board authority.  The lease is the launch
+-- repository's alone (section 3), and no entry resolved here becomes a
+-- board.
+resolveRepositoryRoster :: Text -> [(Text, FilePath)] -> Repository -> IO RepositoryRoster
+resolveRepositoryRoster remoteName configured launch = do
+  configuredEntries <- traverse (resolveConfiguredEntry remoteName) (filter notLaunch configured)
+  pure (RepositoryRoster (launchEntry : configuredEntries))
+  where
+    launchIdentity = repositoryIdentity launch.repositoryOwner launch.repositoryName
+    launchEntry =
+      RosterEntry
+        { rosterEntryIdentity = launchIdentity,
+          rosterEntryCheckout = Just launch.repositoryRoot,
+          rosterEntryDiagnostic = Nothing
+        }
+    -- Both sides are folded rather than only the launch identity.  A
+    -- configured key is canonical lowercase already, so folding it changes
+    -- nothing today; spelling the comparison once on both sides is what
+    -- keeps it one rule instead of two that could disagree.
+    notLaunch (key, _) = asciiLowercase key /= asciiLowercase launchIdentity
+
+resolveConfiguredEntry :: Text -> (Text, FilePath) -> IO RosterEntry
+resolveConfiguredEntry remoteName (key, path) = do
+  result <- resolveRepository remoteName path Nothing
+  pure $ case result of
+    Left message -> degradedEntry key path message
+    Right resolved
+      | asciiLowercase resolvedIdentity == asciiLowercase key ->
+          RosterEntry
+            { rosterEntryIdentity = key,
+              rosterEntryCheckout = Just resolved.repositoryRoot,
+              rosterEntryDiagnostic = Nothing
+            }
+      | otherwise -> degradedEntry key path ("it is a checkout of " <> resolvedIdentity)
+      where
+        -- The key wins.  A checkout whose remote names a different
+        -- repository degrades rather than renaming the entry, because a
+        -- mistyped key would otherwise silently produce a roster member for
+        -- a repository the configuration never named -- and whose override
+        -- table would then fail to apply to it.  A difference of ASCII case
+        -- alone is not a different repository, so it stays usable.
+        resolvedIdentity = repositoryIdentity resolved.repositoryOwner resolved.repositoryName
+
+degradedEntry :: Text -> FilePath -> Text -> RosterEntry
+degradedEntry key path detail =
+  RosterEntry
+    { rosterEntryIdentity = key,
+      rosterEntryCheckout = Nothing,
+      rosterEntryDiagnostic =
+        Just
+          ( "repositories.\""
+              <> key
+              <> "\" has no usable checkout at "
+              <> Text.pack path
+              <> ": "
+              <> detail
+          )
+    }
+
+-- | One notice fragment per degraded entry, in roster order.  This is the
+-- only thing the dashboard reads a roster for in this milestone: the
+-- fragments join the usage, history, settings, and authority fragments on
+-- the startup notice line, so a mistyped or moved checkout is diagnosable
+-- from inside the board instead of from a stderr line the terminal takeover
+-- erases.
+rosterDegradationNotices :: RepositoryRoster -> [Text]
+rosterDegradationNotices roster =
+  [diagnostic | entry <- roster.rosterEntries, Just diagnostic <- [entry.rosterEntryDiagnostic]]
+
+--------------------------------------------------------------------------------
+-- Repository identity
 
 -- | Parses an explicit @--repo@ value, which the user chose deliberately:
 -- the documented bare @OWNER\/NAME@ form, or any remote URL that

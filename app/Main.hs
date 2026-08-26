@@ -4,12 +4,12 @@ import Control.Monad (unless)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import Kanban.CLI (LaunchMode (..), Options (..), launchMode, optionsParserInfo)
-import Kanban.Config (RawConfig (..), cacheEnabled, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
+import Kanban.Config (RawConfig (..), cacheEnabled, configuredRepositoryPaths, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
 import Kanban.Ping (PingMode (..), pingRepositoryIdentity, pingResolvedConfig, resolvePingBrand, runPingMode)
 import Kanban.Preflight (doctorLines, doctorReady, gatherPreflightEnvironment)
-import Kanban.Repository (resolveRepository)
+import Kanban.Repository (resolveRepository, resolveRepositoryRoster)
 import Kanban.UI (runDashboard)
 import Kanban.Usage (UsageAcquisition (..), UsageMode (..), runUsageMode)
 import Kanban.Worker (runWorker)
@@ -133,4 +133,15 @@ main = do
             Right repository -> do
               let ownerName = repositoryIdentity repository.repositoryOwner repository.repositoryName
                   resolvedConfig = resolveConfig ownerName rawConfig
-              runDashboard options resolvedConfig repository
+              -- Resolved once the launch repository is known, because the
+              -- launch checkout is always a roster member and wins a
+              -- collision with its own configured entry. A degraded entry
+              -- reports through the in-app notice rather than refusing the
+              -- launch, so nothing here can fail the way the resolution
+              -- above can.
+              roster <-
+                resolveRepositoryRoster
+                  rawConfig.rawRemoteName
+                  (configuredRepositoryPaths rawConfig)
+                  repository
+              runDashboard options resolvedConfig repository roster

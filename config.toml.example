@@ -113,10 +113,38 @@ ping_claude_seconds = 120
 # to lowercase for this lookup only, so a `Coghex/Kanban` clone selects the
 # `coghex/kanban` key below.
 #
-# Only [workflow], [limits], and [timeouts] may appear below the key.
+# Only [workflow], [limits], [timeouts], and `path` may appear below the key.
 # `cache`, `remote_name`, and `usage` are global-only and fail if set here.
 # Omitted values inherit from the global table; an array replaces the global
 # array in full rather than extending it.
+#
+# `path` is not an override: it says where this repository is checked out on
+# this machine, and it is what puts the table in the dashboard's repository
+# roster. Exactly the tables that set it are members, plus the repository the
+# session was launched in, which is always a member whether or not it is
+# configured here. A table without `path` -- every table in this example file
+# -- is an override table and nothing more, so an existing configuration gains
+# no roster entry by upgrading.
+#
+# The value must be an absolute path, judged as written: nothing expands it,
+# so `~/work/repo` is a configuration error rather than a home-relative path.
+# That is the one roster mistake that refuses to load, because this file is
+# read from a fixed location but consumed by workers running from other
+# directories, so a relative value would name a different checkout for each of
+# them.
+#
+# Every other roster mistake is reported in the dashboard's own startup notice
+# and never refuses to launch. An entry whose path is missing, unusable, or not
+# a Git checkout stays in the roster with no usable checkout, and so does one
+# whose checkout's remote names a repository other than its key -- the key
+# always wins, so nothing is ever queried or reported under an identity this
+# file does not name. A difference of ASCII case alone is the same repository
+# and stays usable. If the launch checkout's repository is also configured with
+# a `path` naming a different checkout, the roster holds one entry for it and
+# uses the launch checkout, silently.
+
+[repositories."owner/name"]
+# path = "/absolute/path/to/checkout"
 
 [repositories."owner/name".workflow]
 # approval_label = "reviewed:approve"
