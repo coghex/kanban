@@ -53,6 +53,7 @@ import Kanban.Models
     unavailableAssignmentDisplay,
   )
 import Kanban.Process (killManagedProcess, managedProcess)
+import Kanban.ProviderAdapter (ProcessRequest (..), ProviderAdapter (..), adapterFor)
 import Kanban.Review.Client (ReviewClient (..), attachToolProcess)
 import Kanban.Review.Diagnostics
   ( claudeRevisionAgent,
@@ -360,7 +361,7 @@ authenticatedClaudeArguments assignment =
 
 runResolvedAuthenticatedClaude :: ReviewClient -> Int -> Text -> Assignment -> IO (Either Text Text)
 runResolvedAuthenticatedClaude client key prompt assignment = do
-  executable <- findExecutable "claude"
+  executable <- findExecutable adapter.adapterExecutable
   case executable of
     Nothing -> pure (Left "Claude CLI was not found on PATH")
     Just claudePath -> do
@@ -387,13 +388,18 @@ runResolvedAuthenticatedClaude client key prompt assignment = do
         Right _ -> pure (Left "Claude CLI did not provide all three standard streams")
   where
     bounds = client.reviewClaudeBounds
-    claudeProcess claudePath = (proc claudePath (authenticatedClaudeArguments assignment))
-        { cwd = Just client.reviewRepositoryRoot,
-          std_in = CreatePipe,
-          std_out = CreatePipe,
-          std_err = CreatePipe,
-          create_group = True
-        }
+    -- @kanban_run_claude@ is Claude's by name and by role
+    -- ('Kanban.Models.roleApplicability' admits no other provider for
+    -- @issue_revise@), so the adapter is looked up on the provider rather
+    -- than on anything this call carries.
+    adapter = adapterFor ClaudeProvider
+    claudeProcess claudePath =
+      adapter.adapterRevisionProcess
+        ProcessRequest
+          { requestExecutable = claudePath,
+            requestArguments = authenticatedClaudeArguments assignment,
+            requestWorkingDirectory = client.reviewRepositoryRoot
+          }
 
 -- | The Claude reviewer's rendering, in the same precedence the pre-#154
 -- capture used: an unreadable stream keeps its own error, an *observed*

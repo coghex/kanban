@@ -66,31 +66,47 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 # actually recognise, which is the only claim it can honestly make: a literal
 # name passed to proc/findExecutable/readProcessWithExitCode
 # (EXECUTABLE_CALL_RE), a literal name passed to Kanban.Drainer's timed
-# runProcess helper (TIMED_PROCESS_CALL_RE), a findExecutable argument bound by
-# a `case` or `if` to string literals (indirect_executable_names), and a
-# managed location spelled as one literal hung off a getHomeDirectory result
-# (HOME_PATH_EXPR_RE). Nothing else under src/ writes one of those shapes.
+# runProcess helper (TIMED_PROCESS_CALL_RE), a provider executable named by an
+# adapter record's `adapterExecutable` field (ADAPTER_EXECUTABLE_RE), a
+# findExecutable argument bound by a `case` or `if` to string literals
+# (indirect_executable_names), and a managed location spelled as one literal
+# hung off a getHomeDirectory result (HOME_PATH_EXPR_RE). Nothing else under
+# src/ writes one of those shapes.
 #
-# Four modules under src/ do call one of those functions and are deliberately
+# Six modules under src/ do call one of those functions and are deliberately
 # out, each for a concrete reason rather than by oversight:
 #
 #   src/Kanban/ServiceProcess.hs, src/Kanban/UsageCommand.hs, and
 #   src/Kanban/Worker.hs are spawn helpers that hand `proc` an executable
 #   *value* their caller computed, so there is no literal for any extractor to
-#   recover; and
+#   recover;
 #
 #   src/Kanban/Ping.hs resolves `findExecutable (pingExecutableName brand)`,
 #   whose argument is a two-equation top-level function rather than the
 #   case/if binding indirect_executable_names reads, and builds its scratch
 #   directory with getXdgDirectory rather than getHomeDirectory, so both
 #   extractors recover nothing from it -- which
-#   test_unscanned_src_modules_would_contribute_nothing pins.
+#   test_unscanned_src_modules_would_contribute_nothing pins; and
 #
-# Listing any of the four would add a member the extractors recover nothing
+#   src/Kanban/Solve.hs and src/Kanban/PullRequestFlow.hs joined that list in
+#   issue #522. Both still resolve an executable with findExecutable, but the
+#   name they resolve is now `adapter.adapterExecutable` rather than a literal
+#   they spell, so neither recovers anything either. Which module the literal
+#   moved to is ProviderAdapter.hs below, and that the two go on recovering
+#   nothing is what holds the provider-adapter boundary's other half.
+#
+# Listing any of the six would add a member the extractors recover nothing
 # from: a surface entry that scans nothing reads as coverage while asserting
 # less than an empty loop does. The `codex` and `claude` that Ping.hs and
 # Worker.hs ultimately run carry `executable` rows grounded in Codex.hs and
 # Claude.hs, which are scanned.
+#
+# Issue #522 added Kanban.ProviderAdapter, the one module that builds a
+# provider's agent-session processes. It is listed because both provider
+# executable names moved into it: `codex` through the embedded review's
+# `proc`, and both through the `adapterExecutable` field the flow modules read
+# back. What it contributes is pinned by
+# test_provider_adapter_owns_every_provider_process.
 #
 # Issue #444 moved both managed discovery records' locations out of
 # Drainer.hs and Review/Canonical.hs into Kanban.ManagedPaths, which is the
@@ -107,8 +123,7 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 # its host-backend detection. What it contributes to each is pinned by
 # test_approval_service_dashboard_reaches_the_haskell_scans.
 SURFACE_FILES = [
-    "src/Kanban/Solve.hs",
-    "src/Kanban/PullRequestFlow.hs",
+    "src/Kanban/ProviderAdapter.hs",
     "src/Kanban/Preflight/Environment.hs",
     "src/Kanban/Review.hs",
     "src/Kanban/Review/Canonical.hs",
@@ -151,6 +166,8 @@ UNSCANNED_SRC_MODULES = (
     "src/Kanban/UsageCommand.hs",
     "src/Kanban/Worker.hs",
     "src/Kanban/Ping.hs",
+    "src/Kanban/Solve.hs",
+    "src/Kanban/PullRequestFlow.hs",
 )
 
 # The four locations Kanban.ManagedPaths spells, and the manifest rows they
@@ -158,6 +175,78 @@ UNSCANNED_SRC_MODULES = (
 # rather than merely a non-empty one: a scan that recovered three of them,
 # or that recovered them from some other file, would pass an "each is
 # documented" check while leaving one spelling reconciled against nothing.
+# --- The provider-adapter boundary (issue #522, MODEL-12) ------------------
+#
+# Every agent-session process a provider runs is built in one module. The two
+# halves of that claim fail differently, so both are asserted: the four flow
+# modules that used to build their own are held to a System.Process import
+# list narrow enough that GHC refuses a spawn they cannot express, and the
+# whole source tree is scanned for the pairing that would let a fifth
+# spawn site appear anywhere else. The scan is rooted at src/ so a new
+# top-level source directory cannot slip past it.
+
+PROVIDER_ADAPTER_FILE = "src/Kanban/ProviderAdapter.hs"
+
+# The provider CLI names an agent session can spawn. Both are the tokens of
+# the codex-cli and claude-cli manifest rows in §4.
+PROVIDER_EXECUTABLE_NAMES = ("codex", "claude")
+
+# What each flow module still needs from System.Process now that it builds no
+# provider process. Solve.hs and PullRequestFlow.hs spawn what the adapter
+# hands them and touch no field of it; Review.hs and Review/Tools.hs keep the
+# wider list because each still builds one *non-provider* process the adapter
+# is not asked for -- Review.hs's `git --version` shutdown placeholder and
+# Review/Tools.hs's `gh` runner.
+#
+# Held as an exact set rather than a subset: a module that regained
+# `proc` would be able to name an executable again, and a subset assertion
+# would not notice.
+FLOW_MODULE_PROCESS_IMPORTS = {
+    "src/Kanban/Solve.hs": {"ProcessHandle", "createProcess", "waitForProcess"},
+    "src/Kanban/PullRequestFlow.hs": {
+        "ProcessHandle",
+        "createProcess",
+        "waitForProcess",
+    },
+    "src/Kanban/Review.hs": {
+        "CreateProcess",
+        "ProcessHandle",
+        "StdStream",
+        "createPipe",
+        "createProcess",
+        "proc",
+        "waitForProcess",
+    },
+    "src/Kanban/Review/Tools.hs": {
+        "CreateProcess",
+        "ProcessHandle",
+        "StdStream",
+        "createProcess",
+        "proc",
+    },
+}
+
+# The modules that go on naming a provider executable beside a System.Process
+# import, and why each is outside the adapter rather than an erosion of it.
+# The first three are the exclusions issue #522 requirement 6 names, taken by
+# decision D-13: none is an agent session and none consumes a roster value.
+# The fourth is the readiness probe that the issue's own background did not
+# enumerate; it is here on the same terms and for the same reason, and it is
+# named rather than left for a reader to infer.
+PROVIDER_SPAWN_EXCLUSIONS = {
+    "src/Kanban/Ping.hs": "the modelless provider ping (D-2)",
+    "src/Kanban/Codex.hs": "the Codex usage probe, which reads account status",
+    "src/Kanban/Claude.hs": "the Claude usage probe, which reads account status",
+    "src/Kanban/Preflight/Environment.hs": (
+        "the readiness probe, which runs <provider> --version, its auth "
+        "status, and its plugin listing before any session exists"
+    ),
+}
+
+PROVIDER_LITERAL_RE = re.compile(
+    '"(' + "|".join(PROVIDER_EXECUTABLE_NAMES) + ')"'
+)
+
 MANAGED_RECORD_SURFACE_FILE = "src/Kanban/ManagedPaths.hs"
 MANAGED_RECORD_TOKENS = {
     "/Library/Application Support/kanban/issue-review/config.json",
@@ -612,10 +701,19 @@ EXECUTABLE_CALL_RE = re.compile(
 )
 TIMED_PROCESS_CALL_RE = re.compile(r'runProcess\s+\d+\s+"([^"]+)"')
 
+# adapterExecutable = "name", the field Kanban.ProviderAdapter's per-provider
+# records name their executable in and the flow modules resolve back out of it
+# (issue #522). Matched on its own because the name reaches findExecutable
+# through a record field rather than through any call shape above.
+ADAPTER_EXECUTABLE_RE = re.compile(r'adapterExecutable\s*=\s*"([^"]+)"')
+
 # findExecutable <var> resolves an executable name bound elsewhere as a
-# string literal (Solve.hs and PullRequestFlow.hs both do this rather than
-# passing a literal directly), so the two known binding idioms are matched
-# separately and their literals are treated as discovered invocations too.
+# string literal, so the two known binding idioms are matched separately and
+# their literals are treated as discovered invocations too. No module under
+# src/ writes either idiom since issue #522 moved Solve.hs's `case` and
+# PullRequestFlow.hs's `if` into the adapter record; both stay matched as
+# bypass shapes, so a module that reintroduced one would be read rather than
+# scanned past.
 INDIRECT_VAR_RE = re.compile(r'findExecutable\s+([A-Za-z_][A-Za-z0-9_\']*)\b')
 
 # A `home` value built with <> or </> segments, e.g.
@@ -690,7 +788,9 @@ def parse_manifest(text=None):
 def indirect_executable_names(content):
     """Literals bound to a variable that findExecutable resolves indirectly.
 
-    Covers the two idioms Solve.hs and PullRequestFlow.hs use:
+    Covers the two idioms Solve.hs and PullRequestFlow.hs used before issue
+    #522 moved both into Kanban.ProviderAdapter, and which nothing under src/
+    writes today:
       executableName = case brand of
         CodexSolver -> "codex"
         ClaudeSolver -> "claude"
@@ -718,8 +818,90 @@ def indirect_executable_names(content):
 def discovered_executables(content):
     names = {match.group(1) for match in EXECUTABLE_CALL_RE.finditer(content)}
     names |= {match.group(1) for match in TIMED_PROCESS_CALL_RE.finditer(content)}
+    names |= {match.group(1) for match in ADAPTER_EXECUTABLE_RE.finditer(content)}
     names |= indirect_executable_names(content)
     return names
+
+
+def haskell_import_names(content, module):
+    """The names a module's `import <module> (...)` list brings into scope.
+
+    Returns None when the module is imported with no list at all, or under
+    `hiding` -- both are unrestricted imports, which is the shape the gate
+    refuses -- and an empty set when the module is not imported. Constructor
+    suffixes are dropped, so `StdStream (CreatePipe, NoStream)` and
+    `CreateProcess (..)` both come back as the bare type name. Multi-line
+    lists are read by scanning balanced parentheses rather than by matching
+    to the first `)`, which a nested constructor list would end early.
+    """
+    names = set()
+    pattern = re.compile(
+        r"^import\s+(?:qualified\s+)?" + re.escape(module) + r"(?![\w.'])",
+        re.MULTILINE,
+    )
+    for match in pattern.finditer(content):
+        rest = content[match.end() :]
+        stripped = rest.lstrip()
+        if stripped.startswith("hiding") or not stripped.startswith("("):
+            return None
+        offset = len(rest) - len(stripped)
+        depth = 0
+        for index in range(offset, len(rest)):
+            if rest[index] == "(":
+                depth += 1
+            elif rest[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    body = rest[offset + 1 : index]
+                    break
+        else:
+            raise AssertionError(
+                f"unterminated `import {module} (` list in a scanned module"
+            )
+        depth = 0
+        current = ""
+        entries = []
+        for character in body:
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+            if character == "," and depth == 0:
+                entries.append(current)
+                current = ""
+            else:
+                current += character
+        entries.append(current)
+        for entry in entries:
+            name = entry.split("(")[0].strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def provider_process_modules():
+    """Every module under src/ that pairs a provider executable name with an
+    import from System.Process.
+
+    Rooted at src/ rather than at src/Kanban so a spawn site added under a
+    new top-level source directory is read rather than walked past.
+
+    That pairing is what building a provider process takes, and it is what
+    the four flow modules each used to have. A module with the name but no
+    process import cannot spawn it (Kanban.Models spells both provider keys,
+    Kanban.Solve.Event both brand names); a module with the process import
+    but no name cannot say which provider it is spawning, which is precisely
+    what the flow modules were reduced to.
+    """
+    found = set()
+    for path in sorted((REPO_ROOT / "src").rglob("*.hs")):
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        content = path.read_text(encoding="utf-8")
+        if haskell_import_names(content, "System.Process") == set():
+            continue
+        if PROVIDER_LITERAL_RE.search(content):
+            found.add(relative)
+    return found
 
 
 def home_relative_segments(content):
@@ -1578,22 +1760,19 @@ class AgentWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(discovered_plugin_commands(snippet), {"find", "head", "python3"})
 
-    def test_indirect_solver_brand_mappings_are_discovered(self):
-        # Solve.hs and PullRequestFlow.hs resolve codex/claude through a
-        # variable (`findExecutable executableName`) rather than a literal,
-        # so this pins that discovered_executables still recovers both
-        # brand names from each file's actual binding instead of silently
-        # covering zero invocations in these two surface files.
-        solve_content = (REPO_ROOT / "src/Kanban/Solve.hs").read_text(encoding="utf-8")
-        pull_request_flow_content = (
-            REPO_ROOT / "src/Kanban/PullRequestFlow.hs"
-        ).read_text(encoding="utf-8")
-        self.assertEqual(
-            discovered_executables(solve_content) & {"codex", "claude"},
-            {"codex", "claude"},
+    def test_provider_brand_mappings_are_discovered_in_the_adapter(self):
+        # The same claim this made of Solve.hs and PullRequestFlow.hs before
+        # issue #522, made of the module their mapping moved to: both brand
+        # names are recovered from the file that actually names them, so the
+        # surface scan is not silently covering zero invocations. Only the
+        # subject moved -- the flow modules resolve
+        # `adapter.adapterExecutable` now, and that they contribute nothing
+        # is what test_unscanned_src_modules_would_contribute_nothing holds.
+        adapter_content = (REPO_ROOT / PROVIDER_ADAPTER_FILE).read_text(
+            encoding="utf-8"
         )
         self.assertEqual(
-            discovered_executables(pull_request_flow_content) & {"codex", "claude"},
+            discovered_executables(adapter_content) & {"codex", "claude"},
             {"codex", "claude"},
         )
 
@@ -3010,6 +3189,102 @@ class ArtPolicyTests(unittest.TestCase):
                         "rather than silently exempt"
                     )
         self.assertEqual(offenders, [], "\n".join(offenders))
+
+
+class ProviderAdapterBoundaryTests(unittest.TestCase):
+    def test_provider_adapter_owns_every_provider_process(self):
+        # Issue #522 requirements 4, 5, 6, and 8.
+        #
+        # The negative control comes first and is per-file: a detector that
+        # recovered nothing would satisfy the set equality below by finding
+        # an empty set on both sides, and would then go on reporting no
+        # erosion for the same reason an empty loop does. Each declared
+        # exclusion has to be something this detector actually detects.
+        constructors = provider_process_modules()
+        for relative_path, reason in sorted(PROVIDER_SPAWN_EXCLUSIONS.items()):
+            with self.subTest(exclusion=relative_path):
+                self.assertIn(
+                    relative_path,
+                    constructors,
+                    f"{relative_path} is declared an exclusion ({reason}) but "
+                    "the detector does not recover a provider process from "
+                    "it; the exclusion is asserting nothing",
+                )
+        self.assertIn(
+            PROVIDER_ADAPTER_FILE,
+            constructors,
+            f"{PROVIDER_ADAPTER_FILE} no longer names a provider executable "
+            "beside a System.Process import; the adapter it declares cannot "
+            "be building anything",
+        )
+        self.assertEqual(
+            constructors,
+            set(PROVIDER_SPAWN_EXCLUSIONS) | {PROVIDER_ADAPTER_FILE},
+            "a module outside Kanban.ProviderAdapter now pairs a provider "
+            "executable name with a System.Process import; route it through "
+            "the adapter, or declare it in PROVIDER_SPAWN_EXCLUSIONS with "
+            "the reason it is not an agent session",
+        )
+
+        # The other half: the flow modules cannot express a provider spawn
+        # even if a name reappeared, because they no longer import the
+        # constructor one needs.
+        for relative_path, expected in sorted(FLOW_MODULE_PROCESS_IMPORTS.items()):
+            with self.subTest(module=relative_path):
+                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                imported = haskell_import_names(content, "System.Process")
+                self.assertIsNotNone(
+                    imported,
+                    f"{relative_path} imports System.Process without an "
+                    "explicit import list; name what it still uses",
+                )
+                self.assertEqual(
+                    imported,
+                    expected,
+                    f"{relative_path}'s System.Process import list changed; "
+                    "update FLOW_MODULE_PROCESS_IMPORTS only for a name the "
+                    "module genuinely still needs",
+                )
+
+    def test_import_list_reader_reads_the_shapes_it_claims_to(self):
+        # The reader above is what both halves rest on, so every answer it
+        # can give is pinned against a fixture rather than only against a
+        # tree that already passes: an unrestricted import and a `hiding`
+        # import are None (refused), an absent import is the empty set
+        # (skipped), a multi-line list with a nested constructor list is read
+        # whole rather than ended at the first `)`, and a longer module name
+        # sharing the scanned one's prefix is not the scanned one.
+        self.assertIsNone(
+            haskell_import_names("import System.Process\n", "System.Process")
+        )
+        self.assertIsNone(
+            haskell_import_names(
+                "import System.Process hiding (proc)\n", "System.Process"
+            )
+        )
+        self.assertEqual(
+            haskell_import_names(
+                "import System.Directory (findExecutable)\n", "System.Process"
+            ),
+            set(),
+        )
+        self.assertEqual(
+            haskell_import_names(
+                "import System.Process\n"
+                "  ( CreateProcess (..),\n"
+                "    StdStream (CreatePipe, NoStream),\n"
+                "    proc,\n"
+                "  )\n",
+                "System.Process",
+            ),
+            {"CreateProcess", "StdStream", "proc"},
+        )
+        # A longer module name that merely starts with the scanned one is not
+        # the scanned one.
+        self.assertEqual(
+            haskell_import_names("import System.Processes (proc)\n", "System.Process"),
+            set(),
+        )
 
 
 if __name__ == "__main__":

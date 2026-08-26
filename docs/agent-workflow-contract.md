@@ -36,11 +36,14 @@ everything else.
 
 ### 2.1 Issue solve (`$solve` / `/solve`)
 
-- **Owning source:** `src/Kanban/Solve.hs`.
-- **Invocation:** resolves the `codex` or `claude` executable with
-  `findExecutable`, then spawns it (`createProcess`) with solve-specific
-  arguments (model/effort flags and the initial or resume solve prompt built
-  by `initialSolvePrompt`/`resumeSolvePrompt`).
+- **Owning source:** `src/Kanban/Solve.hs`, with the process itself built by
+  `src/Kanban/ProviderAdapter.hs`.
+- **Invocation:** resolves the executable the selected provider's adapter
+  record names (`findExecutable adapter.adapterExecutable`), then spawns
+  (`createProcess`) the spec that record's `adapterSolveProcess` builds, with
+  solve-specific arguments (model/effort flags and the initial or resume solve
+  prompt built by `initialSolvePrompt`/`resumeSolvePrompt`). `Kanban.Solve`
+  names no provider executable of its own.
 - **Inputs:** issue number, solver brand, Kanban's resolved repository identity
   (`Kanban.Repository.resolveRepository`'s `owner/name`, whether it came from an
   explicit `--repo` or from the configured `remote_name`), the optional
@@ -141,9 +144,12 @@ arithmetic, which §2.3 owns.
 
 ### 2.2 PR review, rereview, revise, and repair
 
-- **Owning source:** `src/Kanban/PullRequestFlow.hs`.
-- **Invocation:** resolves and spawns `codex` or `claude` the same way as
-  solve, running the named canonical command: `pr-review` and `pr-rereview`
+- **Owning source:** `src/Kanban/PullRequestFlow.hs`, with the process itself
+  built by `src/Kanban/ProviderAdapter.hs`.
+- **Invocation:** resolves and spawns the selected provider's executable the
+  same way as solve — through that provider's adapter record, here through its
+  `adapterPullRequestProcess` — running the named canonical command:
+  `pr-review` and `pr-rereview`
   always run on the opposite brand from the PR's origin marker; `pr-revise`
   and `repair` run on the PR's own origin brand and each internally invokes
   exactly one canonical `pr-rereview` after pushing a fix. `authoredOnOwnBrand`
@@ -248,11 +254,16 @@ arithmetic, which §2.3 owns.
   it — `src/Kanban/Review/Canonical.hs` (backend resolution and invocation),
   `src/Kanban/Review/Tools.hs` (the `gh` and `claude` tool runners), and
   `src/Kanban/Review/Prompts.hs` (the developer instructions and tool schemas).
+  Both provider processes below are built by `src/Kanban/ProviderAdapter.hs`;
+  neither review module names a provider executable.
 - **Invocation:**
   - Interactive Codex-side review/revision sessions talk to
-    `codex app-server --listen stdio://`.
+    `codex app-server --listen stdio://`, started from the Codex adapter's
+    embedded-review backend. That backend is a `Maybe` field: Claude carries
+    none until MODEL-13, and a launch resolving to a provider without one
+    refuses rather than falling back.
   - Interactive Claude-side steps run the authenticated `claude` CLI
-    directly.
+    directly, through the Claude adapter's one-shot revision process.
   - GitHub reads and label/comment mutations for the interactive session go
     through `gh`, never a raw HTTP client.
   - Kanban's own synchronous invocation (`runCanonicalIssueReview` in
@@ -1425,8 +1436,8 @@ by the same rule and is listed per copy, because that surface is scanned per
 file rather than per definition.
 
 ```text
-codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
-claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review/Tools.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
+codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
+claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
 gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | yes
 git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md | kanban | supported | yes
@@ -2277,13 +2288,17 @@ utilities.
 `python3 -m unittest discover -s tools -p 'test_*.py'`, which CI already
 runs) parses the manifest in §4 and:
 
-- fails if the solve, PR-flow, canonical-review, shared provider/process, or
-  issue-approval-dashboard source files (`src/Kanban/Solve.hs`,
-  `PullRequestFlow.hs`, `Preflight/Environment.hs`, `Review.hs`,
-  `Review/Canonical.hs`, `Review/Tools.hs`, `Codex.hs`, `Claude.hs`,
+- fails if the provider-adapter, canonical-review, shared provider/process, or
+  issue-approval-dashboard source files (`src/Kanban/ProviderAdapter.hs`,
+  `Preflight/Environment.hs`, `Review.hs`, `Review/Canonical.hs`,
+  `Review/Tools.hs`, `Codex.hs`, `Claude.hs`,
   `GitHub/Run.hs`, `Repository.hs`, `Drainer.hs`, `ManagedPaths.hs`,
   `ApprovalService.hs`, `Process.hs`) invoke a literal external command that
-  has no matching `executable` manifest entry — `GitHub/Run.hs` rather than
+  has no matching `executable` manifest entry — `ProviderAdapter.hs` rather
+  than `Solve.hs` and `PullRequestFlow.hs` because issue #522 moved both
+  provider executable names into the one record those two flow modules now
+  read them back out of, which is what the same file's
+  `ProviderAdapterBoundaryTests` holds; `GitHub/Run.hs` rather than
   `GitHub.hs`
   because the split in #160 left `Kanban.GitHub` a re-export façade and moved
   the `gh` spawn into `Kanban.GitHub.Run`, which is the only module under

@@ -46,14 +46,15 @@ import Kanban.Models
     recordAssignment,
   )
 import Kanban.Process (ManagedProcess, managedProcess)
-import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, agentOutcome, emitStreamEvent, parseSolveOutputLine, providerForBrand, resumeProvenanceHeader, sealUnknownAggregates)
+import Kanban.ProviderAdapter (ProcessRequest (..), ProviderAdapter (..), adapterForBrand, providerForBrand)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, agentOutcome, emitStreamEvent, parseSolveOutputLine, resumeProvenanceHeader, sealUnknownAggregates)
 import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Workflow (CardStatus (..), classifyPullRequest, pullRequestStatus)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
 import System.IO (BufferMode (..), Handle, hSetBuffering)
-import System.Process (CreateProcess (..), ProcessHandle, StdStream (CreatePipe, NoStream), createProcess, proc, waitForProcess)
+import System.Process (ProcessHandle, createProcess, waitForProcess)
 
 data PullRequestOrigin = PullRequestCodex | PullRequestClaude
   deriving stock (Eq, Ord, Show, Generic)
@@ -216,7 +217,6 @@ runPullRequestFlow = runPullRequestFlowWith (const handleReadLine)
 -- can target one stream's abandonment path without racing the other's.
 runPullRequestFlowWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Assignment -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (PullRequestFlowEvent -> IO ()) -> IO ()
 runPullRequestFlowWith readLineFor repository pullRequestNumber origin action brand configPath config assignment existingSession existingLogPath provenance userMessage aggregator eventSink = do
-  let executableName = if brand == CodexSolver then "codex" else "claude"
   logResult <- openSessionLog repository ("pr-" <> actionName action <> if brand == CodexSolver then "-codex" else "-claude") pullRequestNumber existingLogPath
   sessionLog <- case logResult of
     Left message -> eventSink (PullRequestFlowDiagnostic pullRequestNumber message) >> pure Nothing
@@ -280,6 +280,8 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action br
         Right _ -> closeWithOutcome sessionLog (SolveFailed "PR agent did not provide stdout and stderr pipes")
   where
     repositoryRoot = repository.repositoryRoot
+    adapter = adapterForBrand brand
+    executableName = adapter.adapterExecutable
     -- Before this invocation's terminal event, never after: replay stops at
     -- the terminal journal envelope. A supervisor cancelling this invocation
     -- shares the aggregator and seals it before its own terminal envelope;
@@ -290,13 +292,12 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action br
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (PullRequestProcessFinished pullRequestNumber outcome)
     processSpec executablePath =
-      (proc executablePath (pullRequestArguments pullRequestNumber origin action brand configPath repository config assignment existingSession provenance userMessage))
-        { cwd = Just repositoryRoot,
-          std_in = NoStream,
-          std_out = CreatePipe,
-          std_err = CreatePipe,
-          create_group = True
-        }
+      adapter.adapterPullRequestProcess
+        ProcessRequest
+          { requestExecutable = executablePath,
+            requestArguments = pullRequestArguments pullRequestNumber origin action brand configPath repository config assignment existingSession provenance userMessage,
+            requestWorkingDirectory = repositoryRoot
+          }
 
 -- | The provider argv for one pull-request invocation.
 --
