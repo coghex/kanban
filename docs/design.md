@@ -339,20 +339,33 @@ Initial bindings:
 | `q` / `Ctrl-C` | Quit and restore the terminal from the board, a card's details overlay, or the help overlay; a live-agent overlay's normal-mode `q` hides that overlay instead and never quits |
 
 In the no-agent operating mode — a `models.toml` whose `agents` list loads no
-provider, and equally one that will not load at all — the six bindings that
-drive an agent leave the screen: `x`, `r`, `S`, `A`, `p`, and `a` are absent
-from the footer hint line, from a card's details overlay footer, and from the
-help overlay. Every one of them is still dispatched. Pressing one produces a
-notice naming the mode and the `agents` list that selects it, and nothing else
+provider, and equally one that will not load at all — the four bindings that
+start agent work leave the screen: `r`, `S`, `A`, and `a` are absent from the
+footer hint line, from a card's details overlay footer, and from the help
+overlay. Every one of them is still dispatched. Pressing one produces a notice
+naming the mode and the `agents` list that selects it, and nothing else
 happens: no chooser opens, no session is inserted or reopened, no process is
-spawned or killed, no overlay opens, and the approval service is neither
-started nor stopped. That refusal is given ahead of the settled-history and
+spawned, no overlay opens, and the approval service is neither started nor
+stopped. That refusal is given ahead of the settled-history and
 completed-history answers below, so the reason on screen is the one that is
 actually true of the board. `u` still updates GitHub board data in this mode
 and spawns no usage provider — not at startup, not on the key, and not from
 the sidebar's `↻` — and every other binding in the table above behaves exactly
 as it does in the other two modes. The rows themselves are unchanged: this
 paragraph is what the mode changes, not the table.
+
+Inspecting and terminating work that is already running stays available in
+this mode, so `p` and `x` are on all three surfaces and dispatch normally
+there. Worker discovery runs whatever the roster loads, so a board started
+with no provider still inherits the persistent solve and PR workers an earlier
+run left running, and Milestone 8's recovery contract promises those remain
+visible through the process inspector and terminable through `x`. Neither key
+spawns a provider: one opens the inspector, the other terminates recorded
+process groups. Both are offered unconditionally rather than only when there
+is manageable work, because the footer and help inventories are projections of
+the operating mode alone; an inspector with no rows is the ordinary empty
+case. `x` on a card the completed generation has settled answers the
+read-only-history notice in this mode exactly as it does in the other two.
 
 Refresh keys are ignored for a provider that already has a request in flight.
 Keybindings can become configurable later, but the first release should keep a
@@ -400,11 +413,10 @@ Mouse interaction is intentionally complete but narrow:
 - Left-clicking outside an open details panel closes it.
 - Right-clicking a board card opens its live issue-review, solve,
   autosolve-bound PR review, or direct PR session. With no live session it only
-  selects the card and never opens details. In the no-agent operating mode a
-  press that would open one of those overlays selects the card and shows that
-  mode's refusal instead, because this gesture is a second route to the very
-  overlays `r`, `S`, `A`, and `p` open; a press with no live session under it
-  is unchanged, since it was never opening one.
+  selects the card and never opens details. It behaves the same way in the
+  no-agent operating mode, because this gesture is a second route to the very
+  overlays `p` and then Enter already open there, and that mode leaves the
+  inspector reachable.
 - Right-clicking anywhere while a details panel is open closes it.
 - The mouse wheel scrolls the board column under the pointer by three rows per
   wheel event.

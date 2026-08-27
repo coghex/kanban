@@ -272,19 +272,27 @@ scopeBindings scope = filter (elem scope . (.bindingScopes)) boardBindings
 -- above cannot reach the board without a decision about whether a Kanban that
 -- spawns nothing may offer it.
 --
--- @a@ is here with the five obvious ones because @approve_issues.py@ resolves
--- @issue_gate@ models and can do nothing without a provider, so its control is
--- an agent surface exactly as the solve and review keys are. @d@ is not: the
--- PR drainer merges pull requests and spawns no model, and @i@ is not either,
--- because a fail-closed drainer incident is the one thing a no-agent board
--- still has to be able to show.
+-- @a@ is here with the three that start agent work because
+-- @approve_issues.py@ resolves @issue_gate@ models and can do nothing without
+-- a provider, so its control is an agent surface exactly as the solve and
+-- review keys are. @d@ is not: the PR drainer merges pull requests and spawns
+-- no model, and @i@ is not either, because a fail-closed drainer incident is
+-- the one thing a no-agent board still has to be able to show.
+--
+-- @x@ and @p@ are not here either (issue #546). Neither spawns a provider:
+-- one inspects sessions and the other terminates recorded process groups.
+-- Worker discovery is unconditional, so a board whose roster loads nothing
+-- still inherits the persistent solve and PR workers a previous run left
+-- running, and the design's Milestone 8 (§19) promises those stay inspectable
+-- and terminable. Taking the two keys off that board would strand the work with
+-- no route to it.
 requiresLoadedAgent :: BoardAction -> Bool
 requiresLoadedAgent = \case
   ReviewSelection -> True
   SolveSelection -> True
   AutoSolveSelection -> True
-  KillWorking -> True
-  ShowProcesses -> True
+  KillWorking -> False
+  ShowProcesses -> False
   ToggleApproval -> True
   NextCard -> False
   PreviousCard -> False
