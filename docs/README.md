@@ -20,6 +20,9 @@
 - [Design and implementation notes](design.md) — detailed behavior and engineering decisions.
 - [Bug findings](bugs.md) — repository evidence collected for later triage,
   with the status of each entry.
+- [Releasing](releasing.md) — the reusable procedure for cutting a release, the
+  authorization it cannot happen without, and the dependency review that runs
+  before each one and approximately quarterly.
 - [Media](media/README.md) — the tracked board screenshot, what it is derived
   from, and how to regenerate and review it.
 

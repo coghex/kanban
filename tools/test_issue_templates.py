@@ -27,6 +27,13 @@ pipeline for every issue filed from it:
   Example items stay on single-line comments, which `stripCheckbox` rejects
   because the line starts with `<`.
 
+The `Maintainer release` template joined them later (issue #539). It owes the
+shared rules above like any other template, and it owes one of its own: it
+preselects the `release` label the board and the backlog filter a release by.
+Its release-safety properties -- the authorization item arriving unchecked and
+ahead of the tag item -- are not general template rules, so they live with the
+runbook they gate in `tools/test_release_runbook.py`.
+
 An unfilled placeholder checkbox carrying no reference is the intended state:
 it yields `TrackerIssueReferenceMissing` and `TrackerChildrenMissing` until the
 author lists real children, which is a diagnostic about an empty epic rather
@@ -49,6 +56,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_DIR = REPO_ROOT / ".github" / "ISSUE_TEMPLATE"
 ORDINARY_TEMPLATE = TEMPLATE_DIR / "issue.md"
 EPIC_TEMPLATE = TEMPLATE_DIR / "epic.md"
+RELEASE_TEMPLATE = TEMPLATE_DIR / "release.md"
 
 # CLAUDE.md's "Hygiene" section: the shape every issue body in this repository
 # takes, in this order.
@@ -69,6 +77,11 @@ SUPPORTED_FRONTMATTER_KEYS = frozenset(
 # The label Kanban's default tracker configuration recognizes
 # (src/Kanban/Domain.hs:526-533). An epic filed without it is not a tracker.
 TRACKER_LABEL = "epic"
+
+# The label the release template preselects, which is what the board and the
+# backlog filter a release by. It already exists on this repository's tracker;
+# the template picks it rather than introducing one (issue #539).
+RELEASE_LABEL = "release"
 
 # The heading src/Kanban/Tracker.hs:307-319 recognizes, spelled as this
 # repository's own epics spell it.
@@ -203,14 +216,14 @@ class IssueTemplateTests(unittest.TestCase):
         cls.gate = _approve_issues()
         cls.templates = {
             path.name: path.read_text(encoding="utf-8")
-            for path in (ORDINARY_TEMPLATE, EPIC_TEMPLATE)
+            for path in (ORDINARY_TEMPLATE, EPIC_TEMPLATE, RELEASE_TEMPLATE)
         }
 
     def test_the_template_directory_holds_exactly_the_declared_templates(self):
         self.assertTrue(TEMPLATE_DIR.is_dir(), TEMPLATE_DIR)
         self.assertEqual(
             sorted(path.name for path in TEMPLATE_DIR.glob("*.md")),
-            ["epic.md", "issue.md"],
+            ["epic.md", "issue.md", "release.md"],
             "a template added here owes the rules below and this module's "
             "coverage, so it is named rather than discovered",
         )
@@ -280,6 +293,14 @@ class IssueTemplateTests(unittest.TestCase):
         # explanation there is nothing a marker could leak out of.
         self.assertIn("issue-origin", self.templates["issue.md"])
 
+    def test_the_release_template_delegates_that_explanation(self):
+        # The same delegation the epic template makes, over the third asset
+        # that owes the reader the answer and must not keep a second copy of
+        # it to drift.
+        text = self.templates["release.md"]
+        self.assertIn("origin marker", text)
+        self.assertIn("ordinary issue template", text)
+
     def test_the_epic_template_delegates_that_explanation(self):
         # The negative control over the asset that delegates rather than
         # restating: the epic template owes the reader the same answer, and
@@ -288,6 +309,36 @@ class IssueTemplateTests(unittest.TestCase):
         text = self.templates["epic.md"]
         self.assertIn("origin marker", text)
         self.assertIn("ordinary issue template", text)
+
+
+class ReleaseTemplateTests(unittest.TestCase):
+    """Requirement 7's one property beyond the shared rules: the chooser entry
+    preselects the label a release is filtered by."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = RELEASE_TEMPLATE.read_text(encoding="utf-8")
+        cls.others = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in (ORDINARY_TEMPLATE, EPIC_TEMPLATE)
+        }
+
+    def test_the_release_template_preselects_the_release_label(self):
+        fields = parse_frontmatter(split_frontmatter(self.text)[0])
+        labels = [item.strip() for item in fields.get("labels", "").split(",")]
+        self.assertIn(RELEASE_LABEL, labels)
+
+    def test_no_other_template_preselects_it(self):
+        # The negative control over the assets that must not: a `release` label
+        # on the ordinary or epic template would label every issue filed from
+        # it as a release.
+        for name, text in self.others.items():
+            with self.subTest(template=name):
+                fields = parse_frontmatter(split_frontmatter(text)[0])
+                labels = [
+                    item.strip() for item in fields.get("labels", "").split(",")
+                ]
+                self.assertNotIn(RELEASE_LABEL, labels)
 
 
 class EpicTemplateTests(unittest.TestCase):
