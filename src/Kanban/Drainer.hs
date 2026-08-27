@@ -39,6 +39,7 @@ module Kanban.Drainer
     setDrainerRunning,
     singlePullRequestDrainerPath,
     statusFromControllerExit,
+    systemdControllerFromUnit,
     unitExecStartArguments,
     -- | Exported for the discovery-wording tests, which cannot reach this
     -- branch through 'discoverDrainerController': it needs a definition the
@@ -626,10 +627,7 @@ discoverDrainerController repository = do
         text <- case contents of
           Left _ -> Left (unreadableDefinition DrainerSystemd unit "it could not be read")
           Right bytes -> Right (Text.decodeUtf8Lenient bytes)
-        arguments <- case unitExecStartArguments text of
-          Left message -> Left (unreadableDefinition DrainerSystemd unit message)
-          Right values -> Right values
-        controllerFromProgramArguments DrainerSystemd repository arguments
+        systemdControllerFromUnit repository unit text
 
 -- | A definition that is present but will not parse is the one failure the
 -- record cannot diagnose, so it carries the reader's own complaint — and, like
@@ -646,6 +644,21 @@ unreadableDefinition backend definition detail =
     <> "; "
     <> reinstallHint
 
+-- | The controller a systemd unit's own text names: the reader's rules and
+-- this side's rebinding, in the one order discovery applies them.
+--
+-- Separated from the file read above so that whole decision stays reachable
+-- from a host whose service manager is the other one. What comes out of it is
+-- exactly what @status@, @start@, and @stop@ invoke, so a unit that resets
+-- @ExecStart=@ is answered here or not at all.
+systemdControllerFromUnit ::
+  Repository -> FilePath -> Text -> Either Text DrainerController
+systemdControllerFromUnit repository unit text = do
+  arguments <- case unitExecStartArguments text of
+    Left message -> Left (unreadableDefinition DrainerSystemd unit message)
+    Right values -> Right values
+  controllerFromProgramArguments DrainerSystemd repository arguments
+
 -- | The argument vector a systemd unit's @ExecStart@ names.
 --
 -- systemd's own quoting, which is what the backend writes and what a user
@@ -657,25 +670,71 @@ unreadableDefinition backend definition detail =
 -- those either, and inventing one here would make Kanban report a command
 -- systemd would not run.
 --
--- A unit with no @ExecStart@, or one whose value is empty, names no controller
--- and is rejected rather than turned into an empty command.
+-- systemd's own accumulation rules too, because what is read here stays
+-- authoritative for what the service manager will actually run. Each
+-- assignment appends one command, and an /empty/ assignment clears everything
+-- appended before it, so only the assignments following the last empty one are
+-- effective. Reading a reset as just another directive to append is how a
+-- retired executable ends up invoked with the live one among its arguments.
+--
+-- @systemd.service(5)@ then requires exactly one command unless @Type=@ is
+-- @oneshot@, so a unit left with several effective commands names no single
+-- controller command: under @Type=oneshot@ because each is a command in its
+-- own right and none of them is /the/ one, and under any other @Type=@ —
+-- including an absent one, which systemd reads as @simple@ — because systemd
+-- refuses to load such a unit at all, so nothing is running from it. Both are
+-- rejected rather than concatenated into one argument vector.
+--
+-- A unit with no @ExecStart@, or one whose only assignment is empty, names no
+-- controller and is rejected rather than turned into an empty command.
 unitExecStartArguments :: Text -> Either Text [String]
-unitExecStartArguments contents = case execStartValues of
-  [] -> Left "it declares no ExecStart"
-  values -> case concatMap unitWords values of
+unitExecStartArguments contents = case effectiveCommands of
+  []
+    | any (not . Text.null) execStartAssignments -> Left "its ExecStart names no command"
+    | otherwise -> Left "it declares no ExecStart"
+  [command] -> case unitWords command of
     [] -> Left "its ExecStart names no command"
     arguments -> Right (map Text.unpack arguments)
+  commands -> Left (tooManyCommands (length commands))
   where
-    -- Every ExecStart in the file, in order: systemd itself lets a later one
-    -- append, and a reader that took only the first would report a command
-    -- that is not the whole of what runs.
-    execStartValues =
+    -- Every ExecStart in the file, in order, the empty ones included: an empty
+    -- assignment is not a directive to skip past, it is the reset that decides
+    -- which of the others still count.
+    execStartAssignments = directiveValues "ExecStart="
+
+    -- What survives the last reset: the trailing run of non-empty assignments,
+    -- which is the whole list when none of them is empty and nothing at all
+    -- when the last one is.
+    effectiveCommands =
+      reverse (takeWhile (not . Text.null) (reverse execStartAssignments))
+
+    -- Last assignment wins for a single-value setting, and an empty one puts
+    -- the setting back to its default — which for @Type=@ is @simple@, so
+    -- either spelling of "not stated" lands on 'Nothing'.
+    unitType = case filter (not . Text.null) (directiveValues "Type=") of
+      [] -> Nothing
+      values -> Just (last values)
+
+    -- Both directives are read the same way, so @Type=@ inherits exactly the
+    -- spellings @ExecStart=@ already accepts and no more: a unit whose
+    -- @Type=@ this misses is one whose @ExecStart=@ would be missed too, and
+    -- it is refused either way — only which refusal it earns would move.
+    directiveValues directive =
       [ Text.strip value
         | line <- Text.lines contents,
           let stripped = Text.strip line,
-          Just value <- [Text.stripPrefix "ExecStart=" stripped],
-          not (Text.null (Text.strip value))
+          Just value <- [Text.stripPrefix directive stripped]
       ]
+
+    tooManyCommands count
+      | unitType == Just "oneshot" =
+          "its Type=oneshot ExecStart declares "
+            <> Text.pack (show count)
+            <> " commands, so it names no single controller command"
+      | otherwise =
+          "its ExecStart declares "
+            <> Text.pack (show count)
+            <> " commands, which systemd accepts only under Type=oneshot"
 
 -- | One @ExecStart@ value, split into words under systemd's quoting rules.
 unitWords :: Text -> [Text]

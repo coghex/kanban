@@ -30,6 +30,7 @@ import Kanban.Drainer
     resolveDrainerDefinition,
     runDrainerCommand,
     statusFromControllerExit,
+    systemdControllerFromUnit,
     unitExecStartArguments,
     unreadableDefinition
   )
@@ -380,11 +381,99 @@ spec = do
       unitExecStartArguments "[Service]\nExecStart=\"/tmp/say \\\"hi\\\"/c.py\"\n"
         `shouldBe` Right ["/tmp/say \"hi\"/c.py"]
 
+    it "resolves an empty ExecStart as systemd's reset, not as a directive to skip" $ do
+      -- Requirement 1. systemd clears the command list on an empty
+      -- assignment, so a unit hand-edited this way runs only what follows the
+      -- last one. Filtering the empty assignment out instead made the retired
+      -- executable the head of the vector and left the live one among its
+      -- arguments, for status, start, and stop alike.
+      unitExecStartArguments
+        "[Service]\nType=exec\nExecStart=\"/old/controller\" \"run\"\nExecStart=\nExecStart=\"/actual/controller\" \"run\"\n"
+        `shouldBe` Right ["/actual/controller", "run"]
+      -- A reset before anything has accumulated clears nothing and leaves the
+      -- one command that follows it.
+      unitExecStartArguments "[Service]\nExecStart=\nExecStart=/actual/controller run\n"
+        `shouldBe` Right ["/actual/controller", "run"]
+      -- Requirement 4. The surviving command is read exactly as a lone one is:
+      -- the quoting, the escapes, and %% all still apply on the far side of a
+      -- reset.
+      unitExecStartArguments
+        "[Service]\nExecStart=/old/c.py\nExecStart=\nExecStart=\"/tmp/100%%/say \\\"hi\\\"\" run\n"
+        `shouldBe` Right ["/tmp/100%/say \"hi\"", "run"]
+
+    it "refuses a unit whose last ExecStart resets away every command it had" $
+      -- Requirement 1 the other way round: an assignment that once named a
+      -- command is not evidence one is still named, so this reaches the same
+      -- refusal a unit that never named one does rather than reporting the
+      -- reset-away command.
+      unitExecStartArguments "[Service]\nType=exec\nExecStart=/old/controller run\nExecStart=\n"
+        `shouldBe` Left "its ExecStart names no command"
+
+    it "refuses a unit naming two commands rather than concatenating them" $ do
+      -- Requirements 2 and 3. Under any Type= but oneshot — an absent one
+      -- included, which systemd reads as simple — systemd refuses to load the
+      -- unit at all, so there is nothing running to report; under oneshot both
+      -- commands are legal and neither of them is the controller. Concatenating
+      -- them is the one answer that is wrong either way.
+      unitExecStartArguments "[Service]\nType=exec\nExecStart=/a/ctl run\nExecStart=/b/ctl run\n"
+        `shouldBe` Left "its ExecStart declares 2 commands, which systemd accepts only under Type=oneshot"
+      unitExecStartArguments "[Service]\nExecStart=/a/ctl run\nExecStart=/b/ctl run\n"
+        `shouldBe` Left "its ExecStart declares 2 commands, which systemd accepts only under Type=oneshot"
+      unitExecStartArguments "[Service]\nType=oneshot\nExecStart=/a/ctl run\nExecStart=/b/ctl run\n"
+        `shouldBe` Left "its Type=oneshot ExecStart declares 2 commands, so it names no single controller command"
+      -- The reset decides how many are effective, so the same two directives
+      -- with an earlier command in front still count as two, and a reset
+      -- between them counts as one.
+      unitExecStartArguments "[Service]\nType=oneshot\nExecStart=/a/ctl run\nExecStart=\nExecStart=/b/ctl run\n"
+        `shouldBe` Right ["/b/ctl", "run"]
+
+    it "keeps the ExecStart command a systemd unit resolves to out of the drainer's reach when it is superseded" $ do
+      -- Requirement 11. The parser is not the whole of discovery: what
+      -- 'runDrainerCommand' invokes for status, start, and stop is the
+      -- executable and arguments of the controller this resolves to, so the
+      -- assertion that a superseded executable cannot be reached belongs on
+      -- the controller rather than on the word list.
+      let repository = Repository "/tmp/current-project" "example" "project"
+          unit = "/home/example/.config/systemd/user/kanban-drainer.service"
+      systemdControllerFromUnit
+        repository
+        unit
+        "[Service]\nType=exec\nExecStart=\"/old/python3\" \"/old/drain_prs_service.py\" \"run\"\nExecStart=\nExecStart=\"/actual/python3\" \"/actual/drain_prs_service.py\" \"run\"\n"
+        `shouldBe` Right
+          ( DrainerController
+              "/actual/python3"
+              [ "/actual/drain_prs_service.py",
+                "--path",
+                "/tmp/current-project",
+                "--repo",
+                "example/project"
+              ]
+              DrainerSystemd
+          )
+      -- And a unit systemd itself would not load resolves to no controller at
+      -- all, through the diagnostic that names the file and the repair.
+      refusal <-
+        requireLeft
+          "a two-command unit unexpectedly resolved a controller"
+          ( systemdControllerFromUnit
+              repository
+              unit
+              "[Service]\nType=exec\nExecStart=/a/python3 /a/drain_prs_service.py run\nExecStart=/b/python3 /b/drain_prs_service.py run\n"
+          )
+      refusal `shouldMention` "could not read the PR drainer's systemd unit at /home/example/.config/systemd/user/kanban-drainer.service"
+      refusal `shouldMention` "declares 2 commands"
+      refusal `shouldMention` "install_drainer.py"
+      refusal `shouldNotMention` "/a/python3"
+
     it "refuses a unit that names no command rather than reporting an empty one" $ do
+      -- Requirement 5. Neither message moves: a unit with no ExecStart and a
+      -- unit whose only assignment is the reset both name nothing, and the
+      -- reset resolution above must not turn either into a new wording an
+      -- operator has to learn.
       unitExecStartArguments "[Service]\nType=exec\nRestart=no\n"
-        `shouldSatisfy` isLeft
+        `shouldBe` Left "it declares no ExecStart"
       unitExecStartArguments "[Service]\nExecStart=\nRestart=no\n"
-        `shouldSatisfy` isLeft
+        `shouldBe` Left "it declares no ExecStart"
 
   describe "PR drainer status decoding" $ do
     it "replaces the definition's managed repository with the current one" $ do
