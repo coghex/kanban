@@ -1,4 +1,5 @@
-"""Release-completeness check for the Cabal source distribution.
+"""Release-completeness and package-boundary checks for the Cabal source
+distribution.
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 -m unittest tools.test_source_distribution
@@ -73,6 +74,19 @@ tracked file has none:
   every tracked descendant by whole path component — which no runtime, setup,
   test, or workflow path reads and which no packaged document links to.
 
+The same unpacked archive settles a second question: what the package
+publishes. Kanban's supported interfaces are the executable and its CLI, the
+documented configuration, the on-disk compatibility surface, the installers,
+and the workflow contracts -- not an importable `Kanban.*` library, whose
+modules are implementation seams that get split and respelled whenever the code
+wants it. So the package publishes no library, and "The package boundary"
+section of `SourceDistributionTest` holds it there. Those checks read Cabal,
+not `kanban.cabal`: they ask the real unpacked archive for the library
+components Cabal elaborates for it, and then ask, once per library, whether a
+separate consumer package can name it. A stanza rewritten to restore a public
+library would sail past a text check watching for the old spelling; it cannot
+sail past Cabal's own answer.
+
 Prerequisites are `cabal` on `PATH` and a Git checkout of this repository.
 Neither holds inside an unpacked release -- which nonetheless carries this
 file, since `tools/` ships whole, and whose own `README.md` advertises the
@@ -89,6 +103,7 @@ runs the rest of the suite and collects this module too, where it skips.
 
 import ast
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -101,6 +116,35 @@ from pathlib import Path, PurePosixPath
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SDIST_TIMEOUT_SECONDS = 600
+
+# A package of its own, used to ask the one question a `.cabal` stanza cannot
+# answer: whether something *outside* this package can name a library of it.
+# `{dependencies}` is the `build-depends` entry under test.
+BOUNDARY_PROBE_PACKAGE = """cabal-version: 3.0
+name: kanban-boundary-probe
+version: 0
+build-type: Simple
+
+library
+  default-language: Haskell2010
+  hs-source-dirs: .
+  exposed-modules: KanbanBoundaryProbe
+  build-depends: {dependencies}
+"""
+
+# The Cabal solver's own wording for the two ways this package can refuse an
+# outside `build-depends` entry. Asserting the exact reason is what keeps an
+# unrelated index, network, or solver failure from reading as proof of privacy:
+# any other failure means the probe never reached the question. That the wording
+# is the pinned toolchain's is `tools/test_toolchain_parity.py`'s business; a
+# `cabal` upgrade that rephrases these fails here, loudly, rather than passing
+# on a refusal it stopped understanding.
+NO_SUCH_LIBRARY_REASON = (
+    "requires library from kanban, but the component does not exist"
+)
+PRIVATE_LIBRARY_REASON = (
+    "requires library '{name}' from kanban, but the component is private"
+)
 
 # Trees that ship whole: every tracked file under them must reach the archive.
 RELEASE_TREES = (
@@ -471,6 +515,13 @@ class SourceDistributionTest(unittest.TestCase):
         workspace = tempfile.TemporaryDirectory(prefix="kanban-sdist-")
         cls.addClassCleanup(workspace.cleanup)
         root = Path(workspace.name)
+        # The package-boundary checks build their consumer packages in here, so
+        # those too are removed with the workspace rather than left behind.
+        cls.workspace_root = root
+        # Memoized by the boundary helpers below; each is one `cabal` run, and
+        # every boundary test wants the same answer.
+        cls.elaborated_components = None
+        cls.probe_harness_checked = False
         output = root / "sdist"
         # Both the build directory and the output land outside the checkout,
         # so the run neither reads nor leaves state in the working tree.
@@ -758,6 +809,199 @@ class SourceDistributionTest(unittest.TestCase):
                     COMPONENT_SOURCES[component],
                     f"Installing the {component} component from an unpacked "
                     "release needs its tracked source bundle.",
+                )
+
+    # ---- The package boundary -------------------------------------------
+    #
+    # Kanban's supported interfaces are the executable and its CLI, the
+    # documented configuration, the on-disk compatibility surface, the
+    # installers, and the workflow contracts. An importable `Kanban.*` library
+    # is not among them: those modules are implementation seams, split and
+    # respelled whenever the code wants it. So the package publishes no library
+    # at all, and the two checks below hold it there.
+    #
+    # Neither reads `kanban.cabal`. What a stanza spells and what Cabal makes
+    # of it are different questions, and only the second decides what a
+    # recipient can depend on -- a rewritten stanza that restores a public
+    # library would sail past any text check that was watching for the old
+    # spelling. These ask Cabal instead, about the real unpacked archive: once
+    # for the components it elaborates, and once per library for whether a
+    # package that is not this one can name it.
+
+    def elaborated_library_components(self):
+        """Every library component Cabal elaborates for the unpacked package.
+
+        Read from the `plan.json` a real `cabal build all --dry-run` writes in
+        the unpacked source distribution. `lib` is the unnamed main library --
+        the public one, the whole point of this section -- and `lib:<name>` is
+        a named sublibrary, whose visibility `plan.json` does not record and
+        the consumer probe below decides.
+
+        That run is also this section's positive control for the environment:
+        it resolves the package's own dependencies against the real index, so a
+        probe failure below that names a library component is about that
+        component rather than about a missing index or an offline runner.
+        """
+        cls = type(self)
+        if cls.elaborated_components is None:
+            builddir = self.workspace_root / "plan"
+            proc = _run(
+                [
+                    "cabal",
+                    "build",
+                    "all",
+                    "--dry-run",
+                    "--builddir",
+                    str(builddir),
+                ],
+                cwd=str(self.unpacked_root),
+                timeout=SDIST_TIMEOUT_SECONDS,
+            )
+            self.assertEqual(
+                0,
+                proc.returncode,
+                "The unpacked source distribution must resolve its own build "
+                "plan; without that, nothing below can tell a private library "
+                "apart from an unreachable package index.\n"
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            plan = json.loads((builddir / "cache" / "plan.json").read_text("utf-8"))
+            cls.elaborated_components = sorted(
+                unit["component-name"]
+                for unit in plan["install-plan"]
+                if unit.get("pkg-name") == "kanban"
+                and unit.get("component-name", "").split(":")[0] == "lib"
+            )
+        return cls.elaborated_components
+
+    def probe_dependency(self, dependency):
+        """Run `cabal` over a separate package that depends on `dependency`.
+
+        Returns the completed process. The probe is a package of its own, in a
+        project of its own, so what it asks Cabal is exactly what an outside
+        package asks: not what the stanza says, but whether this dependency
+        resolves against the real unpacked archive.
+        """
+        cls = type(self)
+        if not cls.probe_harness_checked:
+            # A probe that cannot resolve even `base` proves nothing about
+            # Kanban, so establish that this scaffolding works before reading
+            # any refusal below as a verdict. Once per class: it is a `cabal`
+            # run, and the answer cannot change between tests.
+            control = self.run_probe("base")
+            self.assertEqual(
+                0,
+                control.returncode,
+                "The boundary probe must resolve when it asks for nothing from "
+                "this package. It did not, so its refusals below would say "
+                "nothing about the package boundary.\n"
+                f"stdout:\n{control.stdout}\nstderr:\n{control.stderr}",
+            )
+            cls.probe_harness_checked = True
+        return self.run_probe(f"base, {dependency}")
+
+    def run_probe(self, dependencies):
+        # Resolved for the reason setUpClass resolves the unpacked root: on a
+        # platform whose temporary directory is itself a symlink, a relative
+        # path between one resolved end and one unresolved end walks out
+        # through the link and lands nowhere.
+        workspace = Path(
+            tempfile.mkdtemp(dir=self.workspace_root, prefix="boundary-probe-")
+        ).resolve()
+        package = workspace / "probe"
+        package.mkdir()
+        (package / "KanbanBoundaryProbe.hs").write_text(
+            "module KanbanBoundaryProbe where\n", encoding="utf-8"
+        )
+        (package / "probe.cabal").write_text(
+            BOUNDARY_PROBE_PACKAGE.format(dependencies=dependencies),
+            encoding="utf-8",
+        )
+        # The unpacked archive joins the project as a second local package, so
+        # the probe is resolved against the real thing a recipient unpacks.
+        # Named relatively: `packages:` is whitespace-separated, and the only
+        # name reached this way is the `<package>-<version>` directory Cabal
+        # itself chose, rather than a temporary path this run does not control.
+        archive = os.path.relpath(self.unpacked_root, workspace)
+        (workspace / "cabal.project").write_text(
+            f"packages: ./probe/\n          {archive}/\n",
+            encoding="utf-8",
+        )
+        return _run(
+            [
+                "cabal",
+                "build",
+                "kanban-boundary-probe",
+                "--dry-run",
+                "--builddir",
+                str(workspace / "dist"),
+            ],
+            cwd=str(workspace),
+            timeout=SDIST_TIMEOUT_SECONDS,
+        )
+
+    def test_the_package_publishes_no_unnamed_main_library(self):
+        self.assertNotIn(
+            "lib",
+            self.elaborated_library_components(),
+            "The unpacked source distribution has an unnamed main library. "
+            "Cabal publishes that one, so the package would again advertise an "
+            "installable `Kanban.*` API it does not support. The implementation "
+            "modules belong in a private named sublibrary.",
+        )
+        probe = self.probe_dependency("kanban")
+        self.assertNotEqual(
+            0,
+            probe.returncode,
+            "A package that is not this one resolved a plain `kanban` library "
+            "dependency against the unpacked archive. The package must publish "
+            "no library.\n"
+            f"stdout:\n{probe.stdout}\nstderr:\n{probe.stderr}",
+        )
+        self.assertIn(
+            NO_SUCH_LIBRARY_REASON,
+            probe.stdout + probe.stderr,
+            "The probe failed for some reason other than this package having "
+            "no public library, so it proves nothing about the boundary: an "
+            "index, network, or solver failure is not evidence of privacy.",
+        )
+
+    def test_no_named_library_of_this_package_is_public(self):
+        sublibraries = [
+            component
+            for component in self.elaborated_library_components()
+            if component != "lib"
+        ]
+        # Never vacuous: the implementation modules live in a named
+        # sublibrary, so finding none means the enumeration above broke rather
+        # than that there is nothing to check.
+        self.assertNotEqual(
+            [],
+            sublibraries,
+            "Cabal elaborated no named library for this package. The "
+            "implementation modules are supposed to be in one, so this check "
+            "has lost sight of its subject rather than passing.",
+        )
+        for component in sublibraries:
+            name = component.split(":", 1)[1]
+            with self.subTest(sublibrary=name):
+                probe = self.probe_dependency(f"kanban:{name}")
+                self.assertNotEqual(
+                    0,
+                    probe.returncode,
+                    f"A package that is not this one resolved `kanban:{name}` "
+                    "against the unpacked archive, so that implementation "
+                    "library is published. Named sublibraries need "
+                    "`visibility: private`.\n"
+                    f"stdout:\n{probe.stdout}\nstderr:\n{probe.stderr}",
+                )
+                self.assertIn(
+                    PRIVATE_LIBRARY_REASON.format(name=name),
+                    probe.stdout + probe.stderr,
+                    "The probe failed for some reason other than "
+                    f"`{name}` being private, so it proves nothing about the "
+                    "boundary: an index, network, or solver failure is not "
+                    "evidence of privacy.",
                 )
 
 
