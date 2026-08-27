@@ -67,6 +67,7 @@ extra-doc-files:
   docs/media/board-wide.png
   docs/media/board-wide.provenance
   docs/pr-drainer.md
+  docs/releasing.md
   docs/user-guide.md
   docs/workflow-setup.md
 

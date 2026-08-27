@@ -55,7 +55,7 @@ tracked file has none:
   the standard the contribution guide binds them to and the answer to where a
   report goes, rather than reaching either one only from upstream --
   `LICENSE`, `kanban.cabal`, the `config.toml.example` and
-  `models.toml.example` configuration templates, the eleven user
+  `models.toml.example` configuration templates, the twelve user
   and workflow-contract documents under `docs/`,
   `.github/pull_request_template.md` -- the body GitHub pre-fills for a new
   pull request, and the composition-time companion to the packaged
@@ -204,6 +204,7 @@ RELEASE_DOCUMENTS = (
     # documents' are.
     "docs/media/README.md",
     "docs/pr-drainer.md",
+    "docs/releasing.md",
     "docs/user-guide.md",
     "docs/workflow-setup.md",
 )
@@ -343,6 +344,28 @@ MARKDOWN_LINK = re.compile(r"\[[^\]\n]*\]\(\s*([^)\s]+)(?:\s+\"[^\"]*\")?\s*\)")
 DOCUMENTED_TREE_PATH = re.compile(
     r"\b((?:tools|codex-plugin|claude-plugin)/[\w./-]+\.(?:py|json|md))"
 )
+
+# A `tools/` module named the way a document tells the reader to run it --
+# `python3 -m unittest tools.test_source_distribution`. The dotted form is a
+# path into the packaged tree that the slash-shaped pattern above cannot see,
+# and `docs/releasing.md` (issue #539) joins `docs/development.md` and
+# `docs/media/README.md` in advertising modules that way, so a document naming
+# a module the archive does not carry hands its reader a command that cannot
+# run. Only `tools.`: it is the one package an unpacked archive can import
+# from its own root.
+DOCUMENTED_TEST_MODULE = re.compile(r"-m\s+unittest\s+(tools\.[\w.]+)")
+
+
+def documented_module_paths(text):
+    """The archive-relative source files a document's `unittest` invocations
+    name, as paths. `tools.test_x` is `tools/test_x.py`; a dotted subpackage
+    resolves the same way."""
+    return sorted(
+        {
+            module.replace(".", "/") + ".py"
+            for module in DOCUMENTED_TEST_MODULE.findall(text)
+        }
+    )
 
 
 def excluded_entry_covers(entry: str, path: str) -> bool:
@@ -613,6 +636,26 @@ class ExclusionDeclarationTests(unittest.TestCase):
             )
         )
         self.assertEqual(present, ["docs/coordination/scratch-note.md"])
+
+    def test_a_documented_unittest_invocation_resolves_to_a_module_path(self):
+        self.assertEqual(
+            documented_module_paths(
+                "Run `python3 -m unittest tools.test_source_distribution`, or\n"
+                "python3 -m  unittest tools.sub.test_thing\n"
+            ),
+            ["tools/sub/test_thing.py", "tools/test_source_distribution.py"],
+        )
+
+    def test_a_discover_invocation_names_no_module(self):
+        # The negative control for the pattern above: `discover -s tools` names
+        # a directory to search rather than a module to import, so reading it
+        # as a module path would report a file that was never meant to exist.
+        self.assertEqual(
+            documented_module_paths(
+                "python3 -m unittest discover -s tools -p 'test_*.py'"
+            ),
+            [],
+        )
 
     def test_the_live_declarations_cover_tracked_content_when_git_answers(self):
         # The live tuple, held to the same rule wherever a Git checkout is
@@ -899,6 +942,24 @@ class SourceDistributionTest(unittest.TestCase):
             sorted(set(missing)),
             "Every setup, installer, or bundle path named by a packaged "
             "document must exist in the unpacked archive.",
+        )
+
+    def test_documented_test_modules_exist_in_the_archive(self):
+        missing = []
+        for relative in sorted(self.archive_files):
+            if not relative.endswith(".md"):
+                continue
+            document = self.unpacked_root / relative
+            for named in documented_module_paths(
+                document.read_text(encoding="utf-8", errors="replace")
+            ):
+                if named not in self.archive_files:
+                    missing.append(f"{relative} names {named}")
+        self.assertEqual(
+            [],
+            sorted(set(missing)),
+            "Every `python3 -m unittest tools.<module>` a packaged document "
+            "advertises must resolve to a module in the unpacked archive.",
         )
 
     def test_setup_workflow_components_have_their_sources(self):

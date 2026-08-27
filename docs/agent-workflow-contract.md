@@ -2626,6 +2626,7 @@ docs/project_review_516-498.md | coordination | audit-report
 docs/project_review_533-517.md | coordination | audit-report
 docs/public_release_design.md | coordination | audit-report
 docs/release_maintenance_design.md | coordination | audit-report
+docs/releasing.md | pr-atomic | test-parsed;release-document
 docs/superagent_design.md | coordination | audit-report
 docs/ui-bugs.md | coordination | audit-report
 docs/usage_awareness_design.md | coordination | audit-report
@@ -2636,9 +2637,11 @@ docs/workflow_command_vendoring_design.md | coordination | audit-report
 tools/ | pr-atomic | test-parsed;release-document
 ```
 
-The ten `test-parsed` rows name what actually parses them:
-`tools/test_issue_templates.py` reads the frontmatter, headings, and `Children`
-checklist of both templates under `.github/ISSUE_TEMPLATE/`,
+The eleven `test-parsed` rows name what actually parses them:
+`tools/test_issue_templates.py` reads the frontmatter and headings of every
+template under `.github/ISSUE_TEMPLATE/` and the `Children` checklist of the
+epic one, and `tools/test_release_runbook.py` reads the release template's
+authorization item,
 `tools/test_pull_request_template.py` and `test/Spec/Agent/PullRequestFlow.hs`
 read `.github/pull_request_template.md` and run the three parsers that route on
 a pull-request origin marker over it, so a marker pasted into that template's
@@ -2653,7 +2656,11 @@ tables, `tools/test_board_screenshot.py` reconciles the regeneration procedure
 in `docs/media/README.md` against the renderer's own constants,
 `tools/test_claude_plugin.py` and `tools/test_codex_plugin.py` read
 the frontmatter and body of every packaged workflow under `claude-plugin/` and
-`codex-plugin/`, and `tools/test_render_command_sources.py` reads the authored
+`codex-plugin/`, `tools/test_release_runbook.py` reads the ordered steps of
+`docs/releasing.md` and the safety rules inside them — the recorded
+authorization gate ahead of the tag push, the prohibitions that keep a pushed
+tag immutable, where a release's evidence lives, and what the dependency review
+covers — and `tools/test_render_command_sources.py` reads the authored
 command sources under `tools/command_sources/` and byte-compares the Markdown
 rendered from them.
 

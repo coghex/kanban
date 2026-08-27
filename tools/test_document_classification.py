@@ -67,9 +67,11 @@ COORDINATION_REASONS = ("audit-report", "coordination-note")
 # parsed by their own modules, so the reason is not confined to the two
 # workflow-contract documents the issue body named.
 TEST_PARSED_PATHS = {
-    # tools/test_issue_templates.py reads both templates' frontmatter, their
+    # tools/test_issue_templates.py reads every template's frontmatter and
     # headings, and the epic template's Children checklist, which
-    # src/Kanban/Tracker.hs parses in an issue filed from it (issue #434).
+    # src/Kanban/Tracker.hs parses in an issue filed from it (issue #434);
+    # tools/test_release_runbook.py reads the release template's authorization
+    # item (issue #539).
     ".github/ISSUE_TEMPLATE/",
     # tools/test_pull_request_template.py and test/Spec/Agent/PullRequestFlow.hs
     # both read the tracked pull-request template and run the three parsers
@@ -86,6 +88,11 @@ TEST_PARSED_PATHS = {
     # tools/test_board_screenshot.py reconciles the regeneration procedure's
     # pinned font, geometry, and paths against the renderer's own constants.
     "docs/media/README.md",
+    # tools/test_release_runbook.py reads the runbook's ordered steps and the
+    # safety rules inside them -- the authorization gate, the tag-immutability
+    # prohibitions, where release evidence lives, and the dependency review
+    # (issue #539).
+    "docs/releasing.md",
     # tools/test_claude_plugin.py reads every packaged command's frontmatter
     # and body.
     "claude-plugin/",

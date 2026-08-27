@@ -3719,6 +3719,11 @@ predictable, read-only dashboard.
 
 ## 21. Release evidence
 
+**This section records the 1.0.0.0 arc's gates only, and it is closed.** Every
+later release records its evidence on that release's own issue, as
+[`releasing.md`](releasing.md) specifies: nothing is added here for a release
+cut under that procedure, and no permanent per-release document is created.
+
 Permanent records of the manual release gates D-1 requires, one subsection per
 gate (D-13), preceded by the audit that specified what those gates measure and
 closed by the decisions those records cite. All of it is permanent contract
