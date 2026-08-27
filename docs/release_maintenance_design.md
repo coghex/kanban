@@ -21,7 +21,7 @@ concrete precondition
 
 - [x] EPIC. Prepare and publish Kanban 1.1.0.0 through a repeatable release process — [#534]
 - [x] RLM-1. Make the implementation library private and guard the package boundary — [#535]
-- [ ] RLM-2. Establish the public maintainer, support, and conduct baseline
+- [x] RLM-2. Establish the public maintainer, support, and conduct baseline — [#536]
 - [ ] RLM-3. Add human-facing issue intake without weakening agent specifications
 - [ ] RLM-4. Document a supported release-to-release upgrade path
 - [ ] RLM-5. Add the reusable release and maintenance runbook
