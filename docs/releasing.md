@@ -152,9 +152,16 @@ records that it was deferred.
 One person upgrades a real macOS installation from the previous published
 release to the candidate, following
 [the README's upgrade section](../README.md#upgrade-to-a-new-release) exactly as
-a user would. This is the gate no automated check replaces: the rehearsal proves
-the archive builds and installs in a clean directory, and this proves an existing
-installation survives being moved onto it.
+a user would. This is the gate no automated check replaces, and it carries more
+than its name suggests.
+
+Be clear about what the rehearsal did and did not establish. It proves the
+archive is complete — the packaging check unpacks it, inspects it, and runs its
+own setup commands from it — and that the checkout the archive was cut from
+builds, tests, and reports the right version. What no automated step does is
+build and install the executable *from* the unpacked archive. So this is the
+first and only place the candidate archive is installed from, as well as the
+place an existing installation is proved to survive being moved onto it.
 
 The candidate is not published, so the README's first step — which downloads
 the latest public release — is the one step performed differently. Run this from
