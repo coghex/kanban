@@ -77,8 +77,8 @@ concrete precondition
   service; current workflow issues returned by the broad search likewise own
   packaged review or drainer behavior rather than this queue.
 - The current `docs/agent-workflow-contract.md` section 7 already lists this
-  path among the fourteen `coordination` documents, so this design's status
-  ledger is eligible for the repository's direct-document publication lane.
+  path among the `coordination` documents, so this design's status ledger is
+  eligible for the repository's direct-document publication lane.
   The draft still lives and changes only in the `docs-wip` worktree.
 
 ## Desired experience
