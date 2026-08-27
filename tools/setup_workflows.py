@@ -183,55 +183,87 @@ def project_target_root(requested: Path) -> Path:
     be a checkout -- and now that the two roots can be different trees,
     nothing else would notice a project registration being declared in a
     directory that is not a repository at all.
+
+    Applied to the defaulted target as well as an explicit one. Where the
+    registration lands does not depend on how the path was chosen, so neither
+    can the rule about what may receive it.
     """
     try:
         root = install_issue_review.main_checkout_root(requested)
     except install_issue_review.InstallError as exc:
         raise SetupError(
-            f"--target {requested} is not a repository's own main checkout, so a "
-            f"project-scoped registration cannot be declared in it: {exc}"
+            f"{requested} is not a repository's own main checkout, so a "
+            f"project-scoped registration cannot be declared in it: {exc}. "
+            "Name one with --target PATH, or choose --scope user."
         ) from exc
     remote = configured_remote_name()
     proc = run_command(["git", "-C", str(root), "remote", "get-url", remote])
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
         raise SetupError(
-            f"Could not read the {remote!r} remote of --target {root}, so it "
-            f"cannot be shown to be a supported GitHub repository: {detail}"
+            f"Could not read the {remote!r} remote of {root}, so it cannot be "
+            f"shown to be a supported GitHub repository a project-scoped "
+            f"registration may be declared in: {detail}. Name one with "
+            "--target PATH, or choose --scope user."
         )
     try:
         kanban_config.normalize_github_repository(proc.stdout)
     except kanban_config.KanbanConfigError as exc:
         raise SetupError(
-            f"--target {root} is not a checkout of a supported GitHub repository, "
-            f"so a project-scoped registration cannot be declared in it: {exc}"
+            f"{root} is not a checkout of a supported GitHub repository, so a "
+            f"project-scoped registration cannot be declared in it: {exc}. "
+            "Name one with --target PATH, or choose --scope user."
         ) from exc
     return root
 
 
-def selected_target(requested: str | None, repo: Path, scope: str) -> Path | None:
+def declares_project_registration(scope: str, components: list[str]) -> bool:
+    """Whether this run could write a project-scoped provider registration.
+
+    Both halves matter. `--scope user` writes none whatever is selected, and
+    the two issue-review components write none whatever the scope is, so
+    neither case has a project target to validate -- and demanding one would
+    refuse runs that never touch a repository at all.
+    """
+    return scope == "project" and any(
+        component in PROJECT_REGISTERING_COMPONENTS for component in components
+    )
+
+
+def selected_target(
+    requested: str | None, repo: Path, scope: str, components: list[str]
+) -> Path | None:
     """The repository this run declares a project-scoped registration in, or
     None when there is none to declare it in.
 
-    An explicit --target wins, and is validated when it is the thing a project
-    scope will be written against. Otherwise the asset root stands in, exactly
-    as it always has -- but only while it really is a checkout. An unpacked
-    release archive is not, and None is the honest answer there: the component
-    that needs one refuses and names the flag, rather than a registration
-    being declared inside a directory #538 goes on to tell the user to delete.
+    A target that a project registration will actually be written against is
+    validated, and it does not matter whether the user named it or it was
+    defaulted: the registration lands in that repository's own
+    `.claude/settings.json` either way, so a default that skipped the check
+    would be the one unvalidated way to reach exactly what the check exists to
+    refuse.
+
+    Only the asset root can be defaulted, and only while it really is a
+    checkout. An unpacked release archive is not, and None is the honest
+    answer there -- the component that needs a target refuses and names the
+    flag, rather than a registration being declared inside a directory #538
+    goes on to tell the user to delete.
     """
+    project = declares_project_registration(scope, components)
     if requested:
         path = Path(requested).expanduser().resolve()
-        if scope == "project":
+        if project:
             return project_target_root(path)
-        # User scope declares nothing in the target, so it is not required to
-        # be a repository -- but it is still where every provider command
-        # runs, and a directory that is not there would surface as a bare
-        # OSError from the first spawn rather than as the mistake it is.
+        # Nothing will be declared in it, so it is not required to be a
+        # repository -- but it is still where every provider command runs, and
+        # a directory that is not there would surface as a bare OSError from
+        # the first spawn rather than as the mistake it is.
         if not path.is_dir():
             raise SetupError(f"--target {path} is not an existing directory.")
         return path
-    return repo if install_issue_review.is_main_checkout(repo) else None
+    if not install_issue_review.is_main_checkout(repo):
+        return None
+    return project_target_root(repo) if project else repo
 
 
 # -- provider probing ---------------------------------------------------------
@@ -1338,7 +1370,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SetupError("Pass either --apply or --dry-run, not both.")
         components = selected_components(args)
         repo = asset_root(Path(args.repo), components)
-        target = selected_target(args.target, repo, args.scope)
+        target = selected_target(args.target, repo, args.scope, components)
         install_dir = Path(args.install_dir).expanduser().resolve()
         legacy_path = Path(args.legacy_path).expanduser()
         planned: list[dict[str, Any]] = []

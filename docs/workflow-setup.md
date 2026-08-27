@@ -135,15 +135,23 @@ usually two different trees.
   registered or written inside it.
 - **`--target`** is the repository a project-scoped registration is declared
   in. It is required to be that repository's own main checkout with a
-  supported GitHub remote, and a `--target` that is neither is refused before
-  any provider is probed.
+  supported GitHub remote, and one that is neither is refused before any
+  provider is probed. That rule holds however the path was chosen: the
+  registration lands in that repository's own `.claude/settings.json` whether
+  you named it or it was defaulted, so a defaulted target is validated
+  exactly as an explicit one is.
 
 `--target` defaults to `--repo` when `--repo` is itself a main checkout, which
-is every source-checkout run and keeps those unchanged. From an unpacked
-archive there is no such default, and a project-scoped provider component
-refuses and names `--target`, rather than declaring project state inside a
-directory a later upgrade tells you to delete. `--scope user` needs no target
-at all.
+is every source-checkout run. From an unpacked archive there is no such
+default, and a project-scoped provider component refuses and names `--target`,
+rather than declaring project state inside a directory a later upgrade tells
+you to delete.
+
+The validation is applied only when the run could actually write a
+project-scoped registration — `--scope project` together with a component that
+declares one. `--scope user` needs no target at all, and the issue-review and
+legacy-launcher components write nothing outside `--install-dir`, so neither
+is refused by a target it never consumes.
 
 Provider commands run in the target when there is one, and in the asset root
 otherwise. Both providers follow that one rule, so what a plan probed and what
@@ -310,6 +318,7 @@ for the policy this implements.
 | `legacy-launcher: refused` | An ordinary pre-Kanban file, or a symlink resolving to a real file that is not Kanban's tracked backend, exists at `~/work/approve-issues.py` | For an ordinary file, re-run with `--migrate-legacy-launcher` to back it up as `approve-issues.py.pre-kanban-backup` and replace it with a symlink. A symlink to someone else's file is refused outright even with that flag — there is no content to back up — so remove it yourself if you want the launcher here. Either way, nothing in Kanban resolves this path. |
 | `codex-plugin`/`claude-plugin: refused`, marketplace mismatch | A marketplace named `kanban` is already registered from another checkout — including a previous release archive, which carries no marker anything could recognize it by | Remove it (`codex plugin marketplace remove kanban` / `claude plugin marketplace remove kanban`) and re-run, or point `--repo` at that checkout. |
 | `claude-plugin: refused`, no project target | `--repo` is not a main checkout, so a project-scoped registration has nowhere to be declared | Pass `--target /path/to/repo`, or choose `--scope user` explicitly. |
+| `setup_workflows.py: ... project-scoped registration cannot be declared in it` | The target — named or defaulted — is not a main checkout of a supported GitHub repository | Pass `--target /path/to/repo` naming one, or choose `--scope user` explicitly. |
 | `codex-plugin`/`claude-plugin: refused`, bundle disabled | `kanban@kanban` is installed but disabled | Re-enable it (`claude plugin enable kanban@kanban`), or remove it (`codex plugin remove kanban@kanban` / `claude plugin uninstall kanban@kanban`) and re-run. |
 | `codex-plugin: repair` | `kanban@kanban` is installed and enabled, but the bundle Codex cached no longer matches this checkout's tracked one (or is not cached at all) | Re-run with `--apply`: it runs `codex plugin remove kanban@kanban` then `codex plugin add kanban@kanban` and verifies the result. Nothing else is touched. |
 | `codex-plugin: failed`, after a refresh | Both provider commands succeeded, but the cached bundle still diverges | The reported paths say how. Check that `--repo` names the checkout the `kanban` marketplace is registered from, then re-run. |

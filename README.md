@@ -70,8 +70,9 @@ it. None of them asks the archive for Git metadata, which it deliberately does
 not carry. The two that install a *service* do need to be told which repository
 that service is for, because an archive is not one: pass `--repo` to
 `tools/install_drainer.py` and `tools/install_issue_approval.py`, as the
-examples below do. Workflow setup needs the same for a project-scoped provider
-registration, and the `--scope user` form below needs nothing.
+examples below do. Workflow setup needs `--target` for the same reason when it
+declares a project-scoped provider registration; the `--scope user` form below
+needs nothing.
 
 ### First run
 

@@ -152,6 +152,25 @@ class HermeticSetupTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+        # A GitHub remote, because a project-scoped registration may only be
+        # declared in a checkout of a supported GitHub repository — and that
+        # holds for the target this checkout supplies by default just as it
+        # does for one named with --target. No network: `git remote add` only
+        # writes the URL into .git/config.
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.repo),
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:acme/widgets.git",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         # Added, not committed: `git ls-files` reads the index, and a commit
         # would need an identity this hermetic checkout deliberately has not
         # configured.
@@ -1563,6 +1582,69 @@ class CheckoutDefaultTests(HermeticSetupTests):
         self.assertEqual(
             self.component(payload, "claude-plugin")["target"],
             str(self.repo.resolve()),
+        )
+
+    def unsupport_the_remote(self, url):
+        """Point the fixture checkout's `origin` somewhere that is not a
+        repository on github.com."""
+        for command in (
+            ["git", "-C", str(self.repo), "remote", "remove", "origin"],
+            ["git", "-C", str(self.repo), "remote", "add", "origin", url],
+        ):
+            subprocess.run(command, check=True, capture_output=True, text=True)
+
+    def test_a_defaulted_target_with_no_supported_remote_is_refused(self):
+        # The default is validated exactly as an explicit --target is: the
+        # registration lands in that repository either way, so how the path
+        # was chosen cannot decide whether the rule applies.
+        self.install_provider("claude")
+        self.unsupport_the_remote(str(self.root / "bare.git"))
+
+        code, payload = self.run_setup("--component", "claude-plugin")
+
+        self.assertEqual(code, 1)
+        self.assertIn("--target", payload["error"])
+        self.assertEqual(self.fake.calls("claude"), [])
+
+    def test_a_defaulted_target_with_no_remote_at_all_is_refused(self):
+        self.install_provider("claude")
+        subprocess.run(
+            ["git", "-C", str(self.repo), "remote", "remove", "origin"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        code, payload = self.run_setup("--component", "claude-plugin")
+
+        self.assertEqual(code, 1)
+        self.assertIn("--target", payload["error"])
+        self.assertEqual(self.fake.calls("claude"), [])
+
+    def test_an_unsupported_default_still_serves_a_user_scoped_run(self):
+        # Nothing is declared in the target under user scope, so there is no
+        # project registration to refuse — the checkout is still where the
+        # provider commands run.
+        self.install_provider("claude")
+        self.unsupport_the_remote(str(self.root / "bare.git"))
+
+        code, payload = self.run_setup(
+            "--component", "claude-plugin", "--scope", "user"
+        )
+
+        self.assertEqual(code, 0, payload)
+        self.assertEqual(payload["target"], str(self.repo.resolve()))
+
+    def test_an_unsupported_default_still_serves_the_issue_review_components(self):
+        # They write nothing outside --install-dir, so a target they never
+        # consume must not be able to refuse them.
+        self.unsupport_the_remote(str(self.root / "bare.git"))
+
+        code, payload = self.run_setup("--component", "issue-review", "--apply")
+
+        self.assertEqual(code, 0, payload)
+        self.assertEqual(
+            self.component(payload, "issue-review")["status"], "install"
         )
 
     def test_provider_probes_run_in_the_defaulted_target(self):

@@ -938,10 +938,15 @@ reimplement the removal, and `--check` remains read-only.
   rather than by Git metadata, so an unpacked release archive is a supported
   source. `--target` is the repository a project-scoped provider registration
   is declared in, and is required to be that repository's own main checkout
-  with a supported GitHub remote. It defaults to `--repo` while `--repo` is
-  itself a main checkout; from an archive there is no default, and a
-  project-scoped provider component refuses and names `--target` rather than
-  declaring project state inside the archive or silently switching scope.
+  with a supported GitHub remote — whether it was named or defaulted, since
+  the registration lands in that repository either way. It defaults to
+  `--repo` while `--repo` is itself a main checkout; from an archive there is
+  no default, and a project-scoped provider component refuses and names
+  `--target` rather than declaring project state inside the archive or
+  silently switching scope. The requirement applies only to a run that could
+  write such a registration — project scope together with a component that
+  declares one — so user scope and the two issue-review components are never
+  refused by a target they do not consume.
   Provider probe and install commands run in the target when there is one and
   in the asset root otherwise, for both providers.
 - **Invocation:**
