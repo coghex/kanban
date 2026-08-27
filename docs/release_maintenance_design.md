@@ -24,7 +24,7 @@ concrete precondition
 - [x] RLM-2. Establish the public maintainer, support, and conduct baseline — [#536]
 - [x] RLM-3. Add human-facing issue intake without weakening agent specifications — [#537]
 - [x] RLM-4. Document a supported release-to-release upgrade path — [#538]
-- [ ] RLM-5. Add the reusable release and maintenance runbook
+- [x] RLM-5. Add the reusable release and maintenance runbook — [#539]
 - [ ] RLM-6. Verify installation from the exact candidate source archive
 - [ ] RLM-7. Prepare the 1.1.0.0 release candidate
 
