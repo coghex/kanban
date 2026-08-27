@@ -40,7 +40,7 @@ concrete precondition
 
 - [x] PRR-1. Clean batches leave project-review without a durable resume cursor — [#548]
 - [x] PRR-2. A stale pre-gate stop can terminate a drainer restarted after relocation — [#555]
-- [ ] PRR-3. The ready Mission Control design still declares closed prerequisites and its own classification absent
+- [x] PRR-3. The ready Mission Control design still declares closed prerequisites and its own classification absent — [no-issue]
 - [ ] PRR-4. The README still advertises the filter's retired lowercase key
 
 ## 1. Historical sweep continuity
@@ -208,7 +208,15 @@ after the migration is complete.
 
 ## 3. Design readiness evidence
 
-### PRR-3. The ready Mission Control design still declares closed prerequisites and its own classification absent
+### [no-issue] PRR-3. The ready Mission Control design still declares closed prerequisites and its own classification absent
+
+> **Disposition:** No issue — the concern is confirmed (#425 closed 2026-08-21,
+> epic #318 closed 2026-08-22, and `2e2003e` classified this document
+> `coordination | audit-report` in section 7, `config.toml.example`, and
+> `EXCLUDED_TRACKED_PATHS` in the same commit that landed it), but the
+> correction is a documentation-only edit to a `coordination`-lane design
+> record, which publishes straight to `master` and carries neither a tracker
+> item nor a pull request. Prepared as a docs-worktree commit for `/push-docs`.
 
 > **Captured note:** Reconcile direct landing commit `2e2003e` with the Mission
 > Control design that `b03d6e6` marked ready: its current-state evidence must
