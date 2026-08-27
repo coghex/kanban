@@ -364,11 +364,15 @@ data BoardActionGate
 --
 -- The operating mode is asked first, and that ordering is the contract rather
 -- than an accident: the two gates below it resolve the card in front of the
--- user, and a board that spawns nothing must refuse `r`, `S`, `A`, and `x`
--- with the reason that is actually true of it -- the roster loads no provider
--- -- however the selection happens to be sitting. Settled history and the
+-- user, and a board that spawns nothing must refuse `r`, `S`, and `A` with
+-- the reason that is actually true of it -- the roster loads no provider --
+-- however the selection happens to be sitting. Settled history and the
 -- completed-history blocker are facts about /that card/, and they are the
 -- right answer only once there is a mode in which the key could work at all.
+-- `a`, the fourth binding the mode refuses, meets neither of the two below,
+-- so for it the ordering decides nothing; `x` is the other way round, and
+-- since issue #546 the mode has no answer for that key at all, leaving the
+-- card's own two gates to give the only one there is.
 --
 -- Pure, and the whole of what 'applyBoardAction' decides, so a press can be
 -- taken and inspected without a terminal.
@@ -1131,10 +1135,12 @@ applyRunningProcessClick :: BoardColumn -> Int -> AppState -> AppState
 applyRunningProcessClick column row state = case clicked >>= runningProcessOverlay state . entryItem of
   Nothing -> selectedState
   Just overlay -> case runningProcessClickRefusal state of
-    -- The second route to the three live-agent overlays, refused with the
-    -- same words the keys are: the click still selects the card, and opens
-    -- nothing. A card with no live session is untouched -- that press was
-    -- never opening an agent overlay, so it keeps selecting and nothing else.
+    -- The second route to the three live-agent overlays. No mode takes it
+    -- away today, but the refusal is still asked here rather than dropped,
+    -- so a mode that later hides the inspector takes this route with it:
+    -- the click would then still select the card and open nothing. A card
+    -- with no live session is untouched either way -- that press was never
+    -- opening an agent overlay, so it keeps selecting and nothing else.
     Just refusal -> noticeSet refusal selectedState
     Nothing -> closeSearchOn (anchorAt state column row) (selectedState {appOverlay = Just overlay})
   where
@@ -1144,12 +1150,16 @@ applyRunningProcessClick column row state = case clicked >>= runningProcessOverl
 -- | The refusal a right click that would open a live agent session owes the
 -- operating mode.
 --
--- Not a binding of its own, so it borrows the decision rather than restating
--- it: a right click opens exactly the overlays `r`, `S`, `A`, and `p` open,
--- and 'ReviewSelection' is one of them, so a mode that refuses that binding
--- refuses this route with the same words.
+-- Not a binding of its own, so it borrows a decision rather than restating
+-- it, and 'ShowProcesses' is the binding it borrows from: this gesture opens
+-- exactly the overlays `p` and then Enter already open, so it is an
+-- inspection route rather than one that starts work, and it is available
+-- wherever the inspector is (issue #546). It borrowed 'ReviewSelection' while
+-- both were on the same side of the gate, which read the same then and would
+-- now leave a no-agent board's own recovered sessions reachable by keyboard
+-- and refused by mouse.
 runningProcessClickRefusal :: AppState -> Maybe Text
-runningProcessClickRefusal state = agentSurfaceRefusal state.appOperatingMode ReviewSelection
+runningProcessClickRefusal state = agentSurfaceRefusal state.appOperatingMode ShowProcesses
 
 selectCardOnly :: BoardColumn -> Int -> AppState -> AppState
 selectCardOnly column row state =

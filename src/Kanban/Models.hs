@@ -495,9 +495,9 @@ assignmentUnavailableMessage unavailable = case unavailable of
 -- 'Kanban.UI.Settings.operatingModeLine' already names them on screen.
 --
 -- One phrase rather than one per surface, for the same reason
--- 'assignmentUnavailableMessage' is one: the board's six agent bindings, the
--- board card's right click, and the @--usage@ and @--ping@ refusals all say
--- this, and an operator who meets it twice must not be told two things.
+-- 'assignmentUnavailableMessage' is one: the board's four agent bindings and
+-- the @--usage@ and @--ping@ refusals all say this, and an operator who meets
+-- it twice must not be told two things.
 noAgentModeMessage :: Text
 noAgentModeMessage =
   "model roster loads no provider, so this is "

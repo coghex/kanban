@@ -1166,8 +1166,10 @@ overlayHintLine state = footerHintRow . overlayHintChips state
 --
 -- The two scopes of the base table follow the operating mode exactly as the
 -- board's own line does, and for the same reason: a details overlay whose
--- footer named `r`, `S`, `A`, and `x` on a board that loads no provider would
--- advertise four keys that answer with a refusal.
+-- footer named `r`, `S`, and `A` on a board that loads no provider would
+-- advertise three keys that answer with a refusal. `x` is the fourth chip
+-- this footer carries and it stays in every mode, because the work it
+-- terminates can outlive the roster that started it (issue #546).
 overlayHintChips :: AppState -> Overlay -> [Text]
 overlayHintChips state = \case
   HelpOverlay -> map footerHint (modeScopeBindings state.appOperatingMode HelpScope)
@@ -1225,8 +1227,8 @@ footerHintLine = boardFooterHintLine DualMode False
 --
 -- The inventory follows the operating mode, through 'modeScopeBindings'
 -- rather than a second list here: a board that loads no provider offers none
--- of the six agent bindings, so naming them along the bottom of the screen
--- would advertise six keys that answer with a refusal. They are still
+-- of the four agent bindings, so naming them along the bottom of the screen
+-- would advertise four keys that answer with a refusal. They are still
 -- dispatched -- 'Kanban.UI.Events.boardActionGate' is where a press on one
 -- lands -- so this hides a chip and never a key.
 boardFooterHintLine :: OperatingMode -> Bool -> Text
