@@ -475,7 +475,15 @@ promoted.
   populates from a real refresh, and the run is isolated instead by
   redirecting `HOME` to a scratch directory — through a wrapper script the
   session launches rather than `tmux new-session -e` — which moves the
-  config, cache, and managed-component records with it.
+  config, cache, and managed-component records with it. It moves the GitHub
+  CLI's stored credentials too, and the real refresh above depends on them,
+  so the wrapper preserves or explicitly supplies working GitHub read
+  authentication: under a bare scratch `HOME` with no token variable set, a
+  `gh` read exits 4 asking for `gh auth login`, which is the supported
+  prerequisite this project documents. The check therefore asserts the board
+  populated with at least one card before any interaction, so an
+  unauthenticated or empty board fails it rather than letting the
+  interaction steps pass vacuously.
 
 ## Delivery plan
 
