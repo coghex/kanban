@@ -25,11 +25,11 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. The scratch-HOME fullscreen check discards the authentication its real refresh requires
+- [x] PRR-1. The scratch-HOME fullscreen check discards the authentication its real refresh requires — [#543]
 
 ## 1. Fullscreen live-acceptance environment
 
-### PRR-1. The scratch-HOME fullscreen check discards the authentication its real refresh requires
+### [#543] PRR-1. The scratch-HOME fullscreen check discards the authentication its real refresh requires
 
 > **Captured note:** Correct direct commit `98f2d52`'s live-acceptance
 > environment so the isolated tmux session preserves or explicitly provisions
