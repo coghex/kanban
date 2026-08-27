@@ -39,7 +39,7 @@ concrete precondition
 ## Status
 
 - [x] PRR-1. Clean batches leave project-review without a durable resume cursor — [#548]
-- [ ] PRR-2. A stale pre-gate stop can terminate a drainer restarted after relocation
+- [x] PRR-2. A stale pre-gate stop can terminate a drainer restarted after relocation — [#555]
 - [ ] PRR-3. The ready Mission Control design still declares closed prerequisites and its own classification absent
 - [ ] PRR-4. The README still advertises the filter's retired lowercase key
 
@@ -130,7 +130,7 @@ never been audited until this run.
 
 ## 2. Relocated controller safety
 
-### PRR-2. A stale pre-gate stop can terminate a drainer restarted after relocation
+### [#555] PRR-2. A stale pre-gate stop can terminate a drainer restarted after relocation
 
 > **Captured note:** Complete PR #406 / issue #390's stale-controller bound for
 > `stop_service`: a controller that resolved the legacy installation before
