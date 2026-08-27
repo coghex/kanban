@@ -27,22 +27,27 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. The completed code-health ledger still relies on an expired CH-4 disposition — [deferred]: `drain_prs.py` never read end to end
+- [x] PRR-1. The completed code-health ledger still relies on an expired CH-4 disposition — [no-issue]
 
 ## 1. Code-health status after the drainer crossed its revisit threshold
 
-### [deferred] PRR-1. The completed code-health ledger still relies on an expired CH-4 disposition
+### [no-issue] PRR-1. The completed code-health ledger still relies on an expired CH-4 disposition
 
-> **Deferred:** The only tracker item this finding can produce is a
-> `tools/drain_prs.py` decomposition, and closed #159 rejects splitting on size
-> alone — so the file's structure, not its line count, has to specify it, and
-> `docs/code-health-report.md`'s own coverage log records that ~2,900 of its
-> lines have never been read. The ledger half is a coordination-document edit
-> that publishes straight to `master`, not a tracker item. Precondition:
-> `tools/drain_prs.py` read end to end at current master and CH-4 given a fresh
-> disposition in `docs/code-health-report.md` — which either refreshes that
-> `[no-issue]` against current evidence, closing this finding too, or names a
-> concrete seam this finding can then file.
+> **Disposition:** No issue — the work this finding names is a ledger
+> correction, not tracker work, and it has now been done rather than filed.
+> `tools/drain_prs.py` was read end to end at 5,549 lines and 152 top-level
+> definitions on 2026-08-27, and CH-4 was re-decided in
+> `docs/code-health-report.md` on structure and coupling instead of a line
+> count, so it carries no revisit threshold left to expire; that report's status
+> header, checklist row, finding heading, severity wording, measurements, fix
+> shape and coverage log were reconciled in the same pass, which settles the
+> "in progress" versus "18 of 18 resolved" contradiction this finding reported.
+> The read found exactly one clean seam — the autostash, anchor,
+> stash-retirement and fast-forward cluster at `tools/drain_prs.py:2725-3645`,
+> reachable through three entry points and depending outward on four names — and
+> its extraction was deliberately declined as legibility rather than
+> correctness, at the cost of a live-install reinstall on the component that
+> merges pull requests. No decomposition issue is owed.
 
 > **Captured note:** Re-read the current `tools/drain_prs.py` and give CH-4 a
 > fresh disposition now that the report's own roughly 5,000-line revisit
