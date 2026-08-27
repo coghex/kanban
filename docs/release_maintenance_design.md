@@ -25,7 +25,7 @@ concrete precondition
 - [x] RLM-3. Add human-facing issue intake without weakening agent specifications — [#537]
 - [x] RLM-4. Document a supported release-to-release upgrade path — [#538]
 - [x] RLM-5. Add the reusable release and maintenance runbook — [#539]
-- [ ] RLM-6. Verify installation from the exact candidate source archive
+- [x] RLM-6. Verify installation from the exact candidate source archive — [#540]
 - [ ] RLM-7. Prepare the 1.1.0.0 release candidate
 
 ## Epic contract
