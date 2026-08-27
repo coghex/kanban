@@ -2537,9 +2537,11 @@ recording only one would understate what a change to it can break:
 AGENTS.md | pr-atomic | release-document;implementation-coupled
 CHANGELOG.md | pr-atomic | release-document
 CLAUDE.md | pr-atomic | release-document;implementation-coupled
+CODE_OF_CONDUCT.md | pr-atomic | release-document
 CONTRIBUTING.md | pr-atomic | release-document
 README.md | pr-atomic | release-document
 SECURITY.md | pr-atomic | release-document
+SUPPORT.md | pr-atomic | release-document
 claude-plugin/ | pr-atomic | test-parsed;release-document
 codex-plugin/ | pr-atomic | test-parsed;release-document
 docs/README.md | pr-atomic | release-document

@@ -47,3 +47,14 @@ Two documents are authoritative, and this guide does not restate them:
 
 Read `docs/development.md` before you build, and `CLAUDE.md` before you write a
 change you intend to submit.
+
+## Code of conduct
+
+Taking part here — issues, pull requests, and the project's other spaces —
+means agreeing to the [code of conduct](CODE_OF_CONDUCT.md). It states the
+standard in full, including how a concern is reported privately, and this guide
+does not restate it.
+
+If you are not sending a change but need help or want to report something,
+[SUPPORT.md](SUPPORT.md) states what is supported and where each kind of report
+goes.
