@@ -13,9 +13,13 @@
 -- compile.
 --
 -- What /is/ shared is spelled as such: 'normalizedRepositoryIdentity' is the
--- one definition of a canonical repository identity, and
+-- one definition of a canonical repository identity,
 -- "Kanban.ServiceProcess" is the one definition of a bounded, process-grouped
--- controller invocation.
+-- controller invocation, and 'unitExecStartArguments' is the one reading of
+-- what a systemd unit's @ExecStart@ names. That last one used to be a second
+-- copy here, on the grounds that the unit being parsed is the one /this/
+-- installer wrote; both copies then carried the same misreading of systemd's
+-- reset and multiplicity rules, which is what a second copy costs.
 module Kanban.ApprovalService
   ( -- * The installed job
     ApprovalBackend (..),
@@ -32,6 +36,7 @@ module Kanban.ApprovalService
     controllerFromApprovalCommand,
     discoverApprovalController,
     resolveApprovalDefinition,
+    systemdApprovalControllerFromUnit,
     unreadableApprovalDefinition,
 
     -- * What it reports
@@ -82,7 +87,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Kanban.Domain (Repository (..))
-import Kanban.Drainer (normalizedRepositoryIdentity)
+import Kanban.Drainer (normalizedRepositoryIdentity, unitExecStartArguments)
 import Kanban.ServiceProcess
   ( diagnosticMessage,
     invocationFailureMessage,
@@ -1043,51 +1048,23 @@ discoverApprovalController repository = do
         text <- case contents of
           Left _ -> Left (unreadableApprovalDefinition ApprovalSystemd unit "it could not be read")
           Right bytes -> Right (Text.decodeUtf8Lenient bytes)
-        arguments <- case unitApprovalArguments text of
-          Left message -> Left (unreadableApprovalDefinition ApprovalSystemd unit message)
-          Right values -> Right values
-        controllerFromApprovalCommand ApprovalSystemd repository arguments
+        systemdApprovalControllerFromUnit repository unit text
   where
     mapLeftUndiscoverable = either (Left . ApprovalUndiscoverable) Right
 
--- | The argument vector a systemd unit's @ExecStart@ names, under systemd's own
--- quoting. Kept beside this service's own reader rather than shared with the
--- drainer's, because what is being parsed is the unit /this/ installer wrote.
-unitApprovalArguments :: Text -> Either Text [String]
-unitApprovalArguments contents = case execStartValues of
-  [] -> Left "it declares no ExecStart"
-  values -> case concatMap unitWords values of
-    [] -> Left "its ExecStart names no command"
-    arguments -> Right (map Text.unpack arguments)
-  where
-    execStartValues =
-      [ Text.strip value
-        | line <- Text.lines contents,
-          let stripped = Text.strip line,
-          Just value <- [Text.stripPrefix "ExecStart=" stripped],
-          not (Text.null (Text.strip value))
-      ]
-
-unitWords :: Text -> [Text]
-unitWords = go . Text.unpack
-  where
-    go [] = []
-    go (character : rest)
-      | character `elem` (" \t" :: String) = go rest
-      | character == '"' = let (word, remaining) = quoted rest "" in word : go remaining
-      | otherwise = let (word, remaining) = bare (character : rest) "" in word : go remaining
-
-    quoted [] acc = (finish acc, [])
-    quoted ('\\' : escaped : rest) acc = quoted rest (escaped : acc)
-    quoted ('"' : rest) acc = (finish acc, rest)
-    quoted (character : rest) acc = quoted rest (character : acc)
-
-    bare [] acc = (finish acc, [])
-    bare (character : rest) acc
-      | character `elem` (" \t" :: String) = (finish acc, rest)
-      | otherwise = bare rest (character : acc)
-
-    finish = Text.replace "%%" "%" . Text.pack . reverse
+-- | The controller a systemd unit's own text names, for this service: the
+-- shared reader's rules and this service's own rebinding and diagnostics.
+--
+-- Separated from the file read above for the same reason the drainer's
+-- counterpart is — it is what @status@, @start@, and @stop@ go on to invoke,
+-- and it has to be assertable from a host running the other service manager.
+systemdApprovalControllerFromUnit ::
+  Repository -> FilePath -> Text -> Either Text ApprovalController
+systemdApprovalControllerFromUnit repository unit text = do
+  arguments <- case unitExecStartArguments text of
+    Left message -> Left (unreadableApprovalDefinition ApprovalSystemd unit message)
+    Right values -> Right values
+  controllerFromApprovalCommand ApprovalSystemd repository arguments
 
 -- * Board refresh
 

@@ -57,6 +57,20 @@ boardRepository = Repository "/tmp/example-project" "example" "project"
 boardIdentity :: Text
 boardIdentity = "example/project"
 
+-- | Where a systemd host's installer would have written this service's unit.
+-- Named rather than inlined so a refusal can be asserted to point at it.
+approvalUnitPath :: FilePath
+approvalUnitPath = "/home/example/.config/systemd/user/kanban-issue-approval.service"
+
+-- | A unit naming two commands: what a hand edit that added an ExecStart
+-- without resetting the old one leaves behind, and what systemd would refuse
+-- to load under every Type= but oneshot.
+twoCommands :: Text
+twoCommands =
+  "[Service]\nType=exec\n\
+  \ExecStart=/a/python3 /a/approve_issues_service.py run\n\
+  \ExecStart=/b/python3 /b/approve_issues_service.py run\n"
+
 -- | One status document, from the fields a test cares to name.
 document :: [String] -> LazyByteString.ByteString
 document fields = LazyByteString.pack ("{" <> intercalate "," fields <> "}")
@@ -368,6 +382,52 @@ spec = do
     it "refuses a definition whose command identifies no controller" $
       controllerFromApprovalCommand ApprovalLaunchd boardRepository ["/usr/bin/python3"]
         `shouldSatisfy` either (Text.isInfixOf "do not identify the issue approval controller") (const False)
+
+    it "resolves a hand-edited systemd unit's command under systemd's own reset and multiplicity rules" $ do
+      -- Requirement 10, over this service's own systemd reader path, which had
+      -- no ExecStart coverage at all. It reads through the one shared reader
+      -- rather than a second copy of it: the copy that used to live here
+      -- carried the same misreading of an empty assignment, so the service
+      -- whose whole job is gating canonical review would have run a retired
+      -- executable exactly as the drainer did.
+      let resolved contents = systemdApprovalControllerFromUnit boardRepository approvalUnitPath contents
+          refusal contents = either id (const "unexpectedly resolved a controller") (resolved contents)
+      resolved
+        "[Service]\nType=exec\nExecStart=\"/old/python3\" \"/old/approve_issues_service.py\" \"run\"\nExecStart=\nExecStart=\"/actual/python3\" \"/actual/approve_issues_service.py\" \"run\"\n"
+        `shouldBe` Right
+          ( ApprovalController
+              "/actual/python3"
+              [ "/actual/approve_issues_service.py",
+                "--path",
+                "/tmp/example-project",
+                "--repo",
+                "example/project"
+              ]
+              ApprovalSystemd
+          )
+      refusal "[Service]\nType=exec\nExecStart=/old/python3 /old/approve_issues_service.py run\nExecStart=\n"
+        `shouldMention` "its ExecStart names no command"
+      refusal twoCommands
+        `shouldMention` "its ExecStart declares 2 commands, which systemd accepts only under Type=oneshot"
+      refusal "[Service]\nExecStart=/a/python3 /a/approve_issues_service.py run\nExecStart=/b/python3 /b/approve_issues_service.py run\n"
+        `shouldMention` "which systemd accepts only under Type=oneshot"
+      refusal "[Service]\nType=oneshot\nExecStart=/a/python3 /a/approve_issues_service.py run\nExecStart=/b/python3 /b/approve_issues_service.py run\n"
+        `shouldMention` "so it names no single controller command"
+      refusal "[Service]\nType=exec\nRestart=no\n"
+        `shouldMention` "it declares no ExecStart"
+
+    it "refuses an unreadable systemd command through this service's own diagnostic" $ do
+      -- The refusals above have to arrive as this service's unreadable-
+      -- definition message: the file to go and look at is its unit, and the
+      -- repair is its installer, not the drainer's.
+      refused <-
+        requireLeft
+          "a two-command unit unexpectedly resolved a controller"
+          (systemdApprovalControllerFromUnit boardRepository approvalUnitPath twoCommands)
+      refused `shouldMention` ("could not read the issue approval service's systemd unit at " <> Text.pack approvalUnitPath)
+      refused `shouldMention` "install_issue_approval.py"
+      refused `shouldNotMention` "install_drainer.py"
+      refused `shouldNotMention` "/a/python3"
 
   describe "issue approval status decoding" $ do
     it "gives every state the controller publishes its own distinct value" $ do
