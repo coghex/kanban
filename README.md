@@ -217,6 +217,10 @@ Start here:
   and logs.
 - [Issue approval service](docs/issue-approval.md) — installing, operating, and
   recovering the persistent per-repository issue reviewer.
+- [Support](SUPPORT.md) — what is supported, what to expect, and which of the
+  three reporting routes a bug, a vulnerability, and a conduct concern take.
+- [Code of conduct](CODE_OF_CONDUCT.md) — the standard for behavior in this
+  project's spaces, and how a concern is reported privately.
 
 For contributors:
 

@@ -9,8 +9,8 @@ homepage:           https://github.com/coghex/kanban
 bug-reports:        https://github.com/coghex/kanban/issues
 license:            MIT
 license-file:       LICENSE
-author:             coghex
-maintainer:         coghex
+author:             Terry Coghlan
+maintainer:         Terry Coghlan <vincecoghlan@gmail.com>
 category:           Development
 build-type:         Simple
 -- The source distribution is a complete Kanban checkout: everything needed to
@@ -48,9 +48,11 @@ extra-doc-files:
   AGENTS.md
   CHANGELOG.md
   CLAUDE.md
+  CODE_OF_CONDUCT.md
   CONTRIBUTING.md
   README.md
   SECURITY.md
+  SUPPORT.md
   config.toml.example
   models.toml.example
   docs/README.md

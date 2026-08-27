@@ -46,6 +46,14 @@ tracked file has none:
   scopes -- the caches, the optional persistent jobs, the managed reviewer
   link -- so the private reporting route and that scope have to travel with
   it rather than being reachable only from the upstream repository page --
+  `CODE_OF_CONDUCT.md` and `SUPPORT.md`, the rest of that public baseline: the
+  conduct standard governing the project spaces the packaged `CONTRIBUTING.md`
+  sends a contributor into, which links it rather than restating it, and the
+  statement of what ordinary support promises -- the latest release only, best
+  effort -- and which of the three routes a bug, a vulnerability, and a conduct
+  concern each take. A recipient holding only the unpacked tree therefore holds
+  the standard the contribution guide binds them to and the answer to where a
+  report goes, rather than reaching either one only from upstream --
   `LICENSE`, `kanban.cabal`, the `config.toml.example` and
   `models.toml.example` configuration templates, the eleven user
   and workflow-contract documents under `docs/`,
@@ -166,10 +174,12 @@ RELEASE_ROOT_FILES = (
     "AGENTS.md",
     "CHANGELOG.md",
     "CLAUDE.md",
+    "CODE_OF_CONDUCT.md",
     "CONTRIBUTING.md",
     "LICENSE",
     "README.md",
     "SECURITY.md",
+    "SUPPORT.md",
     "cabal.project",
     "config.toml.example",
     "kanban.cabal",
