@@ -48,10 +48,12 @@ Check an item only once its step's result is recorded here.
       `### Unreleased` created above it.
 - [ ] 3. Candidate commit selected, with required `build-test` success on that
       exact commit.
-- [ ] 4. Rehearsal dispatched on the candidate; draft created and deleted.
+- [ ] 4. Rehearsal dispatched on the candidate, its run's head confirmed to
+      be that commit; draft created and kept for item 6.
 - [ ] 5. Dependency and maintenance review performed; date and result recorded.
-- [ ] 6. Manual macOS upgrade from the previous published release performed;
-      each covered item's result recorded.
+- [ ] 6. Manual macOS upgrade performed, from the previous published release
+      onto the candidate archive kept from item 4; each covered item's result
+      recorded; the draft then deleted.
 - [ ] 7. Repository description, topics, and empty homepage checked.
 - [ ] 8. **Publication authorized.** Check this only after the maintainer has
       commented `Authorized: publish <version> from <commit>.` on this issue,

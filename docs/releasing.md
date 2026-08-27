@@ -93,18 +93,44 @@ python3 -m unittest tools.test_document_classification
 ```
 
 The rehearsal then runs the real publication path against the candidate under a
-dry-run tag, and can create nothing but a draft. Dispatch it against the
-candidate commit and give it a tag that has never been used:
+dry-run tag, and can create nothing but a draft. A `workflow_dispatch` takes a
+branch or tag name rather than a commit, so pin the candidate to a scratch
+branch and dispatch against that. The scratch branch triggers nothing — CI runs
+on `master` pushes and pull requests only — and the dry-run tag is not a release
+tag: it names no ref yet, it matches no `v*` pattern, and the rehearsal refuses
+outright under a tag that does.
 
 ```console
-gh workflow run Release --ref <commit> --field dry_run_tag=release-dry-run-<n>
-gh run watch <run-id>
+git push origin <commit>:refs/heads/release-candidate-<n>
+gh workflow run Release --ref release-candidate-<n> \
+  --field dry_run_tag=release-dry-run-<n>
 ```
+
+`gh workflow run` reports no run id, so find the run it started and confirm it
+is the candidate's before reading anything else:
+
+```console
+gh run list --workflow Release --event workflow_dispatch --limit 1 \
+  --json databaseId,headSha,status,conclusion
+gh run watch <databaseId>
+```
+
+The run's `headSha` must be the candidate commit exactly. Anything else is a
+rehearsal of some other tree: delete the scratch branch, re-push it at the
+candidate, and dispatch again.
 
 Confirm from the run that `build-test` succeeded, that the payload carried
 exactly one archive named for the chosen version, and that `publish-dry-run`
-created a draft rather than a release. Delete the draft when you are done
-reading it.
+created a draft rather than a release. The scratch branch has done its work
+once the run's head is confirmed, and nothing downstream reads it:
+
+```console
+git push origin --delete release-candidate-<n>
+```
+
+**Keep the draft.** Its asset is the only build of this candidate that exists —
+no published release carries it — and step 6 upgrades onto it. Step 6 says when
+the draft goes.
 
 The archive the rehearsal builds is also what the release will publish, so this
 is where a packaging gap surfaces. If the candidate fails here, it is not a
@@ -130,6 +156,16 @@ a user would. This is the gate no automated check replaces: the rehearsal proves
 the archive builds and installs in a clean directory, and this proves an existing
 installation survives being moved onto it.
 
+The candidate is not published, so the README's first step — which downloads the
+latest public release — is the one step performed differently. Take the archive
+from the draft step 4 left, and follow the README from its second step onward:
+
+```console
+gh release download release-dry-run-<n> --repo coghex/kanban \
+  --pattern 'kanban-*.tar.gz'
+tar -xzf kanban-*.tar.gz
+```
+
 The upgrade covers, and the record on the release issue names the result of, each
 of:
 
@@ -146,6 +182,15 @@ of:
   than being recreated empty.
 
 A failure here returns to step 3 with a new candidate.
+
+Once every result above is recorded, the draft has done its work:
+
+```console
+gh release delete release-dry-run-<n> --repo coghex/kanban --yes
+```
+
+No `--cleanup-tag`: a draft is never published, so GitHub created no
+`refs/tags/release-dry-run-<n>` for it and there is nothing to clean up.
 
 ## 7. Check the repository settings
 
