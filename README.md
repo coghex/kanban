@@ -360,13 +360,24 @@ Then ask each installed job whether it is running, through the *installed*
 controller rather than the archive's copy. [Manual
 status](docs/pr-drainer.md#manual-status) and [From the
 controller](docs/issue-approval.md#from-the-controller) resolve that controller
-the same way the installation itself does. Each leaves that controller's path
-in `$CONTROL`, which step 4 uses — and which steps 7 and 8 resolve again,
-because step 6 can move an installation as well as re-point it:
+the same way the installation itself does.
+
+The two services have two different controllers, and both of those snippets
+leave their answer in the same `$CONTROL`. Run one snippet, copy its result
+into a name of its own, and only then run the other — otherwise the second
+silently replaces the first and every later command drives the wrong service.
+Take only the lines for services you have:
 
 ```console
-python3 "$CONTROL" --path /path/to/project --json status
+DRAINER_CONTROL="$CONTROL"    # right after the PR drainer's snippet
+python3 "$DRAINER_CONTROL" --path /path/to/project --json status
+
+APPROVAL_CONTROL="$CONTROL"   # right after the issue approval service's snippet
+python3 "$APPROVAL_CONTROL" --path /path/to/project --json status
 ```
+
+Steps 4, 7, and 8 use those two names, and step 7 resolves both again because
+step 6 can move an installation as well as re-point it.
 
 Write down which jobs report a live state. That list is the whole of what step
 8 restarts.
@@ -378,11 +389,12 @@ repository's, not only the one you are upgrading from. Both installers refuse
 while their job is live, and the PR drainer additionally refuses to relocate
 its shared links while *any* recorded repository's drainer is running.
 
-Press `d` and `a` in Kanban for the repository each job is for, or drive the
-installed controller directly:
+Press `d` and `a` in Kanban for the repository each job is for, or drive that
+service's own controller directly — one line per job you are stopping:
 
 ```console
-python3 "$CONTROL" --path /path/to/project --json stop
+python3 "$DRAINER_CONTROL" --path /path/to/project --json stop
+python3 "$APPROVAL_CONTROL" --path /path/to/project --json stop
 ```
 
 A job that step 3 found already stopped is left alone. Stopping has its own
@@ -458,8 +470,9 @@ which is the new archive, and it is validated by the files the selected
 components are installed from rather than by Git metadata. Pass `--install-dir`
 again if the original install used one — nothing recovers it for you.
 
-The two services, once per repository the records in step 3 named, passing back
-that entry's checkout and any custom install directory or `config.toml`:
+Then the services you have, once per repository that service's record named,
+passing back that entry's checkout and any custom install directory or
+`config.toml`. Run only the pair for a service you actually installed:
 
 ```console
 python3 tools/install_drainer.py --repo /path/to/project --dry-run --json
@@ -484,13 +497,13 @@ an ordinary file in the way, are left untouched and reported instead.
 
 ### 7. Verify every component
 
-**Resolve `$CONTROL` again first.** A default PR-drainer reinstall on a Linux
-host whose installation predates the XDG locations relocates it there and
+**Resolve both controllers again first.** A default PR-drainer reinstall on a
+Linux host whose installation predates the XDG locations relocates it there and
 removes the old one, so the controller path step 3 captured can be gone — and a
 controller still pointing at a moved installation refuses rather than answers.
-Re-run the snippet in [Manual status](docs/pr-drainer.md#manual-status) or
-[From the controller](docs/issue-approval.md#from-the-controller); both resolve
-whatever step 6 left.
+Re-run [Manual status](docs/pr-drainer.md#manual-status) and [From the
+controller](docs/issue-approval.md#from-the-controller), copying each result
+into `DRAINER_CONTROL` and `APPROVAL_CONTROL` as step 3 did.
 
 Verify each row of [the support table](#platform-and-component-support)
 with the check that can actually observe it. `kanban --doctor` is **not** that
@@ -503,8 +516,8 @@ issue approval service.
 | Core board | `kanban --version`, then `kanban --path /path/to/project` | The executable on `PATH` is the new build, and it opens the selected repository. |
 | Optional AI actions | `python3 tools/setup_workflows.py` from the new directory with step 6's selection and scope and no `--apply`, then `kanban --doctor` | Setup has converged against the new archive — every component you have reports `unchanged` — and readiness is reported per AI action. |
 | Codex / Claude usage sidebar | `kanban --usage --fresh` | Both providers answered *now*. A plain `kanban --usage` prints whatever is already cached and only asks a provider that has nothing cached, so it can report a window the previous executable stored. Add `--json` for the machine-readable form. |
-| PR drainer | `python3 "$CONTROL" --path /path/to/project --json status`, against its own installed controller | That repository's job is installed and in the state you expect — the one step 3 recorded, until step 8. |
-| Issue approval service | the same, against the approval service's installed controller | The same, for that repository's approval job. |
+| PR drainer | `python3 "$DRAINER_CONTROL" --path /path/to/project --json status` | That repository's job is installed and in the state you expect — the one step 3 recorded, until step 8. |
+| Issue approval service | `python3 "$APPROVAL_CONTROL" --path /path/to/project --json status` | The same, for that repository's approval job. |
 
 Run the two `status` checks for every repository the records named, not only
 the one you happened to be in.
@@ -512,10 +525,13 @@ the one you happened to be in.
 ### 8. Restart only what was running
 
 Start again exactly the jobs step 3 found live, and no others. Press `d` or `a`
-in Kanban for each, or use the `$CONTROL` step 7 resolved:
+in Kanban for each, or use the controllers step 7 resolved — the drainer's for a
+drainer, the approval service's for an approval job, one line per job you are
+restarting:
 
 ```console
-python3 "$CONTROL" --path /path/to/project --json start
+python3 "$DRAINER_CONTROL" --path /path/to/project --json start
+python3 "$APPROVAL_CONTROL" --path /path/to/project --json start
 ```
 
 Installation is deliberately non-starting, so a job you did not restart is
@@ -548,14 +564,13 @@ Two things locate the links to feed it:
   it — holding that service's script links. Read each record's entry for every
   repository while you are there.
 
-Point `INSTALL` at one of them and run this, adding
-`~/work/approve-issues.py` when you have a `legacy-launcher`. The two
-assignments are alternatives, so swap the comment on Linux:
+Point `INSTALL` at one of them and run this. The two assignments are
+alternatives, so swap the comment on Linux:
 
 ```console
 INSTALL=~/Library/Application\ Support/kanban/issue-review            # macOS
 # INSTALL="${XDG_DATA_HOME:-$HOME/.local/share}"/kanban/issue-review  # Linux
-python3 - "$INSTALL"/*.py ~/work/approve-issues.py <<'RESOLVE'
+python3 - "$INSTALL"/*.py <<'RESOLVE'
 import os, sys
 
 for path in sys.argv[1:]:
@@ -563,8 +578,12 @@ for path in sys.argv[1:]:
 RESOLVE
 ```
 
-Then repeat it with `INSTALL` set to each service install directory the
-inventories above resolved, and drop the launcher argument from those runs.
+Run it once per install directory: the `issue-review` one above, and each
+service install directory the inventories resolved.
+
+**Only if step 3 found a `legacy-launcher`**, add `~/work/approve-issues.py` as
+one more argument to any of those runs. Without one that path does not exist,
+and naming it reports a target outside the new directory that means nothing.
 
 Every resolved target must be inside the new extracted directory. The paths you
 started from are expected to be unchanged; that they do not move is the point
