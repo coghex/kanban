@@ -468,12 +468,22 @@ declared in:
 ```console
 claude plugin uninstall kanban@kanban
 claude plugin marketplace remove kanban
-python3 tools/setup_workflows.py --component claude-plugin --target /path/to/repo --apply
 ```
 
-Keep the scope the registration already had. `--target` names the repository a
-project-scoped registration is declared in and has no default from an archive;
-a `--scope user` rerun needs no target at all.
+Then register from the new archive in the scope the registration already had.
+Spell `--scope` out rather than letting it default, because the default is
+`project` and would move a user-scoped registration instead of repairing it:
+
+```console
+# it was project-scoped
+python3 tools/setup_workflows.py --component claude-plugin --scope project --target /path/to/repo --apply
+# it was user-scoped
+python3 tools/setup_workflows.py --component claude-plugin --scope user --apply
+```
+
+`--target` names the repository a project-scoped registration is declared in
+and has no default from an archive; the user-scoped form needs no target at
+all.
 
 ### Confirming the move
 

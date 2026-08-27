@@ -310,19 +310,50 @@ archive](#install-from-a-release-archive) applies to this build too.
 Do this **before** stopping anything. After step 4 you can no longer tell which
 jobs were running, and step 8 restores exactly that.
 
-For the AI-action components, list the install directory and the two provider
-registrations. This is only about which components you have; step 9 is where
-the links are followed to what they finally resolve to:
+For the AI-action components, start with the `issue-review` install directory,
+which steps 6 and 9 both need. This resolves it exactly as everything that
+consults the backend does — a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`
+first, then the record's `backend_path`, then the record's own directory when
+it carries none — and the record's own path is fixed, which is what makes an
+installation made anywhere findable:
 
 ```console
-ls -l ~/Library/Application\ Support/kanban/issue-review/          # macOS
-ls -l "${XDG_DATA_HOME:-$HOME/.local/share}"/kanban/issue-review/  # Linux
+INSTALL="$(python3 - <<'LOCATE'
+import json, os
+from pathlib import Path
+
+override = os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR", "").strip()
+if override:
+    print(Path(override).expanduser())
+else:
+    data = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    for record in (
+        Path(data) / "kanban" / "issue-review" / "config.json",
+        Path.home() / "Library" / "Application Support" / "kanban" / "issue-review" / "config.json",
+    ):
+        if record.exists():
+            recorded = json.loads(record.read_text()).get("backend_path")
+            print(Path(recorded).parent if recorded else record.parent)
+            break
+LOCATE
+)"
+echo "$INSTALL"
+```
+
+An empty answer means you have no `issue-review` backend, and steps 6 and 9
+skip it. Otherwise list it, along with the launcher and both providers:
+
+```console
+ls -l "$INSTALL"
 ls -l ~/work/approve-issues.py
 codex plugin marketplace list
 codex plugin list
 claude plugin marketplace list
 claude plugin list
 ```
+
+This is only about which components you have; step 9 is where the links are
+followed to what they finally resolve to.
 
 What decides whether you *had* a provider component is the `plugin list`, not
 the `marketplace list`. Removing a plugin leaves its marketplace registered —
@@ -435,29 +466,40 @@ The AI-action components, named individually so nothing you did not have gets
 installed:
 
 ```console
-python3 tools/setup_workflows.py --component issue-review
-python3 tools/setup_workflows.py --component issue-review --apply
+python3 tools/setup_workflows.py --component issue-review --install-dir "$INSTALL"
+python3 tools/setup_workflows.py --component issue-review --install-dir "$INSTALL" --apply
 ```
+
+`$INSTALL` is step 3's value. Naming it is right either way — for a default
+install it is the default, and for an `--install-dir` install nothing else
+recovers it, since the record's own location does not move with the links.
 
 Add `--component legacy-launcher` to that same run when you had one: setup
 refuses the launcher unless the backend is present or selected beside it.
 
 Each provider component takes its own run, because `--scope` is one option for
 the whole invocation and each registration has to stay in the scope step 3
-found it in. Codex has only user scope. A Claude registration made under the
-default project scope keeps that scope and needs `--target /path/to/repo`
-naming the repository step 3 recorded:
+found it in. Codex has only user scope:
 
 ```console
 python3 tools/setup_workflows.py --component codex-plugin --scope user --apply
-python3 tools/setup_workflows.py --component claude-plugin --target /path/to/repo --apply
 ```
 
-`--all` is right only when every component you have takes one scope — in
-practice `--all --scope user`, and only when the Claude registration was
-user-scoped too. Under the default project scope `--all` refuses Codex
-outright, which has no project scope to be declared in, and `--scope user`
-would move a project-scoped Claude registration rather than repair it.
+Claude has both, and they are two different commands. Take the one matching
+what step 3 recorded, and spell `--scope` out either way — letting it default
+here means project scope, which would migrate a user-scoped registration rather
+than repair it:
+
+```console
+# step 3 found it in project scope
+python3 tools/setup_workflows.py --component claude-plugin --scope project --target /path/to/repo --apply
+# step 3 found it in user scope
+python3 tools/setup_workflows.py --component claude-plugin --scope user --apply
+```
+
+Do not reach for `--all` in this step. It selects all four components whatever
+you have, so it installs the ones you do not, and one run cannot carry two
+scopes anyway. Naming each component step 3 found is what keeps this a repair.
 
 From an archive there is no default target, so a project-scoped run without
 `--target` refuses rather than declaring project state inside a directory step
@@ -465,10 +507,9 @@ From an archive there is no default target, so a project-scoped run without
 archive](docs/workflow-setup.md#upgrading-to-a-new-release-archive) walks the
 four components one at a time.
 
-`--repo` needs no value here: it defaults to the tree the script lives in,
-which is the new archive, and it is validated by the files the selected
-components are installed from rather than by Git metadata. Pass `--install-dir`
-again if the original install used one — nothing recovers it for you.
+`--repo` needs no value in any of these: it defaults to the tree the script
+lives in, which is the new archive, and it is validated by the files the
+selected components are installed from rather than by Git metadata.
 
 Then the services you have, once per repository that service's record named,
 passing back that entry's checkout and any custom install directory or
@@ -515,7 +556,7 @@ issue approval service.
 | --- | --- | --- |
 | Core board | `kanban --version`, then `kanban --path /path/to/project` | The executable on `PATH` is the new build, and it opens the selected repository. |
 | Optional AI actions | `python3 tools/setup_workflows.py` from the new directory with step 6's selection and scope and no `--apply`, then `kanban --doctor` | Setup has converged against the new archive — every component you have reports `unchanged` — and readiness is reported per AI action. |
-| Codex / Claude usage sidebar | `kanban --usage --fresh` | Both providers answered *now*. A plain `kanban --usage` prints whatever is already cached and only asks a provider that has nothing cached, so it can report a window the previous executable stored. Add `--json` for the machine-readable form. |
+| Codex / Claude usage sidebar | `kanban --usage --fresh` | Every provider you have answered *now* — one that is not installed reports itself as unavailable rather than being left out, and the command succeeds as long as one answered. A plain `kanban --usage` prints whatever is already cached and only asks a provider that has nothing cached, so it can report a window the previous executable stored. Add `--json` for the machine-readable form. |
 | PR drainer | `python3 "$DRAINER_CONTROL" --path /path/to/project --json status` | That repository's job is installed and in the state you expect — the one step 3 recorded, until step 8. |
 | Issue approval service | `python3 "$APPROVAL_CONTROL" --path /path/to/project --json status` | The same, for that repository's approval job. |
 
@@ -554,27 +595,22 @@ that same link rather than at an archive. A link landing on another
 Kanban-installed link is healthy — what has to be inside the new directory is
 where the chain *ends*.
 
-Two things locate the links to feed it:
+There are one or more install directories to feed it, and they are the ones
+step 3 already located:
 
-- The `issue-review` record's `backend_path`, which names the installed
-  `approve_issues.py` link itself. The directory it sits in is the install
-  directory, holding that link beside `kanban_config.py` and
-  `kanban_models.py`.
+- The `issue-review` install directory, which step 3 put in `INSTALL`. It holds
+  `approve_issues.py`, `kanban_config.py`, and `kanban_models.py`.
 - Each service's own install directory —
   [the drainer's](docs/pr-drainer.md#files-and-logs) and [the approval
   service's](docs/issue-approval.md#files-and-logs) file inventories resolve
   it — holding that service's script links. Read each record's entry for every
   repository while you are there.
 
-`INSTALL` is one of those directories — never a file path. For a default
-`issue-review` install it is one of the two spellings below, which are
-alternatives, so swap the comment on Linux. For an install made with
-`--install-dir`, take the record's `backend_path` and drop the trailing
-`/approve_issues.py`; the same goes for a service whose links you moved.
+`INSTALL` is always one of those directories, never a file path. Run this once
+with the value step 3 set, then again with `INSTALL` reset to each service
+install directory in turn:
 
 ```console
-INSTALL=~/Library/Application\ Support/kanban/issue-review            # macOS default
-# INSTALL="${XDG_DATA_HOME:-$HOME/.local/share}"/kanban/issue-review  # Linux default
 python3 - "$INSTALL"/*.py <<'RESOLVE'
 import os, sys
 
@@ -582,9 +618,6 @@ for path in sys.argv[1:]:
     print(f"{path} -> {os.path.realpath(path)}")
 RESOLVE
 ```
-
-Run it once per install directory: the `issue-review` one above, and each
-service install directory the inventories resolved.
 
 **Only if step 3 found a `legacy-launcher`**, add `~/work/approve-issues.py` as
 one more argument to any of those runs. Without one that path does not exist,
@@ -595,7 +628,7 @@ started from are expected to be unchanged; that they do not move is the point
 of them.
 
 The provider marketplaces are the one observable that names an archive
-directly, and each registered source has to be the new one:
+directly:
 
 ```console
 codex plugin marketplace list
@@ -603,15 +636,39 @@ claude plugin marketplace list
 ```
 
 Run the `claude` one from the repository a project-scoped registration was
-declared in. Codex additionally keeps its own *copy* of the bundle rather than
-a link, so re-run
+declared in. What each answer means depends on whether step 3 found a plugin
+behind that marketplace:
+
+- **Plugin installed.** The registered source has to be the new directory. One
+  still naming the old archive means step 5 or step 6 was skipped for that
+  provider; go back and do it.
+- **No `kanban` marketplace listed at all**, including because the provider CLI
+  is not installed and the command fails. You did not have that provider and
+  step 6 did not add one; there is nothing to check.
+- **Marketplace with no `kanban@kanban` behind it.** This is the leftover step 3
+  identified, and it will still name the old archive. Reinstalling the plugin is
+  not the fix — you never had it. Remove the registration instead, which is the
+  half of the removal that was never done:
+
+  ```console
+  codex plugin marketplace remove kanban
+  claude plugin marketplace remove kanban
+  ```
+
+  Take only the line for a provider that actually has one. Nothing Kanban runs
+  resolves a marketplace with no plugin behind it, so removing it changes no
+  behavior — but a later setup run *would* refuse against it as a source
+  mismatch, and step 10 would otherwise leave it naming a directory that no
+  longer exists.
+
+Codex additionally keeps its own *copy* of the bundle rather than a link. When
+step 3 found that plugin, re-run
 `python3 tools/setup_workflows.py --component codex-plugin --scope user` from
 the new directory: a cached copy that has fallen behind reports `repair`, and
 `unchanged` is the answer that clears this step.
 
-If a chain still ends in the old directory, or a marketplace still names it, go
-back to step 6 for that component; it is not fixed by deleting the archive it
-points at.
+If a chain still ends in the old directory, go back to step 6 for that
+component; it is not fixed by deleting the archive it points at.
 
 ### 10. Remove the old archive
 
