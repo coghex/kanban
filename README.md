@@ -311,8 +311,8 @@ Do this **before** stopping anything. After step 4 you can no longer tell which
 jobs were running, and step 8 restores exactly that.
 
 For the AI-action components, list the install directory and the two provider
-registrations. The `ls -l` output shows each link's target, which is the thing
-step 9 comes back to check:
+registrations. This is only about which components you have; step 9 is where
+the links are followed to what they finally resolve to:
 
 ```console
 ls -l ~/Library/Application\ Support/kanban/issue-review/          # macOS
@@ -353,7 +353,8 @@ controller rather than the archive's copy. [Manual
 status](docs/pr-drainer.md#manual-status) and [From the
 controller](docs/issue-approval.md#from-the-controller) resolve that controller
 the same way the installation itself does. Each leaves that controller's path
-in `$CONTROL`, which steps 4, 7, and 8 reuse:
+in `$CONTROL`, which step 4 uses — and which steps 7 and 8 resolve again,
+because step 6 can move an installation as well as re-point it:
 
 ```console
 python3 "$CONTROL" --path /path/to/project --json status
@@ -461,6 +462,14 @@ an ordinary file in the way, are left untouched and reported instead.
 
 ### 7. Verify every component
 
+**Resolve `$CONTROL` again first.** A default PR-drainer reinstall on a Linux
+host whose installation predates the XDG locations relocates it there and
+removes the old one, so the controller path step 3 captured can be gone — and a
+controller still pointing at a moved installation refuses rather than answers.
+Re-run the snippet in [Manual status](docs/pr-drainer.md#manual-status) or
+[From the controller](docs/issue-approval.md#from-the-controller); both resolve
+whatever step 6 left.
+
 Verify each row of [the support table](#platform-and-component-support)
 with the check that can actually observe it. `kanban --doctor` is **not** that
 check for most of them: it is a read-only report on AI-action readiness alone,
@@ -481,7 +490,7 @@ the one you happened to be in.
 ### 8. Restart only what was running
 
 Start again exactly the jobs step 3 found live, and no others. Press `d` or `a`
-in Kanban for each, or:
+in Kanban for each, or use the `$CONTROL` step 7 resolved:
 
 ```console
 python3 "$CONTROL" --path /path/to/project --json start
@@ -495,36 +504,62 @@ labels.
 
 ### 9. Confirm nothing still resolves through the old archive
 
-This is a question about link *targets* and registered *sources*, and no
+This is a question about where an installed link *finally* resolves, and no
 `status` command answers it: the drainer's reports the installed link's path,
-never what that link resolves to. Read the observables directly.
+never that link's target.
+
+Read the whole chain rather than one hop of it. Several of these paths name a
+stable installed location on purpose and go on doing so after a correct
+upgrade: the `issue-review` record's `backend_path` names the link setup
+installed rather than any archive, and `~/work/approve-issues.py` points at
+that same link rather than at an archive. A link landing on another
+Kanban-installed link is healthy — what has to be inside the new directory is
+where the chain *ends*.
+
+Two things locate the links to feed it:
+
+- The `issue-review` record's `backend_path`, which names the install directory
+  holding `approve_issues.py`, `kanban_config.py`, and `kanban_models.py`.
+- Each service's own install directory —
+  [the drainer's](docs/pr-drainer.md#files-and-logs) and [the approval
+  service's](docs/issue-approval.md#files-and-logs) file inventories resolve
+  it — holding that service's script links. Read each record's entry for every
+  repository while you are there.
+
+Name every one of them after the `-`, adding `~/work/approve-issues.py` when
+you have a `legacy-launcher`:
 
 ```console
-ls -l ~/Library/Application\ Support/kanban/issue-review/          # macOS
-ls -l "${XDG_DATA_HOME:-$HOME/.local/share}"/kanban/issue-review/  # Linux
-ls -l ~/work/approve-issues.py
+python3 - PATH ... <<'RESOLVE'
+import os, sys
+
+for path in sys.argv[1:]:
+    print(f"{path} -> {os.path.realpath(path)}")
+RESOLVE
+```
+
+Every resolved target must be inside the new extracted directory. The paths you
+started from are expected to be unchanged; that they do not move is the point
+of them.
+
+The provider marketplaces are the one observable that names an archive
+directly, and each registered source has to be the new one:
+
+```console
 codex plugin marketplace list
 claude plugin marketplace list
 ```
 
-- The `issue-review` link targets, and the `backend_path` the record beside
-  them names.
-- The `legacy-launcher` symlink's target, when you have one.
-- Each service's installed script links: `ls -l` the install directory
-  [the drainer's](docs/pr-drainer.md#files-and-logs) and [the approval
-  service's](docs/issue-approval.md#files-and-logs) file inventories resolve,
-  and read that service's record entry for every repository.
-- Each provider marketplace's registered source, from its own
-  `plugin marketplace list`. Run the `claude` one from the repository a
-  project-scoped registration was declared in.
-
-Every one of them must name a path inside the new directory. Codex additionally
-keeps its own *copy* of the bundle rather than a link, so re-run
+Run the `claude` one from the repository a project-scoped registration was
+declared in. Codex additionally keeps its own *copy* of the bundle rather than
+a link, so re-run
 `python3 tools/setup_workflows.py --component codex-plugin --scope user` from
 the new directory: a cached copy that has fallen behind reports `repair`, and
-`unchanged` is the answer that clears this step. If anything still points into
-the old directory, go back to step 6 for that component; it is not fixed by
-deleting the archive it points at.
+`unchanged` is the answer that clears this step.
+
+If a chain still ends in the old directory, or a marketplace still names it, go
+back to step 6 for that component; it is not fixed by deleting the archive it
+points at.
 
 ### 10. Remove the old archive
 

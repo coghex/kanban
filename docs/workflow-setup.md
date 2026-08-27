@@ -471,10 +471,17 @@ claude plugin marketplace list
 
 `--doctor` reports readiness per AI action and nothing else — not the PR
 drainer, not the issue approval service, not the board, not the usage sidebar.
-What it cannot answer is *which* archive a ready component reads from, so pair
-it with the two marketplace listings and with `ls -l` over the install
-directory above: every path they name has to be inside the new extracted
-directory before the old one is removed.
+What it cannot answer is *which* archive a ready component reads from. Pair it
+with the two marketplace listings, whose registered sources name an archive
+directly, and with `ls -l` over the install directory above, whose three links
+have to point into the new extracted directory.
+
+`~/work/approve-issues.py` is the one that has to be followed rather than
+listed: it points at the installed backend link, not at any archive, so one hop
+of it says nothing about which release it reaches. [Step 9 of the README's
+procedure](../README.md#9-confirm-nothing-still-resolves-through-the-old-archive)
+resolves every installed link to where the chain ends, which is the check that
+licenses removing the old archive.
 
 ## Removal
 
