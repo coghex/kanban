@@ -378,15 +378,25 @@ components install *from*, never by Git metadata.
 ### Read what you have first
 
 Setup installs only the components you select, and an upgrade must not add one
-you never had. Two listings and one directory tell you which you have:
+you never had. One directory and four listings tell you which you have:
 
 ```console
 ls -l ~/Library/Application\ Support/kanban/issue-review/          # macOS
 ls -l "${XDG_DATA_HOME:-$HOME/.local/share}"/kanban/issue-review/  # Linux
 ls -l ~/work/approve-issues.py
+codex plugin list
 codex plugin marketplace list
+claude plugin list
 claude plugin marketplace list
 ```
+
+**The plugin listing decides whether you had a provider component, not the
+marketplace one.** Removing a plugin leaves its marketplace registered — the
+removal below is two commands for that reason — so a `kanban` marketplace with
+no `kanban@kanban` beside it is a leftover, not an installation. Selecting that
+component would install one you never had. The marketplace listing still
+matters: it is what says which asset root the registration names, and so
+whether the upgrade has to move it at all.
 
 Record each provider's scope as well as its presence: a Claude registration
 made under the default project scope is visible only from the repository it was

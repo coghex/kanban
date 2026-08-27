@@ -324,6 +324,14 @@ claude plugin marketplace list
 claude plugin list
 ```
 
+What decides whether you *had* a provider component is the `plugin list`, not
+the `marketplace list`. Removing a plugin leaves its marketplace registered —
+that is why step 5 is two commands — so a `kanban` marketplace with no
+`kanban@kanban` beside it is a leftover, and selecting that component in step 6
+would install one you never had. The marketplace listing answers the other
+question: which asset root the registration names, and so whether step 5 has to
+move it at all.
+
 Record each provider's **scope** as well as its presence. Codex has only
 user scope. A Claude registration made with the default `--scope project` lives
 in one repository's own `.claude/settings.json` and is visible only from that
@@ -419,15 +427,29 @@ python3 tools/setup_workflows.py --component issue-review
 python3 tools/setup_workflows.py --component issue-review --apply
 ```
 
-Add `--component legacy-launcher`, `--component codex-plugin`, or
-`--component claude-plugin` for each of those you had, and pass `--all` only if
-you had all four. `--scope` selects where a *provider* registration is
-declared, so keep each one's original: `--scope user` for Codex, which has no
-other, and for a Claude registration that was project-scoped, the default scope
-plus `--target /path/to/repo` naming the repository step 3 recorded. From an
-archive there is no default target, so a project-scoped run without `--target`
-refuses rather than declaring project state inside a directory step 10 tells
-you to delete. [Upgrading to a new release
+Add `--component legacy-launcher` to that same run when you had one: setup
+refuses the launcher unless the backend is present or selected beside it.
+
+Each provider component takes its own run, because `--scope` is one option for
+the whole invocation and each registration has to stay in the scope step 3
+found it in. Codex has only user scope. A Claude registration made under the
+default project scope keeps that scope and needs `--target /path/to/repo`
+naming the repository step 3 recorded:
+
+```console
+python3 tools/setup_workflows.py --component codex-plugin --scope user --apply
+python3 tools/setup_workflows.py --component claude-plugin --target /path/to/repo --apply
+```
+
+`--all` is right only when every component you have takes one scope — in
+practice `--all --scope user`, and only when the Claude registration was
+user-scoped too. Under the default project scope `--all` refuses Codex
+outright, which has no project scope to be declared in, and `--scope user`
+would move a project-scoped Claude registration rather than repair it.
+
+From an archive there is no default target, so a project-scoped run without
+`--target` refuses rather than declaring project state inside a directory step
+10 tells you to delete. [Upgrading to a new release
 archive](docs/workflow-setup.md#upgrading-to-a-new-release-archive) walks the
 four components one at a time.
 
@@ -526,17 +548,23 @@ Two things locate the links to feed it:
   it — holding that service's script links. Read each record's entry for every
   repository while you are there.
 
-Name every one of them after the `-`, adding `~/work/approve-issues.py` when
-you have a `legacy-launcher`:
+Point `INSTALL` at one of them and run this, adding
+`~/work/approve-issues.py` when you have a `legacy-launcher`. The two
+assignments are alternatives, so swap the comment on Linux:
 
 ```console
-python3 - PATH ... <<'RESOLVE'
+INSTALL=~/Library/Application\ Support/kanban/issue-review            # macOS
+# INSTALL="${XDG_DATA_HOME:-$HOME/.local/share}"/kanban/issue-review  # Linux
+python3 - "$INSTALL"/*.py ~/work/approve-issues.py <<'RESOLVE'
 import os, sys
 
 for path in sys.argv[1:]:
     print(f"{path} -> {os.path.realpath(path)}")
 RESOLVE
 ```
+
+Then repeat it with `INSTALL` set to each service install directory the
+inventories above resolved, and drop the launcher argument from those runs.
 
 Every resolved target must be inside the new extracted directory. The paths you
 started from are expected to be unchanged; that they do not move is the point
