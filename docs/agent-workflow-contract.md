@@ -556,6 +556,27 @@ reimplement the removal, and `--check` remains read-only.
   through the controller, and running `tools/drain_prs.py --pr` once for one
   selected pull request. It owns neither merge policy nor cleanup; every gate,
   the merge, and the post-merge obligations stay with `tools/drain_prs.py`.
+- **Asset root and target:** the repository a job drains and the tree its
+  installed script links point into are two separate inputs.
+  `tools/install_drainer.py --repo` is the target: a real main checkout with a
+  supported GitHub remote, because its identity is what names the job.
+  `--asset-root` is the tree supplying Kanban's own tracked modules, validated
+  by those files rather than by Git metadata, so an unpacked `cabal sdist`
+  release archive — which carries none — is a supported source. Both default
+  to the tree the invoked script lives in, which is one directory in a
+  development checkout and, in a released install, an archive that cannot be
+  a target: that default is refused by name, telling the operator to pass
+  `--repo PATH`. `tools/install_issue_approval.py` takes the same two options
+  with the same meanings. Ownership of an installed link is established by
+  identity, not location, on §3's rule: every module either installer links
+  carries a `kanban-managed-asset:<namespace>/<file>` marker, matched by file
+  name with the namespace left open, because one tracked file serves more than
+  one installed namespace. A link resolving to a file that carries that marker
+  for that name is this installer's own wherever it currently points, so a
+  re-run from a new release archive takes over the links a previous archive
+  left while that archive is still on disk; a link resolving to any other real
+  file is preserved and refused. Each installer's own treatment of a link
+  whose target no longer exists is unchanged.
 - **Backend selection:** `tools/service_manager.select_backend` decides which
   service manager a host's drainer is managed by, and it is the only place
   that decides. It selects launchd on a macOS host that has `launchctl`,
@@ -912,6 +933,17 @@ reimplement the removal, and `--check` remains read-only.
   `src/Kanban/Preflight.hs` (readiness probing), surfaced by
   `kanban --doctor` and, per action, by the board itself. Documented for
   users in [docs/workflow-setup.md](workflow-setup.md).
+- **Asset root and target:** `--repo` is the tree tracked assets are read
+  from, validated by the files the selected components are installed from
+  rather than by Git metadata, so an unpacked release archive is a supported
+  source. `--target` is the repository a project-scoped provider registration
+  is declared in, and is required to be that repository's own main checkout
+  with a supported GitHub remote. It defaults to `--repo` while `--repo` is
+  itself a main checkout; from an archive there is no default, and a
+  project-scoped provider component refuses and names `--target` rather than
+  declaring project state inside the archive or silently switching scope.
+  Provider probe and install commands run in the target when there is one and
+  in the asset root otherwise, for both providers.
 - **Invocation:**
   - Setup installs the canonical issue-review backend through the same
     `tools/install_issue_review.py` primitives described in §3, and each

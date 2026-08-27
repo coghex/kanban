@@ -61,8 +61,14 @@ def run_as(binary: str, argv: list[str]) -> int:
     """Entry point executed by the installed shim scripts."""
     state_dir = Path(os.environ["FAKE_CLI_STATE_DIR"])
     stdin_text = "" if sys.stdin.isatty() else sys.stdin.read()
+    # The working directory is recorded alongside the arguments because for a
+    # provider command it is part of the request: `claude`/`codex` resolve
+    # project configuration from where they are run, so a caller that ran one
+    # in the wrong directory asked a different question with the same words.
     with _calls_path(state_dir, binary).open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"args": argv, "stdin": stdin_text}) + "\n")
+        handle.write(
+            json.dumps({"args": argv, "stdin": stdin_text, "cwd": os.getcwd()}) + "\n"
+        )
 
     responses_file = _responses_path(state_dir, binary)
     entries = []

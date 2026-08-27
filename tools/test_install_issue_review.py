@@ -856,5 +856,118 @@ class SingleSourceInstallPathTests(unittest.TestCase):
                 self.assertIn(token, content)
 
 
+class ArchiveAssetRootTests(unittest.TestCase):
+    """This installer's asset source, held to the release archive's shape.
+
+    It has no target repository at all -- every path it writes is resolved
+    from --install-dir -- so the only thing --repo has ever had to be is a
+    tree carrying the backend's own files. It now says so: an unpacked
+    release archive, which deliberately has no `.git` anywhere, installs
+    exactly as a checkout does.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.archive = self.unpacked_archive("kanban-1.1.0.0")
+        self.install_dir = self.root / "installed"
+        self.legacy_path = self.root / "legacy" / "approve-issues.py"
+        self.home = self.root / "home"
+        self.record_path = redirect_macos_account(self, self.home)
+
+    def unpacked_archive(self, name):
+        archive = self.root / name
+        tools = archive / "tools"
+        tools.mkdir(parents=True)
+        for module in install_issue_review.BACKEND_MODULES.values():
+            (tools / module).write_text(
+                managed_asset_text(module, f"{name} {module}\n"), encoding="utf-8"
+            )
+        self.assertFalse(list(archive.rglob(".git")), archive)
+        return archive.resolve()
+
+    def run_cli(self, *extra_args, repo=None):
+        argv = [
+            "install_issue_review.py",
+            "--repo",
+            str(self.archive if repo is None else repo),
+            "--install-dir",
+            str(self.install_dir),
+            "--legacy-path",
+            str(self.legacy_path),
+            *extra_args,
+        ]
+        buffer = io.StringIO()
+        with mock.patch.object(sys, "argv", argv):
+            with contextlib.redirect_stdout(buffer):
+                exit_code = install_issue_review.main()
+        return exit_code, buffer.getvalue()
+
+    def test_the_cli_installs_from_a_tree_with_no_git_metadata(self):
+        exit_code, output = self.run_cli()
+
+        self.assertEqual(exit_code, 0, output)
+        for module in install_issue_review.BACKEND_MODULES.values():
+            with self.subTest(module=module):
+                self.assertEqual(
+                    (self.install_dir / module).resolve(),
+                    (self.archive / "tools" / module).resolve(),
+                )
+        self.assertEqual(
+            self.legacy_path.resolve(),
+            (self.install_dir / "approve_issues.py").resolve(),
+        )
+        record = json.loads(self.record_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            record["backend_path"],
+            str(self.install_dir.resolve() / "approve_issues.py"),
+        )
+
+    def test_the_repo_field_still_names_the_asset_root(self):
+        exit_code, output = self.run_cli("--json")
+        self.assertEqual(exit_code, 0, output)
+        self.assertEqual(json.loads(output)["repo"], str(self.archive))
+
+    def test_a_newer_archive_takes_over_the_previous_archives_links(self):
+        previous = self.unpacked_archive("kanban-1.0.0.0")
+        self.run_cli(repo=previous)
+
+        exit_code, output = self.run_cli()
+
+        self.assertEqual(exit_code, 0, output)
+        for module in install_issue_review.BACKEND_MODULES.values():
+            with self.subTest(module=module):
+                self.assertEqual(
+                    (self.install_dir / module).resolve(),
+                    (self.archive / "tools" / module).resolve(),
+                )
+        # The previous archive is still on disk: recognition is what allowed
+        # the takeover, not the old target having gone away.
+        self.assertTrue((previous / "tools" / "approve_issues.py").is_file())
+
+    def test_a_tree_missing_a_backend_module_is_refused(self):
+        (self.archive / "tools" / "kanban_models.py").unlink()
+        with self.assertRaises(install_issue_review.InstallError) as raised:
+            install_issue_review.asset_root(self.archive)
+        self.assertIn("kanban_models.py", str(raised.exception))
+
+    def test_an_archive_is_not_a_main_checkout(self):
+        # The predicate `tools/setup_workflows.py` chooses a project-scoped
+        # target default with. An archive answers no, which is what makes that
+        # default absent rather than wrong.
+        self.assertFalse(install_issue_review.is_main_checkout(self.archive))
+
+    def test_a_checkout_is_a_main_checkout(self):
+        checkout = self.unpacked_archive("checkout")
+        subprocess.run(
+            ["git", "init", "-q", str(checkout)], check=True, capture_output=True
+        )
+        self.assertTrue(install_issue_review.is_main_checkout(checkout))
+        self.assertEqual(
+            install_issue_review.main_checkout_root(checkout / "tools"), checkout
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

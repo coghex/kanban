@@ -9,6 +9,11 @@ pre-Kanban compatibility launcher at `~/work/approve-issues.py` to a symlink
 that points at it. An optional --config path is persisted alongside the
 installed backend for whatever launches it to forward.
 
+--repo names a source of tracked assets and nothing else: this installer has
+no target repository, so that tree is never required to be a Git checkout.
+Both supported sources work -- a development checkout, and the unpacked
+release archive, which deliberately carries no Git metadata.
+
 Every successful install also records the absolute path of the backend it
 linked, in a document whose own location --install-dir cannot move, so a
 dashboard that never inherits KANBAN_ISSUE_REVIEW_INSTALL_DIR still finds an
@@ -66,22 +71,89 @@ def run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[s
     return proc
 
 
-def repository_root(requested: Path) -> Path:
+def missing_backend_modules(root: Path) -> list[str]:
+    """Which of the backend's own files `root` does not supply."""
+    return [
+        str(root / "tools" / name)
+        for name in BACKEND_MODULES.values()
+        if not (root / "tools" / name).is_file()
+    ]
+
+
+def asset_root(requested: Path) -> Path:
+    """The tree this installer links the backend out of.
+
+    Validated by the files an installation actually needs, never by Git
+    metadata. Both supported sources are trees of tracked files -- a Kanban
+    checkout, and the unpacked `cabal sdist` release archive `README.md` tells
+    a recipient to keep -- and only one of them has a `.git` directory, so
+    demanding one would refuse the release exactly where it is documented to
+    work.
+
+    This installer has no target repository at all: every path it writes is
+    resolved from --install-dir, so the tree named here supplies content and
+    nothing else. `main_checkout_root` below answers the other question, for
+    the callers that do act on a repository.
+    """
+    root = requested.expanduser().resolve()
+    missing = missing_backend_modules(root)
+    if missing:
+        raise InstallError(
+            "Asset root does not contain the required backend file(s): "
+            + ", ".join(missing)
+        )
+    return root
+
+
+def main_checkout_root(requested: Path) -> Path:
+    """The main checkout of the repository `requested` lies inside.
+
+    Deliberately separate from `asset_root` above, because a tree supplying
+    tracked assets and a repository something is installed *against* are two
+    different questions and only the second one needs Git at all. A linked
+    worktree is refused: the state such an installation belongs to lives in
+    the main checkout.
+
+    `tools/setup_workflows.py` resolves a project-scoped registration target
+    with this rather than restating it, since it already imports this module.
+    The two service installers keep their own copy on purpose: each has to
+    stay runnable beside a checkout whose issue-review installer it does not
+    load, which is why `tools/install_issue_approval.py` imports nothing from
+    here at all.
+    """
     path = requested.expanduser().resolve()
-    proc = run(["git", "-C", str(path), "rev-parse", "--show-toplevel"])
+    proc = run(["git", "-C", str(path), "rev-parse", "--show-toplevel"], check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise InstallError(f"{path} is not a Git repository checkout: {detail}")
     root = Path(proc.stdout.strip()).resolve()
     if not (root / ".git").is_dir():
         raise InstallError(
             f"Install from the repository's main checkout, not a linked worktree: {root}"
         )
-    required = [root / "tools" / name for name in BACKEND_MODULES.values()]
-    missing = [str(item) for item in required if not item.is_file()]
-    if missing:
-        raise InstallError(
-            "Repository does not contain the required backend file(s): "
-            + ", ".join(missing)
-        )
     return root
+
+
+def is_main_checkout(path: Path) -> bool:
+    """Whether `path` is itself a repository's own main checkout.
+
+    Read off the filesystem rather than by running `git`, which is exactly
+    the condition `main_checkout_root` above enforces after its own
+    `rev-parse`: a main checkout's top level is the directory holding a
+    `.git` *directory*, and a linked worktree has a `.git` file there
+    instead.
+
+    Answering it without a subprocess is not an optimization. The only caller
+    is choosing a default for a tree that may be an unpacked release archive,
+    and an archive must never be the subject of a Git query at all -- so the
+    question of whether to ask git one cannot itself be answered by asking
+    git one. It also cannot raise: not being a checkout is a fact about which
+    defaults are available there, not a failure.
+    """
+    try:
+        return (path.expanduser() / ".git").is_dir()
+    except OSError:
+        return False
 
 
 MANAGED_ASSET_MARKER_PREFIX = "kanban-managed-asset:issue-review/"
@@ -411,10 +483,10 @@ def install(
     dry_run: bool,
 ) -> dict[str, Any]:
     sources = {field: repo / "tools" / name for field, name in BACKEND_MODULES.items()}
-    missing = [str(item) for item in sources.values() if not item.is_file()]
+    missing = missing_backend_modules(repo)
     if missing:
         raise InstallError(
-            "Repository does not contain the required backend file(s): "
+            "Asset root does not contain the required backend file(s): "
             + ", ".join(missing)
         )
     install_dir = install_dir.resolve()
@@ -492,7 +564,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--repo",
         default=str(Path(__file__).resolve().parent.parent),
-        help="Kanban checkout containing tools/approve_issues.py (default: this checkout).",
+        help=(
+            "Kanban checkout or unpacked release archive supplying "
+            "tools/approve_issues.py (default: the tree containing this script). "
+            "This is an asset source only; nothing is installed into it."
+        ),
     )
     parser.add_argument(
         "--install-dir",
@@ -529,9 +605,9 @@ def print_plan(result: dict[str, Any], *, repo: Path) -> None:
     kanban_link = result["kanban_link"]
     legacy = result["legacy_launcher"]
     if dry_run:
-        print(f"Dry run for {repo}; no files will be changed.")
+        print(f"Dry run for assets in {repo}; no files will be changed.")
     else:
-        print(f"Installed the canonical issue-review backend for {repo}")
+        print(f"Installed the canonical issue-review backend from {repo}")
     print(f"Kanban-managed launcher {kanban_link['destination']}: {kanban_link['result']}")
     if legacy["status"] == "refused":
         print(
@@ -555,7 +631,7 @@ def print_plan(result: dict[str, Any], *, repo: Path) -> None:
 def main() -> int:
     args = parse_args()
     try:
-        repo = repository_root(Path(args.repo))
+        repo = asset_root(Path(args.repo))
         install_dir = Path(args.install_dir).expanduser().resolve()
         legacy_path = Path(args.legacy_path).expanduser()
         result = install(

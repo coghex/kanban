@@ -15,6 +15,17 @@ created above it.
 
 ### Unreleased
 
+- The optional setup commands run from an unpacked release archive. None of
+  them asks that tree for Git metadata, which a `cabal sdist` archive
+  deliberately does not carry. The two that install a background service take
+  `--repo` for the checkout the service is for and a new `--asset-root` for
+  the tree their links point at; run from an archive with no `--repo`, they
+  refuse and say so rather than installing a job against the archive.
+  `tools/setup_workflows.py` likewise needs `--target` for a project-scoped
+  provider registration when its asset root is not itself a checkout.
+  Re-running any of them from a newer archive re-points the links a previous
+  archive left, while still refusing to touch a file that is not Kanban's own.
+
 - Press `f` for a card filter panel. `j`/`k` or `Up`/`Down` move between its
   boxes, `Left`/`Right` between groups, `Space` toggles the focused box, and
   `d` restores the defaults. Its criteria combine with the `s` column search

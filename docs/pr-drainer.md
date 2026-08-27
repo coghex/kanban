@@ -98,6 +98,41 @@ Install the stopped job:
 python3 tools/install_drainer.py
 ```
 
+### The two roots
+
+`--repo` and `--asset-root` name two different trees, and after a release they
+are usually two different trees.
+
+- **`--repo`** is the target: the main checkout this job drains. Its remote is
+  what names the job, and it is what the installed controller is handed as
+  `--path`. It defaults to the tree this script lives in, which is right in a
+  source checkout. An unpacked release archive is not a repository, so that
+  default is refused there by name and the archive form passes
+  `--repo /path/to/project`.
+- **`--asset-root`** is where the five tracked modules the installed links
+  point at are read from. It is validated by those files, never by Git
+  metadata, so the archive works exactly as a checkout does — and it already
+  defaults to the tree this script lives in, which is the archive. Nothing is
+  ever installed into it.
+
+From an unpacked release archive, therefore:
+
+```console
+python3 tools/install_drainer.py --repo /path/to/project
+```
+
+Re-running from a *newer* archive re-points the five links at it, including
+while the older archive is still on disk: each link is recognized as Kanban's
+own by the identity marker the tracked file at the end of it carries. A link to
+anything else is left untouched and reported, and so is an ordinary file in the
+way.
+
+The source advisory below compares the executing sources against a checkout's
+local `origin/master`. A source that lives in an unpacked archive is not inside
+a repository at all, so it is reported as a comparison that could not be made
+rather than as a divergence. Like every other form of that advisory, it is a
+report and never gates a drain.
+
 The installer:
 
 - refuses to run while this repository's drainer is active;

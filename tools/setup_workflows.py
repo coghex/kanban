@@ -46,12 +46,21 @@ _previous_bytecode_policy = sys.dont_write_bytecode
 sys.dont_write_bytecode = True
 try:
     import install_issue_review
+    import kanban_config
 finally:
     sys.dont_write_bytecode = _previous_bytecode_policy
 
 
 COMPONENTS = ("issue-review", "legacy-launcher", "codex-plugin", "claude-plugin")
 SCOPES = ("project", "user")
+
+# The components that can declare a *project-scoped* provider registration,
+# and therefore the only ones that consume --target at all. Codex registers in
+# `$CODEX_HOME/config.toml` and has no project scope to refuse into, and the
+# two issue-review components write nothing outside --install-dir. Naming them
+# here is what keeps the missing-target refusal below off the operations it
+# would be meaningless for.
+PROJECT_REGISTERING_COMPONENTS = ("claude-plugin",)
 
 # The plugin identifier both marketplaces publish, and the marketplace name
 # both plugin manifests declare. Kept in one place so the conflict check, the
@@ -70,6 +79,41 @@ CODEX_BUNDLE_PREFIX = "/".join(CODEX_BUNDLE_SEGMENTS)
 
 PROBE_TIMEOUT_SECONDS = 60
 
+# The tracked files each component is installed *from*, relative to the asset
+# root. This is what validates an asset root, because it is the only thing
+# that can: the two supported sources are a Kanban checkout and the unpacked
+# `cabal sdist` release archive, and the archive deliberately carries no Git
+# metadata for a `git rev-parse` to find. Only the selected components'
+# entries are required, so setting up a provider bundle does not demand the
+# issue-review backend's modules and vice versa.
+COMPONENT_ASSETS = {
+    "issue-review": tuple(
+        f"tools/{name}" for name in install_issue_review.BACKEND_MODULES.values()
+    ),
+    # The launcher is a symlink to the *installed* backend link rather than to
+    # a tracked file, so the only asset it needs is the one that link resolves
+    # to.
+    "legacy-launcher": ("tools/approve_issues.py",),
+    "codex-plugin": (
+        "codex-plugin/.agents/plugins/marketplace.json",
+        CODEX_BUNDLE_PREFIX + "/.codex-plugin/plugin.json",
+    ),
+    "claude-plugin": (
+        "claude-plugin/.claude-plugin/marketplace.json",
+        "claude-plugin/plugins/kanban/.claude-plugin/plugin.json",
+    ),
+}
+
+# Interpreter artefacts, recognized without asking Git. A checkout answers
+# this question through its own ignore rules, which is strictly better -- they
+# are the rules that decided what got committed. An unpacked archive has no
+# rules to consult and needs none: everything in it was put there *by* the
+# tracked set, so the only files that can appear beside it are the ones an
+# interpreter writes when the packaged coordinator is executed out of the
+# copy.
+GENERATED_ARTIFACT_DIRECTORIES = ("__pycache__",)
+GENERATED_ARTIFACT_SUFFIXES = (".pyc", ".pyo")
+
 # How many diverging paths a human-readable message names before summarizing
 # the rest. The JSON output always carries the complete lists.
 DIVERGENCE_MESSAGE_LIMIT = 8
@@ -77,6 +121,117 @@ DIVERGENCE_MESSAGE_LIMIT = 8
 
 class SetupError(RuntimeError):
     pass
+
+
+# -- the two roots ------------------------------------------------------------
+#
+# `--repo` is where tracked assets are read from and `--target` is the
+# repository a project-scoped provider registration is declared in. They have
+# always been two options; until #542 they could not really be two *trees*,
+# because the asset root was validated as a Git checkout and the target simply
+# defaulted to it. An unpacked release archive is an asset root that can never
+# be either a checkout or a registration target, so each question is now asked
+# of the tree it is actually about.
+
+
+def asset_root(requested: Path, components: list[str]) -> Path:
+    """The tree the selected components are installed from.
+
+    Validated by the files and bundle manifests those components need, never
+    by Git metadata: the supported sources are a Kanban checkout and the
+    unpacked `cabal sdist` release archive, and only one of them has a `.git`
+    directory. Only the selected components are checked, so a run installing
+    one component is not refused by another component's assets being absent.
+    """
+    root = requested.expanduser().resolve()
+    required = sorted(
+        {
+            relative
+            for component in components
+            for relative in COMPONENT_ASSETS[component]
+        }
+    )
+    missing = [relative for relative in required if not (root / relative).is_file()]
+    if missing:
+        raise SetupError(
+            f"{root} does not contain the tracked asset(s) the selected "
+            "component(s) are installed from: " + ", ".join(missing)
+        )
+    return root
+
+
+def configured_remote_name() -> str:
+    """The remote Kanban resolves a repository's identity through.
+
+    The shared configuration's, which is the same answer the drainer and the
+    approval service resolve their targets with; `origin` when there is no
+    readable configuration to say otherwise.
+    """
+    try:
+        raw_config, _ = kanban_config.load_raw_config(None)
+    except kanban_config.KanbanConfigError:
+        return "origin"
+    return raw_config.remote_name
+
+
+def project_target_root(requested: Path) -> Path:
+    """The repository a project-scoped provider registration is declared in.
+
+    A real main checkout, and one whose remote names a repository on
+    github.com. Both are new checks. The target used to be validated only
+    transitively -- it defaulted to an asset root that was itself required to
+    be a checkout -- and now that the two roots can be different trees,
+    nothing else would notice a project registration being declared in a
+    directory that is not a repository at all.
+    """
+    try:
+        root = install_issue_review.main_checkout_root(requested)
+    except install_issue_review.InstallError as exc:
+        raise SetupError(
+            f"--target {requested} is not a repository's own main checkout, so a "
+            f"project-scoped registration cannot be declared in it: {exc}"
+        ) from exc
+    remote = configured_remote_name()
+    proc = run_command(["git", "-C", str(root), "remote", "get-url", remote])
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise SetupError(
+            f"Could not read the {remote!r} remote of --target {root}, so it "
+            f"cannot be shown to be a supported GitHub repository: {detail}"
+        )
+    try:
+        kanban_config.normalize_github_repository(proc.stdout)
+    except kanban_config.KanbanConfigError as exc:
+        raise SetupError(
+            f"--target {root} is not a checkout of a supported GitHub repository, "
+            f"so a project-scoped registration cannot be declared in it: {exc}"
+        ) from exc
+    return root
+
+
+def selected_target(requested: str | None, repo: Path, scope: str) -> Path | None:
+    """The repository this run declares a project-scoped registration in, or
+    None when there is none to declare it in.
+
+    An explicit --target wins, and is validated when it is the thing a project
+    scope will be written against. Otherwise the asset root stands in, exactly
+    as it always has -- but only while it really is a checkout. An unpacked
+    release archive is not, and None is the honest answer there: the component
+    that needs one refuses and names the flag, rather than a registration
+    being declared inside a directory #538 goes on to tell the user to delete.
+    """
+    if requested:
+        path = Path(requested).expanduser().resolve()
+        if scope == "project":
+            return project_target_root(path)
+        # User scope declares nothing in the target, so it is not required to
+        # be a repository -- but it is still where every provider command
+        # runs, and a directory that is not there would surface as a bare
+        # OSError from the first spawn rather than as the mistake it is.
+        if not path.is_dir():
+            raise SetupError(f"--target {path} is not an existing directory.")
+        return path
+    return repo if install_issue_review.is_main_checkout(repo) else None
 
 
 # -- provider probing ---------------------------------------------------------
@@ -245,6 +400,57 @@ def codex_cache_dir(repo: Path) -> Path:
     )
 
 
+def has_git_metadata(repo: Path) -> bool:
+    """Whether this asset root is a working tree Git can answer about.
+
+    Read off the filesystem rather than by running `git`, and that is the
+    point: an unpacked release archive must never be the subject of a Git
+    query at all, so the decision that would spawn one cannot itself be a Git
+    query. `.git` is a directory in a main checkout and a file in a linked
+    worktree, and both are trees `git ls-files` answers for.
+    """
+    return os.path.lexists(repo / ".git")
+
+
+def is_generated_artifact(relative_path: str) -> bool:
+    """Whether a bundle-relative path is an interpreter artefact rather than
+    installed content. A trailing slash marks a directory, exactly as
+    `git check-ignore` is told about one."""
+    parts = PurePosixPath(relative_path.rstrip("/")).parts
+    return any(part in GENERATED_ARTIFACT_DIRECTORIES for part in parts) or (
+        not relative_path.endswith("/")
+        and relative_path.endswith(GENERATED_ARTIFACT_SUFFIXES)
+    )
+
+
+def archive_bundle_files(repo: Path) -> list[str]:
+    """Every file the bundle in an unpacked archive is defined by, relative to
+    it.
+
+    The archive has no index to ask and needs none: it was built *from* the
+    tracked set, so its own contents are that set. Interpreter artefacts are
+    dropped for the same reason the checkout's ignore rules drop them -- the
+    packaged coordinator is executed out of the installed copy, so counting
+    one as content would report a repair that can never converge.
+    """
+    root = codex_bundle_root(repo)
+    try:
+        entries = sorted(
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file()
+        )
+    except OSError as exc:
+        raise SetupError(f"Could not read the bundle in {root}: {exc}") from exc
+    files = [path for path in entries if not is_generated_artifact(path)]
+    if not files:
+        raise SetupError(
+            f"{root} holds no bundle files, so there is no bundle to compare the "
+            "installed one against."
+        )
+    return files
+
+
 def tracked_bundle_files(repo: Path) -> list[str]:
     """Every Git-tracked path under the tracked Codex bundle, relative to it.
 
@@ -319,6 +525,30 @@ def checkout_ignored(repo: Path, relative_paths: list[str]) -> set[str]:
         for entry in proc.stdout.split("\0")
         if entry.startswith(prefix)
     }
+
+
+def bundle_files(repo: Path) -> list[str]:
+    """Every file the bundle this asset root publishes is defined by.
+
+    Two answers, because the bundle has two supported homes and only one of
+    them can be asked the Git question.
+    """
+    if has_git_metadata(repo):
+        return tracked_bundle_files(repo)
+    return archive_bundle_files(repo)
+
+
+def ignored_entries(repo: Path, relative_paths: list[str]) -> set[str]:
+    """The subset of bundle-relative paths that are not installed content.
+
+    A checkout answers with its own ignore rules, which are the rules that
+    decided what was committed in the first place. An archive answers with the
+    artefact shapes above, having no rules to consult -- and no `git` call is
+    made against it, which is what keeps a released install off Git entirely.
+    """
+    if has_git_metadata(repo):
+        return checkout_ignored(repo, relative_paths)
+    return {path for path in relative_paths if is_generated_artifact(path)}
 
 
 def installed_bundle_entries(cache: Path) -> tuple[list[str], list[str]]:
@@ -400,7 +630,7 @@ def codex_cache_divergence(repo: Path) -> dict[str, Any] | None:
     when they match. Raises SetupError when the installed side cannot be read
     at all, so an unusable cache is reported rather than repaired blindly."""
     cache = codex_cache_dir(repo)
-    tracked = tracked_bundle_files(repo)
+    tracked = bundle_files(repo)
     bundle_root = codex_bundle_root(repo)
     if not os.path.lexists(cache):
         # An enabled installation whose cache is simply not there is the same
@@ -429,7 +659,7 @@ def codex_cache_divergence(repo: Path) -> dict[str, Any] | None:
     # Files first, and only the ones that survive the ignore rules go on to
     # suppress the directories holding them.
     unexpected_files = sorted(installed - tracked_set)
-    extra_files = sorted(set(unexpected_files) - checkout_ignored(repo, unexpected_files))
+    extra_files = sorted(set(unexpected_files) - ignored_entries(repo, unexpected_files))
     # Queried with a trailing slash, which is how `git check-ignore` is told a
     # path is a directory — a directory-only rule such as `__pycache__/` does
     # not match the bare spelling of a path that is not in the checkout.
@@ -438,7 +668,7 @@ def codex_cache_divergence(repo: Path) -> dict[str, Any] | None:
         for path in unexpected_directories(installed_directories, tracked, extra_files)
     ]
     extra = sorted(
-        extra_files + sorted(set(unexpected_dirs) - checkout_ignored(repo, unexpected_dirs))
+        extra_files + sorted(set(unexpected_dirs) - ignored_entries(repo, unexpected_dirs))
     )
     if not missing and not different and not extra:
         return None
@@ -510,7 +740,7 @@ def plan_issue_review(repo: Path, install_dir: Path) -> dict[str, Any]:
     links = []
     for source, destination in issue_review_links(repo, install_dir):
         if not source.is_file():
-            raise SetupError(f"Repository does not contain the required backend file: {source}")
+            raise SetupError(f"Asset root does not contain the required backend file: {source}")
         links.append(
             {
                 "source": str(source),
@@ -618,7 +848,23 @@ def plan_legacy_launcher(
     )
 
 
-def plan_codex_plugin(repo: Path, scope: str) -> dict[str, Any]:
+def provider_cwd(repo: Path, target: Path | None) -> Path:
+    """The working directory a provider command runs in.
+
+    The target whenever there is one, for both providers. A project-scoped
+    registration belongs to that repository, and a user-scoped one run with an
+    explicit target still has to be read the way that repository would read it
+    -- a provider resolves project configuration from its working directory,
+    so answering from anywhere else describes an installation nobody has.
+
+    The asset root is the fallback and nothing more. Before #542 the Codex
+    path took it unconditionally, which was invisible while the two roots were
+    always the same directory and wrong the moment they were not.
+    """
+    return repo if target is None else target
+
+
+def plan_codex_plugin(repo: Path, cwd: Path, scope: str) -> dict[str, Any]:
     component = "codex-plugin"
     marketplace_root = repo / "codex-plugin"
     if scope != "user":
@@ -642,7 +888,7 @@ def plan_codex_plugin(repo: Path, scope: str) -> dict[str, Any]:
         )
     commands: list[list[str]] = []
     marketplaces = marketplace_entries(
-        probe_json([executable, "plugin", "marketplace", "list", "--json"], cwd=repo)
+        probe_json([executable, "plugin", "marketplace", "list", "--json"], cwd=cwd)
     )
     for entry in marketplaces:
         if not marketplace_matches(entry, marketplace_root):
@@ -660,7 +906,7 @@ def plan_codex_plugin(repo: Path, scope: str) -> dict[str, Any]:
             )
     if not marketplaces:
         commands.append([executable, "plugin", "marketplace", "add", str(marketplace_root)])
-    entries = plugin_entries(probe_json([executable, "plugin", "list", "--json"], cwd=repo))
+    entries = plugin_entries(probe_json([executable, "plugin", "list", "--json"], cwd=cwd))
     if any(entry_enabled(entry) for entry in entries):
         # Registered and enabled is not the same as current. Read-only, and
         # reached only once the marketplace conflict above has cleared, so a
@@ -711,7 +957,9 @@ def plan_codex_plugin(repo: Path, scope: str) -> dict[str, Any]:
     )
 
 
-def plan_claude_plugin(repo: Path, target: Path, scope: str) -> dict[str, Any]:
+def plan_claude_plugin(
+    repo: Path, cwd: Path, target: Path | None, scope: str
+) -> dict[str, Any]:
     component = "claude-plugin"
     marketplace_root = repo / "claude-plugin"
     executable = shutil.which("claude")
@@ -724,7 +972,7 @@ def plan_claude_plugin(repo: Path, target: Path, scope: str) -> dict[str, Any]:
         )
     commands: list[list[str]] = []
     marketplaces = marketplace_entries(
-        probe_json([executable, "plugin", "marketplace", "list", "--json"], cwd=target)
+        probe_json([executable, "plugin", "marketplace", "list", "--json"], cwd=cwd)
     )
     for entry in marketplaces:
         if not marketplace_matches(entry, marketplace_root):
@@ -744,13 +992,13 @@ def plan_claude_plugin(repo: Path, target: Path, scope: str) -> dict[str, Any]:
         commands.append(
             [executable, "plugin", "marketplace", "add", str(marketplace_root), "--scope", scope]
         )
-    entries = plugin_entries(probe_json([executable, "plugin", "list", "--json"], cwd=target))
+    entries = plugin_entries(probe_json([executable, "plugin", "list", "--json"], cwd=cwd))
     if any(entry_enabled(entry) for entry in entries) and not commands:
         return component_result(
             component,
             "unchanged",
             scope=scope,
-            target=str(target),
+            target=None if target is None else str(target),
             message=f"{PLUGIN_IDENTIFIER} is already installed and enabled for claude.",
         )
     if any(entry_installed(entry) and not entry_enabled(entry) for entry in entries):
@@ -758,7 +1006,7 @@ def plan_claude_plugin(repo: Path, target: Path, scope: str) -> dict[str, Any]:
             component,
             "refused",
             scope=scope,
-            target=str(target),
+            target=None if target is None else str(target),
             message=(
                 f"{PLUGIN_IDENTIFIER} is installed for claude but disabled. It is left "
                 f"untouched; re-enable it with `claude plugin enable {PLUGIN_IDENTIFIER}` "
@@ -771,7 +1019,7 @@ def plan_claude_plugin(repo: Path, target: Path, scope: str) -> dict[str, Any]:
         component,
         "install",
         scope=scope,
-        target=str(target),
+        target=None if target is None else str(target),
         commands=commands,
         message=(
             f"Install {PLUGIN_IDENTIFIER} for claude from {marketplace_root} in {scope} scope"
@@ -780,11 +1028,36 @@ def plan_claude_plugin(repo: Path, target: Path, scope: str) -> dict[str, Any]:
     )
 
 
+def missing_target_refusal(component: str, repo: Path, scope: str) -> dict[str, Any]:
+    """The refusal a project-scoped run gets when it has no repository to
+    declare the registration in.
+
+    Returned before the provider is probed and before anything is written, and
+    it neither invents a target nor quietly demotes the run to user scope:
+    declaring project state inside the asset root would write it into the very
+    directory a release upgrade goes on to remove, and silently changing the
+    scope would install something other than what was asked for.
+    """
+    return component_result(
+        component,
+        "refused",
+        scope=scope,
+        target=None,
+        message=(
+            f"{repo} is not a repository checkout, so a project-scoped "
+            f"registration has no repository to be declared in and would be "
+            f"written into the asset root itself. Name the repository with "
+            f"--target PATH, or choose the user-global registration explicitly "
+            f"with --scope user."
+        ),
+    )
+
+
 def plan_component(
     component: str,
     *,
     repo: Path,
-    target: Path,
+    target: Path | None,
     install_dir: Path,
     legacy_path: Path,
     scope: str,
@@ -792,16 +1065,24 @@ def plan_component(
     backend_ready: bool,
 ) -> dict[str, Any]:
     try:
+        needs_target = (
+            scope == "project"
+            and target is None
+            and component in PROJECT_REGISTERING_COMPONENTS
+        )
+        if needs_target:
+            return missing_target_refusal(component, repo, scope)
         if component == "issue-review":
             return plan_issue_review(repo, install_dir)
         if component == "legacy-launcher":
             return plan_legacy_launcher(
                 install_dir, legacy_path, migrate=migrate, backend_ready=backend_ready
             )
+        cwd = provider_cwd(repo, target)
         if component == "codex-plugin":
-            return plan_codex_plugin(repo, scope)
+            return plan_codex_plugin(repo, cwd, scope)
         if component == "claude-plugin":
-            return plan_claude_plugin(repo, target, scope)
+            return plan_claude_plugin(repo, cwd, target, scope)
     except SetupError as exc:
         return component_result(component, "unavailable", scope=scope, message=str(exc))
     raise SetupError(f"Unknown component: {component}")
@@ -814,7 +1095,7 @@ def apply_component(
     plan: dict[str, Any],
     *,
     repo: Path,
-    target: Path,
+    target: Path | None,
     install_dir: Path,
     legacy_path: Path,
     migrate: bool,
@@ -862,7 +1143,10 @@ def apply_component(
             legacy_path, install_dir / "approve_issues.py", allow_migration=migrate
         )
         return dict(plan, applied=True, plan=result)
-    cwd = repo if component == "codex-plugin" else target
+    # One rule for both providers, and the same one the plan was made under:
+    # a command that ran somewhere other than where it was probed would report
+    # on an installation nobody has.
+    cwd = provider_cwd(repo, target)
     outputs = []
     for command in plan["commands"]:
         proc = run_command(command, cwd=cwd)
@@ -948,14 +1232,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--repo",
         default=str(Path(__file__).resolve().parent.parent),
-        help="Kanban checkout providing the tracked assets (default: this checkout).",
+        help=(
+            "Kanban checkout or unpacked release archive providing the tracked "
+            "assets (default: the tree containing this script). An asset source "
+            "only; nothing is registered in it."
+        ),
     )
     parser.add_argument(
         "--target",
         default=None,
         help=(
-            "Repository a project-scoped registration is declared in "
-            "(default: the --repo checkout)."
+            "Repository a project-scoped registration is declared in (default: "
+            "the --repo tree, when that tree is itself a main checkout). "
+            "Required for project scope when it is not."
         ),
     )
     parser.add_argument(
@@ -1023,10 +1312,13 @@ def plan_needs_attention(plan: dict[str, Any]) -> bool:
 
 
 def print_plan(result: dict[str, Any]) -> None:
+    where = f"assets in {result['repo']}"
+    if result["target"]:
+        where += f", target {result['target']}"
     if result["dry_run"]:
-        print(f"Dry run for {result['repo']}; nothing will be changed.")
+        print(f"Dry run for {where}; nothing will be changed.")
     else:
-        print(f"Applying Kanban workflow setup for {result['repo']}.")
+        print(f"Applying Kanban workflow setup for {where}.")
     for component in result["components"]:
         print(f"  {component['component']}: {component['status']}")
         print(f"    {component['message']}")
@@ -1045,8 +1337,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.apply and args.dry_run:
             raise SetupError("Pass either --apply or --dry-run, not both.")
         components = selected_components(args)
-        repo = install_issue_review.repository_root(Path(args.repo))
-        target = Path(args.target).expanduser().resolve() if args.target else repo
+        repo = asset_root(Path(args.repo), components)
+        target = selected_target(args.target, repo, args.scope)
         install_dir = Path(args.install_dir).expanduser().resolve()
         legacy_path = Path(args.legacy_path).expanduser()
         planned: list[dict[str, Any]] = []
@@ -1088,7 +1380,7 @@ def main(argv: list[str] | None = None) -> int:
         result = {
             "dry_run": not args.apply,
             "repo": str(repo),
-            "target": str(target),
+            "target": None if target is None else str(target),
             "scope": args.scope,
             "install_dir": str(install_dir),
             "components": planned,

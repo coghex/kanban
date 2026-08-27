@@ -2051,6 +2051,7 @@ class InstallerIntegrationTests(RelocationFixture):
             )
 
     def install(self, **options):
+        options.setdefault("asset_root", self.kanban)
         return install_drainer.install(
             self.kanban, self.destination, ntfy_url=None, **options
         )
@@ -2735,6 +2736,7 @@ class StaleInstallRefusalTests(RelocationFixture):
                 install_drainer.install(
                     self.kanban,
                     self.destination,
+                    asset_root=self.kanban,
                     ntfy_url="https://notify.example.test/new",
                     config_path=str(self.kanban / "config.toml"),
                     dry_run=False,
@@ -2759,7 +2761,11 @@ class StaleInstallRefusalTests(RelocationFixture):
         ):
             with self.assertRaises(install_drainer.InstallError):
                 install_drainer.install(
-                    self.kanban, self.destination, ntfy_url=None, dry_run=False
+                    self.kanban,
+                    self.destination,
+                    asset_root=self.kanban,
+                    ntfy_url=None,
+                    dry_run=False,
                 )
         self.assertIn(True, observed)
 
@@ -5488,6 +5494,7 @@ class TakeoverPreviewTests(TakeoverFixture):
             )
 
     def install(self, **options):
+        options.setdefault("asset_root", self.kanban)
         return install_drainer.install(
             self.kanban, self.legacy_dir, ntfy_url=None, **options
         )

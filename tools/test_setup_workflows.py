@@ -2,10 +2,11 @@
 
 Every case runs against a temporary home, a temporary git checkout, and a
 PATH holding only the executables that case installs — scriptable fake
-`codex`/`claude` shims from `fake_cli.py`, plus `git` because
-`install_issue_review.repository_root` resolves the checkout with it. No
-credentials, network access, model call, launchd interaction, or real
-provider installation is involved, so these run under the same
+`codex`/`claude` shims from `fake_cli.py`, plus `git` because a checkout's
+own bundle inventory and ignore rules are read with it and an explicit
+project `--target` is validated with it. No credentials, network access,
+model call, launchd interaction, or real provider installation is involved,
+so these run under the same
 `python3 -m unittest discover -s tools -p 'test_*.py'` CI already runs.
 """
 
@@ -82,8 +83,9 @@ class HermeticSetupTests(unittest.TestCase):
         self.codex_home = self.home / ".codex"
         self.fake = fake_cli.FakeCli(self.root / "fake")
         self._make_checkout()
-        # The hermetic PATH holds only git (which
-        # install_issue_review.repository_root resolves the checkout with)
+        # The hermetic PATH holds only git (which reads a *checkout's* tracked
+        # bundle inventory and ignore rules, and validates an explicit project
+        # `--target`; an archive asset root is never asked anything with it)
         # and python3 (which the fake shims are written in) until a case
         # installs a provider shim, so "executable absent" is a real
         # absence rather than a mocked one.
@@ -101,7 +103,20 @@ class HermeticSetupTests(unittest.TestCase):
         (self.repo / "tools").mkdir(parents=True)
         for name in install_issue_review.BACKEND_MODULES.values():
             shutil.copy(REPO_ROOT / "tools" / name, self.repo / "tools" / name)
-        (self.repo / "claude-plugin").mkdir()
+        # Both marketplace manifests, because setup validates an asset root by
+        # the tracked files each selected component is installed *from* — a
+        # bundle directory holding no manifest publishes nothing.
+        self.claude_bundle = self.repo / "claude-plugin" / "plugins" / "kanban"
+        (self.claude_bundle / ".claude-plugin").mkdir(parents=True)
+        (self.claude_bundle / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "kanban", "version": BUNDLE_VERSION}) + "\n",
+            encoding="utf-8",
+        )
+        (self.repo / "claude-plugin" / ".claude-plugin").mkdir(parents=True)
+        (self.repo / "claude-plugin" / ".claude-plugin" / "marketplace.json").write_text(
+            json.dumps({"name": "kanban", "plugins": [{"name": "kanban"}]}) + "\n",
+            encoding="utf-8",
+        )
         # A miniature but structurally real tracked Codex bundle: a manifest
         # declaring the version its cache directory is named for, skills at
         # the tracked depth, and a vendored script — the shapes the installed
@@ -110,6 +125,13 @@ class HermeticSetupTests(unittest.TestCase):
         (self.bundle / ".codex-plugin").mkdir(parents=True)
         (self.bundle / ".codex-plugin" / "plugin.json").write_text(
             json.dumps({"name": "kanban", "version": BUNDLE_VERSION}) + "\n",
+            encoding="utf-8",
+        )
+        (self.repo / "codex-plugin" / ".agents" / "plugins").mkdir(parents=True)
+        (
+            self.repo / "codex-plugin" / ".agents" / "plugins" / "marketplace.json"
+        ).write_text(
+            json.dumps({"name": "kanban", "plugins": [{"name": "kanban"}]}) + "\n",
             encoding="utf-8",
         )
         for skill in ("solve", "pr-review"):
@@ -190,14 +212,16 @@ class HermeticSetupTests(unittest.TestCase):
         )
         self.fake.script(binary, ["plugin", "install"], stdout="installed\n")
 
-    def run_setup(self, *argv, codex_home=None):
+    def run_setup(self, *argv, codex_home=None, repo=None):
         environment = {
             "PATH": str(self.fake.bin_dir),
             "FAKE_CLI_STATE_DIR": str(self.fake.state_dir),
             "HOME": str(self.home),
             # Redirected rather than left to the host: kanban_config reads
-            # both when it resolves the managed locations, so an ambient one
-            # would point these cases at a real install.
+            # these when it resolves the managed locations and the shared
+            # configuration, so an ambient one would point these cases at a
+            # real install or at the developer's own `remote_name`.
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
             "XDG_DATA_HOME": str(self.home / ".local" / "share"),
             "XDG_STATE_HOME": str(self.home / ".local" / "state"),
         }
@@ -215,7 +239,7 @@ class HermeticSetupTests(unittest.TestCase):
                     [
                         *argv,
                         "--repo",
-                        str(self.repo),
+                        str(self.repo if repo is None else repo),
                         "--install-dir",
                         str(self.install_dir),
                         "--legacy-path",
@@ -1135,6 +1159,422 @@ class ListingParsingTests(unittest.TestCase):
         self.assertEqual(
             setup_workflows.marketplace_sources(entry), ["/tmp/kanban/claude-plugin"]
         )
+
+
+class ArchiveAssetRootTests(HermeticSetupTests):
+    """Setup run the way a release recipient runs it.
+
+    The asset root is an unpacked archive -- a tree of the same tracked files
+    with no `.git` anywhere -- and the repository a project-scoped
+    registration would be declared in is a separate checkout. The real
+    `cabal sdist` archive is exercised as a subprocess by
+    `tools/test_source_distribution.py`; what these cases pin is the behavior
+    that archive shape produces, which needs no toolchain to reach.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Resolved, because setup resolves both roots before it reports or
+        # uses them and macOS's temporary directory is itself a symlink.
+        self.archive = self.unpacked_archive("kanban-1.1.0.0").resolve()
+        self.target = self.make_target("project").resolve()
+
+    def unpacked_archive(self, name):
+        """A copy of the tracked tree with every trace of Git removed."""
+        archive = self.root / name
+        shutil.copytree(self.repo, archive)
+        shutil.rmtree(archive / ".git")
+        self.assertFalse(
+            list(archive.rglob(".git")), f"{archive} still carries Git metadata"
+        )
+        return archive
+
+    def make_target(self, name):
+        """A repository a project-scoped registration could be declared in:
+        its own main checkout, with a remote naming a repository on
+        github.com."""
+        target = self.root / name
+        target.mkdir()
+        for command in (
+            ["git", "init", "-q", str(target)],
+            [
+                "git",
+                "-C",
+                str(target),
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:acme/widgets.git",
+            ],
+        ):
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        return target
+
+    def test_every_component_plans_and_applies_from_the_archive(self):
+        self.install_provider("codex")
+        self.install_provider("claude")
+
+        code, plan = self.run_setup(
+            "--all", "--scope", "user", repo=self.archive
+        )
+        self.assertEqual(code, 0, plan)
+        for name in setup_workflows.COMPONENTS:
+            self.assertEqual(self.component(plan, name)["status"], "install", name)
+
+        code, applied = self.run_setup(
+            "--all", "--scope", "user", "--apply", repo=self.archive
+        )
+        self.assertEqual(code, 0, applied)
+        # Every managed link resolves into the archive, never into the target
+        # checkout and never into the source tree these tests were run from.
+        for name in install_issue_review.BACKEND_MODULES.values():
+            with self.subTest(module=name):
+                self.assertEqual(
+                    (self.install_dir / name).resolve(),
+                    (self.archive / "tools" / name).resolve(),
+                )
+        self.assertEqual(
+            self.legacy_path.resolve(),
+            (self.install_dir / "approve_issues.py").resolve(),
+        )
+        for binary in ("codex", "claude"):
+            with self.subTest(provider=binary):
+                added = [
+                    call
+                    for call in self.mutating_calls(binary)
+                    if call["args"][:3] == ["plugin", "marketplace", "add"]
+                ]
+                self.assertEqual(len(added), 1, added)
+                self.assertTrue(
+                    added[0]["args"][3].startswith(str(self.archive)), added
+                )
+
+    def test_a_project_scoped_run_with_no_target_refuses_before_probing(self):
+        self.install_provider("codex")
+        self.install_provider("claude")
+
+        code, payload = self.run_setup("--all", repo=self.archive)
+
+        self.assertEqual(code, 1, payload)
+        claude = self.component(payload, "claude-plugin")
+        self.assertEqual(claude["status"], "refused")
+        self.assertIn("--target", claude["message"])
+        self.assertIsNone(claude["target"])
+        self.assertIsNone(payload["target"])
+        # Nothing was probed for it, and no project state was declared in the
+        # archive -- which is the directory #538 goes on to have the user
+        # delete, and the reason silently defaulting the target there would be
+        # worse than refusing.
+        self.assertEqual(self.fake.calls("claude"), [])
+        self.assertFalse((self.archive / ".claude").exists())
+        self.assertFalse((self.archive / ".claude.json").exists())
+        # And it did not silently become a user-scoped registration either.
+        self.assertEqual(payload["scope"], "project")
+
+    def test_a_project_scoped_run_with_a_valid_target_installs(self):
+        self.install_provider("claude")
+
+        code, payload = self.run_setup(
+            "--component",
+            "claude-plugin",
+            "--target",
+            str(self.target),
+            "--apply",
+            repo=self.archive,
+        )
+
+        self.assertEqual(code, 0, payload)
+        component = self.component(payload, "claude-plugin")
+        self.assertEqual(component["status"], "install")
+        self.assertEqual(payload["target"], str(self.target))
+        self.assertEqual(payload["repo"], str(self.archive))
+        # The marketplace is added from the archive, and the command runs in
+        # the target -- the repository the project registration belongs to.
+        for call in self.mutating_calls("claude"):
+            with self.subTest(call=call["args"]):
+                self.assertEqual(call["cwd"], str(self.target))
+        added = next(
+            call
+            for call in self.mutating_calls("claude")
+            if call["args"][:3] == ["plugin", "marketplace", "add"]
+        )
+        self.assertEqual(added["args"][3], str(self.archive / "claude-plugin"))
+
+    def test_a_target_that_is_not_a_checkout_is_refused(self):
+        self.install_provider("claude")
+        outsider = self.root / "not-a-repo"
+        outsider.mkdir()
+
+        code, payload = self.run_setup(
+            "--component",
+            "claude-plugin",
+            "--target",
+            str(outsider),
+            repo=self.archive,
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("--target", payload["error"])
+        self.assertEqual(self.fake.calls("claude"), [])
+
+    def test_a_target_with_no_supported_github_remote_is_refused(self):
+        self.install_provider("claude")
+        local = self.root / "local-only"
+        local.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", str(local)], check=True, capture_output=True
+        )
+
+        code, payload = self.run_setup(
+            "--component",
+            "claude-plugin",
+            "--target",
+            str(local),
+            repo=self.archive,
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("--target", payload["error"])
+        self.assertEqual(self.fake.calls("claude"), [])
+
+    def test_a_user_scoped_target_that_does_not_exist_is_refused(self):
+        # User scope declares nothing in the target, so it is not required to
+        # be a repository -- but it is still where every provider command
+        # runs, so a path that is not there is the mistake it looks like.
+        self.install_provider("claude")
+
+        code, payload = self.run_setup(
+            "--component",
+            "claude-plugin",
+            "--scope",
+            "user",
+            "--target",
+            str(self.root / "absent"),
+            repo=self.archive,
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("--target", payload["error"])
+        self.assertEqual(self.fake.calls("claude"), [])
+
+    def test_an_explicit_user_scope_needs_no_target_and_runs_in_the_archive(self):
+        self.install_provider("claude")
+
+        code, payload = self.run_setup(
+            "--component",
+            "claude-plugin",
+            "--scope",
+            "user",
+            "--apply",
+            repo=self.archive,
+        )
+
+        self.assertEqual(code, 0, payload)
+        self.assertIsNone(payload["target"])
+        for call in self.fake.calls("claude"):
+            with self.subTest(call=call["args"]):
+                self.assertEqual(call["cwd"], str(self.archive))
+                # Unambiguously user-scoped, so nothing it ran could have
+                # declared project state in the archive it ran in.
+                if call["args"][:1] == ["plugin"] and "--scope" in call["args"]:
+                    self.assertEqual(
+                        call["args"][call["args"].index("--scope") + 1], "user"
+                    )
+        self.assertFalse((self.archive / ".claude").exists())
+
+    def test_the_codex_bundle_comparison_asks_the_archive_no_git_question(self):
+        # The second convergence pass a released install reaches: the bundle
+        # is registered and enabled, so setup compares the installed copy
+        # against the tracked one -- an inventory the checkout path answers
+        # with `git ls-files` and `git check-ignore`, and the archive must
+        # answer without either.
+        self.install_provider(
+            "codex",
+            marketplaces=json.dumps(
+                [{"name": "kanban", "path": str(self.archive / "codex-plugin")}]
+            ),
+            plugins=(INSTALLED_AND_ENABLED,),
+        )
+        cache = self.cache_dir()
+        shutil.copytree(self.archive / "codex-plugin" / "plugins" / "kanban", cache)
+        # The artefact a packaged coordinator leaves in its own installed
+        # copy. It is not bundle content on either side, and the archive has
+        # no ignore rules to say so.
+        (cache / "skills" / "pr-review" / "scripts" / "__pycache__").mkdir()
+        (
+            cache
+            / "skills"
+            / "pr-review"
+            / "scripts"
+            / "__pycache__"
+            / "review_pr.cpython-312.pyc"
+        ).write_bytes(b"\x00")
+
+        code, payload = self.run_setup(
+            "--component", "codex-plugin", "--scope", "user", repo=self.archive
+        )
+
+        self.assertEqual(code, 0, payload)
+        component = self.component(payload, "codex-plugin")
+        self.assertEqual(component["status"], "unchanged", component)
+        self.assertIsNone(component["divergence"])
+        self.assertEqual(component["commands"], [])
+
+    def test_a_stale_archive_bundle_is_still_reported_as_a_repair(self):
+        # The same comparison, with the teeth left in: an inventory that
+        # reported nothing would report `unchanged` for a genuinely stale
+        # cache too.
+        self.install_provider(
+            "codex",
+            marketplaces=json.dumps(
+                [{"name": "kanban", "path": str(self.archive / "codex-plugin")}]
+            ),
+            plugins=(INSTALLED_AND_ENABLED,),
+        )
+        cache = self.cache_dir()
+        shutil.copytree(self.archive / "codex-plugin" / "plugins" / "kanban", cache)
+        (cache / "skills" / "solve" / "SKILL.md").write_text(
+            "# stale\n", encoding="utf-8"
+        )
+
+        code, payload = self.run_setup(
+            "--component", "codex-plugin", "--scope", "user", repo=self.archive
+        )
+
+        self.assertEqual(code, 1, payload)
+        component = self.component(payload, "codex-plugin")
+        self.assertEqual(component["status"], "repair")
+        self.assertEqual(
+            component["divergence"]["different"], ["skills/solve/SKILL.md"]
+        )
+
+    def test_a_marketplace_from_the_previous_archive_is_refused_untouched(self):
+        # No provenance marker can recognize a directory registration, so a
+        # marketplace added from the previous archive is a path mismatch like
+        # any other. It is reported and left alone; #538 owns the manual
+        # removal that clears it.
+        previous = self.unpacked_archive("kanban-1.0.0.0").resolve()
+        self.install_provider(
+            "claude",
+            marketplaces=json.dumps(
+                [{"name": "kanban", "path": str(previous / "claude-plugin")}]
+            ),
+        )
+
+        code, payload = self.run_setup(
+            "--component",
+            "claude-plugin",
+            "--scope",
+            "user",
+            "--apply",
+            repo=self.archive,
+        )
+
+        self.assertEqual(code, 1, payload)
+        component = self.component(payload, "claude-plugin")
+        self.assertEqual(component["status"], "refused")
+        self.assertIn(str(previous / "claude-plugin"), component["message"])
+        self.assertEqual(self.mutating_calls("claude"), [])
+
+    def test_setup_removed_from_the_archive_after_manual_removal_converges(self):
+        # The other half of the sequence above: once the user has removed the
+        # plugin and the marketplace themselves, the same command registers
+        # the new archive and converges.
+        self.install_provider("claude", marketplaces="[]")
+
+        code, payload = self.run_setup(
+            "--component",
+            "claude-plugin",
+            "--scope",
+            "user",
+            "--apply",
+            repo=self.archive,
+        )
+
+        self.assertEqual(code, 0, payload)
+        added = next(
+            call
+            for call in self.mutating_calls("claude")
+            if call["args"][:3] == ["plugin", "marketplace", "add"]
+        )
+        self.assertEqual(added["args"][3], str(self.archive / "claude-plugin"))
+
+    def test_a_dry_run_from_the_archive_writes_nothing_anywhere(self):
+        self.install_provider("codex")
+        self.install_provider("claude")
+        before = self.tree_snapshot(self.archive) | self.tree_snapshot(self.target)
+
+        code, payload = self.run_setup(
+            "--all", "--scope", "user", repo=self.archive
+        )
+
+        self.assertEqual(code, 0, payload)
+        self.assertEqual(
+            self.tree_snapshot(self.archive) | self.tree_snapshot(self.target), before
+        )
+        self.assertFalse(self.install_dir.exists())
+        self.assertFalse(self.legacy_path.exists())
+
+    def tree_snapshot(self, root):
+        return {
+            path.relative_to(root).as_posix(): path.stat().st_mtime_ns
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+
+    def test_an_asset_root_missing_a_selected_components_files_is_refused(self):
+        (self.archive / "claude-plugin" / ".claude-plugin" / "marketplace.json").unlink()
+
+        code, payload = self.run_setup(
+            "--component", "claude-plugin", "--scope", "user", repo=self.archive
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("marketplace.json", payload["error"])
+
+    def test_an_unselected_components_assets_are_not_required(self):
+        # Validation is per selected component: setting up the Codex bundle
+        # from a tree with no backend modules is a supported archive, not a
+        # broken one.
+        shutil.rmtree(self.archive / "tools")
+        self.install_provider("codex")
+
+        code, payload = self.run_setup(
+            "--component", "codex-plugin", "--scope", "user", repo=self.archive
+        )
+
+        self.assertEqual(code, 0, payload)
+        self.assertEqual(
+            self.component(payload, "codex-plugin")["status"], "install"
+        )
+
+
+class CheckoutDefaultTests(HermeticSetupTests):
+    """The established checkout behavior, held where the two roots meet."""
+
+    def test_the_target_still_defaults_to_the_asset_checkout(self):
+        self.install_provider("claude")
+
+        code, payload = self.run_setup("--component", "claude-plugin")
+
+        self.assertEqual(code, 0, payload)
+        self.assertEqual(payload["repo"], str(self.repo.resolve()))
+        self.assertEqual(payload["target"], str(self.repo.resolve()))
+        self.assertEqual(
+            self.component(payload, "claude-plugin")["target"],
+            str(self.repo.resolve()),
+        )
+
+    def test_provider_probes_run_in_the_defaulted_target(self):
+        self.install_provider("codex")
+        self.install_provider("claude")
+
+        self.run_setup("--all", "--scope", "user")
+
+        for binary in ("codex", "claude"):
+            for call in self.fake.calls(binary):
+                with self.subTest(provider=binary, call=call["args"]):
+                    self.assertEqual(call["cwd"], str(self.repo.resolve()))
 
 
 if __name__ == "__main__":

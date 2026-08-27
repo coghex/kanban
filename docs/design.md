@@ -2454,7 +2454,10 @@ above are unchanged, and persistence the user switched off is not a failure.
 - The installer links the controller, the drainer, the shared configuration
   module, and the service-manager backend the controller drives its host's
   manager
-  through out of one live development checkout, so whatever is on disk there —
+  through out of one asset root, which is separate from the repository the job
+  drains and is validated by the files it supplies rather than by Git metadata:
+  a live development checkout, or the unpacked release archive, which carries
+  none. Out of a checkout, whatever is on disk there —
   a mid-edit file, a checked-out feature branch, a checkout the remote has moved
   past — is what every repository's drain actually runs, and nothing in the run
   says so. Each managed run therefore compares those four executing sources
@@ -2467,7 +2470,10 @@ above are unchanged, and persistence the user switched off is not a failure.
   Sources matching the baseline are silent, the comparison only reads and never
   fetches or writes repository state, and no divergence, missing source, absent
   ref, or failure of the comparison itself refuses, delays, or otherwise changes
-  what the run does. Gating a drain on a dirty checkout is what this
+  what the run does. A source installed out of a release archive is inside no
+  repository at all, so it is one of the comparisons that cannot be made and is
+  summarized in that second line rather than reported as a divergence.
+  Gating a drain on a dirty checkout is what this
   deliberately does not do: the drainer has to keep working while a human works
   the same checkout.
 - The status response also projects the post-merge cleanup a merged pull
