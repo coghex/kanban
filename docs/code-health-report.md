@@ -23,9 +23,14 @@ broken the code is today:
   wrong today.
 - **Low** — hygiene and polish.
 
-Status: **in progress.** This audit is being done deliberately, a few files at a
-time, rather than in one sweep. The "Coverage log" at the bottom records exactly
-what has been read so far, so the audit can resume without re-reading.
+Status: **every finding processed; the reading sweep unfinished.** Those are two
+separate claims, and conflating them is what let this header and the checklist
+below contradict each other. Every finding this report has raised carries a
+terminal disposition — that is what the checklist answers. The audit itself is
+being done deliberately, a few files at a time, and the "Coverage log" at the
+bottom records exactly what has been read; several files remain partly or wholly
+unread, so this report can still gain findings. It is finished as a ledger, not
+as an audit.
 
 ### Status markers
 
@@ -62,7 +67,7 @@ report still owes.
 - [x] CH-1. `test/Spec.hs` is a 9,200-line single-file test suite — [#148]
 - [x] CH-2. `src/Kanban/UI.hs` is a 5,706-line god-module — [#50]
 - [x] CH-3. `AppState` tracks seven parallel `Map Int` session tables — [#51]
-- [x] CH-4. `tools/drain_prs.py` is a 3,967-line script — [no-issue]
+- [x] CH-4. `tools/drain_prs.py` is a 5,549-line script — [no-issue]
 - [x] CH-5. `src/Kanban/Worker.hs` threads fifteen mutable cells positionally — [#153]
 - [x] CH-5A-1. `src/Kanban/Review.hs` exceeds 2,000 lines — [no-issue]
 - [x] CH-6. The LaunchAgent label hardcodes a personal namespace — [#147]
@@ -79,6 +84,8 @@ report still owes.
 - [x] CH-14. Three of this repository's own label names are compiled into the theme — [#152]
 
 **18 of 18 resolved. 0 deferred, 0 unprocessed.** Every finding has been processed.
+That is the finding ledger, not the reading sweep — see the coverage log for how
+much of the repository has actually been read.
 
 Findings 2 and 3 were cleared by reading `src/Kanban/UI.hs` end to end. Both were
 already owned by open issues (#50, #51), so neither was refiled; the read produced
@@ -221,9 +228,11 @@ Findings **4 and 7** were the last two deferrals. Both preconditions cleared, an
 both are now closed as `[no-issue]`:
 
 - **Blocked on sequencing** (4) — #147 landed, so the file could be re-read in
-  its new shape. The read confirmed a phase-ordered module below the ~5,000-line
-  Python threshold recorded by #159, with no demonstrated defect that a package
-  split would prevent.
+  its new shape. The read confirmed a phase-ordered module with no demonstrated
+  defect that a package split would prevent. It was then also below the
+  ~5,000-line Python threshold #159 records — a bar the file has since crossed,
+  which is what prompted the 2026-08-27 re-read recorded in CH-4. That re-read
+  reached the same answer on structure and coupling instead.
 - **Premise unverified** (7) — verification showed that `.drain-prs.json` is
   already loaded from each target repository's root. The shared repositories
   table does not duplicate those drainer settings, but it does not need to.
@@ -425,47 +434,82 @@ variant and its optional `ManagedProcess` together. Insertion and cleanup then
 become single operations that cannot half-apply, and the five reusability
 predicates collapse into one function over `AgentSlot`.
 
-### [no-issue] CH-4. `tools/drain_prs.py` is a 3,967-line script
+### [no-issue] CH-4. `tools/drain_prs.py` is a 5,549-line script
 
-> **Disposition:** No issue — #159 considered this exact file and decided against
-> it: "Python is out of scope entirely. Scripts are held to ~5,000 lines instead,
-> and nothing currently exceeds it — `tools/drain_prs.py` is the largest at 3,170."
-> It is 3,967 today, still below that bar. The re-read this deferral
-> asked for supports that decision rather than overturning it: the file is
-> phase-ordered, and its strongest candidate seam — the autostash and fast-forward
-> cluster from `_relocate_untracked_files` through `_require_merged_index` — has
-> exactly two non-private entry points, `sweep_snapshot_anchors` and
-> `fast_forward_default_branch`, and its own 1,193-line
+> **Disposition:** No issue — re-read end to end at 5,549 lines and 152 top-level
+> definitions on 2026-08-27, after the file crossed the ~5,000-line bar the
+> previous disposition named as its own revisit condition. Crossing it changed the
+> prompt, not the answer.
+>
+> The module is phase-ordered, and the read found exactly one clean seam: the
+> autostash, anchor, stash-retirement and fast-forward cluster at
+> `tools/drain_prs.py:2725-3645` (921 lines). The rest of the file enters it
+> through only `sweep_snapshot_anchors`, `retire_recovery_stashes` and
+> `fast_forward_default_branch`; it depends outward on only `run`, `log`,
+> `git_dir` and `DrainError`; it touches none of the globals `main()` rebinds and
+> never touches the queue state; and it already has its own 2,353-line
 > `tools/test_fast_forward_stash.py`. That is the `Review.hs` outcome, not the
-> `UI.hs` one.
-> The stated fix shape is costlier than written: `tools/` uses flat sibling
-> imports, so promoting it to a package would repoint `DRAINER_PATH`, the
-> `SCRIPT_MODULES` vendoring fixture in `tools/test_single_pr_drain.py`, and
-> multiple test modules, preventing no demonstrated defect. Revisit if the file
-> crosses the ~5,000-line bar #159 set.
+> `UI.hs` one. Extracting it is deliberately left undone: it buys legibility
+> rather than correctness, and it is not free — see the cost below.
+>
+> The other large cluster is not a seam. Coordination-only base advance
+> (`tools/drain_prs.py:1449-2032`, 584 lines) calls back into `get_pr`,
+> `gate_regression`, `audit_merged_pr` and `set_outcome`. It is the merge core,
+> circularly coupled by design. The phase split the fix shape below proposes is
+> worse still: those phases share `ctx`, `state`, `gates` and `report`, plus five
+> module globals `main()` rebinds after config resolution — `APPROVE_LABEL` (23
+> uses), `CHANGES_LABEL` (19), `COORDINATION_PATHS` (7), `LOG_DIR` and
+> `LOG_TO_STDERR`. A submodule doing `from drain_prs import APPROVE_LABEL` would
+> capture the compiled default and silently ignore the operator's configured
+> label — fail-open, on the component that merges pull requests.
+>
+> The cost is also different from what the fix shape records. Promoting `tools/`
+> to a package is not required: the directory is flat and already takes flat
+> siblings. What a new sibling does cost is a live-service breakage window. The
+> install directory holds symlinks into `tools/` and the controller executes from
+> there, so the instant `drain_prs.py` gains a new sibling import every live
+> install fails at import until `install_drainer.py` is rerun *and* the new name
+> reaches roughly nine registries: `_MANAGED_LINK_NAMES`, `sources` and
+> `destinations` in `tools/install_drainer.py`, `installed_source_paths()` in
+> `tools/drain_prs_service.py`, `.github/systemd-lifecycle/lifecycle_check.py`,
+> `SCRIPT_MODULES` in `tools/test_single_pr_drain.py`, `SOURCE_NAMES` in
+> `tools/test_drain_prs_service.py`, and the relocation and install fixtures.
+>
+> This disposition rests on structure and coupling rather than on a line count, so
+> it carries no revisit threshold. The previous one did, and that is precisely how
+> it went stale. What would reopen it is a demonstrated defect a module boundary
+> would have prevented, or a seam appearing where there is currently none.
 
-**Severity: High** — this is the component that merges pull requests, and it is
-the least structured code in the repository.
+**Severity: High** — this is the component that merges pull requests. The
+original wording added "and it is the least structured code in the repository";
+that half is not sustained by the 2026-08-27 end-to-end read and is retained only
+as the finding's original framing.
 
 **Original finding rationale, retained for context with current measurements:**
-`tools/` is flat: `drain_prs.py` (3,967), `approve_issues.py` (2,344), and
-`drain_prs_service.py` (2,049) are single-module programs sharing
-`kanban_config.py` (702). The drainer owns the one irreversible action in the
+`tools/` is flat: `drain_prs.py` (5,549), `approve_issues.py` (3,719), and
+`drain_prs_service.py` (3,096) are single-module programs sharing
+`kanban_config.py` (1,155). The drainer owns the one irreversible action in the
 whole pipeline — merging — and it has already produced at least one recorded
 deadlock (it stripped the very label its own wait loop depended on, causing
 spurious `reviewed:changes` and 3-of-3 failures).
 
-A 3,967-line flat script is arguably a poor host for that logic: there is no
+A 5,549-line flat script is arguably a poor host for that logic: there is no
 module boundary between "decide whether this PR is eligible", "repair a
 conflicted branch", "wait for a check", and "merge", so a state-machine bug in
-one shows up as a mystery in another.
+one shows up as a mystery in another. The 2026-08-27 read tested that argument
+directly and did not sustain it — the module is phase-ordered, and each outcome
+vocabulary is declared once and consumed in one place — but the concern is kept
+here as originally written.
 
-**Fix shape:** promote `tools/` to a package (`tools/kanban_tools/` or similar)
-and split the drainer along its actual phases — eligibility, conflict repair,
-check-waiting, merge, incident reporting — with the merge step as the smallest,
-most-tested module of the set. The Python suite is already large enough
-(`test_integration.py` at 2,916 lines and `test_fast_forward_stash.py` at 1,193,
-plus the other focused `test_*.py` modules) to support this refactor safely.
+**Fix shape, superseded by the disposition above and retained for context:**
+promote `tools/` to a package (`tools/kanban_tools/` or similar) and split the
+drainer along its actual phases — eligibility, conflict repair, check-waiting,
+merge, incident reporting — with the merge step as the smallest, most-tested
+module of the set. The Python suite is already large enough (`test_integration.py`
+at 4,414 lines and `test_fast_forward_stash.py` at 2,353, plus the other focused
+`test_*.py` modules) to support this refactor safely. The disposition rejects both
+halves: the package promotion is unnecessary, and the phase split is the one
+decomposition this module's coupling actively refuses.
 
 ### [#153] CH-5. `src/Kanban/Worker.hs` threads fifteen mutable cells positionally
 
@@ -1232,7 +1276,7 @@ What has actually been read, so the audit can resume without repeating work.
 | `src/Kanban/Worker.hs` (2,253 lines) | **Read fully, line by line** — all 87 top-level definitions. Cleared finding 5, disproved its premise, produced #153, and split off 5a. |
 | `src/Kanban/Review.hs` (2,015 lines at read time; **1,953 now**) | **Read fully, line by line** — all 122 top-level definitions. Closed 5a as no-issue; produced #154 and #155, recorded as findings 12a and 7a. #154 merged the same day (289de6d), extracting `Kanban.CommandCapture` and shifting every line reference in this report's Review findings. |
 | `src/Kanban/Process.hs` | Export list only. |
-| `tools/drain_prs.py` | Read the clean-tree gate, the autostash, `fast_forward_default_branch`, and every main-checkout command site. The other ~2,900 lines not read. |
+| `tools/drain_prs.py` (5,549 lines) | **Read fully, line by line** on 2026-08-27 — all 152 top-level definitions. Prompted by the file crossing the ~5,000-line bar CH-4's previous disposition named; found one clean seam (`2725-3645`), no defect, and re-decided CH-4 on structure and coupling instead. |
 | `tools/drain_prs_service.py` | Read the module constants, `launch_target`, `status_snapshot`, `incident_files`, `install_job`, `start_service`, and the child-spawn loop. Remainder not read. |
 | `tools/install_drainer.py` | Read the header, constants, and install/config-merge surface. Remainder not read. |
 | `test/Spec.hs` | Structure mapped — 330 lines of imports, 48 `describe` blocks in one `main`, 149 trailing helpers. Test bodies not read. |
