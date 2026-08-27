@@ -41,7 +41,7 @@ concrete precondition
 - [x] PRR-1. Clean batches leave project-review without a durable resume cursor — [#548]
 - [x] PRR-2. A stale pre-gate stop can terminate a drainer restarted after relocation — [#555]
 - [x] PRR-3. The ready Mission Control design still declares closed prerequisites and its own classification absent — [no-issue]
-- [ ] PRR-4. The README still advertises the filter's retired lowercase key
+- [x] PRR-4. The README still advertises the filter's retired lowercase key — [#556]
 
 ## 1. Historical sweep continuity
 
@@ -272,7 +272,7 @@ classification as a future change and calls the file pr-atomic.
 
 ## 4. Public key documentation
 
-### PRR-4. The README still advertises the filter's retired lowercase key
+### [#556] PRR-4. The README still advertises the filter's retired lowercase key
 
 > **Captured note:** Complete later descendant PR #519 / issue #513's key
 > migration by changing the README quickstart from lowercase `f` to uppercase
