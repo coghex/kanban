@@ -156,15 +156,22 @@ a user would. This is the gate no automated check replaces: the rehearsal proves
 the archive builds and installs in a clean directory, and this proves an existing
 installation survives being moved onto it.
 
-The candidate is not published, so the README's first step — which downloads the
-latest public release — is the one step performed differently. Take the archive
-from the draft step 4 left, and follow the README from its second step onward:
+The candidate is not published, so the README's first step — which downloads
+the latest public release — is the one step performed differently. Run this from
+a *new* empty directory, not the one holding the release currently installed,
+and take the archive from the draft step 4 left:
 
 ```console
 gh release download release-dry-run-<n> --repo coghex/kanban \
   --pattern 'kanban-*.tar.gz'
 tar -xzf kanban-*.tar.gz
+cd kanban-*/
 ```
+
+That leaves you exactly where the README's first step leaves a user: the
+extracted candidate is the working directory every later step runs from, and
+the old release sits untouched beside it. Follow the README from its second
+step onward with no further substitution.
 
 The upgrade covers, and the record on the release issue names the result of, each
 of:
@@ -267,17 +274,25 @@ its head is the authorized commit.
 ## 11. Verify the published release as a consumer
 
 From a clean directory, on a machine that has none of this repository's state,
-download the published asset and repeat the build, install, and version check:
+download the published asset and repeat the documented consumer install:
 
 ```console
 gh release download --repo coghex/kanban --pattern 'kanban-*.tar.gz'
 shasum -a 256 kanban-*.tar.gz
 tar -xzf kanban-*.tar.gz
-cd kanban-<version>
-cabal build all
+cd kanban-*/
+cabal update
 cabal install exe:kanban --installdir "$PWD/bin" --overwrite-policy=always
 ./bin/kanban --version
 ```
+
+Those are the README's
+[install-from-a-release-archive](../README.md#install-from-a-release-archive)
+commands with one deliberate difference: the executable goes into the extracted
+directory rather than Cabal's user binary directory, so verifying a published
+release never replaces the `kanban` the operator is running. The README's
+`cabal.project.local` escape applies here too if the build stops on a warning
+under a toolchain other than the verified one.
 
 Confirm the release is public and not a draft or prerelease, that it carries
 exactly one asset, that the asset's digest matches the one the release run
