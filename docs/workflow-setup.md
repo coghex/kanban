@@ -20,7 +20,9 @@ same on both. What has not been done is a live Linux run: no end-to-end
 installation followed by an AI action on a Linux host is recorded anywhere, so
 the Linux paths here are documented rather than exercised.
 
-## Fresh clone
+## First setup
+
+### Fresh clone
 
 From a fresh clone, inspect the plan first — this is the default, and it
 writes nothing at all:
@@ -48,6 +50,26 @@ cabal run kanban -- --doctor
 Nothing above copies a personal skill, command, or script by hand, and
 nothing starts the PR drainer, the issue approval service, an approval daemon,
 or an agent session.
+
+### From an unpacked release archive
+
+A released install has no clone. Unpack the archive as
+[the README](../README.md#install-from-a-release-archive) describes and run the
+same setup commands from the extracted directory — nothing here asks that tree
+for Git metadata, which a `cabal sdist` archive deliberately does not carry.
+
+Two things differ, and neither is optional:
+
+- `cabal run kanban -- --doctor` is a checkout's spelling. From a released
+  install the board is the executable you installed, so read `kanban --doctor`
+  for it wherever this document says the longer form.
+- A project-scoped provider registration needs `--target /path/to/repo`. The
+  archive is not a repository, so there is nothing for the default to be — see
+  [Asset root and target](#asset-root-and-target). `--scope user` needs no
+  target and is unchanged.
+
+Upgrading a released install to a later archive is
+[its own procedure](#upgrading-to-a-new-release-archive) below.
 
 ## Components
 
@@ -181,8 +203,10 @@ cache under
 `CODEX_HOME` is unset), and its CLI has no plugin update command for a
 local-source marketplace — `codex plugin` offers `add`, `list`,
 `marketplace`, and `remove`, and `codex plugin marketplace upgrade` refreshes
-Git snapshots, which this marketplace is not. So a checkout that moves ahead
-of that copy leaves every Codex session running the bundle as it was when it
+Git snapshots, which this marketplace is not. So an asset root that moves
+ahead of that copy — a checkout that pulled a revision, or a newer release
+archive unpacked beside the one the bundle was added from — leaves every Codex
+session running the bundle as it was when it
 was last added: skills vendored since then simply do not exist there, and
 `$pr-review`, `$pr-rereview`, `$pr-revise`, and `$repair` execute whatever
 shared coordinator that copy holds, because the tracked skills resolve it by
@@ -191,12 +215,20 @@ searching that same cache.
 Setup therefore compares the installed bundle against the tracked one rather
 than stopping at "registered and enabled":
 
-- The tracked bundle is its **Git-tracked** content under
+- In a checkout, the tracked bundle is its **Git-tracked** content under
   `codex-plugin/plugins/kanban`. A file the checkout carries but Git does not
   track was never part of what the provider was asked to install, so it can
   never make an installation look stale — and `__pycache__/` is ignored on
   *both* sides, since running the packaged coordinator leaves one in the
   checkout and in the cache alike.
+- In an unpacked release archive there is no index to ask, and none is asked:
+  the archive was built *from* the tracked set, so the bundle it carries **is**
+  that set, read off the filesystem. Interpreter artefacts are dropped there by
+  shape — a `__pycache__` directory component, and a `.pyc` or `.pyo` suffix —
+  rather than by ignore rules the archive does not have, and dropped on both
+  sides for exactly the reason the checkout's rules drop them. So the two homes
+  answer the same comparison, and a released install is never the subject of a
+  Git query.
 - A divergence is reported as `repair`, naming the differing bundle-relative
   paths grouped as **missing**, **different**, and **extra**, and exits
   non-zero. Nothing outside Kanban's own installed bundle is read or
@@ -324,6 +356,126 @@ for the policy this implements.
 | `codex-plugin: failed`, after a refresh | Both provider commands succeeded, but the cached bundle still diverges | The reported paths say how. Check that `--repo` names the checkout the `kanban` marketplace is registered from, then re-run. |
 | `codex-plugin`/`claude-plugin: unavailable` | The provider CLI is absent, its plugin listing could not be read, or (Codex) its cached bundle is present but unreadable | Install or update the provider CLI. An unreadable listing is never treated as "nothing installed", and an unreadable cache is never treated as stale — neither guess can trigger a reinstall. |
 
+## Upgrading to a new release archive
+
+Every component here points into the asset root it was installed from:
+`issue-review` and `legacy-launcher` as symlinks, each provider bundle as a
+marketplace registered from that path, and Codex additionally as a *copy* it
+cached from it. A new release archive is not in use until each of those has
+been re-pointed at it.
+
+This is the component-level detail behind
+[the README's ordered procedure](../README.md#upgrade-to-a-new-release), which
+is what sequences these four against the two managed services and against
+removing the old archive last. Follow that order; this section says what each
+component does inside it.
+
+Run every command below from the **new** extracted directory, and keep the old
+one on disk until they have all converged. `--repo` needs no value: it defaults
+to the tree the script lives in, and it is validated by the files the selected
+components install *from*, never by Git metadata.
+
+### Read what you have first
+
+Setup installs only the components you select, and an upgrade must not add one
+you never had. Two listings and one directory tell you which you have:
+
+```console
+ls -l ~/Library/Application\ Support/kanban/issue-review/          # macOS
+ls -l "${XDG_DATA_HOME:-$HOME/.local/share}"/kanban/issue-review/  # Linux
+ls -l ~/work/approve-issues.py
+codex plugin marketplace list
+claude plugin marketplace list
+```
+
+Record each provider's scope as well as its presence: a Claude registration
+made under the default project scope is visible only from the repository it was
+declared in, so run its two commands there, and note that repository — it is
+the `--target` the rerun needs.
+
+### `issue-review`
+
+A rerun re-points the three links — `approve_issues.py`, `kanban_config.py`,
+and `kanban_models.py` — at the new archive and rewrites the record's
+`backend_path` to match, while the old archive is still on disk. Each link is
+recognized as Kanban's own by the identity marker the tracked file at the end
+of it carries; anything else is refused and left exactly as it was.
+
+```console
+python3 tools/setup_workflows.py --component issue-review
+python3 tools/setup_workflows.py --component issue-review --apply
+```
+
+Nothing about the record's own location changes, so a board that inherits no
+environment still finds the installation. Pass `--install-dir` again if the
+original install used one.
+
+### `legacy-launcher`
+
+The same, one link further on: `~/work/approve-issues.py` points at the
+installed backend rather than at the archive, so re-pointing `issue-review`
+above is what moves it. Re-run it in the same pass when you have one, since
+setup refuses the launcher unless the backend is present or selected beside it:
+
+```console
+python3 tools/setup_workflows.py --component issue-review --component legacy-launcher --apply
+```
+
+Nothing in Kanban resolves that path, so no readiness check reports it. `ls -l`
+is the only observation of it there is.
+
+### `codex-plugin`
+
+Codex has no project scope, so the rerun is always `--scope user`. Its
+marketplace has to be moved off the old archive first: setup refuses a
+marketplace named `kanban` registered from anything other than the asset root
+it was given, and an unpacked archive carries no marker that would let one
+release be recognized as the successor of another.
+
+```console
+codex plugin remove kanban@kanban
+codex plugin marketplace remove kanban
+python3 tools/setup_workflows.py --component codex-plugin --scope user --apply
+```
+
+Then run it once more without `--apply`. Codex serves the bundle from its own
+cached copy, so `unchanged` is what says the copy came from the new archive;
+a `repair` verdict means it did not, and `--apply` converges it with the
+provider's own remove-then-add.
+
+### `claude-plugin`
+
+Claude serves the bundle live from the marketplace directory, so there is no
+cached copy to fall behind — but the registration itself still names the old
+archive, and the same refusal applies to it. Remove the plugin first and the
+marketplace second, from the repository a project-scoped registration was
+declared in:
+
+```console
+claude plugin uninstall kanban@kanban
+claude plugin marketplace remove kanban
+python3 tools/setup_workflows.py --component claude-plugin --target /path/to/repo --apply
+```
+
+Keep the scope the registration already had. `--target` names the repository a
+project-scoped registration is declared in and has no default from an archive;
+a `--scope user` rerun needs no target at all.
+
+### Confirming the move
+
+```console
+kanban --doctor
+codex plugin marketplace list
+claude plugin marketplace list
+```
+
+`--doctor` reports readiness per AI action and nothing else — not the PR
+drainer, not the issue approval service, not the board, not the usage sidebar.
+What it cannot answer is *which* archive a ready component reads from, so pair
+it with the two marketplace listings and with `ls -l` over the install
+directory above: every path they name has to be inside the new extracted
+directory before the old one is removed.
+
 ## Removal
 
 Each component is removed with the provider's own command, or by deleting
@@ -339,6 +491,11 @@ rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}"/kanban/issue-review   # Linux
 rm ~/work/approve-issues.py                       # only if it is a symlink
 mv ~/work/approve-issues.py.pre-kanban-backup ~/work/approve-issues.py
 ```
+
+A project-scoped Claude registration is declared in one repository's own
+`.claude/settings.json`, so run the two `claude` commands from that repository.
+Run from anywhere else they report nothing to remove and leave the
+registration in place.
 
 Delete the backend's log directory the same way if you want it gone too:
 `~/Library/Logs/kanban/issue-review` on macOS,
@@ -375,7 +532,12 @@ divergence class, an absent cache, untracked and ignored checkout files
 counting as neither, the exact remove-then-add refresh and the convergence
 re-check afterwards, a refresh that did not converge, an unreadable or
 non-directory cache, and both refusal states keeping precedence over any
-repair.
+repair. Its `ArchiveAssetRootTests` group runs that same surface with an
+unpacked archive as the asset root and a separate checkout as the target:
+every component planned and applied from it, the project-scoped refusal when
+no target exists beside the target-free components running anyway, a
+marketplace left registered by a previous archive, and the bundle comparison
+answered without asking the archive a Git question.
 `test/Spec/Agent/Preflight.hs`'s `workflow preflight` group covers the probe
 classifications and the same fresh-machine states end to end, including
 that the doctor path only ever runs status-only probes and changes nothing.
