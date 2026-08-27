@@ -1290,6 +1290,49 @@ class ArchiveAssetRootTests(HermeticSetupTests):
         # And it did not silently become a user-scoped registration either.
         self.assertEqual(payload["scope"], "project")
 
+    def test_the_target_free_components_run_alone_under_the_default_scope(self):
+        # The other half of the case above, and the pair a release upgrade
+        # documents selecting on their own from the new archive. Neither
+        # declares a project-scoped registration, so neither consumes
+        # --target -- and the default scope must not refuse them on an archive
+        # that could never supply one. Without this, the refusal above would
+        # be free to widen to every component and still pass.
+        code, plan = self.run_setup(
+            "--component",
+            "issue-review",
+            "--component",
+            "legacy-launcher",
+            repo=self.archive,
+        )
+
+        self.assertEqual(code, 0, plan)
+        self.assertEqual(plan["scope"], "project")
+        self.assertIsNone(plan["target"])
+        for name in ("issue-review", "legacy-launcher"):
+            with self.subTest(component=name):
+                self.assertEqual(self.component(plan, name)["status"], "install", plan)
+
+        code, applied = self.run_setup(
+            "--component",
+            "issue-review",
+            "--component",
+            "legacy-launcher",
+            "--apply",
+            repo=self.archive,
+        )
+
+        self.assertEqual(code, 0, applied)
+        for name in install_issue_review.BACKEND_MODULES.values():
+            with self.subTest(module=name):
+                self.assertEqual(
+                    (self.install_dir / name).resolve(),
+                    (self.archive / "tools" / name).resolve(),
+                )
+        self.assertEqual(
+            self.legacy_path.resolve(),
+            (self.install_dir / "approve_issues.py").resolve(),
+        )
+
     def test_a_project_scoped_run_with_a_valid_target_installs(self):
         self.install_provider("claude")
 

@@ -132,21 +132,27 @@ in any order.
 
 The installer does not require `sudo`, and it never starts the service.
 
-Run it once per repository, from that repository's **main checkout** — not a
+Run it once per repository, naming that repository's **main checkout** — not a
 linked worktree. The installer refuses a checkout whose `.git` is a file rather
 than a directory, so a `--dry-run` issued from a worktree returns that refusal
 instead of a plan.
 
-Preview the changes:
+`--repo` names that checkout and `--asset-root` the tree the installed links
+point at. From a source checkout of the repository being reviewed both default
+to the tree this script lives in and neither needs naming; from an unpacked
+release archive the asset root still defaults to it and the target does not
+exist, so `--repo` is passed explicitly. Preview the changes:
 
 ```console
-python3 tools/install_issue_approval.py --dry-run --json
+python3 tools/install_issue_approval.py --dry-run --json                          # source checkout
+python3 tools/install_issue_approval.py --repo /path/to/project --dry-run --json  # release archive
 ```
 
-Install the stopped job:
+Install the stopped job, in whichever of the two forms the preview used:
 
 ```console
-python3 tools/install_issue_approval.py
+python3 tools/install_issue_approval.py                          # source checkout
+python3 tools/install_issue_approval.py --repo /path/to/project  # release archive
 ```
 
 The installer:
@@ -646,12 +652,24 @@ on its own. Re-run it:
 - after moving the repository checkout;
 - when Kanban reports the service as not installed for this repository, or its
   install record as unreadable;
-- after pulling a Kanban revision that changes any of the three linked modules,
-  or adds one the controller imports. The installed scripts are links and the
-  controller is executed out of the install directory, so it resolves its
-  imports there rather than in the checkout: a module the current installation
-  has no link for makes the controller fail at import until the installer
-  supplies it.
+- whenever the asset root moves ahead of the installation: after unpacking a
+  newer release archive, or after pulling a Kanban revision that changes any of
+  the three linked modules or adds one the controller imports. The installed
+  scripts are links and the controller is executed out of the install
+  directory, so it resolves its imports there rather than in the tree the links
+  point into: a module the current installation has no link for makes the
+  controller fail at import until the installer supplies it.
+
+A released install reruns it against the *new* archive and the *same* target —
+`python3 tools/install_issue_approval.py --repo /path/to/project`, run from the
+newly extracted directory. The job's identity, its `--config` selection, its
+queue barrier, its runtime state, its incidents, and its logs are unchanged by
+that; the links and the service definition are what get rewritten. The
+canonical `issue-review` backend this service resolves is a separate
+installation with its own upgrade step, so re-point it in the same pass — see
+[workflow setup](workflow-setup.md#upgrading-to-a-new-release-archive) — and
+[the README's ordered procedure](../README.md#upgrade-to-a-new-release) for
+where both sit among the other components.
 
 Re-running with a different `--install-dir` — or a different
 `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` — moves the job: the definition and the

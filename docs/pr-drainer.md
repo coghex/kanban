@@ -152,8 +152,10 @@ The installer:
   your environment;
 - loads the job without starting it.
 
-Run it once per repository, from that repository's own main checkout. Installing
-a second repository adds its entry beside the first; it never replaces it.
+Run it once per repository, naming that repository's own main checkout: as
+`--repo` from an unpacked release archive, or by default from a source checkout
+that is itself the repository to drain. Installing a second repository adds its
+entry beside the first; it never replaces it.
 
 Rerun the installer after moving the repository checkout. Rerun it as well if
 Kanban reports that the drainer is not installed for this repository or that its
@@ -162,14 +164,24 @@ in place, with no uninstall first and no change to the job's identity. A record
 written before the drainer gained a systemd backend names no backend at all; it
 is read as launchd, so an existing macOS install keeps working untouched.
 
-Rerun it once more after pulling a Kanban revision that adds a module the
-controller imports. The installed scripts are links, and the controller is
-executed out of the install directory, so it resolves its imports there rather
-than in the checkout the links point into: a module the current installation
-has no link for makes the controller fail at import until the installer
-supplies it. The service-manager backend `tools/service_manager.py`, added in
-issue #291, is the first such module; an installation made before it needs one
-rerun per repository, which changes nothing else about the job.
+Rerun it once more whenever the asset root moves ahead of the installation —
+after unpacking a newer release archive, or after pulling a Kanban revision that
+adds a module the controller imports. The installed scripts are links, and the
+controller is executed out of the install directory, so it resolves its imports
+there rather than in the tree the links point into: a module the current
+installation has no link for makes the controller fail at import until the
+installer supplies it. The service-manager backend `tools/service_manager.py`,
+added in issue #291, is the first such module; an installation made before it
+needs one rerun per repository, which changes nothing else about the job.
+
+A released install reruns it against the *new* archive and the *same* target:
+`python3 tools/install_drainer.py --repo /path/to/project`, run from the newly
+extracted directory. The job's identity, its per-repository configuration, its
+runtime state, its incidents, and its logs are all unchanged by that; the links
+and the service definition are what get rewritten. Stop this repository's
+drainer first — the installer refuses while it is live — and see
+[the README's ordered procedure](../README.md#upgrade-to-a-new-release) for
+where that sits among the other components.
 
 ### Migrating from the single machine-wide drainer
 
@@ -241,10 +253,12 @@ and does notify.
 
 #### What the run says about the code it is running
 
-The installed scripts are symlinks into the checkout you develop in, so a run
-executes whatever is on disk there. Each run opens by comparing those four
-sources against that checkout's local `origin/master` and, when they differ,
-writes one line naming each differing file and why:
+The installed scripts are symlinks into the asset root the installer was run
+from, so a run executes whatever is on disk there. That root is a development
+checkout in a source install and an unpacked release archive in a released one.
+Each run opens by comparing those five sources against that tree's local
+`origin/master` and, when they differ, writes one line naming each differing
+file and why:
 
 ```text
 [2026-08-12 07:08:57] PR drainer source advisory: executing sources differ from
@@ -1419,6 +1433,36 @@ definitions are stale as well as for what is written into them.
 
 
 The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Incidents are attributed to the canonical repository rather than to the checkout that raised them, so any clone of that repository can list, acknowledge, and clear them. Stopping the drainer intentionally clears that repository's crash incidents, and no other repository's — a stop ends the supervisor, which is exactly what a crash incident is about. It resolves nothing else: a conflict or cleanup incident stays open across the stop, still naming a debt that is still owed, and clears through its own path once that pull request is mergeable or closed or its last obligation succeeds. Starting the drainer is not gated on an open incident of any kind, and an incident already open when it starts is never mistaken for a startup failure.
+
+## Removing the drainer
+
+Removal is per repository, and it goes through the installed controller rather
+than the installer: `install_drainer.py` installs and repairs, and has no
+uninstall mode. Resolve that controller into `$CONTROL` the way
+[Manual status](#manual-status) below does, then:
+
+```console
+python3 "$CONTROL" --path /path/to/project --json stop
+python3 "$CONTROL" --path /path/to/project --json uninstall
+```
+
+The stop comes first because `uninstall` refuses while the drainer is running —
+a service manager asked to forget a live job would leave a drainer draining
+with nothing able to see or stop it. Pressing `d` in Kanban is the same stop.
+
+It removes exactly one repository's job: its service definition, the manager's
+hold on it, and its entry in the discovery record. Every other installed
+repository's job and the global `ntfy_url` are untouched, and so are the shared
+script links — they are left in place even when no job remains, and are yours
+to delete.
+
+**Runtime state, logs, and open incidents are deliberately left behind.** They
+are the record of what this drainer did, and an uninstall is not an
+acknowledgement. Remove them yourself if you want them gone —
+`<install-dir>/runtime/<slug>/` and `<log-root>/<slug>/`, both resolved in
+[Files and logs](#files-and-logs) — along with the queue state and lock files
+this drainer kept in the repository's own `.git` directory, which nothing
+outside that checkout reads.
 
 ## Manual status
 

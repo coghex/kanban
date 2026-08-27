@@ -15,6 +15,19 @@ created above it.
 
 ### Unreleased
 
+- The documentation carries an ordered release-to-release upgrade path. The
+  README's new upgrade section unpacks the new archive beside the old one,
+  installs the executable, inventories what is installed and which service jobs
+  are running, stops those jobs, moves a provider marketplace off the old
+  archive, re-runs each installed component's setup from the new one, verifies
+  every advertised component with the check that can actually observe it,
+  restarts only what was running, confirms nothing still resolves through the
+  old archive, and removes it last — with the reason each step sits where it
+  does and a statement of what is preserved and what is deliberately rewritten.
+  Every support-table row now has named install, upgrade, verification, and
+  removal guidance, including a removal path for the PR drainer and for the
+  executable itself.
+
 - The optional setup commands run from an unpacked release archive. None of
   them asks that tree for Git metadata, which a `cabal sdist` archive
   deliberately does not carry. The two that install a background service take
