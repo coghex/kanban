@@ -120,10 +120,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -384,6 +386,109 @@ def expanded_exclusions(tracked, entries=EXCLUDED_TRACKED_PATHS):
 
 def _run(args, **kwargs):
     return subprocess.run(args, text=True, capture_output=True, **kwargs)
+
+
+# ---- Executing the packaged setup paths -------------------------------------
+#
+# The archive carries every advertised setup command. Whether it *contains*
+# them is what the inventory checks above answer; whether they *run* there is a
+# different question, and only running them answers it. So the cases at the end
+# of this module drive the unpacked tree's own scripts as subprocesses, against
+# a temporary home and a temporary target checkout.
+#
+# Subprocesses rather than imports, deliberately. The archive's `tools/` carries
+# modules with the same names as this checkout's -- `kanban_config`,
+# `service_manager`, `drain_prs_service` -- so importing them into this process
+# would either collide in `sys.modules` with the ones already loaded or, worse,
+# silently answer with the checkout's copy while the test believed it was
+# reading the archive's. Everything is therefore steered through the
+# environment and `PATH`, which is also how a real recipient's shell reaches
+# them.
+
+# One scriptable stand-in, used for every faked executable. It records the
+# request -- arguments *and* working directory, because for a provider command
+# the directory is part of the request -- and answers from a table read out of
+# the environment. A table entry matches when every word it names appears
+# anywhere in the arguments, which is what lets one entry answer both
+# `plugin marketplace list --json` and a provider that spells the same query
+# differently; entries are tried in order, so a narrower one is listed first.
+_SHIM = r"""#!/usr/bin/env python3
+import json
+import os
+import sys
+
+binary = {binary!r}
+argv = sys.argv[1:]
+with open(os.environ["ARCHIVE_SETUP_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(
+        json.dumps({{"binary": binary, "args": argv, "cwd": os.getcwd()}}) + "\n"
+    )
+for entry in json.loads(os.environ["ARCHIVE_SETUP_RESPONSES"]):
+    if entry["binary"] != binary:
+        continue
+    match = entry["match"]
+    if all(word in argv for word in match):
+        sys.stdout.write(entry.get("stdout", ""))
+        sys.exit(entry.get("exit", 0))
+sys.exit({default_exit})
+"""
+
+# `git` is not faked. The target checkout is a real repository and the
+# installers really have to read it; what this wrapper adds is a record of
+# every invocation, so a case can assert which tree each one was about.
+_GIT_WRAPPER = r"""#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+
+argv = sys.argv[1:]
+with open(os.environ["ARCHIVE_SETUP_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(
+        json.dumps({"binary": "git", "args": argv, "cwd": os.getcwd()}) + "\n"
+    )
+sys.exit(subprocess.run([os.environ["ARCHIVE_SETUP_REAL_GIT"], *argv]).returncode)
+"""
+
+# What each faked executable answers. The provider tables describe a machine
+# with nothing installed; the service-manager tables describe a manager holding
+# no job of ours, which is the state a first install has to be able to see.
+_SHIM_RESPONSES = [
+    {"binary": "codex", "match": ["marketplace", "list"], "stdout": "[]"},
+    {"binary": "codex", "match": ["plugin", "list", "--json"], "stdout": "[]"},
+    {"binary": "claude", "match": ["marketplace", "list"], "stdout": "[]"},
+    {"binary": "claude", "match": ["plugin", "list", "--json"], "stdout": "[]"},
+    # launchd: no job of ours is loaded, and loading one succeeds.
+    {"binary": "launchctl", "match": ["print"], "exit": 1},
+    # systemd: the user manager is reachable, and knows no unit of ours.
+    {
+        "binary": "systemctl",
+        "match": ["show", "--property", "Version"],
+        "stdout": "254\n",
+    },
+]
+
+_ARTIFACT_NAMES = {"__pycache__"}
+_ARTIFACT_SUFFIXES = (".pyc", ".pyo")
+
+
+def _tree_snapshot(root):
+    """Every file under `root` with its exact content, and every symlink with
+    its exact target, minus what the interpreter writes for any Python program
+    it runs. A `.pyc` beside a module says nothing about whether the tool that
+    imported it wrote anything."""
+    snapshot = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if set(relative.parts) & _ARTIFACT_NAMES or path.name.endswith(
+            _ARTIFACT_SUFFIXES
+        ):
+            continue
+        if path.is_file() and not path.is_symlink():
+            snapshot[relative.as_posix()] = path.read_bytes()
+        elif path.is_symlink():
+            snapshot[relative.as_posix()] = os.readlink(path)
+    return snapshot
 
 
 def _prerequisite_gap():
@@ -829,6 +934,568 @@ class SourceDistributionTest(unittest.TestCase):
                     f"Installing the {component} component from an unpacked "
                     "release needs its tracked source bundle.",
                 )
+
+    # ---- Executing the packaged setup paths ------------------------------
+
+    def packaged_setup_workspace(self):
+        """A machine a release recipient could be: a temporary home, a
+        temporary target checkout, and a `PATH` holding only stand-ins.
+
+        Both service managers' executables are supplied rather than one,
+        because which of them this host is managed by is the code under test's
+        own question -- `service_manager._probe_service_manager` asks
+        `sys.platform` and `shutil.which` -- and a fixture that answered it
+        would be testing its own guess. Neither stand-in touches real launchd
+        or systemd state: they record what they were asked and answer from a
+        table.
+        """
+        workspace = tempfile.TemporaryDirectory(prefix="kanban-archive-setup-")
+        self.addCleanup(workspace.cleanup)
+        root = Path(workspace.name).resolve()
+        home = root / "home"
+        (home / "work").mkdir(parents=True)
+        binaries = root / "bin"
+        binaries.mkdir()
+        log = root / "commands.jsonl"
+
+        real_git = shutil.which("git")
+        self.assertIsNotNone(real_git, "the prerequisite check guarantees git")
+        for name, default_exit in (
+            ("codex", 0),
+            ("claude", 0),
+            ("launchctl", 0),
+            ("systemctl", 0),
+        ):
+            shim = binaries / name
+            shim.write_text(
+                _SHIM.format(binary=name, default_exit=default_exit),
+                encoding="utf-8",
+            )
+            os.chmod(shim, 0o755)
+        wrapper = binaries / "git"
+        wrapper.write_text(_GIT_WRAPPER, encoding="utf-8")
+        os.chmod(wrapper, 0o755)
+        (binaries / "python3").symlink_to(sys.executable)
+
+        target = root / "target"
+        target.mkdir()
+        gitconfig = root / "gitconfig"
+        gitconfig.write_text("", encoding="utf-8")
+        git_environment = {
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": str(gitconfig),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        for command in (
+            [real_git, "init", "-q", str(target)],
+            [
+                real_git,
+                "-C",
+                str(target),
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:acme/widgets.git",
+            ],
+        ):
+            proc = _run(command, env=git_environment)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        install_root = root / "installed"
+        environment = {
+            # The stand-ins first, then the system directories the real `git`
+            # and the `#!/usr/bin/env python3` shims resolve through.
+            "PATH": os.pathsep.join([str(binaries), "/usr/bin", "/bin"]),
+            "HOME": str(home),
+            "XDG_CONFIG_HOME": str(home / ".config"),
+            "XDG_DATA_HOME": str(home / ".local" / "share"),
+            "XDG_STATE_HOME": str(home / ".local" / "state"),
+            "XDG_RUNTIME_DIR": str(root / "runtime"),
+            "GIT_CONFIG_GLOBAL": str(gitconfig),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "ARCHIVE_SETUP_LOG": str(log),
+            "ARCHIVE_SETUP_RESPONSES": json.dumps(_SHIM_RESPONSES),
+            "ARCHIVE_SETUP_REAL_GIT": real_git,
+            "KANBAN_ISSUE_REVIEW_INSTALL_DIR": str(install_root / "issue-review"),
+            "LC_ALL": "C.UTF-8",
+            "LANG": "C.UTF-8",
+        }
+        return SimpleNamespace(
+            root=root,
+            home=home,
+            target=target,
+            install_root=install_root,
+            log=log,
+            environment=environment,
+        )
+
+    def run_packaged(self, workspace, script, *arguments, cwd=None):
+        """One packaged setup command, run the way `README.md` says to run it:
+        out of the extracted release directory."""
+        return _run(
+            [sys.executable, str(self.unpacked_root / "tools" / script), *arguments],
+            cwd=str(self.unpacked_root if cwd is None else cwd),
+            env=workspace.environment,
+            timeout=SDIST_TIMEOUT_SECONDS,
+        )
+
+    def recorded_commands(self, workspace, binary=None):
+        if not workspace.log.exists():
+            return []
+        entries = [
+            json.loads(line)
+            for line in workspace.log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        return [
+            entry for entry in entries if binary is None or entry["binary"] == binary
+        ]
+
+    def assert_no_git_question_about_the_archive(self, workspace):
+        """No `git` invocation was *about* the unpacked archive.
+
+        The tree a git call is about is its `-C` argument, or its working
+        directory when it has none -- which is how `git ls-files` and
+        `git check-ignore` are reached, so both spellings the asset root used
+        to be validated and inventoried through are covered. The commands
+        legitimately run from inside the archive all name the target with
+        `-C`, so running them there is not itself a hit.
+        """
+        offenders = []
+        for entry in self.recorded_commands(workspace, "git"):
+            subjects = [
+                entry["args"][index + 1]
+                for index, word in enumerate(entry["args"])
+                if word == "-C" and index + 1 < len(entry["args"])
+            ] or [entry["cwd"]]
+            for subject in subjects:
+                resolved = Path(subject).resolve()
+                if resolved == self.unpacked_root or self.unpacked_root in resolved.parents:
+                    offenders.append(entry)
+        self.assertEqual(
+            [],
+            offenders,
+            "A packaged setup path asked Git about the unpacked archive, which "
+            "carries no Git metadata. The asset root must be validated and "
+            "inventoried by its files.",
+        )
+
+    def test_workflow_setup_applies_every_component_from_the_archive(self):
+        workspace = self.packaged_setup_workspace()
+        install_dir = workspace.install_root / "issue-review"
+
+        plan = self.run_packaged(
+            workspace,
+            "setup_workflows.py",
+            "--all",
+            "--scope",
+            "user",
+            "--install-dir",
+            str(install_dir),
+            "--json",
+        )
+        self.assertEqual(plan.returncode, 0, plan.stdout + plan.stderr)
+        planned = json.loads(plan.stdout)
+        self.assertEqual(planned["repo"], str(self.unpacked_root))
+        for component in planned["components"]:
+            with self.subTest(component=component["component"]):
+                self.assertEqual(component["status"], "install", component)
+
+        applied = self.run_packaged(
+            workspace,
+            "setup_workflows.py",
+            "--all",
+            "--scope",
+            "user",
+            "--install-dir",
+            str(install_dir),
+            "--apply",
+            "--json",
+        )
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+
+        for name in ("approve_issues.py", "kanban_config.py", "kanban_models.py"):
+            with self.subTest(module=name):
+                link = install_dir / name
+                self.assertTrue(link.is_symlink(), link)
+                self.assertEqual(
+                    link.resolve(), self.unpacked_root / "tools" / name
+                )
+        self.assertEqual(
+            (workspace.home / "work" / "approve-issues.py").resolve(),
+            (install_dir / "approve_issues.py").resolve(),
+        )
+        marketplaces = [
+            entry
+            for entry in self.recorded_commands(workspace)
+            if entry["binary"] in ("codex", "claude")
+            and entry["args"][:3] == ["plugin", "marketplace", "add"]
+        ]
+        self.assertEqual(len(marketplaces), 2, marketplaces)
+        for entry in marketplaces:
+            with self.subTest(provider=entry["binary"]):
+                self.assertTrue(
+                    entry["args"][3].startswith(str(self.unpacked_root)), entry
+                )
+        self.assert_no_git_question_about_the_archive(workspace)
+
+    def test_a_second_codex_pass_converges_without_asking_git(self):
+        # The convergence pass a released install reaches on its second run:
+        # the bundle is registered and enabled, so setup compares the cached
+        # copy against the tracked one. In a checkout that inventory is
+        # `git ls-files` and `git check-ignore`; from an archive it has to be
+        # answered without either.
+        workspace = self.packaged_setup_workspace()
+        bundle = self.unpacked_root / "codex-plugin" / "plugins" / "kanban"
+        version = json.loads(
+            (bundle / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )["version"]
+        cache = (
+            workspace.home
+            / ".codex"
+            / "plugins"
+            / "cache"
+            / "kanban"
+            / "kanban"
+            / version
+        )
+        shutil.copytree(bundle, cache)
+        responses = _SHIM_RESPONSES + [
+            {
+                "binary": "codex",
+                "match": ["marketplace", "list"],
+                "stdout": json.dumps(
+                    [
+                        {
+                            "name": "kanban",
+                            "path": str(self.unpacked_root / "codex-plugin"),
+                        }
+                    ]
+                ),
+            },
+            {
+                "binary": "codex",
+                "match": ["plugin", "list", "--json"],
+                "stdout": json.dumps(
+                    [{"id": "kanban@kanban", "installed": True, "enabled": True}]
+                ),
+            },
+        ]
+        # Prepended, because the shim answers with the first matching entry.
+        workspace.environment["ARCHIVE_SETUP_RESPONSES"] = json.dumps(
+            responses[-2:] + responses[:-2]
+        )
+
+        proc = self.run_packaged(
+            workspace,
+            "setup_workflows.py",
+            "--component",
+            "codex-plugin",
+            "--scope",
+            "user",
+            "--json",
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        component = json.loads(proc.stdout)["components"][0]
+        self.assertEqual(component["component"], "codex-plugin")
+        self.assertEqual(component["status"], "unchanged", component)
+        self.assertEqual(component["commands"], [])
+        self.assert_no_git_question_about_the_archive(workspace)
+
+        # The negative control, because "converged" and "compared nothing"
+        # look identical from the outside: change one cached file and the same
+        # command must report the repair, still without asking Git anything
+        # about the archive.
+        stale = next(path for path in sorted(cache.rglob("*.md")) if path.is_file())
+        stale.write_text("# stale\n", encoding="utf-8")
+        repair = self.run_packaged(
+            workspace,
+            "setup_workflows.py",
+            "--component",
+            "codex-plugin",
+            "--scope",
+            "user",
+            "--json",
+        )
+        self.assertEqual(repair.returncode, 1, repair.stdout + repair.stderr)
+        component = json.loads(repair.stdout)["components"][0]
+        self.assertEqual(component["status"], "repair", component)
+        self.assertEqual(
+            component["divergence"]["different"],
+            [stale.relative_to(cache).as_posix()],
+        )
+        self.assert_no_git_question_about_the_archive(workspace)
+
+    def test_workflow_setup_refuses_project_scope_without_a_target(self):
+        workspace = self.packaged_setup_workspace()
+
+        proc = self.run_packaged(
+            workspace,
+            "setup_workflows.py",
+            "--component",
+            "claude-plugin",
+            "--json",
+        )
+
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout or proc.stderr)
+        component = payload["components"][0]
+        self.assertEqual(component["status"], "refused", component)
+        self.assertIn("--target", component["message"])
+        self.assertIsNone(payload["target"])
+        # Nothing was asked of the provider, and nothing was declared in the
+        # archive.
+        self.assertEqual(self.recorded_commands(workspace, "claude"), [])
+        self.assertFalse((self.unpacked_root / ".claude").exists())
+
+    def test_workflow_setup_registers_project_scope_in_an_explicit_target(self):
+        workspace = self.packaged_setup_workspace()
+
+        proc = self.run_packaged(
+            workspace,
+            "setup_workflows.py",
+            "--component",
+            "claude-plugin",
+            "--target",
+            str(workspace.target),
+            "--apply",
+            "--json",
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["repo"], str(self.unpacked_root))
+        self.assertEqual(payload["target"], str(workspace.target))
+        calls = self.recorded_commands(workspace, "claude")
+        self.assertNotEqual([], calls)
+        for entry in calls:
+            with self.subTest(call=entry["args"]):
+                self.assertEqual(entry["cwd"], str(workspace.target))
+        self.assert_no_git_question_about_the_archive(workspace)
+
+    def test_the_pr_drainer_refuses_the_archive_as_its_own_target(self):
+        workspace = self.packaged_setup_workspace()
+
+        proc = self.run_packaged(workspace, "install_drainer.py", "--json")
+
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        error = json.loads(proc.stderr)["error"]
+        self.assertIn("--repo", error)
+        self.assertIn(str(self.unpacked_root), error)
+        self.assertFalse((workspace.install_root / "pr-drainer").exists())
+        self.assertEqual(self.recorded_commands(workspace, "launchctl"), [])
+        self.assertEqual(self.recorded_commands(workspace, "systemctl"), [])
+
+    def test_the_pr_drainer_installs_against_an_explicit_target(self):
+        workspace = self.packaged_setup_workspace()
+        install_dir = workspace.install_root / "pr-drainer"
+
+        proc = self.run_packaged(
+            workspace,
+            "install_drainer.py",
+            "--repo",
+            str(workspace.target),
+            "--install-dir",
+            str(install_dir),
+            "--json",
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads(proc.stdout)
+        # The existing field keeps its existing meaning, and the second root
+        # is reported beside it.
+        self.assertEqual(result["repo"], str(workspace.target))
+        self.assertEqual(result["asset_root"], str(self.unpacked_root))
+        self.assertEqual(result["repository"], "acme/widgets")
+        for name in (
+            "drain_prs.py",
+            "drain_prs_service.py",
+            "kanban_config.py",
+            "kanban_models.py",
+            "service_manager.py",
+        ):
+            with self.subTest(module=name):
+                link = install_dir / name
+                self.assertTrue(link.is_symlink(), link)
+                self.assertEqual(
+                    link.resolve(), self.unpacked_root / "tools" / name
+                )
+        definition = self.installed_definition(result)
+        self.assertIn(str(workspace.target), definition)
+        self.assertNotIn(str(self.unpacked_root), definition)
+        self.assert_no_git_question_about_the_archive(workspace)
+
+    def test_a_newer_archive_takes_over_a_previous_archives_drainer_links(self):
+        # The upgrade shape: an older release is unpacked and installed from,
+        # then a newer one is installed from while the older is still on disk.
+        # Every link is recognized as Kanban's own by the marker its tracked
+        # file carries, so the newer archive takes them over rather than
+        # refusing.
+        workspace = self.packaged_setup_workspace()
+        install_dir = workspace.install_root / "pr-drainer"
+        previous = workspace.root / "previous-release"
+        shutil.copytree(self.unpacked_root, previous)
+
+        first = _run(
+            [
+                sys.executable,
+                str(previous / "tools" / "install_drainer.py"),
+                "--repo",
+                str(workspace.target),
+                "--install-dir",
+                str(install_dir),
+                "--json",
+            ],
+            cwd=str(previous),
+            env=workspace.environment,
+            timeout=SDIST_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(
+            (install_dir / "drain_prs.py").resolve(), previous / "tools" / "drain_prs.py"
+        )
+
+        second = self.run_packaged(
+            workspace,
+            "install_drainer.py",
+            "--repo",
+            str(workspace.target),
+            "--install-dir",
+            str(install_dir),
+            "--json",
+        )
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        for name in (
+            "drain_prs.py",
+            "drain_prs_service.py",
+            "kanban_config.py",
+            "kanban_models.py",
+            "service_manager.py",
+        ):
+            with self.subTest(module=name):
+                self.assertEqual(
+                    (install_dir / name).resolve(), self.unpacked_root / "tools" / name
+                )
+        # The previous archive is still there: recognition is what allowed the
+        # takeover, not the old target having gone away.
+        self.assertTrue((previous / "tools" / "drain_prs.py").is_file())
+
+    def test_the_issue_approval_service_installs_against_an_explicit_target(self):
+        workspace = self.packaged_setup_workspace()
+        backend_dir = workspace.install_root / "issue-review"
+        approval_dir = workspace.install_root / "issue-approval"
+        # This service resolves the canonical backend rather than installing
+        # one, so the archive's own issue-review installer supplies it first.
+        backend = self.run_packaged(
+            workspace,
+            "install_issue_review.py",
+            "--install-dir",
+            str(backend_dir),
+            "--json",
+        )
+        self.assertEqual(backend.returncode, 0, backend.stdout + backend.stderr)
+        self.assertEqual(json.loads(backend.stdout)["repo"], str(self.unpacked_root))
+
+        proc = self.run_packaged(
+            workspace,
+            "install_issue_approval.py",
+            "--repo",
+            str(workspace.target),
+            "--install-dir",
+            str(approval_dir),
+            "--json",
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads(proc.stdout)
+        self.assertEqual(result["repo"], str(workspace.target))
+        self.assertEqual(result["asset_root"], str(self.unpacked_root))
+        self.assertEqual(result["job"]["repository"], "acme/widgets")
+        for name in result["links"]:
+            with self.subTest(module=name):
+                link = Path(result["links"][name]["destination"])
+                self.assertTrue(link.is_symlink(), link)
+                self.assertEqual(
+                    link.resolve(), self.unpacked_root / "tools" / name
+                )
+        definition = self.installed_definition(result)
+        self.assertIn(str(workspace.target), definition)
+        self.assertNotIn(str(self.unpacked_root), definition)
+        self.assert_no_git_question_about_the_archive(workspace)
+
+    def test_the_issue_approval_service_refuses_the_archive_as_its_own_target(self):
+        workspace = self.packaged_setup_workspace()
+
+        proc = self.run_packaged(workspace, "install_issue_approval.py", "--json")
+
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        error = json.loads(proc.stderr)["error"]
+        self.assertIn("--repo", error)
+        self.assertIn(str(self.unpacked_root), error)
+        self.assertFalse((workspace.install_root / "issue-approval").exists())
+
+    def test_dry_runs_from_the_archive_change_nothing(self):
+        workspace = self.packaged_setup_workspace()
+        before_archive = _tree_snapshot(self.unpacked_root)
+        before_target = _tree_snapshot(workspace.target)
+        before_home = _tree_snapshot(workspace.home)
+
+        for script, arguments in (
+            (
+                "setup_workflows.py",
+                (
+                    "--all",
+                    "--scope",
+                    "user",
+                    "--install-dir",
+                    str(workspace.install_root / "issue-review"),
+                ),
+            ),
+            (
+                "install_issue_review.py",
+                ("--install-dir", str(workspace.install_root / "issue-review")),
+            ),
+            (
+                "install_drainer.py",
+                (
+                    "--repo",
+                    str(workspace.target),
+                    "--install-dir",
+                    str(workspace.install_root / "pr-drainer"),
+                ),
+            ),
+        ):
+            with self.subTest(script=script):
+                proc = self.run_packaged(
+                    workspace, script, *arguments, "--dry-run", "--json"
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+        self.assertEqual(_tree_snapshot(self.unpacked_root), before_archive)
+        self.assertEqual(_tree_snapshot(workspace.target), before_target)
+        self.assertEqual(_tree_snapshot(workspace.home), before_home)
+        self.assertFalse(workspace.install_root.exists())
+
+    def installed_definition(self, result):
+        """The service definition an install just wrote, whichever manager
+        this host selected.
+
+        The key is the *backend's* own name for it -- `plist` under launchd,
+        `unit` under systemd -- so the result is searched for either rather
+        than a path being guessed. Which one is present is the host's answer,
+        and asserting on it here would be this fixture deciding what the
+        selection under test should have decided.
+        """
+        for document in (result, result.get("controller", {}), result.get("job", {})):
+            if not isinstance(document, dict):
+                continue
+            for key in ("plist", "unit"):
+                recorded = document.get(key)
+                if recorded:
+                    return Path(recorded).read_text(encoding="utf-8")
+        raise AssertionError(f"no service definition recorded in {result}")
 
     # ---- The package boundary -------------------------------------------
     #

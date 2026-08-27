@@ -565,7 +565,7 @@ class InstallerFixture(unittest.TestCase):
         # hands `install` and what the installed job's definition therefore
         # records: a fixture that skipped it would compare a checkout spelled
         # one way against the same checkout spelled another.
-        return installer.repository_root(path)
+        return installer.target_repository_root(path)
 
     def job(self, repo=None, identity=None, config_path=None):
         return service.job_for_identity(
@@ -586,10 +586,15 @@ class InstallerFixture(unittest.TestCase):
     def install(self, repo=None, **kwargs):
         kwargs.setdefault("dry_run", False)
         kwargs.setdefault("config_path", None)
+        # The fixture checkout is both roots, exactly as a development install
+        # is: the tree the job runs against and the tree its modules are
+        # linked from are one directory unless a case says otherwise.
+        kwargs.setdefault("asset_root", repo or self.repo)
         return installer.install(repo or self.repo, self.install_dir, **kwargs)
 
     def uninstall(self, repo=None, **kwargs):
         kwargs.setdefault("dry_run", False)
+        kwargs.setdefault("asset_root", repo or self.repo)
         return installer.uninstall(repo or self.repo, self.install_dir, **kwargs)
 
     def write_status(self, job, *, state, repo, runner_pid):
@@ -1419,7 +1424,11 @@ class LinkRemovalRaceTests(InstallerFixture):
         starter = threading.Thread(target=start_gadgets)
         starter.start()
         try:
-            installer.install(self.repo, moved, config_path=None, dry_run=False)
+            installer.install(
+                self.repo,
+                moved,
+                asset_root=self.repo,
+                config_path=None, dry_run=False)
         finally:
             starter.join(timeout=60)
 
@@ -1442,7 +1451,10 @@ class RelocationTests(InstallerFixture):
         self.install()
         moved = self.root / "moved-installation"
         result = installer.install(
-            self.repo, moved, config_path=None, dry_run=False
+                self.repo,
+                moved,
+                asset_root=self.repo,
+                config_path=None, dry_run=False
         )
         self.assertEqual(
             Path(result["relocated_from"]).resolve(), self.install_dir.resolve()
@@ -1469,7 +1481,10 @@ class RelocationTests(InstallerFixture):
         self.install(gadgets)
         moved = self.root / "moved-installation"
         result = installer.install(
-            self.repo, moved, config_path=None, dry_run=False
+                self.repo,
+                moved,
+                asset_root=self.repo,
+                config_path=None, dry_run=False
         )
         self.assertEqual(
             [link["result"] for link in result["released_links"].values()],
@@ -1506,7 +1521,10 @@ class RelocationTests(InstallerFixture):
             try:
                 ready.wait(timeout=30)
                 installer.install(
-                    self.repo, directory, config_path=None, dry_run=False
+                self.repo,
+                directory,
+                asset_root=self.repo,
+                config_path=None, dry_run=False
                 )
             except BaseException as error:
                 outcomes[directory] = error
@@ -1575,7 +1593,11 @@ class RelocationTests(InstallerFixture):
     def test_the_relocation_plan_is_what_the_relocation_performs(self):
         self.install()
         moved = self.root / "moved-installation"
-        plan = installer.install(self.repo, moved, config_path=None, dry_run=True)
+        plan = installer.install(
+                self.repo,
+                moved,
+                asset_root=self.repo,
+                config_path=None, dry_run=True)
         self.assertEqual(
             Path(plan["relocated_from"]).resolve(), self.install_dir.resolve()
         )
@@ -1587,7 +1609,11 @@ class RelocationTests(InstallerFixture):
         for name in installer.LINKED_MODULES:
             self.assertTrue((self.install_dir / name).is_symlink())
 
-        performed = installer.install(self.repo, moved, config_path=None, dry_run=False)
+        performed = installer.install(
+                self.repo,
+                moved,
+                asset_root=self.repo,
+                config_path=None, dry_run=False)
         self.assertEqual(plan["released_links"], performed["released_links"])
 
 
@@ -2190,7 +2216,11 @@ class UninstallTests(InstallerFixture):
         gadgets = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
         elsewhere = self.root / "elsewhere"
         self.install()
-        installer.install(gadgets, elsewhere, config_path=None, dry_run=False)
+        installer.install(
+                gadgets,
+                elsewhere,
+                asset_root=gadgets,
+                config_path=None, dry_run=False)
 
         result = self.uninstall()
         self.assertEqual(result["dependent_repositories"], [])
@@ -2229,7 +2259,11 @@ class UninstallTests(InstallerFixture):
         elsewhere = self.root / "elsewhere"
         self.install()
         with self.assertRaises(installer.InstallError) as raised:
-            installer.uninstall(self.repo, elsewhere, dry_run=False)
+            installer.uninstall(
+                self.repo,
+                elsewhere,
+                asset_root=self.repo,
+                dry_run=False)
         self.assertIn(str(self.install_dir), str(raised.exception))
         self.assertIn(str(elsewhere), str(raised.exception))
         # Nothing was removed anywhere.
@@ -2241,17 +2275,28 @@ class UninstallTests(InstallerFixture):
     def test_the_wrong_directory_is_refused_by_the_dry_run_too(self):
         self.install()
         with self.assertRaises(installer.InstallError):
-            installer.uninstall(self.repo, self.root / "elsewhere", dry_run=True)
+            installer.uninstall(
+                self.repo,
+                self.root / "elsewhere",
+                asset_root=self.repo,
+                dry_run=True)
 
     def test_uninstalling_with_no_directory_finds_the_recorded_one(self):
         # Which is why the refusal above costs nothing: the default resolves
         # the installation the job is actually in.
         moved = self.root / "moved-installation"
         self.install()
-        installer.install(self.repo, moved, config_path=None, dry_run=False)
+        installer.install(
+                self.repo,
+                moved,
+                asset_root=self.repo,
+                config_path=None, dry_run=False)
         self.assertEqual(installer.selected_install_dir(self.repo, None), moved)
         result = installer.uninstall(
-            self.repo, installer.selected_install_dir(self.repo, None), dry_run=False
+            self.repo,
+            installer.selected_install_dir(self.repo, None),
+            asset_root=self.repo,
+            dry_run=False,
         )
         self.assertTrue(result["uninstalled"])
         for name in installer.LINKED_MODULES:
@@ -2370,7 +2415,10 @@ class HostRefusalTests(InstallerFixture):
         with self.unmanaged_host():
             with self.assertRaises(installer.InstallError) as raised:
                 installer.install(
-                    self.repo, self.install_dir, config_path=None, dry_run=False
+                self.repo,
+                self.install_dir,
+                asset_root=self.repo,
+                config_path=None, dry_run=False
                 )
         self.assertIn("No supported service manager found", str(raised.exception))
         self.assertFalse(self.install_dir.exists())
@@ -2380,7 +2428,11 @@ class HostRefusalTests(InstallerFixture):
     def test_an_unsupported_host_refuses_an_uninstall_too(self):
         with self.unmanaged_host():
             with self.assertRaises(installer.InstallError):
-                installer.uninstall(self.repo, self.install_dir, dry_run=False)
+                installer.uninstall(
+                self.repo,
+                self.install_dir,
+                asset_root=self.repo,
+                dry_run=False)
 
     def test_a_host_that_cannot_supervise_a_process_group_is_refused_too(self):
         # The other half of requirement 14, and this service's own: a host with
@@ -2748,11 +2800,114 @@ class IdentityTests(InstallerFixture):
         self.assertIn("install_issue_approval.py", str(raised.exception))
         self.assertTrue(target.is_file())
 
-    def test_a_checkout_missing_a_linked_module_is_not_installable(self):
+    def test_an_asset_root_missing_a_linked_module_is_not_installable(self):
         (self.repo / "tools" / "service_manager.py").unlink()
         with self.assertRaises(installer.InstallError) as raised:
-            installer.repository_root(self.repo)
+            installer.asset_root(self.repo)
         self.assertIn("service_manager.py", str(raised.exception))
+
+
+class ArchiveAssetRootTests(InstallerFixture):
+    """Installing from an unpacked release archive against a real checkout.
+
+    The archive supplies the modules; the checkout is the repository whose
+    issues the service reviews. Nothing asks the archive a Git question,
+    because there is nothing there to answer one.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.archive = self.unpacked_archive("kanban-1.1.0.0")
+
+    def unpacked_archive(self, name):
+        """Real copies of the linked modules, and no `.git` anywhere.
+
+        Copies for the same reason `checkout` uses them: a link is recognized
+        as Kanban's own by the marker the tracked file carries, so a stub
+        would prove nothing about the recognition this depends on.
+        """
+        archive = self.root / name
+        tools = archive / "tools"
+        tools.mkdir(parents=True)
+        for module in installer.LINKED_MODULES:
+            shutil.copy(TOOLS_DIR / module, tools / module)
+        self.assertFalse(list(archive.rglob(".git")), archive)
+        return archive.resolve()
+
+    def test_links_resolve_into_the_archive_and_the_job_names_the_checkout(self):
+        result = self.install(asset_root=self.archive)
+
+        self.assertTrue(result["installed"])
+        self.assertEqual(result["repo"], str(self.repo))
+        self.assertEqual(result["asset_root"], str(self.archive))
+        self.assertEqual(result["job"]["repository"], self.identity)
+        for module in installer.LINKED_MODULES:
+            with self.subTest(module=module):
+                link = self.install_dir / module
+                self.assertTrue(link.is_symlink())
+                self.assertEqual(
+                    link.resolve(), (self.archive / "tools" / module).resolve()
+                )
+
+    def test_a_newer_archive_takes_over_the_previous_archives_links(self):
+        previous = self.unpacked_archive("kanban-1.0.0.0")
+        self.install(asset_root=previous)
+
+        self.install(asset_root=self.archive)
+
+        for module in installer.LINKED_MODULES:
+            with self.subTest(module=module):
+                self.assertEqual(
+                    (self.install_dir / module).resolve(),
+                    (self.archive / "tools" / module).resolve(),
+                )
+        self.assertTrue((previous / "tools" / "service_manager.py").is_file())
+
+    def test_a_dry_run_from_the_archive_writes_nothing(self):
+        result = self.install(asset_root=self.archive, dry_run=True)
+
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["asset_root"], str(self.archive))
+        self.assertEqual(result["repo"], str(self.repo))
+        self.assertFalse(self.install_dir.exists())
+
+    def test_the_default_repo_is_refused_when_it_is_an_archive(self):
+        with mock.patch.object(
+            installer, "default_asset_root", return_value=self.archive
+        ):
+            with self.assertRaises(installer.InstallError) as raised:
+                installer.selected_target(None)
+
+        message = str(raised.exception)
+        self.assertIn("--repo", message)
+        self.assertIn(str(self.archive), message)
+        self.assertFalse(self.install_dir.exists())
+
+    def test_a_checkout_default_is_unchanged(self):
+        with mock.patch.object(
+            installer, "default_asset_root", return_value=self.repo
+        ):
+            self.assertEqual(installer.selected_target(None), self.repo.resolve())
+
+    def test_an_asset_root_is_not_required_to_be_a_checkout(self):
+        self.assertEqual(installer.asset_root(self.archive), self.archive)
+
+    def test_the_controller_parity_check_reads_the_archive(self):
+        # The link points at the archive's controller, so that is the copy
+        # this installer's own has to match. A target repository carrying an
+        # unrelated file of that name proves nothing either way.
+        (self.repo / "tools" / service.CONTROLLER_NAME).write_text(
+            "# not the controller\n", encoding="utf-8"
+        )
+        result = self.install(asset_root=self.archive)
+        self.assertTrue(result["installed"])
+
+        (self.archive / "tools" / service.CONTROLLER_NAME).write_text(
+            "# a different controller\n", encoding="utf-8"
+        )
+        with self.assertRaises(installer.InstallError) as raised:
+            self.install(asset_root=self.archive)
+        self.assertIn(service.CONTROLLER_NAME, str(raised.exception))
 
 
 if __name__ == "__main__":

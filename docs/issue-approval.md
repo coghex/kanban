@@ -187,11 +187,18 @@ The installer:
 Installing a second repository adds its entry beside the first; it never
 replaces it.
 
+Re-running from a *newer* release archive re-points the shared links at it,
+including while the older archive is still on disk: each link is recognized as
+Kanban's own by the identity marker the tracked file at the end of it carries.
+A link to anything else is left untouched and reported, and so is an ordinary
+file in the way.
+
 ### Options
 
 | Option | What it does |
 | --- | --- |
-| `--repo PATH` | The repository checkout to review issues for. Defaults to the checkout this script lives in. |
+| `--repo PATH` | The target: the main checkout to review issues for, whose remote names the job. Defaults to the tree this script lives in — which is a checkout in a source install, and an unpacked release archive in a released one. An archive is not a repository, so that default is refused there by name and the archive form passes this explicitly. |
+| `--asset-root PATH` | The tree the shared script links point at. Validated by the modules it has to supply, never by Git metadata, so an unpacked release archive works exactly as a checkout does. Defaults to the tree this script lives in; nothing is ever installed into it. |
 | `--install-dir DIR` | Where the shared script links go — see the precedence below. It moves the links and nothing else: not the discovery record, not the runtime tree, not the logs. |
 | `--config PATH` | A `config.toml` persisted against this repository and carried into the job it installs, so a start from an empty environment still runs with it. Also read from `KANBAN_ISSUE_APPROVAL_CONFIG_PATH`. |
 | `--uninstall` | Remove this repository's job instead of installing one. |

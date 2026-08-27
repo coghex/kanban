@@ -18,6 +18,12 @@ adds an entry beside the first rather than replacing it, and uninstalling one
 removes that entry and that job alone: the shared links go only when no
 installed job is left to run from them.
 
+--repo names the target: the repository this service approves issues for, whose
+remote names the job. --asset-root names the tree Kanban's own tracked modules
+are linked from, and is never a target. They are one tree in a development
+install and two when the modules come from the unpacked release archive, which
+carries no Git metadata and is therefore never asked for any.
+
 The canonical issue-review backend is *not* installed here and never linked
 here. It is one global installation shared by every ordinary review workflow,
 so this installer only resolves it -- through the record
@@ -89,25 +95,62 @@ def run(
     return proc
 
 
-def repository_root(requested: Path) -> Path:
+def default_asset_root() -> Path:
+    """The tree this script itself was invoked out of.
+
+    The default for --asset-root, and the candidate --repo falls back to. One
+    function rather than the same expression in two places, and resolved per
+    call rather than frozen at import so a test can answer it for a tree that
+    is not this checkout.
+    """
+    return Path(__file__).resolve().parent.parent
+
+
+def target_repository_root(requested: Path) -> Path:
+    """The main checkout of the repository this job approves issues for.
+
+    The target, never the asset source. Its remote is what names the job and
+    every runtime path beside it, so it has to be a real repository with real
+    Git metadata. What supplies the modules linked beside the controller is
+    `asset_root` below, and since #542 the two may be different trees.
+    """
     path = requested.expanduser().resolve()
-    proc = run(["git", "-C", str(path), "rev-parse", "--show-toplevel"])
+    proc = run(["git", "-C", str(path), "rev-parse", "--show-toplevel"], check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise InstallError(
+            f"{path} is not a Git repository checkout, so it cannot be the "
+            f"repository an issue approval service runs for: {detail}"
+        )
     root = Path(proc.stdout.strip()).resolve()
     if not (root / ".git").is_dir():
         raise InstallError(
             f"Install from the repository's main checkout, not a linked worktree: {root}"
         )
+    return root
+
+
+def asset_root(requested: Path) -> Path:
+    """The tree the installed script links point into.
+
+    Validated by the files it has to supply, never by Git metadata: the
+    supported sources are a development checkout and the unpacked `cabal
+    sdist` release archive, and only one of those has a `.git` directory.
+    Requiring one would refuse the release exactly where `README.md`
+    documents this command as runnable.
+    """
+    path = requested.expanduser().resolve()
     missing = [
-        str(root / "tools" / name)
+        str(path / "tools" / name)
         for name in LINKED_MODULES
-        if not (root / "tools" / name).is_file()
+        if not (path / "tools" / name).is_file()
     ]
     if missing:
         raise InstallError(
-            "Repository does not contain the required approval service files: "
+            "Asset root does not contain the required approval service files: "
             + ", ".join(missing)
         )
-    return root
+    return path
 
 
 def service_backend() -> service_manager.ServiceManagerBackend:
@@ -386,10 +429,15 @@ def remove_symlink(destination: Path, name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def link_sources(repo: Path, install_dir: Path) -> dict[str, tuple[Path, Path]]:
-    """Each managed link, as (source, destination), keyed by module name."""
+def link_sources(assets: Path, install_dir: Path) -> dict[str, tuple[Path, Path]]:
+    """Each managed link, as (source, destination), keyed by module name.
+
+    Taken from the asset root rather than from the target repository: what a
+    link points at is Kanban's own tracked module, and the repository this
+    service runs for supplies none of them.
+    """
     return {
-        name: (repo / "tools" / name, install_dir / name) for name in LINKED_MODULES
+        name: (assets / "tools" / name, install_dir / name) for name in LINKED_MODULES
     }
 
 
@@ -427,19 +475,23 @@ def dependent_repositories(install_dir: Path, *, excluding: str | None = None) -
     return sorted(dependants)
 
 
-def require_matching_controller(repo: Path) -> None:
+def require_matching_controller(assets: Path) -> None:
     """Refuse to plan a job with one copy of the controller and install another.
 
     This installer resolves the job -- its identity, its label, its definition,
     its record entry -- through the controller module it imported, while the
-    link it installs points at the *worked* checkout's copy, which is what a
-    started job actually runs. Those are one file whenever the installer is run
-    from the checkout it is installing, which is what `--repo` defaults to.
-    When they are two files that differ, the definition would have been written
-    by code that will never run it, so the install is refused rather than made.
+    link it installs points at the *asset root's* copy, which is what a started
+    job actually runs. Those are one file whenever the installer is run out of
+    the tree it links from, which is what `--asset-root` defaults to. When they
+    are two files that differ, the definition would have been written by code
+    that will never run it, so the install is refused rather than made.
+
+    Asked of the asset root, not of the target repository: the target supplies
+    no controller at all, and a repository that merely happens to carry a file
+    of that name is nothing this installer would ever link.
     """
     ours = Path(approve_issues_service.__file__).resolve()
-    theirs = (repo / "tools" / approve_issues_service.CONTROLLER_NAME).resolve()
+    theirs = (assets / "tools" / approve_issues_service.CONTROLLER_NAME).resolve()
     if ours == theirs:
         return
     try:
@@ -451,7 +503,7 @@ def require_matching_controller(repo: Path) -> None:
     raise InstallError(
         f"{theirs} differs from the controller this installer planned the job with "
         f"({ours}), so the definition would be written by one copy and run by the "
-        f"other. Run `python3 tools/install_issue_approval.py` from {repo} instead."
+        f"other. Run `python3 tools/install_issue_approval.py` from {assets} instead."
     )
 
 
@@ -467,7 +519,7 @@ def installation_lock(install_dir: Path) -> Any:
 
 
 def plan_released_links(
-    repo: Path, install_dir: Path, identity: str
+    assets: Path, install_dir: Path, identity: str
 ) -> dict[str, dict[str, str]]:
     """What `release_links` would do to the directory this repository is
     leaving, without writing anything.
@@ -479,19 +531,19 @@ def plan_released_links(
     if dependent_repositories(install_dir, excluding=identity):
         return {
             name: {"destination": str(destination), "result": "kept"}
-            for name, (_source, destination) in link_sources(repo, install_dir).items()
+            for name, (_source, destination) in link_sources(assets, install_dir).items()
         }
     return {
         name: {
             "destination": str(destination),
             "result": plan_link_removal(destination, name),
         }
-        for name, (_source, destination) in link_sources(repo, install_dir).items()
+        for name, (_source, destination) in link_sources(assets, install_dir).items()
     }
 
 
 def release_links(
-    repo: Path, install_dir: Path, identity: str
+    assets: Path, install_dir: Path, identity: str
 ) -> dict[str, dict[str, str]]:
     """Take back the links of an installation this repository has left.
 
@@ -508,13 +560,13 @@ def release_links(
         # among these dependants by having been reinstalled here since — which
         # makes it a dependant like any other rather than the one to discount.
         if dependent_repositories(install_dir):
-            return plan_released_links(repo, install_dir, identity)
+            return plan_released_links(assets, install_dir, identity)
         return {
             name: {
                 "destination": str(destination),
                 "result": remove_symlink(destination, name),
             }
-            for name, (_source, destination) in link_sources(repo, install_dir).items()
+            for name, (_source, destination) in link_sources(assets, install_dir).items()
         }
 
 
@@ -561,10 +613,18 @@ def install(
     repo: Path,
     install_dir: Path,
     *,
+    asset_root: Path,
     config_path: str | None = None,
     dry_run: bool,
 ) -> dict[str, Any]:
     """Install one repository's stopped approval job.
+
+    `repo` is the target: the checkout this service approves issues for, whose
+    remote names the job. `asset_root` is where Kanban's own tracked modules
+    are linked from. They are one tree whenever this installer is run from the
+    checkout it is installing for, which is what the defaults produce; they
+    differ when the modules come from an unpacked release archive, which is
+    not a repository anything can be installed against.
 
     Every refusal happens before the first write, in the order of what it
     protects: the host, because an installation that could never be completed
@@ -586,7 +646,7 @@ def install(
         str(Path(config_path).expanduser().resolve()) if config_path else None
     )
     job = repository_job(repo, resolved_config_path)
-    require_matching_controller(repo)
+    require_matching_controller(asset_root)
     canonical = canonical_backend(job)
     # A snapshot, and used for nothing but the plan below. What the install
     # actually acts on is the location the record write itself replaced, which
@@ -594,7 +654,7 @@ def install(
     snapshot = approve_issues_service.installed_install_dir(job.identity)
     moving = snapshot is not None and not same_directory(snapshot, install_dir)
     plan = controller_operation("install_plan", job, install_dir)
-    sources = link_sources(repo, install_dir)
+    sources = link_sources(asset_root, install_dir)
     resolved_sources = {
         name: (source.resolve(strict=True), destination)
         for name, (source, destination) in sources.items()
@@ -614,6 +674,7 @@ def install(
         )
     document = {
         "repo": str(repo),
+        "asset_root": str(asset_root),
         "install_dir": str(install_dir),
         "backend_path": str(canonical),
         "service_manager": backend.backend_name(),
@@ -628,7 +689,9 @@ def install(
         "job": plan,
         "relocated_from": str(snapshot) if moving else None,
         "released_links": (
-            plan_released_links(repo, Path(snapshot), job.identity) if moving else {}
+            plan_released_links(asset_root, Path(snapshot), job.identity)
+            if moving
+            else {}
         ),
     }
     if dry_run:
@@ -661,13 +724,17 @@ def install(
         # record already names the new directory, so this repository is no
         # longer among the old one's dependants -- and if it is again, it was
         # reinstalled there and its links stay.
-        document["released_links"] = release_links(repo, Path(previous), job.identity)
+        document["released_links"] = release_links(
+            asset_root, Path(previous), job.identity
+        )
     else:
         document["released_links"] = {}
     return {**document, "installed": True, "dry_run": False}
 
 
-def uninstall(repo: Path, install_dir: Path, *, dry_run: bool) -> dict[str, Any]:
+def uninstall(
+    repo: Path, install_dir: Path, *, asset_root: Path, dry_run: bool
+) -> dict[str, Any]:
     """Remove one repository's job, and the shared links if nothing is left.
 
     The job, its definition, and its record entry are this repository's alone.
@@ -683,7 +750,7 @@ def uninstall(repo: Path, install_dir: Path, *, dry_run: bool) -> dict[str, Any]
     # happened: this repository is still recorded, and still running from these
     # links, until it is removed below.
     dependants = dependent_repositories(install_dir, excluding=job.identity)
-    sources = link_sources(repo, install_dir)
+    sources = link_sources(asset_root, install_dir)
     if dependants:
         link_plans = {name: "kept" for name in sources}
     else:
@@ -693,6 +760,7 @@ def uninstall(repo: Path, install_dir: Path, *, dry_run: bool) -> dict[str, Any]
         }
     document = {
         "repo": str(repo),
+        "asset_root": str(asset_root),
         "install_dir": str(install_dir),
         "service_manager": backend.backend_name(),
         "dependent_repositories": dependants,
@@ -743,8 +811,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--repo",
-        default=str(Path(__file__).resolve().parent.parent),
-        help="Repository checkout to review issues for (default: this checkout).",
+        default=None,
+        help=(
+            "Main checkout of the repository to review issues for (default: the "
+            "tree containing this script, when that tree is itself a checkout)."
+        ),
+    )
+    parser.add_argument(
+        "--asset-root",
+        default=None,
+        help=(
+            "Kanban checkout or unpacked release archive supplying the tracked "
+            "modules the installed links point at (default: the tree containing "
+            "this script). Never a target: nothing is installed into it."
+        ),
     )
     parser.add_argument(
         "--install-dir",
@@ -769,6 +849,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--json", action="store_true", help="Print JSON output.")
     return parser.parse_args(argv)
+
+
+def selected_target(requested: str | None) -> Path:
+    """The repository this run installs an approval service for, or an
+    InstallError saying how to name it.
+
+    An explicit --repo is validated as any target is. The default is the tree
+    holding this script, which is a checkout in a development install and an
+    unpacked release archive in a released one -- and an archive is not a
+    repository, so it is refused here by name rather than reported as a
+    puzzling Git failure. Nothing has been written at that point: this runs
+    before `install` is even entered.
+    """
+    if requested is not None:
+        return target_repository_root(Path(requested))
+    default = default_asset_root()
+    if not (default / ".git").is_dir():
+        raise InstallError(
+            f"{default} is not a repository checkout, so it cannot be the "
+            "repository this approval service runs for -- an unpacked release "
+            "archive carries no Git metadata. Name the checkout with --repo "
+            "PATH; its tracked modules still come from --asset-root, which "
+            "already defaults to this tree."
+        )
+    return target_repository_root(default)
 
 
 def selected_install_dir(repo: Path, requested: str | None) -> Path:
@@ -806,6 +911,7 @@ def print_plan(result: dict[str, Any], *, uninstalling: bool) -> None:
     else:
         verb = "Would install" if dry_run else "Installed"
         print(f"{verb} the issue approval job for {job['repository']} at {result['repo']}")
+        print(f"Assets: {result['asset_root']}")
         print(f"Canonical backend: {result['backend_path']}")
     print(f"Service: {job['label']} ({result['service_manager']})")
     for _name, link in sorted(result["links"].items()):
@@ -825,13 +931,22 @@ def print_plan(result: dict[str, Any], *, uninstalling: bool) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        repo = repository_root(Path(args.repo))
+        repo = selected_target(args.repo)
+        assets = asset_root(
+            default_asset_root() if args.asset_root is None else Path(args.asset_root)
+        )
         install_dir = selected_install_dir(repo, args.install_dir)
         if args.uninstall:
-            result = uninstall(repo, install_dir, dry_run=args.dry_run)
+            result = uninstall(
+                repo, install_dir, asset_root=assets, dry_run=args.dry_run
+            )
         else:
             result = install(
-                repo, install_dir, config_path=args.config, dry_run=args.dry_run
+                repo,
+                install_dir,
+                asset_root=assets,
+                config_path=args.config,
+                dry_run=args.dry_run,
             )
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))

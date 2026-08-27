@@ -9,6 +9,12 @@ on macOS, a systemd user unit on Linux, whichever
 --config path is persisted against that repository and forwarded to its
 installed drain_prs.py runs.
 
+--repo names the target: the repository this job drains, whose remote names it.
+--asset-root names the tree Kanban's own tracked modules are linked from, and is
+never a target. They are one tree in a development install and two when the
+modules come from the unpacked release archive, which carries no Git metadata
+and is therefore never asked for any.
+
 One job per canonical GitHub repository. The script links are shared —
 one installed copy of the drainer, the controller, the configuration parser,
 and the service-manager backend serves every repository — while the job, its
@@ -28,6 +34,7 @@ import contextlib
 import errno
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -70,27 +77,66 @@ def run(
     return proc
 
 
-def repository_root(requested: Path) -> Path:
+def default_asset_root() -> Path:
+    """The tree this script itself was invoked out of.
+
+    The default for --asset-root, and the candidate --repo falls back to. One
+    function rather than the same expression in two places, and resolved per
+    call rather than frozen at import so a test can answer it for a tree that
+    is not this checkout.
+    """
+    return Path(__file__).resolve().parent.parent
+
+
+def target_repository_root(requested: Path) -> Path:
+    """The main checkout of the repository this job will drain.
+
+    The target, never the asset source. It is what names the job, what the
+    controller is handed as `--path`, and what the drainer actually works in,
+    so it has to be a real repository with real Git metadata. What supplies
+    the modules installed beside the controller is `asset_root` below, and
+    since #542 the two may be different trees.
+    """
     path = requested.expanduser().resolve()
-    proc = run(["git", "-C", str(path), "rev-parse", "--show-toplevel"])
+    proc = run(["git", "-C", str(path), "rev-parse", "--show-toplevel"], check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise InstallError(
+            f"{path} is not a Git repository checkout, so it cannot be the "
+            f"repository a PR drainer job drains: {detail}"
+        )
     root = Path(proc.stdout.strip()).resolve()
     if not (root / ".git").is_dir():
         raise InstallError(
             f"Install from the repository's main checkout, not a linked worktree: {root}"
         )
-    # The same names `_MANAGED_LINK_NAMES` below enumerates, because they are
-    # the same set by construction: this installer links exactly the modules
-    # the installed controller resolves from beside itself, so a checkout
-    # missing one could only ever produce a link to nothing. Derived rather
-    # than restated so the two cannot drift apart.
-    required = [root / "tools" / name for name in _MANAGED_LINK_NAMES]
+    return root
+
+
+def asset_root(requested: Path) -> Path:
+    """The tree the installed script links point into.
+
+    Validated by the files it has to supply, never by Git metadata: the
+    supported sources are a development checkout and the unpacked `cabal
+    sdist` release archive, and only one of those has a `.git` directory.
+    Requiring one would refuse the release exactly where `README.md`
+    documents this command as runnable.
+
+    The required names are `_MANAGED_LINK_NAMES` below, because they are the
+    same set by construction: this installer links exactly the modules the
+    installed controller resolves from beside itself, so a tree missing one
+    could only ever produce a link to nothing. Derived rather than restated so
+    the two cannot drift apart.
+    """
+    path = requested.expanduser().resolve()
+    required = [path / "tools" / name for name in _MANAGED_LINK_NAMES]
     missing = [str(item) for item in required if not item.is_file()]
     if missing:
         raise InstallError(
-            "Repository does not contain the required drainer files: "
+            "Asset root does not contain the required drainer files: "
             + ", ".join(missing)
         )
-    return root
+    return path
 
 
 def repository_job(repo: Path) -> drain_prs_service.DrainerJob:
@@ -171,6 +217,87 @@ def unique_sibling(path: Path) -> Path:
     raise InstallError(f"Could not allocate a temporary link beside {path}")
 
 
+# How a tracked asset says it is one of Kanban's own. The namespace segment is
+# matched rather than fixed, because one tracked file serves several installed
+# namespaces -- `kanban_config.py` carries the issue-review marker and is
+# linked here too -- and what this check has to establish is that the file at
+# the end of a link is Kanban's own module of that name, not whose installer
+# first claimed it.
+MANAGED_ASSET_PREFIX = "kanban-managed-asset:"
+
+
+def managed_asset_pattern(name: str) -> re.Pattern[str]:
+    return re.compile(
+        re.escape(MANAGED_ASSET_PREFIX) + r"[A-Za-z0-9_-]+/" + re.escape(name)
+    )
+
+
+def is_managed_asset(path: Path, name: str) -> bool:
+    """Whether `path` is one of Kanban's own tracked modules called `name`.
+
+    Verified by reading the identity marker the tracked file itself carries,
+    not by where the path happens to point: a symlink to some unrelated
+    `.../tools/drain_prs.py` matches every shape test one could write while
+    being someone else's file, and only its content can tell the two apart. An
+    unreadable target is never treated as recognized.
+    """
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return bool(managed_asset_pattern(name).search(content))
+
+
+def resolved_link_target(link: Path, target: Path) -> Path:
+    """A symlink's target as this process can reach it.
+
+    `os.readlink` returns the target exactly as written, and a relative one is
+    resolved by the kernel against the *link's own directory*, not against
+    this process's working directory. Checking a raw relative target directly
+    would report a working link as broken, and a broken link is replaced here,
+    so that mistake would silently destroy a working installation.
+    """
+    return target if target.is_absolute() else link.parent / target
+
+
+def is_replaceable_link(current_target: Path, source: Path) -> bool:
+    """Whether an existing symlink may be re-pointed at `source`.
+
+    Two cases qualify. A link whose target is provably one of Kanban's own
+    tracked modules of this name -- recognized by the marker that file carries
+    -- is this installer's own, wherever it currently resolves; that is what
+    lets a re-run from a new release archive take over the links a previous
+    archive left, while the previous archive is still on disk. And a link
+    whose target no longer exists at all is what a moved or deleted checkout
+    leaves behind: broken, holding nothing to preserve, and exactly the state
+    a re-run has to converge.
+
+    A link resolving to any other real file is someone else's installation. It
+    is preserved and refused rather than replaced, which is the protection
+    every other name in `_MANAGED_LINK_NAMES` used to lack.
+    """
+    if current_target.name != source.name:
+        return False
+    if not os.path.exists(current_target):
+        return True
+    return is_managed_asset(current_target, source.name)
+
+
+def symlink_refusal_reason(destination: Path) -> str:
+    """Why `install_symlink` refused this destination, phrased as the recovery
+    step. Read alongside the refusal, so the two never disagree."""
+    if not destination.is_symlink():
+        return (
+            f"{destination} already exists and is not a symlink. It is left untouched; "
+            "move or remove it yourself, then re-run."
+        )
+    return (
+        f"{destination} is a symlink to {os.readlink(destination)}, which does not "
+        "resolve to one of Kanban's own tracked modules. It is left untouched; "
+        "remove it yourself, then re-run."
+    )
+
+
 def install_symlink(source: Path, destination: Path) -> str:
     source = source.resolve(strict=True)
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -185,6 +312,12 @@ def install_symlink(source: Path, destination: Path) -> str:
             current = None
         if current == source:
             return "unchanged"
+        written = Path(os.readlink(destination))
+        if not is_replaceable_link(resolved_link_target(destination, written), source):
+            raise InstallError(
+                "Refusing to replace an existing installation: "
+                + symlink_refusal_reason(destination)
+            )
         temporary = unique_sibling(destination)
         try:
             temporary.symlink_to(source)
@@ -4073,10 +4206,21 @@ def install(
     repo: Path,
     install_dir: Path,
     *,
+    asset_root: Path,
     ntfy_url: str | None,
     config_path: str | None = None,
     dry_run: bool,
 ) -> dict[str, Any]:
+    """Install one repository's stopped drainer job.
+
+    `repo` is the target: the checkout this job drains, whose remote names it
+    and whose path the controller is handed. `asset_root` is where Kanban's
+    own tracked modules are linked from. They are one tree whenever this
+    installer is run from the checkout it is draining, which is what the
+    defaults produce; they differ when the modules come from an unpacked
+    release archive, which is not a repository anything can be installed
+    against.
+    """
     # First, and before any path below writes or links anything: resolving the
     # backend is what refuses a host with no service manager, and a refusal
     # after the script links were installed would leave an installation that
@@ -4098,11 +4242,11 @@ def install(
     # siblings from there and an unlinked one makes every real install fail at
     # import.
     sources = {
-        "drainer": repo / "tools" / "drain_prs.py",
-        "controller": repo / "tools" / "drain_prs_service.py",
-        "config_module": repo / "tools" / "kanban_config.py",
-        "models_module": repo / "tools" / "kanban_models.py",
-        "service_manager": repo / "tools" / "service_manager.py",
+        "drainer": asset_root / "tools" / "drain_prs.py",
+        "controller": asset_root / "tools" / "drain_prs_service.py",
+        "config_module": asset_root / "tools" / "kanban_config.py",
+        "models_module": asset_root / "tools" / "kanban_models.py",
+        "service_manager": asset_root / "tools" / "service_manager.py",
     }
     destinations = {
         "drainer": install_dir / "drain_prs.py",
@@ -4122,6 +4266,7 @@ def install(
             "installed": False,
             "dry_run": True,
             "repo": str(repo),
+            "asset_root": str(asset_root),
             "repository": job.identity,
             "label": job.label,
             "links": {
@@ -4202,6 +4347,7 @@ def install(
     return {
         "installed": True,
         "repo": str(repo),
+        "asset_root": str(asset_root),
         "repository": job.identity,
         "label": job.label,
         "install_dir": str(install_dir),
@@ -4223,8 +4369,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--repo",
-        default=str(Path(__file__).resolve().parent.parent),
-        help="Repository checkout to drain (default: checkout containing this script).",
+        default=None,
+        help=(
+            "Main checkout of the repository to drain (default: the tree "
+            "containing this script, when that tree is itself a checkout)."
+        ),
+    )
+    parser.add_argument(
+        "--asset-root",
+        default=None,
+        help=(
+            "Kanban checkout or unpacked release archive supplying the tracked "
+            "modules the installed links point at (default: the tree containing "
+            "this script). Never a target: nothing is installed into it."
+        ),
     )
     parser.add_argument(
         "--install-dir",
@@ -4248,14 +4406,42 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def selected_target(requested: str | None) -> Path:
+    """The repository this run drains, or an InstallError saying how to name it.
+
+    An explicit --repo is validated as any target is. The default is the tree
+    holding this script, which is a checkout in a development install and an
+    unpacked release archive in a released one -- and an archive is not a
+    repository, so it is refused here by name rather than reported as a
+    puzzling Git failure. Nothing has been written at that point: this runs
+    before `install` is even entered.
+    """
+    if requested is not None:
+        return target_repository_root(Path(requested))
+    default = default_asset_root()
+    if not (default / ".git").is_dir():
+        raise InstallError(
+            f"{default} is not a repository checkout, so it cannot be the "
+            "repository this drainer drains -- an unpacked release archive "
+            "carries no Git metadata. Name the checkout to drain with --repo "
+            "PATH; its tracked modules still come from --asset-root, which "
+            "already defaults to this tree."
+        )
+    return target_repository_root(default)
+
+
 def main() -> int:
     args = parse_args()
     try:
-        repo = repository_root(Path(args.repo))
+        repo = selected_target(args.repo)
+        assets = asset_root(
+            default_asset_root() if args.asset_root is None else Path(args.asset_root)
+        )
         install_dir = Path(args.install_dir).expanduser().resolve()
         result = install(
             repo,
             install_dir,
+            asset_root=assets,
             ntfy_url=args.ntfy_url,
             config_path=args.config,
             dry_run=args.dry_run,
@@ -4263,9 +4449,13 @@ def main() -> int:
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
         elif result.get("dry_run"):
-            print(f"Dry run passed for {repo}; no files or services were changed.")
+            print(
+                f"Dry run passed for {repo} with assets from {assets}; no files "
+                "or services were changed."
+            )
         else:
             print(f"Installed PR drainer for {result['repository']} at {repo}")
+            print(f"Assets: {assets}")
             print(f"Service: {result['label']}")
             print(f"Controller: {install_dir / 'drain_prs_service.py'}")
             print("The job is loaded but stopped; start it from Kanban when ready.")

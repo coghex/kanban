@@ -66,7 +66,13 @@ printf 'package kanban\n  ghc-options: -Wwarn\n' > cabal.project.local
 **Keep the extracted directory.** The executable runs the board on its own, but
 the optional setup tools, workflow bundles, and PR drainer are installed from
 the tracked files inside that directory, and their setup commands are run from
-it.
+it. None of them asks the archive for Git metadata, which it deliberately does
+not carry. The two that install a *service* do need to be told which repository
+that service is for, because an archive is not one: pass `--repo` to
+`tools/install_drainer.py` and `tools/install_issue_approval.py`, as the
+examples below do. Workflow setup needs `--target` for the same reason when it
+declares a project-scoped provider registration; the `--scope user` form below
+needs nothing.
 
 ### First run
 
@@ -181,9 +187,15 @@ refuses only on a host managed by neither. Preview the installation before
 enabling it:
 
 ```console
-python3 tools/install_drainer.py --dry-run --json
-python3 tools/install_drainer.py
+python3 tools/install_drainer.py --repo /path/to/project --dry-run --json
+python3 tools/install_drainer.py --repo /path/to/project
 ```
+
+`--repo` names the checkout to drain. It defaults to the directory the script
+lives in, which is right in a source checkout and impossible in an unpacked
+release — an archive is not a repository — so the archive form names it and the
+installer refuses rather than guessing. The tracked modules it links still come
+from the archive, through `--asset-root`, which already defaults to it.
 
 Installation does not start the drainer. Press `d` in Kanban when you are ready
 to run it.
@@ -195,9 +207,12 @@ number order, and stops at the first issue whose review requested changes. It
 installs the same way, through its own installer and its own job:
 
 ```console
-python3 tools/install_issue_approval.py --dry-run --json
-python3 tools/install_issue_approval.py
+python3 tools/install_issue_approval.py --repo /path/to/project --dry-run --json
+python3 tools/install_issue_approval.py --repo /path/to/project
 ```
+
+`--repo` and `--asset-root` mean here exactly what they mean for the PR drainer
+above, and for the same reason.
 
 Installation starts nothing. Press `a` in Kanban when you are ready to run it —
 and mean it: a running service publishes real review verdicts and moves real

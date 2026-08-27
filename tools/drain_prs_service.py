@@ -28,6 +28,15 @@ import kanban_models
 import service_manager
 
 
+# Identity marker for this tracked asset; `tools/install_drainer.py` links it
+# beside the installed controller and recognizes its own managed link by
+# content rather than by path, exactly as `tools/install_issue_review.py`
+# recognizes the backend's. Without one, a link of this name resolving to
+# someone else's file could not be told from ours, so it could only be
+# replaced blindly or preserved blindly.
+KANBAN_MANAGED_ASSET = "kanban-managed-asset:pr-drainer/drain_prs_service.py"
+
+
 # This module owns the drainer's lifecycle; `tools/service_manager.py` owns
 # every interaction with the service manager that runs it, including the
 # identifier each job is named and targeted by and the definition it is
