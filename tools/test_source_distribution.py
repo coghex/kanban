@@ -88,7 +88,11 @@ library would sail past a text check watching for the old spelling; it cannot
 sail past Cabal's own answer.
 
 Prerequisites are `cabal` on `PATH` and a Git checkout of this repository.
-Neither holds inside an unpacked release -- which nonetheless carries this
+The boundary checks need one thing more -- a `cabal` that can resolve the
+unpacked package's own build plan, which means an index and a compiler inside
+its `base` bound -- and skip where they cannot get it, since a refusal to
+resolve is then the environment's rather than the boundary's. Neither holds
+inside an unpacked release -- which nonetheless carries this
 file, since `tools/` ships whole, and whose own `README.md` advertises the
 `unittest discover` command that collects it. That case skips with a reason
 rather than erroring. Anything else -- `cabal sdist` failing, an unreadable
@@ -521,6 +525,7 @@ class SourceDistributionTest(unittest.TestCase):
         # Memoized by the boundary helpers below; each is one `cabal` run, and
         # every boundary test wants the same answer.
         cls.elaborated_components = None
+        cls.plan_gap = None
         cls.probe_harness_checked = False
         output = root / "sdist"
         # Both the build directory and the output land outside the checkout,
@@ -841,8 +846,20 @@ class SourceDistributionTest(unittest.TestCase):
         it resolves the package's own dependencies against the real index, so a
         probe failure below that names a library component is about that
         component rather than about a missing index or an offline runner.
+
+        Where it cannot resolve one at all, this section skips. `cabal sdist`
+        needs neither an index nor a compatible compiler, so the class above
+        runs anywhere `cabal` does -- including CI's toolchain-free `python`
+        job, which has a `cabal` but no `cabal update` and a GHC outside the
+        package's own `base` bound. Nothing a public library could do makes
+        this run fail, so a failure here is the environment and not the
+        boundary. The skip cannot quietly retire the check either: the job that
+        installs the pinned toolchain runs this module by name and fails on a
+        skipped result.
         """
         cls = type(self)
+        if cls.plan_gap is not None:
+            self.skipTest(cls.plan_gap)
         if cls.elaborated_components is None:
             builddir = self.workspace_root / "plan"
             proc = _run(
@@ -857,14 +874,17 @@ class SourceDistributionTest(unittest.TestCase):
                 cwd=str(self.unpacked_root),
                 timeout=SDIST_TIMEOUT_SECONDS,
             )
-            self.assertEqual(
-                0,
-                proc.returncode,
-                "The unpacked source distribution must resolve its own build "
-                "plan; without that, nothing below can tell a private library "
-                "apart from an unreachable package index.\n"
-                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
-            )
+            if proc.returncode != 0:
+                cls.plan_gap = (
+                    "the unpacked source distribution cannot resolve a build "
+                    "plan here, so a refusal to depend on one of its libraries "
+                    "would not distinguish a private library from an "
+                    "unreachable one. That needs a package index (`cabal "
+                    "update`) and a compiler inside the package's own `base` "
+                    "bound.\n"
+                    f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+                )
+                self.skipTest(cls.plan_gap)
             plan = json.loads((builddir / "cache" / "plan.json").read_text("utf-8"))
             cls.elaborated_components = sorted(
                 unit["component-name"]
