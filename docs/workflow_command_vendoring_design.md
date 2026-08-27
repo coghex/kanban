@@ -23,8 +23,9 @@ concrete precondition
 - [x] VEND-3. Vendor backlog-review — [#430]
 - [x] VEND-4. Vendor project-review — [#462]
 - [x] VEND-5. Vendor drain-prs — [#511]
-- [ ] VEND-6. Vendor janitor — [deferred]: reconciliation winner, the census and references assets, and the Codex copy's personal-path couplings undecided
-- [ ] VEND-7. Vendor finalize
+- [ ] VEND-6. Vendor the janitor census helper
+- [ ] VEND-9. Vendor the janitor command over the census
+- [x] VEND-7. Vendor finalize — [#544]
 - [ ] VEND-8. Vendor autosolve
 
 ## Epic contract
@@ -55,13 +56,22 @@ None is tracked here, and the two brand copies have already diverged:
 | `backlog-review` | 30 | 46 | 29 |
 | `drain-prs` | 94 | 77 | 123 |
 | `finalize` | 23 | absent | — |
-| `janitor` | 23 | 25 | 8 |
+| `janitor` | 23 | 134 | 143 |
 | `project-review` | 79 | 220 | **223** |
 | `retriage` | 179 | 179 | 10 |
 | `triage` | 161 | 152 | 17 |
 
-`project-review`'s Codex copy is nearly three times its Claude copy. No gate
-compares them, and no test asserts either exists.
+`project-review`'s Codex copy is nearly three times its Claude copy, and
+`janitor`'s is now nearly six times — it was rewritten on 2026-08-20, after this
+design last synced to it, and the 23/25/8 row this table carried until then
+described a copy that no longer exists. No gate compares any of them, and no
+test asserts either exists.
+
+`janitor` is also the only command in the set whose Codex copy is more than one
+file. Beside its `SKILL.md` sit `scripts/census.py` (641 lines),
+`references/recovery-state.md` (52), `references/worktree-content.md` (37), and
+`agents/openai.yaml` (4) — 734 lines of sibling material against a 134-line
+skill body. D-12 through D-15 decide what becomes of it.
 
 This repository already fixed the same defect once. #229 vendored the design and
 report document workflows, recording in
@@ -70,9 +80,18 @@ in an owner-maintained personal collection, a repository pull request could
 neither change nor verify them." That reasoning applies unchanged to these eight.
 
 The commands are already generic in the way that matters: none references
-`synarchy` or any consuming repository, and none carries a hardcoded personal
-path. Only `autosolve` and `drain-prs` mention Kanban tooling at all, and both
-do so because they drive this repository's own pipeline components.
+`synarchy` or any consuming repository. Only `autosolve` and `drain-prs` mention
+Kanban tooling at all, and both do so because they drive this repository's own
+pipeline components.
+
+One exception has appeared since that survey. `janitor`'s Codex `scripts/census.py`
+carries two hardcoded personal paths: `census.py:270` spells
+`~/Library/Application Support/kanban/pr-drainer/drain_prs_service.py` directly
+instead of asking `tools/kanban_config.py`'s `drainer_install_dir()`, so it finds
+nothing on a Linux host or under a `KANBAN_DRAINER_INSTALL_DIR` override; and
+`census.py:288-289` resolves `$CODEX_HOME/skills/test/scripts/test_coordinator.py`,
+a personal Codex skill this arc does not vendor and Claude has no counterpart to.
+D-15 repairs the first and keeps the second as a declared, fail-soft probe.
 
 The existing bundles carry one hand-maintained copy per brand —
 `claude-plugin/plugins/kanban/commands/<name>.md` and
@@ -116,7 +135,10 @@ reviewable line in a tracked file rather than an accident nobody can see.
 
 Each slice is one command: reconcile, vendor into both bundles, register, retire
 the personal copy. The unit is deliberately small so the arc can run alongside
-unrelated work without ever holding a large change open.
+unrelated work without ever holding a large change open. `janitor` is the one
+exception, split across two slices by D-16 because its Codex copy brought a
+641-line helper program with it; the eight commands are still eight, delivered
+in nine slices after VEND-0.
 
 **Reconciliation is the real work, not the move.** For each command the two
 brand copies must be compared line by line and each difference classified as a
@@ -346,9 +368,289 @@ One consequence lands on this repository specifically. When a sweep of
 has one. Without that row the fail-closed default makes the file `pr-atomic`, and
 the cursor could not be landed the way the reports beside it are.
 
+### D-12. `janitor` vendors the census architecture
+
+The Codex copy's model wins: `scripts/census.py` emits a `janitor-census/v1`
+snapshot, and the rendered body verifies anomalies, applies preservation gates,
+reports, and applies approved items over that snapshot. The Claude copy's ten
+hand-walked prose categories do not survive as the structure.
+
+This is D-7 applied a second time, and for the same reason D-9 gave: the copy
+that carries real improvements wins, and picking the other discards what lives
+only there. What lives only in the Codex copy is not a nicer wording of the same
+audit — it is the compact-census discipline that keeps a first pass from fetching
+PR bodies, checks and stash patches in bulk; the `all-safe` preservation gates
+that enumerate exactly what qualifies for bulk approval and what never does; the
+`null`-is-not-empty rule that makes a failed inventory an anomaly rather than a
+clean result; and the retention ledger that lets a "keep this" decision survive
+between runs instead of being re-litigated every pass. The prose copy has none of
+those, and none of them is reachable by rewording it.
+
+This is the largest slice in the arc by a wide margin, and it is the one place
+where D-1's "one command per delivery slice" buys the most: a 641-line program
+and a 134-line body reviewed together is already at the edge of one PR.
+
+Three consequences follow, each its own decision below: the two `references/`
+files need a lane (D-13), the retention ledger needs a home (D-14), and
+`census.py`'s two personal-path couplings need resolving (D-15).
+
+`agents/openai.yaml` needs no decision. VEND-1 through VEND-3 established that
+its interface metadata relocates into
+`codex-plugin/plugins/kanban/.codex-plugin/plugin.json`'s `interface` block, and
+VEND-6 follows that mechanically.
+
+One structural fact the slice inherits rather than chooses. The Claude bundle has
+a single shared `claude-plugin/plugins/kanban/scripts/`, and Codex has no shared
+scripts root at all — every skill carries its own, as
+`codex-plugin/plugins/kanban/skills/process-report/scripts/` does. A `census.py`
+that resolves anything through `kanban_config.py` therefore adds a third
+gated-identical copy of that module under `skills/janitor/scripts/`, and the
+bundle-version gate makes touching the shared module drag both other copies with
+it.
+
+*Resolves Q-1.*
+
+### D-13. The two `references/` files do not ship
+
+`references/recovery-state.md` and `references/worktree-content.md` are not
+vendored, in either brand. The rendered body carries a short recovery rule in
+their place, and `render_command_sources.py` is not extended.
+
+This lands in the same place D-10 did, by a different route. D-10 refused
+VEND-4's `references/review-boundaries.md` because its *content* was one
+consuming repository's cursor; these two are ordinary instructions, so that
+reason does not reach them. What does reach them is D-10's mechanism half: the
+one-file-per-brand shape VEND-0 built and five landed slices depend on stays
+exactly as it is, and no bundle skill gains a `references/` directory. Extending
+the renderer to emit auxiliary files was the alternative, and it lost because it
+amends a mechanism ruling five slices are already built on in order to serve one
+slice's convenience.
+
+The cost is real and accepted, and it is larger than the fold-into-the-body
+option would have been. Dropped outright are the five-step ladder for classifying
+an unfamiliar path — `git check-ignore -v`, then exact-path `rg`, then the
+producer's source and documentation, then `git log --all --`, then the producer's
+own read-only `--validate`/`--status` mode — and the rule that no seed or write
+mode is ever run during an audit. Also dropped is the explicit
+`unrecovered` / `fully landed` / `contradicted` classification vocabulary,
+though the Claude copy's category 10 carries most of that judgement inline
+already, which is what makes this less lossy than the line count suggests.
+Anything from those two files that the slice finds it cannot do without is folded
+into the body as prose rather than reintroduced as a file.
+
+*Resolves Q-2.*
+
+### D-14. The retention ledger stays in the Git common directory
+
+`janitor-retain.json` keeps the location the Codex copy gives it:
+`$(git rev-parse --git-common-dir)/janitor-retain.json`, holding
+`janitor-retain/v1` items of `id`, `target`, `disposition`, `reason` and
+`review_when`. It is shared across every linked worktree of the repository, sits
+inside none of them, and is never committed.
+
+D-11 sent VEND-4's sweep cursor to the reviewed repository's docs worktree, and
+this decision deliberately does not follow it, because the two hold different
+kinds of fact. A sweep cursor names pull request numbers — global, portable,
+meaningful on any machine, and worth reviewing in a diff. A retention decision
+names `stash@{3}`, a local worktree path, an unmerged local branch: objects that
+do not exist on another machine and whose selectors shift between runs. Committing
+that produces a tracked file that rots by the next `git stash drop`, which is a
+worse failure than invisibility.
+
+Two alternatives lost. The docs-worktree lane (D-11's) loses on the rot above,
+and would additionally need a `coordination` §7 row plus its
+`EXCLUDED_TRACKED_PATHS` and `config.toml.example` counterparts. Resolving it
+through `kanban_config.py`'s XDG namespace keeps the machine-local property but
+buys nothing over `--git-common-dir` — the state is already per-repository by
+construction there, whereas an XDG path has to key itself by repository — and it
+would add a new managed-path family with its own inventory rows.
+
+The invisibility objection is accepted rather than answered. Nothing reviews a
+"keep this forever" entry, and the ledger dies with the clone. The skill body's
+existing rule is what bounds it: the ledger is a reminder, never an exemption
+from live evidence or an approval gate, every recorded target and its
+`review_when` condition is revalidated each run, and a stale or contradicted
+entry is reported as a decision rather than silently discarded.
+
+*Resolves Q-3.*
+
+### D-15. One coupling is repaired, the other is kept and declared
+
+`census.py`'s two personal-path couplings get different answers, because they
+are different problems.
+
+**The drainer path is repaired.** `census.py:270` spells
+`~/Library/Application Support/kanban/pr-drainer/drain_prs_service.py` directly,
+which finds nothing on a Linux host, ignores `KANBAN_DRAINER_INSTALL_DIR`, and
+ignores an `--install-dir` install. The vendored census resolves it through
+`tools/kanban_config.py` — the one Python resolution point, already shipped in
+both bundles — exactly as VEND-5 made the `drain-prs` asset do, and
+`docs/agent-workflow-contract.md`'s two install-directory rows gain both rendered
+`census.py` paths the way they gained both rendered `drain-prs` paths.
+
+**The test-coordinator probe is kept.** `census.py:288-289` resolves
+`$CODEX_HOME/skills/test/scripts/test_coordinator.py` to recognize the
+coordinator-owned detached test base as permanent infrastructure and to report
+its per-run worktrees. That skill is not vendored by this arc and has no Claude
+counterpart, but the probe already fails soft — an absent coordinator returns
+`{"available": false}` — so an install without it reports nothing rather than
+breaking. Dropping the category was the alternative, and it loses because those
+worktrees would then surface as unexplained anomalies the janitor proposes
+cleaning, which is the precise false positive the category exists to prevent.
+Making it generic through a new environment variable or config key was the other,
+and it loses because a default that finds nothing means the owner must configure
+it to keep today's behavior, in exchange for a config surface this arc does not
+otherwise touch.
+
+Keeping it is conditional on declaring it. `docs/agent-workflow-contract.md`
+already carries a `codex-plugin-cache-root` personal-path row for `/.codex`
+marked `external`, so the inventory has the shape; the vendored census's two
+rendered paths are named on it, or on a row of its own, and the slice does not
+ship until they are. The asymmetry is deliberate and worth stating plainly: the
+Claude-side render probes a Codex-side personal skill, and reports nothing when
+it is absent, which is every Claude install.
+
+*Resolves Q-4.*
+
+### D-16. `janitor` is delivered in two slices, program then command
+
+VEND-6 ships `census.py` with its tests and its two path resolutions, and VEND-9
+ships the rendered body over it. This is the only command in the arc that takes
+two pull requests.
+
+D-1 is not weakened by this. It says each *command* is its own issue, worktree
+and pull request, because batching several makes a diff nobody can review
+carefully — and that reasoning is what splits this one rather than what forbids
+splitting it. Unsplit, VEND-6 measured about 3,900 to 4,250 insertions against
+VEND-5's 1,685: `census.py` twice at 641 lines, a fourth 1,155-line
+`kanban_config.py` home, a test module the size of VEND-5's whole suite, and
+only then a body of about 450 lines. That is not a reviewable unit.
+
+Size alone would not decide it; concentration does. The program is roughly 84%
+of that diff and would draw more than 84% of the findings — it is new code doing
+path resolution, subprocess handling, a JSON schema contract and two personal-path
+repairs, which is the shape that yields one blocker per review round. The body is
+prose, and VEND-1 through VEND-3 showed prose lands in one or two. Splitting puts
+the rounds where the risk is instead of holding a 4,000-line diff open across all
+of them.
+
+The seam is the one VEND-0 already proved in this arc: ship a mechanism first,
+demonstrated by tests, with nothing invokable. VEND-6 adds no command to either
+bundle, so `tools/plugin_bundle_gate.py` sees no new shipped asset and the
+personal copies stay live until VEND-9 replaces them, which is what D-4 requires
+— the retirement belongs to the pull request that ships the replacement, and
+VEND-6 ships no replacement.
+
+Two consequences worth stating. VEND-6 depends on nothing in the arc and can land
+first, in parallel with VEND-7 or VEND-8, because it renders no file and so
+VEND-0's one-file-per-brand outcome does not bind it. And the umbrella epic #373
+still carries a single `VEND-6. Vendor janitor` checklist line, which is now
+drift: the next `/process-design-doc` run reconciles it into two, with approval,
+before it drafts either.
+
+*Recorded 2026-08-27, on the owner's instruction to split whatever needed it.*
+
 ## Open questions
 
-None. Every question raised during design is recorded as a decision above.
+None outstanding. All four below were VEND-6's, and VEND-6's alone — they
+arrived with the `janitor` Codex rewrite that landed on 2026-08-20, after the
+last design sync, and each now carries its decision. They are kept here with
+their `Resolved by` pointers rather than deleted, because the options that lost
+are part of why the decisions read as they do. No slice waits on anything.
+
+### Q-1. Which janitor architecture survives? — Resolved by D-12
+
+The two copies are no longer two spellings of one audit. The Claude copy is ten
+numbered prose categories an agent walks by hand, each with its own remedy line.
+The Codex copy is a helper — `scripts/census.py`, 641 lines — that emits a
+`janitor-census/v1` snapshot the skill body then reasons over, with the body cut
+to verification, preservation gates, reporting and apply.
+
+D-7 says reconciliation picks a winner per command and says why, and D-2 says a
+slice does not introduce behavior neither copy had. What D-7 did not anticipate
+is a divergence this deep: this is not "the Codex copy carries real
+improvements", it is two designs for the same command. The choice decides
+whether VEND-6 vendors a Markdown file or a Markdown file plus a program.
+
+Known options: the census architecture; the prose architecture; or the prose
+architecture now with the census deferred to its own later slice.
+
+**Resolved 2026-08-27:** the census architecture, as D-12.
+
+### Q-2. Do the sibling assets ship, and through which lane? — Resolved by D-13
+
+`references/recovery-state.md` and `references/worktree-content.md` are
+instructions, not state — unlike VEND-4's `references/review-boundaries.md`,
+whose content was one consuming repository's cursor, which is the whole reason
+D-10 refused it. So D-10's *reason* does not reach these two, but D-10's
+*mechanism ruling* does: `render_command_sources.py` stays one file per brand,
+and no bundle skill carries a `references/` directory.
+
+That leaves three shapes. Fold both files' content into the rendered body, which
+costs about 89 lines on top of 134 and keeps the renderer untouched. Extend the
+renderer to emit auxiliary files, which D-10 declined for VEND-4 but did not
+forbid for ever. Or drop them and let the body carry a shorter rule.
+
+`scripts/census.py` is a separate question from the two references even though
+Q-2 covers both, because a tracked helper program is not rendered output at all:
+`process-report` already ships `publish_coordination_doc.py` and
+`tracker_transaction.py` beside its asset, which D-10 explicitly names as not a
+counterexample to the one-file-per-brand rule. If Q-1 keeps the census, the lane
+for the program is that established `scripts/` lane rather than the renderer.
+
+One asymmetry the shape has to survive: the Claude bundle has a single shared
+`claude-plugin/plugins/kanban/scripts/`, while Codex has no shared scripts root
+at all — each skill carries its own, as
+`codex-plugin/plugins/kanban/skills/process-report/scripts/` does. A census that
+imports `kanban_config.py` therefore adds a third gated-identical copy of that
+module under `skills/janitor/scripts/`.
+
+**Resolved 2026-08-27:** neither references file ships, as D-13. `census.py`
+ships in each bundle's helper-program lane, as D-12 records.
+
+### Q-3. Where does the retention ledger live? — Resolved by D-14
+
+`census.py:17` and its reader put the ledger at
+`$(git rev-parse --git-common-dir)/janitor-retain.json` — inside `.git`, shared
+across every linked worktree, machine-local, and invisible in a diff. It carries
+`janitor-retain/v1` items of `id`, `target`, `disposition`, `reason`,
+`review_when`.
+
+D-11 answered the same shape of question for VEND-4's sweep cursor and chose the
+reviewed repository's `docs-wip` worktree, reasoning that per-repository state
+belongs in the repository it describes, visible in a diff and surviving a change
+of machine. Whether that reasoning transfers is genuinely open: a retention
+decision about a local worktree or stash may be exactly the machine-local fact
+D-11's rejected XDG alternative was accused of being, since the objects it names
+do not exist on another machine.
+
+Known options: keep it under `--git-common-dir` as the copy has it; move it to
+the reviewed repository's docs worktree as D-11 did; or resolve it through
+`kanban_config.py`'s XDG namespace.
+
+**Resolved 2026-08-27:** the Git common directory, as D-14.
+
+### Q-4. What becomes of `census.py`'s two personal-path couplings? — Resolved by D-15
+
+`census.py:270` hardcodes
+`~/Library/Application Support/kanban/pr-drainer/drain_prs_service.py`. Kanban
+has exactly one Python resolution point for that — `tools/kanban_config.py`'s
+`drainer_install_dir()` / `installed_drainer_dir()` — and it already ships in
+both bundles, so the repair is available rather than hypothetical. VEND-5 fixed
+the identical defect in the `drain-prs` asset and
+`docs/agent-workflow-contract.md`'s inventory now names both rendered paths on
+the two install-directory rows, which is the precedent.
+
+`census.py:288-289` is different in kind: it resolves
+`$CODEX_HOME/skills/test/scripts/test_coordinator.py` and reports coordinated-test
+worktrees from it. That skill is not vendored by this arc, has no Claude
+counterpart, and its absence is already handled — the function returns
+`{"available": False}`. So the question is whether the vendored census keeps a
+Codex-only optional probe, drops the coordinated-test category entirely, or
+keeps it behind something generic.
+
+**Resolved 2026-08-27:** the drainer path repaired, the test-coordinator probe
+kept and declared, as D-15.
 
 ## Verification strategy
 
@@ -363,7 +665,16 @@ Arc-level signals:
   behavior of whichever copy that slice's reconciliation selected under D-7 —
   which for `project-review` is the Codex copy, per D-9, and not the Claude one.
   This is demonstrated per slice rather than asserted, because none of these
-  commands has automated behavioral coverage today.
+  commands has automated behavioral coverage today. VEND-6 is the one exception
+  D-12 creates: `scripts/census.py` is a program, so its snapshot is asserted by
+  a test module and its own `--self-test` rather than demonstrated by hand, and
+  only the reasoning the rendered body does over that snapshot stays a
+  demonstration.
+- Every path a vendored asset resolves is declared in
+  `docs/agent-workflow-contract.md`'s external-dependency inventory, naming both
+  rendered paths. VEND-5 established this for the drainer install directories;
+  D-15 extends it to `census.py`'s drainer resolution and to the personal Codex
+  skill its test-coordinator probe reaches for.
 - No personal copy remains live for a command whose replacement has shipped.
 
 ## Delivery plan
@@ -484,39 +795,67 @@ Arc-level signals:
   surface only.
 - **Open questions:** `None`
 
-### VEND-6. Vendor janitor
+### VEND-6. Vendor the janitor census helper
 
-> **Deferred:** The Codex copy was rewritten hours after this design last synced
-> to it on 2026-08-20, and the recorded 23/25/8 divergence no longer describes
-> it. Its `SKILL.md` is 134 lines against Claude's 23, with 143 differing lines,
-> and it gained three untracked siblings totalling 730 lines —
-> `scripts/census.py`, `references/recovery-state.md`, and
-> `references/worktree-content.md`. The two are no longer two spellings of one
-> audit but two architectures: ten prose categories an agent walks by hand,
-> against a helper emitting a `janitor-census/v1` snapshot and a per-repository
-> retention ledger at `janitor-retain.json`. This slice's acceptance signal
-> describes only the Claude model, as VEND-4's did before D-9. `census.py` also
-> breaks the arc's genericity premise, hardcoding
-> `~/Library/Application Support/kanban/pr-drainer/drain_prs_service.py` rather
-> than the one Python resolution point, and depending on
-> `~/.codex/skills/test/scripts/test_coordinator.py`, a personal skill this arc
-> does not vendor. Clears when `/design-epic` records a decision for each: which
-> architecture survives, whether `census.py` and the two references ship and
-> through which lane given D-10, where the retention ledger's state lives, and
-> what becomes of the two personal-path couplings.
-
-- **Outcome:** `kanban:janitor` ships in both bundles; personal copies retire.
-- **Scope:** reconcile 8 differing lines; re-point its `/drain-prs` reference;
-  register and retire.
+- **Outcome:** `scripts/census.py` ships in both bundles' helper-program lanes,
+  emitting a `janitor-census/v1` snapshot, with both of D-15's path resolutions
+  settled. No command becomes invokable and no personal copy retires yet.
+- **Scope:** the program, its helper-module homes, and its tests. Repair the
+  drainer resolution through `kanban_config.py` and add the fourth home that
+  needs — Codex has no shared scripts root, so `skills/janitor/scripts/` carries
+  its own gated-identical copy, and the enumerations in
+  `tools/test_source_distribution.py` and `tools/test_agent_workflow_contract.py`
+  grow with it. Keep the test-coordinator probe and declare it, plus the
+  `census.py` paths on the two drainer install-directory rows. Read the retention
+  ledger from the Git common directory (D-14).
 - **Phase:** 2
-- **Depends on:** `VEND-0`, `VEND-5`
+- **Depends on:** `none`
+- **Ordering:** `independent`, and it `can land first`. It renders nothing, so
+  VEND-0's one-file-per-brand outcome does not bind it, and it shares no file
+  with VEND-7 or VEND-8.
+- **Relevant decisions:** D-12, D-14, D-15
+- **Acceptance signals:** `census.py --self-test` passes; a census over a real
+  repository emits a `janitor-census/v1` document whose worktree, branch, ref,
+  claim, stash and drainer collections match what Git and the drainer controller
+  independently report; the drainer block is populated on a host whose install
+  lives under the XDG data root and under a `KANBAN_DRAINER_INSTALL_DIR`
+  override, which the retired copy's hardcoded macOS path could not do; a machine
+  with no test coordinator yields `available: false` rather than an error; a
+  retain-ledger entry at `$(git rev-parse --git-common-dir)/janitor-retain.json`
+  is read back by a run started from a different linked worktree; an unreadable
+  collection is reported as `null` and never as empty; and both bundles' shipped
+  command sets are unchanged, so `tools/plugin_bundle_gate.py` still passes with
+  nothing new invokable.
+- **Out of scope:** the rendered `janitor` body and every registration and
+  retirement it carries, which is VEND-9; and changing what counts as a stale
+  signal.
+- **Open questions:** `None`
+
+### VEND-9. Vendor the janitor command over the census
+
+- **Outcome:** `kanban:janitor` ships in both bundles, reasoning over VEND-6's
+  snapshot; the personal copies retire.
+- **Scope:** the authored source and its two renders — verify anomalies, apply
+  the `all-safe` preservation gates, report, and apply approved items over the
+  `janitor-census/v1` document. Fold the Claude copy's surviving judgement into
+  that body rather than discarding it, and carry a short recovery rule in place
+  of the two `references/` files D-13 drops. Re-point its `/drain-prs`
+  reference; register in both manifests, both READMEs and the bundle gate;
+  retire the personal copies.
+- **Phase:** 2
+- **Depends on:** `VEND-0`, `VEND-5`, `VEND-6`
 - **Ordering:** `not on the critical path`
-- **Relevant decisions:** D-1, D-2, D-4, D-5, D-7
-- **Acceptance signals:** a janitor run reports stale claims, zombie worktrees,
-  orphan branches, and abandoned stashes — each stash classified as fully
-  landed, holding unlanded content, or contradicted by current behavior — and
-  cleans up only what was approved.
-- **Out of scope:** changing what counts as a stale signal.
+- **Relevant decisions:** D-1, D-2, D-4, D-5, D-7, D-12, D-13
+- **Acceptance signals:** both bundles ship it and the gate lists it as mentioned
+  and shipped; a janitor run over a real repository reports anomalies only,
+  states what `all-safe` excludes, and mutates nothing before approval; a run
+  against a census reporting a `null` collection treats it as an anomaly to
+  diagnose rather than a clean result; neither bundle gains a `references/`
+  directory; and no personal `janitor` copy remains live.
+- **Out of scope:** changing `census.py`, which VEND-6 settles; extending
+  `render_command_sources.py` to emit auxiliary files, which D-13 removes the
+  need for; and vendoring the personal `test` skill the census probes, which
+  D-15 keeps as an optional, declared, fail-soft dependency.
 - **Open questions:** `None`
 
 ### VEND-7. Vendor finalize
