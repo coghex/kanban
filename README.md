@@ -556,20 +556,25 @@ where the chain *ends*.
 
 Two things locate the links to feed it:
 
-- The `issue-review` record's `backend_path`, which names the install directory
-  holding `approve_issues.py`, `kanban_config.py`, and `kanban_models.py`.
+- The `issue-review` record's `backend_path`, which names the installed
+  `approve_issues.py` link itself. The directory it sits in is the install
+  directory, holding that link beside `kanban_config.py` and
+  `kanban_models.py`.
 - Each service's own install directory —
   [the drainer's](docs/pr-drainer.md#files-and-logs) and [the approval
   service's](docs/issue-approval.md#files-and-logs) file inventories resolve
   it — holding that service's script links. Read each record's entry for every
   repository while you are there.
 
-Point `INSTALL` at one of them and run this. The two assignments are
-alternatives, so swap the comment on Linux:
+`INSTALL` is one of those directories — never a file path. For a default
+`issue-review` install it is one of the two spellings below, which are
+alternatives, so swap the comment on Linux. For an install made with
+`--install-dir`, take the record's `backend_path` and drop the trailing
+`/approve_issues.py`; the same goes for a service whose links you moved.
 
 ```console
-INSTALL=~/Library/Application\ Support/kanban/issue-review            # macOS
-# INSTALL="${XDG_DATA_HOME:-$HOME/.local/share}"/kanban/issue-review  # Linux
+INSTALL=~/Library/Application\ Support/kanban/issue-review            # macOS default
+# INSTALL="${XDG_DATA_HOME:-$HOME/.local/share}"/kanban/issue-review  # Linux default
 python3 - "$INSTALL"/*.py <<'RESOLVE'
 import os, sys
 

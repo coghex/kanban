@@ -406,10 +406,14 @@ the `--target` the rerun needs.
 ### `issue-review`
 
 A rerun re-points the three links — `approve_issues.py`, `kanban_config.py`,
-and `kanban_models.py` — at the new archive and rewrites the record's
-`backend_path` to match, while the old archive is still on disk. Each link is
-recognized as Kanban's own by the identity marker the tracked file at the end
-of it carries; anything else is refused and left exactly as it was.
+and `kanban_models.py` — at the new archive, while the old archive is still on
+disk. Each link is recognized as Kanban's own by the identity marker the
+tracked file at the end of it carries; anything else is refused and left
+exactly as it was.
+
+The record is repaired in place at the same time, and what it names does not
+move: `backend_path` is the installed `approve_issues.py` link, not the archive
+behind it, so an upgrade that worked leaves that value exactly as it was.
 
 ```console
 python3 tools/setup_workflows.py --component issue-review
