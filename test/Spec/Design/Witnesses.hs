@@ -329,7 +329,7 @@ declarations =
       ( Witnessed
           WitnessedFact
             { factStatement =
-                "kanban.cabal declares exactly the components recorded here — the library, the one `kanban` executable, and the test suite — and the detached worker a started agent may use carries `workerMaxRuntimeSeconds :: WorkerSpec -> Int`, an unconditional bound rather than an optional or absent one.",
+                "kanban.cabal declares exactly the components recorded here — the private implementation library, the one `kanban` executable, and the test suite — and the detached worker a started agent may use carries `workerMaxRuntimeSeconds :: WorkerSpec -> Int`, an unconditional bound rather than an optional or absent one.",
               factRationale =
                 "A GUI, an Electron shell, or a resident daemon is a program of its own: it would be a second executable or a foreign library in this file, and there is neither. The entry's own exception is what the runtime bound holds — a worker whose spec cannot omit a finite runtime is bounded rather than permanently resident, which is the difference between the exception and the non-goal.",
               factReads = [cabalPath],
@@ -357,7 +357,7 @@ declarations =
       ( Witnessed
           WitnessedFact
             { factStatement =
-                "The dependency set of kanban.cabal's shipped components — the library and the `kanban` executable together — is exactly the recorded set, compared whole rather than searched for known offenders.",
+                "The dependency set of kanban.cabal's shipped components — the private implementation library and the `kanban` executable together — is exactly the recorded set, compared whole rather than searched for known offenders.",
               factRationale =
                 "A webhook receiver or a local HTTP server has to listen on a socket, and nothing in that set can: none of those packages opens one. Comparing the whole set rather than a roster of forbidden names is what makes that load-bearing — a listener could not be added under any package name without failing here first.",
               factReads = [cabalPath],
@@ -602,7 +602,7 @@ shippedComponents = do
   pure
     ( sameAs
         "the components kanban.cabal declares"
-        ["library", "executable kanban", "test-suite kanban-test"]
+        ["library kanban-internal", "executable kanban", "test-suite kanban-test"]
         (map fst components)
     )
 
@@ -618,7 +618,7 @@ shippedDependencies = do
         (dedupe (sort declared))
     )
   where
-    shippedComponentNames = ["library", "executable kanban"] :: [Text]
+    shippedComponentNames = ["library kanban-internal", "executable kanban"] :: [Text]
 
 recordedDependencies :: [Text]
 recordedDependencies =
@@ -629,7 +629,7 @@ recordedDependencies =
     "containers",
     "directory",
     "filepath",
-    "kanban",
+    "kanban:kanban-internal",
     "optparse-applicative",
     "process",
     "text",
@@ -646,6 +646,11 @@ recordedDependencies =
 -- A dependency is a line inside a @build-depends:@ block and nowhere else.
 -- Indentation alone would not do: a component's own @ghc-options@ flags are
 -- indented too, and @-Wall@ is spelled exactly like a package name.
+--
+-- A dependency on a sublibrary is spelled @package:sublibrary@, which this has
+-- to read as one name. Anything it cannot read closes the block instead, so a
+-- spelling it did not know would not fail here — it would quietly drop every
+-- dependency declared after it.
 cabalComponents :: IO [(Text, [Text])]
 cabalComponents = do
   contents <- TextIO.readFile cabalPath
@@ -671,17 +676,28 @@ cabalComponents = do
 
     componentKeywords = ["library", "executable", "test-suite", "benchmark", "foreign-library"]
 
-    -- The package name is the first word of an indented line; the version
+    -- The dependency is the first word of an indented line; the version
     -- bound and the trailing comma are not part of it.
     dependencyOn line = case Text.words (Text.strip line) of
       package : _
         | Text.isPrefixOf " " line,
-          not (Text.null named),
-          Text.all isPackageCharacter named ->
+          isDependencyName named ->
             Just named
         where
           named = Text.dropWhileEnd (== ',') package
       _ -> Nothing
+
+    -- A package, or a sublibrary of one: the qualifier separates two ordinary
+    -- names rather than sitting at either end. Admitting a colon anywhere
+    -- instead would read a field heading such as @ghc-options:@ — which ends a
+    -- @build-depends:@ block rather than belonging to one — as a dependency.
+    isDependencyName named = case Text.splitOn ":" named of
+      [package] -> isComponentName package
+      [package, sublibrary] -> isComponentName package && isComponentName sublibrary
+      _ -> False
+
+    isComponentName part =
+      not (Text.null part) && Text.all isPackageCharacter part
 
     isPackageCharacter character = character == '-' || character `elem` packageAlphabet
     packageAlphabet = ['a' .. 'z'] <> ['A' .. 'Z'] <> ['0' .. '9']

@@ -86,8 +86,14 @@ common warnings
     -Wpartial-fields
     -Wredundant-constraints
 
-library
+-- The implementation modules are a private component, not a supported Haskell
+-- API. Kanban's supported interfaces are the executable, its CLI, the
+-- documented configuration, the on-disk compatibility surface, the installers,
+-- and the workflow contracts; importing `Kanban.*` is not among them, so this
+-- package publishes no library for an outside package to depend on.
+library kanban-internal
   import: warnings
+  visibility: private
   hs-source-dirs: src
   exposed-modules:
     Kanban.ApprovalService
@@ -211,7 +217,7 @@ executable kanban
   ghc-options: -threaded -rtsopts -with-rtsopts=-N1
   build-depends:
     base,
-    kanban,
+    kanban:kanban-internal,
     optparse-applicative,
     text
 
@@ -304,7 +310,7 @@ test-suite kanban-test
     filepath,
     hspec                 >= 2.11 && < 2.12,
     hspec-core            >= 2.11 && < 2.12,
-    kanban,
+    kanban:kanban-internal,
     optparse-applicative,
     process,
     text,
