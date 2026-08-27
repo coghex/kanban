@@ -24,7 +24,7 @@ concrete precondition
 - [x] VEND-4. Vendor project-review — [#462]
 - [x] VEND-5. Vendor drain-prs — [#511]
 - [ ] VEND-6. Vendor janitor — [deferred]: reconciliation winner, the census and references assets, and the Codex copy's personal-path couplings undecided
-- [ ] VEND-7. Vendor finalize
+- [x] VEND-7. Vendor finalize — [#544]
 - [ ] VEND-8. Vendor autosolve
 
 ## Epic contract
