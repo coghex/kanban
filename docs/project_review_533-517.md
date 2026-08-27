@@ -26,7 +26,7 @@ concrete precondition
 
 - [x] PRR-1. No-agent mode removes lifecycle controls for recovered persistent workers — [#546]
 - [x] PRR-2. The busy triage fallback marks a changes-requested issue as ready — [#557]
-- [ ] PRR-3. Reused process-group IDs can misattribute this board's `gh` to a previous board
+- [x] PRR-3. Reused process-group IDs can misattribute this board's `gh` to a previous board — [#558]
 - [ ] PRR-4. The reconciled `gh` authority design claims a decoder that was never implemented
 
 ## 1. Persistent-worker control in no-agent mode
@@ -192,7 +192,7 @@ the fallback mark and contain no coexistence exception.
 
 ## 3. Durable `gh` entry attribution
 
-### PRR-3. Reused process-group IDs can misattribute this board's `gh` to a previous board
+### [#558] PRR-3. Reused process-group IDs can misattribute this board's `gh` to a previous board
 
 > **Captured note:** Track the identity of entries inherited at the first
 > reclaim, not only their raw process-group IDs, so a later group this same
