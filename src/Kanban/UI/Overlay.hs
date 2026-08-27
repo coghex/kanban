@@ -158,14 +158,15 @@ drawHelp state = vBox (map txt (helpLines state.appOperatingMode))
 -- @?@, its own binding, before this list was derived.
 --
 -- The board block follows the operating mode through 'modeBoardBindings', so
--- a board that loads no provider lists none of the six agent bindings here
+-- a board that loads no provider lists none of the four agent bindings here
 -- either -- the help overlay and the footer hide the same set, because both
 -- project from that one decision.
 --
 -- The session block does not, deliberately. Those keys belong to a live-agent
--- overlay's own decoder rather than to the base board, and hiding a row that
--- describes an overlay no press can open in that mode is a wider change than
--- this one: the six bindings above are what the mode decides.
+-- overlay's own decoder rather than to the base board, and such an overlay is
+-- reachable in every mode -- `p` and then Enter open a recovered worker's
+-- session on a board that loads nothing (issue #546) -- so there would be
+-- nothing to hide: the four bindings above are what the mode decides.
 helpLines :: OperatingMode -> [Text]
 helpLines mode =
   helpRows (map bindingHelpEntry (modeBoardBindings mode) <> sessionInputHelp <> mouseHelpEntries)

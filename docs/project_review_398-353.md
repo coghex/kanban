@@ -28,7 +28,7 @@ concrete precondition
 ## Status
 
 - [x] PRR-1. The systemd reader ignores ExecStart resets and can invoke the wrong controller — [#549]
-- [ ] PRR-2. The lane contract says assignment is balance-only despite a required safety placement
+- [x] PRR-2. The lane contract says assignment is balance-only despite a required safety placement — [#552]
 
 ## 1. Systemd controller discovery
 
@@ -120,7 +120,7 @@ or reset-then-replaced `ExecStart=` semantics.
 
 ## 2. Test-suite lane contract
 
-### PRR-2. The lane contract says assignment is balance-only despite a required safety placement
+### [#552] PRR-2. The lane contract says assignment is balance-only despite a required safety placement
 
 > **Captured note:** Reconcile PR #394 / commit `9cc7e91`'s foundational lane
 > documentation with PR #506 / commit `af33eda`'s later safety exception:

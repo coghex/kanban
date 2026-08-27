@@ -551,7 +551,7 @@ spec = describe "golden frames" $ do
   -- frame rather than over the projections "Spec.UI.Keys" holds -- a chip
   -- hidden from the line but still reaching the screen some other way would
   -- pass there and fail here.
-  it "names none of the six agent bindings on a no-agent board or in its help overlay" $ do
+  it "names none of the four agent bindings on a no-agent board or in its help overlay" $ do
     board <- renderCase (frameCaseNamed "board-wide-no-agent")
     help <- renderCase (frameCaseNamed "overlay-help-no-agent")
     loadedBoard <- renderCase wideCase
@@ -570,12 +570,23 @@ spec = describe "golden frames" $ do
       ]
     -- The footer's is the same control with the line's existing clip
     -- accounted for: `txt` cuts the row at the terminal width (§6), and on
-    -- the 200-cell wide board `a approvals` already sits past it, so the five
-    -- chips ahead of the cut are what a loaded board draws at all.
+    -- the 200-cell wide board `a approvals` already sits past it, so the
+    -- three chips ahead of the cut are what a loaded board draws at all.
     filter (`Data.Text.isInfixOf` frameLines loadedBoard) agentFooterChips
       `shouldBe` map
         (footerHint . binding)
-        [KillWorking, ReviewSelection, SolveSelection, AutoSolveSelection, ShowProcesses]
+        [ReviewSelection, SolveSelection, AutoSolveSelection]
+
+    -- Requirement 1's other half, on the same two frames: the inspector and
+    -- the kill key are drawn on a no-agent board and listed in its help
+    -- overlay. Without this the assertion above would be satisfied by a
+    -- projection that hid every agent surface, which is what issue #546 is
+    -- correcting.
+    sequence_
+      [ (name, text, text `Data.Text.isInfixOf` frameLines frame) `shouldBe` (name, text, True)
+      | (name, frame, texts) <- [("board" :: String, board, recoveryFooterChips), ("help", help, recoveryHelpDescriptions)],
+        text <- texts
+      ]
 
   -- issue #515 requirement 11's other half. The @.txt@ frames above carry the
   -- badge's text; only this carries its colour, and the colour is the whole
@@ -822,23 +833,23 @@ frameCases =
 -- it draws, so a row hidden without the height following it would be a border
 -- drawn over its own contents.
 --
--- Both are new files. Requirement 9 keeps every frame that already exists
--- byte-identical: dual mode draws exactly what it drew, which is what the
--- untouched frames beside these assert.
+-- These two are the only frames the mode moves, and issue #546 moved them
+-- once more when it gave `p` and `x` back: dual mode draws exactly what it
+-- drew either time, which is what the untouched frames beside these assert.
 operatingModeCases :: [FrameCase]
 operatingModeCases =
   [ FrameCase
       { frameCaseName = "board-wide-no-agent",
         frameCaseWidth = 200,
         frameCaseHeight = 64,
-        frameCaseSummary = "the wide board with no provider loaded: no agent chips, no provider blocks, no approvals control",
+        frameCaseSummary = "the wide board with no provider loaded: no solve, review, autosolve or approvals chips, no provider blocks, no approvals control",
         frameCaseState = noAgentBoard
       },
     FrameCase
       { frameCaseName = "overlay-help-no-agent",
         frameCaseWidth = 200,
         frameCaseHeight = 48,
-        frameCaseSummary = "the help overlay with no provider loaded: the six agent rows gone, the session and mouse rows kept",
+        frameCaseSummary = "the help overlay with no provider loaded: the four agent rows gone, the process and kill rows kept beside the session and mouse rows",
         frameCaseState = \state -> (noAgentBoard state) {appOverlay = Just HelpOverlay}
       }
   ]
@@ -1785,19 +1796,27 @@ sidebarText frame =
 providerSidebarText :: [Text]
 providerSidebarText = ["Codex", "Claude", "5 hour", "week", Data.Text.strip approvalControlLabel]
 
--- | Issue #521's six bindings, in table order.
+-- | Issue #521's bindings as issue #546 left them: the four that start agent
+-- work, in table order.
 agentBindings :: [BoardAction]
-agentBindings = [KillWorking, ReviewSelection, SolveSelection, AutoSolveSelection, ShowProcesses, ToggleApproval]
+agentBindings = [ReviewSelection, SolveSelection, AutoSolveSelection, ToggleApproval]
+
+-- | The two issue #546 took back out of that set, which reach work already
+-- running rather than starting any, and so are drawn in every mode.
+recoveryBindings :: [BoardAction]
+recoveryBindings = [KillWorking, ShowProcesses]
 
 -- | The chip each of them puts on the footer, composed by the projection the
 -- footer itself uses rather than transcribed.
-agentFooterChips :: [Text]
+agentFooterChips, recoveryFooterChips :: [Text]
 agentFooterChips = map (footerHint . binding) agentBindings
+recoveryFooterChips = map (footerHint . binding) recoveryBindings
 
 -- | The description each of them puts on its help row, which is the other
 -- text a frame can be searched for.
-agentHelpDescriptions :: [Text]
+agentHelpDescriptions, recoveryHelpDescriptions :: [Text]
 agentHelpDescriptions = map ((.bindingDescription) . binding) agentBindings
+recoveryHelpDescriptions = map ((.bindingDescription) . binding) recoveryBindings
 
 controlAt :: [[FrameCell]] -> Text -> (Int, Int)
 controlAt frame label = (row, column - 2)

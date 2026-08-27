@@ -325,17 +325,41 @@ spec = describe "keybinding table" $ do
             character /= '\t'
         ]
 
-  -- Issue #521. A board whose roster loads no provider spawns nothing, so the
-  -- six bindings that drive an agent come off the footer and out of the help
-  -- overlay instead of being advertised and then refused. Both surfaces
-  -- project from 'modeBoardBindings', which is why one group covers them, and
-  -- every expectation below is built from the table rather than from a second
-  -- copy of the line -- the same rule the rest of this module keeps.
+  -- Issue #521, narrowed by issue #546. A board whose roster loads no
+  -- provider starts nothing, so the four bindings that start agent work come
+  -- off the footer and out of the help overlay instead of being advertised
+  -- and then refused. `x` and `p` are not among them: they inspect and
+  -- terminate work that is already running, which such a board inherits from
+  -- worker discovery. Both surfaces project from 'modeBoardBindings', which
+  -- is why one group covers them, and every expectation below is built from
+  -- the table rather than from a second copy of the line -- the same rule the
+  -- rest of this module keeps.
   describe "operating mode" $ do
-    it "hides exactly the six bindings §7's paragraph names, and no others" $ do
+    it "hides exactly the four bindings §7's paragraph names, and no others" $ do
       filter requiresLoadedAgent (map (.bindingAction) boardBindings) `shouldBe` agentBindings
       map (.bindingAction) (modeBoardBindings NoAgentMode)
         `shouldBe` filter (`notElem` agentBindings) (map (.bindingAction) boardBindings)
+
+    -- Issue #546 requirement 1, stated as a positive rather than left to the
+    -- negative control below: the two keys that reach already-running work
+    -- are on the no-agent board's footer line and in its help overlay, and
+    -- neither is refused. Where on the line they sit is that control's
+    -- question, since it compares the whole line against the table's order.
+    it "keeps the inspector and the kill key on both surfaces, and refuses neither" $ do
+      sequence_
+        [ (action, footerHint (binding action) `elem` Text.splitOn "  " noAgentFooterHintLine)
+            `shouldBe` (action, True)
+          | action <- recoveryBindings
+        ]
+      sequence_
+        [ (action, any (Text.isInfixOf (binding action).bindingDescription) (helpLines NoAgentMode))
+            `shouldBe` (action, True)
+          | action <- recoveryBindings
+        ]
+      sequence_
+        [ (action, agentSurfaceRefusal NoAgentMode action) `shouldBe` (action, Nothing)
+          | action <- recoveryBindings
+        ]
 
     it "leaves dual and single-agent mode the whole table, in the order it has today" $
       sequence_
@@ -379,11 +403,13 @@ spec = describe "keybinding table" $ do
           | (name, mode) <- loadedModes
         ]
 
-    -- `x`, `r`, `S`, and `A` are live from a card's details overlay too, and
-    -- its footer is the same projection, so it hides them for the same reason.
-    it "hides the four a card's details overlay also carries" $ do
+    -- `r`, `S`, and `A` are live from a card's details overlay too, and its
+    -- footer is the same projection, so it hides them for the same reason.
+    -- `x` is the fourth binding that footer carries and it stays, which is
+    -- the half of requirement 1 this scope owns.
+    it "hides the three a card's details overlay also carries, and keeps x" $ do
       map (.bindingAction) (modeScopeBindings NoAgentMode DetailsScope)
-        `shouldBe` [DismissOrClose, MergeDoneCard, QuitDashboard]
+        `shouldBe` [KillWorking, DismissOrClose, MergeDoneCard, QuitDashboard]
       sequence_
         [ (name, map (.bindingAction) (modeScopeBindings mode DetailsScope))
             `shouldBe` (name, map (.bindingAction) (scopeBindings DetailsScope))
@@ -443,19 +469,23 @@ spec = describe "keybinding table" $ do
 loadedModes :: [(String, OperatingMode)]
 loadedModes = [("dual", DualMode), ("single-agent", SingleAgentMode)]
 
--- | The six bindings issue #521 takes off a no-agent board, written out
--- rather than filtered from 'requiresLoadedAgent', so a binding that quietly
--- joined or left that predicate fails this module instead of moving the
--- expectation with it.
+-- | The four bindings a no-agent board is left without -- issue #521's six,
+-- less the two issue #546 gave back -- written out rather than filtered from
+-- 'requiresLoadedAgent', so a binding that quietly joined or left that
+-- predicate fails this module instead of moving the expectation with it.
 agentBindings :: [BoardAction]
 agentBindings =
-  [ KillWorking,
-    ReviewSelection,
+  [ ReviewSelection,
     SolveSelection,
     AutoSolveSelection,
-    ShowProcesses,
     ToggleApproval
   ]
+
+-- | The two the same issue put back, which the assertions below pair with
+-- 'agentBindings' so that hiding either of them again fails here rather than
+-- only in a golden frame.
+recoveryBindings :: [BoardAction]
+recoveryBindings = [KillWorking, ShowProcesses]
 
 -- | The board's footer line with no provider loaded and nothing filtering.
 noAgentFooterHintLine :: Text
