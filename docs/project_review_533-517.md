@@ -27,7 +27,7 @@ concrete precondition
 - [x] PRR-1. No-agent mode removes lifecycle controls for recovered persistent workers — [#546]
 - [x] PRR-2. The busy triage fallback marks a changes-requested issue as ready — [#557]
 - [x] PRR-3. Reused process-group IDs can misattribute this board's `gh` to a previous board — [#558]
-- [ ] PRR-4. The reconciled `gh` authority design claims a decoder that was never implemented
+- [x] PRR-4. The reconciled `gh` authority design claims a decoder that was never implemented — [no-issue]
 
 ## 1. Persistent-worker control in no-agent mode
 
@@ -266,7 +266,15 @@ construction, and census, liveness, and signaling remain identity-pinned.
 
 ## 4. Reconciled authority-design accuracy
 
-### PRR-4. The reconciled `gh` authority design claims a decoder that was never implemented
+### [no-issue] PRR-4. The reconciled `gh` authority design claims a decoder that was never implemented
+
+> **Disposition:** No issue — the concern is confirmed (`src/Kanban/Process.hs:103-104`
+> derives both JSON instances and no hand-written `OwnedProcessGroup` decoder
+> exists in `src/`, while `test/Spec/Repository/Authority.hs:276-278` proves the
+> generic instance already gives the required legacy compatibility), but the
+> correction is a documentation-only edit to a `coordination`-lane design
+> record, which publishes straight to `master` and carries neither a tracker
+> item nor a pull request. Prepared as a docs-worktree commit for `/push-docs`.
 
 > **Captured note:** Reconcile the delivered authority design with the actual
 > backward-compatible `OwnedProcessGroup` decoder. The compatibility behavior
