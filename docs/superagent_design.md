@@ -102,21 +102,22 @@ concrete precondition
   controller consider the live open backlog in ascending issue number, advance
   at most one issue per backend pass, and hold a current changes-requested issue
   as a barrier.
-- The persistent issue-approval arc is partly landed: issues #320, #349, #351,
-  and #352 are closed and their backend, controller, installer, and Haskell
-  lifecycle surfaces are on the current branch. Its sidebar control (#421)
-  closed on 2026-08-21 and now owns lowercase `a`; operating documentation
-  (#425) remains open. Mission Control should consume that authority
-  rather than create a competing approve-all implementation.
+- The persistent issue-approval arc is landed: issues #320, #349, #351, #352,
+  its sidebar control (#421, which owns lowercase `a`), and its operating
+  documentation (#425) are all closed, as is the umbrella epic #318, and their
+  backend, controller, installer, and Haskell lifecycle surfaces are on
+  `master`. Mission Control should consume that authority rather than create a
+  competing approve-all implementation.
 - A repository-scoped tracker search was repeated for readiness on 2026-08-21
   and found no existing issue or epic whose scope is a durable general agent
   console or mission orchestrator. Epic #318 overlaps only the ordered
   issue-approval command and is a dependency/integration point, not a duplicate
   of this arc.
-- `docs/superagent_design.md` is not currently named by the publication table in
-  `docs/agent-workflow-contract.md` section 7. Until a later contract change
-  classifies it, the repository's fail-closed rule treats it as pr-atomic even
-  though it is being authored in `docs-wip` like the other design records.
+- `docs/agent-workflow-contract.md` section 7 classifies
+  `docs/superagent_design.md` as `coordination | audit-report`, so it publishes
+  straight to `master` rather than through a pull request. Commit `2e2003e`
+  added that row together with the matching `config.toml.example` and
+  source-distribution exclusion entries when it landed this document.
 
 ## Desired experience
 
