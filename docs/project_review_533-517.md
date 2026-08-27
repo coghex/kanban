@@ -25,7 +25,7 @@ concrete precondition
 ## Status
 
 - [x] PRR-1. No-agent mode removes lifecycle controls for recovered persistent workers — [#546]
-- [ ] PRR-2. The busy triage fallback marks a changes-requested issue as ready
+- [x] PRR-2. The busy triage fallback marks a changes-requested issue as ready — [#557]
 - [ ] PRR-3. Reused process-group IDs can misattribute this board's `gh` to a previous board
 - [ ] PRR-4. The reconciled `gh` authority design claims a decoder that was never implemented
 
@@ -119,7 +119,7 @@ the persistent-worker requirements.
 
 ## 2. Busy approval reconciliation
 
-### PRR-2. The busy triage fallback marks a changes-requested issue as ready
+### [#557] PRR-2. The busy triage fallback marks a changes-requested issue as ready
 
 > **Captured note:** During the approval lock's busy fallback, do not render a
 > readiness checkmark for an issue whose complete snapshot also carries the
