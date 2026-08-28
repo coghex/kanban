@@ -395,6 +395,62 @@ def key_of(mode: str, candidate: dict):
     return candidate["number"] if mode == "pr" else candidate["sha"]
 
 
+def resolve_key(mode: str, key, keys: list):
+    """The candidate `key` names, or `None` when it names none of them.
+
+    A commit has as many spellings as it has abbreviations, and the two ends of
+    this module meet in different ones: `git log --format=%H` prints forty
+    characters, while a user naming a commit reads the seven a direct-mode
+    report filename carries, and an endpoint recorded by an earlier run may be
+    either. Exact equality would reject `ed90877` against `ed90877ac1…` — a
+    real commit, correctly spelled, refused as absent — so a SHA matches a
+    candidate when one is a prefix of the other, in whichever direction.
+
+    Ambiguity is a refusal rather than a choice: a prefix that names two
+    commits names neither, and picking one would sweep a range nobody asked
+    for. Pull-request numbers have one spelling and take the exact path.
+    """
+    if key in keys:
+        return key
+    if mode == "pr":
+        return None
+    matches = [
+        candidate
+        for candidate in keys
+        if candidate.startswith(key) or key.startswith(candidate)
+    ]
+    if len(matches) > 1:
+        raise CursorError(
+            f"{key} names {len(matches)} commits in this history "
+            f"({', '.join(sorted(matches))}), so it identifies none of them. "
+            "Name more characters."
+        )
+    return matches[0] if matches else None
+
+
+def resolve_all(mode: str, values, keys: list, keep_unmatched: bool = False) -> list:
+    """`values` in the spelling this history uses.
+
+    A value this history does not hold is dropped by default, which is the safe
+    direction for the coverage and exclusion sets `select` builds: a unit the
+    history does not contain cannot be selected from it either, so leaving it
+    out changes nothing, while keeping a stale spelling would silently stop a
+    recorded unit from matching the candidate it names.
+
+    `keep_unmatched` is what `record` writes back with. There the value is state
+    rather than a filter, and a unit outside the listing this batch happened to
+    take is not a unit that stopped existing.
+    """
+    resolved = []
+    for value in values:
+        found = resolve_key(mode, value, keys)
+        if found is not None:
+            resolved.append(found)
+        elif keep_unmatched:
+            resolved.append(value)
+    return resolved
+
+
 # --------------------------------------------------------------------------
 # Selection
 
@@ -428,12 +484,15 @@ def select(
     excluded = set(state["excluded"]["prs" if mode == "pr" else "commits"])
     keys = [key_of(mode, candidate) for candidate in candidates]
     position = {key: index for index, key in enumerate(keys)}
+    covered = set(resolve_all(mode, covered, keys))
+    excluded = set(resolve_all(mode, excluded, keys))
 
     endpoint = state[mode]["endpoint"]
     frontier = None
     if start is not None:
-        if start not in position:
-            raise CursorError(_absent_start_message(mode, start, partial))
+        supplied_start, start = start, resolve_key(mode, start, keys)
+        if start is None:
+            raise CursorError(_absent_start_message(mode, supplied_start, partial))
         begin = position[start]
         origin = "explicit-start"
     elif override_boundary:
@@ -446,9 +505,10 @@ def select(
         origin = "boundary-override"
     elif endpoint is not None:
         frontier = endpoint
-        endpoint_key = endpoint["number"] if mode == "pr" else endpoint["sha"]
-        if endpoint_key not in position:
-            raise CursorError(_absent_endpoint_message(mode, endpoint_key, partial))
+        recorded_key = endpoint["number"] if mode == "pr" else endpoint["sha"]
+        endpoint_key = resolve_key(mode, recorded_key, keys)
+        if endpoint_key is None:
+            raise CursorError(_absent_endpoint_message(mode, recorded_key, partial))
         begin = position[endpoint_key] + 1
         origin = "recorded-endpoint"
     else:
@@ -599,25 +659,33 @@ def record(
     keys = [key_of(mode, candidate) for candidate in candidates]
     position = {key: index for index, key in enumerate(keys)}
     updated = json.loads(json.dumps(state))
+    reviewed = [_resolved_or_raise(mode, unit, keys, "reviewed", partial) for unit in reviewed]
+    excluded = [
+        _resolved_or_raise(mode, unit, keys, "excluded", partial)
+        for unit in (excluded or [])
+    ]
+    # Everything already recorded is re-spelled the way this history spells it,
+    # so a state written from a `--format=%h` walk and one written from a
+    # `%H` walk converge rather than accumulating two names for one commit.
+    excluded_field = "prs" if mode == "pr" else "commits"
+    updated[mode]["reviewed"] = resolve_all(
+        mode, updated[mode]["reviewed"], keys, keep_unmatched=True
+    )
+    updated["excluded"][excluded_field] = resolve_all(
+        mode, updated["excluded"][excluded_field], keys, keep_unmatched=True
+    )
     # A recording listing is taken after the batch was reviewed, which can be a
     # long way after it was selected. Merges landing in between push older rows
     # off a bounded page, so a reviewed unit missing from one is far more often
     # a short page than a wrong claim -- and refusing it as a wrong claim would
     # leave a completed batch with no durable endpoint at all, which is the
     # defect this module exists to close.
-    for unit in reviewed:
-        if unit not in position:
-            raise CursorError(_absent_recorded_message(unit, "reviewed", partial))
-    for unit in excluded or []:
-        if unit not in position:
-            raise CursorError(_absent_recorded_message(unit, "excluded", partial))
     if not reviewed and not excluded:
         raise CursorError("a completed batch records at least one reviewed or excluded unit.")
 
     updated[mode]["reviewed"] = sorted(set(updated[mode]["reviewed"]) | set(reviewed))
-    excluded_field = "prs" if mode == "pr" else "commits"
     updated["excluded"][excluded_field] = sorted(
-        set(updated["excluded"][excluded_field]) | set(excluded or [])
+        set(updated["excluded"][excluded_field]) | set(excluded)
     )
 
     if reviewed:
@@ -630,6 +698,13 @@ def record(
             partial,
         )
     return updated
+
+
+def _resolved_or_raise(mode: str, unit, keys: list, role: str, partial: bool):
+    found = resolve_key(mode, unit, keys)
+    if found is None:
+        raise CursorError(_absent_recorded_message(unit, role, partial))
+    return found
 
 
 def _absent_recorded_message(unit, role: str, partial: bool) -> str:
@@ -653,9 +728,10 @@ def _advanced_endpoint(mode: str, current, candidate: dict, position: dict, part
     )
     if current is None:
         return proposed
-    current_key = current["number"] if mode == "pr" else current["sha"]
-    if current_key not in position:
-        raise CursorError(_absent_endpoint_message(mode, current_key, partial))
+    recorded_key = current["number"] if mode == "pr" else current["sha"]
+    current_key = resolve_key(mode, recorded_key, list(position))
+    if current_key is None:
+        raise CursorError(_absent_endpoint_message(mode, recorded_key, partial))
     proposed_key = candidate["number"] if mode == "pr" else candidate["sha"]
     # Older means further down a newest-first history, so the frontier only
     # ever moves to a larger index. A batch taken above it — after an explicit

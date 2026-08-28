@@ -392,6 +392,14 @@ DIRECT_MODE = {
         "newest-first, unless the user supplied another count."
     ),
     "a merge counts once": "A direct merge counts as one commit.",
+    "a commit may be abbreviated": (
+        "A commit may be named at any length `git` accepts, including the "
+        "seven a direct-mode report filename carries: `select` and `record` "
+        "resolve an abbreviated SHA against the walk, and refuse a prefix that "
+        "names more than one commit rather than choosing between them. An "
+        "endpoint an earlier run recorded in a shorter spelling keeps working "
+        "for the same reason."
+    ),
     "the direct walk is never sliced": (
         "**Walk the whole first-parent history, not a slice starting at the "
         "entry point.** The recorded endpoint has to be inside the listing the "
@@ -1933,6 +1941,97 @@ class BoundedListingTests(CursorTransitionCase):
             )
         self.assertIn("absent from the candidate history", str(caught.exception))
         self.assertNotIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
+
+
+class AbbreviatedShaTests(CursorTransitionCase):
+    """Round 2's blocker: one commit, several spellings.
+
+    `git log --format=%H` prints forty characters. A user naming a commit reads
+    the seven a direct-mode report filename carries — `docs/project_review_
+    direct_<newest7>-<oldest7>.md` is the shape this workflow writes — and an
+    endpoint recorded by an earlier run may be in either. Exact equality
+    refuses a correctly-spelled commit as absent, which is a stop the sweep
+    cannot be argued out of.
+    """
+
+    def test_an_abbreviated_start_names_the_commit_it_identifies(self):
+        selection = self.select(mode="direct", count=2, start=DIRECT_HISTORY[2][:7])
+        self.assertEqual(
+            self.units(selection), list(DIRECT_HISTORY[2:4])
+        )
+        self.assertEqual(selection["origin"], "explicit-start")
+        # The full spelling is the same request, so the two agree.
+        self.assertEqual(
+            self.units(self.select(mode="direct", count=2, start=DIRECT_HISTORY[2])),
+            self.units(selection),
+        )
+
+    def test_an_abbreviated_recorded_endpoint_still_positions_the_sweep(self):
+        # A cursor written by an earlier run, or by a walk taken with
+        # `--format=%h`, holds a short SHA. It has to keep working against a
+        # `%H` walk, or the sweep stops on state it wrote itself.
+        short = self.module.empty_state()
+        short["direct"]["endpoint"] = {"sha": DIRECT_HISTORY[1][:7]}
+        selection = self.select(mode="direct", count=2, state=short)
+        self.assertEqual(self.units(selection), list(DIRECT_HISTORY[2:4]))
+        self.assertEqual(selection["origin"], "recorded-endpoint")
+
+    def test_an_abbreviated_coverage_or_exclusion_entry_still_matches(self):
+        short = self.module.empty_state()
+        short["direct"]["reviewed"] = [DIRECT_HISTORY[0][:7]]
+        short["excluded"]["commits"] = [DIRECT_HISTORY[1][:8]]
+        selection = self.select(mode="direct", count=2, state=short)
+        self.assertEqual(self.units(selection), list(DIRECT_HISTORY[2:4]))
+        self.assertEqual(
+            sorted(entry["reason"] for entry in selection["skipped"]),
+            ["covered", "excluded"],
+        )
+
+    def test_recording_an_abbreviated_unit_stores_the_history_spelling(self):
+        # The state converges on one name per commit rather than accumulating
+        # a second every time a walk is taken with a different abbreviation.
+        recorded = self.module.record(
+            self.state(),
+            "direct",
+            self.module.normalize_candidates("direct", list(DIRECT_HISTORY)),
+            [DIRECT_HISTORY[0][:7], DIRECT_HISTORY[1][:7]],
+            [DIRECT_HISTORY[2][:7]],
+        )
+        self.assertEqual(recorded["direct"]["endpoint"], {"sha": DIRECT_HISTORY[1]})
+        self.assertEqual(
+            recorded["direct"]["reviewed"], sorted(DIRECT_HISTORY[:2])
+        )
+        self.assertEqual(recorded["excluded"]["commits"], [DIRECT_HISTORY[2]])
+
+    def test_an_ambiguous_prefix_is_refused_rather_than_chosen(self):
+        # The other half, and why this is a resolution rather than a loosened
+        # comparison: a prefix naming two commits names neither, and picking
+        # one would sweep a range nobody asked for.
+        history = ["abcdef01aa", "abcdef01bb", "9999999999"]
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(
+                mode="direct", count=1, candidates=history, start="abcdef0"
+            )
+        message = str(caught.exception)
+        self.assertIn("names 2 commits", message)
+        self.assertIn("abcdef01aa", message)
+        self.assertIn("abcdef01bb", message)
+        # Enough characters resolves it.
+        self.assertEqual(
+            self.units(
+                self.select(
+                    mode="direct", count=1, candidates=history, start="abcdef01a"
+                )
+            ),
+            ["abcdef01aa"],
+        )
+
+    def test_a_pull_request_number_takes_the_exact_path(self):
+        # Non-vacuity for the prefix rule: it is a SHA rule, and #46 must never
+        # resolve to #466 the way `ed90877` resolves to `ed90877ac1`.
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=1, start=46)
+        self.assertIn("is not in this repository's merged history", str(caught.exception))
 
 
 class CursorDocumentTests(CursorTransitionCase):

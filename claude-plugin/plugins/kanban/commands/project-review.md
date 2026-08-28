@@ -236,6 +236,12 @@ git -C "$ROOT" log --first-parent --format=%H \
   | python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode direct --count "${COUNT:-12}"
 ```
 
+A commit may be named at any length `git` accepts, including the seven a
+direct-mode report filename carries: `select` and `record` resolve an
+abbreviated SHA against the walk, and refuse a prefix that names more than one
+commit rather than choosing between them. An endpoint an earlier run recorded in
+a shorter spelling keeps working for the same reason.
+
 **Walk the whole first-parent history, not a slice starting at the entry
 point.** The recorded endpoint has to be inside the listing the helper positions
 within, and a walk that began below it would refuse it as a cursor belonging to
