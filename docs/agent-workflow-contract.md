@@ -1427,8 +1427,12 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   (§2.7) is unaffected and still governs the unapproved work it runs on.
 - **Failure semantics:** it addresses the highest-priority obstacle in
   `pullRequestStatus` order — merge conflict, then any failed check, then a
-  merge state that is not ready (`MergeBehind`, which `pullRequestStatus`
-  reports as `merge pending`), then nothing to fix. An `UNKNOWN` merge state is
+  pending check, then a merge state that is not ready (`MergeBehind`, which
+  `pullRequestStatus` reports as `merge pending`), then nothing to fix. The
+  pending branch mutates nothing: `checksPending` is guarded before the
+  merge-state test in `pullRequestStatus` for the same reason it is here —
+  replacing the approved head while CI is still running discards the run that
+  would have said whether there was anything to fix. An `UNKNOWN` merge state is
   not a clearance and stops the run rather than being reported ready. A real
   check failure is fixed and never retried; a failure judged pre-existing on
   the base branch is reported and stops the run. Cross-repository heads,

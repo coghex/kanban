@@ -35,7 +35,10 @@ created above it.
   would otherwise perform. An approved pull request merely BEHIND its base is
   an obstacle too, not a clearance: green checks do not make it mergeable, so
   it is updated from the base exactly as a conflict is, and an `UNKNOWN` merge
-  state stops the run rather than being reported ready. A rerun pushes
+  state stops the run rather than being reported ready. A check that is still
+  running outranks both and mutates nothing at all, matching
+  `pullRequestStatus`: replacing an approved head mid-CI would discard the
+  run that was about to answer the question. A rerun pushes
   no commit, so the approval it ran under still stands and no rereview is
   invoked; a code fix replaces the reviewed head, so one always is. It is
   authored once under `tools/command_sources/` and rendered into both bundles,

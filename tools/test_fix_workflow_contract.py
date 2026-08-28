@@ -136,11 +136,25 @@ REQUIRED_PHRASES = {
         "decision."
     ),
     # --- A pull request behind its base is unmergeable, not clear. ---
+    "a-pending-check-mutates-nothing": (
+        "3. **A check still running** — no conflict and no failed check, but "
+        "the rollup\n   carries a pending entry. This branch MUTATES NOTHING. "
+        "Report which checks\n   are still running and stop: do not update the "
+        "branch, do not rerun, do not\n   push, and do not invoke a rereview."
+    ),
+    "pending-outranks-behind-as-it-does-in-the-haskell": (
+        "`pullRequestStatus` ranks it this way\n   too — `checksPending` is "
+        "guarded BEFORE the merge-state test"
+    ),
+    "why-pending-outranks-behind": (
+        "replacing the approved head\n   while CI is still running discards "
+        "the very run that would have told you\n   whether there was anything "
+        "to fix, and starts the whole thing again on a\n   head nobody has "
+        "reviewed."
+    ),
     "behind-the-base-is-its-own-obstacle": (
-        "3. **Behind its base** — no conflict and no failed check, but the "
-        "merge state\n   is not ready: GitHub reports `BEHIND`, which\n   "
-        "`src/Kanban/Workflow.hs`'s `pullRequestStatus` classifies as `merge\n"
-        "   pending`"
+        "4. **Behind its base** — no conflict, no failed check, and no pending "
+        "check,"
     ),
     "green-checks-do-not-make-a-behind-pr-mergeable": (
         "Green checks do not make\n   such a pull request mergeable. Update it "
@@ -148,13 +162,13 @@ REQUIRED_PHRASES = {
         "conflict branch does"
     ),
     "nothing-to-fix-requires-a-ready-merge-state": (
-        "4. **Nothing to fix** — no conflict, no failed check, and a merge "
-        "state that is\n   ready."
+        "5. **Nothing to fix** — no conflict, no failed check, no pending "
+        "check, and a\n   merge state that is ready."
     ),
     "an-unknown-merge-state-is-not-a-clearance": (
-        "`UNKNOWN` is not a clearance either — GitHub has not finished\n   "
-        "computing mergeability, so say so and stop rather than reporting a "
-        "pull\n   request ready that may yet come back `BEHIND` or `DIRTY`."
+        "`UNKNOWN` is not a clearance either — GitHub has not\n   finished "
+        "computing mergeability, so say so and stop rather than reporting a\n"
+        "   pull request ready that may yet come back `BEHIND` or `DIRTY`."
     ),
 
     # --- Triage: what may be rerun, and what may never be. ---
@@ -310,12 +324,15 @@ REQUIRED_PHRASES = {
         "having pushed nothing, invoke no rereview,\nand report it."
     ),
     "a-rerun-needs-no-worktree": (
-        "A\nrerun changes no file and needs no worktree at all."
+        "A\nrerun changes no file and needs no worktree at all,"
     ),
     "the-worktree-step-covers-all-three-head-moving-obstacles": (
         "This step applies only when step 3 or step 5 concluded that the head "
         "must\nmove — a merge conflict, a base the head is behind, or a real "
         "check failure."
+    ),
+    "a-pending-check-needs-no-worktree-either": (
+        "neither does a pending\ncheck, which mutates nothing at all."
     ),
     "never-switches-the-primary-checkout": (
         "Never switch the repository's primary checkout."
@@ -326,6 +343,7 @@ REQUIRED_PHRASES = {
 DIAGNOSIS_ORDER = (
     "**Merge conflict**",
     "**Failed check**",
+    "**A check still running**",
     "**Behind its base**",
     "**Nothing to fix**",
 )
@@ -334,6 +352,10 @@ DIAGNOSIS_ORDER = (
 # them, which is what proves the table above is measuring this workflow rather
 # than matching text every packaged workflow happens to contain.
 FIX_ONLY_REQUIREMENTS = (
+    "a-pending-check-mutates-nothing",
+    "pending-outranks-behind-as-it-does-in-the-haskell",
+    "why-pending-outranks-behind",
+    "a-pending-check-needs-no-worktree-either",
     "behind-the-base-is-its-own-obstacle",
     "green-checks-do-not-make-a-behind-pr-mergeable",
     "nothing-to-fix-requires-a-ready-merge-state",
@@ -475,6 +497,28 @@ class FixWorkflowContractTests(unittest.TestCase):
                 sorted(positions),
                 f"{path} lists the obstacle branches out of order {DIAGNOSIS_ORDER}",
             )
+
+    def test_the_branch_order_matches_pull_request_status_precedence(self):
+        # Non-vacuous anchor for DIAGNOSIS_ORDER: the order the assets state is
+        # the order `pullRequestStatus` actually guards in, so a change to the
+        # Haskell precedence fails here rather than leaving the packaged text
+        # quietly disagreeing with the board.
+        source = read(WORKFLOW_HS)
+        start = source.index("pullRequestStatus :: WorkflowConfig")
+        end = source.index("blockedStatus :: WorkflowConfig", start)
+        body = source[start:end]
+        guards = [
+            body.index("MergeConflicting"),
+            body.index("checksFailed"),
+            body.index("checksPending"),
+            body.index("mergeStateReady"),
+        ]
+        self.assertEqual(
+            guards,
+            sorted(guards),
+            "pullRequestStatus no longer guards conflict, failed, pending, "
+            "merge-ready in that order; DIAGNOSIS_ORDER must follow it",
+        )
 
     def test_the_approval_helper_named_by_both_assets_really_exists(self):
         # Non-vacuous anchor: the assets tell an agent to match approval the way
