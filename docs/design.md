@@ -2212,7 +2212,10 @@ above are unchanged, and persistence the user switched off is not a failure.
   board whose snapshot failed — is treated exactly as an entry with one. What
   separates a leftover from a board's own work is not the owner but the record
   the board found at its first reclaim, since under the lease nothing else
-  could have written it.
+  could have written it. That claim is given up as the record carrying it is
+  cleared, and only once the removal succeeds: a process group id is reissued
+  freely once its group is gone, so a board still holding the number would
+  describe its own later `gh` as a predecessor's leftover.
 - The coordinator schedules typed jobs rather than one anonymous refresh: a
   foreground open job and a background history job. When both are runnable the
   open job runs first; a history job never starts or resumes while an open job
