@@ -36,6 +36,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -50,6 +51,8 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 BUILD_JOB = "build-test"
 GATE_STEP = "Derive the version and validate the tag and changelog"
 SDIST_STEP = "Build and verify the source distribution"
+CANDIDATE_STEP = "Install and verify the candidate from the source archive"
+UPLOAD_STEP = "Upload the verified release payload"
 PUBLISH_JOB = "publish-release"
 PUBLISH_STEP = "Publish the release"
 DRY_RUN_JOB = "publish-dry-run"
@@ -274,6 +277,45 @@ class ReleaseWorkflowShapeTests(unittest.TestCase):
                     body,
                     f"writable job {name} runs {command!r}, which belongs in {BUILD_JOB}",
                 )
+
+    def test_the_candidate_install_gate_runs_between_the_sdist_and_the_upload(self):
+        # Requirement 1's placement, and requirement 7's whole argument. The
+        # gate has to see the digested archive and be seen by the upload, and
+        # it has to live in the read-only build job so that both publishers,
+        # which already require that job whole, inherit it without any job
+        # gaining permission to write.
+        steps = [
+            line.strip()[len("- name: ") :]
+            for line in job_lines(BUILD_JOB)
+            if line.strip().startswith("- name: ")
+        ]
+        self.assertIn(CANDIDATE_STEP, steps)
+        self.assertLess(steps.index(SDIST_STEP), steps.index(CANDIDATE_STEP))
+        self.assertLess(steps.index(CANDIDATE_STEP), steps.index(UPLOAD_STEP))
+        self.assertEqual(job_permissions(BUILD_JOB), {"contents": "read"})
+
+    def test_the_candidate_is_built_with_no_warning_relaxation(self):
+        # Requirement 5, which is a negative property no execution can show:
+        # the consumer's build is the one the packaged `cabal.project` and its
+        # -Werror describe, so nothing here may write a `cabal.project.local`
+        # or hand Cabal a flag that softens it.
+        # Read off the executable lines alone: the step's own comments explain
+        # which relaxations it is refusing, and a check that matched those
+        # would forbid saying so.
+        commands = "\n".join(
+            line
+            for line in step_run_script(BUILD_JOB, CANDIDATE_STEP).splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        for escape in ("cabal.project.local", "-Wwarn", "--ghc-options", "-Werror"):
+            self.assertNotIn(
+                escape,
+                commands,
+                f"the candidate gate must not spell {escape!r}: the archive's own"
+                " cabal.project decides how the candidate builds",
+            )
+        # The detector would pass vacuously against a step it could not read.
+        self.assertIn("cabal install exe:kanban", commands)
 
     def test_each_publication_job_gates_on_the_complete_build_and_test_job(self):
         for name in (PUBLISH_JOB, DRY_RUN_JOB):
@@ -825,6 +867,324 @@ class SdistVerificationTests(ReleaseScriptTestCase):
     def test_an_archive_naming_another_version_fails(self):
         output = self.sdist(["kanban-0.9.0.0.tar.gz"], expect_exit=1)
         self.assertIn("expected 'kanban-1.0.0.0.tar.gz'", output)
+
+
+class CandidateInstallTests(ReleaseScriptTestCase):
+    """The gate that installs the release candidate from its own archive.
+
+    Everything above this class proves the archive exists, is named for the
+    version, and arrives intact. This is the one gate that proves it builds,
+    so its fixtures have to keep the archive distinguishable from the checkout
+    the job also has lying around: `cabal` is stubbed to record where it ran,
+    the executable it "installs" is the only one reporting the right version,
+    and decoys reporting the wrong one sit on `PATH` and behind `cabal
+    list-bin` so a script that resolved either would fail rather than pass.
+    """
+
+    DECOY_VERSION = "9.9.9.9"
+
+    def setUp(self):
+        super().setUp()
+        self.payload = self.root / "payload"
+        self.sdist_dir = self.payload / "sdist"
+        self.sdist_dir.mkdir(parents=True)
+        self.notes = self.payload / "release-notes.md"
+        self.notes.write_text(EXPECTED_NOTES, encoding="utf-8")
+        self.digest_file = self.payload / "payload.sha256"
+        self.candidate_dir = self.root / "candidate"
+        self.cabal_log = self.root / "cabal-invocations"
+        self.bin_dir = self.root / "fake" / "bin"
+        self.decoy(self.bin_dir / "kanban")
+
+    # -- fixtures ---------------------------------------------------------
+
+    def decoy(self, path, *, reports=None):
+        """A `kanban` the gate must not resolve, saying so by its version."""
+        reported = f"kanban {self.DECOY_VERSION}" if reports is None else reports
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"#!/bin/bash\necho '{reported}'\n", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def archive(self, *, root_name=f"kanban-{VERSION}", contents=None, name=None):
+        """A real `.tar.gz` holding one package root, as `cabal sdist` makes."""
+        staging = self.root / "staging"
+        shutil.rmtree(staging, ignore_errors=True)
+        package = staging / root_name
+        package.mkdir(parents=True)
+        for relative, text in (contents or {
+            "kanban.cabal": CABAL_FILE,
+            "cabal.project": "packages: .\n\npackage kanban\n  ghc-options: -Werror\n",
+        }).items():
+            member = package / relative
+            member.parent.mkdir(parents=True, exist_ok=True)
+            member.write_text(text, encoding="utf-8")
+        path = self.sdist_dir / (name or f"kanban-{VERSION}.tar.gz")
+        subprocess.run(
+            ["tar", "-czf", str(path), root_name],
+            cwd=str(staging),
+            check=True,
+            capture_output=True,
+        )
+        return path
+
+    def stub_cabal(
+        self, *, build_exit=0, install_exit=0, install_writes=True, reports=None
+    ):
+        """A `cabal` recording where it ran and what it was asked to do.
+
+        `install` writes the executable a real one would, so the only `kanban`
+        reporting the archive's version is the one in the isolated
+        destination -- and `list-bin` answers with a decoy, so a script that
+        asked the checkout instead of the archive would be caught.
+        """
+        reported = f"kanban {VERSION}" if reports is None else reports
+        decoy = self.decoy(self.root / "checkout-build" / "kanban")
+        stub = self.bin_dir / "cabal"
+        stub.write_text(
+            "#!/bin/bash\n"
+            'printf "%s\\t%s\\n" "$PWD" "$*" >> "$CABAL_LOG"\n'
+            'case "$1" in\n'
+            "  build)\n"
+            f"    exit {build_exit}\n"
+            "    ;;\n"
+            "  install)\n"
+            '    installdir=""\n'
+            '    for argument in "$@"; do\n'
+            '      case "$argument" in --installdir=*) installdir="${argument#--installdir=}" ;; esac\n'
+            "    done\n"
+            + (
+                '    if [ -n "$installdir" ]; then\n'
+                '      mkdir -p "$installdir"\n'
+                f"      printf '#!/bin/bash\\necho \"{reported}\"\\n' > \"$installdir/kanban\"\n"
+                '      chmod +x "$installdir/kanban"\n'
+                "    fi\n"
+                if install_writes
+                else ""
+            )
+            + f"    exit {install_exit}\n"
+            "    ;;\n"
+            "  list-bin)\n"
+            f'    echo "{decoy}"\n'
+            "    ;;\n"
+            "esac\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+
+    def candidate(self, *, expect_exit):
+        return self.run_script(
+            step_run_script(BUILD_JOB, CANDIDATE_STEP),
+            {
+                "VERSION": VERSION,
+                "SDIST_DIR": str(self.sdist_dir),
+                "DIGEST_FILE": str(self.digest_file),
+                "CANDIDATE_DIR": str(self.candidate_dir),
+                "CABAL_LOG": str(self.cabal_log),
+            },
+            expect_exit=expect_exit,
+        )
+
+    def cabal_invocations(self):
+        if not self.cabal_log.exists():
+            return []
+        return [
+            line.split("\t", 1)
+            for line in self.cabal_log.read_text(encoding="utf-8").splitlines()
+        ]
+
+    def prepared(self, **archive_arguments):
+        """The ordinary case: one good archive, digested, with `cabal` stubbed."""
+        archive = self.archive(**archive_arguments)
+        self.record_digest(self.digest_file, archive, self.notes)
+        self.stub_cabal()
+        return archive
+
+    # -- the archive is the thing being installed --------------------------
+
+    def test_a_good_candidate_installs_and_reports_its_version(self):
+        # Requirement 8's success case, and the three log lines requirement 3
+        # and the rehearsal both read: which archive, which bytes, and what
+        # the binary built from them said about itself.
+        archive = self.prepared()
+        output = self.candidate(expect_exit=0)
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        self.assertIn(f"candidate archive: kanban-{VERSION}.tar.gz", output)
+        self.assertIn(f"confirmed candidate sha256: {digest}", output)
+        self.assertIn(f"installed candidate reports: kanban {VERSION}", output)
+
+    def test_cabal_runs_from_the_unpacked_archive_and_nowhere_else(self):
+        # Requirement 5. Both commands run with the extracted package root as
+        # their working directory, which is what puts the `cabal.project` the
+        # archive carries -- and its -Werror -- in charge of the build.
+        self.prepared()
+        self.candidate(expect_exit=0)
+        root = self.candidate_dir / "extract" / f"kanban-{VERSION}"
+        commands = [arguments.split()[0] for _, arguments in self.cabal_invocations()]
+        self.assertEqual(commands, ["build", "install"])
+        for directory, arguments in self.cabal_invocations():
+            self.assertEqual(
+                Path(directory).resolve(),
+                root.resolve(),
+                f"cabal {arguments} ran outside the unpacked archive",
+            )
+            self.assertNotIn("cabal.project.local", arguments)
+
+    def test_the_verified_binary_is_the_installed_one_not_a_decoy(self):
+        # Requirement 6, as a negative control rather than an inference. The
+        # decoys are inverted here: `kanban` on PATH and the one behind `cabal
+        # list-bin` report the version the gate wants, and only the executable
+        # in the isolated destination reports the wrong one. A script that
+        # resolved either decoy would pass this; the gate has to fail it.
+        archive = self.archive()
+        self.record_digest(self.digest_file, archive, self.notes)
+        self.stub_cabal(reports="kanban 0.9.0.0")
+        self.decoy(self.bin_dir / "kanban", reports=f"kanban {VERSION}")
+        self.decoy(self.root / "checkout-build" / "kanban", reports=f"kanban {VERSION}")
+        output = self.candidate(expect_exit=1)
+        self.assertIn("reported 'kanban 0.9.0.0'", output)
+        installed = self.candidate_dir / "bin" / "kanban"
+        self.assertEqual(
+            subprocess.run(
+                [str(installed)], text=True, capture_output=True, check=True
+            ).stdout.strip(),
+            "kanban 0.9.0.0",
+        )
+
+    # -- the same bytes the publisher attaches ----------------------------
+
+    def test_an_archive_altered_after_it_was_digested_is_refused(self):
+        # Requirement 2, the property none of requirement 4's cases reaches: a
+        # gate that ran against different bytes than the publisher attaches
+        # would prove nothing about the release.
+        archive = self.prepared()
+        archive.write_bytes(archive.read_bytes() + b"tampered")
+        output = self.candidate(expect_exit=1)
+        self.assertIn("does not match the digest recorded when it was verified", output)
+        self.assertFalse(self.candidate_dir.exists(), "the archive was unpacked anyway")
+        self.assertEqual(self.cabal_invocations(), [])
+
+    def test_a_payload_carrying_no_digest_is_refused(self):
+        self.archive()
+        self.stub_cabal()
+        output = self.candidate(expect_exit=1)
+        self.assertIn("found no payload digest", output)
+
+    def test_a_digest_that_does_not_record_the_archive_is_refused(self):
+        self.archive()
+        self.stub_cabal()
+        self.digest_file.write_text(
+            f"{hashlib.sha256(b'x').hexdigest()}  notes\n", encoding="utf-8"
+        )
+        output = self.candidate(expect_exit=1)
+        self.assertIn("does not record the archive", output)
+
+    # -- requirement 4, one case at a time --------------------------------
+
+    def test_no_archive_fails(self):
+        self.stub_cabal()
+        self.digest_file.write_text("", encoding="utf-8")
+        output = self.candidate(expect_exit=1)
+        self.assertIn("candidate install expected exactly one sdist archive, found 0", output)
+
+    def test_more_than_one_archive_fails(self):
+        self.prepared()
+        self.archive(root_name="kanban-0.9.0.0", name="kanban-0.9.0.0.tar.gz")
+        output = self.candidate(expect_exit=1)
+        self.assertIn("candidate install expected exactly one sdist archive, found 2", output)
+
+    def test_an_archive_that_does_not_extract_fails(self):
+        self.stub_cabal()
+        broken = self.sdist_dir / f"kanban-{VERSION}.tar.gz"
+        broken.write_bytes(b"not a gzip stream at all")
+        self.record_digest(self.digest_file, broken, self.notes)
+        output = self.candidate(expect_exit=1)
+        self.assertIn(f"'kanban-{VERSION}.tar.gz' could not be extracted", output)
+        self.assertEqual(self.cabal_invocations(), [])
+
+    def test_an_unpacked_tree_that_does_not_build_fails(self):
+        # Requirement 4's build phase, distinct from the install phase below:
+        # each command is checked, so a failure says which one it was.
+        archive = self.archive()
+        self.record_digest(self.digest_file, archive, self.notes)
+        self.stub_cabal(build_exit=1)
+        output = self.candidate(expect_exit=1)
+        self.assertIn("failed to build", output)
+        self.assertNotIn("failed to install", output)
+        self.assertEqual(
+            [arguments.split()[0] for _, arguments in self.cabal_invocations()], ["build"]
+        )
+
+    def test_an_unpacked_tree_that_does_not_install_fails(self):
+        archive = self.archive()
+        self.record_digest(self.digest_file, archive, self.notes)
+        self.stub_cabal(install_exit=1, install_writes=False)
+        output = self.candidate(expect_exit=1)
+        self.assertIn("failed to install", output)
+        self.assertNotIn("failed to build", output)
+        self.assertEqual(
+            [arguments.split()[0] for _, arguments in self.cabal_invocations()],
+            ["build", "install"],
+        )
+
+    def test_an_install_that_produces_no_executable_fails(self):
+        # A `cabal install` that reports success and leaves nothing behind is
+        # not the same failure as one that reports failure, and the PATH decoy
+        # must not be allowed to stand in for the missing binary.
+        archive = self.archive()
+        self.record_digest(self.digest_file, archive, self.notes)
+        self.stub_cabal(install_writes=False)
+        output = self.candidate(expect_exit=1)
+        self.assertIn("produced no executable", output)
+        self.assertNotIn(self.DECOY_VERSION, output)
+
+    def test_an_executable_reporting_the_wrong_version_fails(self):
+        archive = self.archive()
+        self.record_digest(self.digest_file, archive, self.notes)
+        self.stub_cabal(reports="kanban 0.9.0.0")
+        output = self.candidate(expect_exit=1)
+        self.assertIn(
+            f"the installed candidate reported 'kanban 0.9.0.0', expected 'kanban {VERSION}'",
+            output,
+        )
+
+    # -- the tree that gets built -----------------------------------------
+
+    def test_an_archive_unpacking_to_no_single_package_root_fails(self):
+        self.stub_cabal()
+        staging = self.root / "loose"
+        (staging / "one").mkdir(parents=True)
+        (staging / "two").mkdir(parents=True)
+        path = self.sdist_dir / f"kanban-{VERSION}.tar.gz"
+        subprocess.run(
+            ["tar", "-czf", str(path), "one", "two"],
+            cwd=str(staging),
+            check=True,
+            capture_output=True,
+        )
+        self.record_digest(self.digest_file, path, self.notes)
+        output = self.candidate(expect_exit=1)
+        self.assertIn("unpacked to 2 directories", output)
+
+    def test_a_package_root_naming_another_version_fails(self):
+        archive = self.archive(root_name="kanban-0.9.0.0")
+        self.record_digest(self.digest_file, archive, self.notes)
+        self.stub_cabal()
+        output = self.candidate(expect_exit=1)
+        self.assertIn(
+            f"unpacked to 'kanban-0.9.0.0', expected 'kanban-{VERSION}'", output
+        )
+
+    def test_a_package_root_without_the_shipped_cabal_project_fails(self):
+        # `cabal.project` is what applies -Werror to the `kanban` package, so
+        # a tree missing it would be built under rules no consumer gets.
+        archive = self.archive(contents={"kanban.cabal": CABAL_FILE})
+        self.record_digest(self.digest_file, archive, self.notes)
+        self.stub_cabal()
+        output = self.candidate(expect_exit=1)
+        self.assertIn("carries no kanban.cabal and cabal.project pair", output)
+        self.assertEqual(self.cabal_invocations(), [])
 
 
 class ProductionPublisherTests(ReleaseScriptTestCase):

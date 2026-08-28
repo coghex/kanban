@@ -375,6 +375,137 @@ jobs:
           echo "recorded payload digest:"
           cat "$DIGEST_FILE"
 
+      # The archive is the whole product: `README.md` tells a consumer to
+      # download it, unpack it, and `cabal install exe:kanban` from the
+      # extracted directory. Every gate above this one proves the archive
+      # exists, is uniquely named, and arrives intact -- none of them proves it
+      # builds. An archive omitting a module, shipping a `.cabal` that cannot
+      # resolve, or producing a binary reporting the wrong version would pass
+      # all of them and reach the public release. So the last thing this job
+      # does before handing the payload on is be that consumer.
+      #
+      # In `build-test` deliberately: this job holds `contents: read`, and both
+      # publishers already require it whole, so a candidate that will not
+      # install blocks the dry-run rehearsal and the `v*` publication alike
+      # without any job gaining permission to write.
+      - name: Install and verify the candidate from the source archive
+        env:
+          VERSION: ${{ steps.gate.outputs.version }}
+          SDIST_DIR: ${{ runner.temp }}/release-payload/sdist
+          DIGEST_FILE: ${{ runner.temp }}/release-payload/payload.sha256
+          # Outside the payload directory, so nothing this step unpacks,
+          # builds, or installs is uploaded as part of the release payload.
+          CANDIDATE_DIR: ${{ runner.temp }}/release-candidate
+        run: |
+          set -euo pipefail
+          digest_of() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | cut -d' ' -f1
+            else
+              shasum -a 256 "$1" | cut -d' ' -f1
+            fi
+          }
+
+          archive_count=0
+          archive=""
+          found=""
+          for candidate in "$SDIST_DIR"/*.tar.gz; do
+            [ -e "$candidate" ] || continue
+            archive_count=$((archive_count + 1))
+            archive="$candidate"
+            found="$found  $candidate"$'\n'
+          done
+          if [ "$archive_count" -ne 1 ]; then
+            echo "candidate install expected exactly one sdist archive, found $archive_count"
+            printf '%s' "$found"
+            exit 1
+          fi
+
+          # Before unpacking anything, because a gate that passed against
+          # different bytes than the publisher attaches proves nothing about
+          # the release. The digest recorded when the archive was verified is
+          # what makes this the same archive.
+          if [ ! -s "$DIGEST_FILE" ]; then
+            echo "candidate install found no payload digest at $DIGEST_FILE"
+            exit 1
+          fi
+          expected_digest=$(awk '$2 == "archive" { print $1 }' "$DIGEST_FILE")
+          if [ -z "$expected_digest" ]; then
+            echo "the payload digest at $DIGEST_FILE does not record the archive"
+            exit 1
+          fi
+          actual_digest=$(digest_of "$archive")
+          if [ "$actual_digest" != "$expected_digest" ]; then
+            echo "'$(basename "$archive")' does not match the digest recorded when it was verified; refusing to install from it"
+            exit 1
+          fi
+
+          rm -rf "$CANDIDATE_DIR"
+          mkdir -p "$CANDIDATE_DIR/extract"
+          if ! tar -xzf "$archive" -C "$CANDIDATE_DIR/extract"; then
+            echo "candidate archive '$(basename "$archive")' could not be extracted"
+            exit 1
+          fi
+
+          # One package root, named for the version, carrying the two files
+          # that decide how it builds. `cabal.project` is what applies -Werror
+          # to the `kanban` package, so a tree missing it would be built under
+          # different rules than a consumer's.
+          root_count=0
+          root=""
+          for entry in "$CANDIDATE_DIR"/extract/*/; do
+            [ -d "$entry" ] || continue
+            root_count=$((root_count + 1))
+            root="${entry%/}"
+          done
+          if [ "$root_count" -ne 1 ]; then
+            echo "candidate archive unpacked to $root_count directories, expected exactly one package root"
+            exit 1
+          fi
+          expected_root="kanban-$VERSION"
+          if [ "$(basename "$root")" != "$expected_root" ]; then
+            echo "candidate archive unpacked to '$(basename "$root")', expected '$expected_root'"
+            exit 1
+          fi
+          if [ ! -f "$root/kanban.cabal" ] || [ ! -f "$root/cabal.project" ]; then
+            echo "the unpacked candidate at $root carries no kanban.cabal and cabal.project pair"
+            exit 1
+          fi
+          echo "candidate archive: $(basename "$archive")"
+          echo "confirmed candidate sha256: $actual_digest"
+
+          # From the unpacked tree, with the `cabal.project` the archive
+          # carries. No `cabal.project.local` and no warning relaxation: a
+          # consumer on the pinned toolchain gets exactly this build, so this
+          # build is the gate. Build and install are separate commands so a
+          # failure names which of the two phases it was.
+          if ! (cd "$root" && cabal build exe:kanban); then
+            echo "the unpacked candidate at $root failed to build"
+            exit 1
+          fi
+          install_dir="$CANDIDATE_DIR/bin"
+          mkdir -p "$install_dir"
+          if ! (cd "$root" && cabal install exe:kanban --installdir="$install_dir" --install-method=copy --overwrite-policy=always); then
+            echo "the unpacked candidate at $root failed to install"
+            exit 1
+          fi
+
+          # Run from the isolated destination by absolute path. Neither PATH
+          # nor anything this job already built in the checkout can answer for
+          # the archive.
+          installed="$install_dir/kanban"
+          if [ ! -x "$installed" ]; then
+            echo "installing the candidate produced no executable at $installed"
+            exit 1
+          fi
+          reported=$("$installed" --version)
+          expected="kanban $VERSION"
+          if [ "$reported" != "$expected" ]; then
+            echo "the installed candidate reported '$reported', expected '$expected'"
+            exit 1
+          fi
+          echo "installed candidate reports: $reported"
+
       - name: Upload the verified release payload
         uses: actions/upload-artifact@v7
         with:
