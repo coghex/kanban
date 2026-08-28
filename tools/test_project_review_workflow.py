@@ -118,6 +118,7 @@ CURSOR_HELPER_LOOKUP = {
 CURSOR_INVOCATIONS = (
     'python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode pr',
     'python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode direct',
+    '--mode direct --count "${COUNT:-12}" --start "$ENTRY_POINT"',
     'python3 "$CURSOR" record --root "$DOCS_WT" --repo "$REPO" --mode pr',
     'python3 "$CURSOR" read --root "$DOCS_WT" --repo "$REPO"',
 )
@@ -393,12 +394,26 @@ DIRECT_MODE = {
     ),
     "a merge counts once": "A direct merge counts as one commit.",
     "a commit may be abbreviated": (
-        "A commit may be named at any length `git` accepts, including the "
-        "seven a direct-mode report filename carries: `select` and `record` "
-        "resolve an abbreviated SHA against the walk, and refuse a prefix that "
-        "names more than one commit rather than choosing between them. An "
-        "endpoint an earlier run recorded in a shorter spelling keeps working "
-        "for the same reason."
+        "A commit may be named at any length `git` itself accepts — four "
+        "characters up, the seven a direct-mode report filename carries "
+        "included. `select` and `record` resolve an abbreviated SHA against "
+        "the walk, and refuse a prefix that names more than one commit rather "
+        "than choosing between them, so length is never the refusal; ambiguity "
+        "is."
+    ),
+    "the entry point is supplied on the first direct batch": (
+        "**`$ENTRY_POINT` is set for the first direct batch and empty for "
+        "every batch after it.** Set it to the first-parent parent of the "
+        "earliest PR-owned commit already reviewed, and leave it empty for a "
+        "repository whose merged-PR listing came back empty, which begins at "
+        "HEAD."
+    ),
+    "an empty start is no start": (
+        "An empty `--start` is no start at all, so this one invocation covers "
+        "both — but leaving it empty on the *first* batch of a repository that "
+        "did have PR history restarts the walk at HEAD and re-reviews PR-owned "
+        "commits, because direct state is still empty at that moment and there "
+        "is no endpoint to position it."
     ),
     "the direct walk is never sliced": (
         "**Walk the whole first-parent history, not a slice starting at the "
@@ -1571,6 +1586,20 @@ class CursorTransitionCase(unittest.TestCase):
     def write_report(self, name, body="# Project Review Findings\n"):
         (self.worktree / "docs" / name).write_text(body, encoding="utf-8")
 
+    def run_cli(self, command, *arguments):
+        """One invocation of the surface the rendered assets actually run.
+
+        The library calls above are the same code, but the argument parsing,
+        the unit lists, and the stdin/file candidate reading are only exercised
+        here — and those are what an asset's fence is made of.
+        """
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            self.module.main(
+                [command, "--root", str(self.worktree), "--repo", REPO, *arguments]
+            )
+        return json.loads(captured.getvalue())
+
     def forget_the_cursor(self):
         """Delete the record, leaving the reports and the history untouched.
 
@@ -2026,6 +2055,46 @@ class AbbreviatedShaTests(CursorTransitionCase):
             ["abcdef01aa"],
         )
 
+    def test_a_prefix_shorter_than_seven_is_resolved_rather_than_refused(self):
+        # Round 3's blocker. Git's own floor is four characters; a pattern that
+        # refused five rejected an abbreviation git resolves, and it rejected
+        # it before the ambiguity check that is what actually decides whether a
+        # prefix names one commit. Length was doing the refusing, and length is
+        # not the question.
+        self.assertEqual(
+            self.units(self.select(mode="direct", count=1, start="ed908")),
+            [DIRECT_HISTORY[0]],
+        )
+        # Through the command line too, which is the surface the asset uses.
+        walk = self.worktree / "walk.txt"
+        walk.write_text("\n".join(DIRECT_HISTORY) + "\n", encoding="utf-8")
+        selection = self.run_cli(
+            "select",
+            "--mode",
+            "direct",
+            "--count",
+            "1",
+            "--candidates",
+            str(walk),
+            "--start",
+            "3b3c",
+        )
+        self.assertEqual(
+            [entry["sha"] for entry in selection["selected"]], [DIRECT_HISTORY[2]]
+        )
+
+    def test_a_short_prefix_is_still_refused_when_it_names_two_commits(self):
+        # The negative control for the floor: lowering it must not turn an
+        # ambiguous prefix into an accepted one.
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(
+                mode="direct",
+                count=1,
+                candidates=["abcdef01aa", "abcdef01bb"],
+                start="abcd",
+            )
+        self.assertIn("names 2 commits", str(caught.exception))
+
     def test_a_pull_request_number_takes_the_exact_path(self):
         # Non-vacuity for the prefix rule: it is a SHA rule, and #46 must never
         # resolve to #466 the way `ed90877` resolves to `ed90877ac1`.
@@ -2167,13 +2236,75 @@ class CursorCommandLineTests(CursorTransitionCase):
             [entry["sha"] for entry in selection["selected"]], list(DIRECT_HISTORY[:2])
         )
 
-    def run_cli(self, command, *arguments):
-        captured = io.StringIO()
-        with contextlib.redirect_stdout(captured):
-            self.module.main(
-                [command, "--root", str(self.worktree), "--repo", REPO, *arguments]
-            )
-        return json.loads(captured.getvalue())
+    def test_the_first_direct_batch_starts_at_the_supplied_entry_point(self):
+        # Round 3's other blocker: the shown invocation had no `--start`, so
+        # the first direct batch of a repository that did have PR history
+        # began at index 0 and re-reviewed PR-owned commits. Direct state is
+        # empty at that moment, so nothing else could position it.
+        walk = self.worktree / "walk.txt"
+        walk.write_text("\n".join(DIRECT_HISTORY) + "\n", encoding="utf-8")
+        first = self.run_cli(
+            "select",
+            "--mode",
+            "direct",
+            "--count",
+            "2",
+            "--candidates",
+            str(walk),
+            "--start",
+            DIRECT_HISTORY[3],
+        )
+        self.assertEqual(
+            [entry["sha"] for entry in first["selected"]], list(DIRECT_HISTORY[3:5])
+        )
+        self.assertEqual(first["origin"], "explicit-start")
+
+        # Recorded, the next batch positions itself and needs no entry point --
+        # which is why the same invocation passes an empty one from then on.
+        self.run_cli(
+            "record",
+            "--mode",
+            "direct",
+            "--candidates",
+            str(walk),
+            "--reviewed",
+            ",".join(DIRECT_HISTORY[3:5]),
+        )
+        later = self.run_cli(
+            "select",
+            "--mode",
+            "direct",
+            "--count",
+            "2",
+            "--candidates",
+            str(walk),
+            "--start",
+            "",
+        )
+        self.assertEqual(
+            [entry["sha"] for entry in later["selected"]], list(DIRECT_HISTORY[5:7])
+        )
+        self.assertEqual(later["origin"], "recorded-endpoint")
+
+        # An empty entry point on the *first* batch is the defect itself: with
+        # no state to position it, the walk restarts at HEAD.
+        self.forget_the_cursor()
+        restarted = self.run_cli(
+            "select",
+            "--mode",
+            "direct",
+            "--count",
+            "2",
+            "--candidates",
+            str(walk),
+            "--start",
+            "",
+        )
+        self.assertEqual(restarted["origin"], "history-head")
+        self.assertEqual(
+            [entry["sha"] for entry in restarted["selected"]], list(DIRECT_HISTORY[:2])
+        )
+
 
 
 if __name__ == "__main__":

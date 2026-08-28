@@ -233,14 +233,24 @@ than from any report's account of it:
 
 ```bash
 git -C "$ROOT" log --first-parent --format=%H \
-  | python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode direct --count "${COUNT:-12}"
+  | python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode direct --count "${COUNT:-12}" --start "$ENTRY_POINT"
 ```
 
-A commit may be named at any length `git` accepts, including the seven a
-direct-mode report filename carries: `select` and `record` resolve an
-abbreviated SHA against the walk, and refuse a prefix that names more than one
-commit rather than choosing between them. An endpoint an earlier run recorded in
-a shorter spelling keeps working for the same reason.
+**`$ENTRY_POINT` is set for the first direct batch and empty for every batch
+after it.** Set it to the first-parent parent of the earliest PR-owned commit
+already reviewed, and leave it empty for a repository whose merged-PR listing
+came back empty, which begins at HEAD. An empty `--start` is no start at all, so
+this one invocation covers both — but leaving it empty on the *first* batch of a
+repository that did have PR history restarts the walk at HEAD and re-reviews
+PR-owned commits, because direct state is still empty at that moment and there
+is no endpoint to position it.
+
+A commit may be named at any length `git` itself accepts — four characters up,
+the seven a direct-mode report filename carries included. `select` and `record`
+resolve an abbreviated SHA against the walk, and refuse a prefix that names more
+than one commit rather than choosing between them, so length is never the
+refusal; ambiguity is. An endpoint an earlier run recorded in a shorter spelling
+keeps working for the same reason.
 
 **Walk the whole first-parent history, not a slice starting at the entry
 point.** The recorded endpoint has to be inside the listing the helper positions

@@ -108,9 +108,15 @@ by hand: the payload below is parsed strictly, and an edit it cannot read stops
 the next sweep instead of being ignored.
 """
 
-# A short SHA is still a SHA; seven characters is what `git log --abbrev` emits
-# and what the direct-mode report filenames carry.
-SHA_RE = re.compile(r"\A[0-9a-f]{7,40}\Z")
+# A short SHA is still a SHA, and how short is git's question rather than this
+# module's: `core.abbrev` will not go below four characters, so four is the
+# floor here too. Seven is merely the length `git log --abbrev` happens to emit
+# and the direct-mode report filenames happen to carry, and a floor set there
+# refuses a five-character abbreviation git itself resolves — before
+# `resolve_key` can say whether it names one commit or several, which is the
+# question that actually decides it. Anything above the floor is a candidate
+# spelling, and resolution, not this pattern, accepts or refuses it.
+SHA_RE = re.compile(r"\A[0-9a-f]{4,40}\Z")
 
 REPO_RE = re.compile(r"\A[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 
