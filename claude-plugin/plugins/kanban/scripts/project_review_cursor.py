@@ -470,6 +470,7 @@ def select(
     reports=None,
     override_boundary: bool = False,
     listing_limit=None,
+    end=None,
 ) -> dict:
     """The next batch, and everything the workflow has to announce about it.
 
@@ -477,6 +478,14 @@ def select(
     take from it. That split is the whole of the resume contract — a user who
     asks for twenty units is asking for a bigger batch, not for the sweep to
     start somewhere else.
+
+    A range has two endpoints and `start` is only one of them. Without `end`,
+    the count keeps filling past the older endpoint whenever coverage or an
+    exclusion thins the middle of the request — so a user who asked for
+    #466–#461 and had three of those already reviewed would be handed three
+    units from below #461 to make the number up. `end` is that older bound, and
+    it is a bound rather than a target: the batch stops there whatever the
+    count still had left.
     """
     if mode not in MODES:
         raise CursorError(f"unknown mode {mode!r}")
@@ -528,9 +537,22 @@ def select(
         begin = 0
         origin = "history-head"
 
+    stop = len(candidates)
+    if end is not None:
+        supplied_end, end = end, resolve_key(mode, end, keys)
+        if end is None:
+            raise CursorError(_absent_end_message(mode, supplied_end, partial))
+        stop = position[end] + 1
+        if stop <= begin:
+            raise CursorError(
+                f"the range ends at {supplied_end}, which is newer than where "
+                "this sweep resumes, so the range holds nothing to review. "
+                "Name its newer endpoint too, or override the boundary."
+            )
+
     selected = []
     skipped = []
-    for index in range(begin, len(candidates)):
+    for index in range(begin, stop):
         key = keys[index]
         if key in excluded:
             skipped.append({"unit": key, "reason": "excluded"})
@@ -548,6 +570,11 @@ def select(
         if keys[index] not in covered and keys[index] not in excluded
     ]
     short = len(selected) < count
+    # A batch the requested range ended is short by request. Reporting it as
+    # truncated would send the workflow raising a limit that cannot help, and
+    # reporting it as exhausted would tell the sweep that PR history had run
+    # out when only the user's range had.
+    bounded = end is not None and short
     return {
         "mode": mode,
         "count": count,
@@ -561,13 +588,15 @@ def select(
         "excluded": sorted(excluded),
         "reports": coverage["reports"],
         "short": short,
+        "bounded": bounded,
+        "range_end": end,
         # Two different answers to one short batch, and collapsing them is the
         # defect: `truncated` means the page ran out and the missing units may
         # be on the next one, while `exhausted` means the history ran out. A
         # sweep that reads the first as the second enters direct mode with
         # merged pull requests still unreviewed behind it.
-        "truncated": short and partial,
-        "exhausted": short and not partial,
+        "truncated": short and partial and not bounded,
+        "exhausted": short and not partial and not bounded,
     }
 
 
@@ -617,6 +646,20 @@ def _absent_start_message(mode: str, start, partial: bool = False) -> str:
     return (
         f"commit {start} is not in the current first-parent history, so it "
         "cannot start a batch."
+    )
+
+
+def _absent_end_message(mode: str, end, partial: bool = False) -> str:
+    unit = f"pull request #{end}" if mode == "pr" else f"commit {end}"
+    if partial:
+        return (
+            f"the range ends at {unit}, which is absent from a listing that "
+            f"came back at its own limit, so it may be on the next page: "
+            f"{RAISE_LIMIT_INSTRUCTION}."
+        )
+    return (
+        f"the range ends at {unit}, which is not in this history. Say so and "
+        "stop; do not review the nearest unit that exists."
     )
 
 
@@ -787,6 +830,13 @@ def build_parser() -> argparse.ArgumentParser:
     selector.add_argument("--count", type=int, default=12)
     selector.add_argument("--start", help="an explicit starting pull request or SHA")
     selector.add_argument(
+        "--end",
+        help=(
+            "the older endpoint of an explicit range; the batch stops there "
+            "whatever the count still had left"
+        ),
+    )
+    selector.add_argument(
         "--override-boundary",
         action="store_true",
         help="ignore the recorded endpoint and start at the head of the history",
@@ -828,6 +878,9 @@ def main(argv=None) -> int:
         start = _unit_list(args.mode, args.start)
         if len(start) > 1:
             raise CursorError("a batch starts at one unit, not several.")
+        end = _unit_list(args.mode, args.end)
+        if len(end) > 1:
+            raise CursorError("a range ends at one unit, not several.")
         return _emit(
             select(
                 state,
@@ -838,6 +891,7 @@ def main(argv=None) -> int:
                 reports=report_coverage(args.root),
                 override_boundary=args.override_boundary,
                 listing_limit=args.listing_limit,
+                end=end[0] if end else None,
             )
         )
 

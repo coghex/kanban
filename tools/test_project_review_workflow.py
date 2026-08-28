@@ -118,7 +118,8 @@ CURSOR_HELPER_LOOKUP = {
 CURSOR_INVOCATIONS = (
     'python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode pr',
     'python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode direct',
-    '--mode direct --count "${COUNT:-12}" --start "$ENTRY_POINT"',
+    '--mode pr --count "${COUNT:-12}" --listing-limit "$LIMIT" --start "$RANGE_START" --end "$RANGE_END"',
+    '--mode direct --count "${COUNT:-12}" --start "$RANGE_START" --end "$RANGE_END"',
     'python3 "$CURSOR" record --root "$DOCS_WT" --repo "$REPO" --mode pr',
     'python3 "$CURSOR" read --root "$DOCS_WT" --repo "$REPO"',
 )
@@ -402,11 +403,11 @@ DIRECT_MODE = {
         "is."
     ),
     "the entry point is supplied on the first direct batch": (
-        "**`$ENTRY_POINT` is set for the first direct batch and empty for "
-        "every batch after it.** Set it to the first-parent parent of the "
-        "earliest PR-owned commit already reviewed, and leave it empty for a "
-        "repository whose merged-PR listing came back empty, which begins at "
-        "HEAD."
+        "**`$RANGE_START` carries the entry point on the first direct batch**, "
+        "and is empty for every batch after it. Set it to the first-parent "
+        "parent of the earliest PR-owned commit already reviewed, and leave it "
+        "empty for a repository whose merged-PR listing came back empty, which "
+        "begins at HEAD."
     ),
     "an empty start is no start": (
         "An empty `--start` is no start at all, so this one invocation covers "
@@ -532,6 +533,43 @@ RECONCILIATION_RULES = {
     "a gap is announced, not dropped": (
         "a unit above the resumed position that no record and no report covers "
         "is reported, never silently dropped."
+    ),
+}
+
+# Round 4's blocker: `--start` is one endpoint, and a range has two. Without
+# the second, the count keeps filling downwards past the older endpoint
+# whenever coverage or an exclusion thins the middle of the request, so the
+# range the user asked for is not the range they get.
+RANGE_BOUND = {
+    "both endpoints are carried": (
+        "`$RANGE_START` and `$RANGE_END` carry a user-supplied range's two "
+        "endpoints — its newer and its older — and are empty when the user "
+        "supplied none; an empty `--start` or `--end` is no bound at all, so "
+        "one invocation covers both cases."
+    ),
+    "the override stays out until asked for": (
+        "Add `--override-boundary` only when the user explicitly overrides the "
+        "recorded endpoint; unlike the two range flags it has a correct "
+        "default and is never implied, so it stays out of the invocation until "
+        "a user asks for it."
+    ),
+    "a start alone is not a range": (
+        "**A range needs both of its endpoints.** `$RANGE_START` alone is a "
+        "starting point, not a range: the count keeps filling downwards past "
+        "the older endpoint whenever coverage or an exclusion thins the middle "
+        "of the request, and a user who asked for #466–#461 with three of "
+        "those already reviewed is handed three units from below #461 to make "
+        "the number up."
+    ),
+    "the end is a bound, not a target": (
+        "`--end` is a bound rather than a target — the batch stops there "
+        "whatever the count still had left, and reports `\"bounded\": true` "
+        "rather than `truncated` or `exhausted`, because it was the request "
+        "that ended and neither the page nor the history."
+    ),
+    "a direct range uses the same two slots": (
+        "A user-supplied range's newer endpoint goes in the same slot, and "
+        "`$RANGE_END` bounds it exactly as in PR mode."
     ),
 }
 
@@ -1234,6 +1272,13 @@ class SweepCursorTests(unittest.TestCase):
                 with self.subTest(asset=relative_path, rule=rule):
                     self.assertIn(flat(phrase), flattened)
 
+    def test_an_explicit_range_carries_both_of_its_endpoints(self):
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            for rule, phrase in sorted(RANGE_BOUND.items()):
+                with self.subTest(asset=relative_path, rule=rule):
+                    self.assertIn(flat(phrase), flattened)
+
     def test_a_count_is_a_batch_size_rather_than_a_position(self):
         # Correction 1 of issue #548's review. "The requested count" appears
         # beside the resume rules, so without this an explicit count reads as
@@ -1742,6 +1787,53 @@ class CursorSelectionTests(CursorTransitionCase):
         self.assertEqual(self.units(self.select(count=3)), [463, 462, 461])
         self.assertEqual(self.state()["excluded"]["prs"], [466])
 
+    def test_a_requested_range_is_not_filled_from_beyond_its_older_end(self):
+        # Round 4's blocker. Coverage thins the middle of the request, and
+        # without an older bound the count makes the number up from below it —
+        # so the user who asked for #466–#461 gets units they did not ask for,
+        # and the sweep advances past them.
+        self.write_report("project_review_471-468.md")
+        selection = self.select(count=6, start=470, end=464)
+        self.assertEqual(self.units(selection), [470, 466, 465, 464])
+        self.assertTrue(selection["short"])
+        self.assertTrue(selection["bounded"])
+        self.assertFalse(selection["exhausted"])
+        self.assertFalse(selection["truncated"])
+
+        # The negative control, and the defect itself: the same request without
+        # the older bound makes the count up from below #464, so the user is
+        # handed two units they did not ask for and the sweep advances past
+        # them.
+        unbounded = self.select(count=6, start=470)
+        self.assertEqual(self.units(unbounded), [470, 466, 465, 464, 463, 462])
+        self.assertFalse(unbounded["bounded"])
+
+    def test_a_range_bound_stops_the_batch_before_the_count_is_met(self):
+        # The bound is a bound, not a target: it wins over a count that still
+        # had room, in both modes.
+        pr = self.select(count=9, start=470, end=466)
+        self.assertEqual(self.units(pr), [470, 468, 471, 466])
+        direct = self.select(
+            mode="direct", count=9, start=DIRECT_HISTORY[1], end=DIRECT_HISTORY[3]
+        )
+        self.assertEqual(self.units(direct), list(DIRECT_HISTORY[1:4]))
+
+    def test_a_range_end_may_be_abbreviated_and_is_refused_when_absent(self):
+        bounded = self.select(mode="direct", count=9, end=DIRECT_HISTORY[2][:5])
+        self.assertEqual(self.units(bounded), list(DIRECT_HISTORY[:3]))
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=3, end=9999)
+        self.assertIn("the range ends at pull request #9999", str(caught.exception))
+
+    def test_a_range_entirely_above_the_resume_point_is_refused(self):
+        # Silence would be worse than a stop here: an end above the resumed
+        # position selects nothing, and an empty batch reported as a completed
+        # one is how a range gets skipped.
+        self.record(self.select(count=3))
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=3, end=470)
+        self.assertIn("newer than where this sweep resumes", str(caught.exception))
+
     def test_a_count_changes_the_batch_size_and_not_the_position(self):
         # Correction 1. Both selections begin at the same unit; only how many
         # follow it differs.
@@ -2222,6 +2314,28 @@ class CursorCommandLineTests(CursorTransitionCase):
         self.assertEqual(
             self.run_cli("read")["state"]["pr"]["endpoint"]["number"], 471
         )
+
+    def test_a_range_bound_holds_through_the_command_line(self):
+        # The surface the asset invokes, since that is where `--end` is spelled
+        # and where an empty one has to mean no bound at all.
+        listing = self.worktree / "listing.json"
+        listing.write_text(json.dumps(PR_LISTING), encoding="utf-8")
+        bounded = self.run_cli(
+            "select", "--mode", "pr", "--count", "9",
+            "--candidates", str(listing), "--start", "470", "--end", "466",
+        )
+        self.assertEqual(
+            [entry["number"] for entry in bounded["selected"]], [470, 468, 471, 466]
+        )
+        self.assertTrue(bounded["bounded"])
+
+        # Empty flags are the ordinary case, and must not bound anything.
+        unbounded = self.run_cli(
+            "select", "--mode", "pr", "--count", "9",
+            "--candidates", str(listing), "--start", "", "--end", "",
+        )
+        self.assertEqual(len(unbounded["selected"]), len(PR_HISTORY))
+        self.assertFalse(unbounded["bounded"])
 
     def test_a_direct_candidate_listing_may_be_the_plain_sha_walk(self):
         # `git log --first-parent --format=%H` prints one SHA per line, which

@@ -159,12 +159,25 @@ whole listing rather than a slice you ordered by number:
 
 ```bash
 gh pr list -R "$REPO" --state merged --limit "$LIMIT" --json number,title,mergedAt,body,url \
-  | python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode pr --count "${COUNT:-12}" --listing-limit "$LIMIT"
+  | python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode pr --count "${COUNT:-12}" --listing-limit "$LIMIT" --start "$RANGE_START" --end "$RANGE_END"
 ```
 
-`$COUNT` is the requested count and defaults to the 12 above. Pass `--start <n>`
-for a supplied starting PR and `--override-boundary` when the user explicitly
-overrides the recorded endpoint. Neither is implied by a count.
+`$COUNT` is the requested count and defaults to the 12 above. `$RANGE_START` and
+`$RANGE_END` carry a user-supplied range's two endpoints — its newer and its
+older — and are empty when the user supplied none; an empty `--start` or
+`--end` is no bound at all, so one invocation covers both cases. Add
+`--override-boundary` only when the user explicitly overrides the recorded
+endpoint; unlike the two range flags it has a correct default and is never
+implied, so it stays out of the invocation until a user asks for it.
+
+**A range needs both of its endpoints.** `$RANGE_START` alone is a starting
+point, not a range: the count keeps filling downwards past the older endpoint
+whenever coverage or an exclusion thins the middle of the request, and a user
+who asked for #466–#461 with three of those already reviewed is handed three
+units from below #461 to make the number up. `--end` is a bound rather than a
+target — the batch stops there whatever the count still had left, and reports
+`"bounded": true` rather than `truncated` or `exhausted`, because it was the
+request that ended and neither the page nor the history.
 
 **`$LIMIT` is not a constant, and `--listing-limit` is how the selection knows
 it.** Start `$LIMIT` at the requested count plus a margin for the over-fetch —
@@ -233,17 +246,19 @@ than from any report's account of it:
 
 ```bash
 git -C "$ROOT" log --first-parent --format=%H \
-  | python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode direct --count "${COUNT:-12}" --start "$ENTRY_POINT"
+  | python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode direct --count "${COUNT:-12}" --start "$RANGE_START" --end "$RANGE_END"
 ```
 
-**`$ENTRY_POINT` is set for the first direct batch and empty for every batch
-after it.** Set it to the first-parent parent of the earliest PR-owned commit
-already reviewed, and leave it empty for a repository whose merged-PR listing
-came back empty, which begins at HEAD. An empty `--start` is no start at all, so
-this one invocation covers both — but leaving it empty on the *first* batch of a
-repository that did have PR history restarts the walk at HEAD and re-reviews
-PR-owned commits, because direct state is still empty at that moment and there
-is no endpoint to position it.
+**`$RANGE_START` carries the entry point on the first direct batch**, and is
+empty for every batch after it. Set it to the first-parent parent of the
+earliest PR-owned commit already reviewed, and leave it empty for a repository
+whose merged-PR listing came back empty, which begins at HEAD. An empty
+`--start` is no start at all, so this one invocation covers both — but leaving
+it empty on the *first* batch of a repository that did have PR history restarts
+the walk at HEAD and re-reviews PR-owned commits, because direct state is still
+empty at that moment and there is no endpoint to position it. A user-supplied
+range's newer endpoint goes in the same slot, and `$RANGE_END` bounds it exactly
+as in PR mode.
 
 A commit may be named at any length `git` itself accepts — four characters up,
 the seven a direct-mode report filename carries included. `select` and `record`
