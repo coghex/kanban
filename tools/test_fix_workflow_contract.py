@@ -164,11 +164,31 @@ REQUIRED_PHRASES = {
         "decision."
     ),
     # --- A pull request behind its base is unmergeable, not clear. ---
+    "an-untrustworthy-rollup-is-its-own-branch": (
+        "3. **A rollup you cannot trust** — before any branch below is allowed "
+        "to\n   clear or mutate the pull request, the check rollup must be "
+        "COMPLETE and\n   every entry in it classifiable."
+    ),
+    "completeness-is-established-by-the-same-comparison-kanban-makes": (
+        "Compare that `totalCount` against the number of entries the step-5 "
+        "rollup\n   command returned. They must be equal — the same comparison\n"
+        "   `src/Kanban/GitHub/Decode.hs` makes before it decodes a single "
+        "context."
+    ),
+    "an-untrustworthy-rollup-fails-closed": (
+        "**A truncated rollup, or any entry you cannot classify, fails "
+        "closed:**\n   report that the check state cannot be read completely "
+        "and stop without\n   pushing, rerunning, or invoking a rereview."
+    ),
+    "why-an-incomplete-rollup-is-not-an-absence": (
+        "An incomplete rollup can be\n   hiding exactly the failed or pending "
+        "entry the branches below test for, so\n   treating it as absence "
+        'would turn "I did not see one" into "there is none".'
+    ),
     "a-pending-check-mutates-nothing": (
-        "3. **A check still running** — no conflict and no failed check, but "
-        "the rollup\n   carries a pending entry. This branch MUTATES NOTHING. "
-        "Report which checks\n   are still running and stop: do not update the "
-        "branch, do not rerun, do not\n   push, and do not invoke a rereview."
+        "4. **A check still running** — no conflict, no failed check, a rollup "
+        "you can\n   trust, and a pending entry in it. This branch MUTATES "
+        "NOTHING."
     ),
     "pending-outranks-behind-as-it-does-in-the-haskell": (
         "`pullRequestStatus` ranks it this way\n   too — `checksPending` is "
@@ -181,11 +201,11 @@ REQUIRED_PHRASES = {
         "reviewed."
     ),
     "behind-the-base-is-its-own-obstacle": (
-        "4. **Behind its base** — no conflict, no failed check, no pending "
+        "5. **Behind its base** — no conflict, no failed check, no pending "
         "check, and\n   the merge state is exactly `BEHIND`"
     ),
     "only-behind-is-fixable-by-a-branch-update": (
-        "5. **Any other merge state that is not ready** — `BLOCKED` and "
+        "6. **Any other merge state that is not ready** — `BLOCKED` and "
         "`UNSTABLE` are\n   real states (`MergeBlocked`, `MergeUnstable`)"
     ),
     "blocked-and-unstable-fail-closed": (
@@ -204,12 +224,12 @@ REQUIRED_PHRASES = {
         "conflict branch does"
     ),
     "nothing-to-fix-requires-a-ready-merge-state": (
-        "6. **Nothing to fix** — no conflict, no failed check, no pending "
+        "7. **Nothing to fix** — no conflict, no failed check, no pending "
         "check, and a\n   merge state that is ready."
     ),
     "an-unknown-merge-state-is-not-a-clearance": (
         "`UNKNOWN` is not a clearance either — GitHub has not\n   finished "
-        "computing mergeability, so it lands in branch 5 and stops rather\n   "
+        "computing mergeability, so it lands in branch 6 and stops rather\n   "
         "than being reported ready when it may yet come back `BEHIND` or "
         "`DIRTY`."
     ),
@@ -237,7 +257,7 @@ REQUIRED_PHRASES = {
         "pull request can carry a failed check AND an\nunrelated pending one"
     ),
     "a-post-rerun-obstacle-is-reported-not-acted-on": (
-        "* **Branch 1, 2 or 4, another head-moving obstacle** — report it and "
+        "* **Branch 1, 2 or 5, another head-moving obstacle** — report it and "
         "stop.\n  Do NOT act on it in this invocation: the rerun already spent "
         "this run's\n  allowance"
     ),
@@ -326,11 +346,11 @@ REQUIRED_PHRASES = {
         "never the reruns' own\noutcomes, and never the failed set alone."
     ),
     "a-post-rerun-non-mutating-stop-is-honoured": (
-        "* **Branch 3 or 5, a non-mutating stop** — report what it now says "
+        "* **Branch 3, 4 or 6, a non-mutating stop** — report what it now says "
         "and stop,\n  exactly as those branches specify."
     ),
-    "only-branch-six-clears-the-obstacle": (
-        "* **Branch 6, nothing to fix** — the obstacle really is cleared and "
+    "only-the-nothing-to-fix-branch-clears-the-obstacle": (
+        "* **Branch 7, nothing to fix** — the obstacle really is cleared and "
         "this\n  workflow is done."
     ),
     "a-non-actions-check-fails-closed": (
@@ -432,6 +452,7 @@ REQUIRED_PHRASES = {
 DIAGNOSIS_ORDER = (
     "**Merge conflict**",
     "**Failed check**",
+    "**A rollup you cannot trust**",
     "**A check still running**",
     "**Behind its base**",
     "**Any other merge state that is not ready**",
@@ -442,6 +463,10 @@ DIAGNOSIS_ORDER = (
 # them, which is what proves the table above is measuring this workflow rather
 # than matching text every packaged workflow happens to contain.
 FIX_ONLY_REQUIREMENTS = (
+    "an-untrustworthy-rollup-is-its-own-branch",
+    "an-untrustworthy-rollup-fails-closed",
+    "completeness-is-established-by-the-same-comparison-kanban-makes",
+    "why-an-incomplete-rollup-is-not-an-absence",
     "a-pending-check-mutates-nothing",
     "pending-outranks-behind-as-it-does-in-the-haskell",
     "why-pending-outranks-behind",
@@ -485,7 +510,7 @@ FIX_ONLY_REQUIREMENTS = (
     "one-rerun-then-stop",
     "the-whole-rollup-is-refetched-after-a-rerun",
     "a-post-rerun-non-mutating-stop-is-honoured",
-    "only-branch-six-clears-the-obstacle",
+    "only-the-nothing-to-fix-branch-clears-the-obstacle",
     "a-non-actions-check-fails-closed",
     "a-non-actions-check-is-never-given-a-run-command",
     "the-run-id-comes-from-the-details-url",
@@ -654,6 +679,49 @@ class FixWorkflowContractTests(unittest.TestCase):
         self.assertIn('approval_label = "reviewed:approve"', example)
         self.assertIn('approval_mode = "label"', example)
         self.assertIn('blocked_labels = ["blocked"]', example)
+
+
+class RollupCompletenessTests(unittest.TestCase):
+    """An unreadable rollup is never a clearance.
+
+    Kanban models a truncated or undecodable rollup as `ChecksUnknown`, which
+    `checksReady` and `checksPending` both reject -- it is neither ready nor
+    pending. A workflow that inferred "no failed entry seen" from a partial
+    rollup would turn not-looking into not-there, and would do it right before
+    updating a branch or declaring the pull request clear.
+    """
+
+    def test_the_unknown_state_the_branch_cites_still_behaves_that_way(self):
+        # Non-vacuous anchor: both halves of "never a clearance" must hold in
+        # the Haskell, or the branch is citing a rule that no longer exists.
+        workflow = read(WORKFLOW_HS)
+        self.assertIn("checksReady ChecksNone = True", workflow)
+        self.assertIn("checksReady (ChecksPassed _) = True", workflow)
+        self.assertIn("checksReady _ = False", workflow)
+        self.assertIn("checksPending (ChecksPending _ _ _) = True", workflow)
+        self.assertIn("checksPending _ = False", workflow)
+        domain = read(REPO_ROOT / "src/Kanban/Domain.hs")
+        self.assertIn("ChecksUnknown", domain)
+
+    def test_the_decoder_still_produces_it_for_both_causes(self):
+        decode = read(REPO_ROOT / "src/Kanban/GitHub/Decode.hs")
+        self.assertIn("then pure (ChecksUnknown, [])", decode)
+        self.assertIn("Left _ -> pure (ChecksUnknown, [ChecksUndecodable])", decode)
+
+    def test_the_branch_precedes_every_clearing_or_mutating_branch(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            untrusted = text.index("**A rollup you cannot trust**")
+            for later in (
+                "**Behind its base**",
+                "**Any other merge state that is not ready**",
+                "**Nothing to fix**",
+            ):
+                self.assertLess(
+                    untrusted,
+                    text.index(later),
+                    f"{path}: the untrusted-rollup branch must precede {later}",
+                )
 
 
 class OriginBrandGateTests(unittest.TestCase):

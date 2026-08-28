@@ -41,7 +41,11 @@ created above it.
   state stops the run rather than being reported ready. A check that is still
   running outranks both and mutates nothing at all, matching
   `pullRequestStatus`: replacing an approved head mid-CI would discard the
-  run that was about to answer the question. Only `BEHIND` is remedied by a
+  run that was about to answer the question. A rollup that cannot be read
+  completely — GitHub truncates its context list, or an entry will not decode,
+  both `ChecksUnknown` to Kanban — fails closed ahead of every branch that
+  would clear or mutate, since not seeing a failure is not the same as there
+  being none. Only `BEHIND` is remedied by a
   branch update; `BLOCKED` and `UNSTABLE` are reported and fail closed. The
   one-rerun ceiling is read from GitHub's own per-run attempt counter rather
   than from memory, so it holds across invocations and counts reruns made by

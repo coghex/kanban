@@ -147,8 +147,31 @@ this order:
 2. **Failed check** — EVERY failed entry in the pull request's status-check
    rollup, required or not, not only required checks, and not only the first
    one you notice. Triage them through step 5 before changing a single file.
-3. **A check still running** — no conflict and no failed check, but the rollup
-   carries a pending entry. This branch MUTATES NOTHING. Report which checks
+3. **A rollup you cannot trust** — before any branch below is allowed to
+   clear or mutate the pull request, the check rollup must be COMPLETE and
+   every entry in it classifiable. GitHub caps the contexts it returns, so a
+   rollup can be truncated, and an entry can carry a shape this workflow does
+   not understand. Kanban models both as `ChecksUnknown`
+   (`src/Kanban/GitHub/Decode.hs` returns it when `totalCount` exceeds the
+   nodes returned, and again when a context will not decode), and
+   `src/Kanban/Workflow.hs` makes it neither ready nor pending — it is never a
+   clearance. Establish completeness rather than assuming it:
+
+   ```bash
+   gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){pullRequest(number:<pr>){commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){totalCount}}}}}}}}' --jq '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.totalCount'
+   ```
+
+   Compare that `totalCount` against the number of entries the step-5 rollup
+   command returned. They must be equal — the same comparison
+   `src/Kanban/GitHub/Decode.hs` makes before it decodes a single context.
+
+   **A truncated rollup, or any entry you cannot classify, fails closed:**
+   report that the check state cannot be read completely and stop without
+   pushing, rerunning, or invoking a rereview. An incomplete rollup can be
+   hiding exactly the failed or pending entry the branches below test for, so
+   treating it as absence would turn "I did not see one" into "there is none".
+4. **A check still running** — no conflict, no failed check, a rollup you can
+   trust, and a pending entry in it. This branch MUTATES NOTHING. Report which checks
    are still running and stop: do not update the branch, do not rerun, do not
    push, and do not invoke a rereview. `pullRequestStatus` ranks it this way
    too — `checksPending` is guarded BEFORE the merge-state test — and the
@@ -156,7 +179,7 @@ this order:
    while CI is still running discards the very run that would have told you
    whether there was anything to fix, and starts the whole thing again on a
    head nobody has reviewed.
-4. **Behind its base** — no conflict, no failed check, no pending check, and
+5. **Behind its base** — no conflict, no failed check, no pending check, and
    the merge state is exactly `BEHIND`, which
    `src/Kanban/Workflow.hs`'s `pullRequestStatus` classifies as `merge
    pending` and `src/Kanban/UI/Details.hs` explains as "the base has advanced
@@ -164,7 +187,7 @@ this order:
    such a pull request mergeable. Update it from the recorded `baseRefName`
    through step 4, exactly as the conflict branch does — incorporating a base
    tip is one operation, and a conflict is only its harder case.
-5. **Any other merge state that is not ready** — `BLOCKED` and `UNSTABLE` are
+6. **Any other merge state that is not ready** — `BLOCKED` and `UNSTABLE` are
    real states (`MergeBlocked`, `MergeUnstable`), and `pullRequestStatus`
    reports them as `merge pending` exactly as it does `BEHIND`. They are NOT
    the same problem: a branch update cannot clear a branch-protection
@@ -175,11 +198,11 @@ this order:
    rerunning, or invoking a rereview. Only `MergeClean` and `MergeProtected`
    are ready (`mergeStateReady`); everything else that is not `BEHIND` lands
    here.
-6. **Nothing to fix** — no conflict, no failed check, no pending check, and a
+7. **Nothing to fix** — no conflict, no failed check, no pending check, and a
    merge state that is ready. Report the pull request's merge state and check
    state and stop without pushing, without rerunning anything, and without
    invoking a rereview. `UNKNOWN` is not a clearance either — GitHub has not
-   finished computing mergeability, so it lands in branch 5 and stops rather
+   finished computing mergeability, so it lands in branch 6 and stops rather
    than being reported ready when it may yet come back `BEHIND` or `DIRTY`.
 
 ## 4. Work in the pull request's own worktree
@@ -375,11 +398,11 @@ Re-running the diagnosis answers all of that with the branches that already
 exist, so this step adds no new judgement — only the discipline of asking
 again:
 
-* **Branch 6, nothing to fix** — the obstacle really is cleared and this
+* **Branch 7, nothing to fix** — the obstacle really is cleared and this
   workflow is done.
-* **Branch 3 or 5, a non-mutating stop** — report what it now says and stop,
+* **Branch 3, 4 or 6, a non-mutating stop** — report what it now says and stop,
   exactly as those branches specify.
-* **Branch 1, 2 or 4, another head-moving obstacle** — report it and stop.
+* **Branch 1, 2 or 5, another head-moving obstacle** — report it and stop.
   Do NOT act on it in this invocation: the rerun already spent this run's
   allowance, and chaining a push onto it would make one invocation's blast
   radius unbounded. Say what the next invocation would do.

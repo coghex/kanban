@@ -1445,8 +1445,12 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   (§2.7) is unaffected and still governs the unapproved work it runs on.
 - **Failure semantics:** it addresses the highest-priority obstacle in
   `pullRequestStatus` order — merge conflict, then any failed check, then a
-  pending check, then `MergeBehind`, then any OTHER non-ready merge state,
-  then nothing to fix. Only `MergeBehind` is remedied, by updating from the
+  rollup that cannot be read completely, then a pending check, then
+  `MergeBehind`, then any OTHER non-ready merge state, then nothing to fix.
+  The rollup branch fails closed ahead of everything that clears or mutates:
+  GitHub caps returned contexts and a context can fail to decode, both of
+  which Kanban models as `ChecksUnknown` — neither ready nor pending — so an
+  incomplete rollup may be hiding the very entry the later branches test for. Only `MergeBehind` is remedied, by updating from the
   base; `MergeBlocked` and `MergeUnstable` are reported and fail closed,
   because a branch update cannot clear a protection requirement or an
   unstable required check and would replace the reviewed head for nothing. The
