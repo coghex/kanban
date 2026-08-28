@@ -16,46 +16,32 @@ created above it.
 ### Unreleased
 
 - A new packaged workflow, `/fix` (Codex: `$fix`), clears the one remaining
-  obstacle in front of an **already-approved** pull request. It refuses any pull
-  request that is not approved under the configured `approval_mode`, resolves a
-  merge conflict, and otherwise triages the failing check: a failure where no
-  job actually executed the pull request's code — a cancelled setup job, a
-  concurrency-group eviction, an aggregator reporting on a dependency that never
-  ran, or a timeout that struck before any step touched the tree — is rerun exactly once and never a second time, as a whole run rather
-  than a `--failed` retry that a cancellation-only run would leave untouched, while a failure that did
-  execute the code is fixed and handed to one canonical rereview. The obstacle
-  is the whole set of failed rollup entries, not the first one seen: a real
-  failure anywhere reruns nothing, the complete rollup is re-fetched and
-  re-judged after a rerun, and a failed entry that is not a GitHub Actions run
-  at all — an external status with no run to read or retry — fails closed
-  rather than being handed a command that cannot apply to it. The workflow runs
-  only on an explicit request to fix or unblock a pull request: asking why one
-  cannot merge is answered by reporting the obstacle and stopping, since a
-  diagnostic question authorises none of the reruns, pushes, or rereview it
-  would otherwise perform. Each bundle also refuses a pull request whose
-  `pr-origin` marker names the other brand: the rereview is routed from that
-  same marker, so fixing another brand's pull request would end in a
-  same-brand review of one's own change. An approved pull request merely BEHIND its base is
-  an obstacle too, not a clearance: green checks do not make it mergeable, so
-  it is updated from the base exactly as a conflict is, and an `UNKNOWN` merge
-  state stops the run rather than being reported ready. A check that is still
-  running outranks both and mutates nothing at all, matching
-  `pullRequestStatus`: replacing an approved head mid-CI would discard the
-  run that was about to answer the question. A rollup that cannot be read
-  completely — GitHub truncates its context list, or an entry will not decode,
-  both `ChecksUnknown` to Kanban — fails closed ahead of every branch that
-  would clear or mutate, since not seeing a failure is not the same as there
-  being none. Only `BEHIND` is remedied by a
-  branch update; `BLOCKED` and `UNSTABLE` are reported and fail closed. The
-  one-rerun ceiling is read from GitHub's own per-run attempt counter rather
-  than from memory, so it holds across invocations and counts reruns made by
-  the drainer or by a person too, and the whole obstacle diagnosis — not just
-  the failed set — is run again after a rerun. A rerun pushes
-  no commit, so the approval it ran under still stands and no rereview is
-  invoked; a code fix replaces the reviewed head, so one always is. It is
-  authored once under `tools/command_sources/` and rendered into both bundles,
-  and it deliberately does not relax `/repair`'s own "no retry loops" rule,
-  which still governs the unapproved work `/repair` runs on.
+  obstacle in front of an **already-approved** pull request. It refuses a pull
+  request that is not approved under the configured `approval_mode`, and one
+  whose `pr-origin` marker names the other brand — the rereview is routed from
+  that same marker, so fixing another brand's pull request would end in a
+  same-brand review of one's own change. It then resolves a merge conflict,
+  updates a branch that is behind its base, or fixes a failed check, pushing at
+  most one focused commit and handing off exactly one canonical rereview.
+
+  Everything else fails closed rather than guessing. A check rollup that cannot
+  be read completely — GitHub truncates its context list, or an entry will not
+  decode, both `ChecksUnknown` to Kanban — stops the run ahead of any branch
+  that would clear or mutate, since not seeing a failure is not the same as
+  there being none. A `BLOCKED` or `UNSTABLE` merge state is reported rather
+  than "fixed" by a branch update that cannot clear it, and a still-running
+  check stops the run rather than replacing an approved head mid-CI.
+
+  It never retries a check. `tools/drain_prs.py` already reruns a failed
+  required check on an approved pull request, keyed to the approved head and
+  quarantining it once the allowance is spent; a second rerunner with its own
+  ceiling would mean two components disagreeing about the same pull request.
+
+  It runs only on an explicit request to fix or unblock: asking why a pull
+  request cannot merge is answered by reporting the obstacle and stopping,
+  since a diagnostic question authorises none of the pushes or rereview it
+  would otherwise perform. It is authored once under `tools/command_sources/`
+  and rendered into both bundles.
 
 ## 1.1.0.0
 

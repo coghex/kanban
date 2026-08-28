@@ -6,9 +6,9 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 plugins *discover* a `fix` workflow and that it sits outside the Haskell
 name-parity set, since Kanban's own CLI spawns `repair` for a Done-column card
 and never this. Discovery and name parity are not the contract, though: `fix`
-may rerun a red required check without changing a line, which is an authority
-no other packaged workflow has, so what the packaged text actually instructs an
-agent to do is the part that must not drift.
+is user-invoked, so nothing upstream establishes the approval, the origin
+brand, or the obstacle it acts on — the packaged text is the only place those
+decisions are made, and it is the part that must not drift.
 
 Both assets are rendered from one source by
 `tools/render_command_sources.py`, so the two brands cannot diverge by an
@@ -19,11 +19,11 @@ files are what an agent actually executes, and because a phrase that survives
 rendering is one that survived sigil substitution and brand-block projection.
 
 Three groups of requirement are checked as text the workflow states in terms an
-agent will act on: the approval precondition that makes the rerun branch safe,
-the triage rule separating an infrastructure failure from a real one together
-with its one-rerun ceiling, and the push/rereview authority boundary --
-specifically that a rerun pushes no head and therefore invokes no rereview,
-while a code fix does both.
+agent will act on: the approval and origin-brand preconditions that bound what
+it may touch at all, the ordered obstacle branches and which of them mutate
+anything, and the push/rereview authority boundary -- specifically that a push
+invalidates the approval and therefore always invokes exactly one rereview,
+while every non-mutating branch invokes none.
 
 `RepairDelegationTests` is the negative control this module owes under
 CLAUDE.md's "Quality gates": the fix-specific rules are asserted absent from the
@@ -85,16 +85,18 @@ FORBIDDEN_PATH_FRAGMENTS = (
 # different sigil per brand, so a phrase carrying one could never match both.
 REQUIRED_PHRASES = {
     # --- The trigger: a diagnostic question authorises nothing. ---
+    "the-worktree-step-serves-only-head-moving-branches": (
+        'This step applies only when step 3 concluded that the head must move — a merge\nconflict, a base the head is behind, or a check failure to fix. Every other\nbranch of step 3 mutates nothing and needs no worktree at all.'
+    ),
     "a-diagnosis-is-not-authorisation": (
-        "**A diagnosis is not authorisation.** This workflow reruns checks, "
-        "commits,\npushes, and hands off a rereview, so it runs only when the "
-        "user asked in that\nturn for the pull request to be fixed, unblocked, "
-        "or made mergeable."
+        "**A diagnosis is not authorisation.** This workflow commits, pushes, "
+        "and hands off a rereview, so it runs only when the user asked in that "
+        "turn for the pull request to be fixed, unblocked, or made mergeable."
     ),
     "a-why-question-is-answered-without-mutating": (
         '"Why can\'t\nthis merge?" and "what is blocking this?" ask for none of '
         "that: answer them by\nrunning step 2 and step 3, reporting the obstacle "
-        "you found, and stopping there\n— no rerun, no worktree, no push."
+        "you found, and stopping there\n— no worktree, no push."
     ),
     "an-ambiguous-request-is-read-as-diagnostic": (
         "When a request could be read either way, treat it\nas diagnostic and "
@@ -130,14 +132,9 @@ REQUIRED_PHRASES = {
         "--json number,body,baseRefName"
     ),
 
-    # --- The approval precondition, and why it is what licenses the rerun. ---
+    # --- The approval precondition, and what it bounds. ---
     "approval-is-required-before-diagnosis": (
         "This workflow acts only on an approved pull request."
-    ),
-    "approval-is-what-makes-the-rerun-safe": (
-        "Approval is the whole\nreason its rerun branch in step 5 is safe: on work a "
-        "reviewer has already\naccepted, a red check is far more likely to be "
-        "infrastructure than a defect the\nreview missed."
     ),
     "approval-is-configured-not-a-fixed-string": (
         "Approval is whatever the effective configuration says it is, never a fixed\n"
@@ -164,21 +161,37 @@ REQUIRED_PHRASES = {
         "decision."
     ),
     # --- A pull request behind its base is unmergeable, not clear. ---
+    "the-conflict-branch-precedes-the-rollup-test": (
+        "1. **Merge conflict** — resolve it against the recorded "
+        "`baseRefName`,\n   preserving the pull request's intent while "
+        "incorporating that base branch's\n   current tip. This branch reads "
+        "no check state, which is why it precedes the\n   rollup test below."
+    ),
     "an-untrustworthy-rollup-is-its-own-branch": (
-        "3. **A rollup you cannot trust** — before any branch below is allowed "
-        "to\n   clear or mutate the pull request, the check rollup must be "
-        "COMPLETE and\n   every entry in it classifiable."
+        "2. **A rollup you cannot trust** — before any branch below draws a "
+        "conclusion\n   from the rollup, that rollup must be COMPLETE."
+    ),
+    "a-failed-check-is-fixed-not-retried": (
+        "3. **Failed check** — EVERY failed entry in the rollup, required or "
+        "not, not\n   only required checks, and not only the first one you "
+        "notice. Fix the causes\n   in the worktree of step 4, push, and hand "
+        "off the rereview of step 6."
+    ),
+    "never-retry-a-failure-instead-of-fixing-it": (
+        "Never\n   delete or skip a test, never weaken an assertion, and never "
+        "retry a failure\n   instead of fixing it — see step 5, which forbids "
+        "that outright."
     ),
     "completeness-is-established-by-the-same-comparison-kanban-makes": (
-        "Compare that `totalCount` against the number of entries the step-5 "
-        "rollup\n   command returned. They must be equal — the same comparison\n"
-        "   `src/Kanban/GitHub/Decode.hs` makes before it decodes a single "
+        "Compare that `totalCount` against the number of entries the command "
+        "above returned. They must be equal — the same comparison "
+        "`src/Kanban/GitHub/Decode.hs` makes before it decodes a single "
         "context."
     ),
     "an-untrustworthy-rollup-fails-closed": (
         "**A truncated rollup, or any entry you cannot classify, fails "
-        "closed:**\n   report that the check state cannot be read completely "
-        "and stop without\n   pushing, rerunning, or invoking a rereview."
+        "closed:** report that the check state cannot be read completely and "
+        "stop without pushing or invoking a rereview."
     ),
     "why-an-incomplete-rollup-is-not-an-absence": (
         "An incomplete rollup can be\n   hiding exactly the failed or pending "
@@ -186,9 +199,31 @@ REQUIRED_PHRASES = {
         'would turn "I did not see one" into "there is none".'
     ),
     "a-pending-check-mutates-nothing": (
-        "4. **A check still running** — no conflict, no failed check, a rollup "
-        "you can\n   trust, and a pending entry in it. This branch MUTATES "
-        "NOTHING."
+        "4. **A check still running** — no conflict, a rollup you can trust, "
+        "no failed\n   entry, and a pending one. This branch MUTATES NOTHING."
+    ),
+    "the-workflow-never-retries-a-check": (
+        "This workflow does not retry a red check, ever. A failed check is "
+        "fixed or it\nis reported; there is no third option and no "
+        "circumstance — however plainly\ninfrastructural the failure looks — "
+        "under which this workflow reruns one."
+    ),
+    "retrying-belongs-to-the-drainer": (
+        "That is a deliberate boundary, not an oversight. `tools/drain_prs.py` "
+        "already\nreruns a failed required check on an approved pull request, "
+        "keyed to the\napproved head, with a duplicate-request barrier and a "
+        "quarantine once its\n`MAX_CI_RERUN_ATTEMPTS` allowance is spent."
+    ),
+    "two-rerunners-would-disagree": (
+        "a second rerunner\nwith its own ceiling would mean two components "
+        "disagreeing about the same\npull request."
+    ),
+    "no-rerun-command-no-loop-no-just-once": (
+        'So: no `gh run rerun`, no "just once to see", and no retry loop.'
+    ),
+    "a-believed-flaky-failure-is-reported-not-retried": (
+        "A failure you\nbelieve is flaky is still a failure this workflow "
+        "reports rather than retries"
     ),
     "pending-outranks-behind-as-it-does-in-the-haskell": (
         "`pullRequestStatus` ranks it this way\n   too — `checksPending` is "
@@ -209,9 +244,9 @@ REQUIRED_PHRASES = {
         "`UNSTABLE` are\n   real states (`MergeBlocked`, `MergeUnstable`)"
     ),
     "blocked-and-unstable-fail-closed": (
-        "This branch fails closed: report the exact merge state, say\n   that "
-        "this workflow has no remedy for it, and stop without pushing,\n   "
-        "rerunning, or invoking a rereview."
+        "This branch fails closed: report the exact merge state, say that this "
+        "workflow has no remedy for it, and stop without pushing or invoking a "
+        "rereview."
     ),
     "only-clean-and-protected-are-ready": (
         "Only `MergeClean` and `MergeProtected`\n   are ready "
@@ -233,164 +268,18 @@ REQUIRED_PHRASES = {
         "than being reported ready when it may yet come back `BEHIND` or "
         "`DIRTY`."
     ),
-    "the-ceiling-is-read-from-github-not-memory": (
-        "**The ceiling is read from GitHub, not from memory.** Before "
-        "rerunning any run,\nask it how many attempts it has already had:"
-    ),
-    "an-attempt-above-one-is-already-spent": (
-        "A first attempt reports `1`. **Anything greater than 1 means this run "
-        "has\nalready been rerun** — by an earlier invocation of this "
-        "workflow, by the PR\ndrainer, or by a person — so it is not rerun "
-        "again"
-    ),
-    "the-remote-counter-is-what-spans-invocations": (
-        'This is what makes "never a\nsecond" hold across invocations rather '
-        "than only within one, and it needs no\ndurable state of this "
-        "workflow's own"
-    ),
-    "the-rerun-requires-attempt-one": (
-        "**Only when EVERY failed run is an infrastructure failure AND every "
-        "one of them\nis still on attempt 1**"
-    ),
-    "the-whole-diagnosis-is-rerun-afterwards": (
-        "Clearing the failure is not the same\nas clearing the obstacle: a "
-        "pull request can carry a failed check AND an\nunrelated pending one"
-    ),
-    "a-post-rerun-obstacle-is-reported-not-acted-on": (
-        "* **Branch 1, 2 or 5, another head-moving obstacle** — report it and "
-        "stop.\n  Do NOT act on it in this invocation: the rerun already spent "
-        "this run's\n  allowance"
-    ),
 
-    # --- Triage: what may be rerun, and what may never be. ---
-    "triage-precedes-any-edit": (
-        "Triage them through step 5 before changing a single file."
-    ),
-    "infrastructure-failure-is-defined-by-what-executed": (
-        "**An infrastructure failure is one where no job that executed the pull\n"
-        "request's code reported a failure.**"
-    ),
-    "infrastructure-failure-is-read-from-the-jobs": (
-        "Decide by what executed, never by the check's name and never by how "
-        "the\nfailure feels:"
-    ),
-    "the-governing-test-outranks-its-examples": (
-        "That sentence is the whole test, and the\nexamples below are "
-        "subordinate to it: an example that turns out to have\nexecuted the "
-        "tree is a REAL failure, whatever it is called."
-    ),
-    "the-eviction-signature-is-named": (
-        "Concurrency-group\neviction is the canonical case: a setup job is "
-        "cancelled with no steps, the\njobs needing it are skipped, and a "
-        "summary job fails asserting they succeeded,\nhaving built nothing."
-    ),
-    "a-timeout-is-not-automatically-infrastructure": (
-        "**A timeout is not automatically infrastructure**, and it is the one "
-        "that will\ntempt you."
-    ),
-    "a-timeout-after-checkout-is-the-code-failing": (
-        "A job that checked out the tree and then hung — an infinite loop, a\n"
-        "deadlock, a performance regression that pushed a suite past its limit "
-        "— timed\nout BECAUSE of the pull request's code"
-    ),
-    "a-timeout-is-infrastructure-only-before-the-tree-runs": (
-        "a timeout counts as infrastructure only where the evidence\nshows no "
-        "step had begun executing the tree"
-    ),
-    "a-flaky-failure-is-a-real-failure-here": (
-        "A failure you\n"
-        "believe is flaky is a real failure for this workflow's purposes: it "
-        "executed the\ncode and it reported a result."
-    ),
-    "a-real-failure-is-never-rerun": (
-        "never rerun a real\nfailure to see whether it passes the second time."
-    ),
+    # --- The retry prohibition. ---
     "a-real-failure-is-never-papered-over": (
-        "Never delete or skip a test, never weaken an assertion"
+        "Never\n   delete or skip a test, never weaken an assertion"
     ),
     "a-pre-existing-failure-stops-the-run": (
-        "A failure you judge to be\npre-existing on the recorded base branch "
-        "must be reported to the user and stop\nthe run rather than papered over."
+        "A failure\n   you judge to be pre-existing on the recorded base "
+        "branch is reported to the\n   user and stops the run rather than "
+        "being papered over."
     ),
     # --- The ceiling. ---
-    "a-real-failure-anywhere-still-reruns-nothing": (
-        "**If ANY failed run is a real failure**, take the fix path for all of "
-        "them"
-    ),
-    "the-rerun-is-the-whole-run-never-failed-only": (
-        '**Never `--failed` here.** That flag reruns "only failed jobs, '
-        'including\ndependencies", and a CANCELLED job is not a failed one — '
-        "which is precisely the\nsignature 5b defines this branch by."
-    ),
-    "failed-only-would-silently-accomplish-nothing": (
-        "A run whose bad jobs are all cancellations\noffers `--failed` nothing "
-        "to act on, so the retry silently accomplishes nothing\nand the run "
-        "stays red; the allowance is spent on a rerun that never happened."
-    ),
-    "a-real-failure-anywhere-reruns-nothing": (
-        "**If ANY failed run is a real failure**, take the fix path for all of "
-        "them"
-    ),
-    "a-rerun-beside-a-real-failure-clears-nothing": (
-        "Rerun nothing — a rerun that ran beside a real failure would clear one "
-        "red check\nand leave the pull request just as unmergeable, having spent "
-        "the allowance."
-    ),
-    "one-rerun-then-stop": (
-        "**One rerun per run, then stop. There is never a second for the same "
-        "run.**"
-    ),
-    "the-whole-rollup-is-refetched-after-a-rerun": (
-        "Wait for every rerun to finish, then RE-FETCH the pull request and "
-        "run **step\n3's whole diagnosis again** against what it says now — "
-        "never the reruns' own\noutcomes, and never the failed set alone."
-    ),
-    "a-post-rerun-non-mutating-stop-is-honoured": (
-        "* **Branch 3, 4 or 6, a non-mutating stop** — report what it now says "
-        "and stop,\n  exactly as those branches specify."
-    ),
-    "only-the-nothing-to-fix-branch-clears-the-obstacle": (
-        "* **Branch 7, nothing to fix** — the obstacle really is cleared and "
-        "this\n  workflow is done."
-    ),
-    "a-non-actions-check-fails-closed": (
-        "**A failed entry of the second kind fails closed.** Report it by name, "
-        "say that\nthis workflow cannot classify or rerun an external check, and "
-        "stop"
-    ),
-    "a-non-actions-check-is-never-given-a-run-command": (
-        "Never issue `gh run view` or\n  `gh run rerun` against it, and never "
-        "guess a run id for it."
-    ),
-    "the-run-id-comes-from-the-details-url": (
-        "A **`CheckRun` whose `detailsUrl` names this repository's own\n  "
-        "`/actions/runs/<run-id>`** is a GitHub Actions job."
-    ),
-    "the-run-not-the-entry-is-the-unit": (
-        "several failed entries commonly share ONE run id, and the run — not\n  "
-        "the entry — is the unit everything below acts on."
-    ),
-    "the-ceiling-differs-from-the-drainers-on-purpose": (
-        "This ceiling is deliberately tighter than the PR drainer's. "
-        "`tools/drain_prs.py`\nretries a failed required check up to its own "
-        "`MAX_CI_RERUN_ATTEMPTS`"
-    ),
-    "neither-ceiling-may-be-changed-to-match-the-other": (
-        "Neither\nceiling is the other's bug. Do not raise this one to match "
-        "the drainer's, and do\nnot lower the drainer's to match this one."
-    ),
-    "the-ceiling-exists-to-surface-evidence": (
-        "A failure that survives one rerun is evidence, and burying it under a "
-        "third\nattempt is exactly what this ceiling exists to prevent."
-    ),
-    # --- Authority: what a rerun does and does not invalidate. ---
-    "a-rerun-pushes-nothing-so-approval-stands": (
-        "Rerunning changes no file and pushes no commit, so the head SHA the approval "
-        "was\ngranted against is unchanged and that approval still stands."
-    ),
-    "a-rerun-invokes-no-rereview-and-no-label": (
-        "A rerun therefore\nnever invokes a rereview and never touches a label."
-    ),
+    # --- Authority: what a push does and does not invalidate. ---
     "a-push-invalidates-the-approval": (
         "Do not assume\nthe pull request is still approved after you push — it is "
         "not, because the\napproval named the SHA you replaced."
@@ -399,9 +288,9 @@ REQUIRED_PHRASES = {
         "When you pushed a new head, finish by invoking exactly one canonical rereview"
     ),
     "no-push-means-no-rereview": (
-        "When you pushed nothing — the rerun branch, the nothing-to-fix branch, or a "
-        "stop\nin step 2 or step 5 — there is no new head, so invoke no rereview and "
-        "simply\nreport what you found."
+        "When you pushed nothing — any of step 3's non-mutating branches, or a "
+        "stop in step 2 or 2b — there is no new head, so invoke no rereview and "
+        "simply report what you found."
     ),
     "never-merges-and-never-closes": (
         "Never merge the pull request, and never close an issue or pull request."
@@ -432,17 +321,6 @@ REQUIRED_PHRASES = {
         "a push that left the head unchanged\ntransferred no fix, so treat it as "
         "having pushed nothing, invoke no rereview,\nand report it."
     ),
-    "a-rerun-needs-no-worktree": (
-        "A\nrerun changes no file and needs no worktree at all,"
-    ),
-    "the-worktree-step-covers-all-three-head-moving-obstacles": (
-        "This step applies only when step 3 or step 5 concluded that the head "
-        "must\nmove — a merge conflict, a base the head is behind, or a real "
-        "check failure."
-    ),
-    "a-pending-check-needs-no-worktree-either": (
-        "neither does a pending\ncheck, which mutates nothing at all."
-    ),
     "never-switches-the-primary-checkout": (
         "Never switch the repository's primary checkout."
     ),
@@ -451,8 +329,8 @@ REQUIRED_PHRASES = {
 # The obstacle branches, in the order the workflow must address them.
 DIAGNOSIS_ORDER = (
     "**Merge conflict**",
-    "**Failed check**",
     "**A rollup you cannot trust**",
+    "**Failed check**",
     "**A check still running**",
     "**Behind its base**",
     "**Any other merge state that is not ready**",
@@ -464,20 +342,21 @@ DIAGNOSIS_ORDER = (
 # than matching text every packaged workflow happens to contain.
 FIX_ONLY_REQUIREMENTS = (
     "an-untrustworthy-rollup-is-its-own-branch",
+    "a-believed-flaky-failure-is-reported-not-retried",
+    "no-rerun-command-no-loop-no-just-once",
+    "two-rerunners-would-disagree",
+    "retrying-belongs-to-the-drainer",
+    "the-workflow-never-retries-a-check",
+    "never-retry-a-failure-instead-of-fixing-it",
+    "a-failed-check-is-fixed-not-retried",
+    "the-conflict-branch-precedes-the-rollup-test",
     "an-untrustworthy-rollup-fails-closed",
     "completeness-is-established-by-the-same-comparison-kanban-makes",
     "why-an-incomplete-rollup-is-not-an-absence",
     "a-pending-check-mutates-nothing",
     "pending-outranks-behind-as-it-does-in-the-haskell",
     "why-pending-outranks-behind",
-    "a-pending-check-needs-no-worktree-either",
     "behind-the-base-is-its-own-obstacle",
-    "a-post-rerun-obstacle-is-reported-not-acted-on",
-    "the-whole-diagnosis-is-rerun-afterwards",
-    "the-rerun-requires-attempt-one",
-    "the-remote-counter-is-what-spans-invocations",
-    "an-attempt-above-one-is-already-spent",
-    "the-ceiling-is-read-from-github-not-memory",
     "only-clean-and-protected-are-ready",
     "blocked-and-unstable-fail-closed",
     "only-behind-is-fixable-by-a-branch-update",
@@ -489,44 +368,30 @@ FIX_ONLY_REQUIREMENTS = (
     "every-malformed-origin-is-a-refusal-not-a-default",
     "a-wrong-brand-origin-stops-with-nothing-changed",
     "why-the-origin-gate-exists",
+    "the-worktree-step-serves-only-head-moving-branches",
     "a-diagnosis-is-not-authorisation",
     "a-why-question-is-answered-without-mutating",
     "an-ambiguous-request-is-read-as-diagnostic",
     "approval-is-required-before-diagnosis",
-    "approval-is-what-makes-the-rerun-safe",
     "approval-is-configured-not-a-fixed-string",
     "approval-modes-are-all-three-honoured",
-    "infrastructure-failure-is-defined-by-what-executed",
-    "the-eviction-signature-is-named",
-    "the-governing-test-outranks-its-examples",
-    "a-timeout-is-not-automatically-infrastructure",
-    "a-timeout-after-checkout-is-the-code-failing",
-    "a-timeout-is-infrastructure-only-before-the-tree-runs",
-    "a-flaky-failure-is-a-real-failure-here",
-    "the-rerun-is-the-whole-run-never-failed-only",
-    "failed-only-would-silently-accomplish-nothing",
-    "a-real-failure-anywhere-reruns-nothing",
-    "a-rerun-beside-a-real-failure-clears-nothing",
-    "one-rerun-then-stop",
-    "the-whole-rollup-is-refetched-after-a-rerun",
-    "a-post-rerun-non-mutating-stop-is-honoured",
-    "only-the-nothing-to-fix-branch-clears-the-obstacle",
-    "a-non-actions-check-fails-closed",
-    "a-non-actions-check-is-never-given-a-run-command",
-    "the-run-id-comes-from-the-details-url",
-    "the-run-not-the-entry-is-the-unit",
-    "the-ceiling-exists-to-surface-evidence",
-    "the-ceiling-differs-from-the-drainers-on-purpose",
-    "neither-ceiling-may-be-changed-to-match-the-other",
-    "a-rerun-pushes-nothing-so-approval-stands",
-    "a-rerun-invokes-no-rereview-and-no-label",
-    "a-rerun-needs-no-worktree",
-    "the-worktree-step-covers-all-three-head-moving-obstacles",
 )
 
 
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def flat(text: str) -> str:
+    """Collapse every run of whitespace to one space.
+
+    The contract these phrases pin is the WORDS, not where the renderer
+    happened to wrap them. Comparing raw text made every unrelated edit that
+    reflowed a paragraph fail this module for no behavioural reason, which
+    trains a reader to fix the assertion rather than read it. Normalising both
+    sides keeps the phrases exact in substance and indifferent to layout.
+    """
+    return " ".join(text.split())
 
 
 def frontmatter_keys(text: str) -> set[str]:
@@ -604,8 +469,9 @@ class FixWorkflowContractTests(unittest.TestCase):
         missing = []
         for path in FIX_ASSETS:
             text = read(path)
+            flattened = flat(text)
             for requirement, phrase in REQUIRED_PHRASES.items():
-                if phrase not in text:
+                if flat(phrase) not in flattened:
                     missing.append(f"{path.relative_to(REPO_ROOT)}: {requirement}")
         self.assertEqual(missing, [], "\n".join(missing))
 
@@ -776,6 +642,43 @@ class OriginBrandGateTests(unittest.TestCase):
             self.assertIn(rejection, flow, f"originFromBody no longer rejects: {rejection}")
 
 
+class NoRerunTests(unittest.TestCase):
+    """The prohibition is enforced as a command line, not only as prose.
+
+    The workflow NAMES `gh run rerun` in the paragraph explaining why it is
+    refused -- that paragraph is what stops the capability being reintroduced
+    as an optimisation -- so the assertion scans only lines that actually
+    invoke a command, and requires none of them to be a rerun.
+    """
+
+    def test_no_asset_invokes_gh_run_rerun(self):
+        for path in FIX_ASSETS:
+            for line in read(path).splitlines():
+                stripped = line.strip()
+                self.assertFalse(
+                    stripped.startswith("gh run rerun"),
+                    f"{path} invokes a rerun: {stripped!r}",
+                )
+
+    def test_the_prohibition_names_the_drainer_as_the_owner(self):
+        for path in FIX_ASSETS:
+            text = flat(read(path))
+            self.assertIn("This workflow does not retry a red check, ever.", text, path)
+            self.assertIn("tools/drain_prs.py", text, path)
+
+    def test_the_drainer_really_is_still_the_rerunner(self):
+        # Non-vacuous anchor: the prohibition defers to a capability that must
+        # still exist, or the workflow is refusing to do something nothing
+        # else does either.
+        drainer = read(REPO_ROOT / "tools/drain_prs.py")
+        self.assertIn("MAX_CI_RERUN_ATTEMPTS = ", drainer)
+        self.assertIn("def rerun_failed_ci(", drainer)
+
+    def test_repair_still_holds_the_same_prohibition(self):
+        for path in REPAIR_ASSETS:
+            self.assertIn("no retry loops", read(path))
+
+
 class MergeStateCoverageTests(unittest.TestCase):
     """Every non-ready merge state has a defined branch, and only one of them
     is fixable by updating from the base."""
@@ -806,124 +709,14 @@ class MergeStateCoverageTests(unittest.TestCase):
             )
 
 
-class InfrastructureDefinitionTests(unittest.TestCase):
-    """The example list may never widen the governing test.
-
-    "No job that executed the pull request's code reported a failure" is the
-    rule; the categories beside it are illustrations. A bare "timeout" in that
-    list contradicted the rule outright -- a job that runs the suite and then
-    hangs times out BECAUSE of the code -- so the list is checked for
-    unqualified entries that would readmit a real failure.
-    """
-
-    def test_the_bare_category_list_no_longer_contains_timeout(self):
-        # The sentence that enumerates always-infrastructure categories must
-        # not name a timeout, because a timeout is only sometimes one.
-        for path in FIX_ASSETS:
-            text = read(path)
-            self.assertNotIn(
-                "is a\ncancellation, a timeout, a runner or registry error",
-                text,
-                f"{path} lists a bare timeout as always infrastructure",
-            )
-            self.assertIn(
-                "Every failure in such a run is a cancellation, a runner or "
-                "registry error, or",
-                text,
-                f"{path} no longer states the always-infrastructure categories",
-            )
-
-    def test_the_timeout_qualification_names_both_directions(self):
-        for path in FIX_ASSETS:
-            text = read(path)
-            # The unsafe direction, and the narrow safe one.
-            self.assertIn("timed\nout BECAUSE of the pull request's code", text, path)
-            self.assertIn("a runner that never picked the job\nup", text, path)
-
-
-
-class DurableCeilingTests(unittest.TestCase):
-    """The one-rerun ceiling survives a fresh invocation.
-
-    Nothing in this workflow persists state of its own, so a ceiling enforced
-    from memory would bound only one invocation and a second `fix` could retry
-    the same run. GitHub's own per-run attempt counter is the durable guard,
-    and it is strictly better than a local one: it also counts reruns made by
-    the PR drainer or by a person.
-    """
-
-    def test_the_attempt_counter_is_consulted_before_any_rerun(self):
-        for path in FIX_ASSETS:
-            text = read(path)
-            self.assertIn("--json attempt", text, path)
-            self.assertIn("is still on attempt 1", text, path)
-
-    def test_the_attempt_field_gh_is_asked_for_really_exists(self):
-        # Non-vacuous anchor: `gh run view --json attempt` must be a real
-        # field, or the guard reads nothing and the ceiling silently reverts
-        # to per-invocation. Checked against gh's own field list rather than
-        # by making a network call.
-        import shutil
-        import subprocess
-
-        if shutil.which("gh") is None:
-            self.skipTest("gh is not installed")
-        result = subprocess.run(
-            ["gh", "run", "view", "--json"],
-            capture_output=True,
-            text=True,
-        )
-        # `--json` with no value makes gh print the supported field list.
-        self.assertIn("attempt", result.stdout + result.stderr)
-
-
-class RerunCommandShapeTests(unittest.TestCase):
-    """The rerun command must be applicable to the failures it is defined by.
-
-    `gh run rerun --failed` reruns "only failed jobs, including dependencies".
-    A CANCELLED job is not a failed job, and a cancellation is the canonical
-    infrastructure failure this workflow exists to retry -- so on a
-    cancellation-only run `--failed` has nothing to act on, spends the single
-    allowance, and leaves the run red. The whole-run form is the one that is
-    always applicable.
-    """
-
-    RERUN_LINE = "gh run rerun <run-id> -R <owner/name>"
-
-    def test_the_rerun_command_is_the_whole_run(self):
-        for path in FIX_ASSETS:
-            text = read(path)
-            self.assertIn(self.RERUN_LINE, text, path)
-
-    def test_no_asset_reruns_only_failed_jobs(self):
-        # The flag may be NAMED -- the prose explains why it is wrong -- but it
-        # must never appear on the command line the workflow tells an agent to
-        # run.
-        for path in FIX_ASSETS:
-            for line in read(path).splitlines():
-                stripped = line.strip()
-                if stripped.startswith("gh run rerun"):
-                    self.assertNotIn(
-                        "--failed",
-                        stripped,
-                        f"{path} instructs a --failed rerun: {stripped!r}",
-                    )
-
-    def test_the_prose_explains_why_failed_only_is_refused(self):
-        for path in FIX_ASSETS:
-            text = read(path)
-            self.assertIn("**Never `--failed` here.**", text, path)
-            self.assertIn("a CANCELLED job is not a failed one", text, path)
-
-
 class ContractDocumentationTests(unittest.TestCase):
     """The authoritative action contract documents this workflow.
 
     Manifest rows declare what it *reaches*; they are not a statement of its
-    invocation, authority, or durable state. A workflow that reruns GitHub
-    Actions, may push a reviewed head, and spawns a nested canonical review
-    owes docs/agent-workflow-contract.md its own section, the way §2.7 gives
-    repair one.
+    invocation, authority, or durable state. A workflow that may push a
+    reviewed head and spawn a nested canonical review owes
+    docs/agent-workflow-contract.md its own section, the way §2.7 gives repair
+    one.
     """
 
     CONTRACT = REPO_ROOT / "docs/agent-workflow-contract.md"
@@ -947,7 +740,7 @@ class ContractDocumentationTests(unittest.TestCase):
             "**Inputs:**",
             "**Preconditions:**",
             "**Outputs:**",
-            "**Rerun authority, and its ceiling:**",
+            "**No rerun authority:**",
             "**Failure semantics:**",
             "**Required authority:**",
             "**Durable state:**",
@@ -958,6 +751,7 @@ class ContractDocumentationTests(unittest.TestCase):
         self.assertIn("approvedPullRequest", section)
         self.assertIn("MergeBehind", section)
         self.assertIn("MAX_CI_RERUN_ATTEMPTS", section)
+        self.assertIn("never retries a red check", section)
         self.assertIn("`--self-review`", section)
         self.assertIn("rather than reviewing itself", section)
 
@@ -991,13 +785,14 @@ class RepairDelegationTests(unittest.TestCase):
         leaked = []
         for path in REPAIR_ASSETS:
             text = read(path)
+            flattened = flat(text)
             for requirement in FIX_ONLY_REQUIREMENTS:
-                if REQUIRED_PHRASES[requirement] in text:
+                if flat(REQUIRED_PHRASES[requirement]) in flattened:
                     leaked.append(f"{path.relative_to(REPO_ROOT)}: {requirement}")
         self.assertEqual(
             leaked,
             [],
-            "repair must not carry fix's approval gate or rerun authority:\n"
+            "repair must not carry fix's approval or origin gates:\n"
             + "\n".join(leaked),
         )
 
@@ -1005,12 +800,18 @@ class RepairDelegationTests(unittest.TestCase):
         self.assertTrue(set(FIX_ONLY_REQUIREMENTS) < set(REQUIRED_PHRASES))
         self.assertGreaterEqual(len(FIX_ONLY_REQUIREMENTS), 10)
 
-    def test_repair_still_forbids_the_retry_loop_fix_is_allowed(self):
-        # The two workflows deliberately disagree here, and that disagreement
-        # is only safe while repair's own prohibition is intact: repair runs on
-        # unapproved work, where a red check is far likelier to be real.
+    def test_both_workflows_now_agree_about_retrying(self):
+        # These two once disagreed: fix was going to retry an infrastructure
+        # failure that repair refuses. Dropping that capability makes the rule
+        # one rule, held in both places, with the drainer as the only
+        # rerunner -- so the agreement is asserted rather than left to drift
+        # back apart.
         for path in REPAIR_ASSETS:
             self.assertIn("no retry loops", read(path))
+        for path in FIX_ASSETS:
+            self.assertIn(
+                "This workflow does not retry a red check, ever.", read(path)
+            )
 
 
 # The spelled-out counts each bundle README states about its own inventory, and

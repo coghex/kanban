@@ -1387,7 +1387,7 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   diagnostic question — "why can't this merge?" — is explicitly NOT an
   invocation: it is answered by running the approval gate and the diagnosis,
   reporting the obstacle, and stopping, because a question authorises none of
-  the reruns, pushes, or rereview this workflow otherwise performs. An
+  the pushes or rereview this workflow otherwise performs. An
   ambiguous request is read as diagnostic. Because it works on the pull
   request's own code, it runs on the pull request's own origin brand — the
   same rule as `pr-revise` and `repair` — and hands any verdict off to the
@@ -1415,38 +1415,25 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   each refused with nothing changed; a blocking label is never removed to
   proceed. This precondition is what distinguishes `fix` from `repair`, which
   deliberately works on unapproved and changes-requested pull requests too, and
-  it is what licenses the rerun authority below.
-- **Outputs:** either at most one focused commit pushed to the pull request's
-  own head branch followed by exactly one canonical rereview — on the same
-  verified-head-advanced condition §2.7 states — or a rerun of one or more
-  GitHub Actions runs, which pushes nothing. The two are exclusive. The
-  rereview publishes the `pr-review:v2` comment and switches the configured
-  verdict labels; the workflow itself never sets one.
-- **Rerun authority, and its ceiling:** this is the one packaged workflow that
-  may retry a red check. It may do so only when EVERY failed run is an
-  infrastructure failure — no job that executed the pull request's code
-  reported a failure — and then only once per run, never twice. That test
-  governs its own examples: a timeout in particular is infrastructure only
-  where no step had begun executing the tree, since a job that checked out
-  and then hung timed out because of the pull request's own code. A failed
-  rollup entry that is not a GitHub Actions run at all (a `StatusContext`, or
-  a `CheckRun` whose `detailsUrl` names no Actions run) fails closed: it is
-  reported and never handed `gh run view` or `gh run rerun`. The rerun is of the WHOLE run, never `--failed`: that flag reruns only failed jobs, and a cancelled job is not a failed one, so on the cancellation-only run this branch is defined by it would spend the single allowance without rerunning anything. After the reruns the whole
-  obstacle diagnosis is run again — not merely the failed set, since a pull
-  request can carry a failed check beside an unrelated pending one — and any
-  obstacle it now reports is itself reported rather than acted on, because
-  the rerun already spent that run's allowance. The ceiling is durable
-  rather than per-invocation: GitHub's own per-run `attempt` counter is read
-  before any rerun, so a run already past attempt 1 is never rerun again by
-  a later invocation, by the drainer, or after a person retried it. This ceiling is
-  deliberately tighter than `tools/drain_prs.py`'s `MAX_CI_RERUN_ATTEMPTS`,
-  which serves an unattended daemon; neither is the other's bug and neither may
-  be changed to match the other. `repair`'s own prohibition on retry loops
-  (§2.7) is unaffected and still governs the unapproved work it runs on.
+  it is what keeps the workflow's remit to the gap between accepted work and
+  the merge queue.
+- **Outputs:** at most one focused commit pushed to the pull request's own head
+  branch, followed by exactly one canonical rereview — on the same
+  verified-head-advanced condition §2.7 states. Every other branch mutates
+  nothing at all. The rereview publishes the `pr-review:v2` comment and
+  switches the configured verdict labels; the workflow itself never sets one.
+- **No rerun authority:** this workflow never retries a red check. A failed
+  check is fixed or reported, and `tools/drain_prs.py` remains the only
+  component that reruns one — keyed to the approved head, with a
+  duplicate-request barrier and a quarantine once its `MAX_CI_RERUN_ATTEMPTS`
+  allowance is spent. A second rerunner with its own ceiling would mean two
+  components disagreeing about the same pull request, so `fix` holds the same
+  prohibition §2.7 states for `repair`.
 - **Failure semantics:** it addresses the highest-priority obstacle in
-  `pullRequestStatus` order — merge conflict, then any failed check, then a
-  rollup that cannot be read completely, then a pending check, then
-  `MergeBehind`, then any OTHER non-ready merge state, then nothing to fix.
+  `pullRequestStatus` order — merge conflict, then a
+  rollup that cannot be read completely, then any failed check, then a pending
+  check, then `MergeBehind`, then any OTHER non-ready merge state, then nothing
+  to fix.
   The rollup branch fails closed ahead of everything that clears or mutates:
   GitHub caps returned contexts and a context can fail to decode, both of
   which Kanban models as `ChecksUnknown` — neither ready nor pending — so an
@@ -1463,16 +1450,16 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   the base branch is reported and stops the run. Cross-repository heads,
   writability, competing remote updates, and a coordinator-rejected rereview
   all behave exactly as §2.7 specifies for `repair`.
-- **Required authority:** GitHub read on the pull request and its Actions runs,
-  the ability to request a rerun of a failed Actions run, and write to push to
-  the pull request's head branch **in the head repository**. It never merges,
+- **Required authority:** GitHub read on the pull request and its check rollup,
+  and write to push to the pull request's head branch **in the head
+  repository**. It never merges,
   never closes an issue or pull request, and never adds or removes a verdict
   label directly.
 - **Durable state:** the same worktree selection §2.7 specifies, keyed on the
   pull request's exact head branch, or a new one at
-  `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/pr-<n>-<slug>`. A rerun
-  needs no worktree at all and creates none. It never switches the
-  repository's primary checkout.
+  `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/pr-<n>-<slug>`. Every
+  non-mutating branch needs no worktree at all and creates none. It never
+  switches the repository's primary checkout.
 - **Mandatory/optional:** optional — user-invoked only, reached by asking for
   it, and spawned by no Kanban code path.
 
