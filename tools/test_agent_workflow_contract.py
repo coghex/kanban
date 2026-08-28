@@ -361,6 +361,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py",
 ]
 
 # The tracked Claude plugin's own packaged workflows (issue #77): the same
@@ -396,6 +397,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
+    "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
 ]
 
 # Both bundles' vendored trusted-comment issue-spec helper (issue #238). Each is
@@ -522,13 +524,28 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "git",
         "sed",
         "awk",
+        "python3",
     },
     "codex-plugin/plugins/kanban/skills/project-review/SKILL.md": {
         "gh",
         "git",
         "sed",
         "awk",
+        "python3",
+        "find",
+        "head",
     },
+}
+
+# Issue #548's cursor helper, vendored into both bundles and covered the way
+# the trusted-comment helper and the document mechanism above are. Its
+# expectation is an empty set, and that is a pin rather than an omission: the
+# reconciliation is arithmetic over listings the workflow already took, so a
+# helper that started shelling out would be reaching a checkout its caller
+# never named -- and would owe a manifest row it does not have.
+PROJECT_REVIEW_CURSOR_SURFACE_FILES = {
+    "claude-plugin/plugins/kanban/scripts/project_review_cursor.py": set(),
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py": set(),
 }
 
 # Issue #511's drainer control surface, pinned the same way and for the
@@ -2351,7 +2368,12 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # are what the repository and docs-worktree resolutions are built
         # from, and `git` because direct-commit mode walks first-parent
         # history with it -- a rewrite that reached for `gh repo view` instead
-        # would drop `sed` here rather than passing quietly.
+        # would drop `sed` here rather than passing quietly. Issue #548 added
+        # `python3`, which is how both brands reach the vendored cursor helper,
+        # and `find` with `head` for the Codex lookup that locates it in the
+        # $CODEX_HOME cache; the Claude lookup is a ${CLAUDE_PLUGIN_ROOT}
+        # substitution and spawns nothing, so those two are Codex-only here
+        # exactly as they are in the rendered asset.
         executable_tokens = {
             row["token"] for row in self.manifest if row["kind"] == "executable"
         }
@@ -2373,16 +2395,59 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     undocumented_command_message(relative_path, name),
                 )
             # Grounded in the manifest from the other side too: being scanned
-            # is not the same as being declared, and the four rows above are
-            # where a reader looks to find out which assets speak each tool.
+            # is not the same as being declared, and the seven rows named below
+            # are where a reader looks to find out which assets speak each tool.
             for name in sorted(expected):
                 row = next(
                     row
                     for row in self.manifest
                     if row["kind"] == "executable" and row["token"] == name
                 )
-                self.assertIn(row["id"], {"gh-cli", "git-cli", "sed-cli", "awk-cli"})
+                self.assertIn(
+                    row["id"],
+                    {
+                        "gh-cli",
+                        "git-cli",
+                        "sed-cli",
+                        "awk-cli",
+                        "python3-cli",
+                        "find-cli",
+                        "head-cli",
+                    },
+                )
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_the_vendored_project_review_cursor_is_scanned_and_declared(self):
+        # The counterpart of the two vendored-helper pins above. Each copy is a
+        # member of its brand's surface list, so dropping one from a list fails
+        # here rather than silently un-scanning a shipped asset; what the
+        # extractor recovers is pinned exactly, so the empty set is an
+        # assertion about the module rather than about an extractor that
+        # stopped matching.
+        for relative_path, expected in sorted(
+            PROJECT_REVIEW_CURSOR_SURFACE_FILES.items()
+        ):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertEqual(
+                discovered_commands_for_plugin_file(relative_path, content),
+                expected,
+                relative_path,
+            )
+        # Non-vacuity for the empty sets above: the same extractor recovers
+        # something from a module that does spawn, so "nothing found" is a
+        # property of these two files rather than of the scan.
+        self.assertEqual(
+            discovered_commands_for_plugin_file(
+                "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
+                'subprocess.run(["git", "log"])',
+            ),
+            {"git"},
+        )
 
     def test_drain_prs_asset_command_discovery_is_not_vacuous(self):
         # The counterpart of the three pins above for the one vendored
@@ -2493,6 +2558,39 @@ class AgentWorkflowContractTests(unittest.TestCase):
             REPO_ROOT / "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md"
         ).read_text(encoding="utf-8")
         self.assertIn(entry["token"], markdown_home_relative_segments(skill))
+
+    def test_the_codex_project_review_skill_declares_the_plugin_cache_root(self):
+        # Round-1 blocker of issue #548's review. The Codex asset resolves its
+        # sweep cursor through `${CODEX_HOME:-$HOME/.codex}`, so it joined the
+        # consumers of `codex-plugin-cache-root` -- and a `personal-path` row
+        # that does not name a consumer is a contract that has stopped
+        # describing the tree. The declaring row is named exactly, for the same
+        # reason the drainer scan above names its two: a scan satisfied by any
+        # `personal-path` row would pass on an asset repointed at some other
+        # user-scoped directory entirely.
+        by_id = {row["id"]: row for row in self.manifest}
+        relative_path = "codex-plugin/plugins/kanban/skills/project-review/SKILL.md"
+        entry = by_id["codex-plugin-cache-root"]
+        self.assertIn(relative_path, entry["files"])
+        segments = markdown_home_relative_segments(
+            (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        )
+        # Load-bearing rather than decorative, and non-vacuous in both
+        # directions: the asset really does name a user-scoped segment, and it
+        # is this row's.
+        self.assertTrue(segments, f"{relative_path} names no user-scoped path")
+        self.assertIn(entry["token"], segments)
+        # The Claude rendering resolves the same helper through
+        # ${CLAUDE_PLUGIN_ROOT} and therefore owes no row at all.
+        self.assertEqual(
+            markdown_home_relative_segments(
+                (
+                    REPO_ROOT
+                    / "claude-plugin/plugins/kanban/commands/project-review.md"
+                ).read_text(encoding="utf-8")
+            ),
+            set(),
+        )
 
     def test_every_declared_document_asset_is_scanned_for_external_commands(self):
         # Requirement 6 of issue #229 and its review correction: the two plugin
