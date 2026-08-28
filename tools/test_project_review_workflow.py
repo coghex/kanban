@@ -41,14 +41,41 @@ handling, and the clean-batch rule that writes no report but still preserves its
 cursor are vendored as they read today, so each is pinned rather than merely
 rendered.
 
-The negative control is the brand boundary itself: `BrandBoundaryTests` asserts
-that stripping the three declared brand-specific lines leaves two byte-identical
-bodies, so a rule that quietly matched everything could not also pass there.
+Issue #548 replaced the last of that preserved behavior that was wrong: the
+boundary rule updated "only when the user asks to preserve a new endpoint", so
+a completed batch left nothing durable behind, and a clean batch — forbidden to
+write an empty report — left not even a filename to recover from. The
+replacement is a vendored mechanism rather than more prose, because prose was
+already what claimed the cursor was preserved. `project_review_cursor.py` ships
+in both bundles, owns the state document and the reconciliation built from it,
+and is exercised here as real state transitions: a clean first batch followed by
+a fresh second invocation that starts immediately below it, a finding-bearing
+batch recording the same endpoint, an interleaved direct commit inside a
+report's claimed interval, an explicit exclusion, and a report whose coverage
+overlaps the naive selection. Each of those carries its own negative control —
+delete the recorded endpoint, or vary only it — because an assertion that still
+holds once the endpoint is gone was never testing the endpoint.
+
+The prose pins stay beside them and neither half stands in for the other: the
+rendered asset is the program an agent executes, so what it says about the
+cursor is a contract in its own right, while what the mechanism does with the
+cursor is one a substring check cannot reach.
+
+The negative control for the prose half is the brand boundary itself:
+`BrandBoundaryTests` asserts that stripping the seven declared brand-specific
+lines leaves two byte-identical bodies, so a rule that quietly matched
+everything could not also pass there.
 """
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
+import json
 import re
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -62,6 +89,48 @@ CODEX_ASSET = "codex-plugin/plugins/kanban/skills/project-review/SKILL.md"
 RENDERED_ASSETS = (CLAUDE_ASSET, CODEX_ASSET)
 
 BUNDLE_ROOTS = ("claude-plugin", "codex-plugin")
+
+# Issue #548's cursor mechanism, vendored the way the trusted-comment helper is:
+# one module, a copy in each bundle held byte-identical, and no tracked original
+# under tools/ because nothing in this repository invokes it. The workflow runs
+# in whatever repository it was pointed at, which tracks no copy of anything,
+# so the helper has to travel with the command that calls it.
+CLAUDE_CURSOR_HELPER = "claude-plugin/plugins/kanban/scripts/project_review_cursor.py"
+CODEX_CURSOR_HELPER = (
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/"
+    "project_review_cursor.py"
+)
+CURSOR_HELPERS = {"claude": CLAUDE_CURSOR_HELPER, "codex": CODEX_CURSOR_HELPER}
+
+# How each brand's rendered asset names it. Neither spelling is a path into the
+# reviewed repository: the helper ships with the bundle, so it is resolved
+# against the bundle's own install location.
+CURSOR_HELPER_LOOKUP = {
+    "claude": 'CURSOR="${CLAUDE_PLUGIN_ROOT}/scripts/project_review_cursor.py"',
+    "codex": (
+        'CURSOR="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '
+        "'*/kanban/*/skills/project-review/scripts/project_review_cursor.py' "
+        '2>/dev/null | head -n1)"'
+    ),
+}
+
+# The three invocations the workflow makes, in the order it makes them.
+CURSOR_INVOCATIONS = (
+    'python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode pr',
+    'python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode direct',
+    '--mode pr --count "${COUNT:-12}" --listing-limit "$LIMIT" --start "$RANGE_START" --end "$RANGE_END"',
+    '--mode direct --count "${COUNT:-12}" --start "$RANGE_START" --end "$RANGE_END"',
+    'python3 "$CURSOR" record --root "$DOCS_WT" --repo "$REPO" --mode pr',
+    'python3 "$CURSOR" read --root "$DOCS_WT" --repo "$REPO"',
+)
+
+# The direct-mode walk, which is the whole first-parent history rather than a
+# slice beginning at the entry point. A sliced walk would leave the recorded
+# endpoint outside the listing the helper positions within, and the helper
+# would then refuse it as a foreign cursor on every later batch -- a fail-closed
+# stop, but one produced by the caller rather than by any real disagreement.
+DIRECT_WALK = 'git -C "$ROOT" log --first-parent --format=%H \\'
+REFUSED_SLICED_DIRECT_WALK = "--format=%H <entry-point>"
 
 # A `gh` invocation as the assets actually spell them, in a fenced block or in
 # inline code. The lookbehind keeps a `gh` that ends a longer word out, and the
@@ -86,7 +155,18 @@ GITHUB_READS = (
     'issue list -R "$REPO" --state open',
     'issue list -R "$REPO" --search',
 )
-DECLARED_GITHUB_CALL_COUNT = len(GITHUB_READS)
+
+# The merged listing is taken twice and every other read once (issue #548): the
+# first fills `select`, and the second orders the endpoint `record` writes after
+# the batch is complete. They are deliberately two calls rather than one saved
+# listing, because recording happens after the report has been written and
+# validated -- possibly a long way after -- and a listing re-taken then is
+# re-validated against current merged history rather than trusted from memory.
+# A later merge only adds rows above the batch, so it cannot reorder it.
+REPEATED_GITHUB_READS = {'pr list -R "$REPO" --state merged': 2}
+DECLARED_GITHUB_CALL_COUNT = sum(
+    REPEATED_GITHUB_READS.get(read, 1) for read in GITHUB_READS
+)
 
 # The listing that opens PR mode has to reach the batch it was asked for. A
 # fixed `--limit` silently truncates any request that reaches past it -- a
@@ -97,27 +177,42 @@ DECLARED_GITHUB_CALL_COUNT = len(GITHUB_READS)
 # are pinned individually.
 LISTING_LIMIT = '--limit "$LIMIT"'
 REFUSED_FIXED_LIMIT = "--limit 40 "
+
+# The limit the listing was taken with, declared to the selection. Issue #548's
+# round-1 blocker: a count checked against the *page* passes on a page that ends
+# at the cursor and selects nothing, and a sweep reading that as the tail enters
+# direct mode with merged pull requests still unreviewed behind it. So the count
+# is checked against the selection, and a short batch is `truncated` or
+# `exhausted` depending on whether the page came back at its own limit.
+DECLARED_LISTING_LIMIT = '--listing-limit "$LIMIT"'
 LISTING_REACH = {
-    "the limit is not a constant": "**`$LIMIT` is not a constant.**",
-    "verified before selecting": (
-        "verify the listing actually reaches the batch you asked for, before "
-        "selecting anything from it"
+    "the limit is not a constant": (
+        "**`$LIMIT` is not a constant, and `--listing-limit` is how the "
+        "selection knows it.**"
     ),
-    "the count fits": "- the requested count fits inside the listing;",
-    "the starting PR appears": "- a supplied starting PR appears in it;",
-    "the boundary is covered": (
-        "- a boundary endpoint from the cursor is at or above its oldest entry."
+    "the count is checked against the selection": (
+        "The question the reach check has to answer is not whether the listing "
+        "holds twelve rows; it is whether twelve *selectable* rows survive "
+        "below the recorded endpoint once coverage and exclusions come out."
     ),
-    "raise and re-list until exhausted": (
-        "Raise `$LIMIT` and list again until each one holds, or until the "
-        "listing is **exhausted** — a listing that came back with fewer rows "
-        "than `$LIMIT` is the whole of the repository's merged history, and "
-        "raising the limit again changes nothing."
+    "a listing that ends at the endpoint selects nothing": (
+        "**A listing that ends at the endpoint passes every count check and "
+        "selects nothing**, so the count is checked against the selection "
+        "rather than against the page."
+    ),
+    "the two answers are never collapsed": (
+        "its answer to a short batch is one of two things that must never be "
+        "collapsed"
+    ),
+    "truncated means raise and re-list": (
+        "**`\"truncated\": true`** — the batch came up short and the listing "
+        "came back at its own limit, so the missing pull requests may be on "
+        "the next page. Raise `$LIMIT` and list again."
     ),
     "truncation is inherited": (
-        "A batch selected from a listing that stopped short of its own boundary "
-        "is silently truncated to whatever happened to fit, and every later "
-        "`continue` inherits the gap."
+        "Treating this as the tail leaves merged pull requests unreviewed "
+        "behind the sweep for good, and every later `continue` inherits the "
+        "gap."
     ),
 }
 
@@ -127,18 +222,29 @@ LISTING_REACH = {
 # batch, so a sweep with fewer PRs left than the batch size never finishes PR
 # history and direct mode is never entered.
 EXHAUSTION_DISPOSITIONS = {
+    "a real absence is one under the limit": (
+        "**Absent from a listing that came back under its limit** is a real "
+        "absence."
+    ),
     "an absent starting PR is invalid": (
-        "**A supplied starting PR that is absent** is an invalid request: that "
+        "A supplied starting PR that is absent is an invalid request: that "
         "PR is not in this repository's merged history at all. Say so and "
         "stop; do not review the nearest number that exists."
     ),
     "an absent boundary is a foreign cursor": (
-        "**A boundary endpoint that is absent** is a cursor that does not "
+        "A boundary endpoint that is absent is a cursor that does not "
         "belong to this repository. Say so and stop rather than sweeping past "
         "it."
     ),
+    "an absence at the limit is a short page": (
+        "**Absent from a listing that came back at its own limit** is a short "
+        "page, not a missing unit. Raise `$LIMIT` and list again; the refusal "
+        "says so in those words."
+    ),
     "a short count is the tail, not an error": (
-        "**A count larger than what remains is not an error at all.** It is "
+        "**`\"exhausted\": true`** — the batch came up short and the listing "
+        "came back with fewer rows than `$LIMIT`, which is the whole of the "
+        "repository's merged history. **This is not an error at all.** It is "
         "the tail of the sweep. Review every PR that does remain, say the "
         "batch was short and why, and treat PR history as exhausted so the "
         "next `continue` enters direct mode."
@@ -237,12 +343,17 @@ REPORT_ONLY = {
         "Do not modify code, push, touch merged PRs, or create or edit tracker "
         "issues."
     ),
-    "the one default write": (
-        "This workflow's only default write is one canonical Markdown findings "
-        "report in the branch-resolved `docs-wip` worktree"
+    "two kinds of default write": (
+        "This workflow writes exactly two kinds of file, both in the "
+        "branch-resolved `docs-wip` worktree and neither of them a tracker "
+        "artifact."
     ),
-    "written only for a batch with a finding": (
-        "written when a completed batch has at least one confirmed current finding"
+    "every batch records its cursor": (
+        "Every completed batch records its sweep cursor, clean or not."
+    ),
+    "the report needs a finding": (
+        "A batch with at least one confirmed current finding additionally "
+        "writes one canonical Markdown findings report."
     ),
     "the report is the handoff": "That report is the durable handoff to",
     "no drafting, no filing": (
@@ -283,6 +394,41 @@ DIRECT_MODE = {
         "newest-first, unless the user supplied another count."
     ),
     "a merge counts once": "A direct merge counts as one commit.",
+    "a commit may be abbreviated": (
+        "A commit may be named at any length `git` itself accepts — four "
+        "characters up, the seven a direct-mode report filename carries "
+        "included. `select` and `record` resolve an abbreviated SHA against "
+        "the walk, and refuse a prefix that names more than one commit rather "
+        "than choosing between them, so length is never the refusal; ambiguity "
+        "is."
+    ),
+    "the entry point is supplied on the first direct batch": (
+        "**`$RANGE_START` carries the entry point on the first direct batch**, "
+        "and is empty for every batch after it. Set it to the first-parent "
+        "parent of the earliest PR-owned commit already reviewed, and leave it "
+        "empty for a repository whose merged-PR listing came back empty, which "
+        "begins at HEAD."
+    ),
+    "an empty start is no start": (
+        "An empty `--start` is no start at all, so this one invocation covers "
+        "both — but leaving it empty on the *first* batch of a repository that "
+        "did have PR history restarts the walk at HEAD and re-reviews PR-owned "
+        "commits, because direct state is still empty at that moment and there "
+        "is no endpoint to position it."
+    ),
+    "the direct walk is never sliced": (
+        "**Walk the whole first-parent history, not a slice starting at the "
+        "entry point.** The recorded endpoint has to be inside the listing the "
+        "helper positions within, and a walk that began below it would refuse "
+        "it as a cursor belonging to some other history."
+    ),
+    "the entry point is a start, not a slice": (
+        "Pass the entry point as `--start` on the first direct batch only — "
+        "the first-parent parent of the earliest PR-owned commit already "
+        "reviewed, or nothing at all for a repository whose merged-PR listing "
+        "came back empty, which starts at HEAD. Every batch after that is "
+        "positioned by the record."
+    ),
     "resume from the parent, never HEAD": (
         "Every later `continue` resumes at the parent of the oldest completed "
         "direct commit; never restart from HEAD once a batch has been reviewed."
@@ -304,25 +450,205 @@ DIRECT_MODE = {
     ),
 }
 
-# Requirement 4, capability 2, and requirement 5: the boundary rule ships as
+# Requirement 4, capability 2, and requirement 5: the cursor rule ships as
 # prose, and names the cursor's location under the reviewed repository's
-# branch-resolved docs worktree (design D-11) rather than a bundled asset.
-BOUNDARY_RULE = {
-    "read before selecting a range": (
-        "Before selecting a range, read "
-        "`$DOCS_WT/docs/project_review_boundaries.md` when it exists."
+# branch-resolved docs worktree (design D-11) rather than a bundled asset. What
+# issue #548 changed is the second half of it: the entry is written by every
+# completed batch instead of only when a user asks, so the rule now has to say
+# so, and the clean batch has to be named as the case that records the same
+# endpoint a finding-bearing one does.
+CURSOR_RULE = {
+    "the helper owns the file": (
+        "The helper owns `$DOCS_WT/docs/project_review_boundaries.md`, the "
+        "sweep cursor for the repository under review."
     ),
     "the cursor belongs to the reviewed repository": (
-        "That file is the sweep cursor for the repository under review, and it "
-        "lives in that repository rather than travelling with this command"
+        "It lives in that repository rather than travelling with this command"
     ),
-    "exclusive older endpoint": (
-        "treat the recorded PR as an **exclusive older endpoint** for a new "
-        "newest-to-oldest sweep: stop before re-reviewing that PR unless the "
-        "user explicitly overrides the boundary."
+    "every batch records, unasked": (
+        "Every completed batch records its endpoint there with no separate user "
+        "request — the oldest reviewed merged PR in PR mode, the oldest "
+        "reviewed first-parent commit by SHA in direct mode"
     ),
-    "updated only on request": (
-        "Update the entry only when the user asks to preserve a new endpoint."
+    "direct mode takes no coverage from a report": (
+        "In this mode a report contributes no coverage at all. A first-parent "
+        "commit inside some report's interval is covered only when the "
+        "recorded endpoint says it was reviewed, and is otherwise selected. A "
+        "report that states its interval held no direct commits has been wrong "
+        "about eight of them, and a commit erased that way is erased for good."
+    ),
+    "a clean batch records the same endpoint": (
+        "**a clean batch records its endpoint exactly as a finding-bearing "
+        "batch does**"
+    ),
+    "selection precedes review, not the report": (
+        "Selection is the helper's too, and it happens before any unit is "
+        "reviewed rather than in the report-writing step."
+    ),
+    "the helper reconciles record and reports": (
+        "`select` reads the candidate history on stdin, reconciles the recorded "
+        "endpoint with the `docs/project_review_*.md` reports beside it, and "
+        "returns the batch."
+    ),
+}
+
+# The four rules the reconciliation is held to, each of them a mistake the
+# sweep has already made rather than a preference. They are pinned as prose
+# because they are the contract an agent reads; that the shipped mechanism
+# actually implements them is `CursorSelectionTests`' business, and neither
+# half stands in for the other.
+RECONCILIATION_RULES = {
+    "merge order, not numeric order": (
+        "**The recorded endpoint is merge order, not numeric order.** It "
+        "identifies the oldest selected PR by `mergedAt`, and it is a "
+        "cumulative exclusive coverage frontier rather than the last run's "
+        "stopping place."
+    ),
+    "a report covers only what it identifies": (
+        "**A report covers only the PRs it explicitly identifies**, which is "
+        "what its filename endpoints name — never every number between them."
+    ),
+    "a report says what to skip, not where to resume": (
+        "a report says what to skip and never where to resume: resuming below "
+        "one would drop whatever it skipped inside its own interval, "
+        "permanently, while resuming above one costs a re-review of two "
+        "announced units."
+    ),
+    "a report never covers a direct commit": (
+        "**A report never establishes direct-commit coverage.** A first-parent "
+        "commit inside a reviewed interval is either covered by the recorded "
+        "endpoint or selected"
+    ),
+    "unverifiable state stops the run": (
+        "**Unverifiable state stops the run.** A recorded PR is validated "
+        "against merged history and a recorded SHA against current first-parent "
+        "ancestry, so a malformed, foreign, or ambiguous cursor refuses before "
+        "review rather than guessing."
+    ),
+    "the first run on an unrecorded repository": (
+        "A repository holding reports but no record yet — every repository, the "
+        "first time this runs — therefore starts at the head of its history and "
+        "skips the units its reports name. Say so, and offer `--start` once"
+    ),
+    "a gap is announced, not dropped": (
+        "a unit above the resumed position that no record and no report covers "
+        "is reported, never silently dropped."
+    ),
+}
+
+# Round 4's blocker: `--start` is one endpoint, and a range has two. Without
+# the second, the count keeps filling downwards past the older endpoint
+# whenever coverage or an exclusion thins the middle of the request, so the
+# range the user asked for is not the range they get.
+RANGE_BOUND = {
+    "both endpoints are carried": (
+        "`$RANGE_START` and `$RANGE_END` carry a user-supplied range's two "
+        "endpoints — its newer and its older — and are empty when the user "
+        "supplied none; an empty `--start` or `--end` is no bound at all, so "
+        "one invocation covers both cases."
+    ),
+    "the override stays out until asked for": (
+        "Add `--override-boundary` only when the user explicitly overrides the "
+        "recorded endpoint; unlike the two range flags it has a correct "
+        "default and is never implied, so it stays out of the invocation until "
+        "a user asks for it."
+    ),
+    "a start alone is not a range": (
+        "**A range needs both of its endpoints.** `$RANGE_START` alone is a "
+        "starting point, not a range: the count keeps filling downwards past "
+        "the older endpoint whenever coverage or an exclusion thins the middle "
+        "of the request, and a user who asked for #466–#461 with three of "
+        "those already reviewed is handed three units from below #461 to make "
+        "the number up."
+    ),
+    "the end is a bound, not a target": (
+        "`--end` is a bound rather than a target — the batch stops there "
+        "whatever the count still had left, and reports `\"bounded\": true` "
+        "rather than `truncated` or `exhausted`, because it was the request "
+        "that ended and neither the page nor the history."
+    ),
+    "a direct range uses the same two slots": (
+        "A user-supplied range's newer endpoint goes in the same slot, and "
+        "`$RANGE_END` bounds it exactly as in PR mode."
+    ),
+}
+
+# Correction 1 of this issue's review: a count is the batch size and nothing
+# else. Without this, "the requested count" reads as a licence to restart the
+# sweep wherever the requester happened to be looking.
+COUNT_IS_NOT_A_POSITION = (
+    "**A count is a batch size, not a position.** An explicit count changes how "
+    "many units this batch takes and nothing else. Only an explicit PR number, "
+    "commit SHA, range, or boundary override moves where the sweep resumes, and "
+    "a unit the user excluded is never selected again by a later invocation."
+)
+
+# Correction 2: the `DOCS_WT="$ROOT"` fallback is gone rather than merely
+# discouraged. It contradicted the rule it sat two lines above -- the primary
+# checkout is the one place neither cursor nor report may be written.
+DOCS_WORKTREE_FAIL_CLOSED = {
+    "an empty resolution stops the run": (
+        "**An empty `$DOCS_WT` stops the run, and `$ROOT` is not the "
+        "fallback.**"
+    ),
+    "why the primary checkout is refused": (
+        "The primary checkout is where the PR drainer's post-merge "
+        "fast-forward autostashes whatever it finds, so a cursor or report "
+        "written there is not durable state at all — it is the next merge's "
+        "wedge."
+    ),
+}
+REFUSED_DOCS_WORKTREE_FALLBACK = '|| DOCS_WT="$ROOT"'
+
+# The recording listing, which is taken later than the selection's and is
+# therefore more exposed to it: merges landing during a long review push older
+# rows off a bounded page, and a reviewed unit missing from one would otherwise
+# be refused as a wrong claim, leaving a completed batch with no endpoint at
+# all. Round-1 blocker.
+RECORDING_LISTING_REACH = {
+    "the same rule, needed more": (
+        "**The recording listing is taken under the same rule, and needs it "
+        "more.** It is taken after the batch was reviewed and its report "
+        "written, which can be a long way after the batch was selected, and "
+        "merges landing in between push older rows off a bounded page — so the "
+        "`$LIMIT` that reached the batch at selection time need not reach it "
+        "now."
+    ),
+    "raise and re-list on an absent unit": (
+        "Declare it, and raise it and list again whenever `record` reports a "
+        "reviewed or excluded unit absent from a listing that came back at its "
+        "own limit."
+    ),
+    "recording nothing is the outcome to refuse": (
+        "Recording nothing is the one outcome to refuse here: the batch is "
+        "already reviewed, and a completed batch with no durable endpoint is "
+        "exactly the state this cursor exists to prevent."
+    ),
+}
+
+# The record step, which closes the loop the cursor rule opens. Its ordering
+# clause is the review's fifth spec addition: a failed report or a failed
+# cursor write is not a completed batch.
+RECORD_STEP = {
+    "recorded last": (
+        "**Record the cursor last.** Advance it only after every selected unit "
+        "has been reviewed and any required report has been written and "
+        "validated, so a failed report or a failed cursor write is never "
+        "reported as a completed batch"
+    ),
+    "the batch size carries its own default": (
+        "`$COUNT` is the requested count and defaults to the 12 above."
+    ),
+    "an empty batch records nothing": (
+        "A batch that selected nothing records nothing and is not a completed "
+        "batch: the helper refuses an empty `--reviewed` with an empty "
+        "`--exclude` rather than moving a frontier no unit was reviewed below."
+    ),
+    "merged, never replaced": (
+        "`record` merges rather than replaces: an earlier exclusion survives a "
+        "later batch, and the endpoint only ever moves older, so a batch taken "
+        "above the frontier under an explicit override does not drag the "
+        "frontier back up with it."
     ),
 }
 
@@ -418,18 +744,21 @@ PRESERVED_BEHAVIOR = {
         "Keep reviewing the rest of the batch. Do not stop to discuss or file "
         "one finding."
     ),
-    "compaction recovery": (
-        "If context was compacted, recover the cursor from the last completed "
-        "range or an unambiguous report name."
+    "compaction recovery reads the record": (
+        "If context was compacted, recover the cursor with "
+        '`python3 "$CURSOR" read --root "$DOCS_WT" --repo "$REPO"` rather than '
+        "from the last completed range or a report name"
     ),
-    "the completion message carries the cursor": (
+    "the completion message names the recorded endpoint": (
         "link the report, state its unprocessed finding count, list fixed-later "
-        "and already-tracked findings briefly, and preserve the oldest reviewed "
-        "landing as the cursor."
+        "and already-tracked findings briefly, and name the endpoint the record "
+        "now holds."
     ),
     "publication is a separate request": (
-        "Do not commit, publish, or push the report unless the user separately "
-        "requests publication."
+        "Do not commit, publish, or push the report or the cursor unless the "
+        "user separately requests publication. Both are left in the docs "
+        "worktree as uncommitted working files; the cursor is durable because "
+        "it is on disk, not because it was landed."
     ),
 }
 
@@ -437,7 +766,10 @@ PRESERVED_BEHAVIOR = {
 # one path that ends with no report at all and still has to move the cursor.
 CLEAN_BATCH = (
     "If a batch is clean, do not create an empty report unless explicitly "
-    "requested. Say the range was clean and preserve its cursor."
+    "requested. Say the range was clean and record its endpoint anyway — a "
+    "clean batch is a completed batch, and the run that follows it resumes "
+    "immediately below it without needing anything this session still "
+    "remembers."
 )
 
 # The write destination, which is the primary checkout's exclusion as much as
@@ -451,6 +783,8 @@ WRITE_DESTINATION = (
 # arguments differently (design D-2/D-7 keep this rather than flattening it).
 CLAUDE_ONLY_LINES = (
     "`$ARGUMENTS` may override the count, or name a PR number, commit SHA, or range.",
+    CURSOR_HELPER_LOOKUP["claude"],
+    '[ -f "$CURSOR" ]',
 )
 
 # The Codex argument convention, and the one caveat that names Codex's default
@@ -458,10 +792,12 @@ CLAUDE_ONLY_LINES = (
 # Claude rendering gains no invented equivalent.
 CODEX_ONLY_LINES = (
     "An explicit count, PR number, commit SHA, or range overrides the default.",
+    CURSOR_HELPER_LOOKUP["codex"],
+    '[ -n "$CURSOR" ]',
     "   In a read-only sandbox, a complete static trace may be the verification; say so.",
 )
 
-CODEX_ONLY_CAVEAT = CODEX_ONLY_LINES[1]
+CODEX_ONLY_CAVEAT = CODEX_ONLY_LINES[-1]
 
 
 def read(relative_path: str) -> str:
@@ -628,14 +964,49 @@ class RepositoryScopeTests(unittest.TestCase):
                     flat(content),
                 )
 
+    def test_the_page_is_no_longer_what_the_count_is_checked_against(self):
+        # The negative control for the reach rewrite. The retired conditions
+        # asked whether the *listing* held the requested count, which a page
+        # ending at the cursor satisfies while selecting nothing; the phrase
+        # that asked it must be gone rather than merely supplemented.
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            with self.subTest(asset=relative_path):
+                self.assertNotIn(
+                    "- the requested count fits inside the listing;", flattened
+                )
+                self.assertNotIn(
+                    "verify the listing actually reaches the batch you asked "
+                    "for, before selecting anything from it",
+                    flattened,
+                )
+
     def test_the_reach_check_precedes_the_review_of_the_batch(self):
         for relative_path in RENDERED_ASSETS:
             flattened = flat(read(relative_path))
             with self.subTest(asset=relative_path):
                 self.assertLess(
-                    flattened.index(flat(LISTING_REACH["verified before selecting"])),
+                    flattened.index(
+                        flat(LISTING_REACH["the count is checked against the selection"])
+                    ),
                     flattened.index("## Review PRs newest-first"),
                 )
+
+    def test_both_listings_declare_the_limit_they_were_taken_with(self):
+        # Round-1 blocker, both halves. A limit the helper is not told about
+        # leaves it unable to tell a short page from a short history, and it
+        # then has to answer the cautious way for every listing or the wrong
+        # way for some -- so the declaration is pinned on both calls, and the
+        # recording listing's rule is pinned with it because that listing is
+        # the later and more exposed of the two.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            flattened = flat(content)
+            with self.subTest(asset=relative_path):
+                self.assertEqual(content.count(DECLARED_LISTING_LIMIT), 2, content.count(DECLARED_LISTING_LIMIT))
+                for rule, phrase in sorted(RECORDING_LISTING_REACH.items()):
+                    with self.subTest(rule=rule):
+                        self.assertIn(flat(phrase), flattened)
 
     def test_the_checkout_is_resolved_and_required_to_match_the_repository(self):
         # Blocker from round 2. `$REPO` scoped the `gh` calls and nothing else,
@@ -763,10 +1134,26 @@ class RepositoryScopeTests(unittest.TestCase):
             with self.subTest(asset=relative_path):
                 resolution = flattened.index(DOCS_WORKTREE_RESOLUTION)
                 self.assertLess(
-                    resolution, flattened.index(flat(BOUNDARY_RULE["read before selecting a range"]))
+                    resolution, flattened.index(flat(CURSOR_RULE["the helper owns the file"]))
                 )
                 self.assertLess(resolution, flattened.index(flat(WRITE_DESTINATION)))
                 self.assertIn(flat(WRITE_DESTINATION), flattened)
+
+    def test_the_docs_worktree_resolution_has_no_primary_checkout_fallback(self):
+        # Correction 2 of issue #548's review. The fallback assigned `$ROOT`
+        # two lines above the paragraph forbidding a write to `$ROOT`, so the
+        # workflow's own resolution was the one path to the destination it
+        # refuses. Absence is the assertion: a paragraph explaining why the
+        # primary checkout is wrong reads as advice while the assignment that
+        # selects it is still there.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            flattened = flat(content)
+            with self.subTest(asset=relative_path):
+                self.assertNotIn(REFUSED_DOCS_WORKTREE_FALLBACK, content)
+                for rule, phrase in sorted(DOCS_WORKTREE_FAIL_CLOSED.items()):
+                    with self.subTest(rule=rule):
+                        self.assertIn(flat(phrase), flattened)
 
 
 class ReportOnlyTests(unittest.TestCase):
@@ -871,25 +1258,72 @@ class SweepCursorTests(unittest.TestCase):
                     ),
                 )
 
-    def test_the_boundary_rule_reaches_both_brands_as_prose(self):
+    def test_the_cursor_rule_reaches_both_brands_as_prose(self):
         for relative_path in RENDERED_ASSETS:
             flattened = flat(read(relative_path))
-            for rule, phrase in sorted(BOUNDARY_RULE.items()):
+            for rule, phrase in sorted(CURSOR_RULE.items()):
                 with self.subTest(asset=relative_path, rule=rule):
                     self.assertIn(flat(phrase), flattened)
 
-    def test_the_boundary_is_read_before_a_range_is_selected(self):
-        # The rule is only a boundary if it is consulted first: a cursor read
-        # after the listing has been taken cannot stop the sweep from
-        # re-reviewing completed history.
+    def test_the_reconciliation_rules_reach_both_brands(self):
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            for rule, phrase in sorted(RECONCILIATION_RULES.items()):
+                with self.subTest(asset=relative_path, rule=rule):
+                    self.assertIn(flat(phrase), flattened)
+
+    def test_an_explicit_range_carries_both_of_its_endpoints(self):
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            for rule, phrase in sorted(RANGE_BOUND.items()):
+                with self.subTest(asset=relative_path, rule=rule):
+                    self.assertIn(flat(phrase), flattened)
+
+    def test_a_count_is_a_batch_size_rather_than_a_position(self):
+        # Correction 1 of issue #548's review. "The requested count" appears
+        # beside the resume rules, so without this an explicit count reads as
+        # permission to restart the sweep wherever the requester was looking.
         for relative_path in RENDERED_ASSETS:
             flattened = flat(read(relative_path))
             with self.subTest(asset=relative_path):
+                self.assertIn(flat(COUNT_IS_NOT_A_POSITION), flattened)
+
+    def test_the_record_step_is_stated_and_ordered_last(self):
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            for rule, phrase in sorted(RECORD_STEP.items()):
+                with self.subTest(asset=relative_path, rule=rule):
+                    self.assertIn(flat(phrase), flattened)
+            with self.subTest(asset=relative_path):
+                self.assertLess(
+                    flattened.index(flat(WRITE_DESTINATION)),
+                    flattened.index(flat(RECORD_STEP["recorded last"])),
+                )
+
+    def test_the_cursor_is_read_before_a_range_is_selected(self):
+        # The rule is only a cursor if it is consulted first: a record read
+        # after the listing has been taken cannot stop the sweep from
+        # re-reviewing completed history. Both halves are ordered -- the rule
+        # that names the file, and the invocation that reads it -- because the
+        # prose moving above the listing while the call stayed below it would
+        # leave the selection exactly as unreconciled as it was.
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            listing = flattened.index(f"gh {GITHUB_READS[0]}")
+            with self.subTest(asset=relative_path):
+                self.assertLess(
+                    flattened.index(flat(CURSOR_RULE["the helper owns the file"])),
+                    listing,
+                )
                 self.assertLess(
                     flattened.index(
-                        flat(BOUNDARY_RULE["read before selecting a range"])
+                        flat(CURSOR_RULE["selection precedes review, not the report"])
                     ),
-                    flattened.index(f"gh {GITHUB_READS[0]}"),
+                    listing,
+                )
+                self.assertLess(
+                    flattened.index(flat(CURSOR_INVOCATIONS[0])),
+                    flattened.index("## Review PRs newest-first"),
                 )
 
 
@@ -943,9 +1377,11 @@ class PreservedBehaviorTests(unittest.TestCase):
 class BrandBoundaryTests(unittest.TestCase):
     """Requirement 6, and the negative control for every rule above.
 
-    Three lines differ between the two renderings' bodies and no others. If a
-    rule asserted here matched everything, it would also have to match the
-    stripped bodies, and this comparison would fail.
+    Seven lines differ between the two renderings' bodies and no others: the
+    argument convention, the two lines of each brand's cursor-helper lookup,
+    and the Codex-only sandbox caveat. If a rule asserted here matched
+    everything, it would also have to match the stripped bodies, and this
+    comparison would fail.
     """
 
     def stripped(self, relative_path: str, brand: str, drop) -> list[str]:
@@ -954,7 +1390,7 @@ class BrandBoundaryTests(unittest.TestCase):
             self.assertIn(line, lines, f"{relative_path}: {line!r}")
         return [line for line in lines if line not in drop]
 
-    def test_the_bodies_differ_only_by_the_three_declared_brand_lines(self):
+    def test_the_bodies_differ_only_by_the_declared_brand_lines(self):
         claude = self.stripped(CLAUDE_ASSET, "claude", CLAUDE_ONLY_LINES)
         codex = self.stripped(CODEX_ASSET, "codex", CODEX_ONLY_LINES)
         self.assertEqual(claude, codex)
@@ -984,10 +1420,1005 @@ class BrandBoundaryTests(unittest.TestCase):
         self.assertNotIn(CODEX_ONLY_LINES[0], claude)
 
     def test_each_brand_reads_its_own_invocation_sigil(self):
-        self.assertIn("/project-review", read(CLAUDE_ASSET))
-        self.assertIn("$project-review", read(CODEX_ASSET))
-        self.assertNotIn("$project-review", read(CLAUDE_ASSET))
-        self.assertNotIn("/project-review", read(CODEX_ASSET))
+        # Measured with the renderer's own notion of where an invocation
+        # token starts and ends, not with a bare substring: since issue #548
+        # the Codex asset resolves its helper through the bundle path
+        # `*/skills/project-review/scripts/...`, and a substring check would
+        # read that path segment as a Claude invocation and fail on it. The
+        # renderer already draws that line -- it is what refuses a literal
+        # sigil in an authored source -- so the test reads the line from there
+        # rather than drawing a second one that could disagree.
+        for brand, relative_path in (("claude", CLAUDE_ASSET), ("codex", CODEX_ASSET)):
+            content = read(relative_path)
+            own = renderer.SIGILS[brand]
+            other = renderer.SIGILS["codex" if brand == "claude" else "claude"]
+            with self.subTest(asset=relative_path):
+                self.assertIn(f"{own}project-review", content)
+                self.assertIn(
+                    "project-review",
+                    renderer.LITERAL_INVOCATION_PATTERNS[own].findall(content),
+                )
+                self.assertNotIn(
+                    "project-review",
+                    renderer.LITERAL_INVOCATION_PATTERNS[other].findall(content),
+                )
+
+
+class BundledCursorHelperTests(unittest.TestCase):
+    """The mechanism ships with the command that calls it, in both bundles."""
+
+    def test_both_bundles_carry_the_helper_and_the_copies_are_identical(self):
+        # Vendored the way trusted_issue_spec.py is: no tracked tools/ original,
+        # because nothing in this repository invokes it -- the workflow runs in
+        # whatever repository it was pointed at, and that repository tracks no
+        # copy of anything this bundle ships. Two copies then have to be held
+        # identical, or the two brands diverge exactly the way the 223 lines
+        # this command was vendored to reconcile did.
+        claude = (REPO_ROOT / CLAUDE_CURSOR_HELPER).read_bytes()
+        codex = (REPO_ROOT / CODEX_CURSOR_HELPER).read_bytes()
+        self.assertTrue(claude, CLAUDE_CURSOR_HELPER)
+        self.assertEqual(claude, codex)
+
+    def test_each_asset_resolves_the_copy_its_own_bundle_ships(self):
+        # A lookup into the reviewed repository, or into the other brand's
+        # bundle, resolves nothing wherever this command actually installs.
+        for brand, relative_path in (("claude", CLAUDE_ASSET), ("codex", CODEX_ASSET)):
+            content = read(relative_path)
+            with self.subTest(asset=relative_path):
+                self.assertIn(CURSOR_HELPER_LOOKUP[brand], content)
+                self.assertNotIn("$DOCS_WT/project_review_cursor.py", content)
+                self.assertNotIn("$ROOT/tools/project_review_cursor.py", content)
+
+    def test_the_helper_is_invoked_for_selection_in_both_modes_and_for_recording(self):
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            for invocation in CURSOR_INVOCATIONS:
+                with self.subTest(asset=relative_path, invocation=invocation):
+                    self.assertIn(invocation, content)
+
+    def test_the_direct_walk_is_the_whole_first_parent_history(self):
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            with self.subTest(asset=relative_path):
+                self.assertIn(DIRECT_WALK, content)
+                self.assertNotIn(REFUSED_SLICED_DIRECT_WALK, content)
+
+    def test_the_helper_spawns_no_external_command(self):
+        # The reconciliation is arithmetic over listings the workflow already
+        # took, so the helper needs no repository access of its own. Pinned as
+        # an absence because a helper that shelled out would need declaring in
+        # docs/agent-workflow-contract.md, and would also be reaching a
+        # checkout the caller never told it about.
+        source = (REPO_ROOT / CLAUDE_CURSOR_HELPER).read_text(encoding="utf-8")
+        for forbidden in ("subprocess", "os.system", "os.popen"):
+            with self.subTest(spelling=forbidden):
+                self.assertNotIn(forbidden, source)
+
+
+def load_cursor_helper(brand: str):
+    """The bundled helper, imported from the copy `brand` actually ships.
+
+    Loaded by path under a private name because it is a bundled asset rather
+    than an importable package: `tools/` is not its home, and giving it one
+    would make the tests pass against a module the workflow never reaches.
+    """
+    path = REPO_ROOT / CURSOR_HELPERS[brand]
+    spec = importlib.util.spec_from_file_location(
+        f"kanban_{brand}_plugin_project_review_cursor", path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+CURSOR_MODULES = {brand: load_cursor_helper(brand) for brand in CURSOR_HELPERS}
+CURSOR = CURSOR_MODULES["claude"]
+
+REPO = "coghex/kanban"
+
+# A merged history whose number order is deliberately not its merge order:
+# #471 merged before #468 and #470, exactly the way the real batch recorded in
+# docs/project_review_466-399.md ran #466, #467, #465, #464, #406 … A cursor
+# that kept "the smallest number reviewed" would describe a batch that never
+# happened, and would then hand the next invocation a starting point above
+# work it had already done.
+PR_HISTORY = (
+    (470, "2026-08-20T00:00:00Z"),
+    (468, "2026-08-19T00:00:00Z"),
+    (471, "2026-08-18T00:00:00Z"),
+    (466, "2026-08-17T00:00:00Z"),
+    (465, "2026-08-16T00:00:00Z"),
+    (464, "2026-08-15T00:00:00Z"),
+    (463, "2026-08-14T00:00:00Z"),
+    (462, "2026-08-13T00:00:00Z"),
+    (461, "2026-08-12T00:00:00Z"),
+)
+
+# `gh pr list` does not return merge order, so the listing handed to the helper
+# is deliberately in some other order: sorting it is the helper's job, and a
+# fixture that pre-sorted it would never exercise that.
+PR_LISTING = [
+    {"number": number, "mergedAt": merged_at}
+    for number, merged_at in sorted(PR_HISTORY)
+]
+
+# A first-parent walk, newest-first, as `git log --first-parent --format=%H`
+# prints it.
+DIRECT_HISTORY = (
+    "ed90877ac1",
+    "6d54e98bb2",
+    "3b3c54f0c3",
+    "a920f7cd14",
+    "b80f628e25",
+    "e84f7320f6",
+    "65001ff1a7",
+    "331d70e2b8",
+)
+
+
+class CursorTransitionCase(unittest.TestCase):
+    """A docs worktree, and the helper acting on it across invocations.
+
+    Every assertion below goes through the shipped module's own serialization
+    and reconciliation rather than through a selection oracle written here.
+    That is the point: the defect this issue reports is invisible to a
+    substring check, because the prose already claimed the cursor was
+    preserved. What was missing was a mechanism, so what is tested is the
+    mechanism.
+    """
+
+    def setUp(self):
+        self.worktree = Path(tempfile.mkdtemp(prefix="project-review-cursor-"))
+        self.addCleanup(shutil.rmtree, self.worktree, ignore_errors=True)
+        (self.worktree / "docs").mkdir()
+        self.module = CURSOR
+
+    # -- the workflow's own two calls, made the way the asset makes them ----
+
+    def state(self):
+        """A fresh read, as a later invocation carrying no context would do."""
+        return self.module.state_for(self.module.load_document(self.worktree), REPO)
+
+    def page(self, rows):
+        """The newest `rows` merged pull requests, as a bounded `gh` page.
+
+        `gh pr list --limit N` returns a page of the newest N merges, so a
+        bounded listing is a prefix of merge order -- and the older units the
+        sweep is resuming towards are exactly what falls off it.
+        """
+        ordered = sorted(PR_HISTORY, key=lambda entry: entry[1], reverse=True)
+        return [
+            {"number": number, "mergedAt": merged_at}
+            for number, merged_at in ordered[:rows]
+        ]
+
+    def select(self, mode="pr", count=3, state=None, candidates=None, **kwargs):
+        listing = PR_LISTING if mode == "pr" else list(DIRECT_HISTORY)
+        return self.module.select(
+            self.state() if state is None else state,
+            mode,
+            self.module.normalize_candidates(
+                mode, listing if candidates is None else candidates
+            ),
+            count,
+            reports=self.module.report_coverage(self.worktree),
+            **kwargs,
+        )
+
+    def record(self, selection, mode="pr", exclude=()):
+        listing = PR_LISTING if mode == "pr" else list(DIRECT_HISTORY)
+        updated = self.module.record(
+            self.state(),
+            mode,
+            self.module.normalize_candidates(mode, listing),
+            [self.units(selection)] if isinstance(selection, (int, str)) else self.units(selection),
+            list(exclude),
+        )
+        document = self.module.load_document(self.worktree)
+        document.setdefault("repositories", {})[REPO] = updated
+        self.module.write_document(self.worktree, document)
+        return updated
+
+    def units(self, selection):
+        if isinstance(selection, dict):
+            selection = selection["selected"]
+        if isinstance(selection, (int, str)):
+            return selection
+        return [
+            entry["number"] if "number" in entry else entry["sha"] for entry in selection
+        ]
+
+    def write_report(self, name, body="# Project Review Findings\n"):
+        (self.worktree / "docs" / name).write_text(body, encoding="utf-8")
+
+    def run_cli(self, command, *arguments):
+        """One invocation of the surface the rendered assets actually run.
+
+        The library calls above are the same code, but the argument parsing,
+        the unit lists, and the stdin/file candidate reading are only exercised
+        here — and those are what an asset's fence is made of.
+        """
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            self.module.main(
+                [command, "--root", str(self.worktree), "--repo", REPO, *arguments]
+            )
+        return json.loads(captured.getvalue())
+
+    def forget_the_cursor(self):
+        """Delete the record, leaving the reports and the history untouched.
+
+        The negative control every transition below owes: if an assertion still
+        holds once the endpoint is gone, the endpoint was not what produced it.
+        """
+        self.module.document_path(self.worktree).unlink()
+
+
+class CursorSelectionTests(CursorTransitionCase):
+    """Requirement 3 and requirement 9: the transitions, not the prose."""
+
+    def test_a_clean_batch_records_and_the_next_invocation_starts_below_it(self):
+        # The defect, end to end. A clean batch writes no report, so before
+        # this mechanism it left nothing at all behind and the next invocation
+        # re-selected the batch it had just finished.
+        first = self.select(count=3)
+        self.assertEqual(self.units(first), [470, 468, 471])
+        self.assertEqual(first["origin"], "history-head")
+
+        self.record(first)  # clean: no report written, cursor recorded anyway
+        self.assertEqual(list((self.worktree / "docs").glob("project_review_*.md")),
+                         [self.module.document_path(self.worktree)])
+
+        second = self.select(count=3)
+        self.assertEqual(self.units(second), [466, 465, 464])
+        self.assertEqual(second["origin"], "recorded-endpoint")
+
+        # Remove the endpoint and the second invocation repeats the first --
+        # which is exactly what was observed twice while
+        # docs/project_review_466-399.md was being produced.
+        self.forget_the_cursor()
+        self.assertEqual(self.units(self.select(count=3)), [470, 468, 471])
+
+    def test_a_finding_bearing_batch_records_the_same_endpoint_as_a_clean_one(self):
+        # Requirement 1: the two batches differ only in whether a report was
+        # also written, so the state they leave has to be identical.
+        clean = self.record(self.select(count=3))
+        reference = json.dumps(clean, sort_keys=True)
+
+        # The second run differs only in that the batch produced a finding, so
+        # a report is written between the selection and the record -- which is
+        # the order the workflow uses, and the order that keeps the report from
+        # reconciling against the batch that is producing it.
+        self.setUp()
+        selection = self.select(count=3)
+        self.write_report("project_review_471-470.md")
+        finding_bearing = self.record(selection)
+        self.assertEqual(json.dumps(finding_bearing, sort_keys=True), reference)
+        self.assertEqual(self.units(self.select(count=3)), [466, 465, 464])
+        # Named rather than left to the equality above, which two runs that
+        # both recorded nothing would also satisfy.
+        self.assertEqual(
+            finding_bearing["pr"]["endpoint"],
+            {"number": 471, "merged_at": "2026-08-18T00:00:00Z"},
+        )
+
+    def test_the_frontier_is_merge_order_rather_than_numeric_order(self):
+        # First spec addition of this issue's review. #468 is the smallest
+        # number in the first batch and #471 is its oldest merge, so a numeric
+        # cursor would resume at #467 and hand #471 back to be reviewed twice.
+        state = self.record(self.select(count=3))
+        self.assertEqual(state["pr"]["endpoint"]["number"], 471)
+        self.assertNotIn(471, self.units(self.select(count=6)))
+
+        # The control keeps the same three reviewed units out of the way and
+        # varies only the endpoint, so what it demonstrates is the endpoint's
+        # doing: a cursor that kept the smallest *number* resumes above #471
+        # and hands it back to be reviewed a second time.
+        numeric = json.loads(json.dumps(state))
+        numeric["pr"]["reviewed"] = []
+        numeric["pr"]["endpoint"] = {"number": 468, "merged_at": "2026-08-19T00:00:00Z"}
+        self.assertIn(471, self.units(self.select(count=6, state=numeric)))
+
+    def test_a_report_whose_coverage_overlaps_the_naive_selection_is_skipped(self):
+        # The second correction the real sweep had to make: the batch below
+        # the cursor was already covered by a separate report, and nothing
+        # noticed until a human read the directory.
+        self.record(self.select(count=3))
+        self.write_report("project_review_465-464.md")
+
+        selection = self.select(count=3)
+        self.assertEqual(self.units(selection), [466, 463, 462])
+        self.assertEqual(
+            [entry["unit"] for entry in selection["skipped"]], [465, 464]
+        )
+
+        # Without the report the same invocation takes the two units back, so
+        # the skip is the report's doing rather than an artifact of the count.
+        self.module.document_path(self.worktree)  # unchanged
+        (self.worktree / "docs" / "project_review_465-464.md").unlink()
+        self.assertEqual(self.units(self.select(count=3)), [466, 465, 464])
+
+    def test_a_report_does_not_cover_the_numbers_between_its_endpoints(self):
+        # Third spec addition. docs/project_review_463-455.md reviewed #463,
+        # #456 and #455 and nothing between them, so reading `463-455` as
+        # fifteen reviewed pull requests would erase twelve unreviewed ones --
+        # silently, and permanently.
+        self.write_report("project_review_466-462.md")
+        selection = self.select(count=5)
+        self.assertEqual(self.units(selection), [470, 468, 471, 465, 464])
+        self.assertNotIn(466, self.units(selection))
+        self.assertNotIn(462, self.units(selection))
+
+    def test_a_direct_commit_inside_a_reported_interval_is_still_selected(self):
+        # Requirement 5. docs/project_review_463-455.md states that no direct
+        # first-parent commits landed in its interval while eight did, so a
+        # report's account of the commits it covered establishes nothing at
+        # all: coverage in direct mode comes from the record or from nowhere.
+        self.write_report("project_review_direct_ed90877-331d70e.md")
+        self.write_report("project_review_466-461.md")
+        selection = self.select(mode="direct", count=3)
+        self.assertEqual(self.units(selection), list(DIRECT_HISTORY[:3]))
+        self.assertEqual(selection["skipped"], [])
+
+        recorded = self.record(selection, mode="direct")
+        self.assertEqual(
+            recorded["direct"]["endpoint"], {"sha": DIRECT_HISTORY[2]}
+        )
+        self.assertEqual(
+            self.units(self.select(mode="direct", count=3)),
+            list(DIRECT_HISTORY[3:6]),
+        )
+        self.forget_the_cursor()
+        self.assertEqual(
+            self.units(self.select(mode="direct", count=3)),
+            list(DIRECT_HISTORY[:3]),
+        )
+
+    def test_an_explicitly_excluded_unit_is_never_selected_again(self):
+        # Requirement 4 and the review's second spec addition: an exclusion is
+        # persisted independently of the endpoint, because advancing the
+        # endpoint past it would otherwise be indistinguishable from having
+        # reviewed it.
+        self.record(self.select(count=3), exclude=[466])
+        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 471)
+        self.assertEqual(self.units(self.select(count=3)), [465, 464, 463])
+
+        self.record(self.select(count=2))
+        self.assertEqual(self.units(self.select(count=3)), [463, 462, 461])
+        self.assertEqual(self.state()["excluded"]["prs"], [466])
+
+    def test_a_requested_range_is_not_filled_from_beyond_its_older_end(self):
+        # Round 4's blocker. Coverage thins the middle of the request, and
+        # without an older bound the count makes the number up from below it —
+        # so the user who asked for #466–#461 gets units they did not ask for,
+        # and the sweep advances past them.
+        self.write_report("project_review_471-468.md")
+        selection = self.select(count=6, start=470, end=464)
+        self.assertEqual(self.units(selection), [470, 466, 465, 464])
+        self.assertTrue(selection["short"])
+        self.assertTrue(selection["bounded"])
+        self.assertFalse(selection["exhausted"])
+        self.assertFalse(selection["truncated"])
+
+        # The negative control, and the defect itself: the same request without
+        # the older bound makes the count up from below #464, so the user is
+        # handed two units they did not ask for and the sweep advances past
+        # them.
+        unbounded = self.select(count=6, start=470)
+        self.assertEqual(self.units(unbounded), [470, 466, 465, 464, 463, 462])
+        self.assertFalse(unbounded["bounded"])
+
+    def test_a_range_bound_stops_the_batch_before_the_count_is_met(self):
+        # The bound is a bound, not a target: it wins over a count that still
+        # had room, in both modes.
+        pr = self.select(count=9, start=470, end=466)
+        self.assertEqual(self.units(pr), [470, 468, 471, 466])
+        direct = self.select(
+            mode="direct", count=9, start=DIRECT_HISTORY[1], end=DIRECT_HISTORY[3]
+        )
+        self.assertEqual(self.units(direct), list(DIRECT_HISTORY[1:4]))
+
+    def test_a_range_end_may_be_abbreviated_and_is_refused_when_absent(self):
+        bounded = self.select(mode="direct", count=9, end=DIRECT_HISTORY[2][:5])
+        self.assertEqual(self.units(bounded), list(DIRECT_HISTORY[:3]))
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=3, end=9999)
+        self.assertIn("the range ends at pull request #9999", str(caught.exception))
+
+    def test_a_range_entirely_above_the_resume_point_is_refused(self):
+        # Silence would be worse than a stop here: an end above the resumed
+        # position selects nothing, and an empty batch reported as a completed
+        # one is how a range gets skipped.
+        self.record(self.select(count=3))
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=3, end=470)
+        self.assertIn("newer than where this sweep resumes", str(caught.exception))
+
+    def test_a_count_changes_the_batch_size_and_not_the_position(self):
+        # Correction 1. Both selections begin at the same unit; only how many
+        # follow it differs.
+        self.record(self.select(count=3))
+        small = self.select(count=1)
+        large = self.select(count=5)
+        self.assertEqual(self.units(small), [466])
+        self.assertEqual(self.units(large)[0], 466)
+        self.assertEqual(small["begin_index"], large["begin_index"])
+        self.assertEqual(small["origin"], large["origin"])
+
+    def test_only_an_explicit_start_or_override_moves_the_position(self):
+        self.record(self.select(count=3))
+        started = self.select(count=2, start=465)
+        self.assertEqual(self.units(started), [465, 464])
+        self.assertEqual(started["origin"], "explicit-start")
+
+        # An override lifts the coverage the position was built from as well
+        # as the position itself; otherwise it moves the sweep back to the
+        # head and then skips everything it finds there.
+        overridden = self.select(count=2, override_boundary=True)
+        self.assertEqual(self.units(overridden), [470, 468])
+        self.assertEqual(overridden["origin"], "boundary-override")
+
+    def test_an_override_still_honors_an_explicit_exclusion(self):
+        # Requirement 4 is unconditional about this: a boundary override says
+        # the coverage is wrong, not that the user changed their mind about a
+        # unit they removed from the sweep.
+        self.record(self.select(count=3), exclude=[466])
+        overridden = self.select(count=9, override_boundary=True)
+        self.assertNotIn(466, self.units(overridden))
+        self.assertEqual(self.units(overridden)[0], 470)
+
+    def test_units_above_the_resume_position_are_reported_as_gaps(self):
+        # Requirement 5's "never silently dropped". A user who reviews an
+        # older batch first -- by supplying a starting PR -- leaves newer
+        # units unreviewed above the endpoint that batch records. They are not
+        # selected from there, so they are named instead.
+        self.record(self.select(count=2, start=465))
+        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 464)
+        later = self.select(count=9)
+        self.assertEqual(self.units(later), [463, 462, 461])
+        self.assertEqual(later["gaps"], [470, 468, 471, 466])
+        self.assertTrue(later["exhausted"])
+
+    def test_a_report_never_moves_the_resume_position(self):
+        # The other half of "a report covers only what it identifies": if a
+        # report set the position as well as the coverage, everything it
+        # skipped inside its own interval would fall above the resume point
+        # and never be selected again. Re-reviewing two announced units is the
+        # cheaper of the two errors, and the only one that can be noticed.
+        self.write_report("project_review_466-461.md")
+        selection = self.select(count=9)
+        self.assertEqual(selection["origin"], "history-head")
+        self.assertEqual(selection["begin_index"], 0)
+        self.assertEqual(self.units(selection), [470, 468, 471, 465, 464, 463, 462])
+
+    def test_a_batch_shorter_than_the_count_is_the_tail_rather_than_an_error(self):
+        selection = self.select(count=50)
+        self.assertEqual(len(selection["selected"]), len(PR_HISTORY))
+        self.assertTrue(selection["exhausted"])
+
+    def test_an_absent_recorded_endpoint_stops_the_run(self):
+        # Fourth spec addition: a recorded PR is validated against merged
+        # history rather than assumed. A cursor naming a pull request this
+        # repository never merged belongs to some other repository, and
+        # sweeping past it would review history twice.
+        foreign = self.module.empty_state()
+        foreign["pr"]["endpoint"] = {"number": 9999, "merged_at": "2026-01-01T00:00:00Z"}
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=3, state=foreign)
+        self.assertIn("does not belong to this repository", str(caught.exception))
+
+    def test_an_absent_recorded_sha_stops_the_run(self):
+        foreign = self.module.empty_state()
+        foreign["direct"]["endpoint"] = {"sha": "0123456"}
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(mode="direct", count=3, state=foreign)
+        self.assertIn("first-parent ancestry", str(caught.exception))
+
+    def test_an_absent_supplied_start_is_an_invalid_request(self):
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=3, start=9999)
+        self.assertIn("not in this repository's merged history", str(caught.exception))
+
+    def test_a_candidate_without_a_merge_timestamp_cannot_be_ordered(self):
+        with self.assertRaises(self.module.CursorError):
+            self.module.normalize_candidates("pr", [{"number": 470}])
+
+
+class BoundedListingTests(CursorTransitionCase):
+    """Round 1's blocker: a page is not a history, and the two must not read
+    alike.
+
+    `gh pr list --limit N` returns the newest N merges. A sweep resuming below
+    a recorded endpoint is walking *away* from that page's newest end, so the
+    units it wants are the first to fall off — and the page that no longer
+    holds them looks exactly like a repository that has run out of merged pull
+    requests. Reading the first as the second moves the sweep to direct mode
+    with merged work still unreviewed behind it, permanently.
+    """
+
+    def test_a_page_ending_at_the_endpoint_is_truncated_rather_than_exhausted(self):
+        self.record(self.select(count=3))
+        endpoint = self.state()["pr"]["endpoint"]["number"]
+
+        # The page reaches the endpoint and stops there: every count check
+        # against the page passes, and the selection is empty.
+        page = self.page(3)
+        self.assertEqual(page[-1]["number"], endpoint)
+        selection = self.select(count=3, candidates=page, listing_limit=3)
+        self.assertEqual(selection["selected"], [])
+        self.assertTrue(selection["short"])
+        self.assertTrue(selection["truncated"])
+        self.assertFalse(selection["exhausted"])
+
+        # Raising the limit is the only remedy it needs, and it works.
+        wider = self.select(count=3, candidates=self.page(6), listing_limit=6)
+        self.assertEqual(self.units(wider), [466, 465, 464])
+        self.assertFalse(wider["short"])
+        self.assertFalse(wider["truncated"])
+
+    def test_a_page_under_its_limit_that_comes_up_short_is_the_tail(self):
+        # The other half, and the reason the two answers cannot be collapsed
+        # into one refusal: a genuine tail must still be reviewed and must
+        # still let PR history exhaust so direct mode is reached.
+        selection = self.select(count=50, candidates=PR_LISTING, listing_limit=200)
+        self.assertEqual(len(selection["selected"]), len(PR_HISTORY))
+        self.assertTrue(selection["short"])
+        self.assertFalse(selection["truncated"])
+        self.assertTrue(selection["exhausted"])
+
+    def test_an_undeclared_limit_is_taken_as_a_complete_listing(self):
+        # The unbounded caller is the real one: direct mode hands over a whole
+        # `git log --first-parent` walk, so reporting that as possibly
+        # truncated would send the workflow raising a limit it never set. PR
+        # mode always declares one, which the asset pin above holds it to.
+        selection = self.select(count=3, candidates=self.page(2))
+        self.assertTrue(selection["short"])
+        self.assertTrue(selection["exhausted"])
+        self.assertFalse(selection["truncated"])
+
+        walk = self.select(mode="direct", count=50)
+        self.assertTrue(walk["exhausted"])
+        self.assertFalse(walk["truncated"])
+
+    def test_a_unit_absent_from_a_full_page_asks_for_a_wider_one(self):
+        # The refusals split the same way. "Not in this repository's merged
+        # history at all" is a claim a bounded page cannot support, and acting
+        # on it stops a sweep that only needed a larger number.
+        page = self.page(3)
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=3, candidates=page, listing_limit=3, start=464)
+        self.assertIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
+        self.assertNotIn(
+            "is not in this repository's merged history", str(caught.exception)
+        )
+
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=3, candidates=page, listing_limit=99, start=464)
+        self.assertIn(
+            "is not in this repository's merged history", str(caught.exception)
+        )
+        self.assertNotIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
+
+    def test_an_endpoint_off_the_page_asks_for_a_wider_one(self):
+        self.record(self.select(count=6))
+        page = self.page(3)
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=3, candidates=page, listing_limit=3)
+        self.assertIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
+        self.assertNotIn("does not belong to this repository", str(caught.exception))
+
+    def test_a_merge_during_review_does_not_strand_a_completed_batch(self):
+        # Round 1's second blocker. The recording listing is taken after the
+        # batch was reviewed and its report written; merges landing in between
+        # push older rows off a bounded page, so the limit that reached the
+        # batch at selection time need not reach it now. Refusing that as a
+        # wrong claim leaves an already-reviewed batch with no durable
+        # endpoint -- the exact state this cursor exists to prevent.
+        selection = self.select(count=3, candidates=self.page(4), listing_limit=4)
+        reviewed = self.units(selection)
+        self.assertEqual(reviewed, [470, 468, 471])
+
+        # Two newer pull requests merge while the batch is being reviewed, so
+        # the same limit now returns a page that stops above the batch.
+        later = [
+            {"number": 480, "mergedAt": "2026-08-22T00:00:00Z"},
+            {"number": 481, "mergedAt": "2026-08-21T00:00:00Z"},
+        ] + self.page(2)
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.module.record(
+                self.state(),
+                "pr",
+                self.module.normalize_candidates("pr", later),
+                reviewed,
+                listing_limit=4,
+            )
+        self.assertIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
+
+        # Raising the limit records the batch that was already reviewed.
+        widened = self.module.normalize_candidates(
+            "pr",
+            [
+                {"number": 480, "mergedAt": "2026-08-22T00:00:00Z"},
+                {"number": 481, "mergedAt": "2026-08-21T00:00:00Z"},
+            ]
+            + PR_LISTING,
+        )
+        recorded = self.module.record(
+            self.state(), "pr", widened, reviewed, listing_limit=40
+        )
+        self.assertEqual(recorded["pr"]["endpoint"]["number"], 471)
+
+    def test_an_absent_unit_in_a_complete_listing_is_still_refused_outright(self):
+        # The negative control for the rule above: the softer refusal must be
+        # the bounded-page case alone, or a genuinely wrong claim would send
+        # the workflow into an unbounded raise-and-retry loop.
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.module.record(
+                self.state(),
+                "pr",
+                self.module.normalize_candidates("pr", PR_LISTING),
+                [9999],
+                listing_limit=200,
+            )
+        self.assertIn("absent from the candidate history", str(caught.exception))
+        self.assertNotIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
+
+
+class AbbreviatedShaTests(CursorTransitionCase):
+    """Round 2's blocker: one commit, several spellings.
+
+    `git log --format=%H` prints forty characters. A user naming a commit reads
+    the seven a direct-mode report filename carries — `docs/project_review_
+    direct_<newest7>-<oldest7>.md` is the shape this workflow writes — and an
+    endpoint recorded by an earlier run may be in either. Exact equality
+    refuses a correctly-spelled commit as absent, which is a stop the sweep
+    cannot be argued out of.
+    """
+
+    def test_an_abbreviated_start_names_the_commit_it_identifies(self):
+        selection = self.select(mode="direct", count=2, start=DIRECT_HISTORY[2][:7])
+        self.assertEqual(
+            self.units(selection), list(DIRECT_HISTORY[2:4])
+        )
+        self.assertEqual(selection["origin"], "explicit-start")
+        # The full spelling is the same request, so the two agree.
+        self.assertEqual(
+            self.units(self.select(mode="direct", count=2, start=DIRECT_HISTORY[2])),
+            self.units(selection),
+        )
+
+    def test_an_abbreviated_recorded_endpoint_still_positions_the_sweep(self):
+        # A cursor written by an earlier run, or by a walk taken with
+        # `--format=%h`, holds a short SHA. It has to keep working against a
+        # `%H` walk, or the sweep stops on state it wrote itself.
+        short = self.module.empty_state()
+        short["direct"]["endpoint"] = {"sha": DIRECT_HISTORY[1][:7]}
+        selection = self.select(mode="direct", count=2, state=short)
+        self.assertEqual(self.units(selection), list(DIRECT_HISTORY[2:4]))
+        self.assertEqual(selection["origin"], "recorded-endpoint")
+
+    def test_an_abbreviated_coverage_or_exclusion_entry_still_matches(self):
+        short = self.module.empty_state()
+        short["direct"]["reviewed"] = [DIRECT_HISTORY[0][:7]]
+        short["excluded"]["commits"] = [DIRECT_HISTORY[1][:8]]
+        selection = self.select(mode="direct", count=2, state=short)
+        self.assertEqual(self.units(selection), list(DIRECT_HISTORY[2:4]))
+        self.assertEqual(
+            sorted(entry["reason"] for entry in selection["skipped"]),
+            ["covered", "excluded"],
+        )
+
+    def test_recording_an_abbreviated_unit_stores_the_history_spelling(self):
+        # The state converges on one name per commit rather than accumulating
+        # a second every time a walk is taken with a different abbreviation.
+        recorded = self.module.record(
+            self.state(),
+            "direct",
+            self.module.normalize_candidates("direct", list(DIRECT_HISTORY)),
+            [DIRECT_HISTORY[0][:7], DIRECT_HISTORY[1][:7]],
+            [DIRECT_HISTORY[2][:7]],
+        )
+        self.assertEqual(recorded["direct"]["endpoint"], {"sha": DIRECT_HISTORY[1]})
+        self.assertEqual(
+            recorded["direct"]["reviewed"], sorted(DIRECT_HISTORY[:2])
+        )
+        self.assertEqual(recorded["excluded"]["commits"], [DIRECT_HISTORY[2]])
+
+    def test_an_ambiguous_prefix_is_refused_rather_than_chosen(self):
+        # The other half, and why this is a resolution rather than a loosened
+        # comparison: a prefix naming two commits names neither, and picking
+        # one would sweep a range nobody asked for.
+        history = ["abcdef01aa", "abcdef01bb", "9999999999"]
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(
+                mode="direct", count=1, candidates=history, start="abcdef0"
+            )
+        message = str(caught.exception)
+        self.assertIn("names 2 commits", message)
+        self.assertIn("abcdef01aa", message)
+        self.assertIn("abcdef01bb", message)
+        # Enough characters resolves it.
+        self.assertEqual(
+            self.units(
+                self.select(
+                    mode="direct", count=1, candidates=history, start="abcdef01a"
+                )
+            ),
+            ["abcdef01aa"],
+        )
+
+    def test_a_prefix_shorter_than_seven_is_resolved_rather_than_refused(self):
+        # Round 3's blocker. Git's own floor is four characters; a pattern that
+        # refused five rejected an abbreviation git resolves, and it rejected
+        # it before the ambiguity check that is what actually decides whether a
+        # prefix names one commit. Length was doing the refusing, and length is
+        # not the question.
+        self.assertEqual(
+            self.units(self.select(mode="direct", count=1, start="ed908")),
+            [DIRECT_HISTORY[0]],
+        )
+        # Through the command line too, which is the surface the asset uses.
+        walk = self.worktree / "walk.txt"
+        walk.write_text("\n".join(DIRECT_HISTORY) + "\n", encoding="utf-8")
+        selection = self.run_cli(
+            "select",
+            "--mode",
+            "direct",
+            "--count",
+            "1",
+            "--candidates",
+            str(walk),
+            "--start",
+            "3b3c",
+        )
+        self.assertEqual(
+            [entry["sha"] for entry in selection["selected"]], [DIRECT_HISTORY[2]]
+        )
+
+    def test_a_short_prefix_is_still_refused_when_it_names_two_commits(self):
+        # The negative control for the floor: lowering it must not turn an
+        # ambiguous prefix into an accepted one.
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(
+                mode="direct",
+                count=1,
+                candidates=["abcdef01aa", "abcdef01bb"],
+                start="abcd",
+            )
+        self.assertIn("names 2 commits", str(caught.exception))
+
+    def test_a_pull_request_number_takes_the_exact_path(self):
+        # Non-vacuity for the prefix rule: it is a SHA rule, and #46 must never
+        # resolve to #466 the way `ed90877` resolves to `ed90877ac1`.
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=1, start=46)
+        self.assertIn("is not in this repository's merged history", str(caught.exception))
+
+
+class CursorDocumentTests(CursorTransitionCase):
+    """Requirement 7 and the fail-closed rule: what the state file may say."""
+
+    def test_a_missing_document_is_the_only_absence_that_is_not_a_refusal(self):
+        # A repository that has never been swept has no cursor, and that is
+        # what every first invocation looks like. Every other unreadable state
+        # is a refusal, because "unreadable" and "absent" select different
+        # ranges and merging them is how a sweep loses history.
+        self.assertEqual(
+            self.module.load_document(self.worktree), self.module.empty_document()
+        )
+        self.assertEqual(self.state(), self.module.empty_state())
+
+    def test_the_document_round_trips_through_its_own_serialization(self):
+        recorded = self.record(self.select(count=3), exclude=[466])
+        reread = self.state()
+        self.assertEqual(reread, recorded)
+        text = self.module.document_path(self.worktree).read_text(encoding="utf-8")
+        self.assertIn(self.module.CURSOR_MARKER, text)
+        self.assertIn("# Project review sweep cursor", text)
+
+    def test_an_unparseable_document_stops_the_run(self):
+        for spelling, body in (
+            ("no marker", "# Project review sweep cursor\n\nnothing here.\n"),
+            (
+                "unreadable json",
+                f"{self.module.CURSOR_MARKER}\n\n```json\n{{not json}}\n```\n",
+            ),
+            (
+                "wrong schema version",
+                f'{self.module.CURSOR_MARKER}\n\n```json\n{{"version": 99}}\n```\n',
+            ),
+            (
+                "a reviewed entry that is not a pull request",
+                f'{self.module.CURSOR_MARKER}\n\n```json\n'
+                '{"version": 1, "repositories": {"o/r": {"pr": '
+                '{"reviewed": ["nope"]}}}}\n```\n',
+            ),
+        ):
+            with self.subTest(spelling=spelling):
+                self.module.document_path(self.worktree).write_text(body, encoding="utf-8")
+                with self.assertRaises(self.module.CursorError):
+                    self.module.load_document(self.worktree)
+
+    def test_the_document_is_written_where_the_workflow_resolved_it(self):
+        self.record(self.select(count=3))
+        self.assertEqual(
+            self.module.document_path(self.worktree),
+            self.worktree / "docs" / "project_review_boundaries.md",
+        )
+        self.assertEqual(
+            self.module.DOCUMENT_RELATIVE_PATH, "docs/project_review_boundaries.md"
+        )
+
+
+class CursorRecordTests(CursorTransitionCase):
+    """The review's fifth spec addition: how a completed batch is folded in."""
+
+    def test_the_endpoint_only_ever_moves_older(self):
+        # A batch taken above the frontier -- after an explicit override, say
+        # -- must not drag the frontier back up with it, or every unit between
+        # the two positions is quietly dropped from the sweep.
+        self.record(self.select(count=6))
+        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 464)
+        self.record(self.select(count=2, override_boundary=True))
+        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 464)
+
+    def test_recording_preserves_an_earlier_exclusion(self):
+        self.record(self.select(count=2), exclude=[471])
+        self.record(self.select(count=2), exclude=[464])
+        self.assertEqual(self.state()["excluded"]["prs"], [464, 471])
+
+    def test_a_reviewed_unit_absent_from_the_candidate_history_is_refused(self):
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.module.record(
+                self.state(),
+                "pr",
+                self.module.normalize_candidates("pr", PR_LISTING),
+                [9999],
+            )
+        self.assertIn("absent from the candidate history", str(caught.exception))
+
+    def test_a_completed_batch_records_at_least_one_unit(self):
+        with self.assertRaises(self.module.CursorError):
+            self.module.record(
+                self.state(),
+                "pr",
+                self.module.normalize_candidates("pr", PR_LISTING),
+                [],
+            )
+
+
+class CursorCommandLineTests(CursorTransitionCase):
+    """The surface the rendered assets actually invoke."""
+
+    def test_select_and_record_round_trip_through_the_command_line(self):
+        listing = self.worktree / "listing.json"
+        listing.write_text(json.dumps(PR_LISTING), encoding="utf-8")
+        first = self.run_cli(
+            "select", "--mode", "pr", "--count", "3", "--candidates", str(listing)
+        )
+        self.assertEqual([entry["number"] for entry in first["selected"]], [470, 468, 471])
+
+        self.run_cli(
+            "record",
+            "--mode",
+            "pr",
+            "--candidates",
+            str(listing),
+            "--reviewed",
+            "470,468,471",
+        )
+        second = self.run_cli(
+            "select", "--mode", "pr", "--count", "3", "--candidates", str(listing)
+        )
+        self.assertEqual([entry["number"] for entry in second["selected"]], [466, 465, 464])
+        self.assertEqual(
+            self.run_cli("read")["state"]["pr"]["endpoint"]["number"], 471
+        )
+
+    def test_a_range_bound_holds_through_the_command_line(self):
+        # The surface the asset invokes, since that is where `--end` is spelled
+        # and where an empty one has to mean no bound at all.
+        listing = self.worktree / "listing.json"
+        listing.write_text(json.dumps(PR_LISTING), encoding="utf-8")
+        bounded = self.run_cli(
+            "select", "--mode", "pr", "--count", "9",
+            "--candidates", str(listing), "--start", "470", "--end", "466",
+        )
+        self.assertEqual(
+            [entry["number"] for entry in bounded["selected"]], [470, 468, 471, 466]
+        )
+        self.assertTrue(bounded["bounded"])
+
+        # Empty flags are the ordinary case, and must not bound anything.
+        unbounded = self.run_cli(
+            "select", "--mode", "pr", "--count", "9",
+            "--candidates", str(listing), "--start", "", "--end", "",
+        )
+        self.assertEqual(len(unbounded["selected"]), len(PR_HISTORY))
+        self.assertFalse(unbounded["bounded"])
+
+    def test_a_direct_candidate_listing_may_be_the_plain_sha_walk(self):
+        # `git log --first-parent --format=%H` prints one SHA per line, which
+        # is what the asset pipes in, so the helper reads that shape without a
+        # transformation step of its own.
+        walk = self.worktree / "walk.txt"
+        walk.write_text("\n".join(DIRECT_HISTORY) + "\n", encoding="utf-8")
+        selection = self.run_cli(
+            "select", "--mode", "direct", "--count", "2", "--candidates", str(walk)
+        )
+        self.assertEqual(
+            [entry["sha"] for entry in selection["selected"]], list(DIRECT_HISTORY[:2])
+        )
+
+    def test_the_first_direct_batch_starts_at_the_supplied_entry_point(self):
+        # Round 3's other blocker: the shown invocation had no `--start`, so
+        # the first direct batch of a repository that did have PR history
+        # began at index 0 and re-reviewed PR-owned commits. Direct state is
+        # empty at that moment, so nothing else could position it.
+        walk = self.worktree / "walk.txt"
+        walk.write_text("\n".join(DIRECT_HISTORY) + "\n", encoding="utf-8")
+        first = self.run_cli(
+            "select",
+            "--mode",
+            "direct",
+            "--count",
+            "2",
+            "--candidates",
+            str(walk),
+            "--start",
+            DIRECT_HISTORY[3],
+        )
+        self.assertEqual(
+            [entry["sha"] for entry in first["selected"]], list(DIRECT_HISTORY[3:5])
+        )
+        self.assertEqual(first["origin"], "explicit-start")
+
+        # Recorded, the next batch positions itself and needs no entry point --
+        # which is why the same invocation passes an empty one from then on.
+        self.run_cli(
+            "record",
+            "--mode",
+            "direct",
+            "--candidates",
+            str(walk),
+            "--reviewed",
+            ",".join(DIRECT_HISTORY[3:5]),
+        )
+        later = self.run_cli(
+            "select",
+            "--mode",
+            "direct",
+            "--count",
+            "2",
+            "--candidates",
+            str(walk),
+            "--start",
+            "",
+        )
+        self.assertEqual(
+            [entry["sha"] for entry in later["selected"]], list(DIRECT_HISTORY[5:7])
+        )
+        self.assertEqual(later["origin"], "recorded-endpoint")
+
+        # An empty entry point on the *first* batch is the defect itself: with
+        # no state to position it, the walk restarts at HEAD.
+        self.forget_the_cursor()
+        restarted = self.run_cli(
+            "select",
+            "--mode",
+            "direct",
+            "--count",
+            "2",
+            "--candidates",
+            str(walk),
+            "--start",
+            "",
+        )
+        self.assertEqual(restarted["origin"], "history-head")
+        self.assertEqual(
+            [entry["sha"] for entry in restarted["selected"]], list(DIRECT_HISTORY[:2])
+        )
+
 
 
 if __name__ == "__main__":
