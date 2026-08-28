@@ -1,0 +1,16 @@
+# GitHub's issue chooser.
+#
+# Blank issues are disabled because the chooser's most inviting option would
+# otherwise lead away from every shape this repository's workflows read: each
+# template beside this file keeps the tracker's five headings in order, and an
+# issue arriving with none of them has to be rewritten before it can be worked.
+#
+# Exactly one contact link, and it routes security reports off the public
+# tracker into GitHub's private advisory form. A second link would divert
+# support questions out of the tracker, where the Support question template is
+# the single route for them.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    about: Report it privately through GitHub's security advisory form rather than as a public issue.
+    url: https://github.com/coghex/kanban/security/advisories/new

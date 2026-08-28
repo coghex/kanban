@@ -2638,10 +2638,11 @@ tools/ | pr-atomic | test-parsed;release-document
 ```
 
 The eleven `test-parsed` rows name what actually parses them:
-`tools/test_issue_templates.py` reads the frontmatter and headings of every
-template under `.github/ISSUE_TEMPLATE/` and the `Children` checklist of the
-epic one, and `tools/test_release_runbook.py` reads the release template's
-authorization item,
+`tools/test_issue_templates.py` reads the frontmatter, headings, and
+preselected labels of every template under `.github/ISSUE_TEMPLATE/`, the
+`Children` checklist of the epic one, and the blank-issue switch and contact
+link of that directory's `config.yml`, and `tools/test_release_runbook.py`
+reads the release template's authorization item,
 `tools/test_pull_request_template.py` and `test/Spec/Agent/PullRequestFlow.hs`
 read `.github/pull_request_template.md` and run the three parsers that route on
 a pull-request origin marker over it, so a marker pasted into that template's

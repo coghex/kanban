@@ -67,11 +67,12 @@ COORDINATION_REASONS = ("audit-report", "coordination-note")
 # parsed by their own modules, so the reason is not confined to the two
 # workflow-contract documents the issue body named.
 TEST_PARSED_PATHS = {
-    # tools/test_issue_templates.py reads every template's frontmatter and
-    # headings, and the epic template's Children checklist, which
-    # src/Kanban/Tracker.hs parses in an issue filed from it (issue #434);
-    # tools/test_release_runbook.py reads the release template's authorization
-    # item (issue #539).
+    # tools/test_issue_templates.py reads every template's frontmatter,
+    # headings, and preselected label, the epic template's Children checklist,
+    # which src/Kanban/Tracker.hs parses in an issue filed from it (issue
+    # #434), and the chooser config.yml's blank-issue switch and contact link
+    # (issue #537); tools/test_release_runbook.py reads the release template's
+    # authorization item (issue #539).
     ".github/ISSUE_TEMPLATE/",
     # tools/test_pull_request_template.py and test/Spec/Agent/PullRequestFlow.hs
     # both read the tracked pull-request template and run the three parsers

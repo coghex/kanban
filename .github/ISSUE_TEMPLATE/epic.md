@@ -1,5 +1,5 @@
 ---
-name: Epic
+name: Maintainer epic
 about: A tracker issue whose Children checklist the board parses into a hierarchy
 title: ''
 labels: epic
