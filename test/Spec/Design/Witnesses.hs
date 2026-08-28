@@ -751,6 +751,7 @@ boardActionInventory =
       "ShowFilter",
       "ToggleEpic",
       "ShowDetails",
+      "ToggleFullscreen",
       "DismissOrClose",
       "ReviewSelection",
       "SolveSelection",

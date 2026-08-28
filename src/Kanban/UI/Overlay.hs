@@ -1,18 +1,26 @@
 module Kanban.UI.Overlay
-  ( drawIncidents,
+  ( InteriorExtent (..),
+    OverlayGeometry (..),
+    drawIncidents,
     drawOverlay,
     drawUndeliveredSteers,
+    fullscreenOverlayBox,
+    fullscreenSideMargin,
     helpLines,
+    interiorViewport,
     mouseHelpEntries,
+    overlayGeometryFor,
     reviewPhaseLabel,
+    settingsRosterHeight,
     solveChooserDisplay,
+    windowedOverlayBox,
   )
 where
 
 
 import Brick
 import Brick.Widgets.Border (borderWithLabel, hBorder )
-import Brick.Widgets.Center (centerLayer)
+import Brick.Widgets.Center (centerLayer, hCenterLayer)
 import Data.List (intersperse)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -68,31 +76,58 @@ import Kanban.UI.Session
 import Kanban.UI.Details
 import Kanban.UI.Board
 
-drawOverlay :: AppState -> Overlay -> Widget Name
-drawOverlay state overlay =
-  centerLayer
-    . panelExtent
-    . hLimit overlayWidth
-    . vLimit overlayHeight
-    . withBorderStyle (innerBorderStyle state)
-    . borderWithLabel (withAttr headingAttr (txt overlayTitle))
-    . padAll 1
-    $ case overlay of
-      HelpOverlay -> drawHelp state
-      SettingsOverlay -> drawSettings state
-      ProcessesOverlay -> drawProcesses state
-      IncidentsOverlay -> drawIncidents state
-      DetailsOverlay item -> viewport DetailsViewport Vertical (drawDetails (detailsEnv state) item)
-      ReviewOverlay issueNumber -> drawReview state issueNumber
-      SolveChooser _ issue -> drawSolveChooser state issue
-      SolveOverlay issueNumber -> drawSolve state issueNumber
-      PullRequestReviewOverlay number -> drawPullRequestReview state number
+-- | How the one scrolling interior each panel has is sized inside the box it
+-- is drawn in, which is the whole of what fullscreen means to a panel.
+data InteriorExtent
+  = -- | A windowed box: the interior keeps the fixed number of rows that
+    -- panel has always bounded its list or transcript to. Those numbers were
+    -- chosen against the 32-row windowed box and are still exactly right for
+    -- it.
+    BoundedInterior
+  | -- | A fullscreen box: the interior takes every row the chrome around it
+    -- leaves. That is what makes a taller box show more of a transcript, of
+    -- the process and incident lists, and of the settings roster, rather than
+    -- the same fixed number of rows with a gap underneath — and it keeps the
+    -- rows below the interior, a rule and an input line, pinned to the bottom
+    -- of the box where they belong.
+    GreedyInterior
+  deriving stock (Eq, Show)
+
+-- | One panel's scrolling interior at the extent the box is drawn at.
+--
+-- @windowed@ stays that panel's own decision about how much of a windowed box
+-- it spends on the thing being scrolled rather than on the chrome around it;
+-- fullscreen replaces the decision rather than adding to it, because the
+-- chrome is what is fixed and the interior is what should absorb a change in
+-- the box.
+interiorViewport :: InteriorExtent -> Int -> Widget Name -> Widget Name
+interiorViewport BoundedInterior windowed = vLimit windowed
+interiorViewport GreedyInterior _ = id
+
+-- | The box an overlay is drawn at, and how its interior fills it.
+data OverlayGeometry = OverlayGeometry
+  { overlayGeometryWidth :: Int,
+    overlayGeometryHeight :: Int,
+    overlayGeometryInterior :: InteriorExtent
+  }
+  deriving stock (Eq, Show)
+
+-- | The columns of application frame a fullscreen box leaves showing on each
+-- side, so the box covers the board and the usage sidebar without becoming
+-- the whole terminal (@docs\/overlay_focus_fullscreen_design.md@ D-10).
+fullscreenSideMargin :: Int
+fullscreenSideMargin = 1
+
+-- | The box an overlay draws in when it is windowed, which is the size it has
+-- always had.
+windowedOverlayBox :: OperatingMode -> Overlay -> (Int, Int)
+windowedOverlayBox mode overlay = (overlayWidth, overlayHeight)
   where
     -- The rows the help overlay is about to draw, which is what both of its
     -- dimensions are measured from. Taken once here rather than twice below,
     -- because the list follows the operating mode and a box sized from a
     -- different one would clip its own contents.
-    rows = helpLines state.appOperatingMode
+    rows = helpLines mode
     overlayWidth = case overlay of
       SolveChooser _ _ -> 42
       SettingsOverlay -> 68
@@ -117,6 +152,104 @@ drawOverlay state overlay =
       -- adds and the two the border takes are the whole difference.
       HelpOverlay -> length rows + 4
       _ -> 32
+
+-- | The box a fullscreen overlay draws in.
+--
+-- The terminal width less one column of frame on each side, and the height
+-- from the top of the frame down to whatever the base keeps below it —
+-- @reservedRows@, the footer and the frame's bottom edge — so the hint row
+-- naming the keys of the surface that has the keyboard stays fully visible
+-- under the box.
+--
+-- Never smaller than the windowed box. On a terminal narrower or shorter than
+-- one of the panels, the fullscreen dimension falls back to the windowed one
+-- and the overlay is clipped exactly as it already is there: making the box
+-- /smaller/ than the size it has when the key was never pressed would be a
+-- new failure mode rather than a bigger view.
+fullscreenOverlayBox :: Int -> Int -> Int -> (Int, Int) -> (Int, Int)
+fullscreenOverlayBox terminalWidth terminalHeight reservedRows (windowedWidth, windowedHeight) =
+  ( max windowedWidth (terminalWidth - 2 * fullscreenSideMargin),
+    max windowedHeight (terminalHeight - reservedRows)
+  )
+
+-- | The geometry one overlay is drawn at: its windowed box, or the fullscreen
+-- one when the flag is set and the overlay honors the toggle at all.
+--
+-- The solve chooser is the exception 'overlayHonorsFullscreen' names, and it
+-- is asked here rather than at the key: the flag can be set from a previous
+-- overlay of another surface only if the settling rule missed it, and a box
+-- that answers the question at the moment it draws itself cannot be caught
+-- out by that.
+overlayGeometryFor :: OperatingMode -> Overlay -> Bool -> Int -> Int -> Int -> OverlayGeometry
+overlayGeometryFor mode overlay fullscreen terminalWidth terminalHeight reservedRows
+  | fullscreen && overlayHonorsFullscreen overlay =
+      uncurry OverlayGeometry (fullscreenOverlayBox terminalWidth terminalHeight reservedRows windowed) GreedyInterior
+  | otherwise = uncurry OverlayGeometry windowed BoundedInterior
+  where
+    windowed = windowedOverlayBox mode overlay
+
+-- | The one geometry seam every layered overlay draws through.
+--
+-- Windowed, the box is centered over the board exactly as it always was.
+-- Fullscreen, it is centered horizontally and anchored to the top of the
+-- frame instead, because its height is measured down to the footer rather
+-- than shared evenly above and below it: centering a box of that height would
+-- put half the reserved rows above it and cover the footer with the other
+-- half. Both placements are layer combinators, so what they do not cover
+-- stays the board underneath.
+drawOverlay :: AppState -> Overlay -> Widget Name
+drawOverlay state overlay = Widget Greedy Greedy $ do
+  context <- getContext
+  let terminalWidth = availWidth context
+      terminalHeight = availHeight context
+      fullscreen = state.appOverlayFullscreen && overlayHonorsFullscreen overlay
+  -- Only a fullscreen box has a height to measure against the footer, and the
+  -- measurement renders the footer a second time, so a windowed frame does
+  -- not pay for it.
+  reservedRows <- if fullscreen then baseFooterRows state terminalWidth else pure 0
+  let geometry = overlayGeometryFor state.appOperatingMode overlay fullscreen terminalWidth terminalHeight reservedRows
+  render (drawOverlayBox state overlay geometry)
+
+-- | The box itself. Everything fullscreen changes about it is read back off
+-- the geometry rather than passed alongside it, so the box cannot be placed
+-- one way and sized the other.
+drawOverlayBox :: AppState -> Overlay -> OverlayGeometry -> Widget Name
+drawOverlayBox state overlay geometry =
+  place
+    . panelExtent
+    . hLimit geometry.overlayGeometryWidth
+    . vLimit geometry.overlayGeometryHeight
+    . withBorderStyle (innerBorderStyle state)
+    . borderWithLabel (withAttr headingAttr (txt overlayTitle))
+    . padAll 1
+    . fillBox
+    $ case overlay of
+      HelpOverlay -> drawHelp state
+      SettingsOverlay -> drawSettings interior state
+      ProcessesOverlay -> drawProcesses interior state
+      IncidentsOverlay -> drawIncidents interior state
+      DetailsOverlay item -> viewport DetailsViewport Vertical (drawDetails (detailsEnv state) item)
+      ReviewOverlay issueNumber -> drawReview interior state issueNumber
+      SolveChooser _ issue -> drawSolveChooser state issue
+      SolveOverlay issueNumber -> drawSolve interior state issueNumber
+      PullRequestReviewOverlay number -> drawPullRequestReview interior state number
+  where
+    interior = geometry.overlayGeometryInterior
+    -- Windowed, the box is centered and 'vLimit' only caps it, so a panel
+    -- whose rows are all fixed draws a border tight around them -- which is
+    -- how every session, settings, process, and incident box has always
+    -- looked. Fullscreen the height is measured against the footer instead,
+    -- so a box that stopped at its content would leave a strip of board
+    -- between its bottom border and the hint row rather than running down to
+    -- it.
+    --
+    -- 'GreedyInterior' already fills the box for every panel that has a
+    -- scrolling interior at all. The fill covers the ones that do not: the
+    -- help overlay, whose rows are the whole panel, and the three "session is
+    -- no longer available" branches, which are a single line.
+    (place, fillBox) = case interior of
+      BoundedInterior -> (centerLayer, id)
+      GreedyInterior -> (hCenterLayer, padBottom Max)
     panelExtent = case overlay of
       HelpOverlay -> id
       SettingsOverlay -> clickable SettingsPanel
@@ -181,8 +314,8 @@ mouseHelpEntries =
     gestureHelpEntry "right/outside click" "close card details"
   ]
 
-drawSettings :: AppState -> Widget Name
-drawSettings state =
+drawSettings :: InteriorExtent -> AppState -> Widget Name
+drawSettings interior state =
   vBox
     [ withAttr cardTitleAttr (txt "Chat output verbosity"),
       txt "",
@@ -197,7 +330,7 @@ drawSettings state =
       hBorder,
       withAttr cardTitleAttr (txt "Agent models"),
       withAttr dimAttr (txtWrap (operatingModeLine state.appOperatingMode)),
-      drawRoster state
+      drawRoster interior state
     ]
   where
     selected = state.appSettings.settingsChatVerbosity
@@ -215,9 +348,9 @@ drawSettings state =
 -- because the model IDs are user-supplied text and a long one has to be
 -- elided at the interior the panel really has rather than cropped silently
 -- by the viewport.
-drawRoster :: AppState -> Widget Name
-drawRoster state =
-  vLimit settingsRosterHeight
+drawRoster :: InteriorExtent -> AppState -> Widget Name
+drawRoster interior state =
+  interiorViewport interior settingsRosterHeight
     . viewport SettingsViewport Vertical
     $ case state.appModelRoster of
       -- The defect replaces the rows rather than sitting beside fabricated
@@ -259,18 +392,20 @@ elidedRow line = Widget Fixed Fixed $ do
   let width = availWidth context
   render (txt (if width <= 0 then "" else if displayWidth line <= width then line else elide width line))
 
--- | How many roster rows the settings panel shows at once. Fewer than the
--- compiled thirteen, so the viewport the rows live in is exercised by the
--- default roster rather than only by a future one.
+-- | How many roster rows the settings panel shows at once /windowed/. Fewer
+-- than the compiled thirteen, so the viewport the rows live in is exercised
+-- by the default roster rather than only by a future one — and it stays a
+-- viewport at every height, so a fullscreen panel shows more rows and still
+-- scrolls the ones past its border rather than drawing them through it.
 settingsRosterHeight :: Int
 settingsRosterHeight = 10
 
-drawProcesses :: AppState -> Widget Name
-drawProcesses state =
+drawProcesses :: InteriorExtent -> AppState -> Widget Name
+drawProcesses interior state =
   vBox
     [ withAttr dimAttr (txt ("tracked sessions: " <> showText (length entries) <> " · live processes: " <> showText (length (filter (.agentSessionLive) entries)))),
       txt "",
-      vLimit 23
+      interiorViewport interior processesViewportHeight
         . viewport ProcessesViewport Vertical
         $ if null entries
           then withAttr dimAttr (txt "No agent sessions have been started.")
@@ -306,12 +441,12 @@ drawProcesses state =
           widget = clickable (ProcessTarget entry.agentSessionRef) (withAttr attribute (txt line))
        in if selected then visible widget else widget
 
-drawIncidents :: AppState -> Widget Name
-drawIncidents state =
+drawIncidents :: InteriorExtent -> AppState -> Widget Name
+drawIncidents interior state =
   vBox
     [ withAttr (drainerSourceAttr source) (txtWrap (drainerSourceSummary source)),
       txt "",
-      vLimit 23
+      interiorViewport interior incidentsViewportHeight
         . viewport IncidentsViewport Vertical
         $ if null entries
           then withAttr dimAttr (txtWrap (emptyStateText source))
@@ -424,6 +559,31 @@ drainerSourceSummary source = case source of
   DrainerSourceChecking -> "PR drainer: checking for open incidents…"
   DrainerSourceUnavailable detail -> "PR drainer: open incidents unavailable · " <> sanitizeText detail
 
+-- | The rows each bounded interior viewport is given inside a /windowed/ box.
+--
+-- Four numbers rather than one, because each panel spends a different amount
+-- of its box on the chrome around the list: the process and incident panels
+-- carry a summary line above theirs, the two solve-style overlays carry a
+-- phase, an activity, an agent, and a log line, and the review overlay carries
+-- a pending interaction and an undelivered-steer block below. Each is the
+-- panel's own share of the 32 rows the windowed box has, and
+-- 'interiorViewport' is what retires all four in a box that is not that
+-- shape.
+processesViewportHeight :: Int
+processesViewportHeight = 23
+
+incidentsViewportHeight :: Int
+incidentsViewportHeight = 23
+
+solveTranscriptHeight :: Int
+solveTranscriptHeight = 19
+
+pullRequestTranscriptHeight :: Int
+pullRequestTranscriptHeight = 19
+
+reviewTranscriptHeight :: Int
+reviewTranscriptHeight = 17
+
 -- | The two brands a solve may be started on, each under the @solve@ cell it
 -- would actually run: row 1 @solve.codex@, row 2 @solve.claude@.
 --
@@ -450,8 +610,8 @@ solveChooserDisplay :: Either RosterLoadError ModelRoster -> SolverBrand -> Text
 solveChooserDisplay rosterResult brand =
   liveAssignmentDisplay (.recordedAssignmentDisplay) (`solveAssignment` brand) rosterResult
 
-drawSolve :: AppState -> Int -> Widget Name
-drawSolve state issueNumber = case Map.lookup issueNumber state.appSolveSessions of
+drawSolve :: InteriorExtent -> AppState -> Int -> Widget Name
+drawSolve interior state issueNumber = case Map.lookup issueNumber state.appSolveSessions of
   Nothing -> withAttr problemAttr (txt "Solve session is no longer available")
   Just session ->
     let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.sessionTranscript
@@ -467,7 +627,7 @@ drawSolve state issueNumber = case Map.lookup issueNumber state.appSolveSessions
           AutoSolve -> withAttr dimAttr (txt ("reviewer: " <> solveReviewerDisplay state.appModelRoster session.sessionDetail.solveSessionBrand)),
         maybe emptyWidget (withAttr dimAttr . txt . ("full log: " <>) . Text.pack) session.sessionLogPath,
         txt "",
-        vLimit 19
+        interiorViewport interior solveTranscriptHeight
           . clickable SolveViewport
           . viewport SolveViewport Vertical
           . padRight Max
@@ -510,8 +670,8 @@ drawSolveInput session
         $ "> " <> session.sessionInput <> "█"
   | otherwise = emptyWidget
 
-drawPullRequestReview :: AppState -> Int -> Widget Name
-drawPullRequestReview state number = case Map.lookup number state.appPullRequestReviewSessions of
+drawPullRequestReview :: InteriorExtent -> AppState -> Int -> Widget Name
+drawPullRequestReview interior state number = case Map.lookup number state.appPullRequestReviewSessions of
   Nothing -> withAttr problemAttr (txt "PR review/revision session is no longer available")
   Just session ->
     let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.sessionTranscript
@@ -525,7 +685,7 @@ drawPullRequestReview state number = case Map.lookup number state.appPullRequest
         withAttr dimAttr (txt ("agent: " <> pullRequestSessionLabel session.sessionDetail.pullRequestSessionAssignment session.sessionDetail.pullRequestSessionOrigin session.sessionDetail.pullRequestSessionAction session.sessionDetail.pullRequestSessionBrand state.appModelRoster)),
         maybe emptyWidget (withAttr dimAttr . txt . ("full log: " <>) . Text.pack) session.sessionLogPath,
         txt "",
-        vLimit 19 . clickable PullRequestReviewViewport . viewport PullRequestReviewViewport Vertical . padRight Max $
+        interiorViewport interior pullRequestTranscriptHeight . clickable PullRequestReviewViewport . viewport PullRequestReviewViewport Vertical . padRight Max $
           if Text.null transcript then withAttr dimAttr (txt "Waiting for agent output…") else txtWrap transcript,
         hBorder,
         if session.sessionPhase == SolveAttention
@@ -544,8 +704,8 @@ pullRequestPhaseLabel session = case session.sessionPhase of
   SolveKilledPhase -> "PR " <> pullRequestActionText session.sessionDetail.pullRequestSessionAction <> " killed"
   SolveOrphanedPhase -> "PR " <> pullRequestActionText session.sessionDetail.pullRequestSessionAction <> " has orphaned subprocesses"
 
-drawReview :: AppState -> Int -> Widget Name
-drawReview state issueNumber = case Map.lookup issueNumber state.appReviewSessions of
+drawReview :: InteriorExtent -> AppState -> Int -> Widget Name
+drawReview interior state issueNumber = case Map.lookup issueNumber state.appReviewSessions of
   Nothing -> withAttr problemAttr (txt "Review session is no longer available")
   Just session ->
     let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.sessionTranscript
@@ -557,7 +717,7 @@ drawReview state issueNumber = case Map.lookup issueNumber state.appReviewSessio
         txt "",
         withAttr (reviewPhaseAttribute session.sessionPhase) (txt (reviewPhaseLabel session)),
         txt "",
-        vLimit 17
+        interiorViewport interior reviewTranscriptHeight
           . clickable ReviewViewport
           . viewport ReviewViewport Vertical
           . padRight Max

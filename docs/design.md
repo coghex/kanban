@@ -297,6 +297,23 @@ Responsive behavior:
   its own box: the row along the bottom of the terminal is where they are
   named. None of that adds rows to section 7's table or to the help overlay,
   which stay the complete list of the bindings they already document.
+- An open overlay is drawn in one of two extents, and `f` (section 7) moves it
+  between them. Windowed is the box each overlay has always declared, centered
+  over the board. Fullscreen spans the terminal less one column of application
+  frame on each side, and runs from the top of the frame down to the top of the
+  footer, so it covers the board and the usage sidebar while the footer's hint
+  line — the row naming the keys of the surface that has the keyboard — stays
+  fully visible beneath it. The rows reserved below are the footer's actual
+  current height plus the frame's bottom edge, so a box is shorter by exactly
+  the rows a notice takes and taller again once it clears; a notice wrapped
+  across several rows reserves all of them. On a terminal narrower or shorter
+  than the windowed box, the fullscreen dimension is the windowed one, and a
+  terminal too small for an overlay clips it exactly as it always has. Each
+  panel's one scrolling interior — a transcript, the process or incident list,
+  the settings roster — takes the rows the chrome around it leaves rather than
+  a fixed count, so a taller box shows more of what is being scrolled and still
+  scrolls the rest. Every overlay opens windowed, and the Codex/Claude solve
+  chooser keeps its windowed box in every extent.
 
 ## 7. Keyboard interaction
 
@@ -315,6 +332,7 @@ Initial bindings:
 | `F` | Show or hide the card filter panel; j/k or Up/Down move between boxes, Left/Right between groups, Space toggles the focused box, d restores the defaults, s focuses the card search, and F or Esc hides the panel leaving the criteria unchanged |
 | `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
+| `f` | Toggle the open overlay between its windowed box and fullscreen, in every overlay except the Codex/Claude solve chooser; a live-agent overlay answers it in normal mode, where insert mode types the letter into the draft instead, and with no overlay open the key does nothing |
 | `Esc` | Close an overlay or dismiss a transient error; in a live-agent overlay it is modal, returning an insert-mode session to normal and only then hiding the overlay, and it never reaches the dashboard's own quit |
 | `r` | Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session; a no-op on a collapsed or childless epic header |
 | `S` | Choose Codex or Claude and start/reopen an issue solve through PR creation |
@@ -410,7 +428,8 @@ Mouse interaction is intentionally complete but narrow:
 - Left-clicking an epic title expands or collapses that epic.
 - Left-clicking a filter checkbox toggles it and moves the panel's own focus to
   it, leaving the keyboard wherever it already was.
-- Left-clicking outside an open details panel closes it.
+- Left-clicking outside an open details panel closes it, while that panel is
+  windowed.
 - Right-clicking a board card opens its live issue-review, solve,
   autosolve-bound PR review, or direct PR session. With no live session it only
   selects the card and never opens details. It behaves the same way in the
@@ -418,6 +437,11 @@ Mouse interaction is intentionally complete but narrow:
   overlays `p` and then Enter already open there, and that mode leaves the
   inspector reachable.
 - Right-clicking anywhere while a details panel is open closes it.
+- A fullscreen overlay withdraws the outside click and nothing else: a plain
+  press on the residual frame columns beside it, or anywhere on the footer
+  below it, does nothing to it. Its exits are `f` back to windowed, `q` or
+  `Esc`, and the right click above, which keeps the meaning stated there in
+  both extents. The windowed gesture is unchanged.
 - The mouse wheel scrolls the board column under the pointer by three rows per
   wheel event.
 - The PR drainer button remains directly clickable.
@@ -1298,12 +1322,15 @@ recorded failure that is absent, empty, whitespace-only, or emptied by
 sanitization adds nothing — no line, no separator, no placeholder — and a row
 of any other kind is unchanged whatever its document carries.
 
-The panel is a fixed-width overlay, so a row is measured against the width
-that overlay gives it rather than the terminal's. A row longer than the panel
-is elided with a visible ellipsis at that measured width, never cropped
-silently: §11's promise that an ellipsis appears wherever text was dropped
-holds for a row whatever made it long — a recorded failure, a long title, or a
-summary that already overran the panel on its own.
+A row is measured against the width the overlay gives it rather than the
+terminal's. Windowed that is the panel's own fixed box, and fullscreen
+(section 6) it is the terminal less the frame column on each side, so the same
+row can be elided in one extent and whole in the other. A row longer than the
+panel it is drawn in is elided with a visible ellipsis at whichever of those
+two widths applies, never cropped silently: §11's promise that an ellipsis
+appears wherever text was dropped holds for a row whatever made it long — a
+recorded failure, a long title, or a summary that already overran the panel on
+its own.
 
 The one notification the drainer publishes when it opens a cleanup incident
 carries that same recorded failure, and says the incident clears once any

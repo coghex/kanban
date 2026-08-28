@@ -102,6 +102,14 @@ data BindingScope
     DetailsScope
   | -- | The help overlay.
     HelpScope
+  | -- | Any open overlay that honors the fullscreen toggle and answers this
+    -- table's keys through the one shared arm ahead of its own decoder --
+    -- settings, the process inspector, and the incidents panel as well as the
+    -- two scopes above. It exists for the single binding that is live in all
+    -- of them at once; the three live-agent overlays are deliberately not in
+    -- it, because a plain letter there is a command only in normal mode and
+    -- that decision belongs to their own modal decoder.
+    OverlayScope
   deriving stock (Eq, Ord, Show, Enum, Bounded)
 
 -- | Every base-board action, in the order §7's table lists them — which is
@@ -119,6 +127,7 @@ data BoardAction
   | ShowFilter
   | ToggleEpic
   | ShowDetails
+  | ToggleFullscreen
   | DismissOrClose
   | ReviewSelection
   | SolveSelection
@@ -203,6 +212,15 @@ binding action = case action of
   ShowDetails ->
     KeyBinding action [plain Vty.KEnter] [BoardScope] Nothing "details" "details"
       "Open the selected card's details overlay"
+  -- Deliberately not a 'BoardScope' binding: with nothing open there is no box
+  -- to grow, and the founding request was for a key that exists only inside an
+  -- overlay. 'OverlayScope' is what makes it live in the three overlays that
+  -- keep their own decoders; the live-agent overlays answer the same letter
+  -- from their normal mode ('Kanban.UI.SessionCore.sessionInputEvent'), where
+  -- insert mode still types it into the draft.
+  ToggleFullscreen ->
+    KeyBinding action [key 'f'] [DetailsScope, HelpScope, OverlayScope] Nothing "fullscreen" "toggle the open overlay between windowed and fullscreen"
+      "Toggle the open overlay between its windowed box and fullscreen, in every overlay except the Codex/Claude solve chooser; a live-agent overlay answers it in normal mode, where insert mode types the letter into the draft instead, and with no overlay open the key does nothing"
   DismissOrClose ->
     KeyBinding action [plain Vty.KEsc] [BoardScope, DetailsScope, HelpScope] Nothing "close" "close overlay or dismiss a notice"
       "Close an overlay or dismiss a transient error; in a live-agent overlay it is modal, returning an insert-mode session to normal and only then hiding the overlay, and it never reaches the dashboard's own quit"
@@ -304,6 +322,7 @@ requiresLoadedAgent = \case
   ShowFilter -> False
   ToggleEpic -> False
   ShowDetails -> False
+  ToggleFullscreen -> False
   DismissOrClose -> False
   ShowIncidents -> False
   RefreshAll -> False

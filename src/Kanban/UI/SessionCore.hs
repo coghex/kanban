@@ -55,7 +55,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime)
 import qualified Graphics.Vty as Vty
-import Kanban.UI.Keys (HelpEntry (..), chord)
+import Kanban.UI.Keys (BoardAction (..), HelpEntry (..), binding, chord, footerHint)
 import Kanban.UI.Types
 import Kanban.UI.Util (safeIndex)
 
@@ -254,6 +254,11 @@ data SessionInputEvent
     SessionInputEnterInsert
   | -- | @Esc@ from insert: stop editing, keeping the draft.
     SessionInputLeaveInsert
+  | -- | @f@ from normal: grow the overlay to fullscreen, or put it back. In
+    -- insert mode the same letter is text, which is why this is decoded here
+    -- with the rest of the modal table rather than in the shared arm the
+    -- non-modal overlays answer it from.
+    SessionInputFullscreen
   | -- | @q@ or @Esc@ from normal: hide the overlay. Never the application's
     -- own quit, which is what the board's @q@ still means.
     SessionInputClose
@@ -331,6 +336,7 @@ sessionFooterHints sendLabel focus = case liveSessionMode focus.sessionFocusLive
   SessionNormal
     | focus.sessionFocusLiveInput ->
         [ "Esc/q hide",
+          fullscreenChip,
           "i insert",
           "Tab next session",
           "Ctrl-C interrupt",
@@ -338,10 +344,19 @@ sessionFooterHints sendLabel focus = case liveSessionMode focus.sessionFocusLive
         ]
     | otherwise ->
         [ "Esc/q hide",
+          fullscreenChip,
           "Tab next session",
           "Ctrl-C interrupt",
           "j/k g/G Ctrl-D/U scroll"
         ]
+
+-- | The fullscreen chip, taken from the binding rather than written out
+-- again: @f@ is declared once in "Kanban.UI.Keys" and every surface that
+-- names it -- this row, the two scoped footers, and the help overlay --
+-- projects that one declaration. Normal mode only, because insert mode types
+-- the letter into the draft.
+fullscreenChip :: Text
+fullscreenChip = footerHint (binding ToggleFullscreen)
 
 -- | How far Ctrl-D and Ctrl-U move a transcript. Vim's half page is half the
 -- window; a session transcript's viewport is a fixed 17-19 rows inside the
@@ -442,6 +457,7 @@ sessionInputEvent focus event = case event of
       Vty.EvKey (Vty.KChar 'i') []
         | focus.sessionFocusLiveInput -> Just SessionInputEnterInsert
       Vty.EvKey (Vty.KChar 'q') [] -> Just SessionInputClose
+      Vty.EvKey (Vty.KChar 'f') [] -> Just SessionInputFullscreen
       Vty.EvKey (Vty.KChar 'j') [] -> Just (SessionInputScroll 1)
       Vty.EvKey (Vty.KChar 'k') [] -> Just (SessionInputScroll (-1))
       Vty.EvKey (Vty.KChar 'd') [Vty.MCtrl] -> Just (SessionInputScroll sessionHalfPage)
@@ -479,6 +495,11 @@ sessionModeAfter = \case
   -- the one being left behind keeps its own too.
   SessionInputCycle -> id
   SessionInputInterrupt -> id
+  -- Fullscreen is the overlay's geometry, not the session's draft: growing
+  -- the box leaves an insert-mode neighbour session exactly as it was, and
+  -- the session this press landed on stays in normal, where the letter was a
+  -- command in the first place.
+  SessionInputFullscreen -> id
   SessionInputClose -> id
   SessionInputChoice _ -> id
 

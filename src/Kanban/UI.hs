@@ -171,6 +171,10 @@ runHeldDashboard authority options config repository roster = do
             appProcessSelection = ProcessSelection Nothing 0,
             appIncidentSelection = IncidentSelection Nothing 0,
             appOverlay = Nothing,
+            -- Nothing is open, so nothing is fullscreen. Never restored from
+            -- a previous run: an overlay always opens windowed, which is what
+            -- keeps the board visible behind a freshly opened panel.
+            appOverlayFullscreen = False,
             appNotice =
               Just
                 ( startupNotice

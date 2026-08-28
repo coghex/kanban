@@ -1,20 +1,20 @@
 ╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
 ║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
 ║┃ Codex          3h 0m old ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
-║┃ 5 hour  [██████░░░░] 63% ┃┃                                          ┃                                         ┃  STANDALONE                             ┃  STANDALONE                             ┃║
-║┃ in 1h 5m · Thu 16:05     ┃┃  ▾ #700  Persistenc┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓─────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃ week    [████░░░░░░] 41% ┃┃  1/2 complete      ┃                                                                                                 ┃ch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
-║┃ in 4d 18h · Tue 09:00    ┃┃  └─ ╭──────────────┃ j / Down             next card                                                                  ┃     │ ┃  │ conflict                           │ ┃║
-║┃ Claude         3h 0m old ┃┃     │ A1 · tracker ┃ k / Up               previous card                                                              ┃     │ ┃  │  reviewed:approve                  │ ┃║
-║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt th┃ x                    kill selected working process tree                                         ┃     │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
-║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope     ┃ h / Left             previous column                                                            ┃     │ ┃  │ updated 3h ago                     │ ┃║
-║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature     ┃ l / Right            next column                                                                ┃     │ ┃  │ Updates the branch after the       │ ┃║
-║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · ┃ g                    first visible item in the column                                           ┃ the │ ┃  │ persistence registry changed on    │ ┃║
-║┃ ┏━━━┓                    ┃┃     │ Write the env┃ G                    last visible item in the column                                            ┃     │ ┃  │ master.                            │ ┃║
-║┃ ┃ ↻ ┃                    ┃┃     │ of the payloa┃ s                    search a column; h/l type into the query, Left/Right move the search       ┃     │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃ ┗━━━┛                    ┃┃     │ write is dete┃ F                    filter cards; j/k move, Left/Right change group, space toggles, d defaults ┃─────╯ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃     ╰──────────────┃ e                    expand / collapse focused epic                                             ┃       ┃                                         ┃║
-║┃                          ┃┃                    ┃ Enter                details                                                                    ┃─────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ 5 hour  [██████░░░░] 63% ┃┃                    ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       ┃  STANDALONE                             ┃║
+║┃ in 1h 5m · Thu 16:05     ┃┃  ▾ #700  Persistenc┃                                                                                                 ┃─────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ week    [████░░░░░░] 41% ┃┃  1/2 complete      ┃ j / Down             next card                                                                  ┃ch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
+║┃ in 4d 18h · Tue 09:00    ┃┃  └─ ╭──────────────┃ k / Up               previous card                                                              ┃     │ ┃  │ conflict                           │ ┃║
+║┃ Claude         3h 0m old ┃┃     │ A1 · tracker ┃ x                    kill selected working process tree                                         ┃     │ ┃  │  reviewed:approve                  │ ┃║
+║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt th┃ h / Left             previous column                                                            ┃     │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
+║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope     ┃ l / Right            next column                                                                ┃     │ ┃  │ updated 3h ago                     │ ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature     ┃ g                    first visible item in the column                                           ┃     │ ┃  │ Updates the branch after the       │ ┃║
+║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · ┃ G                    last visible item in the column                                            ┃ the │ ┃  │ persistence registry changed on    │ ┃║
+║┃ ┏━━━┓                    ┃┃     │ Write the env┃ s                    search a column; h/l type into the query, Left/Right move the search       ┃     │ ┃  │ master.                            │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃     │ of the payloa┃ F                    filter cards; j/k move, Left/Right change group, space toggles, d defaults ┃     │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃ ┗━━━┛                    ┃┃     │ write is dete┃ e                    expand / collapse focused epic                                             ┃─────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃     ╰──────────────┃ Enter                details                                                                    ┃       ┃                                         ┃║
+║┃                          ┃┃                    ┃ f                    toggle the open overlay between windowed and fullscreen                    ┃─────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃                    ┃ Esc                  close overlay or dismiss a notice                                          ┃     │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
 ║┃                          ┃┃  ▸ #701  Input rout┃ r                    review/revise/repair selected issue or PR                                  ┃     │ ┃  │  reviewed:approve   input   ui     │ ┃║
 ║┃                          ┃┃  complete          ┃ S                    solve selected issue (choose model brand)                                  ┃     │ ┃  │ #812 · agent-name → master ·       │ ┃║
@@ -42,7 +42,7 @@
 ║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  ╭─────────────────┃ right/outside click  close card details                                                         ┃       ┃                                         ┃║
 ║┃ off                      ┃┃  │ #901 Add reposit┃                                                                                                 ┃       ┃                                         ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
-║ esc close  q/Ctrl-C quit                                                                                                                                                                             ║
+║ f fullscreen  esc close  q/Ctrl-C quit                                                                                                                                                               ║
 ║ board: updated 3h ago · history: current                                                                                                                                                             ║
 ║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
