@@ -264,11 +264,19 @@ pre-existing on the recorded base branch must be reported to the user and stop
 the run rather than papered over.
 
 **Only when EVERY failed run is an infrastructure failure**, rerun each of those
-runs exactly once:
+runs exactly once — the WHOLE run, with no `--failed`:
 
 ```bash
-gh run rerun <run-id> -R <owner/name> --failed
+gh run rerun <run-id> -R <owner/name>
 ```
+
+**Never `--failed` here.** That flag reruns "only failed jobs, including
+dependencies", and a CANCELLED job is not a failed one — which is precisely the
+signature 5b defines this branch by. A run whose bad jobs are all cancellations
+offers `--failed` nothing to act on, so the retry silently accomplishes nothing
+and the run stays red; the allowance is spent on a rerun that never happened.
+The whole-run form has no such hole. It costs re-running the jobs that already
+passed, which is the correct price for a retry that is always applicable.
 
 **One rerun per run, then stop. There is never a second for the same run.**
 

@@ -1418,7 +1418,7 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   reported a failure — and then only once per run, never twice. A failed
   rollup entry that is not a GitHub Actions run at all (a `StatusContext`, or
   a `CheckRun` whose `detailsUrl` names no Actions run) fails closed: it is
-  reported and never handed `gh run view` or `gh run rerun`. After the reruns
+  reported and never handed `gh run view` or `gh run rerun`. The rerun is of the WHOLE run, never `--failed`: that flag reruns only failed jobs, and a cancelled job is not a failed one, so on the cancellation-only run this branch is defined by it would spend the single allowance without rerunning anything. After the reruns
   the COMPLETE rollup is re-fetched and re-judged, never the reruns' own
   outcomes alone, and any remaining failed entry stops the run. This ceiling is
   deliberately tighter than `tools/drain_prs.py`'s `MAX_CI_RERUN_ATTEMPTS`,

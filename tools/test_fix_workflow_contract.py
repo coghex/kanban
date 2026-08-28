@@ -192,7 +192,17 @@ REQUIRED_PHRASES = {
     # --- The ceiling. ---
     "rerun-only-when-every-failed-run-is-infrastructure": (
         "**Only when EVERY failed run is an infrastructure failure**, rerun each "
-        "of those\nruns exactly once"
+        "of those\nruns exactly once — the WHOLE run, with no `--failed`:"
+    ),
+    "the-rerun-is-the-whole-run-never-failed-only": (
+        '**Never `--failed` here.** That flag reruns "only failed jobs, '
+        'including\ndependencies", and a CANCELLED job is not a failed one — '
+        "which is precisely the\nsignature 5b defines this branch by."
+    ),
+    "failed-only-would-silently-accomplish-nothing": (
+        "A run whose bad jobs are all cancellations\noffers `--failed` nothing "
+        "to act on, so the retry silently accomplishes nothing\nand the run "
+        "stays red; the allowance is spent on a rerun that never happened."
     ),
     "a-real-failure-anywhere-reruns-nothing": (
         "**If ANY failed run is a real failure**, take the fix path for all of "
@@ -339,6 +349,8 @@ FIX_ONLY_REQUIREMENTS = (
     "the-eviction-signature-is-named",
     "a-flaky-failure-is-a-real-failure-here",
     "rerun-only-when-every-failed-run-is-infrastructure",
+    "the-rerun-is-the-whole-run-never-failed-only",
+    "failed-only-would-silently-accomplish-nothing",
     "a-real-failure-anywhere-reruns-nothing",
     "a-rerun-beside-a-real-failure-clears-nothing",
     "one-rerun-then-stop",
@@ -491,6 +503,45 @@ class FixWorkflowContractTests(unittest.TestCase):
         self.assertIn('approval_label = "reviewed:approve"', example)
         self.assertIn('approval_mode = "label"', example)
         self.assertIn('blocked_labels = ["blocked"]', example)
+
+
+class RerunCommandShapeTests(unittest.TestCase):
+    """The rerun command must be applicable to the failures it is defined by.
+
+    `gh run rerun --failed` reruns "only failed jobs, including dependencies".
+    A CANCELLED job is not a failed job, and a cancellation is the canonical
+    infrastructure failure this workflow exists to retry -- so on a
+    cancellation-only run `--failed` has nothing to act on, spends the single
+    allowance, and leaves the run red. The whole-run form is the one that is
+    always applicable.
+    """
+
+    RERUN_LINE = "gh run rerun <run-id> -R <owner/name>"
+
+    def test_the_rerun_command_is_the_whole_run(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            self.assertIn(self.RERUN_LINE, text, path)
+
+    def test_no_asset_reruns_only_failed_jobs(self):
+        # The flag may be NAMED -- the prose explains why it is wrong -- but it
+        # must never appear on the command line the workflow tells an agent to
+        # run.
+        for path in FIX_ASSETS:
+            for line in read(path).splitlines():
+                stripped = line.strip()
+                if stripped.startswith("gh run rerun"):
+                    self.assertNotIn(
+                        "--failed",
+                        stripped,
+                        f"{path} instructs a --failed rerun: {stripped!r}",
+                    )
+
+    def test_the_prose_explains_why_failed_only_is_refused(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            self.assertIn("**Never `--failed` here.**", text, path)
+            self.assertIn("a CANCELLED job is not a failed one", text, path)
 
 
 class ContractDocumentationTests(unittest.TestCase):

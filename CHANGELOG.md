@@ -21,7 +21,8 @@ created above it.
   merge conflict, and otherwise triages the failing check: a failure where no
   job actually executed the pull request's code — a cancelled setup job, a
   concurrency-group eviction, an aggregator reporting on a dependency that never
-  ran — is rerun exactly once and never a second time, while a failure that did
+  ran — is rerun exactly once and never a second time, as a whole run rather
+  than a `--failed` retry that a cancellation-only run would leave untouched, while a failure that did
   execute the code is fixed and handed to one canonical rereview. The obstacle
   is the whole set of failed rollup entries, not the first one seen: a real
   failure anywhere reruns nothing, the complete rollup is re-fetched and
