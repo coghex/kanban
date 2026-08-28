@@ -8,6 +8,12 @@
 -- without deciding what it may overlap with, and the groups inside one lane
 -- still run one at a time, in the order they appear below, which is the order
 -- their @describe@ blocks have always run in.
+--
+-- Not every one of those decisions is free: 'suiteColocations' names the
+-- groups held to another group's lane, and why. One group here is unlike the
+-- rest for that reason. "Spec.Suite.Assignment" is handed the roster and those
+-- declarations rather than composed blind into them, so the assignment this
+-- module states is checked by the suite it composes.
 module Main (main) where
 
 import qualified Spec.Agent.Adapter as Adapter
@@ -45,10 +51,16 @@ import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
 import qualified Spec.Repository.Lease as RepositoryLease
 import qualified Spec.Repository.State as RepositoryState
-import Spec.Support.Lanes (Lane (..), SuiteGroup (..), runSuiteInLanes)
+import Spec.Support.Lanes
+  ( Colocation (..),
+    Lane (..),
+    SuiteGroup (..),
+    runSuiteInLanes,
+  )
 import Spec.Support.LeaseProbes (leaseProbeVariable, runLeaseProbe)
 import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import Spec.Support.UsageWriters (runUsageWriter, usageWriterVariable)
+import qualified Spec.Suite.Assignment as Assignment
 import qualified Spec.UI.AutoSolve as AutoSolve
 import qualified Spec.UI.Cards as Cards
 import qualified Spec.UI.CompletedHistory as CompletedHistory
@@ -92,29 +104,25 @@ main = do
     (Just probeRoot, _, _) -> runLocaleProbe probeRoot
     (Nothing, Just planPath, _) -> runUsageWriter planPath
     (Nothing, Nothing, Just planPath) -> runLeaseProbe planPath
-    (Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups
+    (Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
 
 -- | Every group, its lane, and its established order.
 --
--- The lane column is a packing decision taken from measurement, not a
--- taxonomy. Serially the suite spends 397 of its 399 seconds inside fifteen
--- groups that are waiting on a real deadline, so those fifteen are spread
--- across the five lanes until no lane holds much more than a fifth of them,
--- and the eleven hundred examples whose cost is computing — under two seconds
--- between them — ride along wherever there is room. The seconds beside each
--- group below are what it cost on its own, from
+-- The lane column is a packing decision taken from measurement, except where
+-- 'suiteColocations' below holds a group to another group's lane for safety.
+-- Serially the suite spends 397 of its 399 seconds inside fifteen groups that
+-- are waiting on a real deadline, so those fifteen are spread across the five
+-- lanes until no lane holds much more than a fifth of them, and the eleven
+-- hundred examples whose cost is computing — under two seconds between them —
+-- ride along wherever there is room. The seconds beside each group below are
+-- what it cost on its own, from
 --
 -- > cabal run kanban-test -- --print-slow-items=2000
 --
 -- which is how to check the packing again after a group's cost moves. Those
 -- measurements predate "Spec.Repository.Lease", whose 1.7 seconds are small
--- enough to ride along anywhere on cost alone — but it is the one group here
--- placed for what it must /not/ overlap with rather than for balance. It
--- starts suite processes of its own, and "Spec.Agent.Usage" asserts that a
--- process it swept is gone by the time a call returned; run beside that, the
--- lease group raised the rate at which those sweeps were observed late from
--- roughly one full run in six to four in seven. In the same lane the two are
--- serialised and cannot overlap at all.
+-- enough to ride along anywhere on cost alone; it sits in @UsageLane@ for the
+-- reason 'suiteColocations' states rather than for its cost.
 suiteGroups :: [SuiteGroup]
 suiteGroups =
   [ SuiteGroup "Spec.Agent.ManagedProcess.Lifecycle" LifecycleLane ManagedProcess.lifecycleSpec, -- 53.8s
@@ -169,5 +177,32 @@ suiteGroups =
     SuiteGroup "Spec.Design.Witnesses" UsageLane DesignWitnesses.spec,
     SuiteGroup "Spec.UI.Search" PingLane Search.spec,
     SuiteGroup "Spec.Agent.Ping" PingLane Ping.spec, -- 46.1s
-    SuiteGroup "Spec.Agent.Preflight" SupervisionLane Preflight.spec -- 5.8s
+    SuiteGroup "Spec.Agent.Preflight" SupervisionLane Preflight.spec, -- 5.8s
+    SuiteGroup "Spec.Suite.Assignment" PingLane (Assignment.spec suiteGroups suiteColocations)
+  ]
+
+-- | The pairs of groups above that this assignment is not free to separate.
+--
+-- Each entry is the only statement of its pair anywhere: the lane comment
+-- above and "Spec.Support.Lanes" both point here rather than repeat it, and
+-- @Spec.Support.Lanes.checkAssignment@ refuses to start the suite if an
+-- assignment separates a pair or stops resolving one of its names. Adding a
+-- group is still a cost decision; moving a group named here is not, and that
+-- is enforced now rather than remembered.
+--
+-- The reason below is printed verbatim by that refusal, so it carries the
+-- measurement rather than a pointer to it.
+suiteColocations :: [Colocation]
+suiteColocations =
+  [ Colocation
+      { colocationFirst = "Spec.Agent.Usage",
+        colocationSecond = "Spec.Repository.Lease",
+        colocationReason =
+          "Spec.Repository.Lease starts suite processes of its own, and Spec.Agent.Usage \
+          \asserts that a process it swept is gone by the time a call returned. Run in \
+          \different lanes the two overlap, and doing so raised the rate at which those \
+          \sweeps were observed late from roughly one full run in six to four in seven. \
+          \In one lane they are serialised and cannot overlap at all. Separating them \
+          \again needs that measurement repeated, not a cheaper packing."
+      }
   ]
