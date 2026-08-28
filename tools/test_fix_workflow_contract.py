@@ -167,6 +167,14 @@ REQUIRED_PHRASES = {
         "incorporating that base branch's\n   current tip. This branch reads "
         "no check state, which is why it precedes the\n   rollup test below."
     ),
+    "the-scratch-file-lives-outside-the-checkout": (
+        "`$ROLLUP` is a path OUTSIDE the checkout — "
+        "`ROLLUP=\"$(mktemp -t kanban-rollup)\"` — and it is removed when you "
+        "are done with it."
+    ),
+    "nothing-may-be-left-in-the-working-tree": (
+        "Nothing this workflow does may leave a file in the working tree"
+    ),
     "a-rollup-entry-is-not-a-check": (
         "**A rollup entry is not the same thing as a CHECK.** GitHub returns "
         "every context on the commit, including ones a later run superseded, "
@@ -375,6 +383,8 @@ FIX_ONLY_REQUIREMENTS = (
     "an-undedupable-entry-fails-closed",
     "a-superseded-failure-is-a-real-state-here",
     "the-decoders-dedup-key-and-recency-rule-are-restated",
+    "the-scratch-file-lives-outside-the-checkout",
+    "nothing-may-be-left-in-the-working-tree",
     "a-rollup-entry-is-not-a-check",
     "a-believed-flaky-failure-is-reported-not-retried",
     "no-rerun-command-no-loop-no-just-once",
@@ -674,6 +684,73 @@ class OriginBrandGateTests(unittest.TestCase):
             "PR body has no valid pr-origin marker",
         ):
             self.assertIn(rejection, flow, f"originFromBody no longer rejects: {rejection}")
+
+
+class WorkingTreeHygieneTests(unittest.TestCase):
+    """No packaged asset may write into the repository being worked on.
+
+    CLAUDE.md's Hygiene section forbids scratch files in the tree, and this
+    repository has two mechanisms that make one actively harmful:
+    `tools/drain_prs.py` must relocate untracked files before a fast-forward,
+    and this workflow's own reused-worktree rule tells an agent to PRESERVE
+    untracked content it finds -- so an artifact left by a diagnosis could be
+    folded into a later focused commit.
+    """
+
+    # A shell redirect, as distinct from the `>` that closes a `<placeholder>`:
+    # the operator is preceded by whitespace, which `<pr> -R` is not.
+    REDIRECT_RE = re.compile(r"(?<=\s)>>?\s*(?P<target>\S+)")
+
+    def _redirect_targets(self, text: str) -> list[tuple[str, str]]:
+        found = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            for match in self.REDIRECT_RE.finditer(stripped):
+                target = match.group("target")
+                if target.startswith(("&", "/dev/null")):
+                    continue
+                found.append((stripped, target))
+        return found
+
+    def test_no_redirect_targets_a_relative_path(self):
+        for path in FIX_ASSETS:
+            for line, target in self._redirect_targets(read(path)):
+                self.assertTrue(
+                    target.startswith(('"$', "$", '"/', "/")),
+                    f"{path} redirects into the working tree: {line!r}",
+                )
+
+    def test_the_redirect_detector_finds_the_one_redirect_that_exists(self):
+        # Non-vacuous anchor: a detector that matched nothing would make the
+        # rule above pass on an asset that redirected anywhere it liked.
+        for path in FIX_ASSETS:
+            targets = [t for _, t in self._redirect_targets(read(path))]
+            self.assertIn('"$ROLLUP"', targets, path)
+
+    def test_the_scratch_path_is_made_with_mktemp(self):
+        for path in FIX_ASSETS:
+            self.assertIn("mktemp -t kanban-rollup", read(path), path)
+
+    def test_no_other_packaged_asset_redirects_into_the_tree(self):
+        # Non-vacuous control: this rule is measured against every rendered
+        # bundle asset, so a rule that passed only because `fix` was the only
+        # file examined would fail here instead.
+        roots = (
+            REPO_ROOT / "claude-plugin/plugins/kanban/commands",
+            REPO_ROOT / "codex-plugin/plugins/kanban/skills",
+        )
+        examined = 0
+        for root in roots:
+            for asset in sorted(root.rglob("*.md")):
+                examined += 1
+                for line, target in self._redirect_targets(
+                    asset.read_text(encoding="utf-8")
+                ):
+                    self.assertTrue(
+                        target.startswith(('"$', "$", '"/', "/")),
+                        f"{asset} redirects into the working tree: {line!r}",
+                    )
+        self.assertGreaterEqual(examined, 20, "no bundle assets were examined")
 
 
 class ContextDeduplicationTests(unittest.TestCase):

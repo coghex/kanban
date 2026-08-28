@@ -557,8 +557,10 @@ DRAIN_PRS_SURFACE_EXPECTED_COMMANDS = {
 
 # The approved-pull-request obstacle clearer, pinned like the rendered pairs
 # above but with one deliberate asymmetry rather than one shared set. `gh`
-# reads the pull request, its run's jobs, and requests the single rerun;
-# `git` selects the worktree and resolves the repository root; `python3` runs
+# reads the pull request, its check rollup, and its origin marker -- it never
+# reruns a check, which tools/drain_prs.py owns and this workflow forbids
+# outright; `git` selects the worktree and resolves the repository root;
+# `python3` runs
 # the canonical coordinator. The Codex asset additionally reaches `find` and
 # `head` because it must locate that coordinator under $CODEX_HOME, where the
 # Claude asset resolves it through ${CLAUDE_PLUGIN_ROOT} and needs neither.
