@@ -96,8 +96,8 @@ data GhRecordLock = GhRecordLock
     -- recorded member identities remain the whole of that. What it buys is a
     -- message that can say which board left a group behind.
     ghRecordOwner :: Maybe ProcessIdentity,
-    -- | The groups this record already held when this process first reclaimed
-    -- it, by pgid.
+    -- | The groups this record still holds that this process inherited, by
+    -- pgid.
     --
     -- The one signal that separates an entry this board wrote from one it
     -- inherited, and deliberately not owner presence: this board's own entries
@@ -107,8 +107,21 @@ data GhRecordLock = GhRecordLock
     -- process that is no longer running — and anything appearing after that,
     -- in this process, is this board's own.
     --
+    -- Settled at that first reclaim and emptied when the record carrying those
+    -- entries is durably gone, never in between. A pgid is not a stable
+    -- identity: once an inherited entry has been confirmed gone and removed
+    -- from the record, the operating system may reissue its pgid to a @gh@
+    -- this board starts, and a set still holding the number would describe
+    -- that new entry as a predecessor's. Retiring the claim with the record is
+    -- what keeps this about /which board wrote an entry/ rather than about
+    -- which integer it happens to carry.
+    --
     -- 'Nothing' until that first reclaim, which is why it is an 'IORef' and
     -- not a field settled at construction: the record is not read until then.
+    -- An empty set is a settled answer rather than that state — it says
+    -- nothing inherited is outstanding — so a later read must not take it as
+    -- licence to freeze the set again over entries this board has since
+    -- written.
     ghRecordInherited :: IORef (Maybe (Set Int))
   }
 
@@ -424,6 +437,11 @@ reclaimRecordedGhGroups guard repository = do
           case cleared of
             Left message -> refuse message
             Right () -> do
+              -- Only here, and only once the removal reported success. An
+              -- entry a failed removal left on disk is still an inherited
+              -- entry the next reclaim reads, and giving up the claim over it
+              -- would hand a predecessor's leftover this board's name.
+              retireInherited guard
               clearCleanupFailure guard
               pure (Right ())
         message : _ -> refuse message
@@ -446,12 +464,13 @@ reclaimRecordedGhGroups guard repository = do
 -- | Records which of a repository's entries this process inherited, the first
 -- time it reads the record, and answers that question afterwards.
 --
--- Written once and only once: a later read of the same record can contain
--- entries this board wrote, and letting the answer move would reclassify its
--- own leftovers as a predecessor's. 'atomicModifyIORef'' keeps the first
--- writer's set even though every caller already holds the record lock, because
--- what it must be is decided once, not decided under whichever lock happens to
--- be held.
+-- Settled once and never derived a second time: a later read of the same
+-- record can contain entries this board wrote, and taking the answer again
+-- would reclassify its own leftovers as a predecessor's.
+-- 'atomicModifyIORef'' keeps the first writer's set even though every caller
+-- already holds the record lock, because what it must be is decided once, not
+-- decided under whichever lock happens to be held. 'retireInherited' is the
+-- only thing that moves it afterwards, and all it can do is empty it.
 rememberInherited :: GhFetchGuard -> [OwnedProcessGroup] -> IO (Set Int)
 rememberInherited guard groups =
   atomicModifyIORef' guard.ghGuardRecordLock.ghRecordInherited $ \remembered ->
@@ -461,12 +480,40 @@ rememberInherited guard groups =
         let first = Set.fromList (map ownedProcessGroupPid groups)
          in (Just first, first)
 
+-- | Gives up the inherited claim, because the record that carried it is gone.
+--
+-- Reached only on the one path that clears the record, and only once the
+-- removal reported success. Every inherited entry was in that file, so with
+-- the file gone this process holds no outstanding leftover of a predecessor's
+-- and every entry a later read finds is one it wrote itself — whatever pgid
+-- the operating system reissued in the meantime, and whether or not the entry
+-- carries members, a census, or an owner to tell it apart by. That is the
+-- reason the claim is retired rather than the entries remembered: an entry
+-- 'registerSpawnedGh' has just written can be indistinguishable from the one
+-- that vacated its pgid, both being @OwnedProcessGroup pgid [] False owner@
+-- for the same @owner@, so only /when/ it appeared can separate them.
+--
+-- Emptied rather than reset to 'Nothing', which would let the next read freeze
+-- the set again over this board's own entries. That is the question
+-- 'rememberInherited' settles once, so this answers it rather than reopening
+-- it.
+retireInherited :: GhFetchGuard -> IO ()
+retireInherited guard =
+  atomicModifyIORef' guard.ghGuardRecordLock.ghRecordInherited (const (Just Set.empty, ()))
+
 -- | How a message should describe one entry's provenance.
 --
 -- Three spellings for three genuinely different facts, and the missing-owner
 -- one is not a degraded version of the second: it is what an entry written
 -- before owner metadata existed truthfully supports, and inventing a board for
 -- it would be worse than saying less.
+--
+-- The pgid tested below is only ever asked about against a set that still
+-- holds outstanding inherited entries: 'retireInherited' drops the numbers as
+-- the record carrying them is cleared, so a reissued pgid is not a member and
+-- the first branch answers for it. That set alone decides provenance;
+-- 'ownedProcessGroupOwner' is read beneath it, once an entry is already known
+-- to be a predecessor's, and never to establish that it is one.
 entryOrigin :: Set Int -> OwnedProcessGroup -> Text
 entryOrigin inherited group
   | not (Set.member group.ownedProcessGroupPid inherited) = "a gh this board started"

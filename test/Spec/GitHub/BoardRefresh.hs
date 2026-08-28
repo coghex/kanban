@@ -43,7 +43,7 @@ import Spec.Support.Board
     withFakeGh
   )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
-import Spec.Support.Expect (countOccurrences, shouldMention, shouldNotMention)
+import Spec.Support.Expect (countOccurrences, requireJust, shouldMention, shouldNotMention)
 import Spec.Support.Json
   ( emptyAssigneesJson,
     emptyClosingIssuesJson,
@@ -1130,6 +1130,41 @@ spec = do
             refusal refused `shouldMention` "a gh this board started"
             refusal refused `shouldNotMention` "previous Kanban board"
 
+    -- The transition between those two answers, and the reason it cannot rest
+    -- on a remembered pgid. Once the inherited entry is confirmed gone and its
+    -- record cleared, the operating system is free to reissue that pgid to a
+    -- gh this board starts, and describing that one as a predecessor's would
+    -- name a board that never wrote it.
+    it "describes an entry it wrote at a reissued pgid as this board's" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        -- Started before the pgid is vacated, and still running when it is, so
+        -- the reissued number is provably not this member's own.
+        withSurvivingGroupLeader $ \memberPid ->
+          withVacatedGroupLeader $ \reissuedPgid ->
+            withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+              let repository = Repository temporaryRoot "coghex" "kanban"
+              -- The predecessor left the entry 'registerSpawnedGh' writes: no
+              -- members, no census, and — like this board's own, whose lock
+              -- carries no identity to stamp — no owner. Nothing in it tells
+              -- it apart from the entry recorded below, so only when each
+              -- appeared can.
+              writeGhGroupRecord repository [OwnedProcessGroup reissuedPgid [] False Nothing]
+                `shouldReturn` Right ()
+              guard <- newGhRecordLock >>= newGhFetchGuard
+              -- The first read settles what was inherited; the group is empty,
+              -- so that entry is accounted for and the record goes with it.
+              reclaimRecordedGhGroups guard repository `shouldReturn` Right ()
+              (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
+              member <- liveIdentity memberPid
+              -- This board now records a gh of its own at the pgid the cleared
+              -- entry used to name. Its member is alive and outside that
+              -- group, so the reclaim can only watch it and says whose it is.
+              recordGhGroup guard repository (OwnedProcessGroup reissuedPgid [member] True Nothing)
+                `shouldReturn` Right ()
+              refused <- reclaimRecordedGhGroups guard repository
+              refusal refused `shouldMention` "a gh this board started"
+              refusal refused `shouldNotMention` "previous Kanban board"
+
     -- Owner data is informational, and this is what that has to mean: a live
     -- process named as an entry's owner is not signalled, not censused, and
     -- not what keeps the entry alive. The record clears because the group is
@@ -1178,6 +1213,17 @@ departedIn processId =
       processIdentityStartedAt = "Thu Jan 1 00:00:00 1970",
       processIdentityCommand = "gh api graphql"
     }
+
+-- | A running process's own recorded identity, start time included, so a
+-- record naming it survives 'matchingIdentities' the way one naming a departed
+-- process cannot.
+liveIdentity :: Int -> IO ProcessIdentity
+liveIdentity processId = do
+  snapshot <- readProcessSnapshot
+  case snapshot of
+    Left message -> fail ("could not snapshot processes: " <> Data.Text.unpack message)
+    Right identities ->
+      requireJust ("process " <> show processId <> " was gone before its identity could be read") (identityForPid processId identities)
 
 refusal :: Either Data.Text.Text () -> Data.Text.Text
 refusal = either id (const "")
