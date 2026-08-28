@@ -1201,14 +1201,44 @@ class SinglePrRunLockTests(SinglePrCliFixture):
         self.assertTrue(result["dry_run"])
         self.assertEqual(self.fake.calls("gh"), [])
 
-    def test_the_lock_file_still_holds_exactly_the_bare_pid(self):
+    def test_the_lock_file_holds_exactly_the_published_holder_document(self):
         # drain_prs_service.lock_pid() and
-        # install_drainer.repository_drainer_running() both read it that way.
+        # install_drainer.repository_drainer_running() both decode it, through
+        # the one function that also writes it.
         self.hold(mode="single-pr", pull_request=42)
 
         self.assertEqual(
-            self.lock_path.read_text(encoding="utf-8"), str(os.getpid())
+            self.lock_path.read_bytes(),
+            drain_prs_service.encode_lock_holder(os.getpid()),
         )
+        self.assertEqual(drain_prs_service.lock_pid(self.main), os.getpid())
+
+    def test_a_controller_predating_the_relocation_arc_reads_no_holder(self):
+        """What the document's shape is for, asked of the shape itself.
+
+        A copy of the controller predating #367 parses this file with a bare
+        `int()` and signals whatever PID it gets, from an installation a
+        relocation may since have sealed. It gets nothing from what a drainer
+        publishes now, which is the whole of the bound;
+        `tools/test_drainer_relocation.py` asks it of the sequence end to end.
+        """
+        self.hold(mode="polling")
+
+        with self.assertRaises(ValueError):
+            int(self.lock_path.read_text(encoding="utf-8").strip())
+
+    def test_a_bare_pid_from_an_older_drainer_is_still_read(self):
+        """The direction that stays open, and why it must.
+
+        A drainer that was already running when these modules were upgraded
+        published the bare integer and is genuinely live. A reader that
+        refused it would let an install, a relocation or a takeover proceed
+        over a running drainer, so readers widen while the writer does not.
+        `RefusalTests` in `tools/test_drainer_relocation.py` asks the same of
+        the consumer that refuses those runs.
+        """
+        self.lock_path.write_text(str(os.getpid()), encoding="utf-8")
+
         self.assertEqual(drain_prs_service.lock_pid(self.main), os.getpid())
 
     def test_a_stale_owner_sidecar_is_not_believed(self):

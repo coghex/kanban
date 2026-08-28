@@ -1159,10 +1159,59 @@ def service_backend() -> service_manager.ServiceManagerBackend:
         raise ServiceError(str(exc)) from exc
 
 
+def encode_lock_holder(pid: int) -> bytes:
+    """What a drainer publishes into its checkout run lock.
+
+    A JSON document rather than the bare integer this file once wrote, and the
+    shape is the whole point of it. A copy of this controller predating #367
+    reads that integer with `int()` and acts on what it gets: bound to an
+    installation a relocation has since sealed, its `stop_service` still reads
+    the checkout — which no relocation moves and no seal covers — classifies
+    whatever drainer it finds there as `external`, and signals it. Nothing
+    inside those bytes can be changed, so the only thing that bounds them is
+    the one input they read. A document `int()` cannot parse is decoded by
+    such a copy as no drainer at all, which sends it down the "already
+    stopped" branch that touches nothing.
+
+    One spelling, here, because `decode_lock_holder` below has to be able to
+    read back exactly what this writes.
+    """
+    return json.dumps({"pid": pid}, sort_keys=True).encode("utf-8")
+
+
+def decode_lock_holder(text: str) -> int | None:
+    """The PID a checkout's run lock names, from either shape one can hold.
+
+    Both, deliberately and in one direction only. A drainer that was already
+    running when this controller was upgraded published the bare integer and
+    is genuinely live, so a reader that refused it would let an install, a
+    relocation or a takeover proceed over a running drainer — the opposite of
+    the bound `encode_lock_holder` exists for. Readers widen; the writer does
+    not.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("{"):
+        try:
+            document = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        held = document.get("pid") if isinstance(document, dict) else None
+        # `bool` is an `int`, and a lock naming `true` names no process.
+        if not isinstance(held, int) or isinstance(held, bool):
+            return None
+        return held
+    try:
+        return int(stripped)
+    except ValueError:
+        return None
+
+
 def lock_pid(repo_path: Path) -> int | None:
     path = repo_path / ".git" / "drain_prs.lock"
     try:
-        return int(path.read_text(encoding="utf-8").strip())
+        return decode_lock_holder(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, ValueError):
         return None
 

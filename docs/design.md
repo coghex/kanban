@@ -2720,10 +2720,17 @@ above are unchanged, and persistence the user switched off is not a failure.
   or the repository's on-disk definition, and the definition the manager holds
   stays the relocated one. Every transition that reaches a closed path raises
   and so returns non-success; a `stop` predating #367 reaches none, since it
-  reads a snapshot that the sealed runtime root makes `stopped` and returns
-  without touching a protected artifact or the manager, while a stop that would
-  signal or write is refused like the rest; and the `run` a service manager
-  launches catches its own startup refusals and
+  reads a snapshot that reports nothing running and returns without touching a
+  protected artifact or the manager. That snapshot has two inputs and the seals
+  cover only one: the status file is under the sealed runtime root, while the
+  checkout's own `.git/drain_prs.lock` is moved and closed by nothing, and a
+  live holder there alone classifies the state `external` — a branch that
+  signals the PID it names with `os.kill`, asks the service manager for
+  nothing, and is reachable by a drainer started from that checkout after the
+  relocation finished. What bounds that branch is the lock document itself:
+  a drainer publishes its PID in a shape such a copy's bare `int()` cannot
+  parse, so it finds no holder and delivers no signal. And the `run` a service
+  manager launches catches its own startup refusals and
   answers with an exit code, which a controller from this change onward makes a
   failing one so that neither the manager nor Kanban reading the job through it
   is told a drainer ran, and which one predating it cannot be made to change,

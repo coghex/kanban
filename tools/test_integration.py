@@ -1675,7 +1675,9 @@ class LockFileIntegrityTests(ProcessPrFixture):
     def test_failed_second_acquisition_leaves_the_holder_pid_intact(self):
         self._acquire()
         recorded = self.lock_path.read_bytes()
-        self.assertEqual(recorded, str(os.getpid()).encode())
+        self.assertEqual(
+            recorded, drain_prs_service.encode_lock_holder(os.getpid())
+        )
 
         with self.assertRaises(drain_prs.DrainError) as caught:
             drain_prs.acquire_lock(self.ctx.path)
@@ -1683,23 +1685,30 @@ class LockFileIntegrityTests(ProcessPrFixture):
         self.assertIn("already running", str(caught.exception))
         self.assertEqual(self.lock_path.read_bytes(), recorded)
 
-    def test_first_run_creates_the_file_holding_exactly_the_pid(self):
+    def test_first_run_creates_the_file_holding_exactly_the_document(self):
         self.assertFalse(self.lock_path.exists())
 
         self._acquire()
 
         self.assertEqual(
-            self.lock_path.read_text(encoding="utf-8"), str(os.getpid())
+            self.lock_path.read_bytes(),
+            drain_prs_service.encode_lock_holder(os.getpid()),
         )
+        self.assertEqual(drain_prs_service.lock_pid(self.ctx.path), os.getpid())
 
-    def test_longer_stale_contents_are_replaced_by_exactly_the_pid(self):
+    def test_longer_stale_contents_are_replaced_by_exactly_that_document(self):
+        # A bare integer is what a drainer predating this arc left here, and
+        # it is longer than the document that replaces it, so this is also
+        # where the truncation is asked about across the two shapes.
         self.lock_path.write_text("9" * 200, encoding="utf-8")
 
         self._acquire()
 
         self.assertEqual(
-            self.lock_path.read_text(encoding="utf-8"), str(os.getpid())
+            self.lock_path.read_bytes(),
+            drain_prs_service.encode_lock_holder(os.getpid()),
         )
+        self.assertEqual(drain_prs_service.lock_pid(self.ctx.path), os.getpid())
 
 
 class WorktreeFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
