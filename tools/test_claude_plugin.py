@@ -24,12 +24,14 @@ post-#239 tracked Codex skills; issue #328 completed the report side with
 /draft-report and /note-problem; and issues #393, #410, #427, #430, #462, and
 #511 vendored the rendered /triage roadmap, its /retriage refresh, the
 /push-docs documentation-landing workflow, the /backlog-review backlog audit,
-the /project-review history audit, and the /drain-prs drainer control surface.
+the /project-review history audit, the /drain-prs drainer control surface, and
+the /fix approved-pull-request workflow.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all twenty-one); HASKELL_PARITY_COMMAND_NAMES is the
+commands directory (all twenty-two); HASKELL_PARITY_COMMAND_NAMES is the
 strictly smaller set Kanban's own Haskell code spawns by name (the five
 above). The drafting, document, roadmap, documentation-landing,
-backlog-audit, history-audit, and drainer-control workflows
+backlog-audit, history-audit, drainer-control, and approved-pull-request
+workflows
 are user- or daemon-invoked and are deliberately excluded from that parity
 pinning; see
 docs/drafting-workflow-contract.md and docs/document-workflow-contract.md,

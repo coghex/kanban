@@ -24,9 +24,11 @@ vendored none, and `FixtureIsNotShippedTests` still holds `fixture-command` to
 that. Since VEND-1 (issue #393) the registry also holds `triage`, since
 issue #410 `push-docs`, since VEND-2 (issue #427) `retriage`, since
 VEND-3 (issue #430) `backlog-review`, since VEND-4 (issue #462)
-`project-review`, and since VEND-5 (issue #511) `drain-prs`, all six of which do
-render into both bundles, so the same class pins the shipped sets at twenty-one
-and twenty and pins which registered source belongs to which kind.
+`project-review`, since VEND-5 (issue #511) `drain-prs`, and -- authored
+directly against this mechanism rather than vendored from a personal copy --
+`fix`, all seven of which do render into both bundles, so the same class pins
+the shipped sets at twenty-two and twenty-one and pins which registered source
+belongs to which kind.
 """
 
 from __future__ import annotations

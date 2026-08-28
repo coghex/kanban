@@ -491,5 +491,132 @@ class RepairDelegationTests(unittest.TestCase):
             self.assertIn("no retry loops", read(path))
 
 
+# The spelled-out counts each bundle README states about its own inventory, and
+# the number word for each. Prose that COUNTS a list is the failure mode
+# CLAUDE.md's quality gates name explicitly -- "a module docstring saying 'the
+# eleven documents' sat seventy lines above the tuple it described, and stayed
+# wrong through several changes that grew it" -- and adding `fix` reproduced it
+# across seven sites in two READMEs before a review caught them. This turns the
+# whole-file audit into a gate.
+NUMBER_WORDS = {
+    15: "fifteen",
+    16: "sixteen",
+    17: "seventeen",
+    18: "eighteen",
+    19: "nineteen",
+    20: "twenty",
+    21: "twenty-one",
+    22: "twenty-two",
+    23: "twenty-three",
+    24: "twenty-four",
+}
+
+BUNDLE_READMES = {
+    "claude": (
+        "claude-plugin/README.md",
+        "claude-plugin/plugins/kanban/commands",
+    ),
+    "codex": (
+        "codex-plugin/README.md",
+        "codex-plugin/plugins/kanban/skills",
+    ),
+}
+
+# The workflows Kanban's own Haskell spawns, which every README states as the
+# complement of its user-invoked count. Restated here rather than imported,
+# because the plugin modules that own it are not importable under this
+# module's own load path.
+HASKELL_SPAWNED = {"solve", "pr-review", "pr-rereview", "pr-revise", "repair"}
+
+
+def shipped_workflow_names(prefix: str) -> set[str]:
+    """Every workflow the tracked bundle at `prefix` actually ships."""
+    import subprocess
+
+    listed = subprocess.run(
+        ["git", "ls-files", prefix],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    names = set()
+    for path in listed:
+        tail = path[len(prefix) :].lstrip("/")
+        if not tail:
+            continue
+        # Claude ships commands/<name>.md; Codex ships skills/<name>/SKILL.md.
+        names.add(tail.split("/")[0].removesuffix(".md"))
+    return names
+
+
+class BundleReadmeInventoryTests(unittest.TestCase):
+    """Each bundle README's counting prose matches what the bundle ships."""
+
+    def test_shipped_names_are_recoverable_and_nonempty(self):
+        # Non-vacuous anchor: a helper that recovered nothing would make every
+        # assertion below pass while checking nothing at all.
+        for brand, (_, prefix) in BUNDLE_READMES.items():
+            names = shipped_workflow_names(prefix)
+            self.assertGreaterEqual(len(names), 20, brand)
+            self.assertIn("fix", names, brand)
+            self.assertTrue(HASKELL_SPAWNED < names, brand)
+
+    def test_every_readme_names_every_workflow_it_ships(self):
+        missing = []
+        for brand, (readme, prefix) in BUNDLE_READMES.items():
+            text = (REPO_ROOT / readme).read_text(encoding="utf-8")
+            for name in sorted(shipped_workflow_names(prefix)):
+                if name not in text:
+                    missing.append(f"{readme}: does not name {name!r}")
+        self.assertEqual(missing, [], "\n".join(missing))
+
+    def test_every_readme_total_count_matches_what_is_shipped(self):
+        for brand, (readme, prefix) in BUNDLE_READMES.items():
+            total = len(shipped_workflow_names(prefix))
+            word = NUMBER_WORDS[total]
+            text = (REPO_ROOT / readme).read_text(encoding="utf-8")
+            # Every "<word> ... workflows/commands/skills" claim must be the
+            # real total, and no OTHER number word may be used for it.
+            for candidate, other in NUMBER_WORDS.items():
+                if candidate == total:
+                    continue
+                for noun in ("workflow", "workflows", "commands", "skills"):
+                    self.assertNotIn(
+                        f"{other} packaged {noun}",
+                        text,
+                        f"{readme} states {other} packaged {noun}, but the "
+                        f"bundle ships {total}",
+                    )
+            self.assertIn(
+                f"{word} packaged",
+                text,
+                f"{readme} never states its real packaged total ({word})",
+            )
+
+    def test_every_readme_user_invoked_count_is_the_complement(self):
+        for brand, (readme, prefix) in BUNDLE_READMES.items():
+            shipped = shipped_workflow_names(prefix)
+            user_invoked = len(shipped - HASKELL_SPAWNED)
+            word = NUMBER_WORDS[user_invoked]
+            text = (REPO_ROOT / readme).read_text(encoding="utf-8")
+            self.assertIn(
+                f"The other {word} are",
+                text,
+                f"{readme} does not state {word} user-invoked workflows "
+                f"({len(shipped)} shipped minus {len(HASKELL_SPAWNED)} spawned)",
+            )
+            for candidate, other in NUMBER_WORDS.items():
+                if candidate == user_invoked:
+                    continue
+                self.assertNotIn(
+                    f"The other {other} are",
+                    text,
+                    f"{readme} states {other} user-invoked workflows, but the "
+                    f"complement is {user_invoked}",
+                )
+
+
+
 if __name__ == "__main__":
     unittest.main()

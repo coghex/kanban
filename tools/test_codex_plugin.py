@@ -20,9 +20,10 @@ issue; issue #328 added $note-problem while transposing /draft-report, closing
 the last Codex-only document gap; and issues #393, #410, #427, #430, #462, and
 #511 vendored the rendered $triage roadmap, its $retriage refresh, the
 $push-docs documentation-landing workflow, the $backlog-review backlog audit,
-the $project-review history audit, and the $drain-prs drainer control surface.
+the $project-review history audit, the $drain-prs drainer control surface, and
+the $fix approved-pull-request workflow.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all twenty); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
+(all twenty-one); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
 own Haskell code spawns by name (the five above). Every later set is user- or
 daemon-invoked and deliberately excluded from that parity pinning; the
 breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
@@ -1890,7 +1891,7 @@ class ManifestListingParityTests(unittest.TestCase):
     without describing it fails here.
 
     Parity is per field, not pooled: an installation that reads only the
-    short description must see the same twenty as one that reads only the
+    short description must see the same twenty-one as one that reads only the
     keywords. Non-workflow metadata -- the `kanban` keyword, the display
     name, developer, category, and capabilities -- is not a listing and is
     left alone.
