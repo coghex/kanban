@@ -41,7 +41,8 @@ breaks the pipeline for every issue filed from it:
   `claude-plugin/plugins/kanban/commands/triage.md` partitions the queue on the
   exact `bug` label, `src/Kanban/Domain.hs` recognizes a tracker by `epic`, and
   the board filters a release by `release`. `EXPECTED_LABELS` is the one place
-  that mapping is written down.
+  that mapping is written down, and `EXPECTED_CHOOSER_NAMES` beside it is the
+  one place the chooser entry each template is offered under is written down.
 * `config.yml` decides whether the chooser offers a blank issue at all, and
   carries the single contact link that routes a security report privately. It
   is read here with a parser written out in this module, for the reason
@@ -124,6 +125,20 @@ RELEASE_LABEL = "release"
 BUG_LABEL = "bug"
 ENHANCEMENT_LABEL = "enhancement"
 QUESTION_LABEL = "question"
+
+# The chooser entry each template is offered under. Issue #537's requirement 1
+# names all of them, so the entry is part of the contract rather than editorial:
+# `Bug report` is what an outside reporter looks for first, and the `Maintainer`
+# prefix is what tells them the other three are not theirs to fill in. Asserted
+# exactly, because uniqueness alone cannot see a rename.
+EXPECTED_CHOOSER_NAMES = {
+    BUG_TEMPLATE.name: "Bug report",
+    FEATURE_TEMPLATE.name: "Feature or improvement",
+    SUPPORT_TEMPLATE.name: "Support question",
+    ORDINARY_TEMPLATE.name: "Maintainer issue specification",
+    EPIC_TEMPLATE.name: "Maintainer epic",
+    RELEASE_TEMPLATE.name: "Maintainer release",
+}
 
 # The complete chooser-entry-to-label mapping, asserted exactly rather than by
 # membership: a label a template must not carry is as much a part of this as
@@ -419,10 +434,10 @@ class IssueTemplateTests(unittest.TestCase):
                     )
 
     def test_the_chooser_entries_are_distinct(self):
-        # Two entries reading the same is the failure a chooser cannot show its
-        # way out of: the author picks one at random. With intake and
-        # maintainer entries side by side this decides who files what, so it
-        # covers `about` as well as `name`.
+        # Two entries reading the same is the failure a chooser cannot show
+        # its way out of: the author picks one at random. The rule above pins
+        # each `name` exactly, so this one is load bearing for `about`, which
+        # requirement 1 requires to be distinct without naming its wording.
         for key in ("name", "about"):
             with self.subTest(field=key):
                 values = [
@@ -430,6 +445,44 @@ class IssueTemplateTests(unittest.TestCase):
                     for text in self.templates.values()
                 ]
                 self.assertEqual(len(set(values)), len(values), key)
+
+    def test_every_template_is_offered_under_its_declared_chooser_name(self):
+        # The exact entry, not merely a unique one: renaming `Bug report` to
+        # anything else still reads as distinct, and the chooser is the whole
+        # interface an outside reporter has.
+        self.assertEqual(
+            sorted(EXPECTED_CHOOSER_NAMES),
+            sorted(path.name for path in ALL_TEMPLATES),
+            "EXPECTED_CHOOSER_NAMES names every template and nothing else",
+        )
+        for name, text in self.templates.items():
+            with self.subTest(template=name):
+                fields = parse_frontmatter(split_frontmatter(text)[0])
+                self.assertEqual(fields["name"], EXPECTED_CHOOSER_NAMES[name], name)
+
+    def test_a_renamed_chooser_entry_would_be_reported(self):
+        # The negative control for the rule above, over exactly what
+        # test_the_chooser_entries_are_distinct cannot see: a rename that stays
+        # unique.
+        planted = self.templates["bug_report.md"].replace(
+            "name: Bug report\n", "name: Something went wrong\n", 1
+        )
+        self.assertNotEqual(
+            planted, self.templates["bug_report.md"], "the chooser entry moved"
+        )
+        self.assertEqual(
+            len({
+                parse_frontmatter(split_frontmatter(candidate)[0])["name"]
+                for candidate in
+                list(self.templates.values())[:-1] + [planted]
+            }),
+            len(self.templates),
+            "the planted name is still unique, which is the point",
+        )
+        self.assertNotEqual(
+            parse_frontmatter(split_frontmatter(planted)[0])["name"],
+            EXPECTED_CHOOSER_NAMES["bug_report.md"],
+        )
 
     def test_every_template_carries_the_five_headings_in_order(self):
         # A subsequence rather than an equality: the epic template adds its
