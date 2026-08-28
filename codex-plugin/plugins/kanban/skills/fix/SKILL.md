@@ -278,12 +278,26 @@ gh run view <run-id> -R <owner/name> --log-failed
 ```
 
 **An infrastructure failure is one where no job that executed the pull
-request's code reported a failure.** Every failure in the run is a
-cancellation, a timeout, a runner or registry error, or an aggregator job
-reporting on a dependency that never ran — a job whose steps did not compile,
-lint, or test the pull request's tree. Concurrency-group eviction is the
-canonical case: a setup job is cancelled with no steps, the jobs needing it are
-skipped, and a summary job fails asserting they succeeded, having built nothing.
+request's code reported a failure.** That sentence is the whole test, and the
+examples below are subordinate to it: an example that turns out to have
+executed the tree is a REAL failure, whatever it is called.
+
+Every failure in such a run is a cancellation, a runner or registry error, or
+an aggregator job reporting on a dependency that never ran — a job whose steps
+did not compile, lint, or test the pull request's tree. Concurrency-group
+eviction is the canonical case: a setup job is cancelled with no steps, the
+jobs needing it are skipped, and a summary job fails asserting they succeeded,
+having built nothing.
+
+**A timeout is not automatically infrastructure**, and it is the one that will
+tempt you. A job that checked out the tree and then hung — an infinite loop, a
+deadlock, a performance regression that pushed a suite past its limit — timed
+out BECAUSE of the pull request's code, and rerunning it just spends the
+allowance to watch it hang again. Read the timing-out job's own steps before
+classifying it: a timeout counts as infrastructure only where the evidence
+shows no step had begun executing the tree — a runner that never picked the job
+up, a queue or image-pull timeout, a setup job that timed out before checkout.
+Anything past that point is a real failure and takes the fix path.
 
 **Everything else is a real failure**, including a test that failed on this
 pull request's own code, a compile or lint error, and a check that failed

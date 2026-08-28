@@ -1425,7 +1425,10 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
 - **Rerun authority, and its ceiling:** this is the one packaged workflow that
   may retry a red check. It may do so only when EVERY failed run is an
   infrastructure failure — no job that executed the pull request's code
-  reported a failure — and then only once per run, never twice. A failed
+  reported a failure — and then only once per run, never twice. That test
+  governs its own examples: a timeout in particular is infrastructure only
+  where no step had begun executing the tree, since a job that checked out
+  and then hung timed out because of the pull request's own code. A failed
   rollup entry that is not a GitHub Actions run at all (a `StatusContext`, or
   a `CheckRun` whose `detailsUrl` names no Actions run) fails closed: it is
   reported and never handed `gh run view` or `gh run rerun`. The rerun is of the WHOLE run, never `--failed`: that flag reruns only failed jobs, and a cancelled job is not a failed one, so on the cancellation-only run this branch is defined by it would spend the single allowance without rerunning anything. After the reruns the whole

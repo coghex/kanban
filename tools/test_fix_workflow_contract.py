@@ -254,10 +254,28 @@ REQUIRED_PHRASES = {
         "Decide by what executed, never by the check's name and never by how "
         "the\nfailure feels:"
     ),
+    "the-governing-test-outranks-its-examples": (
+        "That sentence is the whole test, and the\nexamples below are "
+        "subordinate to it: an example that turns out to have\nexecuted the "
+        "tree is a REAL failure, whatever it is called."
+    ),
     "the-eviction-signature-is-named": (
-        "Concurrency-group eviction is the\ncanonical case: a setup job is cancelled "
-        "with no steps, the jobs needing it are\nskipped, and a summary job fails "
-        "asserting they succeeded, having built nothing."
+        "Concurrency-group\neviction is the canonical case: a setup job is "
+        "cancelled with no steps, the\njobs needing it are skipped, and a "
+        "summary job fails asserting they succeeded,\nhaving built nothing."
+    ),
+    "a-timeout-is-not-automatically-infrastructure": (
+        "**A timeout is not automatically infrastructure**, and it is the one "
+        "that will\ntempt you."
+    ),
+    "a-timeout-after-checkout-is-the-code-failing": (
+        "A job that checked out the tree and then hung — an infinite loop, a\n"
+        "deadlock, a performance regression that pushed a suite past its limit "
+        "— timed\nout BECAUSE of the pull request's code"
+    ),
+    "a-timeout-is-infrastructure-only-before-the-tree-runs": (
+        "a timeout counts as infrastructure only where the evidence\nshows no "
+        "step had begun executing the tree"
     ),
     "a-flaky-failure-is-a-real-failure-here": (
         "A failure you\n"
@@ -455,6 +473,10 @@ FIX_ONLY_REQUIREMENTS = (
     "approval-modes-are-all-three-honoured",
     "infrastructure-failure-is-defined-by-what-executed",
     "the-eviction-signature-is-named",
+    "the-governing-test-outranks-its-examples",
+    "a-timeout-is-not-automatically-infrastructure",
+    "a-timeout-after-checkout-is-the-code-failing",
+    "a-timeout-is-infrastructure-only-before-the-tree-runs",
     "a-flaky-failure-is-a-real-failure-here",
     "the-rerun-is-the-whole-run-never-failed-only",
     "failed-only-would-silently-accomplish-nothing",
@@ -714,6 +736,42 @@ class MergeStateCoverageTests(unittest.TestCase):
             self.assertIn(
                 "a branch update cannot clear a branch-protection", text, path
             )
+
+
+class InfrastructureDefinitionTests(unittest.TestCase):
+    """The example list may never widen the governing test.
+
+    "No job that executed the pull request's code reported a failure" is the
+    rule; the categories beside it are illustrations. A bare "timeout" in that
+    list contradicted the rule outright -- a job that runs the suite and then
+    hangs times out BECAUSE of the code -- so the list is checked for
+    unqualified entries that would readmit a real failure.
+    """
+
+    def test_the_bare_category_list_no_longer_contains_timeout(self):
+        # The sentence that enumerates always-infrastructure categories must
+        # not name a timeout, because a timeout is only sometimes one.
+        for path in FIX_ASSETS:
+            text = read(path)
+            self.assertNotIn(
+                "is a\ncancellation, a timeout, a runner or registry error",
+                text,
+                f"{path} lists a bare timeout as always infrastructure",
+            )
+            self.assertIn(
+                "Every failure in such a run is a cancellation, a runner or "
+                "registry error, or",
+                text,
+                f"{path} no longer states the always-infrastructure categories",
+            )
+
+    def test_the_timeout_qualification_names_both_directions(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            # The unsafe direction, and the narrow safe one.
+            self.assertIn("timed\nout BECAUSE of the pull request's code", text, path)
+            self.assertIn("a runner that never picked the job\nup", text, path)
+
 
 
 class DurableCeilingTests(unittest.TestCase):
