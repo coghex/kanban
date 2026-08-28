@@ -26,9 +26,10 @@ created above it.
 
   Everything else fails closed rather than guessing. A check rollup that cannot
   be read completely — GitHub truncates its context list, or an entry will not
-  decode, both `ChecksUnknown` to Kanban — stops the run ahead of any branch
-  that would clear or mutate, since not seeing a failure is not the same as
-  there being none. A `BLOCKED` or `UNSTABLE` merge state is reported rather
+  decode, both `ChecksUnknown` to Kanban — stops the run ahead of every branch
+  that reads it, since not seeing a failure is not the same as there being
+  none. A merge conflict is decided without any check state and so precedes it,
+  and resolving one replaces the head that the checks then re-run against. A `BLOCKED` or `UNSTABLE` merge state is reported rather
   than "fixed" by a branch update that cannot clear it, and a still-running
   check stops the run rather than replacing an approved head mid-CI.
 

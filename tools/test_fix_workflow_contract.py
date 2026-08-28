@@ -746,6 +746,63 @@ class ReusedWorktreeSafetyTests(unittest.TestCase):
             )
 
 
+class RollupQueryTests(unittest.TestCase):
+    """The shipped GraphQL query must actually be able to run.
+
+    A query is a single quoted argument in a fenced command, so nothing between
+    authoring and execution would have caught an unbalanced brace: the renderer
+    copies it verbatim, and no test executed it. It shipped one closing brace
+    short, which would have made every non-conflict diagnosis fail at the first
+    call.
+    """
+
+    @staticmethod
+    def _query(text: str) -> str:
+        for line in text.splitlines():
+            if "gh api graphql" in line:
+                return line.split("-f query='", 1)[1].rsplit("'", 1)[0]
+        raise AssertionError("no gh api graphql line found")
+
+    def test_the_query_braces_balance(self):
+        for path in FIX_ASSETS:
+            query = self._query(read(path))
+            depth = 0
+            for index, char in enumerate(query):
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    self.assertGreaterEqual(
+                        depth, 0, f"{path}: closes before it opens at {index}"
+                    )
+            self.assertEqual(
+                depth,
+                0,
+                f"{path}: query ends at brace depth {depth}, not 0 "
+                f"({query.count('{')} open, {query.count('}')} close)",
+            )
+
+    def test_the_query_selects_every_field_the_dedup_rule_needs(self):
+        for path in FIX_ASSETS:
+            query = self._query(read(path))
+            for field in (
+                "totalCount",
+                "__typename",
+                "checkSuite{app{slug}}",
+                "creator{login}",
+                "startedAt",
+                "completedAt",
+                "createdAt",
+                "conclusion",
+                "state",
+            ):
+                self.assertIn(field, query, f"{path}: query omits {field}")
+
+    def test_both_assets_ship_the_same_query(self):
+        queries = {self._query(read(path)) for path in FIX_ASSETS}
+        self.assertEqual(len(queries), 1, "the two bundles ship different queries")
+
+
 class WorkingTreeHygieneTests(unittest.TestCase):
     """No packaged asset may write into the repository being worked on.
 
@@ -991,6 +1048,9 @@ class ContractDocumentationTests(unittest.TestCase):
         # The two properties that make this action different from repair.
         self.assertIn("approvedPullRequest", section)
         self.assertIn("MergeBehind", section)
+        # The precedence the contract states must be the one the assets use:
+        # conflict is decided without check state and precedes the rollup test.
+        self.assertIn("not ahead of everything that mutates", section)
         self.assertIn("MAX_CI_RERUN_ATTEMPTS", section)
         self.assertIn("never retries a red check", section)
         self.assertIn("`--self-review`", section)

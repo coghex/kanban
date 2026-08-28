@@ -1434,10 +1434,15 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   rollup that cannot be read completely, then any failed check, then a pending
   check, then `MergeBehind`, then any OTHER non-ready merge state, then nothing
   to fix.
-  The rollup branch fails closed ahead of everything that clears or mutates:
-  GitHub caps returned contexts and a context can fail to decode, both of
-  which Kanban models as `ChecksUnknown` — neither ready nor pending — so an
-  incomplete rollup may be hiding the very entry the later branches test for. Only `MergeBehind` is remedied, by updating from the
+  The rollup branch fails closed ahead of every branch that READS the rollup —
+  not ahead of everything that mutates. Merge conflict deliberately precedes it
+  and is the one obstacle decided without any check state, so a conflicted pull
+  request is resolved whatever the rollup looks like; the resolution replaces
+  the head and the checks re-run against it regardless. Everything after that
+  point does depend on the rollup, and GitHub caps returned contexts while a
+  context can fail to decode — both `ChecksUnknown` to Kanban, neither ready
+  nor pending — so an incomplete rollup may be hiding the very entry those
+  branches test for. Only `MergeBehind` is remedied, by updating from the
   base; `MergeBlocked` and `MergeUnstable` are reported and fail closed,
   because a branch update cannot clear a protection requirement or an
   unstable required check and would replace the reviewed head for nothing. The
