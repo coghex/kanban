@@ -3303,9 +3303,22 @@ whatever a spec is annotated with, and it refuses to start the suite at all if
 any example is marked parallelizable. It also reads the suite's own example
 count off the spec tree and fails the run if the lanes between them do not hold
 that many. Which lane a group runs in is a field of the group, so a group
-cannot be added without deciding, and it is a balance decision taken from
-measurement rather than a taxonomy — `--print-slow-items` is how to check it
-again after a group's cost moves.
+cannot be added without deciding, and it is normally a balance decision taken
+from measurement rather than a taxonomy — `--print-slow-items` is how to check
+it again after a group's cost moves.
+
+A lane contains the state a group establishes for itself, but not a group's
+effect on the machine the whole suite runs on, and a pair of groups has been
+measured interfering across that gap. So a group's lane can also be a safety
+decision. Such a pair is *declared* — beside the assignment it constrains, with
+the measurement that justifies it — and the runner refuses to start a suite
+whose assignment separates the two, or whose assignment does not resolve a
+declared name to exactly one group. The refusal names both groups and prints
+the declaration's own reason, so rebalancing on cost alone cannot quietly
+reintroduce the interference and cannot silently leave a declaration enforcing
+nothing. The declaration is the single statement of the constraint: the
+runner's contract and the assignment's own comment refer to it rather than
+restate it, and only a pair whose interference has been measured belongs there.
 
 One lane can be run on its own, which is how a load-sensitivity check repeats a
 group without the rest of the suite:

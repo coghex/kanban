@@ -285,6 +285,7 @@ test-suite kanban-test
     Spec.Support.Render
     Spec.Support.Roster
     Spec.Support.UsageWriters
+    Spec.Suite.Assignment
     Spec.UI.AutoSolve
     Spec.UI.Cards
     Spec.UI.CompletedHistory
