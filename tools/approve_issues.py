@@ -157,9 +157,21 @@ REVIEW_QUEUE_ISSUE_OUTCOMES = frozenset({"advanced", "changes_requested", "retry
 # answer different questions and a reader that accepted either would have to
 # guess which it was handed.
 RECONCILE_SCHEMA = "approve-issues-reconcile-approvals"
-RECONCILE_SCHEMA_VERSION = 1
+# Version 2 added `changes_requested_label`. The bump is not bookkeeping: a
+# consumer built for version 1 renders the busy fallback from the approval
+# label alone, which marks a changes-requested issue as ready to solve. Moving
+# the version is what lets such a reader refuse the document instead.
+RECONCILE_SCHEMA_VERSION = 2
 RECONCILE_RESULT_FIELDS = frozenset(
-    {"schema", "version", "outcome", "approval_label", "message", "issues"}
+    {
+        "schema",
+        "version",
+        "outcome",
+        "approval_label",
+        "changes_requested_label",
+        "message",
+        "issues",
+    }
 )
 RECONCILE_ENTRY_FIELDS = frozenset(
     {"issue", "outcome", "label_removed", "approved", "reasons", "detail"}
@@ -2552,12 +2564,21 @@ def reconcile_result(
     `reviewed:approve` would silently do nothing in a repository whose
     `workflow.approval_label` is something else, which is the failure mode
     naming it here closes.
+
+    `changes_requested_label` is reported for the same reason and is carried on
+    every outcome including `busy`, which is the outcome that needs it. A busy
+    pass reads nothing, so its consumers decide readiness from their own issue
+    snapshot; `current_gate_status` refuses approval while that label is
+    present, so a snapshot fallback that did not know the label would advertise
+    a known-blocked issue as ready in the one mode that claims its marks
+    reflect current labels.
     """
     return {
         "schema": RECONCILE_SCHEMA,
         "version": RECONCILE_SCHEMA_VERSION,
         "outcome": outcome,
         "approval_label": APPROVE_LABEL,
+        "changes_requested_label": CHANGES_LABEL,
         "message": message,
         "issues": entries,
     }
@@ -2622,6 +2643,29 @@ def validate_reconcile_result(
         raise ApproveError(
             f"Reconcile result names approval label {label!r} but this run "
             f"decided against {APPROVE_LABEL!r}"
+        )
+    changes_label = result["changes_requested_label"]
+    if not isinstance(changes_label, str) or not changes_label.strip():
+        raise ApproveError(
+            "Reconcile result names no configured changes-requested label: "
+            f"{changes_label!r}"
+        )
+    if changes_label != CHANGES_LABEL:
+        raise ApproveError(
+            f"Reconcile result names changes-requested label {changes_label!r} "
+            f"but this run decided against {CHANGES_LABEL!r}"
+        )
+    # `_validate_workflow_label_distinctness` already refuses a configuration
+    # resolving both to one label, so this cannot come from config. It can
+    # still come from a document built with the module globals set some other
+    # way, and the busy fallback's whole algorithm is one exact match minus
+    # another: two labels the same would silently mark nothing while reporting
+    # a healthy document. Casefolded to mirror that configuration rule rather
+    # than to catch a second, weaker collision.
+    if changes_label.casefold() == label.casefold():
+        raise ApproveError(
+            f"Reconcile result names {label!r} as both the approval and the "
+            "changes-requested label"
         )
     message = result["message"]
     if not isinstance(message, str) or not message.strip():

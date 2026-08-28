@@ -5,12 +5,13 @@ approval, and until an issue enters `process_issue` nothing removes a stale one
 -- so an unconditional label-only reader advertises readiness against a
 specification no reviewer saw. The roadmap contract has one deliberate liveness
 exception: when the canonical reconciliation lock is busy, it displays the
-configured approval label already present in the complete snapshot rather than
-hiding all readiness. These cover the bounded backend operation and the two
-rendered roadmap contracts that consume it: triage, and since issue #427 the
-retriage refresh that re-renders triage's output. Retriage is the harder
-consumer because it must recompute even the busy fallback instead of carrying
-markers from the prior roadmap.
+configured approval label already present in the complete snapshot -- minus any
+issue also carrying the configured changes-requested label, which the gate
+refuses regardless -- rather than hiding all readiness. These cover the bounded
+backend operation and the two rendered roadmap contracts that consume it:
+triage, and since issue #427 the retriage refresh that re-renders triage's
+output. Retriage is the harder consumer because it must recompute even the busy
+fallback instead of carrying markers from the prior roadmap.
 
 No GitHub account and no model invocation: `get_issue`, `get_comments`, the
 label mutation, and the lock are patched, while the decision itself -- the real
@@ -63,6 +64,15 @@ BRAND_SIGILS = {
 RETIRED_RAW_LABEL_RULES = (
     "every issue carrying the exact `reviewed:approve` label gets `✓`",
     "Confirm every `reviewed:approve` issue has exactly one `✓`",
+)
+
+# The complete busy-fallback algorithm, which triage owns and retriage
+# delegates. Named once so the positive assertion on triage and the negative
+# control on retriage can never drift into testing two different sentences.
+TRIAGE_ONLY_BUSY_RULE = (
+    "render `✓` for every issue in the verified-complete open-issue "
+    "snapshot carrying that exact approval label and not carrying that exact "
+    "changes-requested label"
 )
 
 ORIGIN_BODY = "Background\n\n<!-- issue-origin:claude -->\n"
@@ -143,7 +153,8 @@ class ReconcileHarness(unittest.TestCase):
         return states[index]
 
     def run_reconcile(self, numbers, *, contended=False, legacy_policy="dual",
-                      approve_label="reviewed:approve"):
+                      approve_label="reviewed:approve",
+                      changes_label="reviewed:changes"):
         events = self.events
 
         def acquire(*args, **kwargs):
@@ -184,6 +195,7 @@ class ReconcileHarness(unittest.TestCase):
         with (
             mock.patch.object(approve_issues, "log"),
             mock.patch.object(approve_issues, "APPROVE_LABEL", approve_label),
+            mock.patch.object(approve_issues, "CHANGES_LABEL", changes_label),
             mock.patch.object(approve_issues, "acquire_lock", side_effect=acquire),
             mock.patch.object(approve_issues, "release_lock", side_effect=release),
             mock.patch.object(approve_issues, "get_issue", side_effect=fake_get_issue),
@@ -648,6 +660,60 @@ class ConfiguredLabelSelectionTests(ReconcileHarness):
         self.assertNotIn("inventory", self.kinds())
 
 
+class ReportedLabelTests(ReconcileHarness):
+    """Both configured labels are reported, on every outcome.
+
+    Issue #557. The busy fallback decides readiness from its own snapshot
+    because the backend read nothing, so the labels it matches on have to
+    travel in the document -- and `changes_requested_label` is needed by
+    exactly the outcome that carries no entry to read it from. Only the backend
+    has resolved either label, so a consumer that restated a default would
+    match nothing in a repository configuring its own.
+    """
+
+    def test_a_reconciled_document_reports_both_configured_labels(self):
+        issue = make_issue(7, labels=["reviewed:approve"])
+        self.state(7, issue, [current_marker_for(issue)])
+
+        result = self.run_reconcile([7])
+
+        self.assertEqual(result["outcome"], "reconciled")
+        self.assertEqual(result["approval_label"], "reviewed:approve")
+        self.assertEqual(result["changes_requested_label"], "reviewed:changes")
+
+    def test_a_busy_document_reports_both_configured_labels(self):
+        # The outcome that needs them: it reconciles nothing, so its consumers
+        # decide from their own snapshot with no entry to read.
+        self.state(7, make_issue(7, labels=["reviewed:approve"]), [])
+
+        result = self.run_reconcile([7], contended=True)
+
+        self.assertEqual(result["outcome"], "busy")
+        self.assertEqual(result["approval_label"], "reviewed:approve")
+        self.assertEqual(result["changes_requested_label"], "reviewed:changes")
+
+    def test_a_busy_document_reports_non_default_configured_labels(self):
+        result = self.run_reconcile(
+            [], contended=True, approve_label="acme:go", changes_label="acme:rework"
+        )
+
+        self.assertEqual(result["outcome"], "busy")
+        self.assertEqual(result["approval_label"], "acme:go")
+        self.assertEqual(result["changes_requested_label"], "acme:rework")
+
+    def test_reporting_the_labels_costs_no_read_under_contention(self):
+        # Requirement 3: the fallback's inputs come from what the caller
+        # already holds. A busy pass still touches nothing.
+        self.state(7, make_issue(7, labels=["reviewed:approve"]), [])
+
+        self.run_reconcile([7], contended=True)
+
+        self.assertNotIn("get_issue", self.kinds())
+        self.assertNotIn("get_comments", self.kinds())
+        self.assertNotIn("inventory", self.kinds())
+        self.assertEqual(self.edits(), [])
+
+
 class ResultValidationTests(unittest.TestCase):
     """The document is refused rather than emitted when it is wrong."""
 
@@ -673,6 +739,40 @@ class ResultValidationTests(unittest.TestCase):
     def test_a_document_naming_no_approval_label_is_refused(self):
         with self.assertRaisesRegex(approve_issues.ApproveError, "approval label"):
             self.validate(self.good(approval_label=""))
+
+    def test_a_document_omitting_the_changes_requested_label_is_refused(self):
+        document = self.good()
+        del document["changes_requested_label"]
+        with self.assertRaisesRegex(approve_issues.ApproveError, "wrong fields"):
+            self.validate(document)
+
+    def test_a_document_naming_another_changes_requested_label_is_refused(self):
+        # Same reasoning as the approval label above: a value disagreeing with
+        # the one this run decided against is a document about another
+        # repository's vocabulary, and the busy fallback would exclude on it.
+        with self.assertRaisesRegex(
+            approve_issues.ApproveError, "changes-requested label"
+        ):
+            self.validate(self.good(changes_requested_label="something-else"))
+
+    def test_a_document_naming_no_changes_requested_label_is_refused(self):
+        for value in ("", "   ", None, 7):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    approve_issues.ApproveError, "changes-requested label"
+                ):
+                    self.validate(self.good(changes_requested_label=value))
+
+    def test_a_document_naming_one_label_as_both_is_refused(self):
+        # The one inconsistency neither equality check above can see: each
+        # would pass while the fallback -- one exact match minus another --
+        # silently marked nothing. Configuration already refuses the collision,
+        # so this is the document-level backstop for globals set another way.
+        with mock.patch.object(approve_issues, "CHANGES_LABEL", "REVIEWED:approve"):
+            with self.assertRaisesRegex(
+                approve_issues.ApproveError, "both the approval and the"
+            ):
+                self.validate(self.good(changes_requested_label="REVIEWED:approve"))
 
     def good(self, **overrides):
         result = approve_issues.reconcile_result(
@@ -883,27 +983,82 @@ class TriageAssetTests(unittest.TestCase):
                     text,
                 )
 
+    def test_every_asset_suppresses_the_busy_mark_for_a_changes_requested_issue(self):
+        """Issue #557 requirements 1 and 2, over the three snapshot cases the
+        fallback can face: approval label only is marked, both labels is not,
+        neither is not. Each case is a separate sentence, so an asset that
+        dropped one fails on that case rather than on the paragraph.
+        """
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                text = path.read_text(encoding="utf-8")
+                # Approval label only -> marked; both labels -> not marked.
+                self.assertIn(TRIAGE_ONLY_BUSY_RULE, text)
+                # Neither label, and the changes-requested label alone -> not
+                # marked. The fallback stays live and label-backed.
+                self.assertIn(
+                    "An issue carrying neither label, or the changes-requested "
+                    "label alone, receives no `✓`",
+                    text,
+                )
+                # Requirement 3: both labels come from the document already in
+                # hand, and nothing further is read or locked to apply them.
+                self.assertIn(
+                    "When `approval_label` and `changes_requested_label` are "
+                    "both non-empty strings",
+                    text,
+                )
+                self.assertIn("Take both labels from that same document", text)
+                self.assertIn(
+                    "no second `--check`, no further GitHub read, no lock", text
+                )
+                # The step-13 verification counts the same three cases, so a
+                # suppressed issue is not re-marked while checking the answer.
+                self.assertIn(
+                    "confirm every snapshot issue carrying the reported approval "
+                    "label without the reported changes-requested label has `✓`, "
+                    "no other issue has `✓`",
+                    text,
+                )
+
+    def test_no_asset_names_a_changes_requested_label_of_its_own(self):
+        # Requirement 4. The label is whichever one the document reports, so an
+        # asset naming the default would exclude nothing in a repository
+        # configuring `workflow.changes_requested_label` to something else --
+        # the same failure naming the approval label here would cause.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                self.assertNotIn(
+                    "reviewed:changes", path.read_text(encoding="utf-8")
+                )
+
     def test_busy_fallback_does_not_weaken_other_failure_handling(self):
         for path in self.assets():
             with self.subTest(asset=path.name):
                 text = path.read_text(encoding="utf-8")
                 self.assertIn("Fail closed outside the busy fallback", text)
                 self.assertIn(
-                    "invalid or missing `approval_label` in a busy document", text
+                    "invalid or missing `approval_label` or "
+                    "`changes_requested_label` in a busy document",
+                    text,
                 )
                 self.assertIn("guessed or hard-coded approval label", text)
 
     def test_the_delegating_retriage_assets_do_not_duplicate_the_full_rule(self):
         # Negative control for the rule assertions above: retriage owes the
-        # behavior but delegates the complete algorithm back to triage.
-        triage_only_rule = (
-            "render `✓` for every issue in the verified-complete open-issue "
-            "snapshot carrying that exact label"
-        )
+        # behavior but delegates the complete algorithm back to triage. The
+        # constant is asserted present in every triage asset first, so a typo
+        # in it cannot make the control pass over a retriage that really did
+        # duplicate the rule.
+        for path in self.assets():
+            with self.subTest(asset=path.name, side="states"):
+                self.assertIn(
+                    TRIAGE_ONLY_BUSY_RULE, path.read_text(encoding="utf-8")
+                )
         for path in [RETRIAGE_SOURCE, *RENDERED_RETRIAGE]:
-            with self.subTest(asset=path.name):
+            with self.subTest(asset=path.name, side="delegates"):
                 self.assertNotIn(
-                    triage_only_rule, path.read_text(encoding="utf-8")
+                    TRIAGE_ONLY_BUSY_RULE, path.read_text(encoding="utf-8")
                 )
 
     def test_no_asset_hard_codes_the_default_label_as_readiness(self):
@@ -1086,6 +1241,9 @@ class RetriageAssetTests(unittest.TestCase):
                 for retired in RETIRED_RAW_LABEL_RULES:
                     self.assertNotIn(retired, text)
                 self.assertNotIn("reviewed:approve", text)
+                # Issue #557 extends the same rule to the label the busy
+                # fallback now excludes on.
+                self.assertNotIn("reviewed:changes", text)
 
     def test_the_retired_rules_are_still_the_ones_the_personal_copies_stated(self):
         # Negative control for the assertion above. It compares against
@@ -1112,11 +1270,34 @@ class RetriageAssetTests(unittest.TestCase):
                 flat = " ".join(text.split())
                 self.assertIn("**Busy lock.**", flat)
                 self.assertIn("busy-lock fallback", flat)
-                self.assertIn("current snapshot label", flat)
+                self.assertIn("current snapshot's labels", flat)
                 self.assertIn("not the previous roadmap's marker", flat)
+                self.assertIn(
+                    "both the approval label that earns one and the "
+                    "changes-requested label that withholds it",
+                    flat,
+                )
                 self.assertIn(
                     "do not add `[approval unverified]` merely because the lock is busy",
                     flat,
+                )
+
+    def test_every_asset_delegates_the_busy_exclusion_rather_than_restating_it(self):
+        # Issue #557 requirement 6. Retriage owes the suppression but must not
+        # carry a second copy of the algorithm -- it points at triage and names
+        # only that both configured labels come from the document. The
+        # companion negative control lives in TriageAssetTests, which owns the
+        # rule string.
+        for path in self.assets():
+            with self.subTest(asset=path.name):
+                flat = " ".join(path.read_text(encoding="utf-8").split())
+                self.assertIn(
+                    "busy-lock fallback prescribes, over both configured labels "
+                    "that document reports",
+                    flat,
+                )
+                self.assertIn(
+                    "read off both labels that document reports", flat
                 )
 
     def test_every_asset_discloses_the_busy_fallback_without_a_delta_request(self):
@@ -1146,7 +1327,8 @@ class RetriageAssetTests(unittest.TestCase):
                     "missing or unresolvable backend",
                     "GitHub read or write failure",
                     "malformed document",
-                    "invalid or missing",
+                    "invalid or missing `approval_label` or "
+                    "`changes_requested_label` in a busy document",
                     "unverifiable post-mutation state",
                 ):
                     self.assertIn(cause, flat)
@@ -1222,8 +1404,16 @@ class ManifestCoverageTests(unittest.TestCase):
             "verified-complete open-issue snapshot",
             "display-only fallback",
             "solve gate remains",
-            "invalid or missing `approval_label` in a `busy` document",
+            "invalid or missing `approval_label` or `changes_requested_label` "
+            "in a `busy` document",
             "must disclose that label-backed fallback once per answer",
+            # Issue #557: 2.3.1 authorized an approval-label-only match, which
+            # is the rule the assets no longer follow.
+            "and `changes_requested_label`, the configured label whose presence "
+            "refuses the gate",
+            "not its non-empty `changes_requested_label`",
+            "that are not also exact matches for its validated "
+            "`changes_requested_label`",
         ):
             self.assertIn(busy_term, flat)
 
@@ -1238,7 +1428,17 @@ class SchemaConstantTests(unittest.TestCase):
         document = approve_issues.reconcile_result(
             "reconciled", message="ok", entries=[]
         )
-        self.assertEqual(json.loads(json.dumps(document))["version"], 1)
+        self.assertEqual(json.loads(json.dumps(document))["version"], 2)
+
+    def test_the_version_records_the_added_label_field(self):
+        # A reader built for version 1 renders the busy fallback from the
+        # approval label alone, which marks a changes-requested issue as ready
+        # to solve. The bump is what lets it refuse this document instead of
+        # acting on the half of it it understands.
+        self.assertIn(
+            "changes_requested_label", approve_issues.RECONCILE_RESULT_FIELDS
+        )
+        self.assertGreater(approve_issues.RECONCILE_SCHEMA_VERSION, 1)
 
 
 if __name__ == "__main__":

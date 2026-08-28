@@ -237,26 +237,29 @@ including its `[needs canonical review]` and `[approval unverified]` notes. For
 a completed reconciliation, the refresh-specific consequence is subtraction:
 strip any marker the previous roadmap carried for an issue this document does
 not report as approved right now. For a top-level `busy` result, strip the old
-markers and then recompute them from the snapshot's exact `approval_label`
-matches. Include $triage's required one-time busy-disclosure sentence
+markers and then recompute them from the snapshot exactly as $triage's
+busy-lock fallback prescribes, over both configured labels that document
+reports. Include $triage's required one-time busy-disclosure sentence
 immediately after the repository/count line regardless of whether the user
 asked for a delta. When the user did ask what changed, also describe the marker
 recomputation in the `Delta` line.
 
 **Busy lock.** Apply $triage's busy-lock fallback exactly: the current
-snapshot label, not the previous roadmap's marker, supplies each `✓`; do not
-retry, do not add `[approval unverified]` merely because the lock is busy, and
-claim no successful reconciliation or stale-label removal. Its mandatory
-one-time disclosure is part of the fallback, even when no delta was requested.
+snapshot's labels, not the previous roadmap's marker, supply each `✓` — both
+the approval label that earns one and the changes-requested label that
+withholds it; do not retry, do not add `[approval unverified]` merely because
+the lock is busy, and claim no successful reconciliation or stale-label
+removal. Its mandatory one-time disclosure is part of the fallback, even when
+no delta was requested.
 
 **Fail closed outside the busy fallback.** A missing or unresolvable backend,
 a GitHub read or write failure, a malformed document, an invalid or missing
-`approval_label` in a busy document, or an unverifiable post-mutation state
-means what $triage says it means: render no approval marker for the
-affected issues, claim no successful removal, and mark each one
-`[approval unverified]` with the reason. The previous roadmap's marker is not a
-fallback — a run that could not verify drops it rather than carrying it, and
-never presents an unverified issue as ready to solve.
+`approval_label` or `changes_requested_label` in a busy document, or an
+unverifiable post-mutation state means what $triage says it means:
+render no approval marker for the affected issues, claim no successful removal,
+and mark each one `[approval unverified]` with the reason. The previous
+roadmap's marker is not a fallback — a run that could not verify drops it rather
+than carrying it, and never presents an unverified issue as ready to solve.
 
 ## Blank-Line Rules
 
@@ -302,8 +305,8 @@ itself:
 - Confirm no approval marker was carried over: every one in the answer was
   recomputed from either an approved entry in this run's reconciliation
   document or, only for a top-level `busy` result, an exact current-snapshot
-  match for that document's `approval_label`; every other prior marker was
-  removed.
+  match under $triage's busy-lock fallback, read off both labels that
+  document reports; every other prior marker was removed.
 - For a top-level `busy` result, confirm the answer includes $triage's
   required busy-disclosure sentence exactly once immediately after the
   repository/count line, even when the user did not request a delta.
