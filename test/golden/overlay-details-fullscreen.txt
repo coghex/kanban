@@ -1,0 +1,48 @@
+╔┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ PR #823  Fix modal scroll routing ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓╗
+║┃                                                                                                                                                                                                    ┃║
+║┃ PR #823  Fix modal scroll routing                                                                                                                                                                  ┃║
+║┃  reviewed:approve   input   ui                                                                                                                                                                     ┃║
+║┃ Metadata                                                                                                                                                                                           ┃║
+║┃ #812 · agent-name → master · updated 3h ago                                                                                                                                                        ┃║
+║┃ Author                                                                                                                                                                                             ┃║
+║┃ @agent-name                                                                                                                                                                                        ┃║
+║┃ Branches                                                                                                                                                                                           ┃║
+║┃ work/issue-823 → master                                                                                                                                                                            ┃║
+║┃ Linked issues                                                                                                                                                                                      ┃║
+║┃ #812                                                                                                                                                                                               ┃║
+║┃ Mergeability                                                                                                                                                                                       ┃║
+║┃ clean — the head is current and merges into the base without conflict                                                                                                                              ┃║
+║┃ Checks                                                                                                                                                                                             ┃║
+║┃ 14/14 passed                                                                                                                                                                                       ┃║
+║┃ Timestamps                                                                                                                                                                                         ┃║
+║┃ created 2026-07-08 10:00 UTC                                                                                                                                                                       ┃║
+║┃ updated 2026-07-16 11:43 UTC · 3h ago                                                                                                                                                              ┃║
+║┃ Body                                                                                                                                                                                               ┃║
+║┃ Routes Shift-wheel through the same modal-aware ownership path as ordinary wheel events.                                                                                                           ┃║
+║┃ URL                                                                                                                                                                                                ┃║
+║┃ https://example.test/pull/823                                                                                                                                                                      ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┃                                                                                                                                                                                                    ┃║
+║┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
+║ x kill  f fullscreen  esc close  r review/revise  S solve  A autosolve  m merge  q/Ctrl-C quit                                                                                                       ║
+║ board: updated 3h ago · history: current                                                                                                                                                             ║
+║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

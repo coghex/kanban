@@ -49,7 +49,7 @@ import Data.Text (Text)
 import Kanban.Domain (ItemId (..))
 import Kanban.UI.Types
 import Kanban.UI.Filter (readOnlyHistoryRefusalFor)
-import Kanban.UI.State (closeOverlay, setNotice)
+import Kanban.UI.State (closeOverlay, setNotice, toggleOverlayFullscreen)
 import Kanban.UI.SessionCore
 import Kanban.UI.Session
 import Kanban.UI.Transcript
@@ -337,6 +337,7 @@ handleSessionInputEvent ops hooks key inputEvent = do
     -- own existing behavior; only the mode has already moved.
     SessionInputSubmit -> whenWorkIsLive (hooks.sessionHookSubmit key)
     SessionInputCycle -> cycleSession ops key
+    SessionInputFullscreen -> modify toggleOverlayFullscreen
     SessionInputInterrupt -> whenWorkIsLive (hooks.sessionHookInterrupt key)
     -- Both modes are entered by the write above, so these two arms have
     -- nothing left of their own to do.

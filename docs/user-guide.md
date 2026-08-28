@@ -97,6 +97,7 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `s` | Search a column, starting with Issues |
 | `F` | Show or hide the card filter |
 | `Enter` | Open details |
+| `f` | Make the open window fullscreen, or put it back — every window except the Codex/Claude solve chooser. It does nothing with no window open |
 | `Esc` | Close the current window |
 | `e` | Expand or collapse an epic |
 | `u` | Refresh GitHub, Codex usage, and Claude usage — the sidebar's `↻` button does the same thing |
@@ -112,6 +113,27 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `q` / `Ctrl-C` | Quit |
 
 The footer in the application shows the main controls.
+
+### Making a window fullscreen
+
+Windows open small, so the board stays visible behind them. Press `f` to grow
+the open one to nearly the whole screen, and `f` again to put it back. The
+application's frame stays around it and the footer's hint line stays visible
+underneath, so you can always see which keys the window answers. Whatever is
+being scrolled — a transcript, the jobs list, the attention list, the model
+roster — shows more of itself in the bigger window, and still scrolls.
+
+`f` works in every window except the Codex/Claude solve chooser, which is small
+by design. In a job window it is a command in normal mode; press `i` first and
+`f` is an ordinary letter typed into your message. Every window opens small
+again, including one you open straight from another — pressing Enter on a row
+of the attention list, for instance — and `Tab` between jobs of the same kind
+keeps the window the size you left it.
+
+While a window is fullscreen, an ordinary click outside it does nothing. Every
+other way out is the one that window already had: `f` puts it back, `Esc`
+closes it, `q` hides a job window from its normal mode, and right-clicking a
+details or job window closes it exactly as it does when the window is small.
 
 ## Searching a column
 
@@ -243,7 +265,10 @@ by itself once a merge lands.
 - Use the mouse wheel to scroll the column under the pointer.
 - Click an epic title to expand or collapse it.
 - Right-click a card to open its active job.
-- Click outside an open details window to close it.
+- Click outside an open details window to close it, while it is small. A
+  fullscreen window ignores an ordinary click outside it — leave it with `f`
+  or `Esc`, or with a right-click, which closes a details or job window at
+  either size.
 - Click the `↻` button in the sidebar to refresh, the same as `u`.
 
 Every mouse action has a keyboard equivalent.

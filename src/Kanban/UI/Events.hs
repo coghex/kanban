@@ -2,6 +2,7 @@ module Kanban.UI.Events
   ( BoardActionGate (..),
     BoardMouseAction (..),
     IncidentsAction (..),
+    OverlayExtent (..),
     OverlayMouseAction (..),
     QuitDecision (..),
     applyCardClick,
@@ -18,6 +19,8 @@ module Kanban.UI.Events
     runningProcessClickRefusal,
     settleBoardAction,
     settledSessionRefusal,
+    sharedFullscreenKey,
+    overlayExtent,
     overlayMouseAction,
     quitDecision,
     readOnlyHistoryGate,
@@ -104,10 +107,25 @@ import Kanban.UI.Review
 import Kanban.UI.Worker
 import Kanban.UI.Reconcile
 
+-- | Every event the dashboard receives, and the one place the fullscreen flag
+-- is settled.
+--
+-- 'settleOverlayFullscreen' is applied to whatever the dispatch below left
+-- behind, against the overlay that was open before it. Doing it here rather
+-- than beside every assignment to 'appOverlay' is what makes an overlay
+-- opened from another one -- the incidents panel's Enter into a live session,
+-- a solve session handing off to its PR review -- come back windowed without
+-- every such transition having to remember to say so.
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = do
   now <- liftIO getCurrentTime
   modify (\state -> state {appNow = now})
+  before <- (.appOverlay) <$> get
+  dispatchEvent event
+  modify (settleOverlayFullscreen before)
+
+dispatchEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
+dispatchEvent event = do
   state <- get
   case (state.appOverlay, event) of
     (_, AppEvent (BoardRefreshFinished generation result)) -> applyBoardRefresh generation result
@@ -143,6 +161,18 @@ handleEvent event = do
       modifyReviewSession issueNumber (\session -> session {sessionActivity = "reviewing issue"})
       armReviewTick issueNumber
     (_, AppEvent (CanonicalIssueReviewFinished issueNumber stage result)) -> applyCanonicalIssueReview issueNumber stage result
+    -- @f@ is the one binding live in every overlay that honors it, so it is
+    -- resolved once here rather than in each overlay's own arms below. It has
+    -- to come first: settings, the process inspector, and the incidents panel
+    -- each answer /every/ event they receive, so a letter reaching them is a
+    -- letter they have swallowed. The three live-agent overlays are excluded
+    -- because @f@ is a command there only in normal mode -- in insert mode it
+    -- is a character typed into the draft -- which is their own decoder's
+    -- decision to make ('Kanban.UI.SessionCore.sessionInputEvent').
+    (Just overlay, VtyEvent keyEvent)
+      | sharedFullscreenKey overlay,
+        Just ToggleFullscreen <- boardAction OverlayScope keyEvent ->
+          modify toggleOverlayFullscreen
     -- The help overlay answers nothing of its own, so its scoped bindings can
     -- be resolved before the overlays below, which do.
     (Just HelpOverlay, VtyEvent keyEvent)
@@ -174,7 +204,7 @@ handleEvent event = do
     -- the overlay -- so it is decoded beside the rest of the session table by
     -- 'sessionInputEvent' rather than short-circuited above it (issue #515).
     (Just (ReviewOverlay issueNumber), mouseEvent)
-      | Just action <- overlayMouseAction ReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (ReviewTranscript issueNumber)) action
+      | Just action <- overlayMouseAction (overlayExtent state) ReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (ReviewTranscript issueNumber)) action
     (Just (ReviewOverlay issueNumber), reviewInputEvent) ->
       handleSessionOverlayEvent reviewSessionOps reviewInputHooks issueNumber reviewInputEvent
     (Just (SolveChooser workflow issue), VtyEvent (Vty.EvKey (Vty.KChar '1') [])) -> startIssueSolve issue workflow CodexSolver
@@ -182,17 +212,17 @@ handleEvent event = do
     (Just (SolveChooser _ _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
     (Just (SolveChooser _ _), _) -> pure ()
     (Just (SolveOverlay issueNumber), mouseEvent)
-      | Just action <- overlayMouseAction SolvePanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (SolveTranscript issueNumber)) action
+      | Just action <- overlayMouseAction (overlayExtent state) SolvePanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (SolveTranscript issueNumber)) action
     (Just (SolveOverlay issueNumber), solveInputEvent) ->
       handleSessionOverlayEvent solveSessionOps solveInputHooks issueNumber solveInputEvent
     (Just (PullRequestReviewOverlay number), mouseEvent)
-      | Just action <- overlayMouseAction PullRequestReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (PullRequestTranscript number)) action
+      | Just action <- overlayMouseAction (overlayExtent state) PullRequestReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (PullRequestTranscript number)) action
     (Just (PullRequestReviewOverlay number), inputEvent) ->
       handleSessionOverlayEvent pullRequestSessionOps pullRequestInputHooks number inputEvent
     (Just (DetailsOverlay _), VtyEvent keyEvent)
       | Just action <- boardAction DetailsScope keyEvent -> applyBoardAction action
     (Just (DetailsOverlay _), mouseEvent)
-      | Just action <- overlayMouseAction DetailsPanel mouseEvent -> applyOverlayMouseAction scrollDetails action
+      | Just action <- overlayMouseAction (overlayExtent state) DetailsPanel mouseEvent -> applyOverlayMouseAction scrollDetails action
     -- What is left for an overlay that answered none of the above. Esc is the
     -- fallback for one that neither handles it itself nor appears as a
     -- 'BindingScope'; the scrolling keys are live for the help and details
@@ -426,6 +456,10 @@ blockedByCompletedLoad = \case
   MergeDoneCard -> True
   KillWorking -> True
   ShowFilter -> False
+  -- Reaches no card: it resizes whichever overlay is already open, and the
+  -- blocker is a board-side surface with no overlay over it in the first
+  -- place.
+  ToggleFullscreen -> False
   DismissOrClose -> False
   ShowProcesses -> False
   ShowIncidents -> False
@@ -483,6 +517,7 @@ mutatesSelectedWork = \case
   ShowFilter -> False
   ToggleEpic -> False
   ShowDetails -> False
+  ToggleFullscreen -> False
   DismissOrClose -> False
   ShowProcesses -> False
   ShowIncidents -> False
@@ -506,6 +541,7 @@ dispatchBoardAction = \case
   LastItem -> selectBoundary True
   ToggleEpic -> toggleSelectedTracker
   ShowDetails -> openSelectedDetails
+  ToggleFullscreen -> modify toggleOverlayFullscreen
   DismissOrClose -> closeOverlay
   ReviewSelection -> onSelection startItemReview startSelectedReview
   SolveSelection -> onSelection (openItemSolveChooser SolveOnly) (openSelectedSolveChooser SolveOnly)
@@ -623,6 +659,39 @@ completeDashboardQuit verdict = case quitDecision verdict of
   QuitHalts -> halt
   QuitHeldBack notice -> modify (\current -> current {appQuitPending = False, appNotice = Just notice})
 
+-- | Which overlays answer @f@ through the shared arm in 'dispatchEvent'
+-- rather than through a decoder of their own.
+--
+-- Total in 'OverlaySurface' rather than a wildcard over the two exclusions:
+-- an overlay added later has to say which side of this it is on, because a
+-- surface that honors the toggle and is on neither side would silently have
+-- no way to reach it. The chooser honors nothing, and the three live-agent
+-- overlays answer the letter from their own normal mode.
+sharedFullscreenKey :: Overlay -> Bool
+sharedFullscreenKey overlay = case overlaySurface overlay of
+  HelpSurface -> True
+  SettingsSurface -> True
+  ProcessesSurface -> True
+  IncidentsSurface -> True
+  DetailsSurface -> True
+  SolveChooserSurface -> False
+  ReviewSurface -> False
+  SolveSurface -> False
+  PullRequestReviewSurface -> False
+
+-- | Whether the overlay a click landed over is drawn windowed or fullscreen,
+-- which is the whole of what the mouse policy below needs to know about it.
+data OverlayExtent
+  = WindowedOverlay
+  | FullscreenOverlay
+  deriving stock (Eq, Show)
+
+-- | The extent the open overlay is currently drawn at.
+overlayExtent :: AppState -> OverlayExtent
+overlayExtent state
+  | state.appOverlayFullscreen = FullscreenOverlay
+  | otherwise = WindowedOverlay
+
 -- | The decision a content overlay's shared mouse policy reaches for a given
 -- event, independent of how that decision gets carried out. Wheel events
 -- always resolve to a scroll regardless of which name they land on
@@ -636,19 +705,40 @@ data OverlayMouseAction
   | OverlayMouseNoOp
   deriving stock (Eq, Show)
 
-overlayMouseAction :: Name -> BrickEvent Name AppEvent -> Maybe OverlayMouseAction
-overlayMouseAction panel event = case event of
+-- | The same policy, told which extent the overlay is drawn at.
+--
+-- A fullscreen box withdraws exactly one gesture: the plain outside click that
+-- closes a windowed overlay (@docs\/overlay_focus_fullscreen_design.md@
+-- D-17). What is left beside and below such a box is the application's own
+-- frame and its footer rather than the board the windowed gesture is aimed
+-- past, and a stray press at the very edge of the screen would otherwise throw
+-- away a panel the user has just made as big as they could.
+--
+-- The right click is /not/ that gesture and keeps today's meaning at both
+-- extents, which is what section 7 means by listing it among a fullscreen
+-- overlay's exits. It is hoisted above the panel test on purpose: a click
+-- inside a panel is reported against whichever extent brick finds innermost
+-- there, and for the details and session overlays that is the scrolling
+-- viewport rather than the panel, so a right click over the content has always
+-- arrived here unnamed. Deciding it by button rather than by name is what
+-- makes "right-click closes" true of the whole box instead of only its border.
+overlayMouseAction :: OverlayExtent -> Name -> BrickEvent Name AppEvent -> Maybe OverlayMouseAction
+overlayMouseAction extent panel event = case event of
   MouseDown _ Vty.BScrollUp _ _ -> Just (OverlayMouseScroll (-3))
   MouseDown _ Vty.BScrollDown _ _ -> Just (OverlayMouseScroll 3)
   VtyEvent (Vty.EvMouseDown _ _ Vty.BScrollUp _) -> Just (OverlayMouseScroll (-3))
   VtyEvent (Vty.EvMouseDown _ _ Vty.BScrollDown _) -> Just (OverlayMouseScroll 3)
-  MouseDown name Vty.BRight _ _
-    | name == panel -> Just OverlayMouseClose
+  MouseDown _ Vty.BRight _ _ -> Just OverlayMouseClose
+  VtyEvent (Vty.EvMouseDown _ _ Vty.BRight _) -> Just OverlayMouseClose
   MouseDown name _ _ _
     | name == panel -> Just OverlayMouseNoOp
-  MouseDown _ _ _ _ -> Just OverlayMouseClose
-  VtyEvent (Vty.EvMouseDown _ _ _ _) -> Just OverlayMouseClose
+  MouseDown _ _ _ _ -> Just outsideClick
+  VtyEvent (Vty.EvMouseDown _ _ _ _) -> Just outsideClick
   _ -> Nothing
+  where
+    outsideClick = case extent of
+      WindowedOverlay -> OverlayMouseClose
+      FullscreenOverlay -> OverlayMouseNoOp
 
 applyOverlayMouseAction :: (Int -> EventM Name AppState ()) -> OverlayMouseAction -> EventM Name AppState ()
 applyOverlayMouseAction scrollOverlay = \case

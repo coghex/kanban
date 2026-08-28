@@ -5,6 +5,7 @@ module Spec.UI.ReviewSession (spec) where
 import Brick (BrickEvent (..), Location (..))
 import Data.Aeson (Value (..))
 import qualified Data.Map.Strict as Map
+import Data.Foldable (for_)
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import qualified Data.Text
@@ -19,7 +20,7 @@ import Kanban.Review
     ReviewStage (..)
   )
 import Kanban.UI.Board (reviewPhaseGlyphFor)
-import Kanban.UI.Events (OverlayMouseAction (..), overlayMouseAction)
+import Kanban.UI.Events (OverlayExtent (..), OverlayMouseAction (..), overlayMouseAction)
 import Kanban.UI.Overlay (reviewPhaseLabel)
 import Kanban.UI.Reconcile (reconcileReviewSessions)
 import Kanban.UI.Review
@@ -759,6 +760,10 @@ spec = do
     let backgroundCard = CardTarget Issues 0
         zeroLoc = Location (0, 0)
         rawWheel button = VtyEvent (Vty.EvMouseDown 0 0 button [])
+        -- Everything but the outside click is extent-independent, and saying
+        -- so is what proves fullscreen changed only the one gesture.
+        bothExtents :: [(String, OverlayExtent)]
+        bothExtents = [("windowed", WindowedOverlay), ("fullscreen", FullscreenOverlay)]
         overlays =
           [ ("review overlay", ReviewPanel, ReviewViewport),
             ("solve overlay", SolvePanel, SolveViewport),
@@ -768,28 +773,57 @@ spec = do
 
     mapM_
       ( \(label, panel, viewport) -> describe label $ do
-          it "scrolls, without closing, when the wheel lands on a background clickable" $ do
-            overlayMouseAction panel (MouseDown backgroundCard Vty.BScrollUp [] zeroLoc) `shouldBe` Just (OverlayMouseScroll (-3))
-            overlayMouseAction panel (MouseDown backgroundCard Vty.BScrollDown [] zeroLoc) `shouldBe` Just (OverlayMouseScroll 3)
+          it "scrolls, without closing, when the wheel lands on a background clickable" $
+            for_ bothExtents $ \(extentLabel, extent) -> do
+              (extentLabel, overlayMouseAction extent panel (MouseDown backgroundCard Vty.BScrollUp [] zeroLoc)) `shouldBe` (extentLabel, Just (OverlayMouseScroll (-3)))
+              (extentLabel, overlayMouseAction extent panel (MouseDown backgroundCard Vty.BScrollDown [] zeroLoc)) `shouldBe` (extentLabel, Just (OverlayMouseScroll 3))
 
-          it "scrolls on a raw Vty wheel event that carries no Brick name at all" $ do
-            overlayMouseAction panel (rawWheel Vty.BScrollUp) `shouldBe` Just (OverlayMouseScroll (-3))
-            overlayMouseAction panel (rawWheel Vty.BScrollDown) `shouldBe` Just (OverlayMouseScroll 3)
+          it "scrolls on a raw Vty wheel event that carries no Brick name at all" $
+            for_ bothExtents $ \(extentLabel, extent) -> do
+              (extentLabel, overlayMouseAction extent panel (rawWheel Vty.BScrollUp)) `shouldBe` (extentLabel, Just (OverlayMouseScroll (-3)))
+              (extentLabel, overlayMouseAction extent panel (rawWheel Vty.BScrollDown)) `shouldBe` (extentLabel, Just (OverlayMouseScroll 3))
 
-          it "scrolls when the wheel lands on the overlay's own viewport or panel" $ do
-            overlayMouseAction panel (MouseDown viewport Vty.BScrollUp [] zeroLoc) `shouldBe` Just (OverlayMouseScroll (-3))
-            overlayMouseAction panel (MouseDown viewport Vty.BScrollDown [] zeroLoc) `shouldBe` Just (OverlayMouseScroll 3)
-            overlayMouseAction panel (MouseDown panel Vty.BScrollUp [] zeroLoc) `shouldBe` Just (OverlayMouseScroll (-3))
-            overlayMouseAction panel (MouseDown panel Vty.BScrollDown [] zeroLoc) `shouldBe` Just (OverlayMouseScroll 3)
+          it "scrolls when the wheel lands on the overlay's own viewport or panel" $
+            for_ bothExtents $ \(extentLabel, extent) -> do
+              (extentLabel, overlayMouseAction extent panel (MouseDown viewport Vty.BScrollUp [] zeroLoc)) `shouldBe` (extentLabel, Just (OverlayMouseScroll (-3)))
+              (extentLabel, overlayMouseAction extent panel (MouseDown viewport Vty.BScrollDown [] zeroLoc)) `shouldBe` (extentLabel, Just (OverlayMouseScroll 3))
+              (extentLabel, overlayMouseAction extent panel (MouseDown panel Vty.BScrollUp [] zeroLoc)) `shouldBe` (extentLabel, Just (OverlayMouseScroll (-3)))
+              (extentLabel, overlayMouseAction extent panel (MouseDown panel Vty.BScrollDown [] zeroLoc)) `shouldBe` (extentLabel, Just (OverlayMouseScroll 3))
 
           it "closes on an outside click, left or right, named or raw" $ do
-            overlayMouseAction panel (MouseDown backgroundCard Vty.BLeft [] zeroLoc) `shouldBe` Just OverlayMouseClose
-            overlayMouseAction panel (MouseDown backgroundCard Vty.BRight [] zeroLoc) `shouldBe` Just OverlayMouseClose
-            overlayMouseAction panel (rawWheel Vty.BLeft) `shouldBe` Just OverlayMouseClose
+            overlayMouseAction WindowedOverlay panel (MouseDown backgroundCard Vty.BLeft [] zeroLoc) `shouldBe` Just OverlayMouseClose
+            overlayMouseAction WindowedOverlay panel (MouseDown backgroundCard Vty.BRight [] zeroLoc) `shouldBe` Just OverlayMouseClose
+            overlayMouseAction WindowedOverlay panel (rawWheel Vty.BLeft) `shouldBe` Just OverlayMouseClose
+            -- The press over the panel's own content, which brick reports
+            -- against the viewport inside it rather than against the panel,
+            -- and which the windowed gesture has always closed on.
+            overlayMouseAction WindowedOverlay panel (MouseDown viewport Vty.BLeft [] zeroLoc) `shouldBe` Just OverlayMouseClose
 
-          it "closes the panel on a right click but leaves a left click on the panel inert" $ do
-            overlayMouseAction panel (MouseDown panel Vty.BRight [] zeroLoc) `shouldBe` Just OverlayMouseClose
-            overlayMouseAction panel (MouseDown panel Vty.BLeft [] zeroLoc) `shouldBe` Just OverlayMouseNoOp
+          -- Issue #543 requirement 9: what a windowed box treats as "outside"
+          -- is the board, and what a fullscreen one leaves showing there is
+          -- the application's own frame and its footer. A plain click on
+          -- those does nothing rather than throwing the panel away.
+          it "leaves a plain outside click inert while the overlay is fullscreen" $ do
+            overlayMouseAction FullscreenOverlay panel (MouseDown backgroundCard Vty.BLeft [] zeroLoc) `shouldBe` Just OverlayMouseNoOp
+            overlayMouseAction FullscreenOverlay panel (MouseDown backgroundCard Vty.BMiddle [] zeroLoc) `shouldBe` Just OverlayMouseNoOp
+            overlayMouseAction FullscreenOverlay panel (VtyEvent (Vty.EvMouseDown 0 0 Vty.BLeft [])) `shouldBe` Just OverlayMouseNoOp
+
+          -- The right click is the exception requirement 9 names among a
+          -- fullscreen overlay's own exits, so it keeps today's meaning at
+          -- both extents. It is decided by button rather than by name because
+          -- a press over the panel's content is reported against the
+          -- scrolling viewport inside it, not against the panel: naming the
+          -- panel here would leave the gesture working only on the border.
+          it "closes on a right click wherever it lands, at either extent" $
+            for_ bothExtents $ \(extentLabel, extent) -> do
+              (extentLabel, overlayMouseAction extent panel (MouseDown panel Vty.BRight [] zeroLoc)) `shouldBe` (extentLabel, Just OverlayMouseClose)
+              (extentLabel, overlayMouseAction extent panel (MouseDown viewport Vty.BRight [] zeroLoc)) `shouldBe` (extentLabel, Just OverlayMouseClose)
+              (extentLabel, overlayMouseAction extent panel (MouseDown backgroundCard Vty.BRight [] zeroLoc)) `shouldBe` (extentLabel, Just OverlayMouseClose)
+              (extentLabel, overlayMouseAction extent panel (VtyEvent (Vty.EvMouseDown 0 0 Vty.BRight []))) `shouldBe` (extentLabel, Just OverlayMouseClose)
+
+          it "leaves a left click on the panel itself inert, at either extent" $
+            for_ bothExtents $ \(extentLabel, extent) ->
+              (extentLabel, overlayMouseAction extent panel (MouseDown panel Vty.BLeft [] zeroLoc)) `shouldBe` (extentLabel, Just OverlayMouseNoOp)
        )
        overlays
 
@@ -922,7 +956,7 @@ spec = do
       -- The wheel reaches all three transcripts through
       -- 'overlayMouseAction', whose amount is handed to the same
       -- 'followAfterScroll' the key bindings use.
-      let wheelAmount panel button = case overlayMouseAction panel (VtyEvent (Vty.EvMouseDown 0 0 button [])) of
+      let wheelAmount panel button = case overlayMouseAction WindowedOverlay panel (VtyEvent (Vty.EvMouseDown 0 0 button [])) of
             Just (OverlayMouseScroll amount) -> Just amount
             _ -> Nothing
       mapM_

@@ -109,11 +109,28 @@ spec = describe "keybinding table" $ do
               ]
         ]
 
-    it "keeps the overlay-scoped bindings a strict subset of the board's" $ do
+    -- The overlay scopes were a strict subset of the board's until issue
+    -- #543: `f` is the first binding that exists /only/ while an overlay is
+    -- open, so it is the one action in each of the three overlay scopes that
+    -- the board scope does not carry, and the board keeps exactly everything
+    -- else. Spelled as the enumerated lists rather than as a subset
+    -- predicate, because a subset check would pass a second overlay-only
+    -- binding added by accident.
+    it "keeps the overlay scopes to the board's bindings, plus the one that is overlay-only" $ do
       map (.bindingAction) (scopeBindings DetailsScope)
-        `shouldBe` [KillWorking, DismissOrClose, ReviewSelection, SolveSelection, AutoSolveSelection, MergeDoneCard, QuitDashboard]
-      map (.bindingAction) (scopeBindings HelpScope) `shouldBe` [DismissOrClose, QuitDashboard]
-      map (.bindingAction) (scopeBindings BoardScope) `shouldBe` map (.bindingAction) boardBindings
+        `shouldBe` [KillWorking, ToggleFullscreen, DismissOrClose, ReviewSelection, SolveSelection, AutoSolveSelection, MergeDoneCard, QuitDashboard]
+      map (.bindingAction) (scopeBindings HelpScope) `shouldBe` [ToggleFullscreen, DismissOrClose, QuitDashboard]
+      map (.bindingAction) (scopeBindings OverlayScope) `shouldBe` [ToggleFullscreen]
+      map (.bindingAction) (scopeBindings BoardScope)
+        `shouldBe` filter (/= ToggleFullscreen) (map (.bindingAction) boardBindings)
+
+    -- Requirement 2: with no overlay open the key does what it does today,
+    -- which is nothing at all.
+    it "leaves f meaningless on the board itself" $ do
+      boardAction BoardScope (Vty.EvKey (Vty.KChar 'f') []) `shouldBe` Nothing
+      boardAction DetailsScope (Vty.EvKey (Vty.KChar 'f') []) `shouldBe` Just ToggleFullscreen
+      boardAction HelpScope (Vty.EvKey (Vty.KChar 'f') []) `shouldBe` Just ToggleFullscreen
+      boardAction OverlayScope (Vty.EvKey (Vty.KChar 'f') []) `shouldBe` Just ToggleFullscreen
 
   describe "footer projection" $ do
     it "carries one chip per base-board binding, and nothing else" $
@@ -409,7 +426,7 @@ spec = describe "keybinding table" $ do
     -- the half of requirement 1 this scope owns.
     it "hides the three a card's details overlay also carries, and keeps x" $ do
       map (.bindingAction) (modeScopeBindings NoAgentMode DetailsScope)
-        `shouldBe` [KillWorking, DismissOrClose, MergeDoneCard, QuitDashboard]
+        `shouldBe` [KillWorking, ToggleFullscreen, DismissOrClose, MergeDoneCard, QuitDashboard]
       sequence_
         [ (name, map (.bindingAction) (modeScopeBindings mode DetailsScope))
             `shouldBe` (name, map (.bindingAction) (scopeBindings DetailsScope))

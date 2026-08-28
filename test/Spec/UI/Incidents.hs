@@ -13,8 +13,9 @@ import qualified Graphics.Vty as Vty
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerIncident (..), DrainerState (..), DrainerStatus (..))
 import Kanban.UI.Events (IncidentsAction (..), applyIncidentsAction, incidentsAction)
+import Kanban.Models (OperatingMode (..))
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
-import Kanban.UI.Overlay (drawIncidents, drawOverlay)
+import Kanban.UI.Overlay (InteriorExtent (..), OverlayGeometry (..), drawIncidents, drawOverlay, overlayGeometryFor)
 import Kanban.UI.Session
   ( BoardWorkLocation (..),
     drainerSourceState,
@@ -59,6 +60,11 @@ import Spec.Support.Fixtures
   )
 import Spec.Support.Render (renderWidgetLines)
 import Test.Hspec
+
+-- | Which extent an incidents panel is drawn at, which since issue #543 is
+-- what decides the width a row is measured against.
+data PanelExtent = WindowedPanel | FullscreenPanel
+  deriving stock (Eq, Show)
 
 spec :: Spec
 spec = do
@@ -560,7 +566,7 @@ spec = do
       let marked = filter (Data.Text.isInfixOf "↳") rendered
       marked `shouldSatisfy` ((== 1) . length)
       marked `shouldSatisfy` all (not . Data.Text.isInfixOf "src/Kanban/UI.hs")
-      map Data.Text.length marked `shouldSatisfy` all (<= incidentsPanelWidth)
+      map Data.Text.length marked `shouldSatisfy` all (<= panelInterior WindowedPanel 164)
 
     it "keeps the blocker and remedy of a production-shaped error under a deep checkout" $ do
       -- Exactly what the drainer records: advance_pending_cleanup prefixes the
@@ -639,12 +645,17 @@ spec = do
         -- The note is additive, never a replacement.
         length (written with) `shouldSatisfy` (> length (written without))
 
-    it "elides a row the real fixed-width panel cannot fit, rather than cropping it silently" $ do
-      -- The panel is a fixed-width overlay, so the width a row actually gets
-      -- is the overlay's, not the terminal's. Drawing through drawIncidents
-      -- alone bypasses that limit; this goes through drawOverlay, where a
-      -- real cleanup summary already overruns the panel before any recorded
-      -- failure is added to it.
+    it "elides a row the real panel cannot fit, rather than cropping it silently" $ do
+      -- The panel's width is the overlay's, not the terminal's. Drawing
+      -- through drawIncidents alone bypasses that limit; this goes through
+      -- drawOverlay, where a real cleanup summary already overruns the panel
+      -- before any recorded failure is added to it.
+      --
+      -- Since issue #543 that width is no longer one number: windowed the
+      -- panel is the fixed 100-cell box it always was, and fullscreen it is
+      -- the terminal less the frame on each side. Each extent is measured
+      -- against the width it actually gets, which is what a single
+      -- 'incidentsPanelWidth' literal stopped being able to say.
       state <-
         reportingState
           [ (cleanupIncident 1079)
@@ -656,22 +667,58 @@ spec = do
               }
           ]
       let opened = applyIncidentsAction OpenIncidentsPanel state
-      for_ [200, 164] $ \width -> do
-        case filter (Data.Text.isInfixOf "PR #1079") (overlayLinesAt width opened) of
+      for_ [(extent, width) | extent <- bothExtents, width <- [200, 164]] $ \(extent, width) -> do
+        let interior = panelInterior extent width
+        case filter (Data.Text.isInfixOf "PR #1079") (overlayLinesAtExtent extent width opened) of
           [row] -> do
-            -- Dropped text is announced, and the row still fits the panel the
-            -- overlay draws rather than running past its border.
-            row `shouldSatisfy` Data.Text.isSuffixOf "…"
-            Data.Text.length row `shouldSatisfy` (<= incidentsPanelWidth)
-          rows -> expectationFailure ("expected one cleanup row, got " <> show (length rows))
+            -- Whatever the extent, the row fits the panel the overlay
+            -- actually drew rather than running past its border.
+            (extent, width, Data.Text.length row <= interior) `shouldBe` (extent, width, True)
+          rows -> expectationFailure ("expected one cleanup row at " <> show (extent, width) <> ", got " <> show (length rows))
 
-      -- A row the panel does fit keeps every character, and gains no ellipsis.
+      -- The windowed panel is where this summary is elided at all, which is
+      -- what the fixed 100-cell box has always done to it...
+      panelInterior FullscreenPanel 200 `shouldSatisfy` (> panelInterior WindowedPanel 200)
+      filter (Data.Text.isInfixOf "PR #1079") (overlayLinesAtExtent WindowedPanel 200 opened)
+        `shouldSatisfy` all (Data.Text.isSuffixOf "…")
+      -- ...and the fullscreen panel is wide enough to carry the whole of it,
+      -- which is the point of growing the box.
+      filter (Data.Text.isInfixOf "PR #1079") (overlayLinesAtExtent FullscreenPanel 200 opened)
+        `shouldSatisfy` all (Data.Text.isSuffixOf "pr drainer")
+
+      -- A row the windowed panel does fit keeps every character, and gains no
+      -- ellipsis, at either extent.
       short <- reportingState [conflictIncident 42]
-      case filter (Data.Text.isInfixOf "PR #42") (overlayLinesAt 200 (applyIncidentsAction OpenIncidentsPanel short)) of
-        [row] -> do
-          row `shouldSatisfy` Data.Text.isSuffixOf "pr drainer"
-          row `shouldSatisfy` not . Data.Text.isInfixOf "…"
-        rows -> expectationFailure ("expected one conflict row, got " <> show (length rows))
+      for_ bothExtents $ \extent ->
+        case filter (Data.Text.isInfixOf "PR #42") (overlayLinesAtExtent extent 200 (applyIncidentsAction OpenIncidentsPanel short)) of
+          [row] -> do
+            (extent, Data.Text.isSuffixOf "pr drainer" row) `shouldBe` (extent, True)
+            (extent, Data.Text.isInfixOf "…" row) `shouldBe` (extent, False)
+          rows -> expectationFailure ("expected one conflict row at " <> show extent <> ", got " <> show (length rows))
+
+    it "elides against the fullscreen width once the panel is grown to it" $ do
+      -- A summary that fits the windowed panel is not the interesting case;
+      -- this one overruns it, so the two extents must disagree about whether
+      -- it needs an ellipsis at all. That is precisely what a fixed
+      -- 'incidentsPanelWidth' could not express.
+      state <-
+        reportingState
+          [ (conflictIncident 77)
+              { incidentSummary = Just (Data.Text.replicate 6 "a merge conflict the windowed panel cannot fit ")
+              }
+          ]
+      let opened = applyIncidentsAction OpenIncidentsPanel state
+          rowAt extent = filter (Data.Text.isInfixOf "PR #77") (overlayLinesAtExtent extent 200 opened)
+      case (rowAt WindowedPanel, rowAt FullscreenPanel) of
+        ([windowed], [full]) -> do
+          -- Both are elided at 200 cells, but the fullscreen row carries
+          -- strictly more of the summary before its ellipsis.
+          windowed `shouldSatisfy` Data.Text.isSuffixOf "…"
+          full `shouldSatisfy` Data.Text.isSuffixOf "…"
+          Data.Text.length full `shouldSatisfy` (> Data.Text.length windowed)
+          Data.Text.length windowed `shouldSatisfy` (<= panelInterior WindowedPanel 200)
+          Data.Text.length full `shouldSatisfy` (<= panelInterior FullscreenPanel 200)
+        rows -> expectationFailure ("expected one conflict row at each extent, got " <> show rows)
 
     it "scrolls a list longer than the panel, keeping the selected row shown" $ do
       state <- reportingState [conflictIncident number | number <- [1 .. 40]]
@@ -739,19 +786,39 @@ spec = do
 
     panelLines = panelLinesAt 96
 
-    panelLinesAt width state = renderWidgetLines (themeFor testOptions) width (drawIncidents state)
+    panelLinesAt width state = renderWidgetLines (themeFor testOptions) width (drawIncidents BoundedInterior state)
 
-    -- Through the real overlay, which is where the panel's fixed width and
-    -- its border and padding are applied. The frame the overlay draws around
-    -- each row is stripped so what is left is the row's own cells.
-    overlayLinesAt width state =
+    -- Through the real overlay, which is where the panel's width and its
+    -- border and padding are applied. The frame the overlay draws around each
+    -- row is stripped so what is left is the row's own cells.
+    overlayLinesAt = overlayLinesAtExtent WindowedPanel
+
+    -- The two extents the panel can be drawn at since issue #543, and the
+    -- interior a row gets at each.
+    bothExtents = [WindowedPanel, FullscreenPanel]
+
+    -- Taken from the geometry the overlay itself draws through rather than
+    -- from a literal: windowed that is the fixed box the panel has always
+    -- declared, and fullscreen it is the terminal less the frame column on
+    -- each side, floored at the windowed width. The operating mode is only
+    -- consulted for the help overlay's measured box, so any of them answers
+    -- for this one.
+    panelInterior extent width =
+      (overlayGeometryFor DualMode IncidentsOverlay (extent == FullscreenPanel) width 80 0).overlayGeometryWidth
+        - panelChrome
+
+    -- The border the box draws and the padding inside it, one cell each side
+    -- of each.
+    panelChrome = 4
+
+    overlayLinesAtExtent extent width state =
       map
         (Data.Text.dropAround (`elem` (" │┃|" :: String)))
-        (renderWidgetLines (themeFor testOptions) width (drawOverlay state IncidentsOverlay))
-
-    -- The interior the fixed-width incidents overlay leaves a row: its
-    -- hLimit less the border it draws and the padding inside that.
-    incidentsPanelWidth = 96
+        ( renderWidgetLines
+            (themeFor testOptions)
+            width
+            (drawOverlay state {appOverlayFullscreen = extent == FullscreenPanel} IncidentsOverlay)
+        )
 
     -- The single row an incident produces, which is what the kind-specific
     -- assertions above are about.

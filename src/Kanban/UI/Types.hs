@@ -23,6 +23,9 @@ module Kanban.UI.Types
     OpenDataView (..),
     OpenGeneration,
     Overlay (..),
+    OverlaySurface (..),
+    overlayHonorsFullscreen,
+    overlaySurface,
     PendingReviewInteraction (..),
     ProcessClickOutcome (..),
     ProcessSelection (..),
@@ -163,6 +166,63 @@ data Overlay
   | SolveOverlay Int
   | PullRequestReviewOverlay Int
   deriving stock (Eq, Show)
+
+-- | Which /surface/ an overlay is, with the subject it happens to be showing
+-- dropped.
+--
+-- The fullscreen flag ('appOverlayFullscreen') is reset when the open overlay
+-- is replaced by a genuinely different one and preserved when the same
+-- surface is merely re-pointed, which is the distinction 'Overlay' equality
+-- cannot draw: @Tab@ moves a session overlay from one session to the next
+-- ('Kanban.UI.SessionEvents.cycleSession') and a refresh re-points a details
+-- overlay at the same card's newer record ('Kanban.UI.Reconcile.refreshOverlay'),
+-- and neither is a new surface for the user. Incidents-Enter jumping straight
+-- into a live session is, and resets.
+data OverlaySurface
+  = HelpSurface
+  | SettingsSurface
+  | ProcessesSurface
+  | IncidentsSurface
+  | DetailsSurface
+  | ReviewSurface
+  | SolveChooserSurface
+  | SolveSurface
+  | PullRequestReviewSurface
+  deriving stock (Eq, Ord, Show, Enum, Bounded)
+
+-- | The surface one overlay is. Total in 'Overlay' so an overlay added later
+-- cannot reach the screen without a decision about which surface it is, and
+-- therefore about what a transition into it does to fullscreen.
+overlaySurface :: Overlay -> OverlaySurface
+overlaySurface = \case
+  HelpOverlay -> HelpSurface
+  SettingsOverlay -> SettingsSurface
+  ProcessesOverlay -> ProcessesSurface
+  IncidentsOverlay -> IncidentsSurface
+  DetailsOverlay _ -> DetailsSurface
+  ReviewOverlay _ -> ReviewSurface
+  SolveChooser _ _ -> SolveChooserSurface
+  SolveOverlay _ -> SolveSurface
+  PullRequestReviewOverlay _ -> PullRequestReviewSurface
+
+-- | Whether this overlay honors the fullscreen toggle at all.
+--
+-- Every surface except the Codex\/Claude solve chooser, which is a 42x10
+-- box holding two rows and gains nothing from the screen
+-- (@docs\/overlay_focus_fullscreen_design.md@ D-4). Total in
+-- 'OverlaySurface' for the same reason 'overlaySurface' is total in
+-- 'Overlay'.
+overlayHonorsFullscreen :: Overlay -> Bool
+overlayHonorsFullscreen overlay = case overlaySurface overlay of
+  SolveChooserSurface -> False
+  HelpSurface -> True
+  SettingsSurface -> True
+  ProcessesSurface -> True
+  IncidentsSurface -> True
+  DetailsSurface -> True
+  ReviewSurface -> True
+  SolveSurface -> True
+  PullRequestReviewSurface -> True
 
 data SolvePhase
   = SolveStarting
@@ -701,6 +761,13 @@ data AppState = AppState
     appProcessSelection :: ProcessSelection,
     appIncidentSelection :: IncidentSelection,
     appOverlay :: Maybe Overlay,
+    -- | Whether the open overlay is drawn fullscreen rather than in its
+    -- windowed box. One flag for whichever overlay is open, never a per-kind
+    -- memory: an overlay opens windowed whatever the previous one was
+    -- (@docs\/overlay_focus_fullscreen_design.md@ D-1, D-5), which
+    -- 'Kanban.UI.State.settleOverlayFullscreen' enforces after every event
+    -- rather than at each of the many sites that assign 'appOverlay'.
+    appOverlayFullscreen :: Bool,
     appNotice :: Maybe Text,
     appBoardFreshness :: Freshness,
     -- | The newest complete open generation, kept beside the board it derived.
