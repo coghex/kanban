@@ -84,6 +84,24 @@ FORBIDDEN_PATH_FRAGMENTS = (
 # a workflow reference: those are authored as `{{cmd:}}` tokens and render to a
 # different sigil per brand, so a phrase carrying one could never match both.
 REQUIRED_PHRASES = {
+    # --- The trigger: a diagnostic question authorises nothing. ---
+    "a-diagnosis-is-not-authorisation": (
+        "**A diagnosis is not authorisation.** This workflow reruns checks, "
+        "commits,\npushes, and hands off a rereview, so it runs only when the "
+        "user asked in that\nturn for the pull request to be fixed, unblocked, "
+        "or made mergeable."
+    ),
+    "a-why-question-is-answered-without-mutating": (
+        '"Why can\'t\nthis merge?" and "what is blocking this?" ask for none of '
+        "that: answer them by\nrunning step 2 and step 3, reporting the obstacle "
+        "you found, and stopping there\n— no rerun, no worktree, no push."
+    ),
+    "an-ambiguous-request-is-read-as-diagnostic": (
+        "When a request could be read either way, treat it\nas diagnostic and "
+        "ask, because the diagnostic reading is the one whose mistake\ncosts "
+        "nothing."
+    ),
+
     # --- The approval precondition, and why it is what licenses the rerun. ---
     "approval-is-required-before-diagnosis": (
         "This workflow acts only on an approved pull request."
@@ -274,6 +292,9 @@ DIAGNOSIS_ORDER = ("**Merge conflict**", "**Failed check**", "**Nothing to fix**
 # them, which is what proves the table above is measuring this workflow rather
 # than matching text every packaged workflow happens to contain.
 FIX_ONLY_REQUIREMENTS = (
+    "a-diagnosis-is-not-authorisation",
+    "a-why-question-is-answered-without-mutating",
+    "an-ambiguous-request-is-read-as-diagnostic",
     "approval-is-required-before-diagnosis",
     "approval-is-what-makes-the-rerun-safe",
     "approval-is-configured-not-a-fixed-string",
@@ -331,6 +352,27 @@ class FixAssetPackagingTests(unittest.TestCase):
         keys = frontmatter_keys(read(CLAUDE_FIX))
         self.assertIn("description", keys)
         self.assertEqual(CLAUDE_FIX.stem, "fix")
+
+    def test_neither_description_triggers_on_a_diagnostic_question(self):
+        # The frontmatter description is what a provider matches a user's
+        # phrasing against, so an over-broad one invites this workflow into a
+        # turn that authorised none of what it does. It must name an explicit
+        # request and disclaim the "why can't this merge" reading.
+        for path in FIX_ASSETS:
+            match = FRONTMATTER_RE.match(read(path))
+            self.assertIsNotNone(match, path)
+            description = match.group(1)
+            self.assertIn("Runs only on an explicit request", description)
+            self.assertIn(
+                "diagnostic request, not this workflow",
+                description,
+                f"{path} description must disclaim the diagnostic reading",
+            )
+            self.assertNotIn(
+                "or asks why an approved pull request still cannot merge",
+                description,
+                f"{path} description re-opens the diagnostic trigger",
+            )
 
     def test_neither_asset_sets_forbidden_configuration(self):
         for path in FIX_ASSETS:

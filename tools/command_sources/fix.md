@@ -1,6 +1,6 @@
 ---
 name: fix
-description: Clear an already-approved GitHub pull request's remaining obstacle so it can merge — resolve a merge conflict, rerun CI once when the failure never executed the pull request's code, or fix a genuine check failure and hand off to a canonical rereview. Refuses any pull request that is not approved. Use when the user invokes {{cmd:fix}} or asks why an approved pull request still cannot merge.
+description: Clear an already-approved GitHub pull request's remaining obstacle so it can merge — resolve a merge conflict, rerun CI once when the failure never executed the pull request's code, or fix a genuine check failure and hand off to a canonical rereview. Refuses any pull request that is not approved. Runs only on an explicit request to fix, unblock, or clear an approved pull request: when the user invokes {{cmd:fix}} or asks in that turn for one to be made mergeable. A question about WHY a pull request cannot merge is a diagnostic request, not this workflow.
 argument-hint: "[PR number]"
 ---
 
@@ -10,6 +10,16 @@ Clear the one thing standing between an approved pull request and the merge
 queue, taking its number from the argument below. This workflow touches the
 pull request's own code, so this session runs on the pull request's own origin
 brand, the same way {{cmd:pr-revise}} and {{cmd:repair}} do.
+
+**A diagnosis is not authorisation.** This workflow reruns checks, commits,
+pushes, and hands off a rereview, so it runs only when the user asked in that
+turn for the pull request to be fixed, unblocked, or made mergeable. "Why can't
+this merge?" and "what is blocking this?" ask for none of that: answer them by
+running step 2 and step 3, reporting the obstacle you found, and stopping there
+— no rerun, no worktree, no push. Then say what this workflow would do about it
+and let the user ask for it. When a request could be read either way, treat it
+as diagnostic and ask, because the diagnostic reading is the one whose mistake
+costs nothing.
 
 Never merge the pull request, and never close an issue or pull request. Merging
 belongs to the repository's own merge or drainer process, never to this

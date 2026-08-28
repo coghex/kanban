@@ -27,7 +27,11 @@ created above it.
   failure anywhere reruns nothing, the complete rollup is re-fetched and
   re-judged after a rerun, and a failed entry that is not a GitHub Actions run
   at all — an external status with no run to read or retry — fails closed
-  rather than being handed a command that cannot apply to it. A rerun pushes
+  rather than being handed a command that cannot apply to it. The workflow runs
+  only on an explicit request to fix or unblock a pull request: asking why one
+  cannot merge is answered by reporting the obstacle and stopping, since a
+  diagnostic question authorises none of the reruns, pushes, or rereview it
+  would otherwise perform. A rerun pushes
   no commit, so the approval it ran under still stands and no rereview is
   invoked; a code fix replaces the reviewed head, so one always is. It is
   authored once under `tools/command_sources/` and rendered into both bundles,
