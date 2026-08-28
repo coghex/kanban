@@ -31,7 +31,10 @@ created above it.
   only on an explicit request to fix or unblock a pull request: asking why one
   cannot merge is answered by reporting the obstacle and stopping, since a
   diagnostic question authorises none of the reruns, pushes, or rereview it
-  would otherwise perform. A rerun pushes
+  would otherwise perform. An approved pull request merely BEHIND its base is
+  an obstacle too, not a clearance: green checks do not make it mergeable, so
+  it is updated from the base exactly as a conflict is, and an `UNKNOWN` merge
+  state stops the run rather than being reported ready. A rerun pushes
   no commit, so the approval it ran under still stands and no rereview is
   invoked; a code fix replaces the reviewed head, so one always is. It is
   authored once under `tools/command_sources/` and rendered into both bundles,

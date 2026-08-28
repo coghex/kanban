@@ -5,7 +5,8 @@ Contract version: 2
 ## 1. Purpose and scope
 
 Kanban's board is fully usable without any AI provider. A smaller set of
-explicit actions — issue solve, PR review/rereview/revise/repair, canonical
+explicit actions — issue solve, PR review/rereview/revise/repair, the
+approved-pull-request fix, canonical
 issue
 review/rereview, the solve readiness gate, and the two optional background
 services, the PR drainer and the issue approval service — call
@@ -1367,6 +1368,84 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   installed the key reports the installer rather than failing opaquely, and a
   host with no supported service manager is reported as its own condition rather
   than as a missing installation.
+
+### 2.9 Approved-pull-request fix (`$fix` / `/fix`)
+
+- **Owning source:** the packaged workflows themselves
+  (`codex-plugin/plugins/kanban/skills/fix/SKILL.md`,
+  `claude-plugin/plugins/kanban/commands/fix.md`), both rendered from the one
+  authored source `tools/command_sources/fix.md` by
+  `tools/render_command_sources.py`. There is no Haskell invocation: Kanban's
+  own `r` spawns `repair` for a Done-column problem card and never this, so
+  `fix` is deliberately absent from the name-parity sets in
+  `tools/test_codex_plugin.py` and `tools/test_claude_plugin.py`. It is not a
+  drafting workflow, and is not part of the declared drafting surface
+  ([drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)).
+  Its behavioral contract is `tools/test_fix_workflow_contract.py`.
+- **Invocation:** user-invoked only, as `$fix <pr>` / `/fix <pr>` or an
+  explicit in-turn request to fix, unblock, or clear a pull request. A
+  diagnostic question — "why can't this merge?" — is explicitly NOT an
+  invocation: it is answered by running the approval gate and the diagnosis,
+  reporting the obstacle, and stopping, because a question authorises none of
+  the reruns, pushes, or rereview this workflow otherwise performs. An
+  ambiguous request is read as diagnostic. Because it works on the pull
+  request's own code, it runs on the pull request's own origin brand — the
+  same rule as `pr-revise` and `repair` — and hands any verdict off to the
+  opposite brand's canonical reviewer rather than reviewing itself (no
+  `--self-review`).
+- **Inputs:** one positive pull request number, plus the repository and
+  configuration context when the caller supplies it, scoped and forwarded
+  exactly as §2.7 describes for `repair`.
+- **Preconditions:** the pull request must be approved under the caller's
+  effective `approval_mode` — `label` accepts the configured `approval_label`,
+  `review` accepts GitHub's own `reviewDecision`, `either` accepts both — the
+  same decision `approvedPullRequest` makes in `src/Kanban/Workflow.hs`. An
+  unapproved pull request, one carrying the configured
+  `changes_requested_label`, and one carrying a configured blocked label are
+  each refused with nothing changed; a blocking label is never removed to
+  proceed. This precondition is what distinguishes `fix` from `repair`, which
+  deliberately works on unapproved and changes-requested pull requests too, and
+  it is what licenses the rerun authority below.
+- **Outputs:** either at most one focused commit pushed to the pull request's
+  own head branch followed by exactly one canonical rereview — on the same
+  verified-head-advanced condition §2.7 states — or a rerun of one or more
+  GitHub Actions runs, which pushes nothing. The two are exclusive. The
+  rereview publishes the `pr-review:v2` comment and switches the configured
+  verdict labels; the workflow itself never sets one.
+- **Rerun authority, and its ceiling:** this is the one packaged workflow that
+  may retry a red check. It may do so only when EVERY failed run is an
+  infrastructure failure — no job that executed the pull request's code
+  reported a failure — and then only once per run, never twice. A failed
+  rollup entry that is not a GitHub Actions run at all (a `StatusContext`, or
+  a `CheckRun` whose `detailsUrl` names no Actions run) fails closed: it is
+  reported and never handed `gh run view` or `gh run rerun`. After the reruns
+  the COMPLETE rollup is re-fetched and re-judged, never the reruns' own
+  outcomes alone, and any remaining failed entry stops the run. This ceiling is
+  deliberately tighter than `tools/drain_prs.py`'s `MAX_CI_RERUN_ATTEMPTS`,
+  which serves an unattended daemon; neither is the other's bug and neither may
+  be changed to match the other. `repair`'s own prohibition on retry loops
+  (§2.7) is unaffected and still governs the unapproved work it runs on.
+- **Failure semantics:** it addresses the highest-priority obstacle in
+  `pullRequestStatus` order — merge conflict, then any failed check, then a
+  merge state that is not ready (`MergeBehind`, which `pullRequestStatus`
+  reports as `merge pending`), then nothing to fix. An `UNKNOWN` merge state is
+  not a clearance and stops the run rather than being reported ready. A real
+  check failure is fixed and never retried; a failure judged pre-existing on
+  the base branch is reported and stops the run. Cross-repository heads,
+  writability, competing remote updates, and a coordinator-rejected rereview
+  all behave exactly as §2.7 specifies for `repair`.
+- **Required authority:** GitHub read on the pull request and its Actions runs,
+  the ability to request a rerun of a failed Actions run, and write to push to
+  the pull request's head branch **in the head repository**. It never merges,
+  never closes an issue or pull request, and never adds or removes a verdict
+  label directly.
+- **Durable state:** the same worktree selection §2.7 specifies, keyed on the
+  pull request's exact head branch, or a new one at
+  `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/pr-<n>-<slug>`. A rerun
+  needs no worktree at all and creates none. It never switches the
+  repository's primary checkout.
+- **Mandatory/optional:** optional — user-invoked only, reached by asking for
+  it, and spawned by no Kanban code path.
 
 ## 3. Migration boundary
 

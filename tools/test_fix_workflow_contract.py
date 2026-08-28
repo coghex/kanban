@@ -135,6 +135,28 @@ REQUIRED_PHRASES = {
         "Never remove a\nblocking label to proceed: a blocking label is a human's "
         "decision."
     ),
+    # --- A pull request behind its base is unmergeable, not clear. ---
+    "behind-the-base-is-its-own-obstacle": (
+        "3. **Behind its base** — no conflict and no failed check, but the "
+        "merge state\n   is not ready: GitHub reports `BEHIND`, which\n   "
+        "`src/Kanban/Workflow.hs`'s `pullRequestStatus` classifies as `merge\n"
+        "   pending`"
+    ),
+    "green-checks-do-not-make-a-behind-pr-mergeable": (
+        "Green checks do not make\n   such a pull request mergeable. Update it "
+        "from the recorded `baseRefName`\n   through step 4, exactly as the "
+        "conflict branch does"
+    ),
+    "nothing-to-fix-requires-a-ready-merge-state": (
+        "4. **Nothing to fix** — no conflict, no failed check, and a merge "
+        "state that is\n   ready."
+    ),
+    "an-unknown-merge-state-is-not-a-clearance": (
+        "`UNKNOWN` is not a clearance either — GitHub has not finished\n   "
+        "computing mergeability, so say so and stop rather than reporting a "
+        "pull\n   request ready that may yet come back `BEHIND` or `DIRTY`."
+    ),
+
     # --- Triage: what may be rerun, and what may never be. ---
     "triage-precedes-any-edit": (
         "Triage them through step 5 before changing a single file."
@@ -278,7 +300,12 @@ REQUIRED_PHRASES = {
         "having pushed nothing, invoke no rereview,\nand report it."
     ),
     "a-rerun-needs-no-worktree": (
-        "A rerun changes no file and needs no worktree at all."
+        "A\nrerun changes no file and needs no worktree at all."
+    ),
+    "the-worktree-step-covers-all-three-head-moving-obstacles": (
+        "This step applies only when step 3 or step 5 concluded that the head "
+        "must\nmove — a merge conflict, a base the head is behind, or a real "
+        "check failure."
     ),
     "never-switches-the-primary-checkout": (
         "Never switch the repository's primary checkout."
@@ -286,12 +313,21 @@ REQUIRED_PHRASES = {
 }
 
 # The obstacle branches, in the order the workflow must address them.
-DIAGNOSIS_ORDER = ("**Merge conflict**", "**Failed check**", "**Nothing to fix**")
+DIAGNOSIS_ORDER = (
+    "**Merge conflict**",
+    "**Failed check**",
+    "**Behind its base**",
+    "**Nothing to fix**",
+)
 
 # Requirements that belong to fix alone. The repair pair must carry none of
 # them, which is what proves the table above is measuring this workflow rather
 # than matching text every packaged workflow happens to contain.
 FIX_ONLY_REQUIREMENTS = (
+    "behind-the-base-is-its-own-obstacle",
+    "green-checks-do-not-make-a-behind-pr-mergeable",
+    "nothing-to-fix-requires-a-ready-merge-state",
+    "an-unknown-merge-state-is-not-a-clearance",
     "a-diagnosis-is-not-authorisation",
     "a-why-question-is-answered-without-mutating",
     "an-ambiguous-request-is-read-as-diagnostic",
@@ -319,6 +355,7 @@ FIX_ONLY_REQUIREMENTS = (
     "a-rerun-pushes-nothing-so-approval-stands",
     "a-rerun-invokes-no-rereview-and-no-label",
     "a-rerun-needs-no-worktree",
+    "the-worktree-step-covers-all-three-head-moving-obstacles",
 )
 
 
@@ -454,6 +491,68 @@ class FixWorkflowContractTests(unittest.TestCase):
         self.assertIn('approval_label = "reviewed:approve"', example)
         self.assertIn('approval_mode = "label"', example)
         self.assertIn('blocked_labels = ["blocked"]', example)
+
+
+class ContractDocumentationTests(unittest.TestCase):
+    """The authoritative action contract documents this workflow.
+
+    Manifest rows declare what it *reaches*; they are not a statement of its
+    invocation, authority, or durable state. A workflow that reruns GitHub
+    Actions, may push a reviewed head, and spawns a nested canonical review
+    owes docs/agent-workflow-contract.md its own section, the way §2.7 gives
+    repair one.
+    """
+
+    CONTRACT = REPO_ROOT / "docs/agent-workflow-contract.md"
+
+    def test_the_contract_has_a_section_for_this_workflow(self):
+        text = self.CONTRACT.read_text(encoding="utf-8")
+        self.assertIn(
+            "### 2.9 Approved-pull-request fix (`$fix` / `/fix`)",
+            text,
+            "docs/agent-workflow-contract.md has no section for the fix action",
+        )
+
+    def test_that_section_states_every_contract_dimension(self):
+        text = self.CONTRACT.read_text(encoding="utf-8")
+        start = text.index("### 2.9 Approved-pull-request fix")
+        end = text.index("## 3. Migration boundary", start)
+        section = text[start:end]
+        for heading in (
+            "**Owning source:**",
+            "**Invocation:**",
+            "**Inputs:**",
+            "**Preconditions:**",
+            "**Outputs:**",
+            "**Rerun authority, and its ceiling:**",
+            "**Failure semantics:**",
+            "**Required authority:**",
+            "**Durable state:**",
+            "**Mandatory/optional:**",
+        ):
+            self.assertIn(heading, section, f"§2.9 omits {heading}")
+        # The two properties that make this action different from repair.
+        self.assertIn("approvedPullRequest", section)
+        self.assertIn("MergeBehind", section)
+        self.assertIn("MAX_CI_RERUN_ATTEMPTS", section)
+        self.assertIn("`--self-review`", section)
+        self.assertIn("rather than reviewing itself", section)
+
+    def test_the_scope_sentence_names_the_action(self):
+        # Prose that enumerates the actions, audited the way the README
+        # inventories below are.
+        text = self.CONTRACT.read_text(encoding="utf-8")
+        self.assertIn("the\napproved-pull-request fix", text)
+
+    def test_the_merge_state_the_section_cites_really_exists(self):
+        # Non-vacuous anchor: §2.9 and both assets tell a reader that a
+        # not-ready merge state is its own obstacle, naming Kanban's own
+        # constructor. A rename must fail here.
+        domain = (REPO_ROOT / "src/Kanban/Domain.hs").read_text(encoding="utf-8")
+        self.assertIn("MergeBehind", domain)
+        workflow = (REPO_ROOT / "src/Kanban/Workflow.hs").read_text(encoding="utf-8")
+        self.assertIn("mergeStateReady", workflow)
+        self.assertIn('StatusPending "merge pending"', workflow)
 
 
 class RepairDelegationTests(unittest.TestCase):

@@ -110,15 +110,27 @@ this order:
 2. **Failed check** — EVERY failed entry in the pull request's status-check
    rollup, required or not, not only required checks, and not only the first
    one you notice. Triage them through step 5 before changing a single file.
-3. **Nothing to fix** — no conflict and no failed check. Report the pull
-   request's merge state and check state and stop without pushing, without
-   rerunning anything, and without invoking a rereview. A pending check is not
-   an obstacle: say it is still running and stop.
+3. **Behind its base** — no conflict and no failed check, but the merge state
+   is not ready: GitHub reports `BEHIND`, which
+   `src/Kanban/Workflow.hs`'s `pullRequestStatus` classifies as `merge
+   pending` and `src/Kanban/UI/Details.hs` explains as "the base has advanced
+   past this head; update the branch before merging". Green checks do not make
+   such a pull request mergeable. Update it from the recorded `baseRefName`
+   through step 4, exactly as the conflict branch does — incorporating a base
+   tip is one operation, and a conflict is only its harder case.
+4. **Nothing to fix** — no conflict, no failed check, and a merge state that is
+   ready. Report the pull request's merge state and check state and stop
+   without pushing, without rerunning anything, and without invoking a
+   rereview. A pending check is not an obstacle: say it is still running and
+   stop. `UNKNOWN` is not a clearance either — GitHub has not finished
+   computing mergeability, so say so and stop rather than reporting a pull
+   request ready that may yet come back `BEHIND` or `DIRTY`.
 
 ## 4. Work in the pull request's own worktree
 
-This step applies only when step 3 or step 5 concluded that a file must change.
-A rerun changes no file and needs no worktree at all.
+This step applies only when step 3 or step 5 concluded that the head must
+move — a merge conflict, a base the head is behind, or a real check failure. A
+rerun changes no file and needs no worktree at all.
 
 Resolve the pull request's head repository, head branch, and exact head SHA
 before editing anything, and record all three. `headRepositoryOwner` and
