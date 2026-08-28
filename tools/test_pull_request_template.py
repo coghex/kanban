@@ -149,8 +149,9 @@ class PullRequestTemplateOriginTests(unittest.TestCase):
         # template describes the convention rather than demonstrating it, so
         # the assertion anchors on text the correct file actually contains.
         # `test_issue_templates.py`'s equivalent asserts the literal
-        # `issue-origin` token, which the issue templates do spell; asserting
-        # `pr-origin` here would fail against the file as it should be.
+        # `issue-origin` token, which the ordinary issue template does spell --
+        # every other template there delegates to it; asserting `pr-origin`
+        # here would fail against the file as it should be.
         self.assertIn("ORIGIN COMMENT", self.template)
         self.assertIn("origin marker", self.template)
         # Counted rather than asserted with assertNotIn so a failure reports
