@@ -120,9 +120,11 @@ rehearsal of some other tree: delete the scratch branch, re-push it at the
 candidate, and dispatch again.
 
 Confirm from the run that `build-test` succeeded, that the payload carried
-exactly one archive named for the chosen version, and that `publish-dry-run`
-created a draft rather than a release. The scratch branch has done its work
-once the run's head is confirmed, and nothing downstream reads it:
+exactly one archive named for the chosen version, that the candidate-install
+gate unpacked that archive, confirmed its recorded digest, and reported the
+chosen version from the executable it installed out of it, and that
+`publish-dry-run` created a draft rather than a release. The scratch branch has
+done its work once the run's head is confirmed, and nothing downstream reads it:
 
 ```console
 git push origin --delete release-candidate-<n>
@@ -157,11 +159,14 @@ than its name suggests.
 
 Be clear about what the rehearsal did and did not establish. It proves the
 archive is complete — the packaging check unpacks it, inspects it, and runs its
-own setup commands from it — and that the checkout the archive was cut from
-builds, tests, and reports the right version. What no automated step does is
-build and install the executable *from* the unpacked archive. So this is the
-first and only place the candidate archive is installed from, as well as the
-place an existing installation is proved to survive being moved onto it.
+own setup commands from it — that the checkout the archive was cut from builds,
+tests, and reports the right version, and that the archive itself builds,
+installs, and reports that version from its own unpacked tree, which the
+candidate-install gate does on the runner. What no automated step does is any
+of that on a supported host, from a downloaded asset, onto a machine where an
+earlier release is already installed. So this is the place the candidate is
+installed the way a user installs it, and the only place an existing
+installation is proved to survive being moved onto it.
 
 The candidate is not published, so the README's first step — which downloads
 the latest public release — is the one step performed differently. Run this from
