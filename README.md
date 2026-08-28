@@ -96,7 +96,7 @@ The keys that matter first:
 | `h` / `l` | Move between columns |
 | `Enter` | Open card details |
 | `s` | Search a column by number and title |
-| `f` | Filter which cards the board shows, including closed history |
+| `F` | Filter which cards the board shows, including closed history |
 | `u` | Refresh the board and usage information |
 | `p` | Show running and completed jobs |
 | `i` | Show everything needing attention, and go to it |

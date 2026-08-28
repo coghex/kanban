@@ -39,7 +39,7 @@ created above it.
   Re-running any of them from a newer archive re-points the links a previous
   archive left, while still refusing to touch a file that is not Kanban's own.
 
-- Press `f` for a card filter panel. `j`/`k` or `Up`/`Down` move between its
+- Press `F` for a card filter panel. `j`/`k` or `Up`/`Down` move between its
   boxes, `Left`/`Right` between groups, `Space` toggles the focused box, and
   `d` restores the defaults. Its criteria combine with the `s` column search
   rather than replacing it.
