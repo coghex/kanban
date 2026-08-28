@@ -230,7 +230,7 @@ Then reconcile every candidate in **one** invocation, passing no issue numbers s
 python3 "$BACKEND" --path "$(git rev-parse --show-toplevel)" --repo "$REPO" --reconcile-approvals --legacy-policy dual --json
 ```
 
-One invocation, not one per issue: the backend takes the canonical approval lock at most once for the whole call, and selection is its own because only it has resolved the configured `approval_label`. The returned document names that label; use it when reporting. For a completed reconciliation, treat every issue it reports as the complete candidate set. For a top-level `busy` result, use /triage's verified-snapshot fallback instead of treating the empty `issues` array as the candidate set. Do not follow either result with a per-issue `--check` — two separate calls reopen the read-then-decide window the lock exists to close.
+One invocation, not one per issue: the backend takes the canonical approval lock at most once for the whole call, and selection is its own because only it has resolved the configured `approval_label`. A completed reconciliation names that label in `approval_label` and a busy one inside `busy_fallback`; use whichever it reports when reporting. For a completed reconciliation, treat every issue it reports as the complete candidate set. For a top-level `busy` result, use /triage's verified-snapshot fallback instead of treating the empty `issues` array as the candidate set. Do not follow either result with a per-issue `--check` — two separate calls reopen the read-then-decide window the lock exists to close.
 
 Render each entry exactly as /triage's outcome table prescribes,
 including its `[needs canonical review]` and `[approval unverified]` notes. For
@@ -254,7 +254,7 @@ no delta was requested.
 
 **Fail closed outside the busy fallback.** A missing or unresolvable backend,
 a GitHub read or write failure, a malformed document, an invalid or missing
-`approval_label` or `changes_requested_label` in a busy document, or an
+`busy_fallback` or either label inside it in a busy document, or an
 unverifiable post-mutation state means what /triage says it means:
 render no approval marker for the affected issues, claim no successful removal,
 and mark each one `[approval unverified]` with the reason. The previous
