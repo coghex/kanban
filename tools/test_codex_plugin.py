@@ -182,6 +182,16 @@ PROJECT_REVIEW_SKILL_NAMES = {"project-review"}
 # tools/test_drain_prs_workflow.py.
 DRAINER_SKILL_NAMES = {"drain-prs"}
 
+# The approved-pull-request obstacle clearer. Rendered from
+# tools/command_sources/fix.md the way the five sets above are, and like them
+# user-invoked and excluded from Haskell name parity: Kanban's own CLI spawns
+# repair for a Done-column card, never this. It is its own category rather
+# than another repair name because it acts only on an already-approved pull
+# request and, uniquely among the packaged workflows, may rerun a failed check
+# rather than only fixing or reporting it. Its behavioral assertions live in
+# tools/test_fix_workflow_contract.py.
+PULL_REQUEST_FIX_SKILL_NAMES = {"fix"}
+
 # What a Codex installation must actually discover under skills/.
 EXPECTED_SKILL_NAMES = (
     HASKELL_PARITY_SKILL_NAMES
@@ -192,6 +202,7 @@ EXPECTED_SKILL_NAMES = (
     | BACKLOG_SKILL_NAMES
     | PROJECT_REVIEW_SKILL_NAMES
     | DRAINER_SKILL_NAMES
+    | PULL_REQUEST_FIX_SKILL_NAMES
 )
 
 # Keys that would let a packaged manifest silently override the model,
@@ -410,7 +421,8 @@ class SkillDiscoveryTests(unittest.TestCase):
             | PUBLICATION_SKILL_NAMES
             | BACKLOG_SKILL_NAMES
             | PROJECT_REVIEW_SKILL_NAMES
-            | DRAINER_SKILL_NAMES,
+            | DRAINER_SKILL_NAMES
+            | PULL_REQUEST_FIX_SKILL_NAMES,
         )
         self.assertEqual(DRAFTING_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
         self.assertEqual(ROADMAP_SKILL_NAMES & DRAFTING_SKILL_NAMES, set())

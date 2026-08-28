@@ -45,7 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_COMMANDS_PREFIX = "claude-plugin/plugins/kanban/commands"
 CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 
-# The shipped sets: Claude's twenty-one names, and Codex's the same set minus
+# The shipped sets: Claude's twenty-two names, and Codex's the same set minus
 # Claude-only `draft-issues`. Pinned as counts and as the one documented
 # difference rather than as a third copy of the name list, which
 # tools/test_claude_plugin.py and tools/test_codex_plugin.py already assert.
@@ -53,9 +53,11 @@ CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 # one more when issue #410 vendored `push-docs`, by one more again in
 # VEND-2, which vendored `retriage`, by one more in VEND-3, which vendored
 # `backlog-review`, by one more in VEND-4, which vendored `project-review`,
-# and by one more in VEND-5, which vendored `drain-prs`.
-SHIPPED_CLAUDE_COUNT = 21
-SHIPPED_CODEX_COUNT = 20
+# by one more in VEND-5, which vendored `drain-prs`, and by one more when
+# `fix` was authored directly against this mechanism rather than vendored from
+# a personal copy.
+SHIPPED_CLAUDE_COUNT = 22
+SHIPPED_CODEX_COUNT = 21
 CLAUDE_ONLY_WORKFLOW = "draft-issues"
 
 # The registered sources that render into the two bundles rather than under
@@ -68,6 +70,7 @@ SHIPPING_SOURCE_NAMES = {
     "backlog-review",
     "project-review",
     "drain-prs",
+    "fix",
 }
 
 FIXTURE_SOURCE = "tools/command_sources/fixture-command.md"

@@ -356,6 +356,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/project-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/fix/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
@@ -390,6 +391,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/backlog-review.md",
     "claude-plugin/plugins/kanban/commands/project-review.md",
     "claude-plugin/plugins/kanban/commands/drain-prs.md",
+    "claude-plugin/plugins/kanban/commands/fix.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
@@ -549,6 +551,30 @@ DRAIN_PRS_SURFACE_EXPECTED_COMMANDS = {
     "codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md": {
         "git",
         "sed",
+        "python3",
+    },
+}
+
+# The approved-pull-request obstacle clearer, pinned like the rendered pairs
+# above but with one deliberate asymmetry rather than one shared set. `gh`
+# reads the pull request, its run's jobs, and requests the single rerun;
+# `git` selects the worktree and resolves the repository root; `python3` runs
+# the canonical coordinator. The Codex asset additionally reaches `find` and
+# `head` because it must locate that coordinator under $CODEX_HOME, where the
+# Claude asset resolves it through ${CLAUDE_PLUGIN_ROOT} and needs neither.
+# That difference is authored in a brand block, so pinning the two sets
+# separately is what makes a command leaking ACROSS that block fail here.
+FIX_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/fix.md": {
+        "gh",
+        "git",
+        "python3",
+    },
+    "codex-plugin/plugins/kanban/skills/fix/SKILL.md": {
+        "find",
+        "gh",
+        "git",
+        "head",
         "python3",
     },
 }
@@ -2428,6 +2454,56 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 )
                 self.assertIn(row["id"], {"git-cli", "sed-cli", "python3-cli"})
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_the_fix_assets_reach_exactly_the_pinned_commands(self):
+        # The approved-pull-request obstacle clearer. Unlike the rendered
+        # pairs above, its two assets are pinned to DIFFERENT sets: the Codex
+        # copy alone reaches `find` and `head`, because only it must locate
+        # the coordinator under $CODEX_HOME. Pinning them separately is what
+        # makes a command leaking across that brand block fail here instead of
+        # being absorbed by a shared set.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path, expected in sorted(FIX_SURFACE_EXPECTED_COMMANDS.items()):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            # `gh` is the assertion here, not an absence: this workflow reads
+            # the pull request and requests its one rerun through it.
+            self.assertIn("gh", found, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+            # Declared from the manifest's side too, so being scanned is not
+            # mistaken for being documented.
+            for name in sorted(expected):
+                row = next(
+                    row
+                    for row in self.manifest
+                    if row["kind"] == "executable" and row["token"] == name
+                )
+                self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_only_the_codex_fix_asset_searches_for_its_coordinator(self):
+        # The asymmetry above, asserted as the difference it actually is
+        # rather than as two independent sets that happen to differ.
+        claude = FIX_SURFACE_EXPECTED_COMMANDS[
+            "claude-plugin/plugins/kanban/commands/fix.md"
+        ]
+        codex = FIX_SURFACE_EXPECTED_COMMANDS[
+            "codex-plugin/plugins/kanban/skills/fix/SKILL.md"
+        ]
+        self.assertEqual(codex - claude, {"find", "head"})
+        self.assertEqual(claude - codex, set())
 
     def test_every_drain_prs_asset_home_relative_path_is_documented(self):
         # Requirement 13: the two rendered assets name the drainer install

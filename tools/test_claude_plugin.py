@@ -195,6 +195,16 @@ PROJECT_REVIEW_COMMAND_NAMES = {"project-review"}
 # tools/test_drain_prs_workflow.py.
 DRAINER_COMMAND_NAMES = {"drain-prs"}
 
+# The approved-pull-request obstacle clearer. Rendered from
+# tools/command_sources/fix.md the way the five sets above are, and like them
+# user-invoked and excluded from Haskell name parity: Kanban's own CLI spawns
+# repair for a Done-column card, never this. It is its own category rather
+# than another repair name because it acts only on an already-approved pull
+# request and, uniquely among the packaged workflows, may rerun a failed check
+# rather than only fixing or reporting it. Its behavioral assertions live in
+# tools/test_fix_workflow_contract.py.
+PULL_REQUEST_FIX_COMMAND_NAMES = {"fix"}
+
 # What a Claude Code installation must actually discover in commands/.
 EXPECTED_COMMAND_NAMES = (
     HASKELL_PARITY_COMMAND_NAMES
@@ -205,6 +215,7 @@ EXPECTED_COMMAND_NAMES = (
     | BACKLOG_COMMAND_NAMES
     | PROJECT_REVIEW_COMMAND_NAMES
     | DRAINER_COMMAND_NAMES
+    | PULL_REQUEST_FIX_COMMAND_NAMES
 )
 
 # Keys that would let a packaged command's frontmatter or manifest silently
@@ -349,7 +360,8 @@ class CommandDiscoveryTests(unittest.TestCase):
             | PUBLICATION_COMMAND_NAMES
             | BACKLOG_COMMAND_NAMES
             | PROJECT_REVIEW_COMMAND_NAMES
-            | DRAINER_COMMAND_NAMES,
+            | DRAINER_COMMAND_NAMES
+            | PULL_REQUEST_FIX_COMMAND_NAMES,
         )
         self.assertEqual(DRAFTING_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
         self.assertEqual(ROADMAP_COMMAND_NAMES & DRAFTING_COMMAND_NAMES, set())

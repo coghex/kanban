@@ -1,0 +1,409 @@
+"""Behavioral contract coverage for the packaged fix workflow.
+
+Run with: python3 -m unittest discover -s tools -p 'test_*.py'
+
+`tools/test_claude_plugin.py` and `tools/test_codex_plugin.py` pin that both
+plugins *discover* a `fix` workflow and that it sits outside the Haskell
+name-parity set, since Kanban's own CLI spawns `repair` for a Done-column card
+and never this. Discovery and name parity are not the contract, though: `fix`
+may rerun a red required check without changing a line, which is an authority
+no other packaged workflow has, so what the packaged text actually instructs an
+agent to do is the part that must not drift.
+
+Both assets are rendered from one source by
+`tools/render_command_sources.py`, so the two brands cannot diverge by an
+unsynchronised hand edit. They can still diverge from their *contract* through
+an edit to that single source, which is what this module measures. It asserts
+against BOTH rendered outputs rather than the source, because the rendered
+files are what an agent actually executes, and because a phrase that survives
+rendering is one that survived sigil substitution and brand-block projection.
+
+Three groups of requirement are checked as text the workflow states in terms an
+agent will act on: the approval precondition that makes the rerun branch safe,
+the triage rule separating an infrastructure failure from a real one together
+with its one-rerun ceiling, and the push/rereview authority boundary --
+specifically that a rerun pushes no head and therefore invokes no rereview,
+while a code fix does both.
+
+`RepairDelegationTests` is the negative control this module owes under
+CLAUDE.md's "Quality gates": the fix-specific rules are asserted absent from the
+repair pair, so a phrase table that had degenerated into fragments present in
+every packaged workflow would fail here rather than pass everywhere.
+"""
+
+from __future__ import annotations
+
+import re
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+FIX_SOURCE = REPO_ROOT / "tools/command_sources/fix.md"
+CODEX_FIX = REPO_ROOT / "codex-plugin/plugins/kanban/skills/fix/SKILL.md"
+CLAUDE_FIX = REPO_ROOT / "claude-plugin/plugins/kanban/commands/fix.md"
+
+FIX_ASSETS = (CODEX_FIX, CLAUDE_FIX)
+
+CODEX_REPAIR = REPO_ROOT / "codex-plugin/plugins/kanban/skills/repair/SKILL.md"
+CLAUDE_REPAIR = REPO_ROOT / "claude-plugin/plugins/kanban/commands/repair.md"
+
+REPAIR_ASSETS = (CODEX_REPAIR, CLAUDE_REPAIR)
+
+WORKFLOW_HS = REPO_ROOT / "src/Kanban/Workflow.hs"
+
+FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+FRONTMATTER_KEY_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):", re.MULTILINE)
+
+# The same override surface both plugin modules forbid, restated here so a fix
+# asset is held to it whichever bundle it lives in.
+FORBIDDEN_FRONTMATTER_KEYS = {
+    "model",
+    "models",
+    "effort",
+    "reasoning_effort",
+    "reasoningeffort",
+    "sandbox",
+    "approval",
+    "approvalpolicy",
+    "approval_policy",
+    "permission-mode",
+    "permissionmode",
+    "cwd",
+    "workingdirectory",
+    "working_directory",
+}
+
+FORBIDDEN_PATH_FRAGMENTS = (
+    "/Users/",
+    "/home/",
+    "C:\\Users",
+)
+
+# Every phrase below is asserted against both rendered assets. None may contain
+# a workflow reference: those are authored as `{{cmd:}}` tokens and render to a
+# different sigil per brand, so a phrase carrying one could never match both.
+REQUIRED_PHRASES = {
+    # --- The approval precondition, and why it is what licenses the rerun. ---
+    "approval-is-required-before-diagnosis": (
+        "This workflow acts only on an approved pull request."
+    ),
+    "approval-is-what-makes-the-rerun-safe": (
+        "Approval is the whole\nreason its rerun branch in step 5 is safe: on work a "
+        "reviewer has already\naccepted, a red check is far more likely to be "
+        "infrastructure than a defect the\nreview missed."
+    ),
+    "approval-is-configured-not-a-fixed-string": (
+        "Approval is whatever the effective configuration says it is, never a fixed\n"
+        "string and never the label alone: take the configured `approval_label` "
+        "(default\n`reviewed:approve`) and `approval_mode` (default `label`) from the "
+        "same\nconfiguration the caller supplied"
+    ),
+    "approval-config-is-per-repository-overridable": (
+        "the global `[workflow]` table, overridden\nper repository by "
+        '`[repositories."<owner>/<name>".workflow]`'
+    ),
+    "approval-modes-are-all-three-honoured": (
+        "Honour the configured mode: `label` accepts the\n"
+        "configured approval label, `review` accepts GitHub's own `reviewDecision ==\n"
+        "APPROVED`, and `either` accepts one or both."
+    ),
+    "an-unapproved-pull-request-stops-having-changed-nothing": (
+        "Stop, having changed nothing, when the pull request is not approved under the\n"
+        "resolved mode, or when it carries a configured changes-requested or blocking\n"
+        "label."
+    ),
+    "a-blocking-label-is-never-removed-to-proceed": (
+        "Never remove a\nblocking label to proceed: a blocking label is a human's "
+        "decision."
+    ),
+    # --- Triage: what may be rerun, and what may never be. ---
+    "triage-precedes-any-edit": (
+        "Triage it through step 5\n   before changing a single file."
+    ),
+    "infrastructure-failure-is-defined-by-what-executed": (
+        "**An infrastructure failure is one where no job that executed the pull\n"
+        "request's code reported a failure.**"
+    ),
+    "infrastructure-failure-is-read-from-the-jobs": (
+        "Decide which by reading the failing run's\nown jobs, never by the check's "
+        "name and never by how the failure feels"
+    ),
+    "the-eviction-signature-is-named": (
+        "Concurrency-group eviction is the\ncanonical case: a setup job is cancelled "
+        "with no steps, the jobs needing it are\nskipped, and a summary job fails "
+        "asserting they succeeded, having built nothing."
+    ),
+    "a-flaky-failure-is-a-real-failure-here": (
+        "A failure you\n"
+        "believe is flaky is a real failure for this workflow's purposes: it "
+        "executed the\ncode and it reported a result."
+    ),
+    "a-real-failure-is-never-rerun": (
+        "never rerun a real failure to see whether it passes the second\n  time"
+    ),
+    "a-real-failure-is-never-papered-over": (
+        "Never delete or skip a test, never weaken an\n  assertion"
+    ),
+    "a-pre-existing-failure-stops-the-run": (
+        "A failure you judge to be pre-existing on the recorded base branch must\n  "
+        "be reported to the user and stop the run rather than papered over."
+    ),
+    # --- The ceiling. ---
+    "rerun-exactly-once": (
+        "rerun the failed jobs of that run exactly once,\n  then wait for the result"
+    ),
+    "one-rerun-then-stop": (
+        "**One rerun, then stop. There is never a second.**"
+    ),
+    "a-second-red-stops-for-any-reason": (
+        "When it comes back red — for any\nreason at all, including the same "
+        "infrastructure signature — stop and report the\nsecond failure to the user "
+        "without rerunning, without editing a file, and\nwithout invoking a rereview."
+    ),
+    "the-ceiling-differs-from-the-drainers-on-purpose": (
+        "This ceiling is deliberately tighter than the PR drainer's. "
+        "`tools/drain_prs.py`\nretries a failed required check up to its own "
+        "`MAX_CI_RERUN_ATTEMPTS`"
+    ),
+    "neither-ceiling-may-be-changed-to-match-the-other": (
+        "Neither\nceiling is the other's bug. Do not raise this one to match "
+        "the drainer's, and do\nnot lower the drainer's to match this one."
+    ),
+    "the-ceiling-exists-to-surface-evidence": (
+        "A failure that survives one rerun is evidence, and\nburying it under a third "
+        "attempt is exactly what this ceiling exists to prevent."
+    ),
+    # --- Authority: what a rerun does and does not invalidate. ---
+    "a-rerun-pushes-nothing-so-approval-stands": (
+        "Rerunning changes no file and pushes no commit, so the head SHA the approval "
+        "was\ngranted against is unchanged and that approval still stands."
+    ),
+    "a-rerun-invokes-no-rereview-and-no-label": (
+        "A rerun therefore\nnever invokes a rereview and never touches a label."
+    ),
+    "a-push-invalidates-the-approval": (
+        "Do not assume\nthe pull request is still approved after you push — it is "
+        "not, because the\napproval named the SHA you replaced."
+    ),
+    "exactly-one-rereview-after-a-push": (
+        "When you pushed a new head, finish by invoking exactly one canonical rereview"
+    ),
+    "no-push-means-no-rereview": (
+        "When you pushed nothing — the rerun branch, the nothing-to-fix branch, or a "
+        "stop\nin step 2 or step 5 — there is no new head, so invoke no rereview and "
+        "simply\nreport what you found."
+    ),
+    "never-merges-and-never-closes": (
+        "Never merge the pull request, and never close an issue or pull request."
+    ),
+    "never-mutates-a-verdict-label-directly": (
+        "Never add or remove a verdict label directly."
+    ),
+    "never-compensates-for-an-unavailable-rereview": (
+        "Never compensate by\nsetting a label yourself."
+    ),
+    "does-not-self-review-the-rereview": "Do not pass `--self-review`",
+    "ambiguity-goes-to-the-user": (
+        "ask the user through the session's question mechanism\nrather than choosing"
+    ),
+    # --- Head safety, inherited from the repair contract by construction. ---
+    "cross-repository-heads-are-fail-closed": (
+        "A cross-repository pull request is fail-closed."
+    ),
+    "writability-is-decided-by-the-push-not-maintainer-can-modify": (
+        "Decide whether that push is possible from the head repository itself, never "
+        "from\n`maintainerCanModify`"
+    ),
+    "reverifies-the-head-before-a-non-force-push": (
+        "Before pushing, re-fetch the pull request branch from the recorded head\n"
+        "repository and verify its remote head still equals the recorded SHA."
+    ),
+    "verifies-the-push-actually-advanced-the-head": (
+        "a push that left the head unchanged\ntransferred no fix, so treat it as "
+        "having pushed nothing, invoke no rereview,\nand report it."
+    ),
+    "a-rerun-needs-no-worktree": (
+        "A rerun changes no file and needs no worktree at all."
+    ),
+    "never-switches-the-primary-checkout": (
+        "Never switch the repository's primary checkout."
+    ),
+}
+
+# The obstacle branches, in the order the workflow must address them.
+DIAGNOSIS_ORDER = ("**Merge conflict**", "**Failed check**", "**Nothing to fix**")
+
+# Requirements that belong to fix alone. The repair pair must carry none of
+# them, which is what proves the table above is measuring this workflow rather
+# than matching text every packaged workflow happens to contain.
+FIX_ONLY_REQUIREMENTS = (
+    "approval-is-required-before-diagnosis",
+    "approval-is-what-makes-the-rerun-safe",
+    "approval-is-configured-not-a-fixed-string",
+    "approval-modes-are-all-three-honoured",
+    "infrastructure-failure-is-defined-by-what-executed",
+    "the-eviction-signature-is-named",
+    "a-flaky-failure-is-a-real-failure-here",
+    "rerun-exactly-once",
+    "one-rerun-then-stop",
+    "a-second-red-stops-for-any-reason",
+    "the-ceiling-exists-to-surface-evidence",
+    "the-ceiling-differs-from-the-drainers-on-purpose",
+    "neither-ceiling-may-be-changed-to-match-the-other",
+    "a-rerun-pushes-nothing-so-approval-stands",
+    "a-rerun-invokes-no-rereview-and-no-label",
+    "a-rerun-needs-no-worktree",
+)
+
+
+def read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def frontmatter_keys(text: str) -> set[str]:
+    match = FRONTMATTER_RE.match(text)
+    if match is None:
+        return set()
+    return {key.lower() for key in FRONTMATTER_KEY_RE.findall(match.group(1))}
+
+
+class FixAssetPackagingTests(unittest.TestCase):
+    def test_the_source_and_both_rendered_assets_exist(self):
+        self.assertTrue(FIX_SOURCE.is_file(), f"missing {FIX_SOURCE}")
+        for path in FIX_ASSETS:
+            self.assertTrue(path.is_file(), f"missing {path}")
+
+    def test_codex_skill_frontmatter_name_matches_its_directory(self):
+        text = read(CODEX_FIX)
+        match = FRONTMATTER_RE.match(text)
+        self.assertIsNotNone(match, "fix SKILL.md must open with a --- frontmatter block")
+        name = re.search(r"^name:\s*(\S+)\s*$", match.group(1), re.MULTILINE)
+        self.assertIsNotNone(name, "fix SKILL.md frontmatter must declare name:")
+        self.assertEqual(name.group(1), CODEX_FIX.parent.name)
+        self.assertEqual(name.group(1), "fix")
+
+    def test_claude_command_declares_a_description_and_is_named_fix(self):
+        keys = frontmatter_keys(read(CLAUDE_FIX))
+        self.assertIn("description", keys)
+        self.assertEqual(CLAUDE_FIX.stem, "fix")
+
+    def test_neither_asset_sets_forbidden_configuration(self):
+        for path in FIX_ASSETS:
+            hits = frontmatter_keys(read(path)) & FORBIDDEN_FRONTMATTER_KEYS
+            self.assertEqual(
+                hits,
+                set(),
+                f"{path} must not set model/effort/sandbox/permission/approval/cwd "
+                f"configuration: {hits}",
+            )
+
+    def test_neither_asset_references_a_personal_absolute_path(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            for fragment in FORBIDDEN_PATH_FRAGMENTS:
+                self.assertNotIn(
+                    fragment, text, f"{path} contains forbidden path fragment {fragment!r}"
+                )
+
+
+class FixWorkflowContractTests(unittest.TestCase):
+    """Every requirement below is asserted against both rendered assets, so an
+    edit to the one source cannot drop a rule from the shipped workflows."""
+
+    def test_both_assets_state_every_required_behavior(self):
+        missing = []
+        for path in FIX_ASSETS:
+            text = read(path)
+            for requirement, phrase in REQUIRED_PHRASES.items():
+                if phrase not in text:
+                    missing.append(f"{path.relative_to(REPO_ROOT)}: {requirement}")
+        self.assertEqual(missing, [], "\n".join(missing))
+
+    def test_the_required_phrase_table_is_not_vacuous(self):
+        # Guards the loop above against a table that was emptied or whose
+        # phrases were reduced to trivially-present fragments.
+        self.assertGreaterEqual(len(REQUIRED_PHRASES), 25)
+        for requirement, phrase in REQUIRED_PHRASES.items():
+            self.assertGreaterEqual(len(phrase), 20, requirement)
+
+    def test_obstacle_branches_appear_in_the_declared_order(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            positions = []
+            for marker in DIAGNOSIS_ORDER:
+                index = text.find(marker)
+                self.assertNotEqual(index, -1, f"{path} does not name {marker}")
+                positions.append(index)
+            self.assertEqual(
+                positions,
+                sorted(positions),
+                f"{path} lists the obstacle branches out of order {DIAGNOSIS_ORDER}",
+            )
+
+    def test_the_approval_helper_named_by_both_assets_really_exists(self):
+        # Non-vacuous anchor: the assets tell an agent to match approval the way
+        # `approvedPullRequest` does, so a rename in the Haskell fails here
+        # instead of leaving the packaged text pointing at nothing.
+        source = read(WORKFLOW_HS)
+        self.assertIn("approvedPullRequest ::", source)
+        for mode in ("ApprovalByLabel", "ApprovalByReview", "ApprovalByEither"):
+            self.assertIn(mode, source, f"{WORKFLOW_HS} no longer defines {mode}")
+        for path in FIX_ASSETS:
+            self.assertIn("`approvedPullRequest`", read(path))
+
+    def test_the_drainer_constant_the_ceiling_is_contrasted_with_exists(self):
+        # The assets tell a reader the drainer retries up to its own
+        # MAX_CI_RERUN_ATTEMPTS. A rename or removal there must fail here
+        # rather than leave the packaged text citing nothing.
+        drainer = (REPO_ROOT / "tools/drain_prs.py").read_text(encoding="utf-8")
+        self.assertIn("MAX_CI_RERUN_ATTEMPTS = ", drainer)
+        for path in FIX_ASSETS:
+            self.assertIn("`MAX_CI_RERUN_ATTEMPTS`", read(path))
+
+    def test_the_configured_label_defaults_match_the_tracked_example_config(self):
+        # The assets quote `reviewed:approve` and `blocked` as defaults; the
+        # tracked example config is where those defaults actually live.
+        example = read(REPO_ROOT / "config.toml.example")
+        self.assertIn('approval_label = "reviewed:approve"', example)
+        self.assertIn('approval_mode = "label"', example)
+        self.assertIn('blocked_labels = ["blocked"]', example)
+
+
+class RepairDelegationTests(unittest.TestCase):
+    """The negative control CLAUDE.md's quality gates require.
+
+    Every rule that belongs to fix alone is asserted ABSENT from the repair
+    pair. Without this, a phrase table that had decayed into fragments common
+    to every packaged workflow would pass the positive test above while
+    asserting nothing about this workflow in particular.
+    """
+
+    def test_repair_carries_none_of_the_fix_only_rules(self):
+        leaked = []
+        for path in REPAIR_ASSETS:
+            text = read(path)
+            for requirement in FIX_ONLY_REQUIREMENTS:
+                if REQUIRED_PHRASES[requirement] in text:
+                    leaked.append(f"{path.relative_to(REPO_ROOT)}: {requirement}")
+        self.assertEqual(
+            leaked,
+            [],
+            "repair must not carry fix's approval gate or rerun authority:\n"
+            + "\n".join(leaked),
+        )
+
+    def test_the_fix_only_set_is_a_real_subset_of_the_required_table(self):
+        self.assertTrue(set(FIX_ONLY_REQUIREMENTS) < set(REQUIRED_PHRASES))
+        self.assertGreaterEqual(len(FIX_ONLY_REQUIREMENTS), 10)
+
+    def test_repair_still_forbids_the_retry_loop_fix_is_allowed(self):
+        # The two workflows deliberately disagree here, and that disagreement
+        # is only safe while repair's own prohibition is intact: repair runs on
+        # unapproved work, where a red check is far likelier to be real.
+        for path in REPAIR_ASSETS:
+            self.assertIn("no retry loops", read(path))
+
+
+if __name__ == "__main__":
+    unittest.main()

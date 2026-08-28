@@ -15,6 +15,20 @@ created above it.
 
 ### Unreleased
 
+- A new packaged workflow, `/fix` (Codex: `$fix`), clears the one remaining
+  obstacle in front of an **already-approved** pull request. It refuses any pull
+  request that is not approved under the configured `approval_mode`, resolves a
+  merge conflict, and otherwise triages the failing check: a failure where no
+  job actually executed the pull request's code — a cancelled setup job, a
+  concurrency-group eviction, an aggregator reporting on a dependency that never
+  ran — is rerun exactly once and never a second time, while a failure that did
+  execute the code is fixed and handed to one canonical rereview. A rerun pushes
+  no commit, so the approval it ran under still stands and no rereview is
+  invoked; a code fix replaces the reviewed head, so one always is. It is
+  authored once under `tools/command_sources/` and rendered into both bundles,
+  and it deliberately does not relax `/repair`'s own "no retry loops" rule,
+  which still governs the unapproved work `/repair` runs on.
+
 - The documentation carries an ordered release-to-release upgrade path. The
   README's new upgrade section unpacks the new archive beside the old one,
   installs the executable, inventories what is installed and which service jobs
