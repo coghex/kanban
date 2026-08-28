@@ -343,6 +343,21 @@ REQUIRED_PHRASES = {
         "ask the user through the session's question mechanism\nrather than choosing"
     ),
     # --- Head safety, inherited from the repair contract by construction. ---
+    "a-local-ahead-reused-worktree-stops-the-run": (
+        "**But a reused worktree whose HEAD is not the recorded head stops the "
+        "run.** Uncommitted work is safe to keep — it reaches the remote only "
+        "if you commit it, and the focused commit stages only what you changed. "
+        "COMMITTED work is not:"
+    ),
+    "why-a-local-ahead-push-breaks-the-one-commit-limit": (
+        "A push from there is an ordinary fast-forward that publishes every one "
+        "of them alongside your fix — no force, no warning, and no way for the "
+        '"at most one focused commit" limit to hold.'
+    ),
+    "publishing-someone-elses-commits-is-not-this-workflows-call": (
+        "Those commits are somebody's interrupted work, they have never been "
+        "reviewed, and deciding to publish them is not this workflow's call."
+    ),
     "cross-repository-heads-are-fail-closed": (
         "A cross-repository pull request is fail-closed."
     ),
@@ -684,6 +699,52 @@ class OriginBrandGateTests(unittest.TestCase):
             "PR body has no valid pr-origin marker",
         ):
             self.assertIn(rejection, flow, f"originFromBody no longer rejects: {rejection}")
+
+
+class ReusedWorktreeSafetyTests(unittest.TestCase):
+    """A reused worktree may not smuggle commits onto the reviewed head.
+
+    The worktree is selected by branch and reused dirty on purpose -- that is
+    how interrupted work survives. But dirty and AHEAD are different: an
+    ordinary non-force push from a worktree carrying extra commits is a
+    fast-forward that publishes all of them, so the remote-head check alone
+    (which only proves nobody else moved it) cannot hold the one-commit limit.
+    """
+
+    def test_both_assets_require_the_reused_head_to_match(self):
+        for path in FIX_ASSETS:
+            text = flat(read(path))
+            self.assertIn(
+                "a reused worktree whose HEAD is not the recorded head stops "
+                "the run",
+                text,
+                path,
+            )
+            self.assertIn("git -C <worktree> rev-parse HEAD", text, path)
+
+    def test_the_distinction_between_dirty_and_ahead_is_stated(self):
+        for path in FIX_ASSETS:
+            text = flat(read(path))
+            # Dirty is preserved...
+            self.assertIn("preserve and continue there", text, path)
+            self.assertIn("Uncommitted work is safe to keep", text, path)
+            # ...ahead is refused, including the diverged case.
+            self.assertIn(
+                "The same applies when HEAD has diverged rather than merely "
+                "advanced.",
+                text,
+                path,
+            )
+
+    def test_the_remote_head_check_is_still_present_too(self):
+        # The two checks answer different questions and neither replaces the
+        # other: this one proves nobody else moved the remote.
+        for path in FIX_ASSETS:
+            self.assertIn(
+                "verify its remote head still equals the recorded SHA",
+                flat(read(path)),
+                path,
+            )
 
 
 class WorkingTreeHygieneTests(unittest.TestCase):

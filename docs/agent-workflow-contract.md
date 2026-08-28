@@ -1456,7 +1456,11 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   never closes an issue or pull request, and never adds or removes a verdict
   label directly.
 - **Durable state:** the same worktree selection §2.7 specifies, keyed on the
-  pull request's exact head branch, or a new one at
+  pull request's exact head branch — but reused only when its HEAD equals the
+  recorded head. Uncommitted work there is preserved; COMMITTED work ahead of
+  or diverged from that head stops the run, because an ordinary non-force push
+  would publish those unreviewed commits alongside the fix and no
+  "at most one focused commit" limit could hold. Or a new worktree at
   `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/pr-<n>-<slug>`. Every
   non-mutating branch needs no worktree at all and creates none. It never
   switches the repository's primary checkout.

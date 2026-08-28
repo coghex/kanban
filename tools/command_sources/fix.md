@@ -282,10 +282,26 @@ git worktree list
 ```
 
 A dirty or interrupted reused worktree is recoverable work, not a collision:
-inspect `git status`, `git diff`, `git diff --cached`, and committed progress
-relative to the recorded head, then preserve and continue there. Never discard,
-reset, or overwrite unfinished changes, and never create a second worktree on
-the same branch merely because the first is dirty.
+inspect `git status`, `git diff`, and `git diff --cached`, then preserve and
+continue there. Never discard, reset, or overwrite unfinished changes, and never
+create a second worktree on the same branch merely because the first is dirty.
+
+**But a reused worktree whose HEAD is not the recorded head stops the run.**
+Uncommitted work is safe to keep — it reaches the remote only if you commit it,
+and the focused commit stages only what you changed. COMMITTED work is not:
+
+```bash
+git -C <worktree> rev-parse HEAD
+```
+
+If that is not the SHA recorded at the start of this step, the worktree carries
+commits the pull request's head does not. A push from there is an ordinary
+fast-forward that publishes every one of them alongside your fix — no force, no
+warning, and no way for the "at most one focused commit" limit to hold. Those
+commits are somebody's interrupted work, they have never been reviewed, and
+deciding to publish them is not this workflow's call. Report the worktree, the
+recorded head, and the commits between them, and stop. The same applies when
+HEAD has diverged rather than merely advanced.
 
 Only when no worktree is on that branch, create one keyed on the pull request
 number under the repository-scoped worktrees root
