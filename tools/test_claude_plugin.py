@@ -202,8 +202,9 @@ DRAINER_COMMAND_NAMES = {"drain-prs"}
 # user-invoked and excluded from Haskell name parity: Kanban's own CLI spawns
 # repair for a Done-column card, never this. It is its own category rather
 # than another repair name because it acts only on an already-approved pull
-# request and, uniquely among the packaged workflows, may rerun a failed check
-# rather than only fixing or reporting it. Its behavioral assertions live in
+# request, and because it gates on an origin marker and a merge state no other
+# workflow reads. It never reruns a check: tools/drain_prs.py owns that, and
+# repair holds the same prohibition. Its behavioral assertions live in
 # tools/test_fix_workflow_contract.py.
 PULL_REQUEST_FIX_COMMAND_NAMES = {"fix"}
 

@@ -167,15 +167,43 @@ REQUIRED_PHRASES = {
         "incorporating that base branch's\n   current tip. This branch reads "
         "no check state, which is why it precedes the\n   rollup test below."
     ),
+    "a-rollup-entry-is-not-a-check": (
+        "**A rollup entry is not the same thing as a CHECK.** GitHub returns "
+        "every context on the commit, including ones a later run superseded, "
+        "so the same check can appear twice — an old failure beside the "
+        "passing rerun that replaced it."
+    ),
+    "the-decoders-dedup-key-and-recency-rule-are-restated": (
+        "`src/Kanban/GitHub/Decode.hs` keys each context "
+        "(`check:<app-slug>:<name>` for a `CheckRun`, "
+        "`status:<creator-login>:<context>` for a `StatusContext`), keeps only "
+        "the most recent context per key (`startedAt` falling back to "
+        "`completedAt` for a check run, `createdAt` for a status), and reads "
+        "the verdict off THAT set alone."
+    ),
+    "a-superseded-failure-is-a-real-state-here": (
+        "since the PR drainer reruns required checks on its own schedule, a "
+        "superseded failure is a state this repository actually produces, not "
+        "a hypothetical."
+    ),
+    "an-undedupable-entry-fails-closed": (
+        "**If any entry lacks the fields that rule needs** — no `__typename` "
+        "you recognise, no key, or no timestamp on a context that shares a key "
+        "with another — the rollup falls to branch 2 and the run stops."
+    ),
+    "the-branches-read-the-deduplicated-set": (
+        "3. **Failed check** — EVERY failed check in the DEDUPLICATED set "
+        "above,"
+    ),
     "an-untrustworthy-rollup-is-its-own-branch": (
         "2. **A rollup you cannot trust** — before any branch below draws a "
         "conclusion\n   from the rollup, that rollup must be COMPLETE."
     ),
     "a-failed-check-is-fixed-not-retried": (
-        "3. **Failed check** — EVERY failed entry in the rollup, required or "
-        "not, not\n   only required checks, and not only the first one you "
-        "notice. Fix the causes\n   in the worktree of step 4, push, and hand "
-        "off the rereview of step 6."
+        "3. **Failed check** — EVERY failed check in the DEDUPLICATED set "
+        "above, required or not, not only required checks, and not only the "
+        "first one you notice. Fix the causes in the worktree of step 4, push, "
+        "and hand off the rereview of step 6."
     ),
     "never-retry-a-failure-instead-of-fixing-it": (
         "Never\n   delete or skip a test, never weaken an assertion, and never "
@@ -183,10 +211,10 @@ REQUIRED_PHRASES = {
         "that outright."
     ),
     "completeness-is-established-by-the-same-comparison-kanban-makes": (
-        "Compare that `totalCount` against the number of entries the command "
-        "above returned. They must be equal — the same comparison "
-        "`src/Kanban/GitHub/Decode.hs` makes before it decodes a single "
-        "context."
+        "Compare the `totalCount` the query above returned against the number "
+        "of nodes it returned beside it. They must be equal — the same "
+        "comparison `src/Kanban/GitHub/Decode.hs` makes before it decodes a "
+        "single context."
     ),
     "an-untrustworthy-rollup-fails-closed": (
         "**A truncated rollup, or any entry you cannot classify, fails "
@@ -200,7 +228,8 @@ REQUIRED_PHRASES = {
     ),
     "a-pending-check-mutates-nothing": (
         "4. **A check still running** — no conflict, a rollup you can trust, "
-        "no failed\n   entry, and a pending one. This branch MUTATES NOTHING."
+        "no failed check, and a pending one in that same deduplicated set. "
+        "This branch MUTATES NOTHING."
     ),
     "the-workflow-never-retries-a-check": (
         "This workflow does not retry a red check, ever. A failed check is "
@@ -342,6 +371,11 @@ DIAGNOSIS_ORDER = (
 # than matching text every packaged workflow happens to contain.
 FIX_ONLY_REQUIREMENTS = (
     "an-untrustworthy-rollup-is-its-own-branch",
+    "the-branches-read-the-deduplicated-set",
+    "an-undedupable-entry-fails-closed",
+    "a-superseded-failure-is-a-real-state-here",
+    "the-decoders-dedup-key-and-recency-rule-are-restated",
+    "a-rollup-entry-is-not-a-check",
     "a-believed-flaky-failure-is-reported-not-retried",
     "no-rerun-command-no-loop-no-just-once",
     "two-rerunners-would-disagree",
@@ -640,6 +674,52 @@ class OriginBrandGateTests(unittest.TestCase):
             "PR body has no valid pr-origin marker",
         ):
             self.assertIn(rejection, flow, f"originFromBody no longer rejects: {rejection}")
+
+
+class ContextDeduplicationTests(unittest.TestCase):
+    """The workflow judges checks, not raw contexts.
+
+    GitHub returns every context on the head commit, superseded ones included,
+    so an old failure can sit beside the passing rerun that replaced it. Kanban
+    never reads that list directly. A workflow that did would edit, push and
+    rereview a pull request whose board status is already green -- and because
+    the PR drainer reruns required checks on its own schedule, that state is
+    one this repository actually produces.
+    """
+
+    def test_both_assets_restate_the_decoders_key_and_recency_rule(self):
+        for path in FIX_ASSETS:
+            text = flat(read(path))
+            self.assertIn("check:<app-slug>:<name>", text, path)
+            self.assertIn("status:<creator-login>:<context>", text, path)
+            self.assertIn("keeps only the most recent context per key", text, path)
+
+    def test_the_rollup_query_fetches_the_fields_that_rule_needs(self):
+        # `gh pr view --json statusCheckRollup` omits the app slug and the
+        # status creator, so the key cannot be built from it. The assets must
+        # ask for the same fields Kanban's own query does.
+        for path in FIX_ASSETS:
+            text = read(path)
+            for field in (
+                "checkSuite{app{slug}}",
+                "creator{login}",
+                "startedAt",
+                "completedAt",
+                "createdAt",
+            ):
+                self.assertIn(field, text, f"{path} never fetches {field}")
+
+    def test_the_key_shape_still_matches_the_decoder(self):
+        # Non-vacuous anchor: the assets restate a key format that must remain
+        # the one Decode.hs builds.
+        decode = read(REPO_ROOT / "src/Kanban/GitHub/Decode.hs")
+        self.assertIn('checkContextKey = "check:" <> app <> ":" <> name', decode)
+        self.assertIn('checkContextKey = "status:" <> creator <> ":" <> name', decode)
+        self.assertIn("(startedAt <|> completedAt)", decode)
+
+    def test_the_summary_still_reads_only_the_latest_per_key(self):
+        workflow = read(REPO_ROOT / "src/Kanban/GitHub/Decode.hs")
+        self.assertIn("latest = Map.elems (Map.fromListWith latestContext", workflow)
 
 
 class NoRerunTests(unittest.TestCase):

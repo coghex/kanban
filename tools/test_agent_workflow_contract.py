@@ -2525,8 +2525,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
             self.assertEqual(found, expected, relative_path)
-            # `gh` is the assertion here, not an absence: this workflow reads
-            # the pull request and requests its one rerun through it.
+            # `gh` is the assertion here, not an absence: this workflow
+            # reads the pull request, its check rollup, and its origin marker
+            # through it. It never reruns a check -- that is the drainer's.
             self.assertIn("gh", found, relative_path)
             for name in found:
                 self.assertIn(

@@ -139,11 +139,32 @@ blocking label to proceed: a blocking label is a human's decision.
 ## 3. Diagnose the remaining obstacle
 
 Read the whole check rollup first — the obstacle is the SET of entries, never
-the first one you looked at:
+the first one you looked at. Fetch it with the SAME query and fields
+`src/Kanban/GitHub/Fetch.hs` uses, because the identity and recency fields are
+what make the next paragraph possible and `gh pr view --json statusCheckRollup`
+omits them:
 
 ```bash
-gh pr view <pr> -R <owner/name> --json statusCheckRollup --jq '.statusCheckRollup[] | [.__typename, .name // .context, .conclusion // .state] | @tsv'
+gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){pullRequest(number:<pr>){commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){totalCount nodes{__typename ... on CheckRun{name status conclusion startedAt completedAt checkSuite{app{slug}}} ... on StatusContext{context state createdAt creator{login}}}}}}}}}}' > rollup.json
 ```
+
+**A rollup entry is not the same thing as a CHECK.** GitHub returns every
+context on the commit, including ones a later run superseded, so the same check
+can appear twice — an old failure beside the passing rerun that replaced it.
+Kanban never judges the raw list: `src/Kanban/GitHub/Decode.hs` keys each
+context (`check:<app-slug>:<name>` for a `CheckRun`,
+`status:<creator-login>:<context>` for a `StatusContext`), keeps only the most
+recent context per key (`startedAt` falling back to `completedAt` for a check
+run, `createdAt` for a status), and reads the verdict off THAT set alone. Do
+the same before applying any branch below. Skipping it means treating a
+superseded failure as current — and since the PR drainer reruns required checks
+on its own schedule, a superseded failure is a state this repository actually
+produces, not a hypothetical.
+
+**If any entry lacks the fields that rule needs** — no `__typename` you
+recognise, no key, or no timestamp on a context that shares a key with another
+— the rollup falls to branch 2 and the run stops. Deduplicating on a guess is
+how an "already green" pull request gets edited and rereviewed for nothing.
 
 With approval established, address the highest-priority obstacle you find, in
 this order:
@@ -161,28 +182,27 @@ this order:
    `src/Kanban/Workflow.hs` makes it neither ready nor pending — it is never a
    clearance. Establish completeness rather than assuming it:
 
-   ```bash
-   gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){pullRequest(number:<pr>){commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){totalCount}}}}}}}}' --jq '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.totalCount'
-   ```
-
-   Compare that `totalCount` against the number of entries the command above
-   returned. They must be equal — the same comparison
+   Compare the `totalCount` the query above returned against the number of
+   nodes it returned beside it. They must be equal — the same comparison
    `src/Kanban/GitHub/Decode.hs` makes before it decodes a single context.
+   This is why the rollup is fetched once, with `totalCount` alongside the
+   nodes, rather than read from a convenience view that reports neither.
 
    **A truncated rollup, or any entry you cannot classify, fails closed:**
    report that the check state cannot be read completely and stop without
    pushing or invoking a rereview. An incomplete rollup can be hiding exactly
    the failed or pending entry the branches below test for, so treating it as
    absence would turn "I did not see one" into "there is none".
-3. **Failed check** — EVERY failed entry in the rollup, required or not, not
-   only required checks, and not only the first one you notice. Fix the causes
+3. **Failed check** — EVERY failed check in the DEDUPLICATED set above,
+   required or not, not only required checks, and not only the first one you
+   notice. Fix the causes
    in the worktree of step 4, push, and hand off the rereview of step 6. Never
    delete or skip a test, never weaken an assertion, and never retry a failure
    instead of fixing it — see step 5, which forbids that outright. A failure
    you judge to be pre-existing on the recorded base branch is reported to the
    user and stops the run rather than being papered over.
 4. **A check still running** — no conflict, a rollup you can trust, no failed
-   entry, and a pending one. This branch MUTATES NOTHING. Report which checks
+   check, and a pending one in that same deduplicated set. This branch MUTATES NOTHING. Report which checks
    are still running and stop: do not update the branch, do not push, and do
    not invoke a rereview. `pullRequestStatus` ranks it this way too —
    `checksPending` is guarded BEFORE the merge-state test — and the reason is
