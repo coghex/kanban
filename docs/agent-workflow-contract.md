@@ -1396,6 +1396,16 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
 - **Inputs:** one positive pull request number, plus the repository and
   configuration context when the caller supplies it, scoped and forwarded
   exactly as §2.7 describes for `repair`.
+- **Origin gate:** the pull request's `pr-origin` marker must name the brand of
+  the bundle being invoked, validated by exactly `originFromBody`'s rules in
+  `src/Kanban/PullRequestFlow.hs` — one marker, one kind, as the body's final
+  non-whitespace content. This check exists here and not in §2.7 because
+  Kanban's CLI resolves origin and spawns the matching brand for `repair`,
+  while `fix` is user-invoked and nothing upstream has made that choice. A
+  missing, malformed, or opposite-brand marker stops the run with nothing
+  changed: the coordinator routes the rereview from that same marker, so a
+  session editing a pull request of the other brand's origin would author a
+  change and then hand it to its own brand to review.
 - **Preconditions:** the pull request must be approved under the caller's
   effective `approval_mode` — `label` accepts the configured `approval_label`,
   `review` accepts GitHub's own `reviewDecision`, `either` accepts both — the

@@ -32,7 +32,10 @@ created above it.
   only on an explicit request to fix or unblock a pull request: asking why one
   cannot merge is answered by reporting the obstacle and stopping, since a
   diagnostic question authorises none of the reruns, pushes, or rereview it
-  would otherwise perform. An approved pull request merely BEHIND its base is
+  would otherwise perform. Each bundle also refuses a pull request whose
+  `pr-origin` marker names the other brand: the rereview is routed from that
+  same marker, so fixing another brand's pull request would end in a
+  same-brand review of one's own change. An approved pull request merely BEHIND its base is
   an obstacle too, not a clearance: green checks do not make it mergeable, so
   it is updated from the base exactly as a conflict is, and an `UNKNOWN` merge
   state stops the run rather than being reported ready. A check that is still

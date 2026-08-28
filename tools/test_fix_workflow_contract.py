@@ -102,6 +102,34 @@ REQUIRED_PHRASES = {
         "nothing."
     ),
 
+    # --- The origin gate: this brand may only fix its own brand's work. ---
+    "the-origin-marker-is-validated-before-any-mutation": (
+        "Kanban's own CLI resolves a pull request's origin and spawns the "
+        "matching\nbrand's executable"
+    ),
+    "the-origin-rules-are-the-haskell-ones": (
+        "apply exactly the\nrules `originFromBody` applies in "
+        "`src/Kanban/PullRequestFlow.hs`: the body must\ncarry exactly ONE "
+        "marker, of exactly one kind, as its final non-whitespace\ncontent."
+    ),
+    "every-malformed-origin-is-a-refusal-not-a-default": (
+        "Both markers present, the same marker twice, a marker with trailing\n"
+        "text after it, and no marker at all are each a refusal — not a default."
+    ),
+    "a-wrong-brand-origin-stops-with-nothing-changed": (
+        "**A missing, malformed, or opposite-brand marker stops the run with "
+        "nothing\nchanged.**"
+    ),
+    "why-the-origin-gate-exists": (
+        "the coordinator routes the rereview from\nthat same marker, so "
+        "editing a pull request whose origin names the OTHER brand\nwould have "
+        "this session author a change and then hand it to its own brand to\n"
+        "review"
+    ),
+    "the-pull-request-body-is-fetched": (
+        "--json number,body,baseRefName"
+    ),
+
     # --- The approval precondition, and why it is what licenses the rerun. ---
     "approval-is-required-before-diagnosis": (
         "This workflow acts only on an approved pull request."
@@ -413,6 +441,11 @@ FIX_ONLY_REQUIREMENTS = (
     "green-checks-do-not-make-a-behind-pr-mergeable",
     "nothing-to-fix-requires-a-ready-merge-state",
     "an-unknown-merge-state-is-not-a-clearance",
+    "the-origin-marker-is-validated-before-any-mutation",
+    "the-origin-rules-are-the-haskell-ones",
+    "every-malformed-origin-is-a-refusal-not-a-default",
+    "a-wrong-brand-origin-stops-with-nothing-changed",
+    "why-the-origin-gate-exists",
     "a-diagnosis-is-not-authorisation",
     "a-why-question-is-answered-without-mutating",
     "an-ambiguous-request-is-read-as-diagnostic",
@@ -599,6 +632,58 @@ class FixWorkflowContractTests(unittest.TestCase):
         self.assertIn('approval_label = "reviewed:approve"', example)
         self.assertIn('approval_mode = "label"', example)
         self.assertIn('blocked_labels = ["blocked"]', example)
+
+
+class OriginBrandGateTests(unittest.TestCase):
+    """Each rendered asset demands ITS OWN brand's origin marker.
+
+    This is the one rule the two assets must state DIFFERENTLY, so a shared
+    assertion would be satisfied by an asset that demanded the wrong brand.
+    Asserting each side names its own marker and refuses the other is what
+    makes the gate real.
+    """
+
+    EXPECTED = {
+        "claude-plugin/plugins/kanban/commands/fix.md": ("claude", "codex"),
+        "codex-plugin/plugins/kanban/skills/fix/SKILL.md": ("codex", "claude"),
+    }
+
+    def test_each_asset_requires_its_own_brand_marker(self):
+        for relative, (own, other) in self.EXPECTED.items():
+            text = read(REPO_ROOT / relative)
+            self.assertIn(
+                f"so the marker must be `<!-- pr-origin:{own} -->`",
+                text,
+                f"{relative} does not require its own brand's origin marker",
+            )
+            self.assertIn(
+                f"A `pr-origin:{other}` pull request belongs to",
+                text,
+                f"{relative} does not refuse the opposite brand's origin",
+            )
+
+    def test_neither_asset_requires_the_opposite_brands_marker(self):
+        for relative, (own, other) in self.EXPECTED.items():
+            text = read(REPO_ROOT / relative)
+            self.assertNotIn(
+                f"so the marker must be `<!-- pr-origin:{other} -->`",
+                text,
+                f"{relative} demands the WRONG brand's origin marker",
+            )
+
+    def test_the_marker_rules_the_assets_cite_really_exist(self):
+        # Non-vacuous anchor: the assets tell an agent to apply
+        # `originFromBody`'s rules, so those rules must still be the ones the
+        # Haskell enforces.
+        flow = read(REPO_ROOT / "src/Kanban/PullRequestFlow.hs")
+        self.assertIn("originFromBody :: Text -> Either Text PullRequestOrigin", flow)
+        for rejection in (
+            "PR body contains both pr-origin markers",
+            "PR body contains a duplicate pr-origin marker",
+            "PR origin marker must be the final non-whitespace content",
+            "PR body has no valid pr-origin marker",
+        ):
+            self.assertIn(rejection, flow, f"originFromBody no longer rejects: {rejection}")
 
 
 class MergeStateCoverageTests(unittest.TestCase):

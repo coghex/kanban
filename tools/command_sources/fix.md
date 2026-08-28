@@ -76,7 +76,7 @@ review missed. Read the pull request once and settle approval before diagnosing
 anything:
 
 ```bash
-gh pr view <pr> -R <owner/name> --json number,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,mergeStateStatus,mergeable,labels,reviewDecision,statusCheckRollup,closingIssuesReferences,url
+gh pr view <pr> -R <owner/name> --json number,body,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,mergeStateStatus,mergeable,labels,reviewDecision,statusCheckRollup,closingIssuesReferences,url
 ```
 
 Approval is whatever the effective configuration says it is, never a fixed
@@ -96,6 +96,37 @@ configuration, matched case-insensitively as `hasProblemLabel` does. Record
 `baseRefName` too: merge-conflict repair must incorporate that exact branch, and
 calling a failure pre-existing means reproducing it there rather than on a
 guessed default branch.
+
+## 2b. Require the pull request's origin to be this brand
+
+Kanban's own CLI resolves a pull request's origin and spawns the matching
+brand's executable, which is why {{cmd:repair}} and {{cmd:pr-revise}} can take
+their brand as given. This workflow is user-invoked: nothing upstream has made
+that choice, so it makes it here, before any mutation.
+
+Read the `pr-origin` marker out of the body fetched above and apply exactly the
+rules `originFromBody` applies in `src/Kanban/PullRequestFlow.hs`: the body must
+carry exactly ONE marker, of exactly one kind, as its final non-whitespace
+content. Both markers present, the same marker twice, a marker with trailing
+text after it, and no marker at all are each a refusal — not a default.
+
+<!-- brand:claude -->
+This is the Claude bundle, so the marker must be `<!-- pr-origin:claude -->`.
+A `pr-origin:codex` pull request belongs to the Codex bundle's own fix
+skill, not to this one.
+<!-- brand:codex -->
+This is the Codex bundle, so the marker must be `<!-- pr-origin:codex -->`.
+A `pr-origin:claude` pull request belongs to the Claude bundle's own fix
+command, not to this one.
+<!-- /brand -->
+
+**A missing, malformed, or opposite-brand marker stops the run with nothing
+changed.** This is not bureaucracy: the coordinator routes the rereview from
+that same marker, so editing a pull request whose origin names the OTHER brand
+would have this session author a change and then hand it to its own brand to
+review — the one thing the whole origin-marker mechanism exists to prevent. An
+unknown-origin pull request stops here too; it has no declared brand to match,
+and guessing one would be inventing the very fact this check exists to read.
 
 Stop, having changed nothing, when the pull request is not approved under the
 resolved mode, or when it carries a configured changes-requested or blocking
