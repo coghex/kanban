@@ -15,12 +15,13 @@
 module Spec.Suite.Assignment (spec) where
 
 import Data.List (isInfixOf)
+import Data.Maybe (fromMaybe)
 import Spec.Support.Lanes
   ( Colocation (..),
     Lane (..),
     SuiteGroup (..),
     allLanes,
-    assignmentRefusals,
+    assignmentDiagnostic,
     countExamples,
     laneName,
   )
@@ -30,7 +31,7 @@ spec :: [SuiteGroup] -> [Colocation] -> Spec
 spec groups colocations = describe "the suite's lane assignment" $ do
   describe "the assignment this suite actually runs" $ do
     it "is accepted" $
-      assignmentRefusals groups colocations `shouldBe` []
+      assignmentDiagnostic groups colocations `shouldBe` Nothing
 
     it "declares the one measured pair, and holds both of its groups in one lane" $ do
       map (\held -> (colocationFirst held, colocationSecond held)) colocations
@@ -47,33 +48,33 @@ spec groups colocations = describe "the suite's lane assignment" $ do
 
   describe "a co-location the assignment separates" $ do
     it "is refused, naming both groups, both lanes and the reason" $ do
-      let refusal = firstRefusal (separated syntheticGroups) syntheticColocations
-      refusal `shouldContainAll` ["\"held-first\"", "\"held-second\"", syntheticReason]
-      refusal `shouldContainAll` [laneName UsageLane, laneName PingLane]
-      refusal `shouldSatisfy` isInfixOf "must run in the same lane"
+      let printed = diagnosticFor (separated syntheticGroups)
+      printed `shouldContainAll` ["\"held-first\"", "\"held-second\"", syntheticReason]
+      printed `shouldContainAll` [laneName UsageLane, laneName PingLane]
+      printed `shouldSatisfy` isInfixOf "must run in the same lane"
 
     it "is accepted while the two share a lane, so the refusal is the separation" $
-      assignmentRefusals syntheticGroups syntheticColocations `shouldBe` []
+      assignmentDiagnostic syntheticGroups syntheticColocations `shouldBe` Nothing
 
   describe "a co-location naming a group the assignment does not hold exactly once" $ do
     it "is refused rather than enforcing nothing, naming the endpoint and the reason" $ do
-      let renamed = rename "held-second" "held-second-renamed" syntheticGroups
-          refusal = firstRefusal renamed syntheticColocations
-      refusal `shouldContainAll` ["\"held-first\"", "\"held-second\"", syntheticReason]
-      refusal `shouldSatisfy` isInfixOf "\"held-second\" is not a group of this suite"
+      let printed = diagnosticFor (rename "held-second" "held-second-renamed" syntheticGroups)
+      printed `shouldContainAll` ["\"held-first\"", "\"held-second\"", syntheticReason]
+      printed `shouldSatisfy` isInfixOf "\"held-second\" is not a group of this suite"
 
-    it "is refused when the endpoint names more than one group" $ do
-      let ambiguous = rename "filler-usage" "held-second" syntheticGroups
-      unwords (assignmentRefusals ambiguous syntheticColocations)
-        `shouldSatisfy` isInfixOf "\"held-second\" names 2 groups of this suite, not one"
+    it "still says which declaration an ambiguous endpoint disarmed, not only what made it ambiguous" $ do
+      let printed = diagnosticFor (rename "filler-usage" "held-second" syntheticGroups)
+      printed `shouldSatisfy` isInfixOf "suite groups share a name"
+      printed `shouldContainAll` ["\"held-first\"", "\"held-second\"", syntheticReason]
+      printed `shouldSatisfy` isInfixOf "\"held-second\" names 2 groups of this suite, not one"
 
   describe "the refusals the co-location check did not replace" $ do
     it "refuses two groups sharing a name" $
-      firstRefusal (rename "filler-ping" "filler-deadline" syntheticGroups) syntheticColocations
-        `shouldSatisfy` isInfixOf "suite groups share a name"
+      diagnosticFor (rename "filler-ping" "filler-deadline" syntheticGroups)
+        `shouldContainAll` ["suite groups share a name", "filler-deadline"]
 
     it "refuses a lane holding no groups" $
-      firstRefusal (filter ((/= DeadlineLane) . suiteGroupLane) syntheticGroups) syntheticColocations
+      diagnosticFor (filter ((/= DeadlineLane) . suiteGroupLane) syntheticGroups)
         `shouldSatisfy` isInfixOf ("lane " <> laneName DeadlineLane <> " has no groups")
 
     it "refuses an example marked parallelizable" $ do
@@ -128,10 +129,14 @@ rename from to = map apply
       | suiteGroupName group == from = group {suiteGroupName = to}
       | otherwise = group
 
-firstRefusal :: [SuiteGroup] -> [Colocation] -> String
-firstRefusal assignment held = case assignmentRefusals assignment held of
-  [] -> "the assignment was accepted"
-  refusal : _ -> refusal
+-- | What the runner would print on being handed this assignment and the
+-- synthetic declaration — the whole diagnostic, so an example cannot pass on
+-- text a reader of a real refusal would never see.
+diagnosticFor :: [SuiteGroup] -> String
+diagnosticFor assignment =
+  fromMaybe
+    "the assignment was accepted"
+    (assignmentDiagnostic assignment syntheticColocations)
 
 shouldContainAll :: String -> [String] -> Expectation
 shouldContainAll subject fragments =

@@ -83,7 +83,7 @@ module Spec.Support.Lanes
     laneVariable,
     laneReportVariable,
     runSuiteInLanes,
-    assignmentRefusals,
+    assignmentDiagnostic,
     countExamples,
   )
 where
@@ -610,22 +610,33 @@ seconds value = showFFloat (Just 2) value " seconds"
 -- can say whether the lanes between them hold it.
 --
 -- The work is split in two because the halves cost different things to test.
--- 'assignmentRefusals' reads names and lanes only, so a test can put a
+-- 'assignmentDiagnostic' reads names and lanes only, so a test can put a
 -- synthetic assignment through the real check without building anyone's spec
 -- tree; 'countExamples' needs a tree, and building the suite's own runs every
 -- @runIO@ in it, so a test gives it a tree of its own instead.
 checkAssignment :: [SuiteGroup] -> [Colocation] -> IO Int
 checkAssignment groups colocations = do
-  forM_ (take 1 (assignmentRefusals groups colocations)) die
+  forM_ (assignmentDiagnostic groups colocations) die
   counted <- countExamples (mapM_ suiteGroupSpec groups)
   either die pure counted
 
--- | Every reason to refuse this assignment, worst first, decided from the
--- groups' names and lanes alone. Empty means the assignment is allowed.
+-- | Exactly what the runner prints when it will not start this assignment, or
+-- 'Nothing' when the assignment is allowed.
 --
--- The order matters: two groups sharing a name is reported before anything
--- else because it is what makes a co-location endpoint ambiguous, so a reader
--- is told the cause rather than one of its symptoms.
+-- Every reason is printed, not the first one found. The reasons are not
+-- independent: two groups sharing a name is also what leaves a co-location
+-- endpoint ambiguous, so stopping at the first would tell a reader the cause
+-- while withholding which declaration stopped being enforced, which is the
+-- half that says how much the suite has lost. Ordering is presentation only —
+-- causes first, then what they cost.
+assignmentDiagnostic :: [SuiteGroup] -> [Colocation] -> Maybe String
+assignmentDiagnostic groups colocations =
+  case assignmentRefusals groups colocations of
+    [] -> Nothing
+    refusals -> Just (intercalate "\n\n" refusals)
+
+-- | Every reason to refuse this assignment, decided from the groups' names and
+-- lanes alone. 'assignmentDiagnostic' is what reports them.
 assignmentRefusals :: [SuiteGroup] -> [Colocation] -> [String]
 assignmentRefusals groups colocations =
   concat [duplicateNames, emptyLanes, colocationFaults]
