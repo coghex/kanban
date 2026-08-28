@@ -4730,9 +4730,10 @@ def describe_lock_holder(root: Path, *, self_holds_lock_file: bool = False) -> s
     Only the finer detail -- the PID, the mode, the pull request -- is read
     from what the holder published, and a run reports itself as starting
     rather than guessing when it has not published yet. The lock file holds
-    the bare PID because drain_prs_service.lock_pid() and
-    install_drainer.repository_drainer_running() read it that way; the mode
-    lives in a sidecar, trusted only when it names that same live PID.
+    the document drain_prs_service.encode_lock_holder() writes, which
+    drain_prs_service.lock_pid() and
+    install_drainer.repository_drainer_running() both decode; the mode lives
+    in a sidecar, trusted only when it names that same live PID.
     """
     # `self_holds_lock_file` says this process already holds the lock file and
     # lost the directory, so the holder it is describing is by definition one
@@ -4793,12 +4794,16 @@ def _publish_lock_owner(
     fd: int, root: Path, mode: str, pull_request: int | None
 ) -> None:
     """Publish who holds the lock, for a contender and for the controller."""
-    # The lock file holds nothing but the bare PID, because
+    # The lock file holds nothing but the holder's PID, in the one shape
+    # drain_prs_service.encode_lock_holder() writes it: a document a
+    # controller predating #367 cannot parse, so such a copy -- which may still
+    # be bound to an installation a relocation has sealed -- reads this
+    # checkout as running no drainer rather than as running one it may signal.
     # drain_prs_service.lock_pid() and
-    # install_drainer.repository_drainer_running() both parse it that way.
+    # install_drainer.repository_drainer_running() both decode it.
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
-    os.write(fd, str(os.getpid()).encode("utf-8"))
+    os.write(fd, drain_prs_service.encode_lock_holder(os.getpid()))
     owner_path = lock_owner_path_for(root)
     tmp_fd, tmp_name = tempfile.mkstemp(
         prefix=f"{owner_path.name}.", dir=owner_path.parent

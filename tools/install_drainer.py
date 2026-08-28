@@ -197,16 +197,25 @@ def pid_alive(pid: int) -> bool:
 
 
 def repository_drainer_running(repo: Path) -> bool:
+    """Whether a `drain_prs.py` run holds this checkout's own lock.
+
+    Decoded through `drain_prs_service.decode_lock_holder`, which is the one
+    place the lock document's shape is known, so this refusal and the
+    controller's `external` classification can never disagree about who holds
+    a checkout.
+    """
     git_dir = Path(
         run(["git", "-C", str(repo), "rev-parse", "--absolute-git-dir"])
         .stdout.strip()
     )
     lock_path = git_dir / "drain_prs.lock"
     try:
-        pid = int(lock_path.read_text(encoding="utf-8").strip())
+        pid = drain_prs_service.decode_lock_holder(
+            lock_path.read_text(encoding="utf-8")
+        )
     except (FileNotFoundError, OSError, ValueError):
         return False
-    return pid > 0 and pid_alive(pid)
+    return pid is not None and pid > 0 and pid_alive(pid)
 
 
 def unique_sibling(path: Path) -> Path:

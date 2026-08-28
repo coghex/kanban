@@ -1175,11 +1175,11 @@ installation.
   that takes that one, so they have to be different objects.
 - Repository queue state: `.git/drain_prs_state.json`
 - Repository run lock: the `.git` directory, plus `.git/drain_prs.lock` holding
-  the holder's PID, beside `.git/drain_prs.lock.owner.json`, which records
-  whether that PID is the polling service or a single-PR run. This lock is per
-  *checkout*, and remains a secondary guard: two clones of one repository are
-  excluded from running concurrently by their shared canonical identity, which
-  the lock cannot see.
+  the holder's PID as a small JSON document, beside
+  `.git/drain_prs.lock.owner.json`, which records whether that PID is the
+  polling service or a single-PR run. This lock is per *checkout*, and remains
+  a secondary guard: two clones of one repository are excluded from running
+  concurrently by their shared canonical identity, which the lock cannot see.
 
 A Linux host that installed the drainer before these paths took each platform's
 own convention has its installation at the `~/Library` spellings. The next
@@ -1316,11 +1316,22 @@ It also fails rather than exiting quietly, with two exceptions worth knowing
 about.
 
 A `stop` from a controller old enough to predate the gates does not fail. It
-looks at whether the drainer is running, finds it is not — the status file is
-under one of the sealed paths, so there is nothing to read — and says "already
+looks at whether the drainer is running, finds it is not, and says "already
 stopped". It touches nothing and asks your service manager for nothing, so
-there is nothing there for it to be refused by. A stop that would actually
-signal something is refused like everything else.
+there is nothing there for it to be refused by.
+
+It looks in two places to decide that, and only one of them is sealed. The
+status file is under one of the sealed paths, so there is nothing to read
+there. The other is your checkout's own `.git/drain_prs.lock`, which a move
+neither relocates nor closes — your working copy stays exactly where it is —
+so a drainer you start *after* the move publishes its PID somewhere that old
+command can still look. Were it able to read that file, it would treat what it
+found as a drainer running outside the service manager and send it an
+interrupt, which is your new installation's drainer being stopped by a command
+bound to the old one. It cannot read it: a drainer records its PID in a form
+that command does not understand, so it sees no drainer and says "already
+stopped" instead. Nothing about this depends on the old command behaving
+differently, which is the point — it cannot be changed.
 
 The run your service manager starts is the other. It catches its own refusal
 and answers with an exit code: a current controller answers a failing one —

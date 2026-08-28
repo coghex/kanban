@@ -905,11 +905,19 @@ reimplement the removal, and `--check` remains read-only.
   queued pull request was cleared at and the post-merge obligations a merged
   pull request still owes, and which migrates forward from the shapes earlier
   versions wrote; and a run lock held on `.git/drain_prs.lock` — which holds
-  the holder's bare PID — and then on the `.git` directory, beside a
-  `.git/drain_prs.lock.owner.json` sidecar recording whether that PID is the
-  polling service or a single-PR run. One lock covers both modes, so whichever
-  starts second fails immediately naming the holder rather than acting. A dry
-  run locks the directory alone, since it writes nothing; holding the
+  the holder's PID as the JSON document `drain_prs_service.encode_lock_holder`
+  writes, decoded by `drain_prs_service.decode_lock_holder`, the one function
+  every reader of that file goes through — and then on the `.git` directory,
+  beside a `.git/drain_prs.lock.owner.json` sidecar recording whether that PID
+  is the polling service or a single-PR run. That document is the shape it is
+  on purpose: a controller predating #367 parses this file with a bare `int()`
+  and signals whatever PID it gets, from an installation a relocation may since
+  have sealed, so what a drainer publishes now is deliberately unreadable to
+  it. Readers here decode the bare integer too, because a drainer that was
+  already running when these modules were upgraded published one and is
+  genuinely live. One lock covers both modes, so whichever starts second fails
+  immediately naming the holder rather than acting. A dry run locks the
+  directory alone, since it writes nothing; holding the
   directory without the file is therefore what identifies it, atomically and
   at every instant. That lock is per checkout and remains a secondary guard:
   two clones of one repository resolve to one job identity, and the second
@@ -1986,12 +1994,19 @@ utilities.
   running and returns its "already stopped" result — a read that changes no
   protected artifact and asks the service manager for nothing, so there is
   nothing for a bound to refuse and requiring non-success of it would be
-  requiring a filesystem object to change what a read does. That branch is also
-  the only one it can take from an emptied location, since a relocation refuses
-  outright while any managed job or checkout drainer is running; a stop that
-  would signal the manager or write incident state is refused and diagnosed
-  like every other transition. `run_service` is the other, and only in part: it
-  is what a service manager launches, so it catches its own startup refusals
+  requiring a filesystem object to change what a read does. The status file is
+  not the only input to that snapshot, and the other one no seal covers: it
+  also reads the checkout's own `.git/drain_prs.lock`, which a relocation
+  neither moves nor closes, and a live holder there alone classifies the state
+  `external`. That branch signals the PID it names with `os.kill` and asks the
+  service manager for nothing, so no allowlist over what the manager was asked
+  could observe it, and a relocation's refusal to run while a drainer is live
+  says nothing about the drainer started from that checkout afterwards. What
+  bounds it is the lock document itself, which such a copy cannot decode: it
+  therefore finds no holder, takes the "already stopped" branch, and delivers
+  no signal to the relocated installation's drainer. `run_service` is the
+  other, and only in part: it is what a service manager launches, so it
+  catches its own startup refusals
   and answers with an exit code. A controller from this change onward answers a failing
   one, because a run that reported success would be telling that manager, and
   Kanban reading the job's state through it, that a drainer ran for a

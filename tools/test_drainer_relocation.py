@@ -36,6 +36,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1293,8 +1294,24 @@ class RefusalTests(RelocationFixture):
             self.assert_refuses_and_changes_nothing("is running")
 
     def test_a_live_checkout_drainer_refuses(self):
+        # The bare integer a drainer predating #555 published. Readers still
+        # decode it, because one that was already running when these modules
+        # were upgraded left this and is genuinely live.
         (self.widgets / ".git" / "drain_prs.lock").write_text(
             str(os.getpid()), encoding="utf-8"
+        )
+        self.assert_refuses_and_changes_nothing("a drainer is running in")
+
+    def test_a_live_checkout_drainer_publishing_the_new_document_refuses(self):
+        """The same refusal over the shape a drainer writes there now.
+
+        `repository_drainer_running` is one of the readers #555 moved onto the
+        controller's own decoder, and it is the one that keeps a relocation
+        from running over a live drainer — so it has to go on refusing for
+        exactly what a drainer publishes.
+        """
+        (self.widgets / ".git" / "drain_prs.lock").write_bytes(
+            drain_prs_service.encode_lock_holder(os.getpid())
         )
         self.assert_refuses_and_changes_nothing("a drainer is running in")
 
@@ -3168,12 +3185,39 @@ _PRE_GATE_FRAGMENTS = (
     ),
 )
 
+# What this arc changed inside an existing definition such that a copy built
+# from current source would inherit the *current* answer rather than the
+# vulnerable one, by the issue that changed it and the definition an installed
+# copy predating that issue has instead. Whole definitions, like the stubs
+# above, and restored for the opposite reason: leaving the current one in place
+# would hand the copy this fixture calls old a reader from this arc, and the
+# bound would then be proving something only a current controller does.
+_PRE_GATE_RESTORED = (
+    (
+        "#555",
+        "the checkout run lock's decoder, which reads the document a drainer "
+        "publishes now as well as the bare integer one used to; the historical "
+        "one is the bare `int()` parse that reads today's document as no "
+        "drainer at all",
+        "lock_pid",
+        "def lock_pid(repo_path: Path) -> int | None:\n"
+        '    path = repo_path / ".git" / "drain_prs.lock"\n'
+        "    try:\n"
+        '        return int(path.read_text(encoding="utf-8").strip())\n'
+        "    except (FileNotFoundError, OSError, ValueError):\n"
+        "        return None\n",
+    ),
+)
+
 # The bounds this arc did *not* put inside the controller, by the issue that
 # established each and the code an old copy meets it at. #369 seals the
 # discovery record path and #390 seals the runtime root, and both are
 # filesystem objects the installer leaves: what refuses them is code that
-# predates this repository's whole relocation arc. Each function below is
-# asserted to come out of the transformation byte-identical to the shipped one
+# predates this repository's whole relocation arc. #555's is a filesystem
+# object too, written by the drainer into a checkout no seal covers, and the
+# code an old copy meets it at is the classification that reads that checkout.
+# Each function below is asserted to come out of the transformation
+# byte-identical to the shipped one
 # and to mention nothing relocation-aware, so "this copy lacks that issue's
 # protection" is checked rather than assumed — and a controller-resident gate
 # added at one of them later fails here instead of silently reappearing inside
@@ -3194,6 +3238,16 @@ _PRE_GATE_EXTERNAL = (
         "ensure_dirs",
         (),
     ),
+    (
+        "#555",
+        "the checkout run lock is the one input to a snapshot that no seal "
+        "covers; this arc left the classification reading it exactly as it "
+        "was, so the copy goes on calling `external` a live holder there and "
+        "goes on reaching that holder through the restored decoder rather "
+        "than through anything added here",
+        "status_snapshot",
+        ("locked_pid = lock_pid(job.repo_path)", 'state = "external"'),
+    ),
 )
 
 # What none of the code above may mention. Every one of those functions
@@ -3205,6 +3259,11 @@ _PRE_GATE_FORBIDDEN = (
     "installation_transaction",
     "resolved_installation_drift",
     "RELOCATION_MARKER",
+    # #555's half of the same rule: the copy may not decode a checkout lock
+    # through this arc's codec, because reading the document a drainer
+    # publishes now is exactly the answer it must not have.
+    "encode_lock_holder",
+    "decode_lock_holder",
 )
 
 
@@ -3239,6 +3298,15 @@ class PreGateControllerFixture(RelocationFixture):
                 source.count(before), count, f"{issue}: {described} moved"
             )
             source = source.replace(before, after)
+        for issue, described, name, historical in _PRE_GATE_RESTORED:
+            existing = _function_source(source, name)
+            self.assertNotEqual(
+                existing, historical, f"{issue}: {described} is already historical"
+            )
+            source = source.replace(existing, historical)
+            self.assertNotIn(existing, source, f"{issue}: {described} survived")
+            for fragment in _PRE_GATE_FORBIDDEN:
+                self.assertNotIn(fragment, historical, f"{issue}: {described}")
         for issue, described, name, required in _PRE_GATE_EXTERNAL:
             shipped = _function_source(current, name)
             self.assertEqual(
@@ -3268,6 +3336,41 @@ class PreGateControllerFixture(RelocationFixture):
                 self.fail(f"{message}: {self.process.communicate()}")
             time.sleep(0.02)
         self.assertTrue(path.exists(), message)
+
+    # What a stale invocation may ask the service manager for. Reading is
+    # allowed and unavoidable — `status_snapshot` asks whether a unit is
+    # loaded, which reaches nothing this run protects — while loading,
+    # unloading and signalling are exactly what may not happen, because those
+    # change what the manager holds.
+    MANAGER_READS = frozenset({"show", "is-enabled", "is-active", "list-unit-files"})
+
+    def manager_commands(self):
+        if not self.manager_log.exists():
+            return []
+        return [
+            line.strip()
+            for line in self.manager_log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def assert_the_manager_was_only_read(self):
+        """Nothing this invocation sent the manager changes what it holds.
+
+        Asked as an allowlist rather than a list of forbidden verbs: a
+        subcommand nobody here anticipated is one this cannot vouch for, and
+        `is-enabled` contains `enable`, so matching on fragments would answer
+        the wrong question in both directions.
+        """
+        for line in self.manager_commands():
+            verb = next((word for word in line.split() if not word.startswith("-")), "")
+            self.assertIn(verb, self.MANAGER_READS, line)
+
+    def state_under(self, state, root):
+        """One subtree of a `host_state` reading, so "this location is exactly
+        what it was" can be asked of each location separately."""
+        return {
+            path: value for path, value in state.items() if path.startswith(str(root))
+        }
 
 
 # What the pre-gate writer below runs. Identical to the queued writer above
@@ -3533,11 +3636,13 @@ class PreGateWriterTests(PreGateControllerFixture):
 
         `build_pre_gate_controller` asserts all of this while it builds that
         copy — that #367's controller-resident gates really came out, that
-        #369's and #390's bounds are not in the controller at all, and that the
-        code an old copy meets those two at is byte-identical here. This asks
-        the built copy the same questions afterwards, so a transformation that
-        quietly stopped transforming shows up as a failing test rather than as
-        a second test of the gated path.
+        #555's widened checkout-lock decoder went back to the bare `int()`
+        parse a copy predating it has, that #369's, #390's and #555's bounds
+        are not in the controller at all, and that the code an old copy meets
+        each of them at is byte-identical here. This asks the built copy the
+        same questions
+        afterwards, so a transformation that quietly stopped transforming shows
+        up as a failing test rather than as a second test of the gated path.
         """
         source = (self.pre_gate / "drain_prs_service.py").read_text(encoding="utf-8")
         for issue, described, _name, stub in _PRE_GATE_STUBS:
@@ -3545,6 +3650,20 @@ class PreGateWriterTests(PreGateControllerFixture):
         for issue, described, before, after, _count in _PRE_GATE_FRAGMENTS:
             self.assertNotIn(before, source, f"{issue}: {described}")
             self.assertIn(after, source, f"{issue}: {described}")
+        for issue, described, name, historical in _PRE_GATE_RESTORED:
+            self.assertEqual(
+                _function_source(source, name), historical, f"{issue}: {described}"
+            )
+            # And the current definition it replaced really is a different
+            # one, so a fix that stopped changing this function would fail
+            # here rather than restore what was already there.
+            self.assertNotEqual(
+                _function_source(
+                    Path(drain_prs_service.__file__).read_text(encoding="utf-8"), name
+                ),
+                historical,
+                f"{issue}: {described}",
+            )
         for issue, described, name, required in _PRE_GATE_EXTERNAL:
             body = _function_source(source, name)
             self.assertEqual(
@@ -3558,6 +3677,14 @@ class PreGateWriterTests(PreGateControllerFixture):
                 self.assertIn(fragment, body, f"{issue}: {described}")
             for fragment in _PRE_GATE_FORBIDDEN:
                 self.assertNotIn(fragment, body, f"{issue}: {described}")
+        # And the branch all of that leads to is still in the copy. The
+        # fragment accounting above takes the up-front gate out of
+        # `stop_service` and leaves everything it does afterwards, `os.kill`
+        # included — so a transformation that removed more than it accounts
+        # for would fail here rather than pass by having nothing left to do.
+        stop = _function_source(source, "stop_service")
+        self.assertIn('if state == "external":', stop)
+        self.assertIn("os.kill(pid, signal.SIGINT)", stop)
 
 
 # What the stale invocation below runs: the same pre-gate controller, bound to
@@ -3767,11 +3894,6 @@ class StaleInvocationFixture(PreGateControllerFixture):
         )
         self.outcome = json.loads(self.result.read_text(encoding="utf-8"))
 
-    def state_under(self, state, root):
-        return {
-            path: value for path, value in state.items() if path.startswith(str(root))
-        }
-
     # Which closed path each writer meets. A transition enters `document_lock`
     # before it reads or writes anything at all, so it meets the retained lock;
     # a writer that creates its own directories meets the runtime guard.
@@ -3792,39 +3914,17 @@ class StaleInvocationFixture(PreGateControllerFixture):
     # reads its snapshot and returns straight away when nothing is running.
     # Nothing it does on that branch touches a bound, and nothing may: it is a
     # read that changes no protected artifact and asks the service manager for
-    # nothing. What makes that branch the only one it can take here is the
-    # runtime guard — the status file it would have read is under a path that
-    # is not a directory, so the snapshot is `stopped` however the drainer
-    # ended.
+    # nothing.
+    #
+    # Two independent inputs put it on that branch, and this fixture supplies
+    # both. The runtime guard answers the status file — it is under a path that
+    # is not a directory, so no runner or child is read from it. The checkout
+    # is the other, and the seals do not cover it: `status_snapshot` also reads
+    # `.git/drain_prs.lock`, and a live holder there alone classifies the state
+    # `external`, and that branch sends the stop to `os.kill`. Here that file
+    # holds nothing, because no drainer runs; the group below named for a
+    # relocated drainer is where one does.
     REPORTING = frozenset({"run", "stop"})
-
-    # What a stale invocation may ask the service manager for. Reading is
-    # allowed and unavoidable — `status_snapshot` asks whether a unit is
-    # loaded, which reaches nothing this run protects — while loading,
-    # unloading and signalling are exactly what may not happen, because those
-    # change what the manager holds.
-    MANAGER_READS = frozenset({"show", "is-enabled", "is-active", "list-unit-files"})
-
-    def manager_commands(self):
-        if not self.manager_log.exists():
-            return []
-        return [
-            line.strip()
-            for line in self.manager_log.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-
-    def assert_the_manager_was_only_read(self):
-        """Nothing this invocation sent the manager changes what it holds.
-
-        Asked as an allowlist rather than a list of forbidden verbs: a
-        subcommand nobody here anticipated is one this cannot vouch for, and
-        `is-enabled` contains `enable`, so matching on fragments would answer
-        the wrong question in both directions.
-        """
-        for line in self.manager_commands():
-            verb = next((word for word in line.split() if not word.startswith("-")), "")
-            self.assertIn(verb, self.MANAGER_READS, line)
 
     def refusal(self, writer):
         """What one writer said about refusing, however it said it."""
@@ -3906,12 +4006,16 @@ class StaleInvocationBoundTests(StaleInvocationFixture):
         refuse, and requiring non-success of it would be requiring a filesystem
         object to change what a read does.
 
-        It is also the only branch such a stop can take here. The status file
-        it reads is under the sealed runtime root, so the snapshot is `stopped`
-        whatever the drainer was doing, and a relocation refuses outright while
-        any managed job or checkout drainer is running — so the signalling
-        branch, which would ask the service manager for something, is not
-        reachable from a location a run has emptied.
+        Which branch it takes is decided by two inputs, and this case supplies
+        neither. The sealed runtime root answers the status file, and the
+        checkout — which no relocation moves and no seal covers — publishes no
+        run lock at all, because nothing is draining it. A live holder there
+        would be enough on its own: it classifies the state `external`, whose
+        branch signals that holder directly with `os.kill` and asks the
+        service manager for nothing, so no manager allowlist could observe it.
+        `PreGateStopAgainstARelocatedDrainerTests` below is that case, with a
+        drainer started from this checkout after the relocation sealed the
+        location this process is bound to.
         """
         for index, attempt in enumerate(self.outcome["attempts"]):
             stop = attempt["writers"]["stop"]
@@ -4040,6 +4144,397 @@ class StaleInvocationBoundTests(StaleInvocationFixture):
     def test_a_second_invocation_is_refused_identically(self):
         first, second = self.outcome["attempts"]
         self.assertEqual(second, first)
+
+
+# The drainer the relocated installation runs, started from the same checkout
+# once the relocation is over. A real second process holding the real run lock,
+# taken through `drain_prs.acquire_lock` rather than written by hand, because
+# what the stale controller reads is whatever a drainer actually publishes
+# there and a fixture that wrote its own bytes would be testing itself.
+#
+# It records the signals it is sent instead of dying of them. A drainer really
+# would exit on SIGINT, but a process that exited would leave "was it signalled"
+# to be inferred from its absence, and the absence of a process is also what a
+# crash looks like. Recording keeps the two apart: the file names every signal
+# that arrived, and the process is still there afterwards to be identified.
+_RELOCATED_DRAINER = """
+import os, signal, sys, time
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+ready, signals, release = (Path(argument) for argument in sys.argv[2:5])
+checkout = Path(sys.argv[5])
+
+import drain_prs
+
+descriptor = os.open(str(signals), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+
+
+def record(number, frame):
+    os.write(descriptor, f"{number}\\n".encode("utf-8"))
+
+
+for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(number, record)
+
+lock = drain_prs.acquire_lock(checkout, mode="polling")
+ready.write_text(str(os.getpid()), encoding="utf-8")
+while not release.exists():
+    time.sleep(0.02)
+lock.close()
+"""
+
+
+# What the stale controller runs against it: one `stop`, and nothing else.
+#
+# Only the stop, because this case is about the branch a battery cannot reach.
+# `StaleInvocationBoundTests` above runs every writer with no drainer in the
+# checkout, where a stop returns "already stopped" without a bound in front of
+# it; here a drainer is running, and every other writer would refuse at the
+# same closed paths it already refuses at while adding a second reason for
+# whatever this one changed.
+_STALE_STOP_INVOCATION = """
+import contextlib, io, json, os, sys, time
+from pathlib import Path
+
+# The platform this fixture relocates on, decided before anything resolves a
+# managed path, exactly as the battery script above decides it.
+sys.platform = "linux"
+
+for entry in reversed(sys.argv[1].split(os.pathsep)):
+    sys.path.insert(0, entry)
+ready, go, result = (Path(argument) for argument in sys.argv[2:5])
+checkout = Path(sys.argv[5])
+units = Path(sys.argv[6])
+
+import drain_prs_service
+import service_manager
+
+service_manager._DETECTED = service_manager.SYSTEMD
+service_manager.SYSTEMD_USER_DIR = units
+
+# Bound here, while the legacy record is still the one this host resolves.
+ready.write_text(str(drain_prs_service.DISCOVERY_RECORD_PATH), encoding="utf-8")
+while not go.exists():
+    time.sleep(0.01)
+
+job = drain_prs_service.resolve_job(checkout)
+printed = io.StringIO()
+try:
+    with contextlib.redirect_stdout(printed):
+        returned = drain_prs_service.stop_service(job)
+except BaseException as error:
+    outcome = {"failed": f"{type(error).__name__}: {error}", "returned": None}
+else:
+    outcome = {"failed": None, "returned": returned}
+result.write_text(
+    json.dumps(
+        {
+            **outcome,
+            "printed": printed.getvalue(),
+            "bound_record": str(drain_prs_service.DISCOVERY_RECORD_PATH),
+            "status_path": str(job.status_path),
+            # What this copy makes of the checkout every seal leaves alone.
+            # Reported rather than inferred: it is the single input that
+            # decides between the branch that returns and the branch that
+            # signals.
+            "lock_pid": drain_prs_service.lock_pid(checkout),
+        },
+        default=str,
+    ),
+    encoding="utf-8",
+)
+"""
+
+
+class RelocatedDrainerStopFixture(PreGateControllerFixture):
+    """A stale `stop` invoked while the relocated installation's drainer runs.
+
+    The sequence is the one nothing else here produces, and every step of it is
+    ordered rather than raced. The stale controller binds its managed paths
+    while the legacy record is still what this host resolves; the relocation
+    then runs to completion and seals the location it emptied — which it will
+    only do while no drainer is live, so this is also the only order a real
+    host can reach; a drainer starts from that same checkout, which the
+    relocation neither moved nor sealed; and only then is the stale process
+    released to run its stop.
+
+    That leaves the stale controller reading two things: a status file under a
+    sealed root, which says nothing, and the checkout's own run lock, which
+    says a drainer is running. The second alone is what `status_snapshot`
+    classifies `external`, and the `external` branch of a `stop_service`
+    predating #367 signals the PID it names with `os.kill` — no lock, no
+    record, no service manager, and so nothing any bound in this suite's
+    manager allowlist could ever see.
+    """
+
+    # What the checkout's run lock holds by the time the stale stop reads it.
+    # The default is what a drainer publishes now, through the drainer's own
+    # acquisition; `PreGateStopReachesTheSignallingBranchTests` puts back the
+    # bare integer a drainer predating #555 published there, which is the one
+    # difference between a sequence this bound holds for and one it does not.
+    republish_lock_as_bare_pid = False
+
+    def setUp(self):
+        super().setUp()
+        self.job = self.seed_legacy_installation()[0]
+        self.ready = self.root / "stale-stop.ready"
+        self.go = self.root / "stale-stop.go"
+        self.result = self.root / "stale-stop.result"
+        self.manager_log = self.root / "stale-stop.manager"
+        self.drainer_ready = self.root / "drainer.ready"
+        self.drainer_signals = self.root / "drainer.signals"
+        self.drainer_release = self.root / "drainer.release"
+
+        self.process = self.start_stale_stop()
+        self.wait_for(self.ready, "the stale controller never bound its paths")
+        self.assertEqual(
+            self.ready.read_text(encoding="utf-8"), str(self.legacy_record)
+        )
+
+        self.assertTrue(self.relocate()["relocated"])
+        self.assert_location_is_sealed()
+
+        self.drainer_pid = self.start_relocated_drainer()
+        if self.republish_lock_as_bare_pid:
+            self.checkout_lock.write_text(
+                str(self.drainer_pid), encoding="utf-8"
+            )
+        # Taken with the destination's drainer up and its lock published, and
+        # immediately before the stale stop: startup legitimately writes into
+        # the checkout, so a baseline sampled before it would be comparing
+        # against a host on which no drainer had started.
+        self.before = self.host_state()
+        self.lock_before = self.checkout_lock.read_bytes()
+        self.snapshot_before = self.destination_snapshot()
+
+        self.go.write_text("", encoding="utf-8")
+        self.assertEqual(
+            self.process.wait(timeout=120), 0, self.process.communicate()
+        )
+        self.outcome = json.loads(self.result.read_text(encoding="utf-8"))
+
+    # -- the two processes --------------------------------------------------
+
+    def start_stale_stop(self):
+        script = self.root / "stale_stop_invocation.py"
+        script.write_text(_STALE_STOP_INVOCATION, encoding="utf-8")
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(script),
+                self.controller_path(),
+                str(self.ready),
+                str(self.go),
+                str(self.result),
+                str(self.widgets),
+                str(self.units),
+            ],
+            env={
+                "HOME": str(self.home),
+                "PATH": os.pathsep.join(
+                    [str(self.fake_service_manager()), os.environ.get("PATH", "")]
+                ),
+                "KANBAN_FAKE_MANAGER_LOG": str(self.manager_log),
+                # The `~/Library` log root a pre-XDG copy hardcoded, resolved
+                # identically on either platform. Same reason as the battery.
+                "XDG_STATE_HOME": str(self.legacy_logs.parent.parent),
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(process.kill)
+        return process
+
+    def start_relocated_drainer(self):
+        """The destination's drainer, running current bytes from the tracked
+        modules — which is what a drainer started after a relocation is."""
+        script = self.root / "relocated_drainer.py"
+        script.write_text(_RELOCATED_DRAINER, encoding="utf-8")
+        drainer = subprocess.Popen(
+            [
+                sys.executable,
+                str(script),
+                str(Path(drain_prs_service.__file__).parent),
+                str(self.drainer_ready),
+                str(self.drainer_signals),
+                str(self.drainer_release),
+                str(self.widgets),
+            ],
+            env={"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(self.stop_relocated_drainer)
+        self.drainer = drainer
+        self.wait_for(self.drainer_ready, "the relocated drainer never took the lock")
+        pid = int(self.drainer_ready.read_text(encoding="utf-8"))
+        self.assertEqual(pid, drainer.pid)
+        return pid
+
+    def stop_relocated_drainer(self):
+        self.drainer_release.write_text("", encoding="utf-8")
+        try:
+            self.drainer.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.drainer.kill()
+
+    def wait_for(self, path, message):
+        """`PreGateControllerFixture`'s wait, taught which process to blame.
+
+        Two are in flight here, and the one that failed to reach a rendezvous
+        is the one whose output says why.
+        """
+        watched = self.drainer if path == self.drainer_ready else self.process
+        deadline = time.monotonic() + 30
+        while not path.exists() and time.monotonic() < deadline:
+            if watched.poll() is not None:
+                self.fail(f"{message}: {watched.communicate()}")
+            time.sleep(0.02)
+        self.assertTrue(path.exists(), message)
+
+    # -- what the two locations say afterwards ------------------------------
+
+    @property
+    def checkout_lock(self):
+        return self.widgets / ".git" / "drain_prs.lock"
+
+    def destination_snapshot(self):
+        """What the *current* controller, bound to the destination, makes of
+        the same checkout. The classification #555 leaves alone."""
+        return drain_prs_service.status_snapshot(
+            drain_prs_service.resolve_job(self.widgets)
+        )
+
+    def signals_delivered(self):
+        if not self.drainer_signals.exists():
+            return []
+        return [
+            int(line)
+            for line in self.drainer_signals.read_text(encoding="utf-8").split()
+        ]
+
+
+class PreGateStopAgainstARelocatedDrainerTests(RelocatedDrainerStopFixture):
+    """Issue #555: the sequence the bound above never reached.
+
+    A stale `stop` cannot be made to refuse — the bytes it runs predate every
+    gate, and nothing outside a process changes what its own code does — so
+    what has to hold is that it is a no-op against both locations *and* against
+    the drainer itself. The one thing that decides which of its two branches it
+    takes is the checkout's run lock, which no relocation moves and no seal
+    covers, so that is where the bound is: a drainer publishes a document such
+    a copy's bare `int()` cannot parse, and it therefore finds no holder to
+    signal.
+    """
+
+    def test_the_relocated_drainer_is_never_signalled(self):
+        """Requirement 4's own observation, taken at the receiving end.
+
+        `os.kill` on the `external` branch reaches neither the service manager
+        nor any artifact a comparison of the two locations covers, so nothing
+        already in this file could have seen it. What sees it is the process
+        that would have been signalled.
+        """
+        self.assertEqual(self.signals_delivered(), [])
+        self.assertIsNone(self.drainer.poll())
+        self.assertTrue(drain_prs_service.pid_alive(self.drainer_pid))
+
+    def test_the_stale_stop_finds_no_holder_in_the_checkout_it_can_read(self):
+        """The single input that decides the branch, reported by the copy
+        itself rather than inferred from what it did afterwards."""
+        self.assertEqual(self.outcome["bound_record"], str(self.legacy_record))
+        self.assertIsNone(self.outcome["lock_pid"])
+        # And the file it read really did name the live drainer, to a reader
+        # that understands what a drainer publishes now.
+        self.assertEqual(
+            drain_prs_service.lock_pid(self.widgets), self.drainer_pid
+        )
+
+    def test_the_stale_stop_returns_its_already_stopped_result(self):
+        self.assertIsNone(self.outcome["failed"], self.outcome)
+        self.assertEqual(self.outcome["returned"]["stopped"], False)
+        self.assertEqual(self.outcome["returned"]["state"], "stopped")
+        self.assertIn("already stopped", self.outcome["returned"]["message"])
+        # It was reading the sealed location's status file while it did, which
+        # is what makes this the stale copy's answer and not a current one's.
+        self.assertTrue(
+            self.outcome["status_path"].startswith(str(self.legacy_dir))
+        )
+
+    def test_the_drainer_still_owns_the_checkout_it_took(self):
+        self.assertEqual(self.checkout_lock.read_bytes(), self.lock_before)
+        self.assertEqual(
+            self.checkout_lock.read_bytes(),
+            drain_prs_service.encode_lock_holder(self.drainer_pid),
+        )
+        self.assertTrue(drain_prs.lock_file_is_held(self.widgets))
+
+    def test_the_current_controller_still_reports_it_as_external(self):
+        """The behavior #555 puts out of scope, asserted on both sides of the
+        stale invocation: a live checkout lock with no live runner is genuinely
+        an external drainer, and the destination's own controller has to go on
+        saying so."""
+        for snapshot in (self.snapshot_before, self.destination_snapshot()):
+            self.assertEqual(snapshot["state"], "external")
+            self.assertEqual(snapshot["drainer_pid"], self.drainer_pid)
+
+    def test_both_locations_and_their_seals_are_byte_identical(self):
+        self.assert_location_is_sealed()
+        after = self.host_state()
+        for root in (
+            self.legacy_dir,
+            self.legacy_logs,
+            self.destination,
+            self.destination_logs,
+        ):
+            self.assertEqual(
+                self.state_under(after, root), self.state_under(self.before, root), root
+            )
+        self.assertEqual(after, self.before)
+
+    def test_the_definition_and_the_manager_are_untouched(self):
+        definition = install_drainer.service_backend().definition_path(self.job.label)
+        self.assertEqual(definition.read_bytes(), self.before[str(definition)][1])
+        self.assertIn(str(self.destination), definition.read_text(encoding="utf-8"))
+        # And the other half of the same question: a manager `stop` would have
+        # changed what the manager holds without changing those bytes at all.
+        self.assert_the_manager_was_only_read()
+
+
+class PreGateStopReachesTheSignallingBranchTests(RelocatedDrainerStopFixture):
+    """The control: the same sequence with the lock a copy predating #555 can
+    read, which really does deliver the signal.
+
+    Every other assertion above is about something not happening, and a group
+    of those passes just as well when the sequence never reached the branch in
+    question — a stale process that died early, a relocation that left no
+    drainer, a fixture that stopped arranging the interleaving. This is the
+    one case where the branch is reachable, and it is reached by putting back
+    exactly one thing: the bare integer a drainer published into this file
+    before #555, naming the process that is genuinely running.
+
+    Hand-written rather than produced by a drainer, because there is no
+    drainer left that publishes it — the bytes it takes are the historical
+    publication, and reproducing them is the whole point. What that buys is
+    that the difference between this case and the group above is the lock
+    document and nothing else: same fixture, same two processes, same order.
+    """
+
+    republish_lock_as_bare_pid = True
+
+    def test_the_signal_arrives_when_the_holder_can_be_read(self):
+        self.assertEqual(self.outcome["lock_pid"], self.drainer_pid)
+        self.assertEqual(self.signals_delivered(), [signal.SIGINT])
+        # And the shape of the harm: the stop went looking for a process to
+        # stop, signalled the relocated installation's drainer, and waited for
+        # a status file under a sealed root to say it had gone.
+        self.assertIn("Timed out waiting", self.outcome["failed"])
+        # The drainer survives here only because this fixture's stand-in
+        # records signals instead of exiting on them. A real one would be down.
+        self.assertIsNone(self.drainer.poll())
 
 
 class StaleInvocationDestinationLogTests(StaleInvocationFixture):
