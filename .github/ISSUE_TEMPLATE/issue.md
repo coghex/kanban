@@ -1,6 +1,6 @@
 ---
-name: Issue
-about: A bug, feature, or code-health change in the tracker's five-heading shape
+name: Maintainer issue specification
+about: An agent-ready implementation contract, with cited evidence and reviewer commands
 title: ''
 labels: ''
 assignees: ''
