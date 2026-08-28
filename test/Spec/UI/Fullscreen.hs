@@ -22,9 +22,14 @@ import Kanban.Solve (SolveWorkflow (..))
 import Kanban.UI (drawApplication)
 import Kanban.UI.Events
   ( IncidentsAction (..),
+    OverlayExtent (..),
+    OverlayMouseAction (..),
     applyIncidentsAction,
+    incidentsAction,
+    overlayMouseAction,
     sharedFullscreenKey,
   )
+import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Overlay
   ( InteriorExtent (..),
     OverlayGeometry (..),
@@ -33,8 +38,9 @@ import Kanban.UI.Overlay
     settingsRosterHeight,
     windowedOverlayBox,
   )
-import Kanban.UI.Settings (RosterRow (..), settingsRosterRows)
+import Kanban.UI.Settings (RosterRow (..), SettingsInput (..), settingsInput, settingsRosterRows)
 import Kanban.UI.Selection (refreshOverlay)
+import Brick (BrickEvent (..), Location (..))
 import Kanban.UI.SessionCore
   ( SessionFocus (..),
     SessionInputEvent (..),
@@ -273,6 +279,47 @@ spec = do
       for_ ([("windowed", windowed), ("fullscreen", full)] :: [(String, [Text])]) $ \(label, frame) ->
         (label, closesBelowRoster frame) `shouldBe` (label, True)
 
+  -- What section 7 says a fullscreen overlay's ways out are, held against what
+  -- each overlay's decoder actually answers. Withdrawing the outside click is
+  -- the whole of what fullscreen changes here, so an exit named in the
+  -- documentation and absent from the code -- or the reverse -- is a
+  -- contradiction this group exists to catch. The process inspector's keys are
+  -- arms of @handleEvent@ with no pure decoder to ask, so its row is the one
+  -- this cannot reach; @Esc@ closing it is the arm directly above the
+  -- settings one in 'Kanban.UI.Events.dispatchEvent'.
+  describe "the ways out of an overlay, which fullscreen leaves alone" $ do
+    it "closes each overlay on Esc, through that overlay's own decoder" $ do
+      boardAction DetailsScope escape `shouldBe` Just DismissOrClose
+      boardAction HelpScope escape `shouldBe` Just DismissOrClose
+      settingsInput (VtyEvent escape) `shouldBe` SettingsCloseOverlay
+      incidentsAction (Just IncidentsOverlay) (VtyEvent escape) `shouldBe` Just CloseIncidentsPanel
+      sessionInputEvent (SessionFocus noSessionInputCaps SessionNormal True) escape `shouldBe` Just SessionInputClose
+
+    -- `q` is not a general overlay close and never was: section 7 gives it to
+    -- a live-agent overlay's normal mode, and everywhere else in an overlay it
+    -- is either the dashboard's own quit or nothing at all. Pinned here
+    -- because the fullscreen documentation has to name the exits that exist
+    -- rather than a uniform set.
+    it "answers q only where section 7 already gave it a meaning" $ do
+      boardAction DetailsScope (key 'q') `shouldBe` Just QuitDashboard
+      boardAction HelpScope (key 'q') `shouldBe` Just QuitDashboard
+      sessionInputEvent (SessionFocus noSessionInputCaps SessionNormal True) (key 'q') `shouldBe` Just SessionInputClose
+      settingsInput (VtyEvent (key 'q')) `shouldBe` SettingsIgnoreEvent
+      incidentsAction (Just IncidentsOverlay) (VtyEvent (key 'q')) `shouldBe` Just IgnoreIncidentsEvent
+
+    -- The same for the right click, which the help overlay's mouse rows and
+    -- section 7's mouse policy both describe: it closes the four overlays that
+    -- route through the shared policy, at either extent, and the settings and
+    -- incident panels answer it with nothing in either.
+    it "closes on a right click only through the shared mouse policy" $
+      for_ bothExtents $ \(extentLabel, extent) -> do
+        (extentLabel, overlayMouseAction extent DetailsPanel (MouseDown DetailsPanel Vty.BRight [] origin))
+          `shouldBe` (extentLabel, Just OverlayMouseClose)
+        (extentLabel, settingsInput (MouseDown SettingsPanel Vty.BRight [] origin))
+          `shouldBe` (extentLabel, SettingsIgnoreEvent)
+        (extentLabel, incidentsAction (Just IncidentsOverlay) (MouseDown IncidentsPanel Vty.BRight [] origin))
+          `shouldBe` (extentLabel, Just IgnoreIncidentsEvent)
+
   -- Two decoders answer @f@ -- the shared arm ahead of the non-modal overlays,
   -- and each live-agent overlay's own modal table -- so the thing worth
   -- pinning is that every overlay that honors the toggle is reached by exactly
@@ -310,6 +357,19 @@ spec = do
     it "leaves the session's own mode exactly where it was" $
       for_ [SessionNormal, SessionInsert] $ \mode ->
         (show mode, sessionModeAfter SessionInputFullscreen mode) `shouldBe` (show mode, mode)
+
+-- | Both extents, labelled, for the assertions that must hold in each.
+bothExtents :: [(String, OverlayExtent)]
+bothExtents = [("windowed", WindowedOverlay), ("fullscreen", FullscreenOverlay)]
+
+escape :: Vty.Event
+escape = Vty.EvKey Vty.KEsc []
+
+key :: Char -> Vty.Event
+key character = Vty.EvKey (Vty.KChar character) []
+
+origin :: Location
+origin = Location (0, 0)
 
 -- | The nine overlays, one of each surface, so a decision total in
 -- 'OverlaySurface' is exercised at every arm.
@@ -414,8 +474,8 @@ withTranscript ::
   Int ->
   AppState ->
   AppState
-withTranscript set get key state =
-  set (Map.adjust (\session -> session {sessionTranscript = longTranscript}) key (get state)) state
+withTranscript set get sessionKey state =
+  set (Map.adjust (\session -> session {sessionTranscript = longTranscript}) sessionKey (get state)) state
 
 withPullRequestTranscript :: AppState -> AppState
 withPullRequestTranscript state =

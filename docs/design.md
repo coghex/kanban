@@ -437,11 +437,17 @@ Mouse interaction is intentionally complete but narrow:
   overlays `p` and then Enter already open there, and that mode leaves the
   inspector reachable.
 - Right-clicking anywhere while a details panel is open closes it.
-- A fullscreen overlay withdraws the outside click and nothing else: a plain
+- A fullscreen overlay withdraws the outside click and nothing else. A plain
   press on the residual frame columns beside it, or anywhere on the footer
-  below it, does nothing to it. Its exits are `f` back to windowed, `q` or
-  `Esc`, and the right click above, which keeps the meaning stated there in
-  both extents. The windowed gesture is unchanged.
+  below it, does nothing to it, and every other way out of it is the one that
+  overlay already had: `f` puts the box back to windowed, `Esc` closes it, a
+  live-agent overlay's normal-mode `q` hides it, and the right click above
+  still closes the overlays that answer a right click at all — a card's
+  details overlay and the three live-agent ones. `q` from a card's details
+  overlay or the help overlay still quits the dashboard exactly as the table
+  above states, and the settings, process, and incident overlays answer no `q`
+  and no right click in either extent. The windowed outside-click gesture
+  keeps the meaning stated above.
 - The mouse wheel scrolls the board column under the pointer by three rows per
   wheel event.
 - The PR drainer button remains directly clickable.

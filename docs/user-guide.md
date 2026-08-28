@@ -130,9 +130,10 @@ again, including one you open straight from another — pressing Enter on a row
 of the attention list, for instance — and `Tab` between jobs of the same kind
 keeps the window the size you left it.
 
-While a window is fullscreen, an ordinary click outside it does nothing: use
-`f`, `Esc`, or `q` to leave it. Right-clicking still closes it, exactly as it
-does when the window is small.
+While a window is fullscreen, an ordinary click outside it does nothing. Every
+other way out is the one that window already had: `f` puts it back, `Esc`
+closes it, `q` hides a job window from its normal mode, and right-clicking a
+details or job window closes it exactly as it does when the window is small.
 
 ## Searching a column
 
@@ -265,8 +266,9 @@ by itself once a merge lands.
 - Click an epic title to expand or collapse it.
 - Right-click a card to open its active job.
 - Click outside an open details window to close it, while it is small. A
-  fullscreen window ignores an ordinary click outside it — leave it with `f`,
-  `Esc`, `q`, or a right-click, which still closes it either way.
+  fullscreen window ignores an ordinary click outside it — leave it with `f`
+  or `Esc`, or with a right-click, which closes a details or job window at
+  either size.
 - Click the `↻` button in the sidebar to refresh, the same as `u`.
 
 Every mouse action has a keyboard equivalent.

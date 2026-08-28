@@ -307,11 +307,17 @@ helpLines mode =
 -- | The gestures no key covers, so no binding defines them. Mouse policy
 -- lives in @Kanban.UI.Events@ rather than in a table, and this is prose about
 -- it, not a key hint.
+--
+-- The two halves of the last row stopped meaning the same thing in issue
+-- #543: a right click closes the panel at either extent, while the outside
+-- click is exactly what a fullscreen box withdraws, so the row has to say
+-- which one is which rather than name them together.
 mouseHelpEntries :: [HelpEntry]
 mouseHelpEntries =
   [ gestureHelpEntry "left click" "select card; click selected card for details",
     gestureHelpEntry "mouse wheel" "scroll column under pointer",
-    gestureHelpEntry "right/outside click" "close card details"
+    gestureHelpEntry "right click" "close card details, windowed or fullscreen",
+    gestureHelpEntry "outside click" "close card details, while it is windowed"
   ]
 
 drawSettings :: InteriorExtent -> AppState -> Widget Name
