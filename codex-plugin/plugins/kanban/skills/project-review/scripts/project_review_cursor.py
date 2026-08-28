@@ -41,7 +41,19 @@ rather than a preference:
   #465, #464, #406 … in that order, so a cursor holding "the smallest number
   reviewed" would describe a batch that never happened.
 
-Everything the module cannot prove, it refuses. A recorded endpoint absent from
+A bounded listing is the fourth rule, and the one a count check cannot express.
+`gh pr list --limit N` returns a page, and the question a sweep has to answer is
+not whether that page holds twelve rows — it is whether twelve *selectable* rows
+survive below the recorded endpoint once coverage and exclusions come out. A
+page that ends at the endpoint satisfies every count check and selects nothing,
+and a workflow reading that as the tail of history moves to direct mode leaving
+older merged pull requests unreviewed for good. So the caller declares the limit
+it used, and a short batch is reported as `truncated` when the page came back at
+that limit and `exhausted` only when it came back under it. The same distinction
+governs a refusal: a unit absent from a page at its own limit means raise the
+limit, not that the unit does not exist.
+
+Everything else the module cannot prove, it refuses. A recorded endpoint absent from
 the history it is supposed to index is a cursor belonging to some other
 repository, and a state document it cannot parse is a state document that might
 mean anything; both raise `CursorError` before a unit is selected rather than
@@ -395,6 +407,7 @@ def select(
     start=None,
     reports=None,
     override_boundary: bool = False,
+    listing_limit=None,
 ) -> dict:
     """The next batch, and everything the workflow has to announce about it.
 
@@ -407,6 +420,7 @@ def select(
         raise CursorError(f"unknown mode {mode!r}")
     if count <= 0:
         raise CursorError(f"a batch of {count} units is not a batch.")
+    partial = listing_is_partial(candidates, listing_limit)
     coverage = report_coverage_from(reports)
     covered = set(state[mode]["reviewed"])
     if mode == "pr":
@@ -419,7 +433,7 @@ def select(
     frontier = None
     if start is not None:
         if start not in position:
-            raise CursorError(_absent_start_message(mode, start))
+            raise CursorError(_absent_start_message(mode, start, partial))
         begin = position[start]
         origin = "explicit-start"
     elif override_boundary:
@@ -434,7 +448,7 @@ def select(
         frontier = endpoint
         endpoint_key = endpoint["number"] if mode == "pr" else endpoint["sha"]
         if endpoint_key not in position:
-            raise CursorError(_absent_endpoint_message(mode, endpoint_key))
+            raise CursorError(_absent_endpoint_message(mode, endpoint_key, partial))
         begin = position[endpoint_key] + 1
         origin = "recorded-endpoint"
     else:
@@ -467,6 +481,7 @@ def select(
         for index in range(0, begin)
         if keys[index] not in covered and keys[index] not in excluded
     ]
+    short = len(selected) < count
     return {
         "mode": mode,
         "count": count,
@@ -479,7 +494,14 @@ def select(
         "covered": sorted(covered & set(keys), key=lambda key: position[key]),
         "excluded": sorted(excluded),
         "reports": coverage["reports"],
-        "exhausted": len(selected) < count,
+        "short": short,
+        # Two different answers to one short batch, and collapsing them is the
+        # defect: `truncated` means the page ran out and the missing units may
+        # be on the next one, while `exhausted` means the history ran out. A
+        # sweep that reads the first as the second enters direct mode with
+        # merged pull requests still unreviewed behind it.
+        "truncated": short and partial,
+        "exhausted": short and not partial,
     }
 
 
@@ -489,7 +511,37 @@ def report_coverage_from(reports) -> dict:
     return reports
 
 
-def _absent_start_message(mode: str, start) -> str:
+# The repair a partial listing asks for, kept as one constant so the two
+# refusals and the tests all name the same words.
+RAISE_LIMIT_INSTRUCTION = "raise the listing limit and list again"
+
+
+def listing_is_partial(candidates: list, listing_limit) -> bool:
+    """Whether the listing may have stopped short of the history it indexes.
+
+    A page that came back with fewer rows than it asked for is the whole of
+    what remains; one that came back at its own limit may be a page of a longer
+    history, and nothing in the page itself can tell the two apart.
+
+    A caller that declares no limit is taken at its word that the listing is
+    complete, because the unbounded caller is the real one: direct mode hands
+    over a whole `git log --first-parent` walk, and reporting that as possibly
+    truncated would send the workflow raising a limit it never set. PR mode
+    always declares one, and a test pins that it does.
+    """
+    if listing_limit is None:
+        return False
+    return len(candidates) >= int(listing_limit)
+
+
+def _absent_start_message(mode: str, start, partial: bool = False) -> str:
+    if partial:
+        unit = f"pull request #{start}" if mode == "pr" else f"commit {start}"
+        return (
+            f"{unit} is absent from a listing that came back at its own limit, "
+            f"so it may be on the next page rather than missing: "
+            f"{RAISE_LIMIT_INSTRUCTION}."
+        )
     if mode == "pr":
         return (
             f"pull request #{start} is not in this repository's merged history, "
@@ -502,7 +554,14 @@ def _absent_start_message(mode: str, start) -> str:
     )
 
 
-def _absent_endpoint_message(mode: str, key) -> str:
+def _absent_endpoint_message(mode: str, key, partial: bool = False) -> str:
+    if partial:
+        unit = f"#{key}" if mode == "pr" else str(key)
+        return (
+            f"the recorded endpoint {unit} is absent from a listing that came "
+            f"back at its own limit, so it may be on the next page rather than "
+            f"foreign: {RAISE_LIMIT_INSTRUCTION}."
+        )
     if mode == "pr":
         return (
             f"the recorded endpoint #{key} is absent from this repository's "
@@ -526,6 +585,7 @@ def record(
     candidates: list,
     reviewed: list,
     excluded=None,
+    listing_limit=None,
 ) -> dict:
     """Fold a completed batch into the state, and never let the frontier back up.
 
@@ -535,22 +595,22 @@ def record(
     """
     if mode not in MODES:
         raise CursorError(f"unknown mode {mode!r}")
+    partial = listing_is_partial(candidates, listing_limit)
     keys = [key_of(mode, candidate) for candidate in candidates]
     position = {key: index for index, key in enumerate(keys)}
     updated = json.loads(json.dumps(state))
+    # A recording listing is taken after the batch was reviewed, which can be a
+    # long way after it was selected. Merges landing in between push older rows
+    # off a bounded page, so a reviewed unit missing from one is far more often
+    # a short page than a wrong claim -- and refusing it as a wrong claim would
+    # leave a completed batch with no durable endpoint at all, which is the
+    # defect this module exists to close.
     for unit in reviewed:
         if unit not in position:
-            raise CursorError(
-                f"{unit} was reported as reviewed but is absent from the "
-                "candidate history, so the endpoint it would set cannot be "
-                "ordered."
-            )
+            raise CursorError(_absent_recorded_message(unit, "reviewed", partial))
     for unit in excluded or []:
         if unit not in position:
-            raise CursorError(
-                f"{unit} was reported as excluded but is absent from the "
-                "candidate history."
-            )
+            raise CursorError(_absent_recorded_message(unit, "excluded", partial))
     if not reviewed and not excluded:
         raise CursorError("a completed batch records at least one reviewed or excluded unit.")
 
@@ -563,12 +623,29 @@ def record(
     if reviewed:
         oldest = max(reviewed, key=lambda unit: position[unit])
         updated[mode]["endpoint"] = _advanced_endpoint(
-            mode, updated[mode]["endpoint"], candidates[position[oldest]], position
+            mode,
+            updated[mode]["endpoint"],
+            candidates[position[oldest]],
+            position,
+            partial,
         )
     return updated
 
 
-def _advanced_endpoint(mode: str, current, candidate: dict, position: dict):
+def _absent_recorded_message(unit, role: str, partial: bool) -> str:
+    if partial:
+        return (
+            f"{unit} was reported as {role} but is absent from a listing that "
+            f"came back at its own limit, so it may have been pushed off the "
+            f"page by a later merge: {RAISE_LIMIT_INSTRUCTION}."
+        )
+    return (
+        f"{unit} was reported as {role} but is absent from the candidate "
+        "history, so the endpoint it would set cannot be ordered."
+    )
+
+
+def _advanced_endpoint(mode: str, current, candidate: dict, position: dict, partial: bool = False):
     proposed = (
         {"number": candidate["number"], "merged_at": candidate["merged_at"]}
         if mode == "pr"
@@ -578,7 +655,7 @@ def _advanced_endpoint(mode: str, current, candidate: dict, position: dict):
         return proposed
     current_key = current["number"] if mode == "pr" else current["sha"]
     if current_key not in position:
-        raise CursorError(_absent_endpoint_message(mode, current_key))
+        raise CursorError(_absent_endpoint_message(mode, current_key, partial))
     proposed_key = candidate["number"] if mode == "pr" else candidate["sha"]
     # Older means further down a newest-first history, so the frontier only
     # ever moves to a larger index. A batch taken above it — after an explicit
@@ -633,12 +710,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="ignore the recorded endpoint and start at the head of the history",
     )
     selector.add_argument("--candidates", default="-", help="a JSON or SHA listing, or - for stdin")
+    selector.add_argument(
+        "--listing-limit",
+        type=int,
+        help=(
+            "the --limit the candidate listing was taken with, so a short "
+            "batch can be reported as truncated rather than as exhausted"
+        ),
+    )
 
     recorder = subparsers.add_parser("record", help="fold a completed batch into the state")
     recorder.add_argument("--root", required=True)
     recorder.add_argument("--repo", required=True)
     recorder.add_argument("--mode", required=True, choices=MODES)
     recorder.add_argument("--candidates", default="-")
+    recorder.add_argument("--listing-limit", type=int)
     recorder.add_argument("--reviewed", default="", help="the units this batch reviewed")
     recorder.add_argument("--exclude", default="", help="units the user excluded from every later batch")
     return parser
@@ -669,6 +755,7 @@ def main(argv=None) -> int:
                 start=start[0] if start else None,
                 reports=report_coverage(args.root),
                 override_boundary=args.override_boundary,
+                listing_limit=args.listing_limit,
             )
         )
 
@@ -678,6 +765,7 @@ def main(argv=None) -> int:
         candidates,
         _unit_list(args.mode, args.reviewed),
         _unit_list(args.mode, args.exclude),
+        listing_limit=args.listing_limit,
     )
     document.setdefault("repositories", {})[args.repo] = updated
     path = write_document(args.root, document)

@@ -171,44 +171,52 @@ whole listing rather than a slice you ordered by number:
 
 ```bash
 gh pr list -R "$REPO" --state merged --limit "$LIMIT" --json number,title,mergedAt,body,url \
-  | python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode pr --count "${COUNT:-12}"
+  | python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode pr --count "${COUNT:-12}" --listing-limit "$LIMIT"
 ```
 
 `$COUNT` is the requested count and defaults to the 12 above. Pass `--start <n>`
 for a supplied starting PR and `--override-boundary` when the user explicitly
 overrides the recorded endpoint. Neither is implied by a count.
 
-**`$LIMIT` is not a constant.** Start it at the requested count plus a margin
-for the over-fetch — 40 covers the 12-unit default — and then verify the
-listing actually reaches the batch you asked for, before selecting anything
-from it. Three conditions, all of them:
+**`$LIMIT` is not a constant, and `--listing-limit` is how the selection knows
+it.** Start `$LIMIT` at the requested count plus a margin for the over-fetch —
+40 covers the 12-unit default — and declare it to `select`. The question the
+reach check has to answer is not whether the listing holds twelve rows; it is
+whether twelve *selectable* rows survive below the recorded endpoint once
+coverage and exclusions come out. **A listing that ends at the endpoint passes
+every count check and selects nothing**, so the count is checked against the
+selection rather than against the page.
 
-- the requested count fits inside the listing;
-- a supplied starting PR appears in it;
-- a boundary endpoint from the cursor is at or above its oldest entry.
+`select` answers it, and its answer to a short batch is one of two things that
+must never be collapsed:
 
-Raise `$LIMIT` and list again until each one holds, or until the listing is
-**exhausted** — a listing that came back with fewer rows than `$LIMIT` is the
-whole of the repository's merged history, and raising the limit again changes
-nothing. `--limit` paginates for you, so a larger number is the only remedy a
-short listing needs. A batch selected from a listing that stopped short of its
-own boundary is silently truncated to whatever happened to fit, and every later
-`continue` inherits the gap.
+- **`"truncated": true`** — the batch came up short and the listing came back at
+  its own limit, so the missing pull requests may be on the next page. Raise
+  `$LIMIT` and list again. `--limit` paginates for you, so a larger number is
+  the only remedy a short listing needs. Treating this as the tail leaves merged
+  pull requests unreviewed behind the sweep for good, and every later `continue`
+  inherits the gap.
+- **`"exhausted": true`** — the batch came up short and the listing came back
+  with fewer rows than `$LIMIT`, which is the whole of the repository's merged
+  history. **This is not an error at all.** It is the tail of the sweep. Review
+  every PR that does remain, say the batch was short and why, and treat PR
+  history as exhausted so the next `continue` enters direct mode. A repository
+  with fewer merged PRs than the batch size meets this on its first batch, and
+  is reviewed the same way — including one whose listing comes back empty, which
+  reviews no PR and enters direct mode straight away.
 
-What an exhausted listing that still fails a condition means depends on which
-condition, and the three do not share an answer:
+`select` refuses rather than guessing when a supplied starting PR or the
+recorded endpoint is absent, and its refusal separates the same two causes:
 
-- **A supplied starting PR that is absent** is an invalid request: that PR is
-  not in this repository's merged history at all. Say so and stop; do not
-  review the nearest number that exists.
-- **A boundary endpoint that is absent** is a cursor that does not belong to
-  this repository. Say so and stop rather than sweeping past it.
-- **A count larger than what remains is not an error at all.** It is the tail
-  of the sweep. Review every PR that does remain, say the batch was short and
-  why, and treat PR history as exhausted so the next `continue` enters direct
-  mode. A repository with fewer merged PRs than the batch size meets this on
-  its first batch, and is reviewed the same way — including one whose listing
-  comes back empty, which reviews no PR and enters direct mode straight away.
+- **Absent from a listing that came back under its limit** is a real absence.
+  A supplied starting PR that is absent is an invalid request: that PR is not
+  in this repository's merged history at all. Say so and stop; do not review
+  the nearest number that exists. A boundary endpoint that is absent is a
+  cursor that does not belong to this repository. Say so and stop rather than
+  sweeping past it.
+- **Absent from a listing that came back at its own limit** is a short page,
+  not a missing unit. Raise `$LIMIT` and list again; the refusal says so in
+  those words.
 
 Check `git -C "$ROOT" log --first-parent` for direct-to-default-branch commits
 inside that landing interval and review them as bare commits. Do not mislabel a
@@ -442,8 +450,18 @@ report or a failed cursor write is never reported as a completed batch:
 
 ```bash
 gh pr list -R "$REPO" --state merged --limit "$LIMIT" --json number,title,mergedAt,body,url \
-  | python3 "$CURSOR" record --root "$DOCS_WT" --repo "$REPO" --mode pr --reviewed "$REVIEWED" --exclude "$EXCLUDED"
+  | python3 "$CURSOR" record --root "$DOCS_WT" --repo "$REPO" --mode pr --reviewed "$REVIEWED" --exclude "$EXCLUDED" --listing-limit "$LIMIT"
 ```
+
+**The recording listing is taken under the same rule, and needs it more.** It is
+taken after the batch was reviewed and its report written, which can be a long
+way after the batch was selected, and merges landing in between push older rows
+off a bounded page — so the `$LIMIT` that reached the batch at selection time
+need not reach it now. Declare it, and raise it and list again whenever `record`
+reports a reviewed or excluded unit absent from a listing that came back at its
+own limit. Recording nothing is the one outcome to refuse here: the batch is
+already reviewed, and a completed batch with no durable endpoint is exactly the
+state this cursor exists to prevent.
 
 Direct mode records the same way against the same first-parent walk it selected
 from, with `--mode direct` and the reviewed SHAs. A batch that selected nothing

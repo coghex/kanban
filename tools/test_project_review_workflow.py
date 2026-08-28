@@ -175,27 +175,42 @@ DECLARED_GITHUB_CALL_COUNT = sum(
 # are pinned individually.
 LISTING_LIMIT = '--limit "$LIMIT"'
 REFUSED_FIXED_LIMIT = "--limit 40 "
+
+# The limit the listing was taken with, declared to the selection. Issue #548's
+# round-1 blocker: a count checked against the *page* passes on a page that ends
+# at the cursor and selects nothing, and a sweep reading that as the tail enters
+# direct mode with merged pull requests still unreviewed behind it. So the count
+# is checked against the selection, and a short batch is `truncated` or
+# `exhausted` depending on whether the page came back at its own limit.
+DECLARED_LISTING_LIMIT = '--listing-limit "$LIMIT"'
 LISTING_REACH = {
-    "the limit is not a constant": "**`$LIMIT` is not a constant.**",
-    "verified before selecting": (
-        "verify the listing actually reaches the batch you asked for, before "
-        "selecting anything from it"
+    "the limit is not a constant": (
+        "**`$LIMIT` is not a constant, and `--listing-limit` is how the "
+        "selection knows it.**"
     ),
-    "the count fits": "- the requested count fits inside the listing;",
-    "the starting PR appears": "- a supplied starting PR appears in it;",
-    "the boundary is covered": (
-        "- a boundary endpoint from the cursor is at or above its oldest entry."
+    "the count is checked against the selection": (
+        "The question the reach check has to answer is not whether the listing "
+        "holds twelve rows; it is whether twelve *selectable* rows survive "
+        "below the recorded endpoint once coverage and exclusions come out."
     ),
-    "raise and re-list until exhausted": (
-        "Raise `$LIMIT` and list again until each one holds, or until the "
-        "listing is **exhausted** — a listing that came back with fewer rows "
-        "than `$LIMIT` is the whole of the repository's merged history, and "
-        "raising the limit again changes nothing."
+    "a listing that ends at the endpoint selects nothing": (
+        "**A listing that ends at the endpoint passes every count check and "
+        "selects nothing**, so the count is checked against the selection "
+        "rather than against the page."
+    ),
+    "the two answers are never collapsed": (
+        "its answer to a short batch is one of two things that must never be "
+        "collapsed"
+    ),
+    "truncated means raise and re-list": (
+        "**`\"truncated\": true`** — the batch came up short and the listing "
+        "came back at its own limit, so the missing pull requests may be on "
+        "the next page. Raise `$LIMIT` and list again."
     ),
     "truncation is inherited": (
-        "A batch selected from a listing that stopped short of its own boundary "
-        "is silently truncated to whatever happened to fit, and every later "
-        "`continue` inherits the gap."
+        "Treating this as the tail leaves merged pull requests unreviewed "
+        "behind the sweep for good, and every later `continue` inherits the "
+        "gap."
     ),
 }
 
@@ -205,18 +220,29 @@ LISTING_REACH = {
 # batch, so a sweep with fewer PRs left than the batch size never finishes PR
 # history and direct mode is never entered.
 EXHAUSTION_DISPOSITIONS = {
+    "a real absence is one under the limit": (
+        "**Absent from a listing that came back under its limit** is a real "
+        "absence."
+    ),
     "an absent starting PR is invalid": (
-        "**A supplied starting PR that is absent** is an invalid request: that "
+        "A supplied starting PR that is absent is an invalid request: that "
         "PR is not in this repository's merged history at all. Say so and "
         "stop; do not review the nearest number that exists."
     ),
     "an absent boundary is a foreign cursor": (
-        "**A boundary endpoint that is absent** is a cursor that does not "
+        "A boundary endpoint that is absent is a cursor that does not "
         "belong to this repository. Say so and stop rather than sweeping past "
         "it."
     ),
+    "an absence at the limit is a short page": (
+        "**Absent from a listing that came back at its own limit** is a short "
+        "page, not a missing unit. Raise `$LIMIT` and list again; the refusal "
+        "says so in those words."
+    ),
     "a short count is the tail, not an error": (
-        "**A count larger than what remains is not an error at all.** It is "
+        "**`\"exhausted\": true`** — the batch came up short and the listing "
+        "came back with fewer rows than `$LIMIT`, which is the whole of the "
+        "repository's merged history. **This is not an error at all.** It is "
         "the tail of the sweep. Review every PR that does remain, say the "
         "batch was short and why, and treat PR history as exhausted so the "
         "next `continue` enters direct mode."
@@ -512,6 +538,32 @@ DOCS_WORKTREE_FAIL_CLOSED = {
     ),
 }
 REFUSED_DOCS_WORKTREE_FALLBACK = '|| DOCS_WT="$ROOT"'
+
+# The recording listing, which is taken later than the selection's and is
+# therefore more exposed to it: merges landing during a long review push older
+# rows off a bounded page, and a reviewed unit missing from one would otherwise
+# be refused as a wrong claim, leaving a completed batch with no endpoint at
+# all. Round-1 blocker.
+RECORDING_LISTING_REACH = {
+    "the same rule, needed more": (
+        "**The recording listing is taken under the same rule, and needs it "
+        "more.** It is taken after the batch was reviewed and its report "
+        "written, which can be a long way after the batch was selected, and "
+        "merges landing in between push older rows off a bounded page — so the "
+        "`$LIMIT` that reached the batch at selection time need not reach it "
+        "now."
+    ),
+    "raise and re-list on an absent unit": (
+        "Declare it, and raise it and list again whenever `record` reports a "
+        "reviewed or excluded unit absent from a listing that came back at its "
+        "own limit."
+    ),
+    "recording nothing is the outcome to refuse": (
+        "Recording nothing is the one outcome to refuse here: the batch is "
+        "already reviewed, and a completed batch with no durable endpoint is "
+        "exactly the state this cursor exists to prevent."
+    ),
+}
 
 # The record step, which closes the loop the cursor rule opens. Its ordering
 # clause is the review's fifth spec addition: a failed report or a failed
@@ -851,14 +903,49 @@ class RepositoryScopeTests(unittest.TestCase):
                     flat(content),
                 )
 
+    def test_the_page_is_no_longer_what_the_count_is_checked_against(self):
+        # The negative control for the reach rewrite. The retired conditions
+        # asked whether the *listing* held the requested count, which a page
+        # ending at the cursor satisfies while selecting nothing; the phrase
+        # that asked it must be gone rather than merely supplemented.
+        for relative_path in RENDERED_ASSETS:
+            flattened = flat(read(relative_path))
+            with self.subTest(asset=relative_path):
+                self.assertNotIn(
+                    "- the requested count fits inside the listing;", flattened
+                )
+                self.assertNotIn(
+                    "verify the listing actually reaches the batch you asked "
+                    "for, before selecting anything from it",
+                    flattened,
+                )
+
     def test_the_reach_check_precedes_the_review_of_the_batch(self):
         for relative_path in RENDERED_ASSETS:
             flattened = flat(read(relative_path))
             with self.subTest(asset=relative_path):
                 self.assertLess(
-                    flattened.index(flat(LISTING_REACH["verified before selecting"])),
+                    flattened.index(
+                        flat(LISTING_REACH["the count is checked against the selection"])
+                    ),
                     flattened.index("## Review PRs newest-first"),
                 )
+
+    def test_both_listings_declare_the_limit_they_were_taken_with(self):
+        # Round-1 blocker, both halves. A limit the helper is not told about
+        # leaves it unable to tell a short page from a short history, and it
+        # then has to answer the cautious way for every listing or the wrong
+        # way for some -- so the declaration is pinned on both calls, and the
+        # recording listing's rule is pinned with it because that listing is
+        # the later and more exposed of the two.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            flattened = flat(content)
+            with self.subTest(asset=relative_path):
+                self.assertEqual(content.count(DECLARED_LISTING_LIMIT), 2, content.count(DECLARED_LISTING_LIMIT))
+                for rule, phrase in sorted(RECORDING_LISTING_REACH.items()):
+                    with self.subTest(rule=rule):
+                        self.assertIn(flat(phrase), flattened)
 
     def test_the_checkout_is_resolved_and_required_to_match_the_repository(self):
         # Blocker from round 2. `$REPO` scoped the `gh` calls and nothing else,
@@ -1424,6 +1511,19 @@ class CursorTransitionCase(unittest.TestCase):
         """A fresh read, as a later invocation carrying no context would do."""
         return self.module.state_for(self.module.load_document(self.worktree), REPO)
 
+    def page(self, rows):
+        """The newest `rows` merged pull requests, as a bounded `gh` page.
+
+        `gh pr list --limit N` returns a page of the newest N merges, so a
+        bounded listing is a prefix of merge order -- and the older units the
+        sweep is resuming towards are exactly what falls off it.
+        """
+        ordered = sorted(PR_HISTORY, key=lambda entry: entry[1], reverse=True)
+        return [
+            {"number": number, "mergedAt": merged_at}
+            for number, merged_at in ordered[:rows]
+        ]
+
     def select(self, mode="pr", count=3, state=None, candidates=None, **kwargs):
         listing = PR_LISTING if mode == "pr" else list(DIRECT_HISTORY)
         return self.module.select(
@@ -1693,6 +1793,146 @@ class CursorSelectionTests(CursorTransitionCase):
     def test_a_candidate_without_a_merge_timestamp_cannot_be_ordered(self):
         with self.assertRaises(self.module.CursorError):
             self.module.normalize_candidates("pr", [{"number": 470}])
+
+
+class BoundedListingTests(CursorTransitionCase):
+    """Round 1's blocker: a page is not a history, and the two must not read
+    alike.
+
+    `gh pr list --limit N` returns the newest N merges. A sweep resuming below
+    a recorded endpoint is walking *away* from that page's newest end, so the
+    units it wants are the first to fall off — and the page that no longer
+    holds them looks exactly like a repository that has run out of merged pull
+    requests. Reading the first as the second moves the sweep to direct mode
+    with merged work still unreviewed behind it, permanently.
+    """
+
+    def test_a_page_ending_at_the_endpoint_is_truncated_rather_than_exhausted(self):
+        self.record(self.select(count=3))
+        endpoint = self.state()["pr"]["endpoint"]["number"]
+
+        # The page reaches the endpoint and stops there: every count check
+        # against the page passes, and the selection is empty.
+        page = self.page(3)
+        self.assertEqual(page[-1]["number"], endpoint)
+        selection = self.select(count=3, candidates=page, listing_limit=3)
+        self.assertEqual(selection["selected"], [])
+        self.assertTrue(selection["short"])
+        self.assertTrue(selection["truncated"])
+        self.assertFalse(selection["exhausted"])
+
+        # Raising the limit is the only remedy it needs, and it works.
+        wider = self.select(count=3, candidates=self.page(6), listing_limit=6)
+        self.assertEqual(self.units(wider), [466, 465, 464])
+        self.assertFalse(wider["short"])
+        self.assertFalse(wider["truncated"])
+
+    def test_a_page_under_its_limit_that_comes_up_short_is_the_tail(self):
+        # The other half, and the reason the two answers cannot be collapsed
+        # into one refusal: a genuine tail must still be reviewed and must
+        # still let PR history exhaust so direct mode is reached.
+        selection = self.select(count=50, candidates=PR_LISTING, listing_limit=200)
+        self.assertEqual(len(selection["selected"]), len(PR_HISTORY))
+        self.assertTrue(selection["short"])
+        self.assertFalse(selection["truncated"])
+        self.assertTrue(selection["exhausted"])
+
+    def test_an_undeclared_limit_is_taken_as_a_complete_listing(self):
+        # The unbounded caller is the real one: direct mode hands over a whole
+        # `git log --first-parent` walk, so reporting that as possibly
+        # truncated would send the workflow raising a limit it never set. PR
+        # mode always declares one, which the asset pin above holds it to.
+        selection = self.select(count=3, candidates=self.page(2))
+        self.assertTrue(selection["short"])
+        self.assertTrue(selection["exhausted"])
+        self.assertFalse(selection["truncated"])
+
+        walk = self.select(mode="direct", count=50)
+        self.assertTrue(walk["exhausted"])
+        self.assertFalse(walk["truncated"])
+
+    def test_a_unit_absent_from_a_full_page_asks_for_a_wider_one(self):
+        # The refusals split the same way. "Not in this repository's merged
+        # history at all" is a claim a bounded page cannot support, and acting
+        # on it stops a sweep that only needed a larger number.
+        page = self.page(3)
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=3, candidates=page, listing_limit=3, start=464)
+        self.assertIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
+        self.assertNotIn(
+            "is not in this repository's merged history", str(caught.exception)
+        )
+
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=3, candidates=page, listing_limit=99, start=464)
+        self.assertIn(
+            "is not in this repository's merged history", str(caught.exception)
+        )
+        self.assertNotIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
+
+    def test_an_endpoint_off_the_page_asks_for_a_wider_one(self):
+        self.record(self.select(count=6))
+        page = self.page(3)
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.select(count=3, candidates=page, listing_limit=3)
+        self.assertIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
+        self.assertNotIn("does not belong to this repository", str(caught.exception))
+
+    def test_a_merge_during_review_does_not_strand_a_completed_batch(self):
+        # Round 1's second blocker. The recording listing is taken after the
+        # batch was reviewed and its report written; merges landing in between
+        # push older rows off a bounded page, so the limit that reached the
+        # batch at selection time need not reach it now. Refusing that as a
+        # wrong claim leaves an already-reviewed batch with no durable
+        # endpoint -- the exact state this cursor exists to prevent.
+        selection = self.select(count=3, candidates=self.page(4), listing_limit=4)
+        reviewed = self.units(selection)
+        self.assertEqual(reviewed, [470, 468, 471])
+
+        # Two newer pull requests merge while the batch is being reviewed, so
+        # the same limit now returns a page that stops above the batch.
+        later = [
+            {"number": 480, "mergedAt": "2026-08-22T00:00:00Z"},
+            {"number": 481, "mergedAt": "2026-08-21T00:00:00Z"},
+        ] + self.page(2)
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.module.record(
+                self.state(),
+                "pr",
+                self.module.normalize_candidates("pr", later),
+                reviewed,
+                listing_limit=4,
+            )
+        self.assertIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
+
+        # Raising the limit records the batch that was already reviewed.
+        widened = self.module.normalize_candidates(
+            "pr",
+            [
+                {"number": 480, "mergedAt": "2026-08-22T00:00:00Z"},
+                {"number": 481, "mergedAt": "2026-08-21T00:00:00Z"},
+            ]
+            + PR_LISTING,
+        )
+        recorded = self.module.record(
+            self.state(), "pr", widened, reviewed, listing_limit=40
+        )
+        self.assertEqual(recorded["pr"]["endpoint"]["number"], 471)
+
+    def test_an_absent_unit_in_a_complete_listing_is_still_refused_outright(self):
+        # The negative control for the rule above: the softer refusal must be
+        # the bounded-page case alone, or a genuinely wrong claim would send
+        # the workflow into an unbounded raise-and-retry loop.
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.module.record(
+                self.state(),
+                "pr",
+                self.module.normalize_candidates("pr", PR_LISTING),
+                [9999],
+                listing_limit=200,
+            )
+        self.assertIn("absent from the candidate history", str(caught.exception))
+        self.assertNotIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
 
 
 class CursorDocumentTests(CursorTransitionCase):

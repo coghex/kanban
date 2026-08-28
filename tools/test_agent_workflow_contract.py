@@ -2559,6 +2559,39 @@ class AgentWorkflowContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn(entry["token"], markdown_home_relative_segments(skill))
 
+    def test_the_codex_project_review_skill_declares_the_plugin_cache_root(self):
+        # Round-1 blocker of issue #548's review. The Codex asset resolves its
+        # sweep cursor through `${CODEX_HOME:-$HOME/.codex}`, so it joined the
+        # consumers of `codex-plugin-cache-root` -- and a `personal-path` row
+        # that does not name a consumer is a contract that has stopped
+        # describing the tree. The declaring row is named exactly, for the same
+        # reason the drainer scan above names its two: a scan satisfied by any
+        # `personal-path` row would pass on an asset repointed at some other
+        # user-scoped directory entirely.
+        by_id = {row["id"]: row for row in self.manifest}
+        relative_path = "codex-plugin/plugins/kanban/skills/project-review/SKILL.md"
+        entry = by_id["codex-plugin-cache-root"]
+        self.assertIn(relative_path, entry["files"])
+        segments = markdown_home_relative_segments(
+            (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        )
+        # Load-bearing rather than decorative, and non-vacuous in both
+        # directions: the asset really does name a user-scoped segment, and it
+        # is this row's.
+        self.assertTrue(segments, f"{relative_path} names no user-scoped path")
+        self.assertIn(entry["token"], segments)
+        # The Claude rendering resolves the same helper through
+        # ${CLAUDE_PLUGIN_ROOT} and therefore owes no row at all.
+        self.assertEqual(
+            markdown_home_relative_segments(
+                (
+                    REPO_ROOT
+                    / "claude-plugin/plugins/kanban/commands/project-review.md"
+                ).read_text(encoding="utf-8")
+            ),
+            set(),
+        )
+
     def test_every_declared_document_asset_is_scanned_for_external_commands(self):
         # Requirement 6 of issue #229 and its review correction: the two plugin
         # surfaces above are enumerated lists, not globs, so a vendored asset
