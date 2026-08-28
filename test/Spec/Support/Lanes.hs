@@ -27,7 +27,7 @@
 -- sweep cannot reach another lane's children and one lane's census cannot find
 -- them among its own descendants.
 --
--- Three things hold that shape down, all of them in the runner rather than in
+-- Four things hold that shape down, all of them in the runner rather than in
 -- a convention a spec has to observe:
 --
 --   * 'laneConfig' pins hspec to a single job, so a lane cannot run two of its
@@ -35,6 +35,10 @@
 --   * 'checkAssignment' refuses to start the suite at all if any example is
 --     marked parallelizable, so annotating one is a failure rather than a
 --     silent race;
+--   * 'checkAssignment' also refuses an assignment that separates two groups
+--     declared to need one lane between them — see 'Colocation' — so a
+--     rebalancing that would let such a pair overlap fails at startup rather
+--     than intermittently afterwards;
 --   * 'summarize' holds the lanes to the example count 'checkAssignment' read
 --     off the suite's own spec tree, so a lane that dies, never reports, or
 --     turns out to hold the wrong groups fails the run instead of quietly
@@ -61,23 +65,32 @@
 --     signal reaches a process group, and no live process of another lane's
 --     session can be in a group this lane recorded.
 --
--- That is the whole list, so no group is held to another group's lane and
--- nothing here is a constraint a future group has to be told about. What
--- 'suiteGroups' does decide is balance, not safety.
+-- That is the whole list of what a lane shares with its siblings, so nothing
+-- above holds one group to another group's lane. What a lane does not contain
+-- is a group's own effect on the machine, and a pair of groups has been
+-- measured interfering that way: the suite's assignment therefore decides
+-- balance /and/, for the pairs declared as a 'Colocation', safety. Those
+-- declarations live beside the assignment they constrain — in this suite,
+-- beside @suiteGroups@ in "Main" — carrying the measurement that justifies
+-- each one, and 'checkAssignment' refuses to start a suite that separates a
+-- declared pair.
 module Spec.Support.Lanes
   ( Lane (..),
     SuiteGroup (..),
+    Colocation (..),
     allLanes,
     laneName,
     laneVariable,
     laneReportVariable,
     runSuiteInLanes,
+    assignmentDiagnostic,
+    countExamples,
   )
 where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, bracket, mask_, onException, try)
-import Control.Monad (filterM, forM_, unless, when)
+import Control.Monad (filterM, forM_, unless)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.List (find, intercalate, nub, sort)
@@ -126,11 +139,12 @@ import Text.Read (readMaybe)
 -- cannot be added without deciding what it is allowed to overlap with.
 --
 -- Each lane is named after the group that dominates it, and that is all the
--- name claims: membership is a packing decision taken from measured cost, not
--- a taxonomy. Five lanes hold the suite's waiting evenly enough that the
--- longest is within about a tenth of the average, and the groups whose cost is
--- computing — the great majority of the examples, and under two seconds
--- between them — ride along wherever there is room.
+-- name claims: membership is decided by measured cost and by the declared
+-- 'Colocation' constraints, not by a taxonomy. Five lanes hold the suite's
+-- waiting evenly enough that the longest is within about a tenth of the
+-- average, and the groups whose cost is computing — the great majority of the
+-- examples, and under two seconds between them — ride along wherever there is
+-- room.
 data Lane
   = DeadlineLane
   | SupervisionLane
@@ -144,6 +158,29 @@ data SuiteGroup = SuiteGroup
   { suiteGroupName :: String,
     suiteGroupLane :: Lane,
     suiteGroupSpec :: Spec
+  }
+
+-- | Two groups that must run in one lane, and the measurement that says so.
+--
+-- A lane contains the state a group establishes for itself, but not a group's
+-- effect on the machine the whole suite is running on. Where two groups have
+-- been measured interfering across that gap, putting them in one lane
+-- serialises them, and this is how that placement is stated: as a constraint
+-- 'checkAssignment' enforces rather than a comment a rebalancing can pass by.
+--
+-- A declaration belongs beside the assignment it constrains, so that whoever
+-- moves a group reads it, and it is the only place the pair is stated —
+-- everything else, this module included, refers to it. 'colocationReason' is
+-- printed verbatim when the suite refuses to start, so it has to say why the
+-- two cannot overlap without sending the reader anywhere else.
+--
+-- Only a pair whose interference has actually been measured belongs here. A
+-- constraint added speculatively costs the packing freedom of a real one and
+-- earns none of its safety.
+data Colocation = Colocation
+  { colocationFirst :: String,
+    colocationSecond :: String,
+    colocationReason :: String
   }
 
 allLanes :: [Lane]
@@ -178,9 +215,14 @@ laneReportVariable = "KANBAN_TEST_LANE_REPORT"
 
 -- | The suite's entry point. Runs one lane when this process is a lane, and
 -- otherwise runs every lane and adds up what they ran.
-runSuiteInLanes :: [SuiteGroup] -> IO ()
-runSuiteInLanes groups =
-  lookupEnv laneVariable >>= maybe (runEveryLane groups) (runOneLane groups)
+--
+-- The co-location constraints travel with the assignment because they
+-- constrain it: only the runner half checks them, since a lane runs the groups
+-- it was handed rather than deciding where any of them belongs.
+runSuiteInLanes :: [SuiteGroup] -> [Colocation] -> IO ()
+runSuiteInLanes groups colocations =
+  lookupEnv laneVariable
+    >>= maybe (runEveryLane groups colocations) (runOneLane groups)
 
 -- * One lane
 
@@ -255,9 +297,9 @@ requireOwnSession lane = do
 -- * Every lane
 
 -- | The runner half: start every lane at once, then report them in order.
-runEveryLane :: [SuiteGroup] -> IO ()
-runEveryLane groups = do
-  expected <- checkAssignment groups
+runEveryLane :: [SuiteGroup] -> [Colocation] -> IO ()
+runEveryLane groups colocations = do
+  expected <- checkAssignment groups colocations
   self <- getExecutablePath
   supplied <- getArgs
   -- A lane writes to a file, so it would decide there is no terminal to colour
@@ -566,24 +608,109 @@ seconds value = showFFloat (Just 2) value " seconds"
 -- | Refuses to start a suite whose lanes cannot hold what this harness
 -- promises, and answers how many examples the whole suite has so the runner
 -- can say whether the lanes between them hold it.
-checkAssignment :: [SuiteGroup] -> IO Int
-checkAssignment groups = do
-  let names = map suiteGroupName groups
-      repeated = nub [name | (name, count) <- tally names, count > (1 :: Int)]
-  unless (null repeated) $
-    die ("suite groups share a name, so one of them cannot be reported: " <> unwords repeated)
-  forM_ allLanes $ \lane ->
-    when (null (groupsIn groups lane)) $
-      die ("lane " <> laneName lane <> " has no groups, so the assignment no longer matches the lanes")
-  (_, forest) <- evalSpec defaultConfig (mapM_ suiteGroupSpec groups)
+--
+-- The work is split in two because the halves cost different things to test.
+-- 'assignmentDiagnostic' reads names and lanes only, so a test can put a
+-- synthetic assignment through the real check without building anyone's spec
+-- tree; 'countExamples' needs a tree, and building the suite's own runs every
+-- @runIO@ in it, so a test gives it a tree of its own instead.
+checkAssignment :: [SuiteGroup] -> [Colocation] -> IO Int
+checkAssignment groups colocations = do
+  forM_ (assignmentDiagnostic groups colocations) die
+  counted <- countExamples (mapM_ suiteGroupSpec groups)
+  either die pure counted
+
+-- | Exactly what the runner prints when it will not start this assignment, or
+-- 'Nothing' when the assignment is allowed.
+--
+-- Every reason is printed, not the first one found. The reasons are not
+-- independent: two groups sharing a name is also what leaves a co-location
+-- endpoint ambiguous, so stopping at the first would tell a reader the cause
+-- while withholding which declaration stopped being enforced, which is the
+-- half that says how much the suite has lost. Ordering is presentation only —
+-- causes first, then what they cost.
+assignmentDiagnostic :: [SuiteGroup] -> [Colocation] -> Maybe String
+assignmentDiagnostic groups colocations =
+  case assignmentRefusals groups colocations of
+    [] -> Nothing
+    refusals -> Just (intercalate "\n\n" refusals)
+
+-- | Every reason to refuse this assignment, decided from the groups' names and
+-- lanes alone. 'assignmentDiagnostic' is what reports them.
+assignmentRefusals :: [SuiteGroup] -> [Colocation] -> [String]
+assignmentRefusals groups colocations =
+  concat [duplicateNames, emptyLanes, colocationFaults]
+  where
+    duplicateNames =
+      let repeated =
+            nub [name | (name, count) <- tally (map suiteGroupName groups), count > (1 :: Int)]
+       in [ "suite groups share a name, so one of them cannot be reported: " <> unwords repeated
+            | not (null repeated)
+          ]
+    emptyLanes =
+      [ "lane " <> laneName lane <> " has no groups, so the assignment no longer matches the lanes"
+        | lane <- allLanes,
+          null (groupsIn groups lane)
+      ]
+    colocationFaults = concatMap (colocationRefusal groups) colocations
+
+-- | Why this assignment cannot honour one declared co-location, if it cannot.
+--
+-- A pair is refused for being separated, and also for naming an endpoint this
+-- assignment does not resolve to exactly one group: a rename or a removal
+-- would otherwise leave the declaration matching nothing and enforcing
+-- nothing, which is the failure a constraint exists to prevent, arrived at
+-- quietly. Either way the message names both groups and carries the
+-- declaration's own reason, so it is actionable without opening this file.
+colocationRefusal :: [SuiteGroup] -> Colocation -> [String]
+colocationRefusal groups colocation =
+  case (resolve (colocationFirst colocation), resolve (colocationSecond colocation)) of
+    (Left fault, _) -> [unresolved fault]
+    (_, Left fault) -> [unresolved fault]
+    (Right firstLane, Right secondLane)
+      | firstLane == secondLane -> []
+      | otherwise -> [separated firstLane secondLane]
+  where
+    resolve name = case filter ((== name) . suiteGroupName) groups of
+      [group] -> Right (suiteGroupLane group)
+      [] -> Left (show name <> " is not a group of this suite")
+      matched -> Left (show name <> " names " <> show (length matched) <> " groups of this suite, not one")
+    pair =
+      show (colocationFirst colocation) <> " and " <> show (colocationSecond colocation)
+    separated firstLane secondLane =
+      pair
+        <> " must run in the same lane, but they are assigned to lane "
+        <> laneName firstLane
+        <> " and lane "
+        <> laneName secondLane
+        <> ", which run at the same time. "
+        <> colocationReason colocation
+    unresolved fault =
+      "the declaration that "
+        <> pair
+        <> " must run in the same lane cannot be enforced, because "
+        <> fault
+        <> ". Repair the declaration rather than dropping it: "
+        <> colocationReason colocation
+
+-- | How many examples a spec tree holds, or why it may not be run at all.
+--
+-- Evaluating the tree is what finds a parallelizable example, and is also the
+-- only way to count what the lanes will have to account for between them, so
+-- the two answers come from one evaluation.
+countExamples :: Spec -> IO (Either String Int)
+countExamples spec = do
+  (_, forest) <- evalSpec defaultConfig spec
   let items = forestItems forest
       parallelized = sort [path | (path, item) <- items, itemIsParallelizable item == Just True]
-  unless (null parallelized) $
-    die
-      ( "these examples are marked parallelizable, which would run one beside another in a single process:\n  "
-          <> intercalate "\n  " parallelized
-      )
-  pure (length items)
+  pure $
+    if null parallelized
+      then Right (length items)
+      else
+        Left
+          ( "these examples are marked parallelizable, which would run one beside another in a single process:\n  "
+              <> intercalate "\n  " parallelized
+          )
 
 groupsIn :: [SuiteGroup] -> Lane -> [SuiteGroup]
 groupsIn groups lane = filter ((== lane) . suiteGroupLane) groups

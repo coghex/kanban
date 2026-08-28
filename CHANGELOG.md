@@ -38,6 +38,136 @@ created above it.
   and it deliberately does not relax `/repair`'s own "no retry loops" rule,
   which still governs the unapproved work `/repair` runs on.
 
+## 1.1.0.0
+
+Kanban gains a card filter panel, a settings overlay that edits its model
+roster, an operating mode derived from the providers that roster loads, Linux
+support for both background services, an issue approval service, and a
+documented upgrade path. Two changes affect anyone moving from 1.0.0.0, and
+they come first.
+
+### Upgrading from 1.0.0.0
+
+- Kanban publishes no Haskell library. The implementation modules are a
+  private `kanban-internal` component, so a package that depended on `kanban`
+  and imported `Kanban.*` no longer resolves against this version. Kanban's
+  supported interfaces are the `kanban` executable and its command line, the
+  documented configuration files, the on-disk compatibility surface, the
+  installers under `tools/`, and the workflow contracts under `docs/`;
+  importing the implementation was never among them.
+- `Kanban.CLI.Options` gained an `optionPing :: [String]` field, positioned
+  between `optionJson` and `optionAscii`. Code that constructed that record
+  positionally, or matched it exhaustively, no longer compiles. Together with
+  the withdrawn library above, that is why this release is a major bump.
+- Nothing a user installs changes shape. [Upgrade to a new
+  release](README.md#upgrade-to-a-new-release) is the ordered procedure: what
+  to stop, what to re-run from the new archive, what to verify with the check
+  that can actually observe it, and what is preserved across the move.
+
+### The board
+
+- Press `F` for a card filter panel. `j`/`k` or `Up`/`Down` move between its
+  boxes, `Left`/`Right` between groups, `Space` toggles the focused box, and
+  `d` restores the defaults. Its criteria combine with the `s` column search
+  rather than replacing it.
+- A live-agent overlay's sessions take the keyboard the way vim does. Each
+  session opens in normal mode, where `i` starts insert, `j`/`k`, `g`/`G`, and
+  `Ctrl-D`/`Ctrl-U` scroll its transcript, `1`-`9` answer a pending numbered
+  choice, and `q` hides the overlay without interrupting its work. Insert mode
+  edits the draft; `Enter` sends it and returns to normal, and `Esc` returns to
+  normal without sending. `Esc` stages one step at a time — insert to normal,
+  normal to hidden — and never reaches the dashboard's guarded quit. `Tab`
+  moves between sessions and leaves each in the mode you left it in.
+- The footer's hint line names the keys of whatever surface currently holds
+  the keyboard, including every open overlay, rather than always listing the
+  board's. It is the dashboard's one context-aware hotkey row.
+- A card's top and bottom border runs are drawn in color rather than the
+  terminal's default, so the whole border now follows the rule its corners
+  already did: an unselected card's border is its status color throughout,
+  and on the selected card the left, top, and bottom edges take the selection
+  color while the right edge and the corners on it keep the status color.
+- One board per repository. A second dashboard on the same GitHub repository
+  is refused before it draws a frame, naming the repository and the process
+  already holding it. The claim is keyed by the repository rather than by the
+  checkout path, so two clones of one repository contend and two spellings of
+  its name — `Coghex/Kanban` and `coghex/kanban` — are recognized as the same
+  one. The cached `gh` record is now keyed the same way; a record an earlier
+  version left under the old case-sensitive name is carried across on the
+  first run that can claim it. Only the dashboard takes the claim: `--doctor`,
+  `--usage`, `--ping`, and `--glyph-test` are unaffected.
+
+### Agent actions and models
+
+- Kanban's operating mode follows the providers `models.toml` actually loads:
+  two is dual, one is single-agent, and none — an empty `agents` list, or a
+  file that will not load at all — is no-agent. In no-agent mode the four
+  bindings that start agent work, `r`, `S`, `A`, and `a`, leave the footer,
+  the card details footer, and the help overlay, and pressing one says which
+  mode is in effect instead of starting anything. `p` and `x` stay on all
+  three surfaces in every mode, so work an earlier run left running is still
+  visible in the process inspector and terminable there, and `u` still updates
+  the board while spawning no usage provider. The settings overlay names the
+  derived mode on a read-only line.
+- The settings overlay `o` opens now edits the model roster as well as
+  chat-output verbosity: `j`/`k` or Up/Down pick an assignment, `h`/`l` or
+  Left/Right cycle its model, `[`/`]` cycle its effort, and `d` restores the
+  picked assignment's default — or repairs a roster too broken to launch
+  anything. An edit is saved to `models.toml` under Kanban's XDG
+  configuration directory — `~/.config/kanban/models.toml` unless
+  `XDG_CONFIG_HOME` names another root — and the running board moves to what
+  was saved only once that write succeeds.
+- The PR drainer runs on Linux: a systemd user-unit backend joins the macOS
+  launchd one. Its install directory, discovery record, runtime state, and
+  logs follow each platform's own convention — `~/Library` on macOS, the XDG
+  data and state directories on Linux — and an older Linux installation made
+  under the `~/Library` shape is relocated to the XDG locations by the next
+  default operation.
+- An issue approval service keeps the canonical issue reviews moving without
+  a terminal left open: installed per repository with
+  `python3 tools/install_issue_approval.py` as its own managed job — launchd
+  on macOS, a systemd user unit on Linux — it repeatedly advances the open
+  backlog one bounded pass at a time, and Kanban discovers and monitors the
+  installation beside the drainer's.
+- Press `a`, or click the `approve_issues.py` control the sidebar draws beside
+  the drainer's, to start or stop that approval service from the board, the
+  same way `d` starts and stops the PR drainer.
+
+### Usage
+
+- Each usage window in the sidebar now shows how long until it resets and the
+  wall-clock time it resets at, and each provider's name carries the age of
+  the numbers under it, so a snapshot restored from a previous session is
+  distinguishable from a fresh one.
+- A clickable `↻` control in the sidebar starts the same board-and-usage
+  update `u` does.
+- Tell Kanban roughly what one solve round costs a provider — the
+  `estimated_percent_per_solve_round` key in `config.toml` — and the sidebar
+  converts each usage window's percentage left into the number of solve
+  rounds it still buys.
+- `kanban --ping codex` (or `claude`) deliberately starts that provider's
+  usage window with one minimal paid request, so a window you are about to
+  spend has its full duration ahead of it. Nothing else ever starts a ping,
+  and a failed ping is not retried.
+- The Claude usage probe and the process census are now correct with the
+  util-linux `script` and procps `ps` that Linux ships as well as the BSD
+  flavors on macOS, so the usage sidebar reads right on both platforms.
+- The Claude usage probe no longer leaves a `claude` process behind when the
+  probe fails partway through. The recursive process-group cleanup that
+  already covered the timeout and missing-pipe paths now also covers the
+  exception path between them.
+- Two Kanban processes on one machine no longer lose each other's usage
+  numbers. A cached refresh is merged into whatever the snapshot file already
+  holds, under a lock taken for that read-merge-write alone, so a slow probe
+  in one process cannot roll back a window another process just recorded, and
+  an older reading never replaces a newer one.
+- The usage sidebar's percentage row stays inside the sidebar whatever it has
+  to show: a provider label too wide for its field is cut with the same
+  ellipsis a card's elided line carries, rather than pushing the bar and the
+  percentage off the edge, and the percentage is right-aligned so one, two,
+  and three digits share a column and `100%` still reads in full.
+
+### Installing, upgrading, and configuring
+
 - The documentation carries an ordered release-to-release upgrade path. The
   README's new upgrade section unpacks the new archive beside the old one,
   installs the executable, inventories what is installed and which service jobs
@@ -62,65 +192,29 @@ created above it.
   Re-running any of them from a newer archive re-points the links a previous
   archive left, while still refusing to touch a file that is not Kanban's own.
 
-- Press `F` for a card filter panel. `j`/`k` or `Up`/`Down` move between its
-  boxes, `Left`/`Right` between groups, `Space` toggles the focused box, and
-  `d` restores the defaults. Its criteria combine with the `s` column search
-  rather than replacing it.
-- Each usage window in the sidebar now shows how long until it resets and the
-  wall-clock time it resets at, and each provider's name carries the age of
-  the numbers under it, so a snapshot restored from a previous session is
-  distinguishable from a fresh one.
-- A clickable `↻` control in the sidebar starts the same board-and-usage
-  update `u` does.
-- Tell Kanban roughly what one solve round costs a provider — the
-  `estimated_percent_per_solve_round` key in `config.toml` — and the sidebar
-  converts each usage window's percentage left into the number of solve
-  rounds it still buys.
-- `kanban --ping codex` (or `claude`) deliberately starts that provider's
-  usage window with one minimal paid request, so a window you are about to
-  spend has its full duration ahead of it. Nothing else ever starts a ping,
-  and a failed ping is not retried.
-- The Claude usage probe and the process census are now correct with the
-  util-linux `script` and procps `ps` that Linux ships as well as the BSD
-  flavors on macOS, so the usage sidebar reads right on both platforms.
-- The PR drainer runs on Linux: a systemd user-unit backend joins the macOS
-  launchd one. Its install directory, discovery record, runtime state, and
-  logs follow each platform's own convention — `~/Library` on macOS, the XDG
-  data and state directories on Linux — and an older Linux installation made
-  under the `~/Library` shape is relocated to the XDG locations by the next
-  default operation.
-- An issue approval service keeps the canonical issue reviews moving without
-  a terminal left open: installed per repository with
-  `python3 tools/install_issue_approval.py` as its own managed job — launchd
-  on macOS, a systemd user unit on Linux — it repeatedly advances the open
-  backlog one bounded pass at a time, and Kanban discovers and monitors the
-  installation beside the drainer's.
-- Press `a`, or click the `approve_issues.py` control the sidebar draws beside
-  the drainer's, to start or stop that approval service from the board, the
-  same way `d` starts and stops the PR drainer.
-- Two Kanban processes on one machine no longer lose each other's usage
-  numbers. A cached refresh is merged into whatever the snapshot file already
-  holds, under a lock taken for that read-merge-write alone, so a slow probe
-  in one process cannot roll back a window another process just recorded, and
-  an older reading never replaces a newer one.
-- The settings overlay `o` opens now edits the model roster as well as
-  chat-output verbosity: `j`/`k` or Up/Down pick an assignment, `h`/`l` or
-  Left/Right cycle its model, `[`/`]` cycle its effort, and `d` restores the
-  picked assignment's default — or repairs a roster too broken to launch
-  anything. An edit is saved to `models.toml` under Kanban's XDG
-  configuration directory — `~/.config/kanban/models.toml` unless
-  `XDG_CONFIG_HOME` names another root — and the running board moves to what
-  was saved only once that write succeeds.
-- The usage sidebar's percentage row stays inside the sidebar whatever it has
-  to show: a provider label too wide for its field is cut with the same
-  ellipsis a card's elided line carries, rather than pushing the bar and the
-  percentage off the edge, and the percentage is right-aligned so one, two,
-  and three digits share a column and `100%` still reads in full.
-- A card's top and bottom border runs are drawn in color rather than the
-  terminal's default, so the whole border now follows the rule its corners
-  already did: an unselected card's border is its status color throughout,
-  and on the selected card the left, top, and bottom edges take the selection
-  color while the right edge and the corners on it keep the status color.
+- A `[repositories."owner/name"]` table may now carry `path`, the absolute
+  path to where that repository is checked out on this machine, which puts it
+  in the repository roster Kanban resolves at startup. It is not an override:
+  a table without it is an override table and nothing more, so an existing
+  configuration gains no roster entry by upgrading. A relative value fails
+  startup — nothing expands `~` — while a path that is missing, unusable, not
+  a Git checkout, or a checkout of some other repository is reported in the
+  dashboard's startup notice and never blocks the launch.
+
+### The project
+
+- The repository carries a public contributor baseline: `CONTRIBUTING.md`,
+  `SUPPORT.md`, `SECURITY.md`, and `CODE_OF_CONDUCT.md` at the root, GitHub
+  issue templates for bug reports, feature requests, support questions, and
+  the tracker's own shapes, and a pull-request template. `README.md` names
+  where to ask a question, where to report a vulnerability, and which platform
+  each installable component is supported on.
+- [Releasing and maintenance](docs/releasing.md) documents how a release is
+  cut, verified, and published, and `docs/issue-approval.md` documents the
+  issue approval service.
+- The tracked workflow bundles that `tools/setup_workflows.py` installs carry
+  eight more commands: `triage`, `retriage`, `backlog-review`, `draft-report`,
+  `note-problem`, `project-review`, `drain-prs`, and `push-docs`.
 
 ## 1.0.0.0
 
