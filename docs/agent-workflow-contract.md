@@ -452,7 +452,7 @@ reimplement the removal, and `--check` remains read-only.
   provenance under `--legacy-policy hold` — makes `marker_matches` answer False
   for *every* marker including a current one, so it is reported as unverified
   rather than acted on. A blocking pipeline incident, a non-`OPEN` issue, and a
-  present `reviewed:changes` label each refuse the gate while leaving the marker
+  present changes-requested label each refuse the gate while leaving the marker
   current; those mutate nothing and are reported with the gate's own `reasons`.
   An `INVALID` latest marker is reported as a per-issue unverified outcome
   carrying the marker's `comment_url`, exactly as `--check` reports rather than
@@ -465,9 +465,11 @@ reimplement the removal, and `--check` remains read-only.
   defined by `workflow.approval_label`, which the backend has already resolved,
   so a caller choosing candidates would have to restate that label and would
   silently reconcile nothing in a repository that overrides it; and a set chosen
-  before the lock could change before any decision ran. The result names the
-  label it decided against in `approval_label`, so a consumer reports the
-  repository's own label rather than assuming the default.
+  before the lock could change before any decision ran. A completed
+  reconciliation names the label it decided against in `approval_label`, and a
+  `busy` one names it together with the configured changes-requested label
+  inside `busy_fallback`, so a consumer reports and matches on the repository's
+  own labels rather than assuming the defaults.
 - **Locking.** The canonical `approve_issues.lock` is acquired at most once for
   the whole invocation, whatever the number of issues, and released on every
   exit path including failure and interruption. Every issue and comment read
@@ -479,11 +481,27 @@ reimplement the removal, and `--check` remains read-only.
   reported.
 - **Result.** Exactly one bounded, versioned JSON document, written to stdout in
   a single call, carrying exactly `schema`
-  (`"approve-issues-reconcile-approvals"`), `version` (`1`), `outcome`,
+  (`"approve-issues-reconcile-approvals"`), `version` (`2`), `outcome`,
   `message`, and `issues`: one entry per requested issue, in the order
   requested, each carrying exactly `issue`, `outcome`, `label_removed`,
-  `approved`, `reasons`, and `detail`; plus `approval_label`, the configured
-  label this pass decided against.
+  `approved`, `reasons`, and `detail`; plus `approval_label` and
+  `busy_fallback`, exactly one of which is populated per outcome.
+
+  A completed reconciliation reports `approval_label`, the configured label this
+  pass decided against, and a null `busy_fallback`. A `busy` one reports a null
+  `approval_label` and a `busy_fallback` object carrying exactly
+  `approval_label` and `changes_requested_label`, both configured. That split is
+  the rollout safety of the exclusion below rather than presentation, and
+  version 2 records it without enforcing it: the consumers are workflow assets
+  that read `outcome` and `approval_label` and never read `version`, and an
+  installed backend can be newer than a cached plugin bundle. A version 1 asset
+  marks from a `busy` document *when `approval_label` is a non-empty string* and
+  fails closed on *an invalid or missing `approval_label` in a busy document*.
+  Null satisfies the second and not the first, so withholding the field it reads
+  lands it in its own documented fail-closed branch while a version 2 asset
+  reads `busy_fallback`. The document is refused if a `busy` outcome names
+  `approval_label` at all, so the producer cannot regress into the shape a
+  legacy reader acts on.
 
   | `outcome` | meaning |
   | --- | --- |
@@ -500,12 +518,14 @@ reimplement the removal, and `--check` remains read-only.
   Both top-level outcomes are ordinary completions and **exit zero**, `busy`
   included. The document is validated before it is printed, on the terms
   `--review-queue`'s already follows: an unknown schema or version, a missing or
-  additional field at either level, an `approval_label` disagreeing with the one
-  the run decided against, a mistyped or Boolean-as-integer value, an
-  entry set that does not match the requested issues in order, a `removed` that
-  claims approval or omits `label_removed`, an `unverified` carrying an
-  `approved` Boolean or no `detail`, or any model invocation at all are refused
-  rather than emitted.
+  additional field at any of the three levels, a label reported for the wrong
+  outcome — an `approval_label` on `busy`, a `busy_fallback` on `reconciled` —
+  a `busy_fallback` label that is absent, blank, disagreeing with the one the
+  run decided against, or equal to the other, a mistyped or Boolean-as-integer
+  value, an entry set that does not match the requested issues in order, a
+  `removed` that claims approval or omits `label_removed`, an `unverified`
+  carrying an `approved` Boolean or no `detail`, or any model invocation at all
+  are refused rather than emitted.
 - **Failure semantics.** Fail closed outside the scoped `busy` liveness
   exception. A missing backend, a GitHub read or write failure, a malformed
   result, or an unverifiable post-mutation state is a per-issue `unverified`
@@ -516,11 +536,19 @@ reimplement the removal, and `--check` remains read-only.
   readiness marker for an issue it could not verify, and never presents such an
   issue as ready to solve. A validated top-level `busy` document is the sole
   exception: although the backend read and mutated nothing under the held lock,
-  triage and retriage may render the document's non-empty `approval_label` from
-  their verified-complete open-issue snapshot. That display-only fallback
-  claims no reconciliation or removal; the later solve gate remains
-  authoritative and may refuse a stale label. Every other failure still closes,
-  including an invalid or missing `approval_label` in a `busy` document.
+  triage and retriage may render, from their verified-complete open-issue
+  snapshot, every issue carrying the non-empty `approval_label` in the
+  document's `busy_fallback` and not its non-empty `changes_requested_label`.
+  The exclusion is what keeps the
+  fallback consistent with the gate it stands in for: `current_gate_status`
+  refuses approval while the changes-requested label is present, so an issue
+  carrying both is blocked, and marking it would present known-blocked work as
+  ready in the one mode that says its marks reflect current labels. It costs no
+  extra read — both labels are in the snapshot the fallback already holds.
+  That display-only fallback claims no reconciliation or removal; the later
+  solve gate remains authoritative and may refuse a stale label. Every other
+  failure still closes, including an invalid or missing `busy_fallback`, or
+  either label inside it, in a `busy` document.
 - **Consumers.** The rendered triage assets
   (`claude-plugin/plugins/kanban/commands/triage.md`,
   `codex-plugin/plugins/kanban/skills/triage/SKILL.md`) are the first, and the
@@ -530,10 +558,13 @@ reimplement the removal, and `--check` remains read-only.
   `reconciled` document, all four render their readiness marker from each
   entry's post-reconciliation `approved`. For a `busy` document requested with
   no issue numbers, its empty `issues` array claims no reconciliation; the four
-  instead render exact matches for its validated `approval_label` from the
-  verified-complete open-issue snapshot. They must disclose that label-backed
-  fallback once per answer, immediately after the repository/count line, while
-  it remains advisory and display-only. Neither
+  instead render, from the verified-complete open-issue snapshot, exact matches
+  for the validated `approval_label` in its `busy_fallback` that are not also
+  exact matches for that object's validated `changes_requested_label`. An issue
+  carrying neither label, or the changes-requested label alone, is unmarked as
+  it always was. They must
+  disclose that label-backed fallback once per answer, immediately after the
+  repository/count line, while it remains advisory and display-only. Neither
   outcome is followed by a second `--check`, which would reopen the
   read-then-decide window the lock closes. They pass no issue numbers and name
   no candidate label, so a repository configuring its own approval label is
