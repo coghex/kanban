@@ -1652,7 +1652,8 @@ rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKI
 sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md | kanban | supported | no
 tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
 grep-cli | executable | grep | tools/docs_land.sh | kanban | supported | no
-mktemp-cli | executable | mktemp | tools/docs_land.sh | kanban | supported | no
+mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | no
+rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
 ```
 
@@ -1857,6 +1858,12 @@ directory, and the Codex bundle's `find`-based lookups below are rooted at the
 reason — Kanban never creates it, and every workflow that consults it is an
 optional user- or Kanban-invoked action. The Claude bundle declares no
 counterpart, for the reason the next paragraph gives.
+
+`mktemp-cli` and `rm-cli` are `mandatory: no` for the same shape of reason:
+`fix` writes the check rollup it diagnoses from to a temporary file OUTSIDE the
+worked checkout and deletes it, because CLAUDE.md's hygiene rule forbids leaving
+a scratch file in the tree and `tools/drain_prs.py` would otherwise have to
+relocate it before every fast-forward. `mktemp-cli` is also `tools/docs_land.sh`'s.
 
 `find-cli` and `head-cli` are `mandatory: no`: they are only needed to locate
 one of the installed Codex plugin's own vendored scripts from inside a workflow

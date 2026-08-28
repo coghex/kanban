@@ -168,9 +168,8 @@ REQUIRED_PHRASES = {
         "no check state, which is why it precedes the\n   rollup test below."
     ),
     "the-scratch-file-lives-outside-the-checkout": (
-        "`$ROLLUP` is a path OUTSIDE the checkout — "
-        "`ROLLUP=\"$(mktemp -t kanban-rollup)\"` — and it is removed when you "
-        "are done with it."
+        "`mktemp` puts that file OUTSIDE the checkout, and the `rm` is not "
+        "optional."
     ),
     "nothing-may-be-left-in-the-working-tree": (
         "Nothing this workflow does may leave a file in the working tree"
@@ -791,6 +790,30 @@ class WorkingTreeHygieneTests(unittest.TestCase):
     def test_the_scratch_path_is_made_with_mktemp(self):
         for path in FIX_ASSETS:
             self.assertIn("mktemp -t kanban-rollup", read(path), path)
+
+    def test_the_scratch_path_is_assigned_before_it_is_redirected_into(self):
+        # A reader executes the fence top to bottom. An assignment that came
+        # after the redirect would leave the target empty, which is the shape
+        # this ordering assertion exists to refuse.
+        for path in FIX_ASSETS:
+            text = read(path)
+            assignment = text.index('ROLLUP="$(mktemp')
+            redirect = text.index('> "$ROLLUP"')
+            self.assertLess(
+                assignment,
+                redirect,
+                f"{path} redirects into $ROLLUP before assigning it",
+            )
+
+    def test_the_scratch_file_is_removed_in_the_same_fence(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            redirect = text.index('> "$ROLLUP"')
+            self.assertIn(
+                'rm -f "$ROLLUP"',
+                text[redirect:],
+                f"{path} never removes its scratch file",
+            )
 
     def test_no_other_packaged_asset_redirects_into_the_tree(self):
         # Non-vacuous control: this rule is measured against every rendered

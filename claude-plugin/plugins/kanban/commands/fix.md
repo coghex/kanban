@@ -133,16 +133,18 @@ what make the next paragraph possible and `gh pr view --json statusCheckRollup`
 omits them:
 
 ```bash
+ROLLUP="$(mktemp -t kanban-rollup)"
 gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){pullRequest(number:<pr>){commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){totalCount nodes{__typename ... on CheckRun{name status conclusion startedAt completedAt checkSuite{app{slug}}} ... on StatusContext{context state createdAt creator{login}}}}}}}}}}' > "$ROLLUP"
+# ... read $ROLLUP for every branch below, then:
+rm -f "$ROLLUP"
 ```
 
-`$ROLLUP` is a path OUTSIDE the checkout — `ROLLUP="$(mktemp -t kanban-rollup)"`
-— and it is removed when you are done with it. Nothing this workflow does may
-leave a file in the working tree: CLAUDE.md's hygiene rule is explicit about
-scratch files, `tools/drain_prs.py` has to relocate any untracked file it finds
-before a fast-forward, and step 4 tells you to PRESERVE untracked content in a
-reused worktree — so a stray artifact here is one an obstacle-fixing run could
-fold into its own focused commit.
+`mktemp` puts that file OUTSIDE the checkout, and the `rm` is not optional.
+Nothing this workflow does may leave a file in the working tree: CLAUDE.md's
+hygiene rule is explicit about scratch files, `tools/drain_prs.py` has to
+relocate any untracked file it finds before a fast-forward, and step 4 tells
+you to PRESERVE untracked content in a reused worktree — so a stray artifact
+here is one an obstacle-fixing run could fold into its own focused commit.
 
 **A rollup entry is not the same thing as a CHECK.** GitHub returns every
 context on the commit, including ones a later run superseded, so the same check

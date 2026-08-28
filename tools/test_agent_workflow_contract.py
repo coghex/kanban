@@ -570,14 +570,18 @@ FIX_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/fix.md": {
         "gh",
         "git",
+        "mktemp",
         "python3",
+        "rm",
     },
     "codex-plugin/plugins/kanban/skills/fix/SKILL.md": {
         "find",
         "gh",
         "git",
         "head",
+        "mktemp",
         "python3",
+        "rm",
     },
 }
 
