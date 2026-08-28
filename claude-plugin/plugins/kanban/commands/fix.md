@@ -97,9 +97,9 @@ this order:
 1. **Merge conflict** — resolve it against the recorded `baseRefName`,
    preserving the pull request's intent while incorporating that base branch's
    current tip.
-2. **Failed check** — any failed check in the pull request's status-check
-   rollup, required or not, not only required checks. Triage it through step 5
-   before changing a single file.
+2. **Failed check** — EVERY failed entry in the pull request's status-check
+   rollup, required or not, not only required checks, and not only the first
+   one you notice. Triage them through step 5 before changing a single file.
 3. **Nothing to fix** — no conflict and no failed check. Report the pull
    request's merge state and check state and stop without pushing, without
    rerunning anything, and without invoking a rereview. A pending check is not
@@ -170,11 +170,40 @@ different from the one recorded at the start. That verified new SHA is what
 transferred no fix, so treat it as having pushed nothing, invoke no rereview,
 and report it.
 
-## 5. Triage a failed check before fixing or rerunning it
+## 5. Triage every failed check before fixing or rerunning anything
 
 A failed check is one of two different things, and confusing them is how a real
-defect gets retried until it passes. Decide which by reading the failing run's
-own jobs, never by the check's name and never by how the failure feels:
+defect gets retried until it passes. Enumerate the whole rollup first — the
+obstacle is the SET of failed entries, never the first one you looked at:
+
+```bash
+gh pr view <pr> -R <owner/name> --json statusCheckRollup --jq '.statusCheckRollup[] | [.__typename, .name // .context, .conclusion // .state, .detailsUrl] | @tsv'
+```
+
+### 5a. Not every rollup entry is a workflow run
+
+`statusCheckRollup` mixes two kinds of entry, and only one of them can be
+classified or rerun by the commands below:
+
+* A **`CheckRun` whose `detailsUrl` names this repository's own
+  `/actions/runs/<run-id>`** is a GitHub Actions job. Recover `<run-id>` from
+  that URL; several failed entries commonly share ONE run id, and the run — not
+  the entry — is the unit everything below acts on.
+* **Anything else** — a `StatusContext` posted by an external service, or a
+  `CheckRun` from a non-Actions app whose `detailsUrl` names no Actions run —
+  has no run to read jobs from and no run to rerun. Never issue `gh run view` or
+  `gh run rerun` against it, and never guess a run id for it.
+
+**A failed entry of the second kind fails closed.** Report it by name, say that
+this workflow cannot classify or rerun an external check, and stop — without
+rerunning the Actions runs beside it and without editing a file. Someone who can
+read that service's own result has to decide what it means.
+
+### 5b. Classify each distinct failed run
+
+For every distinct run id among the failed Actions entries, read that run's own
+jobs. Decide by what executed, never by the check's name and never by how the
+failure feels:
 
 ```bash
 gh run view <run-id> -R <owner/name> --json jobs --jq '.jobs[] | "\(.conclusion) \(.name)"'
@@ -195,27 +224,41 @@ because the pull request is genuinely incompatible with its base. A failure you
 believe is flaky is a real failure for this workflow's purposes: it executed the
 code and it reported a result.
 
-Route on that answer:
+### 5c. Route on the whole set, not on one run
 
-* **Real failure** — fix the cause in the worktree of step 4, push, and hand off
-  the rereview of step 6. Never delete or skip a test, never weaken an
-  assertion, and never rerun a real failure to see whether it passes the second
-  time. A failure you judge to be pre-existing on the recorded base branch must
-  be reported to the user and stop the run rather than papered over.
-* **Infrastructure failure** — rerun the failed jobs of that run exactly once,
-  then wait for the result:
+**If ANY failed run is a real failure**, take the fix path for all of them: fix
+the causes in the worktree of step 4, push, and hand off the rereview of step 6.
+Rerun nothing — a rerun that ran beside a real failure would clear one red check
+and leave the pull request just as unmergeable, having spent the allowance.
+Never delete or skip a test, never weaken an assertion, and never rerun a real
+failure to see whether it passes the second time. A failure you judge to be
+pre-existing on the recorded base branch must be reported to the user and stop
+the run rather than papered over.
 
-  ```bash
-  gh run rerun <run-id> -R <owner/name> --failed
-  ```
+**Only when EVERY failed run is an infrastructure failure**, rerun each of those
+runs exactly once:
 
-**One rerun, then stop. There is never a second.** Wait for the rerun to
-finish and report what it did. When it comes back green, the pull request's
-obstacle is cleared and this workflow is done. When it comes back red — for any
-reason at all, including the same infrastructure signature — stop and report the
-second failure to the user without rerunning, without editing a file, and
-without invoking a rereview. A failure that survives one rerun is evidence, and
-burying it under a third attempt is exactly what this ceiling exists to prevent.
+```bash
+gh run rerun <run-id> -R <owner/name> --failed
+```
+
+**One rerun per run, then stop. There is never a second for the same run.**
+
+### 5d. Re-evaluate the complete rollup afterwards
+
+Wait for every rerun to finish, then RE-FETCH the whole rollup with the command
+in step 5 and judge the pull request on what it says now — never on the reruns'
+own outcomes alone. A rollup that was green for the reruns can still carry a
+failed entry that was not part of them, including one that only appeared while
+they ran.
+
+* **No failed entry remains** — the obstacle is cleared and this workflow is
+  done.
+* **A failed entry remains** — stop and report it, whatever its kind and
+  whatever it looks like. Do not rerun a run this invocation already reran, do
+  not start a fix, and do not invoke a rereview. A failure that survives one
+  rerun is evidence, and burying it under a third attempt is exactly what this
+  ceiling exists to prevent.
 
 Rerunning changes no file and pushes no commit, so the head SHA the approval was
 granted against is unchanged and that approval still stands. A rerun therefore

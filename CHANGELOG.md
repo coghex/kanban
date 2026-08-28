@@ -22,7 +22,12 @@ created above it.
   job actually executed the pull request's code — a cancelled setup job, a
   concurrency-group eviction, an aggregator reporting on a dependency that never
   ran — is rerun exactly once and never a second time, while a failure that did
-  execute the code is fixed and handed to one canonical rereview. A rerun pushes
+  execute the code is fixed and handed to one canonical rereview. The obstacle
+  is the whole set of failed rollup entries, not the first one seen: a real
+  failure anywhere reruns nothing, the complete rollup is re-fetched and
+  re-judged after a rerun, and a failed entry that is not a GitHub Actions run
+  at all — an external status with no run to read or retry — fails closed
+  rather than being handed a command that cannot apply to it. A rerun pushes
   no commit, so the approval it ran under still stands and no rereview is
   invoked; a code fix replaces the reviewed head, so one always is. It is
   authored once under `tools/command_sources/` and rendered into both bundles,

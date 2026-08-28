@@ -2253,6 +2253,57 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     f"segment {segment!r}; declare it in the manifest",
                 )
 
+    def test_every_plugin_surface_asset_home_relative_path_is_documented(self):
+        # The drafting and document loops above each walk their own declared
+        # list, so an asset outside both reached NO home-relative scan at all:
+        # `fix` named ~/.codex twice and no gate saw it. This closes that by
+        # walking the two whole-bundle surface lists, which every packaged
+        # workflow is already on, and it checks the stronger property the
+        # drafting loop does not -- that the DECLARING row actually names the
+        # asset, so a documented token is not mistaken for a documented asset.
+        rows = [row for row in self.manifest if row["kind"] == "personal-path"]
+        for relative_path in PLUGIN_SURFACE_FILES + CLAUDE_PLUGIN_SURFACE_FILES:
+            if not relative_path.endswith(".md"):
+                continue
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            for segment in markdown_home_relative_segments(content):
+                declaring = [
+                    row
+                    for row in rows
+                    if segment in row["token"] or row["token"] in segment
+                ]
+                self.assertTrue(
+                    declaring,
+                    f"{relative_path} names an undocumented user-scoped path "
+                    f"segment {segment!r}; declare it in the manifest",
+                )
+                self.assertTrue(
+                    any(relative_path in row["files"] for row in declaring),
+                    f"{relative_path} names user-scoped path {segment!r} but is "
+                    f"not listed by any row declaring it "
+                    f"({', '.join(row['id'] for row in declaring)}); add it to "
+                    "that row's files column",
+                )
+
+    def test_the_whole_bundle_home_path_scan_really_recovers_something(self):
+        # Non-vacuous anchor for the loop above: a scan that recovered nothing
+        # from every asset would pass while asserting nothing at all.
+        codex_fix = (
+            REPO_ROOT / "codex-plugin/plugins/kanban/skills/fix/SKILL.md"
+        ).read_text(encoding="utf-8")
+        segments = markdown_home_relative_segments(codex_fix)
+        self.assertIn("/.codex", segments)
+        self.assertIn("/worktrees", segments)
+        claude_fix = (
+            REPO_ROOT / "claude-plugin/plugins/kanban/commands/fix.md"
+        ).read_text(encoding="utf-8")
+        # The Claude rendering resolves its coordinator through
+        # ${CLAUDE_PLUGIN_ROOT}, so it names the worktrees root and NOT
+        # ~/.codex -- the asymmetry the brand block exists to produce.
+        claude_segments = markdown_home_relative_segments(claude_fix)
+        self.assertIn("/worktrees", claude_segments)
+        self.assertNotIn("/.codex", claude_segments)
+
     def test_rereview_asset_command_discovery_is_not_vacuous(self):
         # Issue #240's assets reach the completeness loops above by being
         # listed, and a loop over an asset the extractor recovers nothing from

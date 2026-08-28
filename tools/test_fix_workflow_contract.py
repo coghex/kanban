@@ -119,15 +119,15 @@ REQUIRED_PHRASES = {
     ),
     # --- Triage: what may be rerun, and what may never be. ---
     "triage-precedes-any-edit": (
-        "Triage it through step 5\n   before changing a single file."
+        "Triage them through step 5 before changing a single file."
     ),
     "infrastructure-failure-is-defined-by-what-executed": (
         "**An infrastructure failure is one where no job that executed the pull\n"
         "request's code reported a failure.**"
     ),
     "infrastructure-failure-is-read-from-the-jobs": (
-        "Decide which by reading the failing run's\nown jobs, never by the check's "
-        "name and never by how the failure feels"
+        "Decide by what executed, never by the check's name and never by how "
+        "the\nfailure feels:"
     ),
     "the-eviction-signature-is-named": (
         "Concurrency-group eviction is the\ncanonical case: a setup job is cancelled "
@@ -140,26 +140,62 @@ REQUIRED_PHRASES = {
         "executed the\ncode and it reported a result."
     ),
     "a-real-failure-is-never-rerun": (
-        "never rerun a real failure to see whether it passes the second\n  time"
+        "never rerun a real\nfailure to see whether it passes the second time."
     ),
     "a-real-failure-is-never-papered-over": (
-        "Never delete or skip a test, never weaken an\n  assertion"
+        "Never delete or skip a test, never weaken an assertion"
     ),
     "a-pre-existing-failure-stops-the-run": (
-        "A failure you judge to be pre-existing on the recorded base branch must\n  "
-        "be reported to the user and stop the run rather than papered over."
+        "A failure you judge to be\npre-existing on the recorded base branch "
+        "must be reported to the user and stop\nthe run rather than papered over."
     ),
     # --- The ceiling. ---
-    "rerun-exactly-once": (
-        "rerun the failed jobs of that run exactly once,\n  then wait for the result"
+    "rerun-only-when-every-failed-run-is-infrastructure": (
+        "**Only when EVERY failed run is an infrastructure failure**, rerun each "
+        "of those\nruns exactly once"
+    ),
+    "a-real-failure-anywhere-reruns-nothing": (
+        "**If ANY failed run is a real failure**, take the fix path for all of "
+        "them"
+    ),
+    "a-rerun-beside-a-real-failure-clears-nothing": (
+        "Rerun nothing — a rerun that ran beside a real failure would clear one "
+        "red check\nand leave the pull request just as unmergeable, having spent "
+        "the allowance."
     ),
     "one-rerun-then-stop": (
-        "**One rerun, then stop. There is never a second.**"
+        "**One rerun per run, then stop. There is never a second for the same "
+        "run.**"
     ),
-    "a-second-red-stops-for-any-reason": (
-        "When it comes back red — for any\nreason at all, including the same "
-        "infrastructure signature — stop and report the\nsecond failure to the user "
-        "without rerunning, without editing a file, and\nwithout invoking a rereview."
+    "the-whole-rollup-is-refetched-after-a-rerun": (
+        "RE-FETCH the whole rollup with the command\nin step 5 and judge the pull "
+        "request on what it says now — never on the reruns'\nown outcomes alone."
+    ),
+    "a-remaining-failed-entry-stops-for-any-reason": (
+        "**A failed entry remains** — stop and report it, whatever its kind and\n"
+        "  whatever it looks like. Do not rerun a run this invocation already "
+        "reran, do\n  not start a fix, and do not invoke a rereview."
+    ),
+    "only-an-empty-failed-set-clears-the-obstacle": (
+        "**No failed entry remains** — the obstacle is cleared and this workflow "
+        "is\n  done."
+    ),
+    "a-non-actions-check-fails-closed": (
+        "**A failed entry of the second kind fails closed.** Report it by name, "
+        "say that\nthis workflow cannot classify or rerun an external check, and "
+        "stop"
+    ),
+    "a-non-actions-check-is-never-given-a-run-command": (
+        "Never issue `gh run view` or\n  `gh run rerun` against it, and never "
+        "guess a run id for it."
+    ),
+    "the-run-id-comes-from-the-details-url": (
+        "A **`CheckRun` whose `detailsUrl` names this repository's own\n  "
+        "`/actions/runs/<run-id>`** is a GitHub Actions job."
+    ),
+    "the-run-not-the-entry-is-the-unit": (
+        "several failed entries commonly share ONE run id, and the run — not\n  "
+        "the entry — is the unit everything below acts on."
     ),
     "the-ceiling-differs-from-the-drainers-on-purpose": (
         "This ceiling is deliberately tighter than the PR drainer's. "
@@ -171,8 +207,8 @@ REQUIRED_PHRASES = {
         "the drainer's, and do\nnot lower the drainer's to match this one."
     ),
     "the-ceiling-exists-to-surface-evidence": (
-        "A failure that survives one rerun is evidence, and\nburying it under a third "
-        "attempt is exactly what this ceiling exists to prevent."
+        "A failure that survives one\n  rerun is evidence, and burying it under a "
+        "third attempt is exactly what this\n  ceiling exists to prevent."
     ),
     # --- Authority: what a rerun does and does not invalidate. ---
     "a-rerun-pushes-nothing-so-approval-stands": (
@@ -245,9 +281,17 @@ FIX_ONLY_REQUIREMENTS = (
     "infrastructure-failure-is-defined-by-what-executed",
     "the-eviction-signature-is-named",
     "a-flaky-failure-is-a-real-failure-here",
-    "rerun-exactly-once",
+    "rerun-only-when-every-failed-run-is-infrastructure",
+    "a-real-failure-anywhere-reruns-nothing",
+    "a-rerun-beside-a-real-failure-clears-nothing",
     "one-rerun-then-stop",
-    "a-second-red-stops-for-any-reason",
+    "the-whole-rollup-is-refetched-after-a-rerun",
+    "a-remaining-failed-entry-stops-for-any-reason",
+    "only-an-empty-failed-set-clears-the-obstacle",
+    "a-non-actions-check-fails-closed",
+    "a-non-actions-check-is-never-given-a-run-command",
+    "the-run-id-comes-from-the-details-url",
+    "the-run-not-the-entry-is-the-unit",
     "the-ceiling-exists-to-surface-evidence",
     "the-ceiling-differs-from-the-drainers-on-purpose",
     "neither-ceiling-may-be-changed-to-match-the-other",

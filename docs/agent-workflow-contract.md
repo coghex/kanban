@@ -1515,7 +1515,8 @@ launchagents-dir | personal-path | /Library/LaunchAgents | tools/service_manager
 systemd-user-unit-dir | personal-path | /.config/systemd/user | tools/service_manager.py | kanban | supported | no
 find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md | kanban | supported | no
 head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md | kanban | supported | no
-codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md | external | supported | no
+worktrees-root | personal-path | /worktrees | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | no
+codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md | external | supported | no
 awk-cli | executable | awk | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
 rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/note-problem.md | kanban | supported | no
 sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md | kanban | supported | no
@@ -1712,6 +1713,13 @@ whatever `$XDG_CONFIG_HOME` names, which no literal can declare. Both are
 `tools/service_manager.py`'s alone: it is the only module that may name a
 service-manager artifact at all.
 
+`worktrees-root` is the isolated-worktree parent the three pull-request-code
+workflows create under: `$solve` for a claimed issue, `$repair` and `$fix` for a
+pull request's own branch. All three spell it `${WORKTREES_ROOT:-$HOME/worktrees}`,
+so the override is the operator's and the default is the row's single literal.
+Kanban owns it — the workflows create it — but nothing requires it to pre-exist,
+which is why it is `mandatory: no`.
+
 `codex-plugin-cache-root` is the only user-scoped path this repository declares
 that Kanban does not own: `$CODEX_HOME` (default `~/.codex`) is Codex's own
 directory, and the Codex bundle's `find`-based lookups below are rooted at the
@@ -1724,7 +1732,7 @@ counterpart, for the reason the next paragraph gives.
 one of the installed Codex plugin's own vendored scripts from inside a workflow
 whose working directory is the worked repository rather than the plugin's own
 install location — the shared review coordinator for `$pr-review`,
-`$pr-rereview`, `$pr-revise`, and `$repair`, the trusted-comment issue-spec
+`$pr-rereview`, `$pr-revise`, `$repair`, and `$fix`, the trusted-comment issue-spec
 helper for `$solve` (§2.1) and `$issue-rereview`, and the publication and
 tracker-transaction modules for `$process-report`, `$process-design-doc`, and
 `$note-problem` — themselves optional AI
