@@ -153,8 +153,22 @@ REQUIRED_PHRASES = {
         "reviewed."
     ),
     "behind-the-base-is-its-own-obstacle": (
-        "4. **Behind its base** — no conflict, no failed check, and no pending "
-        "check,"
+        "4. **Behind its base** — no conflict, no failed check, no pending "
+        "check, and\n   the merge state is exactly `BEHIND`"
+    ),
+    "only-behind-is-fixable-by-a-branch-update": (
+        "5. **Any other merge state that is not ready** — `BLOCKED` and "
+        "`UNSTABLE` are\n   real states (`MergeBlocked`, `MergeUnstable`)"
+    ),
+    "blocked-and-unstable-fail-closed": (
+        "This branch fails closed: report the exact merge state, say\n   that "
+        "this workflow has no remedy for it, and stop without pushing,\n   "
+        "rerunning, or invoking a rereview."
+    ),
+    "only-clean-and-protected-are-ready": (
+        "Only `MergeClean` and `MergeProtected`\n   are ready "
+        "(`mergeStateReady`); everything else that is not `BEHIND` lands\n   "
+        "here."
     ),
     "green-checks-do-not-make-a-behind-pr-mergeable": (
         "Green checks do not make\n   such a pull request mergeable. Update it "
@@ -162,13 +176,42 @@ REQUIRED_PHRASES = {
         "conflict branch does"
     ),
     "nothing-to-fix-requires-a-ready-merge-state": (
-        "5. **Nothing to fix** — no conflict, no failed check, no pending "
+        "6. **Nothing to fix** — no conflict, no failed check, no pending "
         "check, and a\n   merge state that is ready."
     ),
     "an-unknown-merge-state-is-not-a-clearance": (
         "`UNKNOWN` is not a clearance either — GitHub has not\n   finished "
-        "computing mergeability, so say so and stop rather than reporting a\n"
-        "   pull request ready that may yet come back `BEHIND` or `DIRTY`."
+        "computing mergeability, so it lands in branch 5 and stops rather\n   "
+        "than being reported ready when it may yet come back `BEHIND` or "
+        "`DIRTY`."
+    ),
+    "the-ceiling-is-read-from-github-not-memory": (
+        "**The ceiling is read from GitHub, not from memory.** Before "
+        "rerunning any run,\nask it how many attempts it has already had:"
+    ),
+    "an-attempt-above-one-is-already-spent": (
+        "A first attempt reports `1`. **Anything greater than 1 means this run "
+        "has\nalready been rerun** — by an earlier invocation of this "
+        "workflow, by the PR\ndrainer, or by a person — so it is not rerun "
+        "again"
+    ),
+    "the-remote-counter-is-what-spans-invocations": (
+        'This is what makes "never a\nsecond" hold across invocations rather '
+        "than only within one, and it needs no\ndurable state of this "
+        "workflow's own"
+    ),
+    "the-rerun-requires-attempt-one": (
+        "**Only when EVERY failed run is an infrastructure failure AND every "
+        "one of them\nis still on attempt 1**"
+    ),
+    "the-whole-diagnosis-is-rerun-afterwards": (
+        "Clearing the failure is not the same\nas clearing the obstacle: a "
+        "pull request can carry a failed check AND an\nunrelated pending one"
+    ),
+    "a-post-rerun-obstacle-is-reported-not-acted-on": (
+        "* **Branch 1, 2 or 4, another head-moving obstacle** — report it and "
+        "stop.\n  Do NOT act on it in this invocation: the rerun already spent "
+        "this run's\n  allowance"
     ),
 
     # --- Triage: what may be rerun, and what may never be. ---
@@ -204,9 +247,9 @@ REQUIRED_PHRASES = {
         "must be reported to the user and stop\nthe run rather than papered over."
     ),
     # --- The ceiling. ---
-    "rerun-only-when-every-failed-run-is-infrastructure": (
-        "**Only when EVERY failed run is an infrastructure failure**, rerun each "
-        "of those\nruns exactly once — the WHOLE run, with no `--failed`:"
+    "a-real-failure-anywhere-still-reruns-nothing": (
+        "**If ANY failed run is a real failure**, take the fix path for all of "
+        "them"
     ),
     "the-rerun-is-the-whole-run-never-failed-only": (
         '**Never `--failed` here.** That flag reruns "only failed jobs, '
@@ -232,17 +275,17 @@ REQUIRED_PHRASES = {
         "run.**"
     ),
     "the-whole-rollup-is-refetched-after-a-rerun": (
-        "RE-FETCH the whole rollup with the command\nin step 5 and judge the pull "
-        "request on what it says now — never on the reruns'\nown outcomes alone."
+        "Wait for every rerun to finish, then RE-FETCH the pull request and "
+        "run **step\n3's whole diagnosis again** against what it says now — "
+        "never the reruns' own\noutcomes, and never the failed set alone."
     ),
-    "a-remaining-failed-entry-stops-for-any-reason": (
-        "**A failed entry remains** — stop and report it, whatever its kind and\n"
-        "  whatever it looks like. Do not rerun a run this invocation already "
-        "reran, do\n  not start a fix, and do not invoke a rereview."
+    "a-post-rerun-non-mutating-stop-is-honoured": (
+        "* **Branch 3 or 5, a non-mutating stop** — report what it now says "
+        "and stop,\n  exactly as those branches specify."
     ),
-    "only-an-empty-failed-set-clears-the-obstacle": (
-        "**No failed entry remains** — the obstacle is cleared and this workflow "
-        "is\n  done."
+    "only-branch-six-clears-the-obstacle": (
+        "* **Branch 6, nothing to fix** — the obstacle really is cleared and "
+        "this\n  workflow is done."
     ),
     "a-non-actions-check-fails-closed": (
         "**A failed entry of the second kind fails closed.** Report it by name, "
@@ -271,8 +314,8 @@ REQUIRED_PHRASES = {
         "the drainer's, and do\nnot lower the drainer's to match this one."
     ),
     "the-ceiling-exists-to-surface-evidence": (
-        "A failure that survives one\n  rerun is evidence, and burying it under a "
-        "third attempt is exactly what this\n  ceiling exists to prevent."
+        "A failure that survives one rerun is evidence, and burying it under a "
+        "third\nattempt is exactly what this ceiling exists to prevent."
     ),
     # --- Authority: what a rerun does and does not invalidate. ---
     "a-rerun-pushes-nothing-so-approval-stands": (
@@ -345,6 +388,7 @@ DIAGNOSIS_ORDER = (
     "**Failed check**",
     "**A check still running**",
     "**Behind its base**",
+    "**Any other merge state that is not ready**",
     "**Nothing to fix**",
 )
 
@@ -357,6 +401,15 @@ FIX_ONLY_REQUIREMENTS = (
     "why-pending-outranks-behind",
     "a-pending-check-needs-no-worktree-either",
     "behind-the-base-is-its-own-obstacle",
+    "a-post-rerun-obstacle-is-reported-not-acted-on",
+    "the-whole-diagnosis-is-rerun-afterwards",
+    "the-rerun-requires-attempt-one",
+    "the-remote-counter-is-what-spans-invocations",
+    "an-attempt-above-one-is-already-spent",
+    "the-ceiling-is-read-from-github-not-memory",
+    "only-clean-and-protected-are-ready",
+    "blocked-and-unstable-fail-closed",
+    "only-behind-is-fixable-by-a-branch-update",
     "green-checks-do-not-make-a-behind-pr-mergeable",
     "nothing-to-fix-requires-a-ready-merge-state",
     "an-unknown-merge-state-is-not-a-clearance",
@@ -370,15 +423,14 @@ FIX_ONLY_REQUIREMENTS = (
     "infrastructure-failure-is-defined-by-what-executed",
     "the-eviction-signature-is-named",
     "a-flaky-failure-is-a-real-failure-here",
-    "rerun-only-when-every-failed-run-is-infrastructure",
     "the-rerun-is-the-whole-run-never-failed-only",
     "failed-only-would-silently-accomplish-nothing",
     "a-real-failure-anywhere-reruns-nothing",
     "a-rerun-beside-a-real-failure-clears-nothing",
     "one-rerun-then-stop",
     "the-whole-rollup-is-refetched-after-a-rerun",
-    "a-remaining-failed-entry-stops-for-any-reason",
-    "only-an-empty-failed-set-clears-the-obstacle",
+    "a-post-rerun-non-mutating-stop-is-honoured",
+    "only-branch-six-clears-the-obstacle",
     "a-non-actions-check-fails-closed",
     "a-non-actions-check-is-never-given-a-run-command",
     "the-run-id-comes-from-the-details-url",
@@ -547,6 +599,71 @@ class FixWorkflowContractTests(unittest.TestCase):
         self.assertIn('approval_label = "reviewed:approve"', example)
         self.assertIn('approval_mode = "label"', example)
         self.assertIn('blocked_labels = ["blocked"]', example)
+
+
+class MergeStateCoverageTests(unittest.TestCase):
+    """Every non-ready merge state has a defined branch, and only one of them
+    is fixable by updating from the base."""
+
+    def test_every_non_ready_merge_state_kanban_models_is_named(self):
+        domain = read(REPO_ROOT / "src/Kanban/Domain.hs")
+        workflow = read(WORKFLOW_HS)
+        # The two Kanban calls ready; everything else must reach a branch.
+        self.assertIn("mergeStateReady MergeClean = True", workflow)
+        self.assertIn("mergeStateReady MergeProtected = True", workflow)
+        for constructor in ("MergeBehind", "MergeBlocked", "MergeUnstable"):
+            self.assertIn(constructor, domain, f"{constructor} is gone")
+            for path in FIX_ASSETS:
+                self.assertIn(
+                    constructor.removeprefix("Merge").upper()
+                    if constructor != "MergeBehind"
+                    else "BEHIND",
+                    read(path),
+                    f"{path} never names {constructor}'s GitHub state",
+                )
+
+    def test_only_behind_is_remedied_by_a_branch_update(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            self.assertIn("the merge state is exactly `BEHIND`", text, path)
+            self.assertIn(
+                "a branch update cannot clear a branch-protection", text, path
+            )
+
+
+class DurableCeilingTests(unittest.TestCase):
+    """The one-rerun ceiling survives a fresh invocation.
+
+    Nothing in this workflow persists state of its own, so a ceiling enforced
+    from memory would bound only one invocation and a second `fix` could retry
+    the same run. GitHub's own per-run attempt counter is the durable guard,
+    and it is strictly better than a local one: it also counts reruns made by
+    the PR drainer or by a person.
+    """
+
+    def test_the_attempt_counter_is_consulted_before_any_rerun(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            self.assertIn("--json attempt", text, path)
+            self.assertIn("is still on attempt 1", text, path)
+
+    def test_the_attempt_field_gh_is_asked_for_really_exists(self):
+        # Non-vacuous anchor: `gh run view --json attempt` must be a real
+        # field, or the guard reads nothing and the ceiling silently reverts
+        # to per-invocation. Checked against gh's own field list rather than
+        # by making a network call.
+        import shutil
+        import subprocess
+
+        if shutil.which("gh") is None:
+            self.skipTest("gh is not installed")
+        result = subprocess.run(
+            ["gh", "run", "view", "--json"],
+            capture_output=True,
+            text=True,
+        )
+        # `--json` with no value makes gh print the supported field list.
+        self.assertIn("attempt", result.stdout + result.stderr)
 
 
 class RerunCommandShapeTests(unittest.TestCase):

@@ -38,7 +38,12 @@ created above it.
   state stops the run rather than being reported ready. A check that is still
   running outranks both and mutates nothing at all, matching
   `pullRequestStatus`: replacing an approved head mid-CI would discard the
-  run that was about to answer the question. A rerun pushes
+  run that was about to answer the question. Only `BEHIND` is remedied by a
+  branch update; `BLOCKED` and `UNSTABLE` are reported and fail closed. The
+  one-rerun ceiling is read from GitHub's own per-run attempt counter rather
+  than from memory, so it holds across invocations and counts reruns made by
+  the drainer or by a person too, and the whole obstacle diagnosis — not just
+  the failed set — is run again after a rerun. A rerun pushes
   no commit, so the approval it ran under still stands and no rereview is
   invoked; a code fix replaces the reviewed head, so one always is. It is
   authored once under `tools/command_sources/` and rendered into both bundles,

@@ -1418,17 +1418,25 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   reported a failure — and then only once per run, never twice. A failed
   rollup entry that is not a GitHub Actions run at all (a `StatusContext`, or
   a `CheckRun` whose `detailsUrl` names no Actions run) fails closed: it is
-  reported and never handed `gh run view` or `gh run rerun`. The rerun is of the WHOLE run, never `--failed`: that flag reruns only failed jobs, and a cancelled job is not a failed one, so on the cancellation-only run this branch is defined by it would spend the single allowance without rerunning anything. After the reruns
-  the COMPLETE rollup is re-fetched and re-judged, never the reruns' own
-  outcomes alone, and any remaining failed entry stops the run. This ceiling is
+  reported and never handed `gh run view` or `gh run rerun`. The rerun is of the WHOLE run, never `--failed`: that flag reruns only failed jobs, and a cancelled job is not a failed one, so on the cancellation-only run this branch is defined by it would spend the single allowance without rerunning anything. After the reruns the whole
+  obstacle diagnosis is run again — not merely the failed set, since a pull
+  request can carry a failed check beside an unrelated pending one — and any
+  obstacle it now reports is itself reported rather than acted on, because
+  the rerun already spent that run's allowance. The ceiling is durable
+  rather than per-invocation: GitHub's own per-run `attempt` counter is read
+  before any rerun, so a run already past attempt 1 is never rerun again by
+  a later invocation, by the drainer, or after a person retried it. This ceiling is
   deliberately tighter than `tools/drain_prs.py`'s `MAX_CI_RERUN_ATTEMPTS`,
   which serves an unattended daemon; neither is the other's bug and neither may
   be changed to match the other. `repair`'s own prohibition on retry loops
   (§2.7) is unaffected and still governs the unapproved work it runs on.
 - **Failure semantics:** it addresses the highest-priority obstacle in
   `pullRequestStatus` order — merge conflict, then any failed check, then a
-  pending check, then a merge state that is not ready (`MergeBehind`, which
-  `pullRequestStatus` reports as `merge pending`), then nothing to fix. The
+  pending check, then `MergeBehind`, then any OTHER non-ready merge state,
+  then nothing to fix. Only `MergeBehind` is remedied, by updating from the
+  base; `MergeBlocked` and `MergeUnstable` are reported and fail closed,
+  because a branch update cannot clear a protection requirement or an
+  unstable required check and would replace the reviewed head for nothing. The
   pending branch mutates nothing: `checksPending` is guarded before the
   merge-state test in `pullRequestStatus` for the same reason it is here —
   replacing the approved head while CI is still running discards the run that

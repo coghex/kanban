@@ -119,20 +119,31 @@ this order:
    while CI is still running discards the very run that would have told you
    whether there was anything to fix, and starts the whole thing again on a
    head nobody has reviewed.
-4. **Behind its base** — no conflict, no failed check, and no pending check,
-   but the merge state is not ready: GitHub reports `BEHIND`, which
+4. **Behind its base** — no conflict, no failed check, no pending check, and
+   the merge state is exactly `BEHIND`, which
    `src/Kanban/Workflow.hs`'s `pullRequestStatus` classifies as `merge
    pending` and `src/Kanban/UI/Details.hs` explains as "the base has advanced
    past this head; update the branch before merging". Green checks do not make
    such a pull request mergeable. Update it from the recorded `baseRefName`
    through step 4, exactly as the conflict branch does — incorporating a base
    tip is one operation, and a conflict is only its harder case.
-5. **Nothing to fix** — no conflict, no failed check, no pending check, and a
+5. **Any other merge state that is not ready** — `BLOCKED` and `UNSTABLE` are
+   real states (`MergeBlocked`, `MergeUnstable`), and `pullRequestStatus`
+   reports them as `merge pending` exactly as it does `BEHIND`. They are NOT
+   the same problem: a branch update cannot clear a branch-protection
+   requirement or an unstable required check, so applying `BEHIND`'s remedy to
+   them would replace the reviewed head and leave the pull request just as
+   unmergeable. This branch fails closed: report the exact merge state, say
+   that this workflow has no remedy for it, and stop without pushing,
+   rerunning, or invoking a rereview. Only `MergeClean` and `MergeProtected`
+   are ready (`mergeStateReady`); everything else that is not `BEHIND` lands
+   here.
+6. **Nothing to fix** — no conflict, no failed check, no pending check, and a
    merge state that is ready. Report the pull request's merge state and check
    state and stop without pushing, without rerunning anything, and without
    invoking a rereview. `UNKNOWN` is not a clearance either — GitHub has not
-   finished computing mergeability, so say so and stop rather than reporting a
-   pull request ready that may yet come back `BEHIND` or `DIRTY`.
+   finished computing mergeability, so it lands in branch 5 and stops rather
+   than being reported ready when it may yet come back `BEHIND` or `DIRTY`.
 
 ## 4. Work in the pull request's own worktree
 
@@ -266,8 +277,24 @@ failure to see whether it passes the second time. A failure you judge to be
 pre-existing on the recorded base branch must be reported to the user and stop
 the run rather than papered over.
 
-**Only when EVERY failed run is an infrastructure failure**, rerun each of those
-runs exactly once — the WHOLE run, with no `--failed`:
+**The ceiling is read from GitHub, not from memory.** Before rerunning any run,
+ask it how many attempts it has already had:
+
+```bash
+gh run view <run-id> -R <owner/name> --json attempt --jq .attempt
+```
+
+A first attempt reports `1`. **Anything greater than 1 means this run has
+already been rerun** — by an earlier invocation of this workflow, by the PR
+drainer, or by a person — so it is not rerun again: report its attempt count,
+say the allowance for that run is spent, and stop. This is what makes "never a
+second" hold across invocations rather than only within one, and it needs no
+durable state of this workflow's own: the attempt counter is GitHub's, it
+survives everything, and it counts every rerunner rather than just this one.
+
+**Only when EVERY failed run is an infrastructure failure AND every one of them
+is still on attempt 1**, rerun each of those runs exactly once — the WHOLE run,
+with no `--failed`:
 
 ```bash
 gh run rerun <run-id> -R <owner/name>
@@ -285,19 +312,29 @@ passed, which is the correct price for a retry that is always applicable.
 
 ### 5d. Re-evaluate the complete rollup afterwards
 
-Wait for every rerun to finish, then RE-FETCH the whole rollup with the command
-in step 5 and judge the pull request on what it says now — never on the reruns'
-own outcomes alone. A rollup that was green for the reruns can still carry a
-failed entry that was not part of them, including one that only appeared while
-they ran.
+Wait for every rerun to finish, then RE-FETCH the pull request and run **step
+3's whole diagnosis again** against what it says now — never the reruns' own
+outcomes, and never the failed set alone. Clearing the failure is not the same
+as clearing the obstacle: a pull request can carry a failed check AND an
+unrelated pending one, where the failure correctly took priority and the
+pending check still blocks the merge once it is gone. The reruns can also leave
+the pull request `BEHIND` a base that moved while they ran.
 
-* **No failed entry remains** — the obstacle is cleared and this workflow is
-  done.
-* **A failed entry remains** — stop and report it, whatever its kind and
-  whatever it looks like. Do not rerun a run this invocation already reran, do
-  not start a fix, and do not invoke a rereview. A failure that survives one
-  rerun is evidence, and burying it under a third attempt is exactly what this
-  ceiling exists to prevent.
+Re-running the diagnosis answers all of that with the branches that already
+exist, so this step adds no new judgement — only the discipline of asking
+again:
+
+* **Branch 6, nothing to fix** — the obstacle really is cleared and this
+  workflow is done.
+* **Branch 3 or 5, a non-mutating stop** — report what it now says and stop,
+  exactly as those branches specify.
+* **Branch 1, 2 or 4, another head-moving obstacle** — report it and stop.
+  Do NOT act on it in this invocation: the rerun already spent this run's
+  allowance, and chaining a push onto it would make one invocation's blast
+  radius unbounded. Say what the next invocation would do.
+
+A failure that survives one rerun is evidence, and burying it under a third
+attempt is exactly what this ceiling exists to prevent.
 
 Rerunning changes no file and pushes no commit, so the head SHA the approval was
 granted against is unchanged and that approval still stands. A rerun therefore
