@@ -24,14 +24,15 @@ post-#239 tracked Codex skills; issue #328 completed the report side with
 /draft-report and /note-problem; and issues #393, #410, #427, #430, #462, and
 #511 vendored the rendered /triage roadmap, its /retriage refresh, the
 /push-docs documentation-landing workflow, the /backlog-review backlog audit,
-the /project-review history audit, the /drain-prs drainer control surface, and
-the /fix approved-pull-request workflow.
+the /project-review history audit, the /drain-prs drainer control surface, the
+/fix approved-pull-request workflow, and — issue #544, the last of the eight —
+the /finalize manual merge fallback.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all twenty-two); HASKELL_PARITY_COMMAND_NAMES is the
+commands directory (all twenty-three); HASKELL_PARITY_COMMAND_NAMES is the
 strictly smaller set Kanban's own Haskell code spawns by name (the five
 above). The drafting, document, roadmap, documentation-landing,
-backlog-audit, history-audit, drainer-control, and approved-pull-request
-workflows
+backlog-audit, history-audit, drainer-control, approved-pull-request, and
+manual-finalization workflows
 are user- or daemon-invoked and are deliberately excluded from that parity
 pinning; see
 docs/drafting-workflow-contract.md and docs/document-workflow-contract.md,
@@ -208,6 +209,17 @@ DRAINER_COMMAND_NAMES = {"drain-prs"}
 # tools/test_fix_workflow_contract.py.
 PULL_REQUEST_FIX_COMMAND_NAMES = {"fix"}
 
+# The manual merge fallback vendored by issue #544, slice VEND-7. Rendered from
+# tools/command_sources/finalize.md the way the six sets above are, and like
+# them user-invoked and excluded from Haskell name parity. It is its own
+# category rather than another pull-request name because it is the only
+# packaged workflow that merges at all: every other one stops at the open pull
+# request, and CLAUDE.md's merge prohibition holds for them unchanged. This one
+# is the single explicitly-invoked exception, taken only when the drainer that
+# owns merging cannot be used. Its behavioral assertions live in
+# tools/test_finalize_workflow.py.
+FINALIZE_COMMAND_NAMES = {"finalize"}
+
 # What a Claude Code installation must actually discover in commands/.
 EXPECTED_COMMAND_NAMES = (
     HASKELL_PARITY_COMMAND_NAMES
@@ -219,6 +231,7 @@ EXPECTED_COMMAND_NAMES = (
     | PROJECT_REVIEW_COMMAND_NAMES
     | DRAINER_COMMAND_NAMES
     | PULL_REQUEST_FIX_COMMAND_NAMES
+    | FINALIZE_COMMAND_NAMES
 )
 
 # Keys that would let a packaged command's frontmatter or manifest silently
@@ -364,7 +377,8 @@ class CommandDiscoveryTests(unittest.TestCase):
             | BACKLOG_COMMAND_NAMES
             | PROJECT_REVIEW_COMMAND_NAMES
             | DRAINER_COMMAND_NAMES
-            | PULL_REQUEST_FIX_COMMAND_NAMES,
+            | PULL_REQUEST_FIX_COMMAND_NAMES
+            | FINALIZE_COMMAND_NAMES,
         )
         self.assertEqual(DRAFTING_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
         self.assertEqual(ROADMAP_COMMAND_NAMES & DRAFTING_COMMAND_NAMES, set())
@@ -404,6 +418,20 @@ class CommandDiscoveryTests(unittest.TestCase):
                 | PUBLICATION_COMMAND_NAMES
                 | BACKLOG_COMMAND_NAMES
                 | PROJECT_REVIEW_COMMAND_NAMES
+            ),
+            set(),
+        )
+        self.assertEqual(
+            FINALIZE_COMMAND_NAMES
+            & (
+                DRAFTING_COMMAND_NAMES
+                | DOCUMENT_COMMAND_NAMES
+                | ROADMAP_COMMAND_NAMES
+                | PUBLICATION_COMMAND_NAMES
+                | BACKLOG_COMMAND_NAMES
+                | PROJECT_REVIEW_COMMAND_NAMES
+                | DRAINER_COMMAND_NAMES
+                | PULL_REQUEST_FIX_COMMAND_NAMES
             ),
             set(),
         )

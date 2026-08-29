@@ -15,6 +15,38 @@ created above it.
 
 ### Unreleased
 
+- A new packaged workflow, `/finalize` (Codex: `$finalize`), is the manual
+  fallback for merging one reviewed pull request when the service-managed PR
+  drainer cannot be used. It is not the ordinary merge path and is never taken
+  on an agent's own initiative: `tools/drain_prs.py` keeps owning eligible
+  merges, and every other packaged workflow still stops at the open pull
+  request. `finalize` runs on the pull request the user names, in the turn the
+  user asks for it.
+
+  Its gate fails closed and is evaluated twice — once to decide, and again
+  immediately before the merge, because labels, the head, and the check set are
+  all mutable. It resolves the authenticated GitHub login, reads the whole
+  paginated comment feed rather than a bounded window, and requires the
+  globally newest marker that login published to name the pull request's
+  current head with `verdict=APPROVE`. That marker is the `pr-review:v2` shape
+  the review coordinator publishes today, comma-joined `reviewers=` and
+  `models=` fields included, with the legacy `pr-review:v1` spelling still
+  honoured; a marker authored by anyone else, a malformed one, a stale head,
+  and a non-`APPROVE` verdict each refuse. So do a missing `reviewed:approve`,
+  a present `reviewed:changes`, a `mergeable` that is not exactly `MERGEABLE`,
+  and any check that is not successful. A refusal merges nothing, closes
+  nothing, removes no worktree, and deletes no branch.
+
+  It merges with `--admin --merge --match-head-commit`, the same call the
+  drainer makes, and never `--squash`, `--rebase`, or GitHub auto-merge —
+  arming a merge on a head whose checks have not passed is a mutation the gate
+  forbids. The linked issue, the pull request's worktree, its branch, and the
+  local default branch are only touched after GitHub confirms the pull request
+  as `MERGED`. It is authored once under `tools/command_sources/` and rendered
+  into both bundles, and `CLAUDE.md` and `docs/agent-workflow-contract.md`
+  §2.10 now record it as the single explicitly-invoked exception to the
+  never-merge rule.
+
 - A new packaged workflow, `/fix` (Codex: `$fix`), clears the one remaining
   obstacle in front of an **already-approved** pull request. It refuses a pull
   request that is not approved under the configured `approval_mode`, and one

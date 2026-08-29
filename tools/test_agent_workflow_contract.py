@@ -357,6 +357,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/project-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md",
     "codex-plugin/plugins/kanban/skills/fix/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/finalize/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
@@ -393,6 +394,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/project-review.md",
     "claude-plugin/plugins/kanban/commands/drain-prs.md",
     "claude-plugin/plugins/kanban/commands/fix.md",
+    "claude-plugin/plugins/kanban/commands/finalize.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
@@ -599,6 +601,35 @@ FIX_SURFACE_EXPECTED_COMMANDS = {
         "mktemp",
         "python3",
         "rm",
+    },
+}
+
+# Issue #544's manual merge fallback, pinned as one shared set the way the
+# rendered pairs above are, because its two assets differ only in argument
+# convention and sigil: it resolves nothing under $CODEX_HOME and needs no
+# `find`/`head` search, so the fix asymmetry has no counterpart here. `gh` is
+# every GitHub call it makes -- the authenticated-user lookup, the pull-request
+# read, the paginated comment feed, the check listing, the merge, the
+# merged-state confirmation, the three cleanup reads, and the linked issue's
+# close. `git` is the primary checkout's own worktree listing, the remote URL
+# the repository identity is reduced from, and the post-merge cleanup; `sed`
+# performs both of those reductions; and `python3` is the review-marker gate,
+# which decides against JSON those `gh` reads already returned rather than
+# making a request of its own. `mktemp` and `rm` are deliberately absent: the
+# gate passes its inputs on argv, so unlike `fix` this workflow writes no
+# scratch file anywhere and has none to remove.
+FINALIZE_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/finalize.md": {
+        "gh",
+        "git",
+        "python3",
+        "sed",
+    },
+    "codex-plugin/plugins/kanban/skills/finalize/SKILL.md": {
+        "gh",
+        "git",
+        "python3",
+        "sed",
     },
 }
 
@@ -2615,6 +2646,65 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     if row["kind"] == "executable" and row["token"] == name
                 )
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_the_finalize_assets_reach_exactly_the_pinned_commands(self):
+        # The manual merge fallback. Pinned as one shared set rather than two,
+        # because its brand blocks carry argument text alone: a command
+        # leaking into one rendering and not the other fails here as an
+        # inequality, which is the same teeth the fix pair gets from being
+        # pinned separately.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path, expected in sorted(
+            FINALIZE_SURFACE_EXPECTED_COMMANDS.items()
+        ):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            # `gh` is the assertion, not an absence: this is the one packaged
+            # workflow that merges, and every one of those calls is a `gh`
+            # call.
+            self.assertIn("gh", found, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+            # Declared from the manifest's side too, and against the four rows
+            # a reader consults to find out which assets speak each tool.
+            for name in sorted(expected):
+                row = next(
+                    row
+                    for row in self.manifest
+                    if row["kind"] == "executable" and row["token"] == name
+                )
+                self.assertIn(
+                    row["id"],
+                    {"gh-cli", "git-cli", "python3-cli", "sed-cli"},
+                )
+                self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_the_two_finalize_renderings_reach_the_same_commands(self):
+        # One source, two renders: the sets are equal by construction, so
+        # pinning that equality is what catches a brand block that grew a
+        # command on one side only.
+        claude = FINALIZE_SURFACE_EXPECTED_COMMANDS[
+            "claude-plugin/plugins/kanban/commands/finalize.md"
+        ]
+        codex = FINALIZE_SURFACE_EXPECTED_COMMANDS[
+            "codex-plugin/plugins/kanban/skills/finalize/SKILL.md"
+        ]
+        self.assertEqual(claude, codex)
+        # And the fix pair's asymmetry is not this pair's: nothing here is
+        # searched for under $CODEX_HOME.
+        self.assertEqual(claude & {"find", "head"}, set())
 
     def test_only_the_codex_fix_asset_searches_for_its_coordinator(self):
         # The asymmetry above, asserted as the difference it actually is

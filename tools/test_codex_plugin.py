@@ -20,10 +20,12 @@ issue; issue #328 added $note-problem while transposing /draft-report, closing
 the last Codex-only document gap; and issues #393, #410, #427, #430, #462, and
 #511 vendored the rendered $triage roadmap, its $retriage refresh, the
 $push-docs documentation-landing workflow, the $backlog-review backlog audit,
-the $project-review history audit, the $drain-prs drainer control surface, and
-the $fix approved-pull-request workflow.
+the $project-review history audit, the $drain-prs drainer control surface, the
+$fix approved-pull-request workflow, and — issue #544, the last of the eight —
+the $finalize manual merge fallback, which had no Codex copy at all before this
+slice rendered one.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all twenty-one); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
+(all twenty-two); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
 own Haskell code spawns by name (the five above). Every later set is user- or
 daemon-invoked and deliberately excluded from that parity pinning; the
 breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
@@ -194,6 +196,19 @@ DRAINER_SKILL_NAMES = {"drain-prs"}
 # tools/test_fix_workflow_contract.py.
 PULL_REQUEST_FIX_SKILL_NAMES = {"fix"}
 
+# The manual merge fallback vendored by issue #544, slice VEND-7. Rendered from
+# tools/command_sources/finalize.md the way the six sets above are, and like
+# them user-invoked and excluded from Haskell name parity. It is its own
+# category rather than another pull-request name because it is the only
+# packaged workflow that merges at all: every other one stops at the open pull
+# request, and CLAUDE.md's merge prohibition holds for them unchanged. This one
+# is the single explicitly-invoked exception, taken only when the drainer that
+# owns merging cannot be used. It is also the only vendored workflow with no
+# personal Codex counterpart to reconcile against; this skill is authored by
+# rendering the single Claude copy. Its behavioral assertions live in
+# tools/test_finalize_workflow.py.
+FINALIZE_SKILL_NAMES = {"finalize"}
+
 # What a Codex installation must actually discover under skills/.
 EXPECTED_SKILL_NAMES = (
     HASKELL_PARITY_SKILL_NAMES
@@ -205,6 +220,7 @@ EXPECTED_SKILL_NAMES = (
     | PROJECT_REVIEW_SKILL_NAMES
     | DRAINER_SKILL_NAMES
     | PULL_REQUEST_FIX_SKILL_NAMES
+    | FINALIZE_SKILL_NAMES
 )
 
 # Keys that would let a packaged manifest silently override the model,
@@ -424,7 +440,8 @@ class SkillDiscoveryTests(unittest.TestCase):
             | BACKLOG_SKILL_NAMES
             | PROJECT_REVIEW_SKILL_NAMES
             | DRAINER_SKILL_NAMES
-            | PULL_REQUEST_FIX_SKILL_NAMES,
+            | PULL_REQUEST_FIX_SKILL_NAMES
+            | FINALIZE_SKILL_NAMES,
         )
         self.assertEqual(DRAFTING_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
         self.assertEqual(ROADMAP_SKILL_NAMES & DRAFTING_SKILL_NAMES, set())
@@ -464,6 +481,20 @@ class SkillDiscoveryTests(unittest.TestCase):
                 | PUBLICATION_SKILL_NAMES
                 | BACKLOG_SKILL_NAMES
                 | PROJECT_REVIEW_SKILL_NAMES
+            ),
+            set(),
+        )
+        self.assertEqual(
+            FINALIZE_SKILL_NAMES
+            & (
+                DRAFTING_SKILL_NAMES
+                | DOCUMENT_SKILL_NAMES
+                | ROADMAP_SKILL_NAMES
+                | PUBLICATION_SKILL_NAMES
+                | BACKLOG_SKILL_NAMES
+                | PROJECT_REVIEW_SKILL_NAMES
+                | DRAINER_SKILL_NAMES
+                | PULL_REQUEST_FIX_SKILL_NAMES
             ),
             set(),
         )
@@ -1892,7 +1923,7 @@ class ManifestListingParityTests(unittest.TestCase):
     without describing it fails here.
 
     Parity is per field, not pooled: an installation that reads only the
-    short description must see the same twenty-one as one that reads only the
+    short description must see the same twenty-two as one that reads only the
     keywords. Non-workflow metadata -- the `kanban` keyword, the display
     name, developer, category, and capabilities -- is not a listing and is
     left alone.
