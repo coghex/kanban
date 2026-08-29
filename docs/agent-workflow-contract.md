@@ -1515,9 +1515,15 @@ state.
   including its comma-joined `reviewers=` and `models=` fields — or the legacy
   `pr-review:v1` spelling, naming the pull request's current `headRefOid` with
   `verdict=APPROVE`. A marker authored by anyone else, a malformed marker, a
-  stale head, and a non-`APPROVE` verdict each refuse. Beyond the marker it
-  requires `mergeable` to be exactly `MERGEABLE` and every check to be
-  successful, both before any mutation.
+  stale head, and a non-`APPROVE` verdict each refuse. The marker's `reviewers=`
+  set must also exclude the pull request's own brand, read off the body by
+  exactly `originFromBody`'s rules: an approval published by the brand that
+  wrote the code is a self-review, which the marker alone cannot reveal because
+  it names who reviewed and not who wrote. A body with no marker is the
+  unknown-origin route the coordinator reviews with both brands, and there only
+  a marker naming both is known to be independent. Beyond the marker it requires
+  `mergeable` to be exactly `MERGEABLE` and every check to be successful, both
+  before any mutation.
 - **Refusal:** total. It merges nothing, closes nothing, removes no worktree,
   and deletes no branch, and it never adds, removes, or repairs a verdict label
   to get past its own gate.
@@ -1534,6 +1540,13 @@ state.
   existing `issue-<n>-*` worktree, located through this repository's own
   `git worktree list` so a legacy path and a repository-scoped one are both
   found where they are, and touches no other worktree, branch, or repository.
+  Two of its cleanup steps are guarded on values that resolve to nothing rather
+  than to a wrong target, and each empty value is a refusal: the head branch is
+  resolved only for a pull request whose head is in this repository, so a
+  cross-repository head is never deleted here under a same-named branch of the
+  base repository; and the local base branch is advanced only when the primary
+  checkout is actually on it, so a pull request targeting a non-default base
+  cannot fast-forward the default branch to somewhere it does not belong.
 - **Mandatory/optional:** optional — user-invoked only, reached by asking for
   it, and spawned by no Kanban code path.
 
@@ -1721,7 +1734,7 @@ awk-cli | executable | awk | tools/docs_land.sh;codex-plugin/plugins/kanban/skil
 rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/note-problem.md | kanban | supported | no
 sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
 tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
-grep-cli | executable | grep | tools/docs_land.sh | kanban | supported | no
+grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
 mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | no
 rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
@@ -1978,13 +1991,21 @@ observation is about. It is the one entry in this manifest that a stock system
 may genuinely lack. That costs an installation without it those four workflows'
 search step and nothing else, which is what `mandatory: no` records.
 
-`tr-cli`, `grep-cli`, and `dirname-cli` are the documentation-landing helper's
-own utilities (issue #410): `tools/docs_land.sh` reaches all three and nothing
-else in this repository does. It also spawns `git`, `awk`, `sed`, `mktemp`, and
+`tr-cli` and `dirname-cli` are the documentation-landing helper's own utilities
+(issue #410): `tools/docs_land.sh` reaches both and nothing else in this
+repository does. It also spawns `git`, `awk`, `sed`, `grep`, `mktemp`, and
 `python3` — the last to reach `tools/docs_land_paths.py`, which itself spawns
 only `git`. All are `mandatory: no` because landing documentation is an optional
 user-invoked action, and every supported macOS/Linux shell already provides
 these utilities.
+
+`grep-cli` gained its first packaged consumer with `finalize` (issue #544). It
+is one exact-match test there, and it is what makes two of that workflow's
+refusals refusals rather than wrong writes: the checked-out branch of the
+primary checkout must be the pull request's own base branch before a
+fast-forward advances it, so `grep -Fx "$BASE"` over
+`git symbolic-ref --short HEAD` leaves the variable the fast-forward is guarded
+on empty for every other branch and for a detached HEAD.
 
 `sed-cli` outgrew that helper as the vendored workflows landed, and its row
 records it: `retriage`, `backlog-review`, and `project-review` rewrite roadmap

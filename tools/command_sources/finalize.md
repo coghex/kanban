@@ -76,7 +76,7 @@ unless every condition below holds, and every later step is guarded on `$HEAD`.
 
 ```bash
 VIEWER="$(gh api user --jq .login)"
-PR_STATE="$(gh pr view "$PR" -R "$REPO" --json number,url,headRefOid,headRefName,baseRefName,labels,mergeable,mergeStateStatus,closingIssuesReferences)"
+PR_STATE="$(gh pr view "$PR" -R "$REPO" --json number,url,body,headRefOid,headRefName,baseRefName,labels,mergeable,mergeStateStatus,closingIssuesReferences)"
 PR_COMMENTS="$(gh api --paginate --slurp "repos/$REPO/issues/$PR/comments?per_page=100")"
 PR_CHECKS="$(gh pr checks "$PR" -R "$REPO" --json name,state,bucket)"
 HEAD="$(python3 - "$VIEWER" "$PR_STATE" "$PR_COMMENTS" "$PR_CHECKS" <<'PY'
@@ -85,7 +85,7 @@ import re
 import sys
 
 V1_RE = re.compile(
-    r"<!--\s*pr-review:v1\s+reviewer=(?:claude|codex)\s+"
+    r"<!--\s*pr-review:v1\s+reviewer=(?P<reviewers>claude|codex)\s+"
     r"head=(?P<head>[0-9a-f]{40})\s+"
     r"verdict=(?P<verdict>APPROVE|CHANGES_REQUESTED)\s*-->",
     re.IGNORECASE,
@@ -94,13 +94,20 @@ V1_RE = re.compile(
 # the ordinary shape rather than an exception, and `models=` is one token.
 V2_RE = re.compile(
     r"<!--\s*pr-review:v2\s+"
-    r"reviewers=(?:claude|codex)(?:,(?:claude|codex))*\s+"
+    r"reviewers=(?P<reviewers>(?:claude|codex)(?:,(?:claude|codex))*)\s+"
     r"models=\S+\s+"
     r"head=(?P<head>[0-9a-f]{40})\s+"
     r"verdict=(?P<verdict>APPROVE|CHANGES_REQUESTED)\s*-->",
     re.IGNORECASE,
 )
 MARKER_OPENING_RE = re.compile(r"<!--\s*pr-review:v")
+# The two origin markers, character for character as `originFromBody` spells
+# them in src/Kanban/PullRequestFlow.hs. A different spacing is not one of
+# these markers there and is not one here.
+ORIGIN_MARKERS = {
+    "claude": "<!-- pr-origin:claude -->",
+    "codex": "<!-- pr-origin:codex -->",
+}
 
 viewer = sys.argv[1].strip()
 try:
@@ -182,6 +189,48 @@ for comment in ordered:
 
 if chosen is None:
     refuse("no review marker published by " + viewer + " is in the feed", True)
+
+# Whose brand reviewed has to be read off the pull request, not assumed: an
+# approval published by the same brand that wrote the code is a self-review,
+# and the marker alone cannot tell you that. These are exactly the rules
+# originFromBody applies in src/Kanban/PullRequestFlow.hs -- one marker, of one
+# kind, as the final non-whitespace content of the body.
+body_text = str(state.get("body") or "")
+stripped = body_text.rstrip()
+counts = {brand: body_text.count(marker) for brand, marker in ORIGIN_MARKERS.items()}
+present = [brand for brand, count in counts.items() if count]
+if len(present) > 1:
+    refuse("the pull request body carries both pr-origin markers", True)
+if any(count > 1 for count in counts.values()):
+    refuse("the pull request body carries a duplicate pr-origin marker", True)
+origin = present[0] if present else None
+if origin is not None and not stripped.endswith(ORIGIN_MARKERS[origin]):
+    refuse("the pr-origin marker is not the body's final content", True)
+
+reviewers = {
+    part.strip().lower()
+    for part in chosen.group("reviewers").split(",")
+    if part.strip()
+}
+if origin is None:
+    # No declared origin is the dual route the coordinator takes: with no
+    # brand to be opposite of, only a review carrying BOTH brands is known to
+    # be independent of whoever wrote the code.
+    if reviewers != set(ORIGIN_MARKERS):
+        refuse(
+            "this pull request declares no origin, so only a dual-brand review "
+            "is known to be independent; the newest marker names "
+            + ",".join(sorted(reviewers)),
+            True,
+        )
+elif origin in reviewers:
+    refuse(
+        "the newest marker names this pull request's own brand ("
+        + origin
+        + ") as a reviewer, which is a self-review",
+        True,
+    )
+
 verdict = chosen.group("verdict").upper()
 marker_head = chosen.group("head").lower()
 if verdict != "APPROVE":
@@ -253,6 +302,19 @@ What that gate requires, and why each part is what it is:
 - **A malformed marker refuses.** An owned comment that opens a `pr-review:v`
   marker this gate cannot parse stops the run rather than being skipped over in
   favour of an older one it can.
+- **A reviewer set that does not exclude the pull request's own brand.** The
+  approval this workflow acts on is an *opposite-brand* approval, and the marker
+  alone cannot say whether it is one: it names who reviewed, not who wrote. So
+  the origin is read off the pull request body by exactly the rules
+  `originFromBody` applies in `src/Kanban/PullRequestFlow.hs` — one marker, of
+  one kind, as the body's final non-whitespace content — and a marker whose
+  `reviewers=` names that same brand is refused as a self-review. Both markers
+  present, the same marker twice, and a marker with trailing text after it are
+  each refusals rather than defaults. A body with **no** marker is the
+  coordinator's unknown-origin route, which reviews with both brands; there
+  being no declared brand to be opposite of, only a marker naming both is known
+  to be independent of whoever wrote the code, and a single-brand marker on such
+  a pull request refuses.
 - **`mergeable` exactly `MERGEABLE`.** `CONFLICTING` is a real merge conflict and
   `UNKNOWN` means GitHub has not finished computing mergeability; neither is a
   clearance, and merging on either is how an unresolved conflict lands.
@@ -322,11 +384,26 @@ Only after step 4 confirmed the merge. Resolve what to remove first, from the
 pull request itself rather than from the session's own directory:
 
 ```bash
-BRANCH="$(gh pr view "$PR" -R "$REPO" --json headRefName --jq .headRefName)"
 BASE="$(gh pr view "$PR" -R "$REPO" --json baseRefName --jq .baseRefName)"
+BRANCH="$(gh pr view "$PR" -R "$REPO" --json isCrossRepository,headRefName --jq 'select(.isCrossRepository == false) | .headRefName')"
 ISSUE="$(gh pr view "$PR" -R "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[0].number // empty')"
 WORKTREE="$(git -C "$ROOT" worktree list --porcelain | sed -n "/issue-$ISSUE-/s#^worktree ##p")"
+BASE_CHECKOUT="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD | grep -Fx "$BASE")"
 ```
+
+Two of those resolve to nothing on purpose, and the guards below turn each empty
+value into a refusal rather than a wrong deletion:
+
+- `$BRANCH` is the head branch **only when the head lives in this repository**.
+  A cross-repository pull request's `headRefName` names a branch in the fork, not
+  here, so deleting it on `origin` would delete whatever unrelated branch happens
+  to share the name in the base repository. The `select` leaves `$BRANCH` empty
+  for such a pull request, and the deletion refuses.
+- `$BASE_CHECKOUT` is the base branch **only when `$ROOT` is actually on it**.
+  Fast-forwarding is a local branch update, and `--ff-only` applies it to
+  whatever branch the checkout has out — which for a pull request targeting a
+  non-default base would advance the default branch to somewhere it should not
+  go. A detached HEAD leaves it empty too.
 
 `git worktree list` is the only source for the worktree path, so a legacy path
 and a repository-scoped one are both found where they actually are. It is
@@ -337,7 +414,9 @@ none, there is nothing to remove — skip the removal line below and say so.
 ```bash
 git -C "$ROOT" worktree remove "$WORKTREE"
 git -C "$ROOT" fetch origin
+: "${BASE_CHECKOUT:?the primary checkout is not on the base branch of this pull request; leave its branches alone}"
 git -C "$ROOT" merge --ff-only "origin/$BASE"
+: "${BRANCH:?the head of this pull request lives in another repository; delete no branch here}"
 git -C "$ROOT" branch -d "$BRANCH"
 git -C "$ROOT" push origin --delete "$BRANCH"
 ```
@@ -349,15 +428,24 @@ the merge is in `$ROOT`'s own base branch, an ordinary delete succeeds, and one
 that still refuses is telling you the branch holds a commit the merge did not —
 which is a fact to report rather than force past.
 
+Neither refusal message contains an apostrophe, and that is not style. A `'`
+inside a `${VAR:?...}` word is read as an opening quote, and the shell then
+swallows every line up to the next one — the `git merge` between these two
+guards, when both messages carried one. Keep them apostrophe-free.
+
+Either guard stops the run where it stands, with the steps above it done and the
+steps below it undone. That is the intended shape: the merge has already
+landed and is not undone by stopping here, and every step this leaves out is one
+that would otherwise have written to the wrong branch. Report exactly what was
+left undone.
+
 Every one of those is scoped to `$ROOT` and to this pull request's own branch.
 Leave every other worktree and every other branch untouched. If the removal
 refuses over leftover build artifacts, confirm that nothing uncommitted matters
 and retry it with `--force` — never `rm -rf`, which would leave the worktree
 registered and the repository's metadata wrong. The fast-forward is `--ff-only`
 and never a force: a default branch that will not fast-forward is a fact to
-report, not one to overwrite. It also assumes `$ROOT` is on that base branch,
-which is the primary checkout's ordinary state; if it is not, say so and leave
-the fast-forward undone rather than switching a checkout somebody is using.
+report, not one to overwrite.
 
 The linked issue closes itself through the pull request's `Closes #<n>`
 reference. Read it back, and run this only when it is somehow still open. A

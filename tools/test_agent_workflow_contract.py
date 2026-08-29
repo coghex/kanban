@@ -617,17 +617,21 @@ FIX_SURFACE_EXPECTED_COMMANDS = {
 # which decides against JSON those `gh` reads already returned rather than
 # making a request of its own. `mktemp` and `rm` are deliberately absent: the
 # gate passes its inputs on argv, so unlike `fix` this workflow writes no
-# scratch file anywhere and has none to remove.
+# scratch file anywhere and has none to remove. `grep` is the one exact-match
+# test the cleanup makes -- is the primary checkout on this pull request's base
+# branch? -- and this pair is that row's first packaged consumer.
 FINALIZE_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/finalize.md": {
         "gh",
         "git",
+        "grep",
         "python3",
         "sed",
     },
     "codex-plugin/plugins/kanban/skills/finalize/SKILL.md": {
         "gh",
         "git",
+        "grep",
         "python3",
         "sed",
     },
@@ -2687,7 +2691,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 )
                 self.assertIn(
                     row["id"],
-                    {"gh-cli", "git-cli", "python3-cli", "sed-cli"},
+                    {"gh-cli", "git-cli", "grep-cli", "python3-cli", "sed-cli"},
                 )
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
 

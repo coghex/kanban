@@ -32,17 +32,24 @@ created above it.
   the review coordinator publishes today, comma-joined `reviewers=` and
   `models=` fields included, with the legacy `pr-review:v1` spelling still
   honoured; a marker authored by anyone else, a malformed one, a stale head,
-  and a non-`APPROVE` verdict each refuse. So do a missing `reviewed:approve`,
+  and a non-`APPROVE` verdict each refuse. The marker's reviewers must also
+  exclude the pull request's own brand — read off the body by exactly
+  `originFromBody`'s rules — because an approval published by the brand that
+  wrote the code is a self-review that the marker alone cannot reveal; a body
+  declaring no origin is the coordinator's dual route, where only a marker
+  naming both brands is known to be independent. A missing `reviewed:approve`,
   a present `reviewed:changes`, a `mergeable` that is not exactly `MERGEABLE`,
-  and any check that is not successful. A refusal merges nothing, closes
-  nothing, removes no worktree, and deletes no branch.
+  and any check that is not successful each refuse too. A refusal merges
+  nothing, closes nothing, removes no worktree, and deletes no branch.
 
   It merges with `--admin --merge --match-head-commit`, the same call the
   drainer makes, and never `--squash`, `--rebase`, or GitHub auto-merge —
   arming a merge on a head whose checks have not passed is a mutation the gate
   forbids. The linked issue, the pull request's worktree, its branch, and the
   local default branch are only touched after GitHub confirms the pull request
-  as `MERGED`. It is authored once under `tools/command_sources/` and rendered
+  as `MERGED`, and two of those are guarded further: a cross-repository head is
+  never deleted here under a same-named branch of the base repository, and the
+  local base branch is advanced only when the primary checkout is on it. It is authored once under `tools/command_sources/` and rendered
   into both bundles, and `CLAUDE.md` and `docs/agent-workflow-contract.md`
   §2.10 now record it as the single explicitly-invoked exception to the
   never-merge rule.

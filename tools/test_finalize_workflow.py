@@ -81,6 +81,22 @@ GH_INVOCATION_RE = re.compile(r"(?<![\w-])gh (?P<tail>[a-z][^\n`]*)")
 
 REPOSITORY_SCOPE = '-R "$REPO"'
 
+# The word of a `${VAR:?word}` refusal, which the shell evaluates rather than
+# prints verbatim.
+PARAMETER_REFUSAL_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:\?([^}]*)\}")
+
+# The three fail-closed guards the workflow carries, by the word each refuses
+# with. Enumerated so the scan above is measured against a known set rather
+# than against whatever it happens to find.
+EXPECTED_REFUSAL_WORDS = (
+    "the finalize gate refused; nothing is merged, closed, removed, or deleted",
+    "the merge is not confirmed; close nothing, remove nothing, delete nothing",
+    "the primary checkout is not on the base branch of this pull request; "
+    "leave its branches alone",
+    "the head of this pull request lives in another repository; delete no "
+    "branch here",
+)
+
 
 def gh_invocations(text: str) -> list[str]:
     """Every `gh` call in `text`, with the command substitution's own closing
@@ -111,9 +127,16 @@ REPOSITORY_RESOLUTION = 'REPO="$(git -C "$ROOT" remote get-url origin'
 # leave the gate deciding without it, and a field dropped here would leave the
 # harness answering a question the asset never asked.
 PR_VIEW_FIELDS = (
-    "number,url,headRefOid,headRefName,baseRefName,labels,mergeable,"
+    "number,url,body,headRefOid,headRefName,baseRefName,labels,mergeable,"
     "mergeStateStatus,closingIssuesReferences"
 )
+
+# The two origin markers, character for character as `originFromBody` spells
+# them, and as the gate has to.
+ORIGIN_MARKERS = {
+    "claude": "<!-- pr-origin:claude -->",
+    "codex": "<!-- pr-origin:codex -->",
+}
 
 # The paginated issue-comment endpoint, embedding the resolved repository the
 # way `tools/drain_prs.py` does. `gh pr view --json comments` returns a bounded
@@ -130,8 +153,8 @@ REPOSITORY_SCOPED_CALLS = (
     'pr checks "$PR" -R "$REPO" --json name,state,bucket',
     'pr merge "$PR" -R "$REPO" --admin --merge --match-head-commit',
     'pr view "$PR" -R "$REPO" --json state,mergedAt',
-    'pr view "$PR" -R "$REPO" --json headRefName',
     'pr view "$PR" -R "$REPO" --json baseRefName',
+    'pr view "$PR" -R "$REPO" --json isCrossRepository,headRefName',
     'pr view "$PR" -R "$REPO" --json closingIssuesReferences',
     'issue close "$ISSUE" -R "$REPO"',
 )
@@ -240,6 +263,7 @@ HEAD_BRANCH = "issue-7-example"
 BASE_BRANCH = "master"
 VIEWER = "coghex"
 WORKTREE_PATH = "/tmp/worktrees/coghex/kanban/issue-7-example"
+CHECKOUT_ROOT = "/tmp/checkout"
 
 
 def read(relative_path: str) -> str:
@@ -345,16 +369,23 @@ def comment(identifier: int, created_at: str, body: str, login: str = VIEWER) ->
     }
 
 
+# The ordinary body of a pull request this repository's own solve workflow
+# opened: one origin marker, as the final non-whitespace content.
+CLAUDE_ORIGIN_BODY = "Closes #7\n\n" + ORIGIN_MARKERS["claude"] + "\n"
+
+
 def pull_request_state(
     *,
     head: str = APPROVED_HEAD,
     labels: tuple[str, ...] = ("reviewed:approve",),
     mergeable: str = "MERGEABLE",
     merge_state: str = "CLEAN",
+    body: str = CLAUDE_ORIGIN_BODY,
 ) -> dict:
     return {
         "number": int(PR_NUMBER),
         "url": f"https://github.com/{REPO_SLUG}/pull/{PR_NUMBER}",
+        "body": body,
         "headRefOid": head,
         "headRefName": HEAD_BRANCH,
         "baseRefName": BASE_BRANCH,
@@ -369,7 +400,7 @@ APPROVED_PAGES = [[comment(1, "2026-08-01T00:00:00Z", coordinator_marker(APPROVE
 GREEN_CHECKS = [{"name": "build-test", "state": "SUCCESS", "bucket": "pass"}]
 
 WORKTREE_LISTING = (
-    "worktree /tmp/checkout\nHEAD 0000\nbranch refs/heads/master\n\n"
+    f"worktree {CHECKOUT_ROOT}\nHEAD 0000\nbranch refs/heads/{BASE_BRANCH}\n\n"
     f"worktree {WORKTREE_PATH}\nHEAD 1111\nbranch refs/heads/{HEAD_BRANCH}\n"
 )
 
@@ -392,6 +423,8 @@ class Harness:
         checks: list | None = None,
         merged: str = "2026-08-02T00:00:00Z",
         merge_head: str = APPROVED_HEAD,
+        cross_repository: bool = False,
+        checked_out: str = BASE_BRANCH,
     ) -> None:
         base = ["pr", "view", PR_NUMBER, "-R", REPO_SLUG, "--json"]
         self.fake.script("gh", ["api", "user", "--jq", ".login"], stdout=viewer + "\n")
@@ -431,11 +464,32 @@ class Harness:
             stdout="Merged\n",
         )
         self.fake.script("gh", base + ["state,mergedAt"], stdout=merged + "\n")
-        self.fake.script("gh", base + ["headRefName"], stdout=HEAD_BRANCH + "\n")
         self.fake.script("gh", base + ["baseRefName"], stdout=BASE_BRANCH + "\n")
-        self.fake.script("gh", base + ["closingIssuesReferences"], stdout=LINKED_ISSUE + "\n")
+        # Empty stands for a cross-repository head: the asset's own `select`
+        # yields nothing there, which is what the deletion guard reads.
+        self.fake.script(
+            "gh",
+            base + ["isCrossRepository,headRefName"],
+            stdout=("" if cross_repository else HEAD_BRANCH + "\n"),
+        )
+        self.fake.script(
+            "gh", base + ["closingIssuesReferences"], stdout=LINKED_ISSUE + "\n"
+        )
         self.fake.script("gh", ["issue", "close", LINKED_ISSUE, "-R", REPO_SLUG], stdout="")
-        self.fake.script("git", ["-C"], stdout=WORKTREE_LISTING)
+        # The specific git reads first: fake_cli takes the first scripted
+        # entry whose match is a prefix of the call, so the catch-all has to
+        # be inserted last or it would answer these two as well.
+        self.fake.script(
+            "git",
+            ["-C", CHECKOUT_ROOT, "worktree", "list", "--porcelain"],
+            stdout=WORKTREE_LISTING,
+        )
+        self.fake.script(
+            "git",
+            ["-C", CHECKOUT_ROOT, "symbolic-ref", "--quiet", "--short", "HEAD"],
+            stdout=checked_out + "\n" if checked_out else "",
+        )
+        self.fake.script("git", ["-C"], stdout="")
 
     def run(self, script: str) -> subprocess.CompletedProcess:
         env = {
@@ -443,7 +497,7 @@ class Harness:
             "HOME": str(self.root / "home"),
             "PR": PR_NUMBER,
             "REPO": REPO_SLUG,
-            "ROOT": "/tmp/checkout",
+            "ROOT": CHECKOUT_ROOT,
         }
         env.update(self.fake.environ_overrides())
         return subprocess.run(
@@ -526,6 +580,81 @@ class RegistrationTests(unittest.TestCase):
                 for name in REFERENCED_WORKFLOWS:
                     self.assertIn(renderer.SIGILS[brand] + name, text)
                     self.assertNotIn(renderer.SIGILS[other] + name, text)
+
+    def test_every_fenced_block_is_valid_shell(self):
+        # An asset is the program an agent runs, and this one runs a Python
+        # gate inside a `$( ... )` command substitution. Bash quote-scans a
+        # heredoc body in that position, so ONE bare apostrophe in a Python
+        # comment -- "the pull request\'s own brand" -- opens a quote that
+        # swallows the rest of the fence and makes the whole block a syntax
+        # error. That is invisible to every string assertion in this module and
+        # to the renderer, and it costs the run before a single `gh` call.
+        for relative_path in RENDERED_ASSETS:
+            for index, fence in enumerate(bash_fences(read(relative_path))):
+                with self.subTest(asset=relative_path, fence=index):
+                    with tempfile.NamedTemporaryFile(
+                        "w", suffix=".sh", delete=False
+                    ) as handle:
+                        handle.write(fence + "\n")
+                        script = handle.name
+                    self.addCleanup(os.unlink, script)
+                    completed = subprocess.run(
+                        ["sh", "-n", script],
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_the_shell_syntax_check_detects_a_planted_unbalanced_quote(self):
+        # The control for the check above: the exact defect it exists to
+        # catch, planted into the gate fence, must fail it.
+        planted = gate_fence(CLAUDE_ASSET).replace(
+            "import json", "# the pull request's own brand\nimport json", 1
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
+            handle.write(planted + "\n")
+            script = handle.name
+        self.addCleanup(os.unlink, script)
+        completed = subprocess.run(
+            ["sh", "-n", script],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0, completed.stderr)
+
+    def test_no_refusal_word_carries_an_apostrophe(self):
+        # A syntactically VALID trap the check above cannot see. A `\'` inside a
+        # `${VAR:?word}` is read as an opening quote, so the shell swallows
+        # every line up to the next one: two guards a `git merge` apart, both
+        # with an apostrophe in their message, silently dropped that merge.
+        # Every fence is scanned, not only the two that carry a guard today.
+        for relative_path in RENDERED_ASSETS:
+            for index, fence in enumerate(bash_fences(read(relative_path))):
+                for word in PARAMETER_REFUSAL_RE.findall(fence):
+                    with self.subTest(asset=relative_path, fence=index, word=word):
+                        self.assertNotIn("'", word)
+
+    def test_the_apostrophe_scan_finds_a_planted_one(self):
+        planted = PARAMETER_REFUSAL_RE.findall(
+            ''': "${BRANCH:?the head of this request\'s repository}"'''
+        )
+        self.assertEqual(len(planted), 1, planted)
+        self.assertIn("'", planted[0])
+
+    def test_the_apostrophe_scan_reads_the_words_the_assets_carry(self):
+        # Non-vacuity: a regex that matched nothing would report no apostrophe
+        # for the same reason a clean asset does.
+        found = [
+            word
+            for relative_path in RENDERED_ASSETS
+            for fence in bash_fences(read(relative_path))
+            for word in PARAMETER_REFUSAL_RE.findall(fence)
+        ]
+        self.assertEqual(len(found), 2 * len(EXPECTED_REFUSAL_WORDS), found)
+        for expected in EXPECTED_REFUSAL_WORDS:
+            self.assertIn(expected, found)
 
     def test_the_source_names_every_workflow_through_a_token(self):
         self.assertEqual(
@@ -665,7 +794,9 @@ class GateDecisionTests(unittest.TestCase):
     def test_a_coordinator_published_dual_reviewer_v2_marker_passes(self):
         # `review_marker` comma-joins both lists, so a dual review publishes
         # `reviewers=claude,codex`. The personal copy's regex, and
-        # `tools/drain_prs.py`'s to this day, accept one reviewer only.
+        # `tools/drain_prs.py`'s to this day, accept one reviewer only. A dual
+        # review is the coordinator's UNKNOWN-origin route, so the pull request
+        # it belongs to is one whose body declares no origin.
         marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex", "claude"])
         self.assertIn("reviewers=codex,claude", marker)
         for relative_path in RENDERED_ASSETS:
@@ -673,8 +804,96 @@ class GateDecisionTests(unittest.TestCase):
                 self.assertApproved(
                     self.decide(
                         relative_path,
+                        states=[pull_request_state(body="Closes #7\n")],
                         pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
                     )
+                )
+
+    def test_an_approval_by_the_pull_requests_own_brand_is_a_self_review(self):
+        # The marker names who reviewed, never who wrote, so the origin has to
+        # be read off the pull request. A `reviewers=claude` approval on a
+        # claude-origin pull request is exactly the self-review the whole
+        # opposite-brand routing exists to prevent.
+        marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["claude"])
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
+                    ),
+                    "names this pull request's own brand (claude)",
+                )
+
+    def test_a_dual_marker_naming_the_origin_brand_is_still_a_self_review(self):
+        # Including the opposite brand does not launder the same-brand half.
+        marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex", "claude"])
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
+                    ),
+                    "names this pull request's own brand (claude)",
+                )
+
+    def test_a_codex_origin_pull_request_refuses_a_codex_approval(self):
+        # The rule is symmetric, and this is the direction the default fixture
+        # cannot exercise.
+        marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"])
+        state = pull_request_state(body="Closes #7\n\n" + ORIGIN_MARKERS["codex"] + "\n")
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        states=[state],
+                        pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
+                    ),
+                    "names this pull request's own brand (codex)",
+                )
+
+    def test_a_single_brand_marker_on_an_unknown_origin_pull_request_refuses(self):
+        # With no declared origin there is no brand to be opposite of, so a
+        # single-brand review cannot be known to be independent.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        states=[pull_request_state(body="Closes #7\n")],
+                    ),
+                    "declares no origin",
+                )
+
+    def test_two_origin_markers_refuse_rather_than_picking_one(self):
+        body = "Closes #7\n\n" + ORIGIN_MARKERS["codex"] + "\n" + ORIGIN_MARKERS["claude"] + "\n"
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(relative_path, states=[pull_request_state(body=body)]),
+                    "carries both pr-origin markers",
+                )
+
+    def test_a_duplicated_origin_marker_refuses(self):
+        body = "Closes #7\n\n" + ORIGIN_MARKERS["claude"] + "\n" + ORIGIN_MARKERS["claude"] + "\n"
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(relative_path, states=[pull_request_state(body=body)]),
+                    "carries a duplicate pr-origin marker",
+                )
+
+    def test_an_origin_marker_with_trailing_text_refuses(self):
+        # `originFromBody` requires it to be the body's final non-whitespace
+        # content, so a marker quoted mid-body is not a declaration.
+        body = "Closes #7\n\n" + ORIGIN_MARKERS["claude"] + "\n\nand then some prose.\n"
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(relative_path, states=[pull_request_state(body=body)]),
+                    "not the body's final content",
                 )
 
     def test_a_legacy_v1_marker_still_passes(self):
@@ -949,6 +1168,17 @@ class MutationBoundaryTests(unittest.TestCase):
                 ]
             },
             "a merge conflict": {"states": [pull_request_state(mergeable="CONFLICTING")]},
+            "an approval by the pull request's own brand": {
+                "pages": [
+                    [
+                        comment(
+                            1,
+                            "2026-08-01T00:00:00Z",
+                            coordinator_marker(APPROVED_HEAD, "APPROVE", ["claude"]),
+                        )
+                    ]
+                ]
+            },
         }
         for relative_path in RENDERED_ASSETS:
             for reason, scripted in refusals.items():
@@ -1022,17 +1252,70 @@ class MutationBoundaryTests(unittest.TestCase):
                 )
                 git = harness.git_calls()
                 self.assertIn(
-                    ["-C", "/tmp/checkout", "worktree", "remove", WORKTREE_PATH], git
+                    ["-C", CHECKOUT_ROOT, "worktree", "remove", WORKTREE_PATH], git
                 )
-                self.assertIn(["-C", "/tmp/checkout", "branch", "-d", HEAD_BRANCH], git)
+                self.assertIn(["-C", CHECKOUT_ROOT, "branch", "-d", HEAD_BRANCH], git)
                 self.assertIn(
-                    ["-C", "/tmp/checkout", "push", "origin", "--delete", HEAD_BRANCH],
+                    ["-C", CHECKOUT_ROOT, "push", "origin", "--delete", HEAD_BRANCH],
                     git,
                 )
                 self.assertIn(
-                    ["-C", "/tmp/checkout", "merge", "--ff-only", "origin/" + BASE_BRANCH],
+                    ["-C", CHECKOUT_ROOT, "merge", "--ff-only", "origin/" + BASE_BRANCH],
                     git,
                 )
+
+    def test_a_cross_repository_head_is_never_deleted_here(self):
+        # `headRefName` names a branch in the fork, not here, so deleting it on
+        # origin would delete whatever unrelated branch happens to share the
+        # name in the base repository. The merge and the worktree removal are
+        # unaffected; only the deletion is refused.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path, cross_repository=True
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("another repository", completed.stderr)
+                git = harness.git_calls()
+                self.assertIn(
+                    ["-C", CHECKOUT_ROOT, "worktree", "remove", WORKTREE_PATH], git
+                )
+                for call in git:
+                    self.assertNotIn("branch", call, call)
+                    self.assertNotIn("--delete", call, call)
+
+    def test_a_checkout_off_the_base_branch_keeps_its_local_branches(self):
+        # `--ff-only` advances whatever branch the checkout has out, so a pull
+        # request targeting a non-default base would otherwise move the
+        # default branch somewhere it should not go.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path, checked_out="some-other-branch"
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "not on the base branch of this pull request", completed.stderr
+                )
+                git = harness.git_calls()
+                self.assertIn(
+                    ["-C", CHECKOUT_ROOT, "worktree", "remove", WORKTREE_PATH], git
+                )
+                for call in git:
+                    self.assertNotIn("merge", call, call)
+                    self.assertNotIn("branch", call, call)
+                    self.assertNotIn("--delete", call, call)
+
+    def test_a_detached_head_keeps_its_local_branches_too(self):
+        # `symbolic-ref` prints nothing on a detached HEAD, which the guard has
+        # to read as "not on the base" rather than as a match.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(relative_path, checked_out="")
+                self.assertNotEqual(completed.returncode, 0)
+                for call in harness.git_calls():
+                    self.assertNotIn("merge", call, call)
+                    self.assertNotIn("--delete", call, call)
 
     def test_the_gate_is_re_read_before_the_merge(self):
         # Two runs means two of each read, which is what makes the refresh
