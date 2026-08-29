@@ -103,7 +103,12 @@ V2_RE = re.compile(
     r"verdict=(?P<verdict>APPROVE|CHANGES_REQUESTED)\s*-->",
     re.IGNORECASE,
 )
-MARKER_OPENING_RE = re.compile(r"<!--\s*pr-review:v")
+# Case-insensitive like the two parsers above, and for the same reason they
+# are: a marker this gate cannot parse must be detected in every spelling it
+# could be written in. A case-sensitive opening test would skip a malformed
+# `<!-- PR-REVIEW:V2 ... -->` and let an older APPROVE win, which is the
+# fail-open the malformed-marker rule exists to close.
+MARKER_OPENING_RE = re.compile(r"<!--\s*pr-review:v", re.IGNORECASE)
 # The two origin markers, character for character as `originFromBody` spells
 # them in src/Kanban/PullRequestFlow.hs. A different spacing is not one of
 # these markers there and is not one here.
@@ -270,9 +275,14 @@ body_text = str(state.get("body") or "")
 stripped = body_text.rstrip()
 counts = {brand: body_text.count(marker) for brand, marker in ORIGIN_MARKERS.items()}
 present = [brand for brand, count in counts.items() if count]
-if len(present) > 1:
+# Spelled without a greater-than comparison on purpose: one surrounded by
+# spaces in a fenced block reads as a shell redirect into the working tree to
+# the packaged-asset hygiene scan, which does not know this block is Python.
+# There are exactly two brands, so "both present" is "two present", and "more
+# than once" is "not zero or one".
+if len(present) == 2:
     refuse("the pull request body carries both pr-origin markers", True)
-if any(count > 1 for count in counts.values()):
+if any(count not in (0, 1) for count in counts.values()):
     refuse("the pull request body carries a duplicate pr-origin marker", True)
 origin = present[0] if present else None
 if origin is not None and not stripped.endswith(ORIGIN_MARKERS[origin]):

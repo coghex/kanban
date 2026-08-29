@@ -1127,6 +1127,34 @@ class GateDecisionTests(unittest.TestCase):
                     self.decide(relative_path, pages=pages), "is malformed"
                 )
 
+    def test_a_malformed_marker_refuses_in_any_case_spelling(self):
+        # The parsers are case-insensitive, so the opening test has to be too:
+        # a case-sensitive one would skip a malformed `<!-- PR-REVIEW:V2 ... -->`
+        # and let the older APPROVE beneath it win, which is exactly the
+        # fail-open the malformed-marker rule exists to close.
+        pages = [
+            [comment(1, "2026-08-01T00:00:00Z", coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"]))],
+            [comment(2, "2026-08-05T00:00:00Z", "<!-- PR-REVIEW:V2 verdict=APPROVE -->")],
+        ]
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(relative_path, pages=pages), "is malformed"
+                )
+
+    def test_a_well_formed_marker_in_another_case_still_passes(self):
+        # Non-vacuity for the case rule above: the parsers really are
+        # case-insensitive, so an upper-case marker is not simply refused.
+        marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"]).upper()
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertApproved(
+                    self.decide(
+                        relative_path,
+                        pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
+                    )
+                )
+
     def test_a_missing_approval_label_refuses(self):
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
