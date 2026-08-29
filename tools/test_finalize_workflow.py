@@ -95,6 +95,8 @@ EXPECTED_REFUSAL_WORDS = (
     "leave its branches alone",
     "the head of this pull request lives in another repository; delete no "
     "branch here",
+    "pushing to origin does not reach the repository this pull request is in; "
+    "delete no remote branch here",
 )
 
 
@@ -500,6 +502,7 @@ class Harness:
         worktree_listing: str = WORKTREE_LISTING,
         local_branch: str | None = APPROVED_HEAD,
         failing_git: list[str] | None = None,
+        push_repo: str = REPO_SLUG,
     ) -> None:
         base = ["pr", "view", PR_NUMBER, "-R", REPO_SLUG, "--json"]
         self.fake.script("gh", ["api", "user", "--jq", ".login"], stdout=viewer + "\n")
@@ -583,6 +586,13 @@ class Harness:
             "git",
             ["-C", CHECKOUT_ROOT, "rev-parse", "--verify", "--quiet"],
             stdout=("" if local_branch is None else local_branch + "\n"),
+        )
+        # `git push` uses remote.origin.pushurl when one is configured, so the
+        # push URL is read separately from the fetch URL $REPO came from.
+        self.fake.script(
+            "git",
+            ["-C", CHECKOUT_ROOT, "remote", "get-url", "--push", "origin"],
+            stdout=f"https://github.com/{push_repo}.git\n",
         )
         if failing_git is not None:
             self.fake.script(
@@ -1154,6 +1164,68 @@ class GateDecisionTests(unittest.TestCase):
                         pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
                     )
                 )
+
+    def test_an_approval_followed_by_a_later_marker_refuses(self):
+        # The fail-open this closes: taking the FIRST marker that parses reads
+        # a comment opening with a current-head APPROVE and going on to a
+        # CHANGES_REQUESTED as the approval alone.
+        body = (
+            coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"])
+            + "\n\nsecond thoughts\n\n"
+            + coordinator_marker(APPROVED_HEAD, "CHANGES_REQUESTED", ["codex"])
+        )
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        pages=[[comment(1, "2026-08-01T00:00:00Z", body)]],
+                    ),
+                    "carries 2 review markers",
+                )
+
+    def test_an_approval_followed_by_a_malformed_marker_refuses(self):
+        # And the malformed test now runs even though a valid marker matched,
+        # which it did not when the first parseable one ended the search.
+        body = (
+            coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"])
+            + "\n\n<!-- pr-review:v2 garbage -->\n"
+        )
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        pages=[[comment(1, "2026-08-01T00:00:00Z", body)]],
+                    ),
+                    "is malformed",
+                )
+
+    def test_a_marker_repeated_verbatim_refuses(self):
+        marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"])
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        pages=[
+                            [comment(1, "2026-08-01T00:00:00Z", marker + "\n" + marker)]
+                        ],
+                    ),
+                    "carries 2 review markers",
+                )
+
+    def test_a_comment_with_no_marker_is_passed_over_not_refused(self):
+        # Non-vacuity for the three above: a comment carrying no marker at all
+        # is skipped so an older marker comment can still be found, which is
+        # the behavior the opening count has to preserve.
+        pages = [
+            [comment(1, "2026-08-01T00:00:00Z", coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"]))],
+            [comment(2, "2026-08-05T00:00:00Z", "looks good, merging soon")],
+        ]
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertApproved(self.decide(relative_path, pages=pages))
 
     def test_a_missing_approval_label_refuses(self):
         for relative_path in RENDERED_ASSETS:
@@ -1843,6 +1915,36 @@ class MutationBoundaryTests(unittest.TestCase):
                                 f"{' '.join(later)} ran after {' '.join(failing)} "
                                 f"failed: {call}",
                             )
+
+    def test_a_push_url_naming_another_repository_deletes_nothing_remote(self):
+        # $REPO comes from the FETCH url. A checkout that fetches from this
+        # repository and pushes to another passes every other check --
+        # isCrossRepository included -- and would then delete a same-named
+        # branch over there.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path, push_repo="someone-else/kanban"
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("does not reach the repository", completed.stderr)
+                git = harness.git_calls()
+                # The local cleanup up to that point still happened.
+                self.assertIn(LOCAL_DELETE, git)
+                for call in git:
+                    self.assertNotIn("--delete", call, call)
+
+    def test_a_push_url_spelled_in_another_case_is_the_same_repository(self):
+        # Non-vacuity for the guard above, and the reason it folds case: a
+        # remote URL may spell the identity any way and still name this
+        # repository, so an exact match would refuse an ordinary checkout.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path, push_repo="Coghex/Kanban"
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn(REMOTE_DELETE, harness.git_calls())
 
     def test_the_gate_is_re_read_before_the_merge(self):
         # Two runs means two of each read, which is what makes the refresh

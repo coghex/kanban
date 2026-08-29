@@ -67,7 +67,10 @@ created above it.
   bound to the reviewed head rather than to the branch name — `git update-ref -d
   <ref> <old-value>` locally, `--force-with-lease` on the remote — so a branch
   another actor deleted and recreated under the same name is rejected rather
-  than removed. The worktree it removes is identified the same way — the one
+  than removed. The remote deletion additionally requires that pushing to
+  `origin` really reaches the repository the pull request is in: the identity
+  was resolved from the remote's fetch URL, and a configured
+  `remote.origin.pushurl` can send the push to a different repository entirely. The worktree it removes is identified the same way — the one
   whose checked-out branch is the pull request's head branch and whose `HEAD` is
   the reviewed head, read out of `git worktree list --porcelain` rather than
   matched against a path pattern that a stale worktree of the same number style

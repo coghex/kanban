@@ -1520,7 +1520,10 @@ state.
   including its comma-joined `reviewers=` and `models=` fields — or the legacy
   `pr-review:v1` spelling, naming the pull request's current `headRefOid` with
   `verdict=APPROVE`. A marker authored by anyone else, a malformed marker, a
-  stale head, and a non-`APPROVE` verdict each refuse. The marker's `reviewers=`
+  stale head, and a non-`APPROVE` verdict each refuse — and so does a comment
+  carrying more than one marker, since taking the first that parsed would read
+  an `APPROVE` followed by a `CHANGES_REQUESTED` as the approval alone and would
+  never reach the malformed test at all. The marker's `reviewers=`
   set must also exclude the pull request's own brand, read off the body by
   exactly `originFromBody`'s rules: an approval published by the brand that
   wrote the code is a self-review, which the marker alone cannot reveal because
@@ -1553,7 +1556,10 @@ state.
   than to a wrong target, and each empty value is a refusal: the head branch is
   resolved only for a pull request whose head is in this repository, so a
   cross-repository head is never deleted here under a same-named branch of the
-  base repository; and the local base branch is advanced only when the primary
+  base repository; the remote deletion happens only when pushing to `origin`
+  actually reaches `$REPO`, since the identity was resolved from the remote's
+  *fetch* URL and `remote.origin.pushurl` can send the push somewhere else
+  entirely; and the local base branch is advanced only when the primary
   checkout is actually on it, so a pull request targeting a non-default base
   cannot fast-forward the default branch to somewhere it does not belong. Two
   further values resolve to nothing as ordinary *skips* rather than refusals —

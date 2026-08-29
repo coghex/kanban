@@ -255,12 +255,24 @@ for comment in ordered:
     if login.lower() != viewer.lower():
         continue
     body = str(comment.get("body") or "")
-    match = V2_RE.search(body) or V1_RE.search(body)
-    if match is None:
-        if MARKER_OPENING_RE.search(body) is not None:
-            refuse("the newest review marker you published is malformed", True)
+    # Every marker in the comment, not the first one that parses. A comment
+    # opening with a current-head APPROVE and going on to a CHANGES_REQUESTED
+    # or a malformed one would otherwise be read as the approval alone, and
+    # the malformed test would never run because a valid match had been found.
+    openings = len(MARKER_OPENING_RE.findall(body))
+    if openings == 0:
         continue
-    chosen = match
+    found = list(V2_RE.finditer(body)) + list(V1_RE.finditer(body))
+    if len(found) != openings:
+        refuse("a review marker you published is malformed", True)
+    if len(found) != 1:
+        refuse(
+            "the newest comment you published carries "
+            + str(len(found))
+            + " review markers, and only one can be the verdict",
+            True,
+        )
+    chosen = found[0]
     break
 
 if chosen is None:
@@ -398,9 +410,13 @@ What that gate requires, and why each part is what it is:
   touches a file the pull request owns, but a marker whose head no longer matches
   is stale whatever the label says, so the head comparison decides and not the
   label alone.
-- **A malformed marker refuses.** An owned comment that opens a `pr-review:v`
-  marker this gate cannot parse stops the run rather than being skipped over in
-  favour of an older one it can.
+- **A malformed or duplicated marker refuses.** Every `pr-review:v` opening in
+  the chosen comment has to parse, and exactly one has to be there. Taking the
+  first marker that parsed would read a comment opening with a current-head
+  `APPROVE` and going on to a `CHANGES_REQUESTED` as the approval alone, and
+  would never reach the malformed test at all, because a valid match had
+  already been found. The coordinator publishes exactly one marker per comment,
+  so anything else is a comment this gate cannot safely read.
 - **A reviewer set that does not exclude the pull request's own brand.** The
   approval this workflow acts on is an *opposite-brand* approval, and the marker
   alone cannot say whether it is one: it names who reviewed, not who wrote. So
@@ -514,6 +530,7 @@ WORKTREE="$(git -C "$ROOT" worktree list --porcelain | awk -v ref="refs/heads/$B
 BASE_CHECKOUT="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD | grep -Fx "$BASE")"
 OPEN_ISSUE="$(gh issue view "${ISSUE:-0}" -R "$REPO" --json number,state --jq 'select(.state == "OPEN") | .number')"
 LOCAL_BRANCH="$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH")"
+PUSH_TARGET="$(git -C "$ROOT" remote get-url --push origin | sed -E 's#\.git$##; s#.*(/|:)([^/:]+/[^/:]+)$#\2#' | grep -Fix "$REPO")"
 ```
 
 Two of those resolve to nothing on purpose, and the guards below turn each empty
@@ -529,6 +546,16 @@ value into a refusal rather than a wrong deletion:
   whatever branch the checkout has out — which for a pull request targeting a
   non-default base would advance the default branch to somewhere it should not
   go. A detached HEAD leaves it empty too.
+- `$PUSH_TARGET` is non-empty **only when pushing to `origin` really reaches
+  `$REPO`**. `$REPO` was resolved from the remote's *fetch* URL, and `git push`
+  uses `remote.origin.pushurl` when one is configured — so a checkout that
+  fetches from `$REPO` and pushes somewhere else would have every check above
+  pass, `isCrossRepository` included, and then delete a same-named branch in
+  that other repository. The push URL is reduced to one `owner/name` the same
+  way and matched against `$REPO`, case-insensitively because a remote URL may
+  spell the identity in any case while naming the same repository. `--push`
+  falls back to the fetch URL when no push URL is set, so the ordinary checkout
+  simply matches itself.
 
 `git worktree list` is the only source for the worktree path, so a legacy path
 and a repository-scoped one are both found where they actually are — and it is
@@ -570,6 +597,7 @@ git -C "$ROOT" fetch origin &&
 git -C "$ROOT" merge --ff-only "origin/$BASE" &&
 : "${BRANCH:?the head of this pull request lives in another repository; delete no branch here}" &&
 { [ -z "$LOCAL_BRANCH" ] || git -C "$ROOT" update-ref -d "refs/heads/$BRANCH" "$HEAD"; } &&
+: "${PUSH_TARGET:?pushing to origin does not reach the repository this pull request is in; delete no remote branch here}" &&
 git -C "$ROOT" push origin --force-with-lease="refs/heads/$BRANCH:$HEAD" --delete "$BRANCH"
 ```
 
@@ -597,7 +625,11 @@ delete with `stale info` if the branch has moved. `$HEAD` is the head the gate
 validated and the merge landed, so both deletions can only ever remove the thing
 this run actually merged. `$LOCAL_BRANCH` is empty when `$ROOT` never had a copy
 of the branch — finalizing a pull request whose worktree was somebody else's —
-and that is a skip rather than a failure.
+and that is a skip rather than a failure. Binding the head does not answer
+*which repository* the push reaches, which is why `$PUSH_TARGET` guards the
+remote deletion separately: a lease protects the ref it names in whatever
+repository the push lands in, and the point of that guard is that it must land
+in this one.
 
 Neither refusal message contains an apostrophe, and that is not style. A `'`
 inside a `${VAR:?...}` word is read as an opening quote, and the shell then
