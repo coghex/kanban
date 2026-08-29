@@ -225,6 +225,16 @@ PRESERVED_BEHAVIOR = {
     "the fast-forward is never forced": (
         "The fast-forward is `--ff-only` and never a force"
     ),
+    "the base-retarget window is documented, not hidden": (
+        "**One window this does not close, deliberately.**"
+    ),
+    "the window is the merge primitive, not this workflow": (
+        "`tools/drain_prs.py` merges with exactly the same call and exactly "
+        "the same binding"
+    ),
+    "the merged base is reported": (
+        "Name the base you merged onto in the report"
+    ),
     "no remote branch is deleted": (
         "**This workflow deletes no remote branch, deliberately.**"
     ),
@@ -2476,6 +2486,32 @@ class PreservedBehaviorTests(unittest.TestCase):
             content,
         )
         self.assertIn("The single exception is the packaged `finalize` workflow", content)
+
+    def test_the_accepted_window_is_recorded_in_the_contract_too(self):
+        # An accepted limitation is only accepted if it is written down where
+        # a reader looks for this action's guarantees. Otherwise the next
+        # reviewer finds it again as a defect, and the next implementer closes
+        # it by reintroducing the remote write this workflow does not make.
+        content = flat(read("docs/agent-workflow-contract.md"))
+        self.assertIn("One window stays open, and is accepted rather than closed.", content)
+        self.assertIn("`--match-head-commit` has no base counterpart", content)
+        self.assertIn(
+            "`tools/drain_prs.py` merges with the same call and the same "
+            "binding unattended",
+            content,
+        )
+
+    def test_the_drainer_really_makes_the_same_merge_call(self):
+        # The claim the acceptance rests on, checked against the drainer
+        # rather than asserted: if it ever gains a base binding this workflow
+        # does not have, the reasoning above stops holding and this fails.
+        drainer = read("tools/drain_prs.py")
+        merge = drainer[drainer.index("def merge_pr("):]
+        merge = merge[: merge.index("\ndef ", 1)]
+        for flag in ("--admin", "--merge", "--match-head-commit"):
+            self.assertIn(flag, merge, flag)
+        for absent in ("--match-base", "baseRefName"):
+            self.assertNotIn(absent, merge, absent)
 
     def test_the_contract_declares_finalize_as_the_sole_manual_fallback(self):
         content = flat(read("docs/agent-workflow-contract.md"))

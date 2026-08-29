@@ -36,6 +36,16 @@ created above it.
   the marker records no base to compare with. A stacked pull request onto a
   feature base is deliberately out of scope.
 
+  One window is accepted rather than closed, and documented as such: the base
+  is re-read immediately before the merge, but `--match-head-commit` binds only
+  the head and has no base counterpart, so a retarget in that last instant
+  lands the reviewed head on the new base. Closing it would mean advancing the
+  base reference directly with a compare-and-swap rather than asking GitHub to
+  merge — a remote write this workflow deliberately does not make — and
+  `tools/drain_prs.py` merges with the same call and the same binding
+  unattended, so the exposure is the merge primitive's rather than this
+  workflow's. The base actually merged onto is named in the report.
+
   Its gate fails closed and is evaluated twice — once to decide, and again
   immediately before the merge, because labels, the head, and the check set are
   all mutable. It resolves the authenticated GitHub login, reads the whole

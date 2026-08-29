@@ -1520,6 +1520,18 @@ state.
   is therefore a narrowing rather than a check: a stacked pull request onto a
   feature base is out of this action's scope and belongs to whoever owns that
   base. A default branch that cannot be resolved refuses too.
+
+  One window stays open, and is accepted rather than closed. The base is
+  re-read immediately before the merge, but `gh pr merge` binds only the head:
+  `--match-head-commit` has no base counterpart, so a retarget between that
+  read and the merge lands the reviewed head on the new base. Closing it means
+  advancing the base reference directly with a compare-and-swap instead of
+  asking GitHub to merge — a remote write this action deliberately does not
+  make. `tools/drain_prs.py` merges with the same call and the same binding
+  unattended, so the exposure belongs to the merge primitive and this action is
+  no more subject to it than the component that owns merging. The base actually
+  merged onto is named in the report, which is what makes the window
+  auditable.
 - **Review gate:** fail-closed, and evaluated twice — once to decide, and again
   immediately before the merge with nothing in between, because labels, the
   head, and the check set are all mutable. It requires the pull request to be

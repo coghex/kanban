@@ -559,6 +559,23 @@ If the gate refused, `$HEAD` is empty and the parameter expansion above stops
 the shell before `gh` is reached. That is the intent — never substitute a head
 read from somewhere else, and never drop `--match-head-commit` to get past it.
 
+**One window this does not close, deliberately.** The gate re-reads the base
+immediately before the merge, so a retarget is caught right up to that read —
+but the merge itself binds only the head. `--match-head-commit` is the one
+binding the merge subcommand accepts; there is no base counterpart. An actor who
+retargets the pull request between that final read and the merge therefore lands
+the reviewed head on the new base, and nothing here can refuse it.
+
+Closing that would mean advancing the base reference directly with a
+compare-and-swap rather than asking GitHub to merge — a larger mechanism, and
+one that writes to a remote, which is the surface this workflow deliberately
+does not have. It is also not a weakness peculiar to this fallback:
+`tools/drain_prs.py` merges with exactly the same call and exactly the same
+binding, unattended, for every pull request it drains. The window is a property
+of the merge primitive, and finalize is no more exposed to it than the component
+that owns merging. Name the base you merged onto in the report, so the window is
+auditable after the fact.
+
 **Do not arm auto-merge.** Arming a merge on a head whose checks have not passed
 is a mutation, and step 2 forbids every mutation until they have. A pull request
 whose checks are still running is refused and re-finalized later, when they are
