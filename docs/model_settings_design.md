@@ -32,7 +32,7 @@ concrete precondition
 - [ ] MODEL-13. Implement the Claude embedded-review backend — [deferred]: Q-12 must carry a signed-off decision in this document
 - [ ] MODEL-10. Implement single-agent review routing in the Haskell flows
 - [x] MODEL-11. Make the Python gates and plugin reviews single-agent aware — [#572]
-- [ ] MODEL-6. Package the defaults and document the roster surface
+- [ ] MODEL-6. Package the defaults and document the roster surface — [deferred]: #572 and the issues for MODEL-13 and MODEL-10 must all be merged
 
 ## Epic contract
 
@@ -996,6 +996,17 @@ concrete proposal before any implementation.
 - **Open questions:** None
 
 ### MODEL-6. Package the defaults and document the roster surface
+
+> **Deferred 2026-08-29.** The packaging half is already satisfied:
+> `models.toml.example` ships through `kanban.cabal:57`'s `extra-source-files`
+> and `tools/test_source_distribution.py`'s `RELEASE_ROOT_FILES`, verified
+> against the release payload, which is the sdist tarball and the only artifact
+> kind. What remains is the documentation sweep, and its acceptance signal is an
+> arc-wide invariant that the arc's unlanded slices could re-violate — MODEL-13
+> would plausibly rewrite `docs/design.md:849`'s `issue_revise.claude` line, and
+> #572 already edits the contract paragraph at `:224-248` that holds `:227`'s
+> model pair. Precondition: #572, MODEL-13, and MODEL-10 are all merged, so the
+> sweep runs once over final prose and stays true.
 
 - **Outcome:** the tracked example roster ships in the release artifact
   beside `config.toml.example`; `docs/design.md` §16 documents the file and
