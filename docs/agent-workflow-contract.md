@@ -1557,6 +1557,14 @@ state.
   through `Closes #<n>`, and one whose worktree is already gone — and each
   skipped step is not run at all rather than run against an empty argument,
   which `git` and `gh` would turn into an error the workflow would step past.
+  The whole cleanup is one `&&` chain, so the first failure ends it and nothing
+  after it runs — a still-checked-out or dirty worktree is never left behind
+  while its branch is deleted out from under it. Both deletions are bound to the
+  reviewed head rather than to the branch name, because a name is not an
+  identity: the local ref goes through `git update-ref -d <ref> <old-value>` and
+  the remote one through `--force-with-lease=refs/heads/<branch>:<head>`, so a
+  branch another actor deleted and recreated under the same name between the
+  merge and the cleanup is rejected rather than removed.
 - **Mandatory/optional:** optional — user-invoked only, reached by asking for
   it, and spawned by no Kanban code path.
 

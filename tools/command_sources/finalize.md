@@ -472,6 +472,7 @@ ISSUE="$(gh pr view "$PR" -R "$REPO" --json closingIssuesReferences --jq '.closi
 WORKTREE="$(git -C "$ROOT" worktree list --porcelain | sed -n "/issue-$ISSUE-/s#^worktree ##p")"
 BASE_CHECKOUT="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD | grep -Fx "$BASE")"
 OPEN_ISSUE="$(gh issue view "${ISSUE:-0}" -R "$REPO" --json number,state --jq 'select(.state == "OPEN") | .number')"
+LOCAL_BRANCH="$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH")"
 ```
 
 Two of those resolve to nothing on purpose, and the guards below turn each empty
@@ -498,7 +499,8 @@ than to something wrong, but unlike the two above they are **skips, not
 refusals**: a pull request that closes no issue, one whose issue already closed
 itself through the `Closes #<n>` reference, and one whose worktree was removed
 earlier are all ordinary, and none of them is a reason to leave a merged pull
-request half cleaned up. Each is guarded by its own `[ -z ... ] ||` so the
+request half cleaned up. `$LOCAL_BRANCH` is a third of the same kind. Each is
+guarded by its own `[ -z ... ] ||` so the
 command is not run at all rather than run against an empty argument — which
 `git` and `gh` would each turn into an error this workflow would then step
 straight past, having no `set -e` to stop it. That spelling rather than
@@ -507,21 +509,40 @@ last step of a clean run reporting a non-zero status for having correctly done
 nothing.
 
 ```bash
-[ -z "$WORKTREE" ] || git -C "$ROOT" worktree remove "$WORKTREE"
-git -C "$ROOT" fetch origin
-: "${BASE_CHECKOUT:?the primary checkout is not on the base branch of this pull request; leave its branches alone}"
-git -C "$ROOT" merge --ff-only "origin/$BASE"
-: "${BRANCH:?the head of this pull request lives in another repository; delete no branch here}"
-git -C "$ROOT" branch -d "$BRANCH"
-git -C "$ROOT" push origin --delete "$BRANCH"
+{ [ -z "$WORKTREE" ] || git -C "$ROOT" worktree remove "$WORKTREE"; } &&
+git -C "$ROOT" fetch origin &&
+: "${BASE_CHECKOUT:?the primary checkout is not on the base branch of this pull request; leave its branches alone}" &&
+git -C "$ROOT" merge --ff-only "origin/$BASE" &&
+: "${BRANCH:?the head of this pull request lives in another repository; delete no branch here}" &&
+{ [ -z "$LOCAL_BRANCH" ] || git -C "$ROOT" update-ref -d "refs/heads/$BRANCH" "$HEAD"; } &&
+git -C "$ROOT" push origin --force-with-lease="refs/heads/$BRANCH:$HEAD" --delete "$BRANCH"
 ```
 
-That order is the order it is for two reasons. The worktree goes first because a
-branch checked out in one cannot be deleted. The local base branch advances
-before the branch is deleted so the deletion can be `-d` rather than `-D`: once
-the merge is in `$ROOT`'s own base branch, an ordinary delete succeeds, and one
-that still refuses is telling you the branch holds a commit the merge did not —
-which is a fact to report rather than force past.
+**That is one `&&` chain, and it is one on purpose.** This workflow sets no
+`set -e`, so written as separate commands a failed worktree removal, fetch, or
+fast-forward would be stepped straight past into the two deletions — leaving a
+still-checked-out or dirty worktree behind while its branch is deleted out from
+under it. Chained, the first failure ends the cleanup and every later step is
+simply not run. Keep any step you add inside the chain.
+
+The order within it is the order it is for two reasons. The worktree goes first
+because a branch checked out in one cannot be deleted. The local base branch
+advances before either deletion so the merged commits are reachable from
+`$ROOT`'s own base branch before the branch that carried them goes away.
+
+**Both deletions are bound to the reviewed head, not to the branch name.**
+A name is not an identity: between the merge and this cleanup another actor can
+delete `$BRANCH` and push a new, unrelated branch under the same name, and a
+deletion by name alone would then delete *that*. So the local ref is removed
+with `git update-ref -d <ref> <old-value>`, which deletes only a ref that still
+equals `$HEAD`, and the remote one with
+`--force-with-lease="refs/heads/$BRANCH:$HEAD"`, which sends that same head as
+the expected old value so the server performs a compare-and-swap and rejects the
+delete with `stale info` if the branch has moved. `$HEAD` is the head the gate
+validated and the merge landed, so both deletions can only ever remove the thing
+this run actually merged. `$LOCAL_BRANCH` is empty when `$ROOT` never had a copy
+of the branch — finalizing a pull request whose worktree was somebody else's —
+and that is a skip rather than a failure.
 
 Neither refusal message contains an apostrophe, and that is not style. A `'`
 inside a `${VAR:?...}` word is read as an opening quote, and the shell then
@@ -538,13 +559,16 @@ Every one of those is scoped to `$ROOT` and to this pull request's own branch.
 Leave every other worktree and every other branch untouched. If the removal
 refuses over leftover build artifacts, confirm that nothing uncommitted matters
 and retry it with `--force` — never `rm -rf`, which would leave the worktree
-registered and the repository's metadata wrong. The fast-forward is `--ff-only`
-and never a force: a default branch that will not fast-forward is a fact to
-report, not one to overwrite.
+registered and the repository's metadata wrong — and a removal that still
+refuses ends the chain, so nothing is deleted while it is unresolved. The
+fast-forward is `--ff-only` and never a force: a default branch that will not
+fast-forward is a fact to report, not one to overwrite.
 
 The linked issue closes itself through the pull request's `Closes #<n>`
 reference, so `$OPEN_ISSUE` above is empty in the ordinary case and this runs
-only when the closure did not happen. It is empty for a pull request that closes
+only when the closure did not happen. Run it after the cleanup chain above has
+reported success; a cleanup that ended early is a state to report, not one to
+carry on from. It is empty for a pull request that closes
 no issue too — the `${ISSUE:-0}` substitution keeps that read a well-formed
 request for an issue number that will not resolve, rather than a `gh` invocation
 with a missing argument:

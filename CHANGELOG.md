@@ -53,9 +53,15 @@ created above it.
   arming a merge on a head whose checks have not passed is a mutation the gate
   forbids. The linked issue, the pull request's worktree, its branch, and the
   local default branch are only touched after GitHub confirms the pull request
-  as `MERGED`, and two of those are guarded further: a cross-repository head is
-  never deleted here under a same-named branch of the base repository, and the
-  local base branch is advanced only when the primary checkout is on it. It is authored once under `tools/command_sources/` and rendered
+  as `MERGED`, and the cleanup is guarded further still. It is one `&&` chain,
+  so a failed worktree removal, fetch, or fast-forward ends it rather than being
+  stepped past into the deletions. A cross-repository head is never deleted here
+  under a same-named branch of the base repository, and the local base branch is
+  advanced only when the primary checkout is on it. Both branch deletions are
+  bound to the reviewed head rather than to the branch name — `git update-ref -d
+  <ref> <old-value>` locally, `--force-with-lease` on the remote — so a branch
+  another actor deleted and recreated under the same name is rejected rather
+  than removed. It is authored once under `tools/command_sources/` and rendered
   into both bundles, and `CLAUDE.md` and `docs/agent-workflow-contract.md`
   §2.10 now record it as the single explicitly-invoked exception to the
   never-merge rule.

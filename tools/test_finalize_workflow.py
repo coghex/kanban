@@ -220,8 +220,12 @@ PRESERVED_BEHAVIOR = {
     "the fast-forward is never forced": (
         "The fast-forward is `--ff-only` and never a force"
     ),
-    "the branch deletion is not forced": (
-        "so the deletion can be `-d` rather than `-D`"
+    "both deletions are bound to the reviewed head": (
+        "**Both deletions are bound to the reviewed head, not to the branch "
+        "name.**"
+    ),
+    "the cleanup is one chain": (
+        "**That is one `&&` chain, and it is one on purpose.**"
     ),
     "no refreshing push": (
         'do not push anything to the branch to "refresh" it'
@@ -265,6 +269,29 @@ BASE_BRANCH = "master"
 VIEWER = "coghex"
 WORKTREE_PATH = "/tmp/worktrees/coghex/kanban/issue-7-example"
 CHECKOUT_ROOT = "/tmp/checkout"
+
+# The two deletions, bound to the reviewed head rather than to the branch name:
+# `update-ref -d <ref> <old>` deletes only a ref that still equals it, and the
+# lease sends the same head as the expected old value so the server performs a
+# compare-and-swap. A name is not an identity — another actor can delete and
+# recreate `$BRANCH` between the merge and the cleanup.
+LOCAL_DELETE = [
+    "-C",
+    CHECKOUT_ROOT,
+    "update-ref",
+    "-d",
+    "refs/heads/" + HEAD_BRANCH,
+    APPROVED_HEAD,
+]
+REMOTE_DELETE = [
+    "-C",
+    CHECKOUT_ROOT,
+    "push",
+    "origin",
+    "--force-with-lease=refs/heads/" + HEAD_BRANCH + ":" + APPROVED_HEAD,
+    "--delete",
+    HEAD_BRANCH,
+]
 
 
 def read(relative_path: str) -> str:
@@ -440,6 +467,8 @@ class Harness:
         linked_issue: str | None = LINKED_ISSUE,
         issue_open: bool = True,
         worktree_listing: str = WORKTREE_LISTING,
+        local_branch: str | None = APPROVED_HEAD,
+        failing_git: list[str] | None = None,
     ) -> None:
         base = ["pr", "view", PR_NUMBER, "-R", REPO_SLUG, "--json"]
         self.fake.script("gh", ["api", "user", "--jq", ".login"], stdout=viewer + "\n")
@@ -517,6 +546,20 @@ class Harness:
             ["-C", CHECKOUT_ROOT, "symbolic-ref", "--quiet", "--short", "HEAD"],
             stdout=checked_out + "\n" if checked_out else "",
         )
+        # Empty stands for a primary checkout that never had a copy of the
+        # branch, which the asset skips rather than fails on.
+        self.fake.script(
+            "git",
+            ["-C", CHECKOUT_ROOT, "rev-parse", "--verify", "--quiet"],
+            stdout=("" if local_branch is None else local_branch + "\n"),
+        )
+        if failing_git is not None:
+            self.fake.script(
+                "git",
+                ["-C", CHECKOUT_ROOT, *failing_git],
+                stderr="fatal: scripted failure\n",
+                exit_code=1,
+            )
         self.fake.script("git", ["-C"], stdout="")
 
     def run(self, script: str) -> subprocess.CompletedProcess:
@@ -548,24 +591,45 @@ def gate_fence(relative_path: str) -> str:
     return fence_containing(read(relative_path), "VIEWER=")
 
 
-def whole_workflow(relative_path: str, *, gate_runs: int = 1) -> str:
+# The cleanup chain, in the order the asset runs it, by the tokens that
+# identify each step. Used to assert that a failure really does end the chain:
+# nothing after the failing step may reach the command log.
+CLEANUP_CHAIN = (
+    ["worktree", "remove"],
+    ["fetch", "origin"],
+    ["merge", "--ff-only"],
+    ["update-ref", "-d"],
+    ["push", "origin"],
+)
+
+
+def matches_step(call: list[str], step: list[str]) -> bool:
+    return all(token in call for token in step)
+
+
+def whole_workflow(
+    relative_path: str, *, gate_runs: int = 1, include_issue_close: bool = True
+) -> str:
     """Every executable fence of the workflow, in the order it documents them.
 
     The gate is repeated because the asset requires it: it is re-run
     immediately before the merge, with nothing in between, since labels, the
     head and the check set are all mutable.
+
+    The linked issue's close is the one fence the document gates on the cleanup
+    chain having succeeded rather than on a shell condition, so a scenario
+    asserting the chain's own exit status leaves it out.
     """
     text = read(relative_path)
-    return "\n".join(
-        [gate_fence(relative_path)] * gate_runs
-        + [
-            fence_containing(text, "gh pr merge"),
-            fence_containing(text, "MERGED="),
-            fence_containing(text, "BRANCH="),
-            fence_containing(text, "worktree remove"),
-            fence_containing(text, "gh issue close"),
-        ]
-    )
+    fences = [gate_fence(relative_path)] * gate_runs + [
+        fence_containing(text, "gh pr merge"),
+        fence_containing(text, "MERGED="),
+        fence_containing(text, "BRANCH="),
+        fence_containing(text, "worktree remove"),
+    ]
+    if include_issue_close:
+        fences.append(fence_containing(text, "gh issue close"))
+    return "\n".join(fences)
 
 
 class RegistrationTests(unittest.TestCase):
@@ -1248,13 +1312,20 @@ class MutationBoundaryTests(unittest.TestCase):
         *,
         gate_runs: int = 2,
         config: str | None = None,
+        include_issue_close: bool = True,
         **scripted,
     ):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         harness = Harness(Path(directory.name), config=config)
         harness.script_github(**scripted)
-        completed = harness.run(whole_workflow(relative_path, gate_runs=gate_runs))
+        completed = harness.run(
+            whole_workflow(
+                relative_path,
+                gate_runs=gate_runs,
+                include_issue_close=include_issue_close,
+            )
+        )
         return completed, harness
 
     def assertNoMutation(self, harness: Harness):
@@ -1407,11 +1478,8 @@ class MutationBoundaryTests(unittest.TestCase):
                 self.assertIn(
                     ["-C", CHECKOUT_ROOT, "worktree", "remove", WORKTREE_PATH], git
                 )
-                self.assertIn(["-C", CHECKOUT_ROOT, "branch", "-d", HEAD_BRANCH], git)
-                self.assertIn(
-                    ["-C", CHECKOUT_ROOT, "push", "origin", "--delete", HEAD_BRANCH],
-                    git,
-                )
+                self.assertIn(LOCAL_DELETE, git)
+                self.assertIn(REMOTE_DELETE, git)
                 self.assertIn(
                     ["-C", CHECKOUT_ROOT, "merge", "--ff-only", "origin/" + BASE_BRANCH],
                     git,
@@ -1484,7 +1552,7 @@ class MutationBoundaryTests(unittest.TestCase):
                     ["-C", CHECKOUT_ROOT, "merge", "--ff-only", "origin/" + BASE_BRANCH],
                     git,
                 )
-                self.assertIn(["-C", CHECKOUT_ROOT, "branch", "-d", HEAD_BRANCH], git)
+                self.assertIn(LOCAL_DELETE, git)
 
     def test_an_issue_that_already_closed_itself_is_left_alone(self):
         # `Closes #<n>` closes it on merge, so this is the ordinary case.
@@ -1513,7 +1581,7 @@ class MutationBoundaryTests(unittest.TestCase):
                     ["-C", CHECKOUT_ROOT, "merge", "--ff-only", "origin/" + BASE_BRANCH],
                     git,
                 )
-                self.assertIn(["-C", CHECKOUT_ROOT, "branch", "-d", HEAD_BRANCH], git)
+                self.assertIn(LOCAL_DELETE, git)
                 self.assertIn(
                     ["issue", "close", LINKED_ISSUE, "-R", REPO_SLUG],
                     harness.gh_calls(),
@@ -1531,6 +1599,74 @@ class MutationBoundaryTests(unittest.TestCase):
                 )
                 for call in harness.git_calls() + harness.gh_calls():
                     self.assertNotIn("", call[1:], call)
+
+    def test_a_reused_branch_name_is_never_deleted_by_name_alone(self):
+        # A name is not an identity. Both deletions carry the reviewed head as
+        # the value they expect to find, so a branch another actor deleted and
+        # recreated under the same name cannot be removed by this run.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                _, harness = self.execute(relative_path)
+                git = harness.git_calls()
+                self.assertIn(LOCAL_DELETE, git)
+                self.assertIn(REMOTE_DELETE, git)
+                for call in git:
+                    if "--delete" in call:
+                        lease = [
+                            argument
+                            for argument in call
+                            if argument.startswith("--force-with-lease=")
+                        ]
+                        self.assertEqual(
+                            lease,
+                            [
+                                "--force-with-lease=refs/heads/"
+                                + HEAD_BRANCH
+                                + ":"
+                                + APPROVED_HEAD
+                            ],
+                            call,
+                        )
+                    if "update-ref" in call:
+                        self.assertEqual(call[-1], APPROVED_HEAD, call)
+
+    def test_a_primary_checkout_without_the_branch_still_deletes_the_remote(self):
+        # Finalizing a pull request whose worktree was somebody else's is a
+        # skip, not a failure, and it must not cost the remote deletion.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(relative_path, local_branch=None)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                git = harness.git_calls()
+                for call in git:
+                    self.assertNotIn("update-ref", call, call)
+                self.assertIn(REMOTE_DELETE, git)
+
+    def test_a_failed_cleanup_step_deletes_nothing_after_it(self):
+        # The cleanup is one `&&` chain precisely so a failure here does not
+        # leave a still-checked-out worktree behind while its branch is deleted
+        # out from under it.
+        for relative_path in RENDERED_ASSETS:
+            for index, failing in enumerate(CLEANUP_CHAIN[:-1]):
+                with self.subTest(asset=relative_path, step=" ".join(failing)):
+                    completed, harness = self.execute(
+                        relative_path,
+                        failing_git=failing,
+                        include_issue_close=False,
+                    )
+                    self.assertNotEqual(completed.returncode, 0)
+                    git = harness.git_calls()
+                    # The failing step was attempted, and nothing after it was.
+                    self.assertTrue(
+                        any(matches_step(call, failing) for call in git), git
+                    )
+                    for later in CLEANUP_CHAIN[index + 1 :]:
+                        for call in git:
+                            self.assertFalse(
+                                matches_step(call, later),
+                                f"{' '.join(later)} ran after {' '.join(failing)} "
+                                f"failed: {call}",
+                            )
 
     def test_the_gate_is_re_read_before_the_merge(self):
         # Two runs means two of each read, which is what makes the refresh
