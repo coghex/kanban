@@ -429,9 +429,40 @@ def pull_request_state(
 APPROVED_PAGES = [[comment(1, "2026-08-01T00:00:00Z", coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"]))]]
 GREEN_CHECKS = [{"name": "build-test", "state": "SUCCESS", "bucket": "pass"}]
 
+def worktree_record(path: str, head: str, branch: str | None) -> str:
+    """One `git worktree list --porcelain` block."""
+    lines = [f"worktree {path}", f"HEAD {head}"]
+    lines.append("detached" if branch is None else f"branch refs/heads/{branch}")
+    return "\n".join(lines) + "\n"
+
+
+PRIMARY_RECORD = worktree_record(CHECKOUT_ROOT, "0" * 40, BASE_BRANCH)
+
+# The ordinary listing: the primary checkout, then this pull request's own
+# worktree on its head branch at the reviewed head.
 WORKTREE_LISTING = (
-    f"worktree {CHECKOUT_ROOT}\nHEAD 0000\nbranch refs/heads/{BASE_BRANCH}\n\n"
-    f"worktree {WORKTREE_PATH}\nHEAD 1111\nbranch refs/heads/{HEAD_BRANCH}\n"
+    PRIMARY_RECORD
+    + "\n"
+    + worktree_record(WORKTREE_PATH, APPROVED_HEAD, HEAD_BRANCH)
+)
+
+# A stale worktree for a DIFFERENT pull request whose path carries the same
+# `issue-<n>-` shape. The substring match this replaced would have removed it.
+DECOY_PATH = "/tmp/worktrees/coghex/kanban/issue-7-something-else"
+DECOY_LISTING = PRIMARY_RECORD + "\n" + worktree_record(
+    DECOY_PATH, "2" * 40, "issue-7-something-else"
+)
+
+# The collision a run with no linked issue used to open: an `issue--` path the
+# reduced pattern would have matched.
+EMPTY_ISSUE_DECOY_PATH = "/tmp/worktrees/coghex/kanban/issue--leftover"
+EMPTY_ISSUE_DECOY_LISTING = PRIMARY_RECORD + "\n" + worktree_record(
+    EMPTY_ISSUE_DECOY_PATH, "3" * 40, "issue--leftover"
+)
+
+# The right branch, but moved on to a commit this run did not merge.
+MOVED_ON_LISTING = PRIMARY_RECORD + "\n" + worktree_record(
+    WORKTREE_PATH, "4" * 40, HEAD_BRANCH
 )
 
 
@@ -1488,8 +1519,9 @@ class MutationBoundaryTests(unittest.TestCase):
     def test_a_cross_repository_head_is_never_deleted_here(self):
         # `headRefName` names a branch in the fork, not here, so deleting it on
         # origin would delete whatever unrelated branch happens to share the
-        # name in the base repository. The merge and the worktree removal are
-        # unaffected; only the deletion is refused.
+        # name in the base repository. The merge and the local fast-forward are
+        # unaffected; both deletions are refused. Nothing is removed either:
+        # with no branch of ours, no worktree of ours is on it.
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 completed, harness = self.execute(
@@ -1498,11 +1530,14 @@ class MutationBoundaryTests(unittest.TestCase):
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertIn("another repository", completed.stderr)
                 git = harness.git_calls()
+                self.assertIn(["-C", CHECKOUT_ROOT, "fetch", "origin"], git)
                 self.assertIn(
-                    ["-C", CHECKOUT_ROOT, "worktree", "remove", WORKTREE_PATH], git
+                    ["-C", CHECKOUT_ROOT, "merge", "--ff-only", "origin/" + BASE_BRANCH],
+                    git,
                 )
                 for call in git:
-                    self.assertNotIn("branch", call, call)
+                    self.assertNotIn("remove", call, call)
+                    self.assertNotIn("update-ref", call, call)
                     self.assertNotIn("--delete", call, call)
 
     def test_a_checkout_off_the_base_branch_keeps_its_local_branches(self):
@@ -1563,15 +1598,77 @@ class MutationBoundaryTests(unittest.TestCase):
                 for call in harness.gh_calls():
                     self.assertNotEqual(call[:2], ["issue", "close"], call)
 
+    def test_a_same_numbered_worktree_for_another_branch_is_left_alone(self):
+        # A path is no more an identity than a branch name is: an
+        # `issue-<n>-` substring matches a stale worktree for a different pull
+        # request that happens to share the number style.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path, worktree_listing=DECOY_LISTING
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                for call in harness.git_calls():
+                    self.assertNotIn(DECOY_PATH, call, call)
+                    self.assertNotIn("remove", call, call)
+
+    def test_a_pull_request_with_no_linked_issue_matches_no_worktree(self):
+        # The collision the old pattern opened: with no issue it reduced to
+        # `issue--`, which an unrelated leftover path could satisfy. Selection
+        # does not read the issue number at all any more.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path,
+                    linked_issue=None,
+                    worktree_listing=EMPTY_ISSUE_DECOY_LISTING,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                for call in harness.git_calls():
+                    self.assertNotIn(EMPTY_ISSUE_DECOY_PATH, call, call)
+                    self.assertNotIn("remove", call, call)
+
+    def test_a_worktree_that_moved_past_the_reviewed_head_is_left_alone(self):
+        # Right branch, wrong commit: it carries work this run did not merge,
+        # so it is not this run's to remove.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path, worktree_listing=MOVED_ON_LISTING
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                for call in harness.git_calls():
+                    self.assertNotIn("remove", call, call)
+
+    def test_the_matching_worktree_is_the_one_removed(self):
+        # Non-vacuity for the three assertions above: the same selection, with
+        # the pull request's own worktree present, really does find it.
+        listing = (
+            PRIMARY_RECORD
+            + "\n"
+            + worktree_record(DECOY_PATH, "2" * 40, "issue-7-something-else")
+            + "\n"
+            + worktree_record(WORKTREE_PATH, APPROVED_HEAD, HEAD_BRANCH)
+        )
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                _, harness = self.execute(relative_path, worktree_listing=listing)
+                removals = [
+                    call for call in harness.git_calls() if "remove" in call
+                ]
+                self.assertEqual(
+                    removals,
+                    [["-C", CHECKOUT_ROOT, "worktree", "remove", WORKTREE_PATH]],
+                )
+
     def test_a_pull_request_with_no_registered_worktree_removes_none(self):
         # The worktree may have been removed already, which is not a reason to
         # run `git worktree remove` against an empty path and then step past
         # the error into the rest of the cleanup.
-        listing = f"worktree {CHECKOUT_ROOT}\nHEAD 0000\nbranch refs/heads/{BASE_BRANCH}\n"
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 completed, harness = self.execute(
-                    relative_path, worktree_listing=listing
+                    relative_path, worktree_listing=PRIMARY_RECORD
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 for call in harness.git_calls():
@@ -1591,11 +1688,12 @@ class MutationBoundaryTests(unittest.TestCase):
         # The defect the two skips above close: `git worktree remove ""` and
         # `gh issue close ""` are errors this workflow, having no `set -e`,
         # would step straight past.
-        listing = f"worktree {CHECKOUT_ROOT}\nHEAD 0000\nbranch refs/heads/{BASE_BRANCH}\n"
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 _, harness = self.execute(
-                    relative_path, worktree_listing=listing, linked_issue=None
+                    relative_path,
+                    worktree_listing=PRIMARY_RECORD,
+                    linked_issue=None,
                 )
                 for call in harness.git_calls() + harness.gh_calls():
                     self.assertNotIn("", call[1:], call)

@@ -61,7 +61,11 @@ created above it.
   bound to the reviewed head rather than to the branch name — `git update-ref -d
   <ref> <old-value>` locally, `--force-with-lease` on the remote — so a branch
   another actor deleted and recreated under the same name is rejected rather
-  than removed. It is authored once under `tools/command_sources/` and rendered
+  than removed. The worktree it removes is identified the same way — the one
+  whose checked-out branch is the pull request's head branch and whose `HEAD` is
+  the reviewed head, read out of `git worktree list --porcelain` rather than
+  matched against a path pattern that a stale worktree of the same number style
+  would satisfy. It is authored once under `tools/command_sources/` and rendered
   into both bundles, and `CLAUDE.md` and `docs/agent-workflow-contract.md`
   §2.10 now record it as the single explicitly-invoked exception to the
   never-merge rule.

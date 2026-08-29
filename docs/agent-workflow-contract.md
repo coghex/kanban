@@ -1541,10 +1541,14 @@ state.
   to remove the merged pull request's own worktree, delete its branch, and
   fast-forward the default branch — every one of those only after GitHub has
   confirmed the pull request as `MERGED`.
-- **Durable state:** none of its own. It removes the merged pull request's
-  existing `issue-<n>-*` worktree, located through this repository's own
-  `git worktree list` so a legacy path and a repository-scoped one are both
-  found where they are, and touches no other worktree, branch, or repository.
+- **Durable state:** none of its own. It removes the merged pull request's own
+  worktree, identified through this repository's own
+  `git worktree list --porcelain` as the one whose checked-out branch is the
+  pull request's `headRefName` and whose `HEAD` is the reviewed head — never by
+  a path pattern, which would match a stale worktree for a different pull
+  request of the same number style and would say nothing about what is checked
+  out in it. A legacy path and a repository-scoped one are both found that way,
+  and no other worktree, branch, or repository is touched.
   Two of its cleanup steps are guarded on values that resolve to nothing rather
   than to a wrong target, and each empty value is a refusal: the head branch is
   resolved only for a pull request whose head is in this repository, so a
@@ -1748,7 +1752,7 @@ find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md
 head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md | kanban | supported | no
 worktrees-root | personal-path | /worktrees | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | no
 codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md | external | supported | no
-awk-cli | executable | awk | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
+awk-cli | executable | awk | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
 rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/note-problem.md | kanban | supported | no
 sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
 tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
@@ -1994,14 +1998,16 @@ own because it names no home-relative bundle path at all.
 
 `awk-cli` and `rg-cli` are `mandatory: no` because nothing outside the
 document workflows declared in
-[document-workflow-contract.md §2](document-workflow-contract.md#2-declared-assets)
-and the documentation-landing helper below
+[document-workflow-contract.md §2](document-workflow-contract.md#2-declared-assets),
+the documentation-landing helper below, and `finalize`
 needs either, and those are optional user-invoked actions. Every one
-of the ten resolves its docs worktree by branch with
+of the ten document workflows resolves its docs worktree by branch with
 `git worktree list --porcelain | awk ...`, which is why `awk` is a dependency
 of all ten — and of `tools/docs_land.sh`, which resolves its worktrees the
-same way; like `find` and `head`, every supported
-macOS/Linux shell already provides it. `rg` is the exception: both
+same way, and of `finalize` (issue #544), which reads the same porcelain record
+to find the merged pull request's own worktree by the branch and head it has
+checked out rather than by a substring of its path. Like `find` and `head`,
+every supported macOS/Linux shell already provides it. `rg` is the exception: both
 `process-report` variants name ripgrep to list a report's finding headings —
 inside a fenced block in the Claude command, in prose in the Codex skill — and
 both `note-problem` variants name it in prose to locate the implementation an

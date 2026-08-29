@@ -460,7 +460,7 @@ pull request itself rather than from the session's own directory:
 BASE="$(gh pr view "$PR" -R "$REPO" --json baseRefName --jq .baseRefName)"
 BRANCH="$(gh pr view "$PR" -R "$REPO" --json isCrossRepository,headRefName --jq 'select(.isCrossRepository == false) | .headRefName')"
 ISSUE="$(gh pr view "$PR" -R "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[0].number // empty')"
-WORKTREE="$(git -C "$ROOT" worktree list --porcelain | sed -n "/issue-$ISSUE-/s#^worktree ##p")"
+WORKTREE="$(git -C "$ROOT" worktree list --porcelain | awk -v ref="refs/heads/$BRANCH" -v sha="$HEAD" '/^worktree /{path=substr($0,10); head=""} /^HEAD /{head=$2} /^branch /{if ($2==ref && head==sha) {print path; exit}}')"
 BASE_CHECKOUT="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD | grep -Fx "$BASE")"
 OPEN_ISSUE="$(gh issue view "${ISSUE:-0}" -R "$REPO" --json number,state --jq 'select(.state == "OPEN") | .number')"
 LOCAL_BRANCH="$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH")"
@@ -481,9 +481,23 @@ value into a refusal rather than a wrong deletion:
   go. A detached HEAD leaves it empty too.
 
 `git worktree list` is the only source for the worktree path, so a legacy path
-and a repository-scoped one are both found where they actually are. It is
-scoped to this repository's own registrations: issue numbers are repository-local,
-and another repository's worktrees are not this workflow's to touch.
+and a repository-scoped one are both found where they actually are — and it is
+scoped to this repository's own registrations, since another repository's
+worktrees are not this workflow's to touch.
+
+**The worktree is identified, not pattern-matched.** A path is no more an
+identity than a branch name is: an `issue-<n>-` substring matches a stale
+worktree for a different pull request that happens to share the number style,
+matches whatever a run with no linked issue leaves the pattern reduced to, and
+says nothing about what the worktree actually has checked out. The `awk` above
+reads the porcelain record properly and takes the path of the worktree whose
+`branch` is exactly this pull request's `refs/heads/$BRANCH` **and** whose
+`HEAD` is exactly the reviewed `$HEAD`. Git allows a branch to be checked out in
+at most one worktree, so that names at most one path. Anything else — no match,
+a worktree that has moved on to commits this run did not merge, a
+cross-repository pull request with no local branch at all — leaves `$WORKTREE`
+empty, and an empty `$WORKTREE` removes nothing. The linked issue number is not
+part of this at all any more; it is only what the issue close below reads.
 
 `$WORKTREE` and `$OPEN_ISSUE` are two more values that resolve to nothing rather
 than to something wrong, but unlike the two above they are **skips, not

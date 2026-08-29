@@ -619,9 +619,13 @@ FIX_SURFACE_EXPECTED_COMMANDS = {
 # gate passes its inputs on argv, so unlike `fix` this workflow writes no
 # scratch file anywhere and has none to remove. `grep` is the one exact-match
 # test the cleanup makes -- is the primary checkout on this pull request's base
-# branch? -- and this pair is that row's first packaged consumer.
+# branch? -- and this pair is that row's first packaged consumer. `awk` reads
+# the `git worktree list --porcelain` record properly, so the merged pull
+# request's own worktree is found by the branch and head it has checked out
+# rather than by a substring of its path.
 FINALIZE_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/finalize.md": {
+        "awk",
         "gh",
         "git",
         "grep",
@@ -629,6 +633,7 @@ FINALIZE_SURFACE_EXPECTED_COMMANDS = {
         "sed",
     },
     "codex-plugin/plugins/kanban/skills/finalize/SKILL.md": {
+        "awk",
         "gh",
         "git",
         "grep",
@@ -2691,7 +2696,14 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 )
                 self.assertIn(
                     row["id"],
-                    {"gh-cli", "git-cli", "grep-cli", "python3-cli", "sed-cli"},
+                    {
+                        "awk-cli",
+                        "gh-cli",
+                        "git-cli",
+                        "grep-cli",
+                        "python3-cli",
+                        "sed-cli",
+                    },
                 )
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
 
