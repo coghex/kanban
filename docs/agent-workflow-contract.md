@@ -1556,10 +1556,10 @@ state.
   and no other worktree, branch, or repository is touched.
   Two of its cleanup steps are guarded on values that resolve to nothing rather
   than to a wrong target, and each empty value is a refusal: the head branch is
-  resolved only for a pull request whose head is in this repository, so a
-  cross-repository head is never deleted here under a same-named branch of the
-  base repository; and the local base branch is advanced only when the primary
-  checkout is actually on it, so a pull request targeting a non-default base
+  resolved only for a pull request whose head is in this repository, since a
+  fork's `headRefName` identifies nothing local — neither the worktree to
+  remove nor a ref this repository owns; and the local base branch is advanced
+  only when the primary checkout is actually on it, so a pull request targeting a non-default base
   cannot fast-forward the default branch to somewhere it does not belong.
 
   Deleting the merged head branch on the remote is deliberately **not** part of
@@ -1586,12 +1586,13 @@ state.
   skipped, not closed.
   The whole cleanup is one `&&` chain, so the first failure ends it and nothing
   after it runs — a still-checked-out or dirty worktree is never left behind
-  while its branch is deleted out from under it. Both deletions are bound to the
-  reviewed head rather than to the branch name, because a name is not an
-  identity: the local ref goes through `git update-ref -d <ref> <old-value>` and
-  the remote one through `--force-with-lease=refs/heads/<branch>:<head>`, so a
-  branch another actor deleted and recreated under the same name between the
-  merge and the cleanup is rejected rather than removed.
+  while its branch is deleted out from under it. The one deletion it makes is
+  bound to the reviewed head rather than to the branch name, because a name is
+  not an identity: the local ref goes through
+  `git update-ref -d <ref> <old-value>`, so a branch another actor deleted and
+  recreated under the same name between the merge and the cleanup is rejected
+  rather than removed. There is no remote counterpart to that, by the decision
+  recorded above.
 - **Mandatory/optional:** optional — user-invoked only, reached by asking for
   it, and spawned by no Kanban code path.
 

@@ -273,11 +273,10 @@ VIEWER = "coghex"
 WORKTREE_PATH = "/tmp/worktrees/coghex/kanban/issue-7-example"
 CHECKOUT_ROOT = "/tmp/checkout"
 
-# The two deletions, bound to the reviewed head rather than to the branch name:
-# `update-ref -d <ref> <old>` deletes only a ref that still equals it, and the
-# lease sends the same head as the expected old value so the server performs a
-# compare-and-swap. A name is not an identity — another actor can delete and
-# recreate `$BRANCH` between the merge and the cleanup.
+# The one deletion this workflow makes, bound to the reviewed head rather than
+# to the branch name: `update-ref -d <ref> <old>` deletes only a ref that still
+# equals it. A name is not an identity — another actor can delete and recreate
+# `$BRANCH` between the merge and the cleanup.
 LOCAL_DELETE = [
     "-C",
     CHECKOUT_ROOT,
@@ -1890,33 +1889,18 @@ class MutationBoundaryTests(unittest.TestCase):
                     self.assertNotIn("", call[1:], call)
 
     def test_a_reused_branch_name_is_never_deleted_by_name_alone(self):
-        # A name is not an identity. Both deletions carry the reviewed head as
-        # the value they expect to find, so a branch another actor deleted and
+        # A name is not an identity. The deletion carries the reviewed head as
+        # the value it expects to find, so a branch another actor deleted and
         # recreated under the same name cannot be removed by this run.
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 _, harness = self.execute(relative_path)
                 git = harness.git_calls()
                 self.assertIn(LOCAL_DELETE, git)
-                for call in git:
-                    if "--delete" in call:
-                        lease = [
-                            argument
-                            for argument in call
-                            if argument.startswith("--force-with-lease=")
-                        ]
-                        self.assertEqual(
-                            lease,
-                            [
-                                "--force-with-lease=refs/heads/"
-                                + HEAD_BRANCH
-                                + ":"
-                                + APPROVED_HEAD
-                            ],
-                            call,
-                        )
-                    if "update-ref" in call:
-                        self.assertEqual(call[-1], APPROVED_HEAD, call)
+                deletions = [call for call in git if "update-ref" in call]
+                self.assertEqual(len(deletions), 1, git)
+                for call in deletions:
+                    self.assertEqual(call[-1], APPROVED_HEAD, call)
 
     def test_a_primary_checkout_without_the_branch_still_deletes_the_remote(self):
         # Finalizing a pull request whose worktree was somebody else's is a

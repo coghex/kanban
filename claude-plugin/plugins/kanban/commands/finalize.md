@@ -527,10 +527,11 @@ Two of those resolve to nothing on purpose, and the guards below turn each empty
 value into a refusal rather than a wrong deletion:
 
 - `$BRANCH` is the head branch **only when the head lives in this repository**.
-  A cross-repository pull request's `headRefName` names a branch in the fork, not
-  here, so deleting it on `origin` would delete whatever unrelated branch happens
-  to share the name in the base repository. The `select` leaves `$BRANCH` empty
-  for such a pull request, and the deletion refuses.
+  A cross-repository pull request's `headRefName` names a branch in the fork,
+  not here, so it identifies nothing local: it is not the name of the worktree
+  to remove, and `refs/heads/$BRANCH` is not a ref this repository owns. The
+  `select` leaves `$BRANCH` empty for such a pull request, and the deletion
+  refuses rather than acting on a name that means something else here.
 - `$BASE_CHECKOUT` is the base branch **only when `$ROOT` is actually on it**.
   Fast-forwarding is a local branch update, and `--ff-only` applies it to
   whatever branch the checkout has out — which for a pull request targeting a
