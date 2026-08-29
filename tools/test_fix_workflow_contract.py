@@ -206,6 +206,20 @@ REQUIRED_PHRASES = {
         "2. **A rollup you cannot trust** — before any branch below draws a "
         "conclusion\n   from the rollup, that rollup must be COMPLETE."
     ),
+    "a-null-rollup-is-trusted-checks-none": (
+        "when `statusCheckRollup` itself is `null` or absent, treat it as "
+        "`ChecksNone`, exactly as `parseChecks` does in "
+        "`src/Kanban/GitHub/Decode.hs`"
+    ),
+    "a-null-rollup-continues-as-no-checks": (
+        "There is no `contexts` object to compare in that shape because GitHub "
+        "is reporting NO checks; continue through the later branches with no "
+        "failed or pending checks."
+    ),
+    "a-malformed-present-rollup-still-fails-closed": (
+        "Do not confuse that with a PRESENT, non-null rollup whose `contexts`, "
+        "`totalCount`, or nodes cannot be read — that still fails closed."
+    ),
     "a-failed-check-is-fixed-not-retried": (
         "3. **Failed check** — EVERY failed check in the DEDUPLICATED set "
         "above, required or not, not only required checks, and not only the "
@@ -652,6 +666,22 @@ class RollupCompletenessTests(unittest.TestCase):
         decode = read(REPO_ROOT / "src/Kanban/GitHub/Decode.hs")
         self.assertIn("then pure (ChecksUnknown, [])", decode)
         self.assertIn("Left _ -> pure (ChecksUnknown, [ChecksUndecodable])", decode)
+
+    def test_the_decoder_maps_an_absent_or_null_rollup_to_checks_none(self):
+        decode = read(REPO_ROOT / "src/Kanban/GitHub/Decode.hs")
+        self.assertIn('rollup <- object .:? "statusCheckRollup"', decode)
+        self.assertIn("Nothing -> pure (ChecksNone, [])", decode)
+
+    def test_both_assets_distinguish_null_from_a_malformed_present_rollup(self):
+        for path in FIX_ASSETS:
+            text = flat(read(path))
+            self.assertIn(
+                "statusCheckRollup` itself is `null` or absent, treat it as "
+                "`ChecksNone`",
+                text,
+                path,
+            )
+            self.assertIn("PRESENT, non-null rollup", text, path)
 
     def test_the_branch_precedes_every_clearing_or_mutating_branch(self):
         for path in FIX_ASSETS:

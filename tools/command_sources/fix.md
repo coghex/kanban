@@ -193,6 +193,14 @@ this order:
    `src/Kanban/Workflow.hs` makes it neither ready nor pending — it is never a
    clearance. Establish completeness rather than assuming it:
 
+   One shape is a trusted empty set, not an unreadable rollup: when
+   `statusCheckRollup` itself is `null` or absent, treat it as `ChecksNone`,
+   exactly as `parseChecks` does in `src/Kanban/GitHub/Decode.hs`. There is no
+   `contexts` object to compare in that shape because GitHub is reporting NO
+   checks; continue through the later branches with no failed or pending
+   checks. Do not confuse that with a PRESENT, non-null rollup whose
+   `contexts`, `totalCount`, or nodes cannot be read — that still fails closed.
+
    Compare the `totalCount` the query above returned against the number of
    nodes it returned beside it. They must be equal — the same comparison
    `src/Kanban/GitHub/Decode.hs` makes before it decodes a single context.
