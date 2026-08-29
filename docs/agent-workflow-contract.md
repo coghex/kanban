@@ -6,7 +6,7 @@ Contract version: 2
 
 Kanban's board is fully usable without any AI provider. A smaller set of
 explicit actions — issue solve, PR review/rereview/revise/repair, the
-approved-pull-request fix, canonical
+approved-pull-request fix, the manual finalization fallback, canonical
 issue
 review/rereview, the solve readiness gate, and the two optional background
 services, the PR drainer and the issue approval service — call
@@ -1472,6 +1472,160 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
 - **Mandatory/optional:** optional — user-invoked only, reached by asking for
   it, and spawned by no Kanban code path.
 
+### 2.10 Manual finalization (`$finalize` / `/finalize`)
+
+**Merge authority.** `tools/drain_prs.py` owns merging eligible approved pull
+requests out of the Done column, and that ownership is unchanged. No agent
+merges a pull request on its own initiative: the solve, review, rereview,
+revise, repair, and fix actions above each stop at the open pull request, and
+an autonomous loop does the same. `finalize` is the one declared exception, and
+it is the *user's* exception rather than an agent's — it merges only the one
+pull request the user names, in the turn the user asks for it, and only because
+the drainer that would otherwise have merged it cannot be used. Reaching it
+without such a request is a contract violation whatever the pull request's
+state.
+
+- **Owning source:** the packaged workflows themselves
+  (`codex-plugin/plugins/kanban/skills/finalize/SKILL.md`,
+  `claude-plugin/plugins/kanban/commands/finalize.md`), both rendered from the
+  one authored source `tools/command_sources/finalize.md` by
+  `tools/render_command_sources.py`. There is no Haskell invocation, so
+  `finalize` is deliberately absent from the name-parity sets in
+  `tools/test_codex_plugin.py` and `tools/test_claude_plugin.py`. It is not a
+  drafting workflow, and is not part of the declared drafting surface
+  ([drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)).
+  Its behavioral contract is `tools/test_finalize_workflow.py`.
+- **Invocation:** user-invoked only, as `$finalize <pr>` / `/finalize <pr>`, or
+  after drainer recovery (§2.4) has established that manual finalization is the
+  appropriate fallback for one named pull request. A pull request merely being
+  ready is not an invocation.
+- **Inputs:** one positive pull request number, validated as exactly that
+  before the first GitHub read: `gh` accepts a branch name or a URL wherever a
+  pull request number goes, so an unvalidated target would let
+  `$finalize some-branch` / `/finalize some-branch` gate and then merge whatever
+  pull request that branch has open. An empty, non-numeric, non-positive, or
+  multi-token value is refused having read nothing. The repository identity is
+  resolved once from the checkout's `origin` remote before the first GitHub
+  read, reported to the user, and passed as `-R "$REPO"` on every
+  repository-addressed `gh` call; the paginated issue-comment feed embeds
+  `repos/$REPO/...`. The authenticated-user lookup is the one call that names
+  no repository, because that endpoint has none.
+- **Target restriction:** it finalizes a pull request whose base is the
+  repository's **default branch**, and refuses any other. A pull request can be
+  *retargeted* to a different base without its head moving, which leaves both
+  the approval label and the head-bound marker current while the reviewed code
+  would land on a base nobody reviewed it against;
+  `.github/workflows/review-gate.yml` strips the label on a `synchronize` push
+  and never on a retarget, and the marker records no base to compare with. This
+  is therefore a narrowing rather than a check: a stacked pull request onto a
+  feature base is out of this action's scope and belongs to whoever owns that
+  base. A default branch that cannot be resolved refuses too.
+
+  One window stays open, and is accepted rather than closed. The base is
+  re-read immediately before the merge, but `gh pr merge` binds only the head:
+  `--match-head-commit` has no base counterpart, so a retarget between that
+  read and the merge lands the reviewed head on the new base. Closing it means
+  advancing the base reference directly with a compare-and-swap instead of
+  asking GitHub to merge — a remote write this action deliberately does not
+  make. `tools/drain_prs.py` merges with the same call and the same binding
+  unattended, so the exposure belongs to the merge primitive and this action is
+  no more subject to it than the component that owns merging. The base actually
+  merged onto is named in the report, which is what makes the window
+  auditable.
+- **Review gate:** fail-closed, and evaluated twice — once to decide, and again
+  immediately before the merge with nothing in between, because labels, the
+  head, and the check set are all mutable. It requires the pull request to be
+  approved under the repository's own configured `approval_mode`, by its own
+  configured `approval_label` or GitHub's `reviewDecision`, with the configured
+  changes-requested and blocking labels absent — resolved from the global
+  `[workflow]` table overridden by `[repositories."<owner>/<name>".workflow]`,
+  exactly as the bundled coordinator, the drainer and the board resolve them,
+  and compared with case folded on both sides as `hasLabel` does. It requires
+  the authenticated login resolved; the complete paginated issue-comment feed
+  read through a temporary file outside the checkout — that feed is the one
+  unbounded input, and an argument long enough to carry it exceeds the system
+  limit on exactly the long pull requests the pagination exists to read — and
+  ordered newest-first; and the globally newest marker *that login published* to be a
+  well-formed `pr-review:v2` marker — the current coordinator's shape,
+  including its comma-joined `reviewers=` and `models=` fields — or the legacy
+  `pr-review:v1` spelling, naming the pull request's current `headRefOid` with
+  `verdict=APPROVE`. A marker authored by anyone else, a malformed marker, a
+  stale head, and a non-`APPROVE` verdict each refuse — and so does a comment
+  carrying more than one marker, since taking the first that parsed would read
+  an `APPROVE` followed by a `CHANGES_REQUESTED` as the approval alone and would
+  never reach the malformed test at all. The marker's `reviewers=`
+  set must also exclude the pull request's own brand, read off the body by
+  exactly `originFromBody`'s rules: an approval published by the brand that
+  wrote the code is a self-review, which the marker alone cannot reveal because
+  it names who reviewed and not who wrote. A body with no marker is the
+  unknown-origin route the coordinator reviews with both brands, and there only
+  a marker naming both is known to be independent. Beyond the marker it requires
+  `mergeable` to be exactly `MERGEABLE` and every check to be successful, both
+  before any mutation.
+- **Refusal:** total. It merges nothing, closes nothing, removes no worktree,
+  and deletes no branch, and it never adds, removes, or repairs a verdict label
+  to get past its own gate.
+- **Merge:** `gh pr merge <pr> -R "$REPO" --admin --merge --match-head-commit
+  <validated head>`, the same call `tools/drain_prs.py` makes. Never `--squash`
+  and never `--rebase`, and never GitHub auto-merge: arming a merge on a head
+  whose checks have not passed is a mutation the gate forbids.
+- **Required authority:** GitHub read on the pull request, its comment feed,
+  and its checks; write to merge it and to close the linked issue. Local write
+  to remove the merged pull request's own worktree, delete its **local** branch
+  ref, and fast-forward the default branch — every one of those only after
+  GitHub has confirmed the pull request as `MERGED`. It writes to no git remote
+  at all: it deletes no remote branch, and the local deletion it does make is
+  bound to the reviewed head through `git update-ref -d <ref> <old-value>`.
+- **Durable state:** none of its own. It removes the merged pull request's own
+  worktree, identified through this repository's own
+  `git worktree list --porcelain` as the one whose checked-out branch is the
+  pull request's `headRefName` and whose `HEAD` is the reviewed head — never by
+  a path pattern, which would match a stale worktree for a different pull
+  request of the same number style and would say nothing about what is checked
+  out in it. A legacy path and a repository-scoped one are both found that way,
+  and no other worktree, branch, or repository is touched.
+  Two of its cleanup steps are guarded on values that resolve to nothing rather
+  than to a wrong target, and each empty value is a refusal: the head branch is
+  resolved only for a pull request whose head is in this repository, since a
+  fork's `headRefName` identifies nothing local — neither the worktree to
+  remove nor a ref this repository owns; and the local base branch is advanced
+  only when the primary checkout is actually on it, so a pull request targeting a non-default base
+  cannot fast-forward the default branch to somewhere it does not belong.
+
+  Deleting the merged head branch on the remote is deliberately **not** part of
+  this action. Making it safe from here is a lattice rather than a check: the
+  identity is resolved from the remote's fetch URL while `git push` follows the
+  multi-valued `remote.origin.pushurl`, every one of those URLs receives the
+  push, and a URL reduced to an `owner/name` has lost the host it was going to.
+  For a step whose value is tidiness, on a fallback that runs when the ordinary
+  machinery is already unavailable, the branch is left instead: a repository
+  with `delete_branch_on_merge` has GitHub remove it as part of the merge,
+  `tools/drain_prs.py` removes it after its own merges, and otherwise it stays
+  as a visible, reversible leftover.
+
+  Two
+  further values resolve to nothing as ordinary *skips* rather than refusals —
+  a pull request that closes no issue, one whose issue already closed itself
+  through `Closes #<n>`, and one whose worktree is already gone — and each
+  skipped step is not run at all rather than run against an empty argument,
+  which `git` and `gh` would turn into an error the workflow would step past.
+  The issue it closes is selected from the closing references **with the
+  repository each one names**, and only one naming `$REPO` is taken: issue
+  numbers are repository-local, so a pull request closing `other/repo#7` would
+  otherwise close an unrelated `$REPO#7`. References in other repositories are
+  skipped, not closed.
+  The whole cleanup is one `&&` chain, so the first failure ends it and nothing
+  after it runs — a still-checked-out or dirty worktree is never left behind
+  while its branch is deleted out from under it. The one deletion it makes is
+  bound to the reviewed head rather than to the branch name, because a name is
+  not an identity: the local ref goes through
+  `git update-ref -d <ref> <old-value>`, so a branch another actor deleted and
+  recreated under the same name between the merge and the cleanup is rejected
+  rather than removed. There is no remote counterpart to that, by the decision
+  recorded above.
+- **Mandatory/optional:** optional — user-invoked only, reached by asking for
+  it, and spawned by no Kanban code path.
+
 ## 3. Migration boundary
 
 Kanban owns the canonical issue-review backend, fully: its path convention,
@@ -1619,9 +1773,9 @@ file rather than per definition.
 codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
-gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | yes
-git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | yes
-python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | no
+gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | yes
+git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | yes
+python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs;src/Kanban/ApprovalService.hs | kanban | supported | no
 launchctl-cli | executable | launchctl | tools/service_manager.py;src/Kanban/ApprovalService.hs | kanban | supported | no
@@ -1652,13 +1806,13 @@ find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md
 head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md | kanban | supported | no
 worktrees-root | personal-path | /worktrees | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | no
 codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md | external | supported | no
-awk-cli | executable | awk | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
+awk-cli | executable | awk | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
 rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/note-problem.md | kanban | supported | no
-sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md | kanban | supported | no
+sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
 tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
-grep-cli | executable | grep | tools/docs_land.sh | kanban | supported | no
-mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | no
-rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | no
+grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
+mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
+rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
 ```
 
@@ -1868,9 +2022,14 @@ counterpart, for the reason the next paragraph gives.
 
 `mktemp-cli` and `rm-cli` are `mandatory: no` for the same shape of reason:
 `fix` writes the check rollup it diagnoses from to a temporary file OUTSIDE the
-worked checkout and deletes it, because CLAUDE.md's hygiene rule forbids leaving
-a scratch file in the tree and `tools/drain_prs.py` would otherwise have to
-relocate it before every fast-forward. `mktemp-cli` is also `tools/docs_land.sh`'s.
+worked checkout and deletes it, and `finalize` (issue #544) does the same with
+the paginated comment feed its review gate is decided from — that feed is the
+one input which grows without bound, and passing it as an argument would exceed
+the system argument limit on exactly the long pull requests the pagination
+exists to read. Both write outside the tree and delete afterwards, because
+CLAUDE.md's hygiene rule forbids leaving a scratch file in it and
+`tools/drain_prs.py` would otherwise have to relocate it before every
+fast-forward. `mktemp-cli` is also `tools/docs_land.sh`'s.
 
 `find-cli` and `head-cli` are `mandatory: no`: they are only needed to locate
 one of the installed Codex plugin's own vendored scripts from inside a workflow
@@ -1898,14 +2057,16 @@ own because it names no home-relative bundle path at all.
 
 `awk-cli` and `rg-cli` are `mandatory: no` because nothing outside the
 document workflows declared in
-[document-workflow-contract.md §2](document-workflow-contract.md#2-declared-assets)
-and the documentation-landing helper below
+[document-workflow-contract.md §2](document-workflow-contract.md#2-declared-assets),
+the documentation-landing helper below, and `finalize`
 needs either, and those are optional user-invoked actions. Every one
-of the ten resolves its docs worktree by branch with
+of the ten document workflows resolves its docs worktree by branch with
 `git worktree list --porcelain | awk ...`, which is why `awk` is a dependency
 of all ten — and of `tools/docs_land.sh`, which resolves its worktrees the
-same way; like `find` and `head`, every supported
-macOS/Linux shell already provides it. `rg` is the exception: both
+same way, and of `finalize` (issue #544), which reads the same porcelain record
+to find the merged pull request's own worktree by the branch and head it has
+checked out rather than by a substring of its path. Like `find` and `head`,
+every supported macOS/Linux shell already provides it. `rg` is the exception: both
 `process-report` variants name ripgrep to list a report's finding headings —
 inside a fenced block in the Claude command, in prose in the Codex skill — and
 both `note-problem` variants name it in prose to locate the implementation an
@@ -1913,14 +2074,49 @@ observation is about. It is the one entry in this manifest that a stock system
 may genuinely lack. That costs an installation without it those four workflows'
 search step and nothing else, which is what `mandatory: no` records.
 
-`sed-cli`, `tr-cli`, `grep-cli`, `mktemp-cli`, and `dirname-cli` are the
-documentation-landing helper's own utilities (issue #410): `tools/docs_land.sh`
-resolves its worktrees, formats its occupant reports, and stages its temporary
-path lists with them, and it also spawns `git`, `awk`, and `python3` — the
-last to reach `tools/docs_land_paths.py`, which itself spawns only `git`. All
-are `mandatory: no` because landing documentation is an optional user-invoked
-action, and every supported macOS/Linux shell already provides these
-utilities.
+`tr-cli` and `dirname-cli` are the documentation-landing helper's own utilities
+(issue #410): `tools/docs_land.sh` reaches both and nothing else in this
+repository does. It also spawns `git`, `awk`, `sed`, `grep`, `mktemp`, and
+`python3` — the last to reach `tools/docs_land_paths.py`, which itself spawns
+only `git`. All are `mandatory: no` because landing documentation is an optional
+user-invoked action, and every supported macOS/Linux shell already provides
+these utilities.
+
+`grep-cli` gained its first packaged consumer with `finalize` (issue #544). It
+is one exact-match test there, and it is what makes two of that workflow's
+refusals refusals rather than wrong writes: the checked-out branch of the
+primary checkout must be the pull request's own base branch before a
+fast-forward advances it, so `grep -Fx "$BASE"` over
+`git symbolic-ref --short HEAD` leaves the variable the fast-forward is guarded
+on empty for every other branch and for a detached HEAD.
+
+`sed-cli` outgrew that helper as the vendored workflows landed, and its row
+records it: `retriage`, `backlog-review`, and `project-review` rewrite roadmap
+and report text with it, `drain-prs` reduces a remote URL to one `owner/name`
+with it, and `finalize` does both — the same remote reduction, plus the
+`git worktree list --porcelain` reads that name the primary checkout and the
+merged pull request's own worktree. It stays `mandatory: no` for the reason the
+utilities above are: every workflow that spawns it is an optional user-invoked
+action, and every supported macOS/Linux shell already provides it.
+
+`finalize` is the newest consumer of the four executable rows a packaged
+workflow can carry, and the first packaged consumer of any of them that merges
+(issue #544, slice VEND-7). Its `gh` calls are the whole of its GitHub reach:
+the authenticated-user lookup, the pull-request read, the paginated
+issue-comment feed its review-marker gate is decided from, the check listing,
+the merge itself, the merged-state confirmation, the three cleanup reads, and
+the linked issue's close. Every one of those that addresses a repository
+carries `-R "$REPO"`, and the paginated feed embeds `repos/$REPO/...`; the
+authenticated-user endpoint is global and takes neither, which is the one
+`gh` call in the workflow that names no repository because there is none to
+name. Its `git` calls are the primary checkout's own — the worktree listing,
+the remote URL the repository identity is reduced from, and the post-merge
+worktree removal, branch deletion, fetch, and fast-forward — and its `python3`
+call is the gate itself, which decides against the JSON those `gh` reads
+returned rather than making a request of its own. Both rendered assets are
+declared against all four rows, because both are one render of one source: a
+brand block that leaked a call into one and not the other would leave that
+brand's asset speaking a tool its declaration does not carry.
 
 ## 5. Portable-install policy
 

@@ -166,8 +166,15 @@ This repository is developed by agents, and the board reads their state off GitH
   carries exactly one of `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->` as its
   final non-whitespace content — `Kanban.PullRequestFlow.originFromBody` rejects a
   duplicated, mixed, or trailing-text marker.
-- Never merge a pull request. Solve and review agents stop at the open PR;
-  `tools/drain_prs.py` owns merging eligible PRs out of the Done column.
+- Never merge a pull request on your own initiative. Solve, review, and
+  autonomous agents stop at the open PR; `tools/drain_prs.py` owns merging
+  eligible PRs out of the Done column. The single exception is the packaged
+  `finalize` workflow, and it is the user's to invoke, not an agent's to
+  choose: it merges one named pull request, only when the user asks for it in
+  that turn because the drainer cannot be used, and it refuses any pull request
+  whose current head lacks a fresh opposite-brand approval marker, a passing
+  check set, and a clean merge state. See `docs/agent-workflow-contract.md`
+  §2.10.
 
 ## Hygiene
 

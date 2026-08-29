@@ -275,6 +275,23 @@ COMMAND_SOURCES = (
             "document all nine control operations."
         ),
     ),
+    CommandSource(
+        name="finalize",
+        source="tools/command_sources/finalize.md",
+        claude_commands_dir=CLAUDE_COMMANDS_DIR,
+        codex_skills_dir=CODEX_SKILLS_DIR,
+        note=(
+            "VEND-7, and the one slice in the arc with no Codex counterpart "
+            "to reconcile against: the personal collection held a single "
+            "Claude copy, so the Codex asset is authored by rendering it. "
+            "Its reconciliation was therefore entirely against this "
+            "repository -- a review gate reading a marker version the "
+            "coordinator stopped publishing, a service manager named as "
+            "launchd alone, and four unscoped gh calls -- which is why every "
+            "claim it makes is pinned as behavior in "
+            "tools/test_finalize_workflow.py rather than carried over."
+        ),
+    ),
 )
 
 

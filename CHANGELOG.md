@@ -15,6 +15,109 @@ created above it.
 
 ### Unreleased
 
+- A new packaged workflow, `/finalize` (Codex: `$finalize`), is the manual
+  fallback for merging one reviewed pull request when the service-managed PR
+  drainer cannot be used. It is not the ordinary merge path and is never taken
+  on an agent's own initiative: `tools/drain_prs.py` keeps owning eligible
+  merges, and every other packaged workflow still stops at the open pull
+  request. `finalize` runs on the pull request the user names, in the turn the
+  user asks for it.
+
+  It takes one positive pull request number and checks that it is one before
+  reading anything: `gh` accepts a branch name or a URL wherever a number goes,
+  so an unvalidated target would let `/finalize some-branch` merge whatever pull
+  request that branch has open.
+
+  It finalizes a pull request onto the repository's **default branch** only. A
+  pull request can be retargeted to a different base without its head moving,
+  which leaves the approval label and the head-bound marker both current while
+  the reviewed code would land on a base nobody reviewed it against — the
+  review gate workflow strips the label on a push and never on a retarget, and
+  the marker records no base to compare with. A stacked pull request onto a
+  feature base is deliberately out of scope.
+
+  One window is accepted rather than closed, and documented as such: the base
+  is re-read immediately before the merge, but `--match-head-commit` binds only
+  the head and has no base counterpart, so a retarget in that last instant
+  lands the reviewed head on the new base. Closing it would mean advancing the
+  base reference directly with a compare-and-swap rather than asking GitHub to
+  merge — a remote write this workflow deliberately does not make — and
+  `tools/drain_prs.py` merges with the same call and the same binding
+  unattended, so the exposure is the merge primitive's rather than this
+  workflow's. The base actually merged onto is named in the report.
+
+  Its gate fails closed and is evaluated twice — once to decide, and again
+  immediately before the merge, because labels, the head, and the check set are
+  all mutable. It resolves the authenticated GitHub login, reads the whole
+  paginated comment feed rather than a bounded window — through a temporary
+  file outside the checkout, since that feed is the one unbounded input and an
+  argument long enough to carry it exceeds the system limit on exactly the long
+  pull requests the pagination exists to read — and requires the
+  globally newest marker that login published to name the pull request's
+  current head with `verdict=APPROVE`. That marker is the `pr-review:v2` shape
+  the review coordinator publishes today, comma-joined `reviewers=` and
+  `models=` fields included, with the legacy `pr-review:v1` spelling still
+  honoured; a marker authored by anyone else, a malformed one, a stale head,
+  and a non-`APPROVE` verdict each refuse. The marker's reviewers must also
+  exclude the pull request's own brand — read off the body by exactly
+  `originFromBody`'s rules — because an approval published by the brand that
+  wrote the code is a self-review that the marker alone cannot reveal; a body
+  declaring no origin is the coordinator's dual route, where only a marker
+  naming both brands is known to be independent. Beyond the marker, the pull
+  request must be approved under the repository's *own* configured
+  `approval_mode`, by its own configured `approval_label` or GitHub's
+  `reviewDecision`, with the configured changes-requested and blocking labels
+  absent — the same global-then-per-repository resolution the coordinator, the
+  drainer and the board make, so a repository that renamed its verdict labels
+  is read correctly rather than having every approval refused. A `mergeable`
+  that is not exactly `MERGEABLE`, a merge state that is not ready, and any
+  check that is not successful refuse too. Readiness mirrors Kanban's own
+  `mergeStateReady`: `CLEAN`, and a `BLOCKED` state on a `MERGEABLE` pull
+  request, which is the branch-protection requirement `--admin` clears.
+  `BEHIND` and `UNSTABLE` refuse — `mergeable` says whether a merge would be
+  clean, not whether it should happen now, and a head that has not seen its
+  base tip belongs in `/fix` and the drainer's branch-update-and-rereview path
+  rather than here. A refusal merges nothing, closes nothing, removes no
+  worktree, and deletes no branch.
+
+  It merges with `--admin --merge --match-head-commit`, the same call the
+  drainer makes, and never `--squash`, `--rebase`, or GitHub auto-merge —
+  arming a merge on a head whose checks have not passed is a mutation the gate
+  forbids. The linked issue, the pull request's worktree, its branch, and the
+  local default branch are only touched after GitHub confirms the pull request
+  as `MERGED`.
+
+  It deletes no **remote** branch, and writes to no git remote at all. A
+  repository with `delete_branch_on_merge` has GitHub remove the head branch as
+  part of the merge, and `tools/drain_prs.py` removes it after its own merges,
+  so what a remote deletion here would have added is tidiness — against several
+  ways to delete the wrong branch, since the repository identity comes from the
+  remote's fetch URL while `git push` follows the multi-valued
+  `remote.origin.pushurl`, every one of those URLs receives the push, and a URL
+  reduced to an `owner/name` has lost the host it was going to. Where neither
+  GitHub nor the drainer removes it, the merged branch stays as a visible,
+  reversible leftover.
+
+  The local cleanup is one `&&` chain, so a failed worktree removal, fetch, or
+  fast-forward ends it rather than being stepped past into the deletion. A
+  cross-repository head is never deleted here under a same-named branch of the
+  base repository, and the local base branch is advanced only when the primary
+  checkout is on it. The local branch deletion is bound to the reviewed head
+  rather than to the branch name — `git update-ref -d <ref> <old-value>` — so a
+  branch another actor deleted and recreated under the same name is rejected
+  rather than removed. The worktree it removes is identified the same way — the one
+  whose checked-out branch is the pull request's head branch and whose `HEAD` is
+  the reviewed head, read out of `git worktree list --porcelain` rather than
+  matched against a path pattern that a stale worktree of the same number style
+  would satisfy. The linked issue is selected the same way: closing references
+  carry the repository they belong to and issue numbers are repository-local,
+  so only a reference naming this repository is closed and one pointing at
+  another repository is skipped rather than turned into a same-numbered issue
+  here. It is authored once under `tools/command_sources/` and rendered
+  into both bundles, and `CLAUDE.md` and `docs/agent-workflow-contract.md`
+  §2.10 now record it as the single explicitly-invoked exception to the
+  never-merge rule.
+
 - A new packaged workflow, `/fix` (Codex: `$fix`), clears the one remaining
   obstacle in front of an **already-approved** pull request. It refuses a pull
   request that is not approved under the configured `approval_mode`, and one
