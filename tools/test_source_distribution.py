@@ -306,6 +306,15 @@ BUNDLED_MECHANISM_MODULES = (
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
 )
 
+# Issue #548's project-review cursor mechanism, asserted for the same reason
+# and against the same failure: the workflow's resume contract is that helper,
+# so a release that shipped the command without it would install a sweep that
+# refuses to start. One copy per bundle, each beside the command that calls it.
+BUNDLED_CURSOR_MODULES = (
+    "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py",
+)
+
 # What each `tools/setup_workflows.py` component installs from. Keyed to that
 # module's own COMPONENTS tuple, so a new component cannot land without a
 # stated source bundle.
@@ -837,6 +846,15 @@ class SourceDistributionTest(unittest.TestCase):
             "invoke, and the Claude bundle its review coordinator's model "
             "roster reader; a bundle that ships the workflows without them "
             "installs a command that fails closed in every repository.",
+        )
+
+    def test_the_bundled_project_review_cursor_ships_with_both_bundles(self):
+        self.assert_present(
+            BUNDLED_CURSOR_MODULES,
+            "Both provider bundles must carry the project-review cursor "
+            "helper their sweep resolves before its first read; a bundle that "
+            "ships the command without it installs a sweep that stops at its "
+            "own helper lookup in every repository.",
         )
 
     def test_provider_bundle_manifests_ship(self):

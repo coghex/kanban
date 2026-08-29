@@ -94,6 +94,7 @@ testAppState board = do
         appProcessSelection = ProcessSelection Nothing 0,
         appIncidentSelection = IncidentSelection Nothing 0,
         appOverlay = Nothing,
+        appOverlayFullscreen = False,
         appNotice = Nothing,
         appBoardFreshness = Fresh epoch,
         appOpenSnapshot = Nothing,

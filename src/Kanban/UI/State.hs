@@ -8,6 +8,8 @@ module Kanban.UI.State
     noticeSet,
     plainTranscript,
     setNotice,
+    settleOverlayFullscreen,
+    toggleOverlayFullscreen,
     transcriptFor,
   )
 where
@@ -57,8 +59,53 @@ forceTerminalRepaint = do
   liftIO (Vty.refresh vty)
   setNotice "Terminal repainted"
 
+-- | Hide whatever overlay is open.
+--
+-- Deliberately does not touch 'appOverlayFullscreen'. Closing clears it, but
+-- that is 'settleOverlayFullscreen''s rule and it holds for every other site
+-- that puts an overlay away or replaces it without coming through here;
+-- restating it here would leave the close path guarded twice and its half of
+-- that rule untested. Nothing renders between this and the settle, which
+-- brick runs at the end of the same event.
 closeOverlay :: EventM Name AppState ()
 closeOverlay = modify (\state -> state {appOverlay = Nothing, appNotice = Nothing})
+
+-- | The whole of what @f@ does: one flag, on the overlay that is open and
+-- honors the toggle.
+--
+-- A refusal rather than a notice when it does not. The solve chooser is the
+-- one overlay that keeps its windowed box, and it says so by staying the size
+-- it is; the footer never names @f@ for it, so there is nothing for a message
+-- to correct.
+toggleOverlayFullscreen :: AppState -> AppState
+toggleOverlayFullscreen state
+  | maybe False overlayHonorsFullscreen state.appOverlay =
+      state {appOverlayFullscreen = not state.appOverlayFullscreen}
+  | otherwise = state
+
+-- | What one event leaves the fullscreen flag holding, given the overlay that
+-- was open before it.
+--
+-- The single seam the reset rule lives at. @appOverlay@ is assigned from
+-- thirty sites and only one of them is 'closeOverlay', so clearing the flag
+-- beside each assignment would be a rule with thirty chances to be forgotten
+-- -- the incidents panel's Enter, which replaces the panel with a live
+-- session without closing anything, is exactly the transition that would be.
+-- Deciding it here from the before-and-after pair instead makes every one of
+-- those sites reset by construction.
+--
+-- Preserved only while the same /surface/ stays open. That is what keeps
+-- @Tab@ session cycling and a refresh that re-points the same overlay
+-- fullscreen while a genuinely different overlay -- or no overlay at all --
+-- comes back windowed.
+settleOverlayFullscreen :: Maybe Overlay -> AppState -> AppState
+settleOverlayFullscreen before state
+  | surviving = state
+  | otherwise = state {appOverlayFullscreen = False}
+  where
+    surviving = case (before, state.appOverlay) of
+      (Just opened, Just still) -> overlaySurface opened == overlaySurface still
+      _ -> False
 
 -- | Review protocol events are addressed by the app-server's thread id
 -- rather than by issue number, which is the one session lookup the shared

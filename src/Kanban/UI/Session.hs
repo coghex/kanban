@@ -82,6 +82,7 @@ import Kanban.Worker
     WorkerSpec (..),
     WorkerTask (..)
     )
+import Kanban.UI.Keys (BoardAction (..), binding, footerHint)
 import Kanban.UI.SessionCore (liveSessionMode)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -250,6 +251,10 @@ processesFooterHints =
     "Enter open session",
     "x kill process tree",
     "wheel scroll",
+    -- Projected from the one declaration site rather than written out, for
+    -- the same reason 'settingsFooterHints' projects it: @f@ is a base-table
+    -- binding the shared arm answers ahead of this panel's own keys.
+    footerHint (binding ToggleFullscreen),
     "Esc close"
   ]
 
@@ -484,6 +489,7 @@ incidentsFooterHints =
     "k/↑ previous",
     "Enter go to the work",
     "wheel scroll",
+    footerHint (binding ToggleFullscreen),
     "Esc close"
   ]
 

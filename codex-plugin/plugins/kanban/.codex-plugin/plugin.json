@@ -1,6 +1,6 @@
 {
   "name": "kanban",
-  "version": "1.23.0",
+  "version": "1.24.0",
   "description": "Kanban's tracked Codex workflows: the Kanban-invoked $solve, $pr-review, $pr-rereview, $pr-revise, and $repair, plus the user-invoked $fix, $issue, $autoissue, $issue-review, $issue-rereview, $design-epic, $process-design-doc, $draft-report, $note-problem, $process-report, $triage, $retriage, $push-docs, $backlog-review, $project-review, and $drain-prs drafting, readiness-gate, document, roadmap, documentation-landing, backlog-audit, history-audit, drainer-control, and approved-pull-request workflows.",
   "author": {
     "name": "Terry"

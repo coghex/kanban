@@ -1,6 +1,7 @@
 module Kanban.UI.Board
   ( CardEnv (..),
     approvalControlLabel,
+    baseFooterRows,
     boardFooterHintLine,
     boardHintLine,
     cardExcerptLimit,
@@ -54,6 +55,7 @@ import Brick.Widgets.Border.Style
     unicodeBold,
   )
 import qualified Brick.Types as BrickTypes
+import qualified Graphics.Vty as Vty
 import Data.List (intersperse )
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -1125,6 +1127,35 @@ drawLiveActivity state isLive frame startedAt activity
     activityGlyph
       | state.appOptions.optionAscii = "*"
       | otherwise = spinnerGlyph frame
+
+-- | How many rows the base frame keeps for itself below an open overlay: the
+-- footer it is about to draw, plus its own bottom border.
+--
+-- Measured by rendering the very widget 'drawBase' draws, rather than by
+-- predicting its height. The footer is variable-height — the hint row, the
+-- freshness row, and a notice drawn with 'txtWrap', which takes as many rows
+-- as the width and the notice between them decide — so a fullscreen box that
+-- reserved a fixed number would cover a wrapped notice on one terminal and
+-- leave a gap above a bare footer on another. This is the only prediction
+-- that cannot drift from what is drawn: it /is/ what is drawn.
+--
+-- @terminalWidth@ is the whole terminal's; the footer's own width is that
+-- less whatever side borders the frame is drawing, which is the one thing
+-- 'drawBase' decides differently between its two border styles.
+baseFooterRows :: AppState -> Int -> BrickTypes.RenderM Name Int
+baseFooterRows state terminalWidth = do
+  rendered <- render (hLimit footerWidth (drawFooter state))
+  pure (Vty.imageHeight rendered.image + baseBottomBorderRows)
+  where
+    footerWidth
+      | usesOpenBorders state = terminalWidth
+      | otherwise = max 0 (terminalWidth - 2)
+
+-- | The frame's bottom edge, which both border styles draw as one row: the
+-- closing 'hBorder' under the open style, and the box border's own bottom
+-- under the other.
+baseBottomBorderRows :: Int
+baseBottomBorderRows = 1
 
 drawFooter :: AppState -> Widget Name
 drawFooter state =

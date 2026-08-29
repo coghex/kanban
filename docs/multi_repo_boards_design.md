@@ -381,6 +381,18 @@ was rejected as too expensive vertically beside the existing column
 headings and footer hint. design.md §6's layout diagram is redrawn in
 MRB-3.
 
+Interplay note (added by #543, the fullscreen slice of the overlay arc).
+Lowercase `f` now makes any open overlay fullscreen, and a fullscreen box is
+composed with this row rather than over it: the tab row stays visible above it,
+and the base footer — the hint line, the freshness line, and however many rows
+a wrapped notice takes — stays visible below it. The fullscreen height budget
+is therefore the terminal minus this row at the top and minus the footer and
+the frame's bottom edge underneath, and its width is the terminal less one
+column of frame on each side, so a fullscreen overlay covers the board and the
+usage sidebar and nothing else. MRB-3 implements the row knowing a fullscreen
+overlay sits underneath it, and `overlay_focus_fullscreen_design.md` D-2 and
+D-10 are the signed-off decisions this restates.
+
 ### D-15. At its floor the row degrades to the active tab plus a count
 
 User signoff 2026-08-16. Labels truncate progressively as width runs out;

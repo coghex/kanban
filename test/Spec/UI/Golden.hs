@@ -772,6 +772,13 @@ frameCases =
         frameCaseState = \state -> state {appOverlay = Just (DetailsOverlay (fixtureItem 823))}
       },
     FrameCase
+      { frameCaseName = "overlay-details-fullscreen",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "the same details overlay after f: the frame's side columns and the footer are all that is left of the board",
+        frameCaseState = fullscreen . \state -> state {appOverlay = Just (DetailsOverlay (fixtureItem 823))}
+      },
+    FrameCase
       { frameCaseName = "overlay-help",
         frameCaseWidth = 200,
         frameCaseHeight = 48,
@@ -916,8 +923,25 @@ sessionModeCases =
         frameCaseHeight = 48,
         frameCaseSummary = "the same overlay after i and a typed draft, in insert mode",
         frameCaseState = revisionSession (typedIntoSession "iCheck the retry path too")
+      },
+    -- Issue #543: the same normal-mode session after `f`. Its transcript
+    -- viewport grows with the box rather than staying nineteen rows inside a
+    -- taller border, which is what separates this frame from a windowed one
+    -- that merely gained a wider title.
+    FrameCase
+      { frameCaseName = "overlay-session-fullscreen",
+        frameCaseWidth = 200,
+        frameCaseHeight = 48,
+        frameCaseSummary = "the normal-mode session overlay after f: a taller transcript, the residual side borders, and the hint row still visible",
+        frameCaseState = fullscreen . revisionSession id
       }
   ]
+
+-- | The state @f@ leaves behind, applied after whichever overlay the case
+-- opens: the flag is one field on the dashboard rather than anything the
+-- overlay carries.
+fullscreen :: AppState -> AppState
+fullscreen state = state {appOverlayFullscreen = True}
 
 -- | An interactive issue-revision session, which is the review stage that
 -- talks to the app-server and therefore the one that reads typed text.
@@ -1483,6 +1507,7 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       appProcessSelection = ProcessSelection Nothing 0,
       appIncidentSelection = IncidentSelection Nothing 0,
       appOverlay = Nothing,
+      appOverlayFullscreen = False,
       appNotice = Just "Cached GitHub snapshot loaded · press u to update",
       appBoardFreshness = Fresh goldenFetchedAt,
       appLastSuccessfulFetch = Just goldenFetchedAt,

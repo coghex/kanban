@@ -71,6 +71,7 @@ import Kanban.Models
     roleKey,
   )
 import Kanban.Settings (ChatVerbosity (..))
+import Kanban.UI.Keys (BoardAction (..), binding, footerHint)
 import Kanban.UI.Types
 
 -- | One @(role, provider)@ assignment as the screen shows it.
@@ -470,5 +471,10 @@ settingsFooterHints =
     "[/] effort",
     "d reset",
     "1/2/3 chat",
+    -- The one chip on this row that is not this overlay's own key. @f@ is
+    -- declared in "Kanban.UI.Keys" and answered by the shared arm ahead of
+    -- 'settingsInput', so the row projects that declaration rather than
+    -- spelling the letter out a second time here.
+    footerHint (binding ToggleFullscreen),
     "Esc close"
   ]
