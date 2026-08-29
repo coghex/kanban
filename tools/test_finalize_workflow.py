@@ -57,6 +57,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -331,6 +332,22 @@ def flat(text: str) -> str:
 
 
 BASH_FENCE_RE = re.compile(r"```bash\n(?P<body>.*?)\n[ \t]*```", re.DOTALL)
+
+# A quoted heredoc and its body, as the gate spells one.
+HEREDOC_BODY_RE = re.compile(
+    r"<<'([A-Za-z_][A-Za-z0-9_]*)'[^\n]*\n(.*?)\n\1\n", re.DOTALL
+)
+# A double-quoted region, removed before the apostrophe rule reads a line: a
+# `'` inside one is literal, because the shell meets the `"` first.
+DOUBLE_QUOTED_RE = re.compile(r'"[^"]*"')
+
+# Every shell installed here. `sh` is a different program per platform -- bash
+# 3.2 on macOS, dash on most Linux -- and they disagree about quote-scanning a
+# heredoc body inside `$( ... )`, so the assets are checked against all of
+# them rather than against whichever one this host calls `sh`.
+AVAILABLE_SHELLS = [
+    name for name in ("sh", "bash", "dash", "zsh") if shutil.which(name)
+]
 
 
 def bash_fences(text: str) -> list[str]:
@@ -726,48 +743,82 @@ class RegistrationTests(unittest.TestCase):
                     self.assertIn(renderer.SIGILS[brand] + name, text)
                     self.assertNotIn(renderer.SIGILS[other] + name, text)
 
-    def test_every_fenced_block_is_valid_shell(self):
-        # An asset is the program an agent runs, and this one runs a Python
-        # gate inside a `$( ... )` command substitution. Bash quote-scans a
-        # heredoc body in that position, so ONE bare apostrophe in a Python
-        # comment -- "the pull request\'s own brand" -- opens a quote that
-        # swallows the rest of the fence and makes the whole block a syntax
-        # error. That is invisible to every string assertion in this module and
-        # to the renderer, and it costs the run before a single `gh` call.
-        for relative_path in RENDERED_ASSETS:
-            for index, fence in enumerate(bash_fences(read(relative_path))):
-                with self.subTest(asset=relative_path, fence=index):
-                    with tempfile.NamedTemporaryFile(
-                        "w", suffix=".sh", delete=False
-                    ) as handle:
-                        handle.write(fence + "\n")
-                        script = handle.name
-                    self.addCleanup(os.unlink, script)
-                    completed = subprocess.run(
-                        ["sh", "-n", script],
-                        stdin=subprocess.DEVNULL,
-                        capture_output=True,
-                        text=True,
-                    )
-                    self.assertEqual(completed.returncode, 0, completed.stderr)
-
-    def test_the_shell_syntax_check_detects_a_planted_unbalanced_quote(self):
-        # The control for the check above: the exact defect it exists to
-        # catch, planted into the gate fence, must fail it.
-        planted = gate_fence(CLAUDE_ASSET).replace(
-            "import json", "# the pull request's own brand\nimport json", 1
-        )
+    def parses_under(self, shell: str, script_text: str) -> int:
         with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
-            handle.write(planted + "\n")
+            handle.write(script_text + "\n")
             script = handle.name
         self.addCleanup(os.unlink, script)
-        completed = subprocess.run(
-            ["sh", "-n", script],
+        return subprocess.run(
+            [shell, "-n", script],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+        ).returncode
+
+    def test_every_fenced_block_is_valid_shell(self):
+        # An asset is the program an agent runs, and this one runs a Python
+        # gate inside a `$( ... )` command substitution -- a position where
+        # shells disagree about whether the heredoc body is quote-scanned.
+        # Every shell on the host is used rather than `sh` alone, because `sh`
+        # is a different program per platform and the strictest one is where
+        # the real protection comes from: macOS ships bash 3.2 as /bin/sh,
+        # which DOES quote-scan there, while dash and modern bash do not.
+        for shell in AVAILABLE_SHELLS:
+            for relative_path in RENDERED_ASSETS:
+                for index, fence in enumerate(bash_fences(read(relative_path))):
+                    with self.subTest(
+                        shell=shell, asset=relative_path, fence=index
+                    ):
+                        self.assertEqual(self.parses_under(shell, fence), 0)
+
+    def test_the_shell_syntax_check_detects_a_planted_error(self):
+        # The control for the check above. The planted defect is an unbalanced
+        # command substitution rather than the apostrophe that motivated the
+        # check, because every shell rejects this one: asserting the
+        # apostrophe here would assert something untrue wherever `sh` is dash.
+        # The apostrophe class has its own check below, statically.
+        planted = gate_fence(CLAUDE_ASSET) + '\nLEFT="$(echo unterminated\n'
+        for shell in AVAILABLE_SHELLS:
+            with self.subTest(shell=shell):
+                self.assertNotEqual(self.parses_under(shell, planted), 0)
+
+    def test_no_heredoc_comment_carries_a_bare_apostrophe(self):
+        # The apostrophe class, pinned without a parser so it holds on every
+        # platform. Inside a heredoc that sits in `$( ... )`, bash 3.2 -- which
+        # is macOS's own /bin/sh -- reads a bare `'` as an opening quote and
+        # swallows the rest of the fence. An apostrophe INSIDE a double-quoted
+        # Python string is safe, because the `"` is seen first, so the rule is
+        # only about the ones left over when those regions are removed.
+        for relative_path in RENDERED_ASSETS:
+            for fence in bash_fences(read(relative_path)):
+                for tag, body in HEREDOC_BODY_RE.findall(fence):
+                    for number, line in enumerate(body.splitlines(), 1):
+                        bare = DOUBLE_QUOTED_RE.sub("", line)
+                        with self.subTest(
+                            asset=relative_path, heredoc=tag, line=number
+                        ):
+                            self.assertNotIn("'", bare, line)
+
+    def test_the_apostrophe_rule_finds_a_planted_comment(self):
+        planted = gate_fence(CLAUDE_ASSET).replace(
+            "import json", "# the pull request's own brand\nimport json", 1
         )
-        self.assertNotEqual(completed.returncode, 0, completed.stderr)
+        found = [
+            line
+            for tag, body in HEREDOC_BODY_RE.findall(planted)
+            for line in body.splitlines()
+            if "'" in DOUBLE_QUOTED_RE.sub("", line)
+        ]
+        self.assertEqual(len(found), 1, found)
+        # And a double-quoted apostrophe is NOT flagged, or the rule would
+        # forbid three refusal messages the gate legitimately carries.
+        safe = [
+            line
+            for tag, body in HEREDOC_BODY_RE.findall(gate_fence(CLAUDE_ASSET))
+            for line in body.splitlines()
+            if "'" in line
+        ]
+        self.assertTrue(safe, "the gate really does carry quoted apostrophes")
 
     def test_no_refusal_word_carries_an_apostrophe(self):
         # A syntactically VALID trap the check above cannot see. A `\'` inside a
