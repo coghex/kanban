@@ -15,6 +15,35 @@ created above it.
 
 ### Unreleased
 
+- A new packaged workflow, `/fix` (Codex: `$fix`), clears the one remaining
+  obstacle in front of an **already-approved** pull request. It refuses a pull
+  request that is not approved under the configured `approval_mode`, and one
+  whose `pr-origin` marker names the other brand — the rereview is routed from
+  that same marker, so fixing another brand's pull request would end in a
+  same-brand review of one's own change. It then resolves a merge conflict,
+  updates a branch that is behind its base, or fixes a failed check, pushing at
+  most one focused commit and handing off exactly one canonical rereview.
+
+  Everything else fails closed rather than guessing. A check rollup that cannot
+  be read completely — GitHub truncates its context list, or an entry will not
+  decode, both `ChecksUnknown` to Kanban — stops the run ahead of every branch
+  that reads it, since not seeing a failure is not the same as there being
+  none. A merge conflict is decided without any check state and so precedes it,
+  and resolving one replaces the head that the checks then re-run against. A `BLOCKED` or `UNSTABLE` merge state is reported rather
+  than "fixed" by a branch update that cannot clear it, and a still-running
+  check stops the run rather than replacing an approved head mid-CI.
+
+  It never retries a check. `tools/drain_prs.py` already reruns a failed
+  required check on an approved pull request, keyed to the approved head and
+  quarantining it once the allowance is spent; a second rerunner with its own
+  ceiling would mean two components disagreeing about the same pull request.
+
+  It runs only on an explicit request to fix or unblock: asking why a pull
+  request cannot merge is answered by reporting the obstacle and stopping,
+  since a diagnostic question authorises none of the pushes or rereview it
+  would otherwise perform. It is authored once under `tools/command_sources/`
+  and rendered into both bundles.
+
 ## 1.1.0.0
 
 Kanban gains a card filter panel, a settings overlay that edits its model

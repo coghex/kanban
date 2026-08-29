@@ -356,6 +356,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/project-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/fix/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
@@ -391,6 +392,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/backlog-review.md",
     "claude-plugin/plugins/kanban/commands/project-review.md",
     "claude-plugin/plugins/kanban/commands/drain-prs.md",
+    "claude-plugin/plugins/kanban/commands/fix.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
@@ -567,6 +569,36 @@ DRAIN_PRS_SURFACE_EXPECTED_COMMANDS = {
         "git",
         "sed",
         "python3",
+    },
+}
+
+# The approved-pull-request obstacle clearer, pinned like the rendered pairs
+# above but with one deliberate asymmetry rather than one shared set. `gh`
+# reads the pull request, its check rollup, and its origin marker -- it never
+# reruns a check, which tools/drain_prs.py owns and this workflow forbids
+# outright; `git` selects the worktree and resolves the repository root;
+# `python3` runs
+# the canonical coordinator. The Codex asset additionally reaches `find` and
+# `head` because it must locate that coordinator under $CODEX_HOME, where the
+# Claude asset resolves it through ${CLAUDE_PLUGIN_ROOT} and needs neither.
+# That difference is authored in a brand block, so pinning the two sets
+# separately is what makes a command leaking ACROSS that block fail here.
+FIX_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/fix.md": {
+        "gh",
+        "git",
+        "mktemp",
+        "python3",
+        "rm",
+    },
+    "codex-plugin/plugins/kanban/skills/fix/SKILL.md": {
+        "find",
+        "gh",
+        "git",
+        "head",
+        "mktemp",
+        "python3",
+        "rm",
     },
 }
 
@@ -2244,6 +2276,57 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     f"segment {segment!r}; declare it in the manifest",
                 )
 
+    def test_every_plugin_surface_asset_home_relative_path_is_documented(self):
+        # The drafting and document loops above each walk their own declared
+        # list, so an asset outside both reached NO home-relative scan at all:
+        # `fix` named ~/.codex twice and no gate saw it. This closes that by
+        # walking the two whole-bundle surface lists, which every packaged
+        # workflow is already on, and it checks the stronger property the
+        # drafting loop does not -- that the DECLARING row actually names the
+        # asset, so a documented token is not mistaken for a documented asset.
+        rows = [row for row in self.manifest if row["kind"] == "personal-path"]
+        for relative_path in PLUGIN_SURFACE_FILES + CLAUDE_PLUGIN_SURFACE_FILES:
+            if not relative_path.endswith(".md"):
+                continue
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            for segment in markdown_home_relative_segments(content):
+                declaring = [
+                    row
+                    for row in rows
+                    if segment in row["token"] or row["token"] in segment
+                ]
+                self.assertTrue(
+                    declaring,
+                    f"{relative_path} names an undocumented user-scoped path "
+                    f"segment {segment!r}; declare it in the manifest",
+                )
+                self.assertTrue(
+                    any(relative_path in row["files"] for row in declaring),
+                    f"{relative_path} names user-scoped path {segment!r} but is "
+                    f"not listed by any row declaring it "
+                    f"({', '.join(row['id'] for row in declaring)}); add it to "
+                    "that row's files column",
+                )
+
+    def test_the_whole_bundle_home_path_scan_really_recovers_something(self):
+        # Non-vacuous anchor for the loop above: a scan that recovered nothing
+        # from every asset would pass while asserting nothing at all.
+        codex_fix = (
+            REPO_ROOT / "codex-plugin/plugins/kanban/skills/fix/SKILL.md"
+        ).read_text(encoding="utf-8")
+        segments = markdown_home_relative_segments(codex_fix)
+        self.assertIn("/.codex", segments)
+        self.assertIn("/worktrees", segments)
+        claude_fix = (
+            REPO_ROOT / "claude-plugin/plugins/kanban/commands/fix.md"
+        ).read_text(encoding="utf-8")
+        # The Claude rendering resolves its coordinator through
+        # ${CLAUDE_PLUGIN_ROOT}, so it names the worktrees root and NOT
+        # ~/.codex -- the asymmetry the brand block exists to produce.
+        claude_segments = markdown_home_relative_segments(claude_fix)
+        self.assertIn("/worktrees", claude_segments)
+        self.assertNotIn("/.codex", claude_segments)
+
     def test_rereview_asset_command_discovery_is_not_vacuous(self):
         # Issue #240's assets reach the completeness loops above by being
         # listed, and a loop over an asset the extractor recovers nothing from
@@ -2493,6 +2576,57 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 )
                 self.assertIn(row["id"], {"git-cli", "sed-cli", "python3-cli"})
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_the_fix_assets_reach_exactly_the_pinned_commands(self):
+        # The approved-pull-request obstacle clearer. Unlike the rendered
+        # pairs above, its two assets are pinned to DIFFERENT sets: the Codex
+        # copy alone reaches `find` and `head`, because only it must locate
+        # the coordinator under $CODEX_HOME. Pinning them separately is what
+        # makes a command leaking across that brand block fail here instead of
+        # being absorbed by a shared set.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path, expected in sorted(FIX_SURFACE_EXPECTED_COMMANDS.items()):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            # `gh` is the assertion here, not an absence: this workflow
+            # reads the pull request, its check rollup, and its origin marker
+            # through it. It never reruns a check -- that is the drainer's.
+            self.assertIn("gh", found, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+            # Declared from the manifest's side too, so being scanned is not
+            # mistaken for being documented.
+            for name in sorted(expected):
+                row = next(
+                    row
+                    for row in self.manifest
+                    if row["kind"] == "executable" and row["token"] == name
+                )
+                self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_only_the_codex_fix_asset_searches_for_its_coordinator(self):
+        # The asymmetry above, asserted as the difference it actually is
+        # rather than as two independent sets that happen to differ.
+        claude = FIX_SURFACE_EXPECTED_COMMANDS[
+            "claude-plugin/plugins/kanban/commands/fix.md"
+        ]
+        codex = FIX_SURFACE_EXPECTED_COMMANDS[
+            "codex-plugin/plugins/kanban/skills/fix/SKILL.md"
+        ]
+        self.assertEqual(codex - claude, {"find", "head"})
+        self.assertEqual(claude - codex, set())
 
     def test_every_drain_prs_asset_home_relative_path_is_documented(self):
         # Requirement 13: the two rendered assets name the drainer install

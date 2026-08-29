@@ -244,6 +244,22 @@ COMMAND_SOURCES = (
         ),
     ),
     CommandSource(
+        name="fix",
+        source="tools/command_sources/fix.md",
+        claude_commands_dir=CLAUDE_COMMANDS_DIR,
+        codex_skills_dir=CODEX_SKILLS_DIR,
+        note=(
+            "The approved-pull-request obstacle clearer. Authored here rather "
+            "than as a hand-edited pair because it restates the worktree, "
+            "cross-repository, and safe-push rules the repair pair already "
+            "carries: two copies of that text is exactly the drift D-3 exists "
+            "to prevent. It is the one registry entry whose body references "
+            "three other workflows -- {{cmd:pr-review}}, {{cmd:pr-revise}} and "
+            "{{cmd:repair}} -- naming each through the token rather than a "
+            "literal sigil."
+        ),
+    ),
+    CommandSource(
         name="drain-prs",
         source="tools/command_sources/drain-prs.md",
         claude_commands_dir=CLAUDE_COMMANDS_DIR,
