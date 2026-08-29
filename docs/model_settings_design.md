@@ -31,7 +31,7 @@ concrete precondition
 - [x] MODEL-12. Extract the provider adapter interface behind the agent flows — [#522]
 - [ ] MODEL-13. Implement the Claude embedded-review backend — [deferred]: Q-12 must carry a signed-off decision in this document
 - [ ] MODEL-10. Implement single-agent review routing in the Haskell flows
-- [ ] MODEL-11. Make the Python gates and plugin reviews single-agent aware
+- [x] MODEL-11. Make the Python gates and plugin reviews single-agent aware — [#572]
 - [ ] MODEL-6. Package the defaults and document the roster surface
 
 ## Epic contract
