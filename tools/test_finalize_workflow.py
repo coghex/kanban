@@ -127,8 +127,8 @@ REPOSITORY_RESOLUTION = 'REPO="$(git -C "$ROOT" remote get-url origin'
 # leave the gate deciding without it, and a field dropped here would leave the
 # harness answering a question the asset never asked.
 PR_VIEW_FIELDS = (
-    "number,url,body,headRefOid,headRefName,baseRefName,labels,mergeable,"
-    "mergeStateStatus,closingIssuesReferences"
+    "number,url,body,headRefOid,headRefName,baseRefName,labels,reviewDecision,"
+    "mergeable,mergeStateStatus,closingIssuesReferences"
 )
 
 # The two origin markers, character for character as `originFromBody` spells
@@ -156,7 +156,8 @@ REPOSITORY_SCOPED_CALLS = (
     'pr view "$PR" -R "$REPO" --json baseRefName',
     'pr view "$PR" -R "$REPO" --json isCrossRepository,headRefName',
     'pr view "$PR" -R "$REPO" --json closingIssuesReferences',
-    'issue close "$ISSUE" -R "$REPO"',
+    'issue view "${ISSUE:-0}" -R "$REPO" --json number,state',
+    'issue close "$OPEN_ISSUE" -R "$REPO"',
 )
 # The one call that names no repository, because the endpoint has none. It is
 # an enumerated exception rather than a pattern: a second unscoped call added
@@ -381,6 +382,7 @@ def pull_request_state(
     mergeable: str = "MERGEABLE",
     merge_state: str = "CLEAN",
     body: str = CLAUDE_ORIGIN_BODY,
+    review_decision: str = "",
 ) -> dict:
     return {
         "number": int(PR_NUMBER),
@@ -390,6 +392,7 @@ def pull_request_state(
         "headRefName": HEAD_BRANCH,
         "baseRefName": BASE_BRANCH,
         "labels": [{"name": name} for name in labels],
+        "reviewDecision": review_decision,
         "mergeable": mergeable,
         "mergeStateStatus": merge_state,
         "closingIssuesReferences": [{"number": int(LINKED_ISSUE)}],
@@ -408,11 +411,20 @@ WORKTREE_LISTING = (
 class Harness:
     """One scripted `gh`/`git` pair plus the fences to run against them."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, config: str | None = None):
         self.fake = fake_cli.FakeCli(root)
         self.fake.install("gh")
         self.fake.install("git")
         self.root = root
+        # The gate resolves its verdict labels from the real well-known path,
+        # so the run gets an XDG config root of its own rather than the
+        # developer's.
+        self.config_home = root / "config"
+        (self.config_home / "kanban").mkdir(parents=True, exist_ok=True)
+        if config is not None:
+            (self.config_home / "kanban" / "config.toml").write_text(
+                config, encoding="utf-8"
+            )
 
     def script_github(
         self,
@@ -425,6 +437,9 @@ class Harness:
         merge_head: str = APPROVED_HEAD,
         cross_repository: bool = False,
         checked_out: str = BASE_BRANCH,
+        linked_issue: str | None = LINKED_ISSUE,
+        issue_open: bool = True,
+        worktree_listing: str = WORKTREE_LISTING,
     ) -> None:
         base = ["pr", "view", PR_NUMBER, "-R", REPO_SLUG, "--json"]
         self.fake.script("gh", ["api", "user", "--jq", ".login"], stdout=viewer + "\n")
@@ -473,16 +488,29 @@ class Harness:
             stdout=("" if cross_repository else HEAD_BRANCH + "\n"),
         )
         self.fake.script(
-            "gh", base + ["closingIssuesReferences"], stdout=LINKED_ISSUE + "\n"
+            "gh",
+            base + ["closingIssuesReferences"],
+            stdout=("" if linked_issue is None else linked_issue + "\n"),
         )
-        self.fake.script("gh", ["issue", "close", LINKED_ISSUE, "-R", REPO_SLUG], stdout="")
+        # Empty stands for "no issue, or one that already closed itself": the
+        # asset's own `select` yields nothing in both cases.
+        self.fake.script(
+            "gh",
+            ["issue", "view", linked_issue or "0", "-R", REPO_SLUG, "--json"],
+            stdout=(
+                (linked_issue + "\n") if (issue_open and linked_issue) else ""
+            ),
+        )
+        self.fake.script(
+            "gh", ["issue", "close", linked_issue or "0", "-R", REPO_SLUG], stdout=""
+        )
         # The specific git reads first: fake_cli takes the first scripted
         # entry whose match is a prefix of the call, so the catch-all has to
         # be inserted last or it would answer these two as well.
         self.fake.script(
             "git",
             ["-C", CHECKOUT_ROOT, "worktree", "list", "--porcelain"],
-            stdout=WORKTREE_LISTING,
+            stdout=worktree_listing,
         )
         self.fake.script(
             "git",
@@ -498,6 +526,7 @@ class Harness:
             "PR": PR_NUMBER,
             "REPO": REPO_SLUG,
             "ROOT": CHECKOUT_ROOT,
+            "XDG_CONFIG_HOME": str(self.config_home),
         }
         env.update(self.fake.environ_overrides())
         return subprocess.run(
@@ -769,9 +798,11 @@ class GateDecisionTests(unittest.TestCase):
     gate on one side would otherwise pass here.
     """
 
-    def decide(self, relative_path: str, **scripted) -> subprocess.CompletedProcess:
+    def decide(
+        self, relative_path: str, config: str | None = None, **scripted
+    ) -> subprocess.CompletedProcess:
         with tempfile.TemporaryDirectory() as directory:
-            harness = Harness(Path(directory))
+            harness = Harness(Path(directory), config=config)
             harness.script_github(**scripted)
             return harness.run(
                 gate_fence(relative_path) + '\nprintf "gate=%s\\n" "$HEAD"\n'
@@ -1006,7 +1037,7 @@ class GateDecisionTests(unittest.TestCase):
             with self.subTest(asset=relative_path):
                 self.assertRefused(
                     self.decide(relative_path, states=[pull_request_state(labels=())]),
-                    "reviewed:approve is not attached",
+                    "this repository approves by label",
                 )
 
     def test_a_present_changes_label_refuses(self):
@@ -1016,6 +1047,121 @@ class GateDecisionTests(unittest.TestCase):
                 self.assertRefused(
                     self.decide(relative_path, states=[state]),
                     "reviewed:changes is attached",
+                )
+
+    def test_a_blocking_label_refuses(self):
+        # hasProblemLabel treats a blocking label exactly as it treats the
+        # changes-requested one, and a blocking label is a human decision.
+        state = pull_request_state(labels=("reviewed:approve", "blocked"))
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(relative_path, states=[state]),
+                    "a blocking label is attached: blocked",
+                )
+
+    def test_the_label_comparison_folds_case_on_both_sides(self):
+        # hasLabel case-folds both sides, so the gate has to as well.
+        state = pull_request_state(labels=("Reviewed:Approve",))
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertApproved(self.decide(relative_path, states=[state]))
+
+    def test_a_repository_that_renamed_its_approval_label_is_read_correctly(self):
+        # The defect this closes: a hard-coded `reviewed:approve` refuses every
+        # approval a repository that renamed the label ever publishes.
+        config = '[workflow]\napproval_label = "ship-it"\n'
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertApproved(
+                    self.decide(
+                        relative_path,
+                        config=config,
+                        states=[pull_request_state(labels=("ship-it",))],
+                    )
+                )
+                # And the default is no longer an approval there.
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        config=config,
+                        states=[pull_request_state(labels=("reviewed:approve",))],
+                    ),
+                    "this repository approves by label",
+                )
+
+    def test_a_repository_override_wins_over_the_global_table(self):
+        config = (
+            '[workflow]\napproval_label = "global-approve"\n\n'
+            '[repositories."coghex/kanban".workflow]\n'
+            'approval_label = "repo-approve"\n'
+        )
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertApproved(
+                    self.decide(
+                        relative_path,
+                        config=config,
+                        states=[pull_request_state(labels=("repo-approve",))],
+                    )
+                )
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        config=config,
+                        states=[pull_request_state(labels=("global-approve",))],
+                    ),
+                    "this repository approves by label",
+                )
+
+    def test_a_renamed_changes_requested_label_still_refuses(self):
+        config = '[workflow]\nchanges_requested_label = "needs-work"\n'
+        state = pull_request_state(labels=("reviewed:approve", "needs-work"))
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(relative_path, config=config, states=[state]),
+                    "needs-work is attached",
+                )
+
+    def test_a_review_mode_repository_accepts_githubs_own_approval(self):
+        # A repository configured for `review` would otherwise look unapproved
+        # with a perfectly good approval on it.
+        config = '[workflow]\napproval_mode = "review"\n'
+        state = pull_request_state(labels=(), review_decision="APPROVED")
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertApproved(
+                    self.decide(relative_path, config=config, states=[state])
+                )
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        config=config,
+                        states=[pull_request_state(labels=("reviewed:approve",))],
+                    ),
+                    "this repository approves by review",
+                )
+
+    def test_either_mode_accepts_the_label_alone_and_the_review_alone(self):
+        config = '[workflow]\napproval_mode = "either"\n'
+        for relative_path in RENDERED_ASSETS:
+            for state in (
+                pull_request_state(labels=("reviewed:approve",)),
+                pull_request_state(labels=(), review_decision="APPROVED"),
+            ):
+                with self.subTest(asset=relative_path, labels=state["labels"]):
+                    self.assertApproved(
+                        self.decide(relative_path, config=config, states=[state])
+                    )
+
+    def test_an_unreadable_configuration_keeps_the_documented_defaults(self):
+        # Fail-soft on the file, not on the gate: an unparseable config must
+        # not turn every pull request into an approval or a refusal by accident.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertApproved(
+                    self.decide(relative_path, config="this is not toml [[[")
                 )
 
     def test_a_conflicted_pull_request_refuses(self):
@@ -1096,10 +1242,17 @@ class MutationBoundaryTests(unittest.TestCase):
     each would appear in the log.
     """
 
-    def execute(self, relative_path: str, *, gate_runs: int = 2, **scripted):
+    def execute(
+        self,
+        relative_path: str,
+        *,
+        gate_runs: int = 2,
+        config: str | None = None,
+        **scripted,
+    ):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        harness = Harness(Path(directory.name))
+        harness = Harness(Path(directory.name), config=config)
         harness.script_github(**scripted)
         completed = harness.run(whole_workflow(relative_path, gate_runs=gate_runs))
         return completed, harness
@@ -1316,6 +1469,68 @@ class MutationBoundaryTests(unittest.TestCase):
                 for call in harness.git_calls():
                     self.assertNotIn("merge", call, call)
                     self.assertNotIn("--delete", call, call)
+
+    def test_a_merged_pull_request_with_no_linked_issue_closes_nothing(self):
+        # A standalone pull request is ordinary, and it is not a reason to
+        # leave the rest of the cleanup undone.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(relative_path, linked_issue=None)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                for call in harness.gh_calls():
+                    self.assertNotEqual(call[:2], ["issue", "close"], call)
+                git = harness.git_calls()
+                self.assertIn(
+                    ["-C", CHECKOUT_ROOT, "merge", "--ff-only", "origin/" + BASE_BRANCH],
+                    git,
+                )
+                self.assertIn(["-C", CHECKOUT_ROOT, "branch", "-d", HEAD_BRANCH], git)
+
+    def test_an_issue_that_already_closed_itself_is_left_alone(self):
+        # `Closes #<n>` closes it on merge, so this is the ordinary case.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(relative_path, issue_open=False)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                for call in harness.gh_calls():
+                    self.assertNotEqual(call[:2], ["issue", "close"], call)
+
+    def test_a_pull_request_with_no_registered_worktree_removes_none(self):
+        # The worktree may have been removed already, which is not a reason to
+        # run `git worktree remove` against an empty path and then step past
+        # the error into the rest of the cleanup.
+        listing = f"worktree {CHECKOUT_ROOT}\nHEAD 0000\nbranch refs/heads/{BASE_BRANCH}\n"
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path, worktree_listing=listing
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                for call in harness.git_calls():
+                    self.assertNotIn("remove", call, call)
+                git = harness.git_calls()
+                self.assertIn(
+                    ["-C", CHECKOUT_ROOT, "merge", "--ff-only", "origin/" + BASE_BRANCH],
+                    git,
+                )
+                self.assertIn(["-C", CHECKOUT_ROOT, "branch", "-d", HEAD_BRANCH], git)
+                self.assertIn(
+                    ["issue", "close", LINKED_ISSUE, "-R", REPO_SLUG],
+                    harness.gh_calls(),
+                )
+
+    def test_no_skipped_step_is_run_against_an_empty_argument(self):
+        # The defect the two skips above close: `git worktree remove ""` and
+        # `gh issue close ""` are errors this workflow, having no `set -e`,
+        # would step straight past.
+        listing = f"worktree {CHECKOUT_ROOT}\nHEAD 0000\nbranch refs/heads/{BASE_BRANCH}\n"
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                _, harness = self.execute(
+                    relative_path, worktree_listing=listing, linked_issue=None
+                )
+                for call in harness.git_calls() + harness.gh_calls():
+                    self.assertNotIn("", call[1:], call)
 
     def test_the_gate_is_re_read_before_the_merge(self):
         # Two runs means two of each read, which is what makes the refresh

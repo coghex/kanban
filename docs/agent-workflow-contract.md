@@ -1507,9 +1507,14 @@ state.
   no repository, because that endpoint has none.
 - **Review gate:** fail-closed, and evaluated twice — once to decide, and again
   immediately before the merge with nothing in between, because labels, the
-  head, and the check set are all mutable. It requires the configured approval
-  label present and the changes-requested label absent; the authenticated login
-  resolved; the complete paginated issue-comment feed read and ordered
+  head, and the check set are all mutable. It requires the pull request to be
+  approved under the repository's own configured `approval_mode`, by its own
+  configured `approval_label` or GitHub's `reviewDecision`, with the configured
+  changes-requested and blocking labels absent — resolved from the global
+  `[workflow]` table overridden by `[repositories."<owner>/<name>".workflow]`,
+  exactly as the bundled coordinator, the drainer and the board resolve them,
+  and compared with case folded on both sides as `hasLabel` does. It requires
+  the authenticated login resolved; the complete paginated issue-comment feed read and ordered
   newest-first; and the globally newest marker *that login published* to be a
   well-formed `pr-review:v2` marker — the current coordinator's shape,
   including its comma-joined `reviewers=` and `models=` fields — or the legacy
@@ -1546,7 +1551,12 @@ state.
   cross-repository head is never deleted here under a same-named branch of the
   base repository; and the local base branch is advanced only when the primary
   checkout is actually on it, so a pull request targeting a non-default base
-  cannot fast-forward the default branch to somewhere it does not belong.
+  cannot fast-forward the default branch to somewhere it does not belong. Two
+  further values resolve to nothing as ordinary *skips* rather than refusals —
+  a pull request that closes no issue, one whose issue already closed itself
+  through `Closes #<n>`, and one whose worktree is already gone — and each
+  skipped step is not run at all rather than run against an empty argument,
+  which `git` and `gh` would turn into an error the workflow would step past.
 - **Mandatory/optional:** optional — user-invoked only, reached by asking for
   it, and spawned by no Kanban code path.
 

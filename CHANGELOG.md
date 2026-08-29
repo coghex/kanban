@@ -37,10 +37,16 @@ created above it.
   `originFromBody`'s rules — because an approval published by the brand that
   wrote the code is a self-review that the marker alone cannot reveal; a body
   declaring no origin is the coordinator's dual route, where only a marker
-  naming both brands is known to be independent. A missing `reviewed:approve`,
-  a present `reviewed:changes`, a `mergeable` that is not exactly `MERGEABLE`,
-  and any check that is not successful each refuse too. A refusal merges
-  nothing, closes nothing, removes no worktree, and deletes no branch.
+  naming both brands is known to be independent. Beyond the marker, the pull
+  request must be approved under the repository's *own* configured
+  `approval_mode`, by its own configured `approval_label` or GitHub's
+  `reviewDecision`, with the configured changes-requested and blocking labels
+  absent — the same global-then-per-repository resolution the coordinator, the
+  drainer and the board make, so a repository that renamed its verdict labels
+  is read correctly rather than having every approval refused. A `mergeable`
+  that is not exactly `MERGEABLE` and any check that is not successful refuse
+  too. A refusal merges nothing, closes nothing, removes no worktree, and
+  deletes no branch.
 
   It merges with `--admin --merge --match-head-commit`, the same call the
   drainer makes, and never `--squash`, `--rebase`, or GitHub auto-merge —

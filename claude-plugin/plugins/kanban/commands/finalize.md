@@ -67,13 +67,16 @@ unless every condition below holds, and every later step is guarded on `$HEAD`.
 
 ```bash
 VIEWER="$(gh api user --jq .login)"
-PR_STATE="$(gh pr view "$PR" -R "$REPO" --json number,url,body,headRefOid,headRefName,baseRefName,labels,mergeable,mergeStateStatus,closingIssuesReferences)"
+PR_STATE="$(gh pr view "$PR" -R "$REPO" --json number,url,body,headRefOid,headRefName,baseRefName,labels,reviewDecision,mergeable,mergeStateStatus,closingIssuesReferences)"
 PR_COMMENTS="$(gh api --paginate --slurp "repos/$REPO/issues/$PR/comments?per_page=100")"
 PR_CHECKS="$(gh pr checks "$PR" -R "$REPO" --json name,state,bucket)"
-HEAD="$(python3 - "$VIEWER" "$PR_STATE" "$PR_COMMENTS" "$PR_CHECKS" <<'PY'
+HEAD="$(python3 - "$REPO" "$VIEWER" "$PR_STATE" "$PR_COMMENTS" "$PR_CHECKS" <<'PY'
 import json
+import os
 import re
 import sys
+import tomllib
+from pathlib import Path
 
 V1_RE = re.compile(
     r"<!--\s*pr-review:v1\s+reviewer=(?P<reviewers>claude|codex)\s+"
@@ -100,14 +103,15 @@ ORIGIN_MARKERS = {
     "codex": "<!-- pr-origin:codex -->",
 }
 
-viewer = sys.argv[1].strip()
+repo = sys.argv[1].strip()
+viewer = sys.argv[2].strip()
 try:
-    state = json.loads(sys.argv[2])
-    pages = json.loads(sys.argv[3])
+    state = json.loads(sys.argv[3])
+    pages = json.loads(sys.argv[4])
 except ValueError:
     state = None
     pages = None
-checks_text = sys.argv[4].strip()
+checks_text = sys.argv[5].strip()
 number = state.get("number") if isinstance(state, dict) else None
 subject = "PR #" + str(number) if number is not None else "the named pull request"
 
@@ -135,15 +139,82 @@ if not isinstance(state, dict) or not isinstance(pages, list):
 if not viewer:
     refuse("the authenticated GitHub login could not be resolved", True)
 
+# Which labels decide this is configuration, never a fixed string: the global
+# [workflow] table, overridden by [repositories."owner/name".workflow]. Exactly
+# the resolution the bundled coordinator, the drainer and the board all make,
+# so a repository that renamed its verdict labels is read the same way here as
+# everywhere else. An unreadable or absent file keeps the documented defaults.
+approval_label = "reviewed:approve"
+changes_label = "reviewed:changes"
+blocked_labels = {"blocked"}
+approval_mode = "label"
+xdg = os.environ.get("XDG_CONFIG_HOME")
+config_path = (Path(xdg) if xdg else Path.home() / ".config") / "kanban" / "config.toml"
+document = {}
+if config_path.is_file():
+    try:
+        with config_path.open("rb") as handle:
+            document = tomllib.load(handle)
+    except (tomllib.TOMLDecodeError, OSError):
+        document = {}
+
+
+def apply_workflow(table):
+    global approval_label, changes_label, blocked_labels, approval_mode
+    if not isinstance(table, dict):
+        return
+    workflow = table.get("workflow")
+    if not isinstance(workflow, dict):
+        return
+    if isinstance(workflow.get("approval_label"), str) and workflow["approval_label"]:
+        approval_label = workflow["approval_label"]
+    named = workflow.get("changes_requested_label")
+    if isinstance(named, str) and named:
+        changes_label = named
+    blocking = workflow.get("blocked_labels")
+    if isinstance(blocking, list) and all(isinstance(one, str) for one in blocking):
+        blocked_labels = set(blocking)
+    mode = workflow.get("approval_mode")
+    if mode in ("label", "review", "either"):
+        approval_mode = mode
+
+
+apply_workflow(document)
+repositories = document.get("repositories")
+if isinstance(repositories, dict):
+    # The override key is the canonical ASCII-lowercased owner/name, folded the
+    # one way Kanban.Config folds it rather than with Unicode lowering.
+    ascii_lower = str.maketrans(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+    )
+    apply_workflow(repositories.get(repo.translate(ascii_lower)))
+
+# hasLabel folds case on both sides, so the comparison here does too.
 labels = {
-    str(item.get("name") or "").lower()
+    str(item.get("name") or "").casefold()
     for item in state.get("labels") or []
     if isinstance(item, dict)
 }
-if "reviewed:approve" not in labels:
-    refuse("reviewed:approve is not attached", True)
-if "reviewed:changes" in labels:
-    refuse("reviewed:changes is attached", True)
+by_label = approval_label.casefold() in labels
+by_review = str(state.get("reviewDecision") or "").upper() == "APPROVED"
+approved = {
+    "label": by_label,
+    "review": by_review,
+    "either": by_label or by_review,
+}[approval_mode]
+if not approved:
+    refuse(
+        "this repository approves by " + approval_mode + " and the pull request "
+        "is not approved that way",
+        True,
+    )
+if changes_label.casefold() in labels:
+    refuse(changes_label + " is attached", True)
+# hasProblemLabel treats a blocking label exactly as it treats the
+# changes-requested one, and a blocking label is a decision a human made.
+blocking = sorted(one for one in blocked_labels if one.casefold() in labels)
+if blocking:
+    refuse("a blocking label is attached: " + ", ".join(blocking), True)
 
 head = str(state.get("headRefOid") or "").lower()
 if re.match(r"\A[0-9a-f]{40}\Z", head) is None:
@@ -306,6 +377,17 @@ What that gate requires, and why each part is what it is:
   being no declared brand to be opposite of, only a marker naming both is known
   to be independent of whoever wrote the code, and a single-brand marker on such
   a pull request refuses.
+- **The repository's own verdict labels, under its own approval mode.** The
+  approval label, the changes-requested label, the blocking labels and the
+  approval mode are configuration — the global `[workflow]` table, overridden by
+  `[repositories."<owner>/<name>".workflow]` — so the gate resolves them the way
+  the bundled coordinator, the drainer and the board all do, and compares them
+  with case folded on both sides as `hasLabel` does. A repository that renamed
+  `reviewed:approve` would otherwise have every one of its approvals refused,
+  and one configured for `review` approval would look unapproved with a
+  perfectly good approval on it. A blocking label refuses for the same reason
+  the changes-requested label does: `hasProblemLabel` treats the two alike, and
+  a blocking label is a decision a human made.
 - **`mergeable` exactly `MERGEABLE`.** `CONFLICTING` is a real merge conflict and
   `UNKNOWN` means GitHub has not finished computing mergeability; neither is a
   clearance, and merging on either is how an unresolved conflict lands.
@@ -380,6 +462,7 @@ BRANCH="$(gh pr view "$PR" -R "$REPO" --json isCrossRepository,headRefName --jq 
 ISSUE="$(gh pr view "$PR" -R "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[0].number // empty')"
 WORKTREE="$(git -C "$ROOT" worktree list --porcelain | sed -n "/issue-$ISSUE-/s#^worktree ##p")"
 BASE_CHECKOUT="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD | grep -Fx "$BASE")"
+OPEN_ISSUE="$(gh issue view "${ISSUE:-0}" -R "$REPO" --json number,state --jq 'select(.state == "OPEN") | .number')"
 ```
 
 Two of those resolve to nothing on purpose, and the guards below turn each empty
@@ -399,11 +482,23 @@ value into a refusal rather than a wrong deletion:
 `git worktree list` is the only source for the worktree path, so a legacy path
 and a repository-scoped one are both found where they actually are. It is
 scoped to this repository's own registrations: issue numbers are repository-local,
-and another repository's worktrees are not this workflow's to touch. If it names
-none, there is nothing to remove — skip the removal line below and say so.
+and another repository's worktrees are not this workflow's to touch.
+
+`$WORKTREE` and `$OPEN_ISSUE` are two more values that resolve to nothing rather
+than to something wrong, but unlike the two above they are **skips, not
+refusals**: a pull request that closes no issue, one whose issue already closed
+itself through the `Closes #<n>` reference, and one whose worktree was removed
+earlier are all ordinary, and none of them is a reason to leave a merged pull
+request half cleaned up. Each is guarded by its own `[ -z ... ] ||` so the
+command is not run at all rather than run against an empty argument — which
+`git` and `gh` would each turn into an error this workflow would then step
+straight past, having no `set -e` to stop it. That spelling rather than
+`[ -n ... ] &&` because a skip is not a failure: the `&&` form would leave the
+last step of a clean run reporting a non-zero status for having correctly done
+nothing.
 
 ```bash
-git -C "$ROOT" worktree remove "$WORKTREE"
+[ -z "$WORKTREE" ] || git -C "$ROOT" worktree remove "$WORKTREE"
 git -C "$ROOT" fetch origin
 : "${BASE_CHECKOUT:?the primary checkout is not on the base branch of this pull request; leave its branches alone}"
 git -C "$ROOT" merge --ff-only "origin/$BASE"
@@ -439,12 +534,14 @@ and never a force: a default branch that will not fast-forward is a fact to
 report, not one to overwrite.
 
 The linked issue closes itself through the pull request's `Closes #<n>`
-reference. Read it back, and run this only when it is somehow still open. A
-pull request that closes no issue leaves `$ISSUE` empty and has nothing to
-close here:
+reference, so `$OPEN_ISSUE` above is empty in the ordinary case and this runs
+only when the closure did not happen. It is empty for a pull request that closes
+no issue too — the `${ISSUE:-0}` substitution keeps that read a well-formed
+request for an issue number that will not resolve, rather than a `gh` invocation
+with a missing argument:
 
 ```bash
-gh issue close "$ISSUE" -R "$REPO"
+[ -z "$OPEN_ISSUE" ] || gh issue close "$OPEN_ISSUE" -R "$REPO"
 ```
 
 ## 6. Report
