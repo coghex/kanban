@@ -521,7 +521,6 @@ WORKTREE="$(git -C "$ROOT" worktree list --porcelain | awk -v ref="refs/heads/$B
 BASE_CHECKOUT="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD | grep -Fx "$BASE")"
 OPEN_ISSUE="$(gh issue view "${ISSUE:-0}" -R "$REPO" --json number,state --jq 'select(.state == "OPEN") | .number')"
 LOCAL_BRANCH="$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH")"
-PUSH_TARGET="$(git -C "$ROOT" remote get-url --push --all origin | sed -E 's#\.git$##; s#.*(/|:)([^/:]+/[^/:]+)$#\2#' | awk -v want="$REPO" '{seen++; if (tolower($0) != tolower(want)) foreign=1} END{if (seen && !foreign) print "ok"}')"
 ```
 
 Two of those resolve to nothing on purpose, and the guards below turn each empty
@@ -537,20 +536,6 @@ value into a refusal rather than a wrong deletion:
   whatever branch the checkout has out — which for a pull request targeting a
   non-default base would advance the default branch to somewhere it should not
   go. A detached HEAD leaves it empty too.
-- `$PUSH_TARGET` is non-empty **only when every push URL reaches `$REPO`**.
-  `$REPO` was resolved from the remote's *fetch* URL, and `git push` uses
-  `remote.origin.pushurl` when one is configured — so a checkout that fetches
-  from `$REPO` and pushes somewhere else would have every check above pass,
-  `isCrossRepository` included, and then delete a same-named branch in that
-  other repository. `remote.origin.pushurl` is also **multi-valued**, and
-  `git push origin` writes to every one of them, so checking the first is not
-  checking the push: `--all` lists them all, each is reduced to one
-  `owner/name` the same way, and the `awk` yields its `ok` only when at least
-  one was listed and none of them is anything but `$REPO`. The comparison folds
-  case, because a remote URL may spell the identity any way and still name the
-  same repository — unlike the branch comparison above it, which stays exact
-  because branch names are case-sensitive. `--push` falls back to the fetch URL
-  when no push URL is set, so the ordinary checkout simply matches itself.
 
 `git worktree list` is the only source for the worktree path, so a legacy path
 and a repository-scoped one are both found where they actually are — and it is
@@ -601,40 +586,50 @@ git -C "$ROOT" fetch origin &&
 : "${BASE_CHECKOUT:?the primary checkout is not on the base branch of this pull request; leave its branches alone}" &&
 git -C "$ROOT" merge --ff-only "origin/$BASE" &&
 : "${BRANCH:?the head of this pull request lives in another repository; delete no branch here}" &&
-{ [ -z "$LOCAL_BRANCH" ] || git -C "$ROOT" update-ref -d "refs/heads/$BRANCH" "$HEAD"; } &&
-: "${PUSH_TARGET:?pushing to origin does not reach the repository this pull request is in, or does not reach only it; delete no remote branch here}" &&
-git -C "$ROOT" push origin --force-with-lease="refs/heads/$BRANCH:$HEAD" --delete "$BRANCH"
+{ [ -z "$LOCAL_BRANCH" ] || git -C "$ROOT" update-ref -d "refs/heads/$BRANCH" "$HEAD"; }
 ```
 
-**That is one `&&` chain, and it is one on purpose.** This workflow sets no
-`set -e`, so written as separate commands a failed worktree removal, fetch, or
-fast-forward would be stepped straight past into the two deletions — leaving a
-still-checked-out or dirty worktree behind while its branch is deleted out from
-under it. Chained, the first failure ends the cleanup and every later step is
-simply not run. Keep any step you add inside the chain.
+**This workflow deletes no remote branch, deliberately.** Everything above
+happens in `$ROOT`; nothing in the cleanup writes to a remote at all. That is a
+narrowing, and the reason for it is that "delete the branch named `$BRANCH` on
+`origin`" cannot be made safe from here at a cost worth paying. `$REPO` is
+resolved from the remote's *fetch* URL, while `git push` follows
+`remote.origin.pushurl`; that setting is multi-valued and every URL receives the
+push; and a URL reduced to an `owner/name` has lost the host it was going to,
+so a same-named repository on another host reads as this one. Each of those is
+answerable on its own, and together they are a lattice of ways to delete
+somebody else's branch — for a step whose entire value is tidiness, on a
+fallback that runs when the ordinary machinery is already unavailable.
+
+The branch is not left forever, and this workflow is not what was removing it in
+practice: a repository with `delete_branch_on_merge` set has GitHub delete the
+head branch as part of the merge, and `tools/drain_prs.py` deletes it explicitly
+after its own merges, checking first whether it is already gone. Either of those
+runs against a target it resolved itself. What is left for a human is a
+repository with neither, where the merged branch stays until someone removes it
+— which is a visible, reversible leftover, unlike a deletion sent to the wrong
+place.
+
+**The one deletion that remains is local, and is bound to the reviewed head.**
+A name is not an identity: between the merge and this cleanup another actor can
+delete `$BRANCH` and create a new, unrelated branch under the same name, and a
+deletion by name alone would then delete *that*. So the local ref is removed
+with `git update-ref -d <ref> <old-value>`, which deletes only a ref that still
+equals `$HEAD` — the head the gate validated and the merge landed — and refuses
+anything else. `$LOCAL_BRANCH` is empty when `$ROOT` never had a copy of the
+branch, which is a skip rather than a failure.
+
+**The chain is one `&&` chain on purpose.** This workflow sets no `set -e`, so
+written as separate commands a failed worktree removal, fetch, or fast-forward
+would be stepped straight past into the deletion — leaving a still-checked-out
+or dirty worktree behind while its branch is deleted out from under it. Chained,
+the first failure ends the cleanup and every later step is simply not run. Keep
+any step you add inside the chain.
 
 The order within it is the order it is for two reasons. The worktree goes first
 because a branch checked out in one cannot be deleted. The local base branch
-advances before either deletion so the merged commits are reachable from
-`$ROOT`'s own base branch before the branch that carried them goes away.
-
-**Both deletions are bound to the reviewed head, not to the branch name.**
-A name is not an identity: between the merge and this cleanup another actor can
-delete `$BRANCH` and push a new, unrelated branch under the same name, and a
-deletion by name alone would then delete *that*. So the local ref is removed
-with `git update-ref -d <ref> <old-value>`, which deletes only a ref that still
-equals `$HEAD`, and the remote one with
-`--force-with-lease="refs/heads/$BRANCH:$HEAD"`, which sends that same head as
-the expected old value so the server performs a compare-and-swap and rejects the
-delete with `stale info` if the branch has moved. `$HEAD` is the head the gate
-validated and the merge landed, so both deletions can only ever remove the thing
-this run actually merged. `$LOCAL_BRANCH` is empty when `$ROOT` never had a copy
-of the branch — finalizing a pull request whose worktree was somebody else's —
-and that is a skip rather than a failure. Binding the head does not answer
-*which repository* the push reaches, which is why `$PUSH_TARGET` guards the
-remote deletion separately: a lease protects the ref it names in whatever
-repository the push lands in, and the point of that guard is that it must land
-in this one.
+advances before the deletion so the merged commits are reachable from `$ROOT`'s
+own base branch before the branch that carried them goes away.
 
 Neither refusal message contains an apostrophe, and that is not style. A `'`
 inside a `${VAR:?...}` word is read as an opening quote, and the shell then
@@ -672,6 +667,8 @@ with a missing argument:
 ## 6. Report
 
 End with one line naming the outcome: the resolved repository, the pull request
-merged and at which head, the issue closed, the worktree removed, the branch
-deleted, and the default branch fast-forwarded — or, on a refusal, which
+merged and at which head, the issue closed, the worktree removed, the local
+branch deleted, and the default branch fast-forwarded — or, on a refusal, which
 condition failed and what the pull request needs before it can be finalized.
+Say that the remote branch was left alone, and whether it is still there, so
+nobody reads a finished run as having tidied it.

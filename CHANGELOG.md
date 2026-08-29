@@ -59,20 +59,27 @@ created above it.
   arming a merge on a head whose checks have not passed is a mutation the gate
   forbids. The linked issue, the pull request's worktree, its branch, and the
   local default branch are only touched after GitHub confirms the pull request
-  as `MERGED`, and the cleanup is guarded further still. It is one `&&` chain,
-  so a failed worktree removal, fetch, or fast-forward ends it rather than being
-  stepped past into the deletions. A cross-repository head is never deleted here
-  under a same-named branch of the base repository, and the local base branch is
-  advanced only when the primary checkout is on it. Both branch deletions are
-  bound to the reviewed head rather than to the branch name — `git update-ref -d
-  <ref> <old-value>` locally, `--force-with-lease` on the remote — so a branch
-  another actor deleted and recreated under the same name is rejected rather
-  than removed. The remote deletion additionally requires that every configured
-  push URL reaches the repository the pull request is in: the identity was
-  resolved from the remote's fetch URL, a configured `remote.origin.pushurl`
-  can send the push to a different repository entirely, and because that
-  setting is multi-valued and `git push origin` writes to all of them,
-  validating only the first would not be validating the push. The worktree it removes is identified the same way — the one
+  as `MERGED`.
+
+  It deletes no **remote** branch, and writes to no git remote at all. A
+  repository with `delete_branch_on_merge` has GitHub remove the head branch as
+  part of the merge, and `tools/drain_prs.py` removes it after its own merges,
+  so what a remote deletion here would have added is tidiness — against several
+  ways to delete the wrong branch, since the repository identity comes from the
+  remote's fetch URL while `git push` follows the multi-valued
+  `remote.origin.pushurl`, every one of those URLs receives the push, and a URL
+  reduced to an `owner/name` has lost the host it was going to. Where neither
+  GitHub nor the drainer removes it, the merged branch stays as a visible,
+  reversible leftover.
+
+  The local cleanup is one `&&` chain, so a failed worktree removal, fetch, or
+  fast-forward ends it rather than being stepped past into the deletion. A
+  cross-repository head is never deleted here under a same-named branch of the
+  base repository, and the local base branch is advanced only when the primary
+  checkout is on it. The local branch deletion is bound to the reviewed head
+  rather than to the branch name — `git update-ref -d <ref> <old-value>` — so a
+  branch another actor deleted and recreated under the same name is rejected
+  rather than removed. The worktree it removes is identified the same way — the one
   whose checked-out branch is the pull request's head branch and whose `HEAD` is
   the reviewed head, read out of `git worktree list --porcelain` rather than
   matched against a path pattern that a stale worktree of the same number style

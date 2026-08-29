@@ -1541,9 +1541,11 @@ state.
   whose checks have not passed is a mutation the gate forbids.
 - **Required authority:** GitHub read on the pull request, its comment feed,
   and its checks; write to merge it and to close the linked issue. Local write
-  to remove the merged pull request's own worktree, delete its branch, and
-  fast-forward the default branch — every one of those only after GitHub has
-  confirmed the pull request as `MERGED`.
+  to remove the merged pull request's own worktree, delete its **local** branch
+  ref, and fast-forward the default branch — every one of those only after
+  GitHub has confirmed the pull request as `MERGED`. It writes to no git remote
+  at all: it deletes no remote branch, and the local deletion it does make is
+  bound to the reviewed head through `git update-ref -d <ref> <old-value>`.
 - **Durable state:** none of its own. It removes the merged pull request's own
   worktree, identified through this repository's own
   `git worktree list --porcelain` as the one whose checked-out branch is the
@@ -1556,13 +1558,22 @@ state.
   than to a wrong target, and each empty value is a refusal: the head branch is
   resolved only for a pull request whose head is in this repository, so a
   cross-repository head is never deleted here under a same-named branch of the
-  base repository; the remote deletion happens only when **every** configured
-  push URL reaches `$REPO`, since the identity was resolved from the remote's
-  *fetch* URL, `remote.origin.pushurl` can send the push somewhere else
-  entirely, and that setting is multi-valued — `git push origin` writes to all
-  of them, so checking the first is not checking the push; and the local base branch is advanced only when the primary
+  base repository; and the local base branch is advanced only when the primary
   checkout is actually on it, so a pull request targeting a non-default base
-  cannot fast-forward the default branch to somewhere it does not belong. Two
+  cannot fast-forward the default branch to somewhere it does not belong.
+
+  Deleting the merged head branch on the remote is deliberately **not** part of
+  this action. Making it safe from here is a lattice rather than a check: the
+  identity is resolved from the remote's fetch URL while `git push` follows the
+  multi-valued `remote.origin.pushurl`, every one of those URLs receives the
+  push, and a URL reduced to an `owner/name` has lost the host it was going to.
+  For a step whose value is tidiness, on a fallback that runs when the ordinary
+  machinery is already unavailable, the branch is left instead: a repository
+  with `delete_branch_on_merge` has GitHub remove it as part of the merge,
+  `tools/drain_prs.py` removes it after its own merges, and otherwise it stays
+  as a visible, reversible leftover.
+
+  Two
   further values resolve to nothing as ordinary *skips* rather than refusals —
   a pull request that closes no issue, one whose issue already closed itself
   through `Closes #<n>`, and one whose worktree is already gone — and each

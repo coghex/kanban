@@ -95,8 +95,6 @@ EXPECTED_REFUSAL_WORDS = (
     "leave its branches alone",
     "the head of this pull request lives in another repository; delete no "
     "branch here",
-    "pushing to origin does not reach the repository this pull request is in, "
-    "or does not reach only it; delete no remote branch here",
 )
 
 
@@ -222,12 +220,15 @@ PRESERVED_BEHAVIOR = {
     "the fast-forward is never forced": (
         "The fast-forward is `--ff-only` and never a force"
     ),
-    "both deletions are bound to the reviewed head": (
-        "**Both deletions are bound to the reviewed head, not to the branch "
-        "name.**"
+    "no remote branch is deleted": (
+        "**This workflow deletes no remote branch, deliberately.**"
+    ),
+    "the surviving deletion is bound to the reviewed head": (
+        "**The one deletion that remains is local, and is bound to the "
+        "reviewed head.**"
     ),
     "the cleanup is one chain": (
-        "**That is one `&&` chain, and it is one on purpose.**"
+        "**The chain is one `&&` chain on purpose.**"
     ),
     "no refreshing push": (
         'do not push anything to the branch to "refresh" it'
@@ -285,15 +286,8 @@ LOCAL_DELETE = [
     "refs/heads/" + HEAD_BRANCH,
     APPROVED_HEAD,
 ]
-REMOTE_DELETE = [
-    "-C",
-    CHECKOUT_ROOT,
-    "push",
-    "origin",
-    "--force-with-lease=refs/heads/" + HEAD_BRANCH + ":" + APPROVED_HEAD,
-    "--delete",
-    HEAD_BRANCH,
-]
+# There is no remote-deletion counterpart on purpose: this workflow writes to
+# no remote at all, which NoRemoteWriteTests pins as an invariant.
 
 
 def read(relative_path: str) -> str:
@@ -503,7 +497,6 @@ class Harness:
         worktree_listing: str = WORKTREE_LISTING,
         local_branch: str | None = APPROVED_HEAD,
         failing_git: list[str] | None = None,
-        push_repos: tuple[str, ...] = (REPO_SLUG,),
     ) -> None:
         base = ["pr", "view", PR_NUMBER, "-R", REPO_SLUG, "--json"]
         if closing_references is None:
@@ -598,15 +591,6 @@ class Harness:
             ["-C", CHECKOUT_ROOT, "rev-parse", "--verify", "--quiet"],
             stdout=("" if local_branch is None else local_branch + "\n"),
         )
-        # `git push` uses remote.origin.pushurl when one is configured, so the
-        # push URL is read separately from the fetch URL $REPO came from.
-        self.fake.script(
-            "git",
-            ["-C", CHECKOUT_ROOT, "remote", "get-url", "--push", "--all", "origin"],
-            stdout="".join(
-                f"https://github.com/{one}.git\n" for one in push_repos
-            ),
-        )
         if failing_git is not None:
             self.fake.script(
                 "git",
@@ -653,7 +637,6 @@ CLEANUP_CHAIN = (
     ["fetch", "origin"],
     ["merge", "--ff-only"],
     ["update-ref", "-d"],
-    ["push", "origin"],
 )
 
 
@@ -1673,7 +1656,6 @@ class MutationBoundaryTests(unittest.TestCase):
                     ["-C", CHECKOUT_ROOT, "worktree", "remove", WORKTREE_PATH], git
                 )
                 self.assertIn(LOCAL_DELETE, git)
-                self.assertIn(REMOTE_DELETE, git)
                 self.assertIn(
                     ["-C", CHECKOUT_ROOT, "merge", "--ff-only", "origin/" + BASE_BRANCH],
                     git,
@@ -1916,7 +1898,6 @@ class MutationBoundaryTests(unittest.TestCase):
                 _, harness = self.execute(relative_path)
                 git = harness.git_calls()
                 self.assertIn(LOCAL_DELETE, git)
-                self.assertIn(REMOTE_DELETE, git)
                 for call in git:
                     if "--delete" in call:
                         lease = [
@@ -1947,7 +1928,6 @@ class MutationBoundaryTests(unittest.TestCase):
                 git = harness.git_calls()
                 for call in git:
                     self.assertNotIn("update-ref", call, call)
-                self.assertIn(REMOTE_DELETE, git)
 
     def test_a_failed_cleanup_step_deletes_nothing_after_it(self):
         # The cleanup is one `&&` chain precisely so a failure here does not
@@ -1974,73 +1954,6 @@ class MutationBoundaryTests(unittest.TestCase):
                                 f"{' '.join(later)} ran after {' '.join(failing)} "
                                 f"failed: {call}",
                             )
-
-    def test_a_push_url_naming_another_repository_deletes_nothing_remote(self):
-        # $REPO comes from the FETCH url. A checkout that fetches from this
-        # repository and pushes to another passes every other check --
-        # isCrossRepository included -- and would then delete a same-named
-        # branch over there.
-        for relative_path in RENDERED_ASSETS:
-            with self.subTest(asset=relative_path):
-                completed, harness = self.execute(
-                    relative_path, push_repos=("someone-else/kanban",)
-                )
-                self.assertNotEqual(completed.returncode, 0)
-                self.assertIn("does not reach the repository", completed.stderr)
-                git = harness.git_calls()
-                # The local cleanup up to that point still happened.
-                self.assertIn(LOCAL_DELETE, git)
-                for call in git:
-                    self.assertNotIn("--delete", call, call)
-
-    def test_a_push_url_spelled_in_another_case_is_the_same_repository(self):
-        # Non-vacuity for the guard above, and the reason it folds case: a
-        # remote URL may spell the identity any way and still name this
-        # repository, so an exact match would refuse an ordinary checkout.
-        for relative_path in RENDERED_ASSETS:
-            with self.subTest(asset=relative_path):
-                completed, harness = self.execute(
-                    relative_path, push_repos=("Coghex/Kanban",)
-                )
-                self.assertEqual(completed.returncode, 0, completed.stderr)
-                self.assertIn(REMOTE_DELETE, harness.git_calls())
-
-    def test_a_second_push_url_naming_another_repository_deletes_nothing(self):
-        # `remote.origin.pushurl` is multi-valued and `git push origin` writes
-        # to every one of them, so validating the first is not validating the
-        # push: a checkout whose first URL is this repository and whose second
-        # is a foreign one would delete the same-named branch over there too.
-        for relative_path in RENDERED_ASSETS:
-            with self.subTest(asset=relative_path):
-                completed, harness = self.execute(
-                    relative_path,
-                    push_repos=(REPO_SLUG, "someone-else/kanban"),
-                )
-                self.assertNotEqual(completed.returncode, 0)
-                self.assertIn("does not reach", completed.stderr)
-                for call in harness.git_calls():
-                    self.assertNotIn("--delete", call, call)
-
-    def test_several_push_urls_all_naming_this_repository_are_accepted(self):
-        # Non-vacuity for the check above: it must not simply refuse every
-        # multi-URL remote.
-        for relative_path in RENDERED_ASSETS:
-            with self.subTest(asset=relative_path):
-                completed, harness = self.execute(
-                    relative_path, push_repos=(REPO_SLUG, "Coghex/Kanban")
-                )
-                self.assertEqual(completed.returncode, 0, completed.stderr)
-                self.assertIn(REMOTE_DELETE, harness.git_calls())
-
-    def test_a_remote_with_no_push_url_at_all_deletes_nothing(self):
-        # The `seen` half of the check: an empty listing is not "every URL
-        # matches", it is nothing to have checked.
-        for relative_path in RENDERED_ASSETS:
-            with self.subTest(asset=relative_path):
-                completed, harness = self.execute(relative_path, push_repos=())
-                self.assertNotEqual(completed.returncode, 0)
-                for call in harness.git_calls():
-                    self.assertNotIn("--delete", call, call)
 
     def test_the_gate_is_re_read_before_the_merge(self):
         # Two runs means two of each read, which is what makes the refresh
@@ -2089,6 +2002,67 @@ class MutationBoundaryTests(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             self.assertNoMutation(harness)
+
+
+class NoRemoteWriteTests(unittest.TestCase):
+    """This workflow writes to no remote, and that is the point.
+
+    Deleting the merged head branch was dropped rather than hardened. Making
+    "delete the branch named `$BRANCH` on `origin`" safe from here is a lattice
+    rather than a check: `$REPO` comes from the remote's FETCH url while `git
+    push` follows `remote.origin.pushurl`, that setting is multi-valued and
+    every URL receives the push, and a URL reduced to an `owner/name` has lost
+    the host it was going to -- so a same-named repository on another host
+    reads as this one. Each is answerable alone; together they are several ways
+    to delete somebody else's branch, for a step whose whole value is tidiness,
+    on a fallback that runs when the ordinary machinery is already unavailable.
+
+    So the absence is asserted directly, in both renderings and from the
+    command log, rather than left as something a later edit could quietly undo.
+    """
+
+    # Every git subcommand that can reach a remote with a write. `fetch` is
+    # deliberately absent: it is a read, and the cleanup needs it.
+    REMOTE_WRITING_SUBCOMMANDS = ("push", "send-pack", "update-ref-remote")
+
+    def test_neither_rendering_pushes_anything(self):
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            with self.subTest(asset=relative_path):
+                for fence in bash_fences(content):
+                    self.assertNotIn("git push", fence)
+                    self.assertNotIn("--delete", fence)
+                    self.assertNotIn("--force-with-lease", fence)
+
+    def test_neither_rendering_reads_a_push_url(self):
+        # The resolution that existed only to make such a push safe is gone
+        # with it; leaving it would be a check with nothing behind it.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertNotIn("get-url --push", read(relative_path))
+
+    def test_the_push_detector_finds_a_planted_push(self):
+        planted = gate_fence(CLAUDE_ASSET) + '\ngit push origin --delete "$BRANCH"\n'
+        self.assertIn("git push", planted)
+
+    def test_a_full_successful_run_makes_no_remote_write(self):
+        # The same absence from the other side: an end-to-end run whose every
+        # step succeeds still issues no remote write.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                harness = Harness(Path(tempfile.mkdtemp(dir=directory.name)))
+                harness.script_github()
+                completed = harness.run(
+                    whole_workflow(relative_path, gate_runs=2)
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                for call in harness.git_calls():
+                    for subcommand in self.REMOTE_WRITING_SUBCOMMANDS:
+                        self.assertNotIn(subcommand, call, call)
+                # Non-vacuity: the run really did do its local cleanup.
+                self.assertIn(LOCAL_DELETE, harness.git_calls())
 
 
 class ResolutionTests(unittest.TestCase):
