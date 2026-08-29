@@ -76,7 +76,11 @@ created above it.
   whose checked-out branch is the pull request's head branch and whose `HEAD` is
   the reviewed head, read out of `git worktree list --porcelain` rather than
   matched against a path pattern that a stale worktree of the same number style
-  would satisfy. It is authored once under `tools/command_sources/` and rendered
+  would satisfy. The linked issue is selected the same way: closing references
+  carry the repository they belong to and issue numbers are repository-local,
+  so only a reference naming this repository is closed and one pointing at
+  another repository is skipped rather than turned into a same-numbered issue
+  here. It is authored once under `tools/command_sources/` and rendered
   into both bundles, and `CLAUDE.md` and `docs/agent-workflow-contract.md`
   §2.10 now record it as the single explicitly-invoked exception to the
   never-merge rule.

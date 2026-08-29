@@ -498,6 +498,7 @@ class Harness:
         cross_repository: bool = False,
         checked_out: str = BASE_BRANCH,
         linked_issue: str | None = LINKED_ISSUE,
+        closing_references: tuple[tuple[str, str], ...] | None = None,
         issue_open: bool = True,
         worktree_listing: str = WORKTREE_LISTING,
         local_branch: str | None = APPROVED_HEAD,
@@ -505,6 +506,10 @@ class Harness:
         push_repos: tuple[str, ...] = (REPO_SLUG,),
     ) -> None:
         base = ["pr", "view", PR_NUMBER, "-R", REPO_SLUG, "--json"]
+        if closing_references is None:
+            closing_references = (
+                () if linked_issue is None else ((REPO_SLUG, linked_issue),)
+            )
         self.fake.script("gh", ["api", "user", "--jq", ".login"], stdout=viewer + "\n")
         for state in states if states is not None else [pull_request_state()]:
             self.fake.script("gh", base + [PR_VIEW_FIELDS], stdout=json.dumps(state))
@@ -550,10 +555,16 @@ class Harness:
             base + ["isCrossRepository,headRefName"],
             stdout=("" if cross_repository else HEAD_BRANCH + "\n"),
         )
+        # The asset's own --jq emits one `owner/name number` line per closing
+        # reference, so the fixture is that listing rather than a bare number:
+        # a reference carries the repository it belongs to, and issue numbers
+        # are repository-local.
         self.fake.script(
             "gh",
             base + ["closingIssuesReferences"],
-            stdout=("" if linked_issue is None else linked_issue + "\n"),
+            stdout="".join(
+                f"{repo} {number}\n" for repo, number in closing_references
+            ),
         )
         # Empty stands for "no issue, or one that already closed itself": the
         # asset's own `select` yields nothing in both cases.
@@ -1740,6 +1751,52 @@ class MutationBoundaryTests(unittest.TestCase):
                     git,
                 )
                 self.assertIn(LOCAL_DELETE, git)
+
+    def test_a_cross_repository_reference_closes_no_issue_here(self):
+        # Issue numbers are repository-local. A pull request closing
+        # `other/repo#7` while `$REPO#7` is an unrelated open issue here must
+        # not close that one, which reducing the references to their first
+        # bare number would have done.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path,
+                    closing_references=(("someone-else/other", LINKED_ISSUE),),
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                for call in harness.gh_calls():
+                    self.assertNotEqual(call[:2], ["issue", "close"], call)
+
+    def test_a_local_reference_beneath_a_foreign_one_is_still_found(self):
+        # Non-vacuity, and the reason foreign references are skipped rather
+        # than refused: the pull request may close one of each.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path,
+                    closing_references=(
+                        ("someone-else/other", "99"),
+                        (REPO_SLUG, LINKED_ISSUE),
+                    ),
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn(
+                    ["issue", "close", LINKED_ISSUE, "-R", REPO_SLUG],
+                    harness.gh_calls(),
+                )
+
+    def test_a_reference_spelled_in_another_case_is_this_repository(self):
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path,
+                    closing_references=(("Coghex/Kanban", LINKED_ISSUE),),
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn(
+                    ["issue", "close", LINKED_ISSUE, "-R", REPO_SLUG],
+                    harness.gh_calls(),
+                )
 
     def test_an_issue_that_already_closed_itself_is_left_alone(self):
         # `Closes #<n>` closes it on merge, so this is the ordinary case.

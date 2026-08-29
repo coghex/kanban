@@ -1568,6 +1568,11 @@ state.
   through `Closes #<n>`, and one whose worktree is already gone — and each
   skipped step is not run at all rather than run against an empty argument,
   which `git` and `gh` would turn into an error the workflow would step past.
+  The issue it closes is selected from the closing references **with the
+  repository each one names**, and only one naming `$REPO` is taken: issue
+  numbers are repository-local, so a pull request closing `other/repo#7` would
+  otherwise close an unrelated `$REPO#7`. References in other repositories are
+  skipped, not closed.
   The whole cleanup is one `&&` chain, so the first failure ends it and nothing
   after it runs — a still-checked-out or dirty worktree is never left behind
   while its branch is deleted out from under it. Both deletions are bound to the

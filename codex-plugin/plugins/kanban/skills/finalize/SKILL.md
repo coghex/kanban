@@ -516,7 +516,7 @@ pull request itself rather than from the session's own directory:
 ```bash
 BASE="$(gh pr view "$PR" -R "$REPO" --json baseRefName --jq .baseRefName)"
 BRANCH="$(gh pr view "$PR" -R "$REPO" --json isCrossRepository,headRefName --jq 'select(.isCrossRepository == false) | .headRefName')"
-ISSUE="$(gh pr view "$PR" -R "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[0].number // empty')"
+ISSUE="$(gh pr view "$PR" -R "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[] | "\(.repository.owner.login)/\(.repository.name) \(.number)"' | awk -v want="$REPO" 'tolower($1) == tolower(want) {print $2; exit}')"
 WORKTREE="$(git -C "$ROOT" worktree list --porcelain | awk -v ref="refs/heads/$BRANCH" -v sha="$HEAD" '/^worktree /{path=substr($0,10); head=""} /^HEAD /{head=$2} /^branch /{if ($2==ref && head==sha) {print path; exit}}')"
 BASE_CHECKOUT="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD | grep -Fx "$BASE")"
 OPEN_ISSUE="$(gh issue view "${ISSUE:-0}" -R "$REPO" --json number,state --jq 'select(.state == "OPEN") | .number')"
@@ -570,6 +570,16 @@ a worktree that has moved on to commits this run did not merge, a
 cross-repository pull request with no local branch at all — leaves `$WORKTREE`
 empty, and an empty `$WORKTREE` removes nothing. The linked issue number is not
 part of this at all any more; it is only what the issue close below reads.
+
+**A closing reference carries its own repository, and issue numbers are
+repository-local.** A pull request can close `other/repo#7` while `$REPO#7` is
+an unrelated open issue here, so reducing the references to their first bare
+number and closing that number in `$REPO` closes the wrong issue. Each reference
+is kept with the repository it names, and only one naming `$REPO` is taken —
+folding case, since a repository identity may be spelled either way. A pull
+request whose closing references are all in other repositories leaves `$ISSUE`
+empty and closes nothing here, which is right: an issue in another repository is
+not this workflow to close.
 
 `$WORKTREE` and `$OPEN_ISSUE` are two more values that resolve to nothing rather
 than to something wrong, but unlike the two above they are **skips, not
