@@ -28,6 +28,14 @@ created above it.
   so an unvalidated target would let `/finalize some-branch` merge whatever pull
   request that branch has open.
 
+  It finalizes a pull request onto the repository's **default branch** only. A
+  pull request can be retargeted to a different base without its head moving,
+  which leaves the approval label and the head-bound marker both current while
+  the reviewed code would land on a base nobody reviewed it against — the
+  review gate workflow strips the label on a push and never on a retarget, and
+  the marker records no base to compare with. A stacked pull request onto a
+  feature base is deliberately out of scope.
+
   Its gate fails closed and is evaluated twice — once to decide, and again
   immediately before the merge, because labels, the head, and the check set are
   all mutable. It resolves the authenticated GitHub login, reads the whole

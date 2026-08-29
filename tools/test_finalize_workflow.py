@@ -154,6 +154,7 @@ REPOSITORY_SCOPED_CALLS = (
     'pr view "$PR" -R "$REPO" --json ' + PR_VIEW_FIELDS,
     'api --paginate --slurp "' + COMMENT_FEED + '"',
     'pr checks "$PR" -R "$REPO" --json name,state,bucket',
+    'repo view -R "$REPO" --json defaultBranchRef',
     'pr merge "$PR" -R "$REPO" --admin --merge --match-head-commit',
     'pr view "$PR" -R "$REPO" --json state,mergedAt',
     'pr view "$PR" -R "$REPO" --json baseRefName',
@@ -489,6 +490,7 @@ class Harness:
         states: list[dict] | None = None,
         pages: list | None = None,
         checks: list | None = None,
+        default_branch: str = BASE_BRANCH,
         merged: str = "2026-08-02T00:00:00Z",
         merge_head: str = APPROVED_HEAD,
         cross_repository: bool = False,
@@ -522,6 +524,11 @@ class Harness:
             "gh",
             ["pr", "checks", PR_NUMBER, "-R", REPO_SLUG, "--json", "name,state,bucket"],
             stdout=json.dumps(checks if checks is not None else GREEN_CHECKS),
+        )
+        self.fake.script(
+            "gh",
+            ["repo", "view", "-R", REPO_SLUG, "--json", "defaultBranchRef"],
+            stdout=default_branch + "\n" if default_branch else "",
         )
         # Scripted for exactly one head. A merge bound to any other one finds
         # no scripted response, so the head binding is enforced by the fixture
@@ -668,7 +675,8 @@ def whole_workflow(
     fences = [gate_fence(relative_path)] * gate_runs + [
         fence_containing(text, "gh pr merge"),
         fence_containing(text, "MERGED="),
-        fence_containing(text, "BRANCH="),
+        # Specific enough to pass over the gate's own DEFAULT_BRANCH= line.
+        fence_containing(text, 'BRANCH="$(gh pr view'),
         fence_containing(text, "worktree remove"),
     ]
     if include_issue_close:
@@ -851,11 +859,23 @@ class RepositoryScopeTests(unittest.TestCase):
                 self.assertEqual(unscoped, ["gh " + GLOBAL_CALLS[0]])
 
     def test_the_repository_is_resolved_without_a_github_call_of_its_own(self):
+        # The identity cannot come from `gh`: at that point `$REPO` does not
+        # exist yet, so the call could not carry `-R` and would read whatever
+        # repository the working directory happens to be. The default-branch
+        # lookup is a different question asked of an ALREADY resolved
+        # repository, so it is allowed -- but only in its scoped form, which is
+        # what distinguishes it from the resolution this forbids.
         for relative_path in RENDERED_ASSETS:
             content = read(relative_path)
             with self.subTest(asset=relative_path):
                 self.assertIn(REPOSITORY_RESOLUTION, content)
-                self.assertNotIn("gh repo view", content)
+                unscoped = [
+                    call
+                    for call in gh_invocations(content)
+                    if call.startswith("gh repo view")
+                    and REPOSITORY_SCOPE not in call
+                ]
+                self.assertEqual(unscoped, [])
 
     def test_resolution_precedes_every_github_call(self):
         for relative_path in RENDERED_ASSETS:
@@ -1371,6 +1391,46 @@ class GateDecisionTests(unittest.TestCase):
                     "mergeable=CONFLICTING",
                 )
 
+    def test_a_retargeted_pull_request_refuses(self):
+        # A pull request can be retargeted without its head moving, which
+        # leaves the marker current and the approval label attached while the
+        # reviewed code is about to land on a base nobody reviewed it against.
+        # The marker records no base, so the target is pinned instead.
+        state = pull_request_state()
+        state["baseRefName"] = "some-feature-base"
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(relative_path, states=[state]),
+                    "targets some-feature-base rather than the default branch",
+                )
+
+    def test_an_unresolvable_default_branch_refuses(self):
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(relative_path, default_branch=""),
+                    "default branch of this repository could not be resolved",
+                )
+
+    def test_a_repository_whose_default_branch_is_not_master_is_read_correctly(self):
+        # Non-vacuity: the default branch is READ, not assumed. A repository
+        # whose default is `main` finalizes a `main`-targeted pull request and
+        # refuses a `master`-targeted one.
+        state = pull_request_state()
+        state["baseRefName"] = "main"
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertApproved(
+                    self.decide(
+                        relative_path, states=[state], default_branch="main"
+                    )
+                )
+                self.assertRefused(
+                    self.decide(relative_path, default_branch="main"),
+                    "targets master rather than the default branch main",
+                )
+
     def test_a_branch_behind_its_base_refuses(self):
         # The case `mergeable` alone walks straight past: MERGEABLE and BEHIND
         # together mean the head has not seen the base tip the reviewed code
@@ -1639,6 +1699,7 @@ class MutationBoundaryTests(unittest.TestCase):
             "an unstable merge state": {
                 "states": [pull_request_state(merge_state="UNSTABLE")]
             },
+            "a retargeted base": {"default_branch": "some-other-default"},
             "an approval by the pull request's own brand": {
                 "pages": [
                     [

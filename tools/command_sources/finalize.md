@@ -98,7 +98,8 @@ PR_STATE="$(gh pr view "$PR" -R "$REPO" --json number,url,body,headRefOid,headRe
 PR_COMMENTS="$(mktemp)"
 gh api --paginate --slurp "repos/$REPO/issues/$PR/comments?per_page=100" > "$PR_COMMENTS"
 PR_CHECKS="$(gh pr checks "$PR" -R "$REPO" --json name,state,bucket)"
-HEAD="$(python3 - "$REPO" "$VIEWER" "$PR_STATE" "$PR_COMMENTS" "$PR_CHECKS" <<'PY'
+DEFAULT_BRANCH="$(gh repo view -R "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)"
+HEAD="$(python3 - "$REPO" "$VIEWER" "$PR_STATE" "$PR_COMMENTS" "$PR_CHECKS" "$DEFAULT_BRANCH" <<'PY'
 import json
 import os
 import re
@@ -151,6 +152,7 @@ except (OSError, ValueError):
     state = None
     pages = None
 checks_text = sys.argv[5].strip()
+default_branch = sys.argv[6].strip()
 number = state.get("number") if isinstance(state, dict) else None
 subject = "PR #" + str(number) if number is not None else "the named pull request"
 
@@ -362,6 +364,27 @@ if marker_head != head:
         True,
     )
 
+# An approval names a commit, and this workflow binds it to one -- but a pull
+# request can be RETARGETED to a different base without its head moving, which
+# leaves the marker and the label both current while the merge lands the
+# reviewed code somewhere nobody reviewed it against. Nothing in the marker
+# records the base it was approved for, so there is no before-and-after to
+# compare. This workflow finalizes the ordinary Done-column case instead: a
+# pull request targeting the default branch, and nothing else. A stacked pull
+# request onto a feature base is out of scope here and belongs to whoever owns
+# that base.
+base_branch = str(state.get("baseRefName") or "")
+if not default_branch:
+    refuse("the default branch of this repository could not be resolved", False)
+if base_branch != default_branch:
+    refuse(
+        "this pull request targets "
+        + (base_branch or "an unreadable base")
+        + " rather than the default branch "
+        + default_branch,
+        False,
+    )
+
 mergeable = str(state.get("mergeable") or "").upper()
 if mergeable != "MERGEABLE":
     refuse("GitHub reports mergeable=" + (mergeable or "unset"), False)
@@ -478,6 +501,18 @@ What that gate requires, and why each part is what it is:
 - **`mergeable` exactly `MERGEABLE`.** `CONFLICTING` is a real merge conflict and
   `UNKNOWN` means GitHub has not finished computing mergeability; neither is a
   clearance, and merging on either is how an unresolved conflict lands.
+- **A base that is the repository's default branch.** An approval names a
+  commit, and everything above binds it to one — but a pull request can be
+  *retargeted* to a different base without its head moving at all. The marker
+  still names the current head, `.github/workflows/review-gate.yml` strips the
+  approval label only on a `synchronize` push and never on a retarget, and the
+  marker records no base to compare against, so nothing in the gate above would
+  notice that the reviewed code is about to land somewhere it was never
+  reviewed against. So the target is pinned instead: this workflow finalizes a
+  pull request onto the default branch, and refuses any other base. That is a
+  deliberate narrowing rather than a check — a stacked pull request onto a
+  feature base is out of scope here, and belongs to whoever owns that base. A
+  default branch that cannot be resolved refuses too.
 - **A merge state that is actually ready.** `mergeable` answers whether the
   merge *would* be clean, never whether it *should* happen now: a pull request
   is routinely `MERGEABLE` while its `mergeStateStatus` is `BEHIND` — its head

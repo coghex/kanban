@@ -1510,6 +1510,16 @@ state.
   repository-addressed `gh` call; the paginated issue-comment feed embeds
   `repos/$REPO/...`. The authenticated-user lookup is the one call that names
   no repository, because that endpoint has none.
+- **Target restriction:** it finalizes a pull request whose base is the
+  repository's **default branch**, and refuses any other. A pull request can be
+  *retargeted* to a different base without its head moving, which leaves both
+  the approval label and the head-bound marker current while the reviewed code
+  would land on a base nobody reviewed it against;
+  `.github/workflows/review-gate.yml` strips the label on a `synchronize` push
+  and never on a retarget, and the marker records no base to compare with. This
+  is therefore a narrowing rather than a check: a stacked pull request onto a
+  feature base is out of this action's scope and belongs to whoever owns that
+  base. A default branch that cannot be resolved refuses too.
 - **Review gate:** fail-closed, and evaluated twice — once to decide, and again
   immediately before the merge with nothing in between, because labels, the
   head, and the check set are all mutable. It requires the pull request to be
