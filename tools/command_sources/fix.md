@@ -317,9 +317,34 @@ leave any recovered work from a reused worktree intact rather than reverting it
 or folding it into the fix.
 
 Before pushing, re-fetch the pull request branch from the recorded head
-repository and verify its remote head still equals the recorded SHA. Push to
-that exact branch, in that head repository, without force. If the remote head
-moved, stop and report the competing update rather than overwriting it.
+repository and verify its remote head still equals the recorded SHA. If the
+remote head moved, stop and report the competing update rather than
+overwriting it.
+
+After that head check and IMMEDIATELY before the push, re-read the pull request
+from the resolved repository with the same authority-bearing fields step 2
+used:
+
+```bash
+gh pr view <pr> -R <owner/name> --json number,body,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,mergeStateStatus,mergeable,labels,reviewDecision,statusCheckRollup,closingIssuesReferences,url
+```
+
+Reapply step 2's configured approval decision to that FRESH `labels` and
+`reviewDecision`, reapply its configured changes-requested and blocking-label
+refusal, and reapply step 2b's complete origin-marker parse — including that
+the result still names THIS bundle's active brand. Require the fresh
+`headRefOid` to equal the recorded SHA too. If approval was withdrawn, any
+configured problem label appeared, the origin became missing, malformed, or a
+different brand, or the head no longer matches, STOP with no push and no
+rereview. Do not perform other work between this fresh gate check and the push.
+
+The remote-ref comparison does not replace this revalidation. A pull request's
+body, labels, and `reviewDecision` can all change without moving its head SHA;
+the workflow's authority can therefore disappear while the branch itself
+still looks unchanged.
+
+Only after BOTH pre-push checks pass, push to that exact branch in the recorded
+head repository, without force.
 
 After pushing, verify the head repository's `headRefName` now resolves to a SHA
 different from the one recorded at the start. That verified new SHA is what

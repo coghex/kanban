@@ -368,6 +368,27 @@ REQUIRED_PHRASES = {
         "Before pushing, re-fetch the pull request branch from the recorded head\n"
         "repository and verify its remote head still equals the recorded SHA."
     ),
+    "revalidates-mutable-authority-immediately-before-push": (
+        "After that head check and IMMEDIATELY before the push, re-read the pull "
+        "request from the resolved repository with the same authority-bearing "
+        "fields step 2 used"
+    ),
+    "reapplies-approval-problem-label-and-origin-gates": (
+        "Reapply step 2's configured approval decision to that FRESH `labels` "
+        "and `reviewDecision`, reapply its configured changes-requested and "
+        "blocking-label refusal, and reapply step 2b's complete origin-marker "
+        "parse — including that the result still names THIS bundle's active brand."
+    ),
+    "lost-pre-push-authority-stops-without-pushing": (
+        "If approval was withdrawn, any configured problem label appeared, the "
+        "origin became missing, malformed, or a different brand, or the head no "
+        "longer matches, STOP with no push and no rereview."
+    ),
+    "an-unchanged-head-does-not-prove-authority": (
+        "A pull request's body, labels, and `reviewDecision` can all change "
+        "without moving its head SHA; the workflow's authority can therefore "
+        "disappear while the branch itself still looks unchanged."
+    ),
     "verifies-the-push-actually-advanced-the-head": (
         "a push that left the head unchanged\ntransferred no fix, so treat it as "
         "having pushed nothing, invoke no rereview,\nand report it."
@@ -744,6 +765,52 @@ class ReusedWorktreeSafetyTests(unittest.TestCase):
                 flat(read(path)),
                 path,
             )
+
+
+class PrePushAuthorityRevalidationTests(unittest.TestCase):
+    """A stable branch ref does not prove the workflow still has authority.
+
+    Approval, labels, and the PR body are mutable GitHub metadata. The initial
+    read bounds diagnosis, while a second read immediately before push closes
+    the window in which authority can be withdrawn without changing the SHA.
+    """
+
+    PR_VIEW_PREFIX = "gh pr view <pr> -R <owner/name> --json "
+
+    def test_both_assets_fetch_authority_metadata_twice(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            self.assertEqual(
+                text.count(self.PR_VIEW_PREFIX),
+                2,
+                f"{path} must read the PR once for diagnosis and once before push",
+            )
+
+    def test_the_second_read_carries_every_mutable_gate_field(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            second = text.rindex(self.PR_VIEW_PREFIX)
+            command_end = text.index("\n", second)
+            command = text[second:command_end]
+            for field in ("body", "headRefOid", "labels", "reviewDecision"):
+                self.assertIn(field, command, f"{path}: pre-push read omits {field}")
+
+    def test_revalidation_is_after_the_remote_head_check_and_before_push(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            remote_head_check = text.index(
+                "verify its remote head still equals the recorded SHA"
+            )
+            fresh_gate = text.index("IMMEDIATELY before the push")
+            push = text.index("Only after BOTH pre-push checks pass, push", fresh_gate)
+            post_push = text.index("After pushing, verify", push)
+            self.assertLess(remote_head_check, fresh_gate, path)
+            self.assertLess(fresh_gate, push, path)
+            self.assertLess(push, post_push, path)
+
+    def test_the_problem_label_helper_the_assets_follow_still_exists(self):
+        workflow = read(WORKFLOW_HS)
+        self.assertIn("hasProblemLabel ::", workflow)
 
 
 class RollupQueryTests(unittest.TestCase):
