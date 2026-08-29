@@ -1556,10 +1556,11 @@ state.
   than to a wrong target, and each empty value is a refusal: the head branch is
   resolved only for a pull request whose head is in this repository, so a
   cross-repository head is never deleted here under a same-named branch of the
-  base repository; the remote deletion happens only when pushing to `origin`
-  actually reaches `$REPO`, since the identity was resolved from the remote's
-  *fetch* URL and `remote.origin.pushurl` can send the push somewhere else
-  entirely; and the local base branch is advanced only when the primary
+  base repository; the remote deletion happens only when **every** configured
+  push URL reaches `$REPO`, since the identity was resolved from the remote's
+  *fetch* URL, `remote.origin.pushurl` can send the push somewhere else
+  entirely, and that setting is multi-valued — `git push origin` writes to all
+  of them, so checking the first is not checking the push; and the local base branch is advanced only when the primary
   checkout is actually on it, so a pull request targeting a non-default base
   cannot fast-forward the default branch to somewhere it does not belong. Two
   further values resolve to nothing as ordinary *skips* rather than refusals —

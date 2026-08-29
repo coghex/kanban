@@ -521,7 +521,7 @@ WORKTREE="$(git -C "$ROOT" worktree list --porcelain | awk -v ref="refs/heads/$B
 BASE_CHECKOUT="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD | grep -Fx "$BASE")"
 OPEN_ISSUE="$(gh issue view "${ISSUE:-0}" -R "$REPO" --json number,state --jq 'select(.state == "OPEN") | .number')"
 LOCAL_BRANCH="$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH")"
-PUSH_TARGET="$(git -C "$ROOT" remote get-url --push origin | sed -E 's#\.git$##; s#.*(/|:)([^/:]+/[^/:]+)$#\2#' | grep -Fix "$REPO")"
+PUSH_TARGET="$(git -C "$ROOT" remote get-url --push --all origin | sed -E 's#\.git$##; s#.*(/|:)([^/:]+/[^/:]+)$#\2#' | awk -v want="$REPO" '{seen++; if (tolower($0) != tolower(want)) foreign=1} END{if (seen && !foreign) print "ok"}')"
 ```
 
 Two of those resolve to nothing on purpose, and the guards below turn each empty
@@ -537,16 +537,20 @@ value into a refusal rather than a wrong deletion:
   whatever branch the checkout has out — which for a pull request targeting a
   non-default base would advance the default branch to somewhere it should not
   go. A detached HEAD leaves it empty too.
-- `$PUSH_TARGET` is non-empty **only when pushing to `origin` really reaches
-  `$REPO`**. `$REPO` was resolved from the remote's *fetch* URL, and `git push`
-  uses `remote.origin.pushurl` when one is configured — so a checkout that
-  fetches from `$REPO` and pushes somewhere else would have every check above
-  pass, `isCrossRepository` included, and then delete a same-named branch in
-  that other repository. The push URL is reduced to one `owner/name` the same
-  way and matched against `$REPO`, case-insensitively because a remote URL may
-  spell the identity in any case while naming the same repository. `--push`
-  falls back to the fetch URL when no push URL is set, so the ordinary checkout
-  simply matches itself.
+- `$PUSH_TARGET` is non-empty **only when every push URL reaches `$REPO`**.
+  `$REPO` was resolved from the remote's *fetch* URL, and `git push` uses
+  `remote.origin.pushurl` when one is configured — so a checkout that fetches
+  from `$REPO` and pushes somewhere else would have every check above pass,
+  `isCrossRepository` included, and then delete a same-named branch in that
+  other repository. `remote.origin.pushurl` is also **multi-valued**, and
+  `git push origin` writes to every one of them, so checking the first is not
+  checking the push: `--all` lists them all, each is reduced to one
+  `owner/name` the same way, and the `awk` yields its `ok` only when at least
+  one was listed and none of them is anything but `$REPO`. The comparison folds
+  case, because a remote URL may spell the identity any way and still name the
+  same repository — unlike the branch comparison above it, which stays exact
+  because branch names are case-sensitive. `--push` falls back to the fetch URL
+  when no push URL is set, so the ordinary checkout simply matches itself.
 
 `git worktree list` is the only source for the worktree path, so a legacy path
 and a repository-scoped one are both found where they actually are — and it is
@@ -588,7 +592,7 @@ git -C "$ROOT" fetch origin &&
 git -C "$ROOT" merge --ff-only "origin/$BASE" &&
 : "${BRANCH:?the head of this pull request lives in another repository; delete no branch here}" &&
 { [ -z "$LOCAL_BRANCH" ] || git -C "$ROOT" update-ref -d "refs/heads/$BRANCH" "$HEAD"; } &&
-: "${PUSH_TARGET:?pushing to origin does not reach the repository this pull request is in; delete no remote branch here}" &&
+: "${PUSH_TARGET:?pushing to origin does not reach the repository this pull request is in, or does not reach only it; delete no remote branch here}" &&
 git -C "$ROOT" push origin --force-with-lease="refs/heads/$BRANCH:$HEAD" --delete "$BRANCH"
 ```
 

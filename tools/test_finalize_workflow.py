@@ -95,8 +95,8 @@ EXPECTED_REFUSAL_WORDS = (
     "leave its branches alone",
     "the head of this pull request lives in another repository; delete no "
     "branch here",
-    "pushing to origin does not reach the repository this pull request is in; "
-    "delete no remote branch here",
+    "pushing to origin does not reach the repository this pull request is in, "
+    "or does not reach only it; delete no remote branch here",
 )
 
 
@@ -502,7 +502,7 @@ class Harness:
         worktree_listing: str = WORKTREE_LISTING,
         local_branch: str | None = APPROVED_HEAD,
         failing_git: list[str] | None = None,
-        push_repo: str = REPO_SLUG,
+        push_repos: tuple[str, ...] = (REPO_SLUG,),
     ) -> None:
         base = ["pr", "view", PR_NUMBER, "-R", REPO_SLUG, "--json"]
         self.fake.script("gh", ["api", "user", "--jq", ".login"], stdout=viewer + "\n")
@@ -591,8 +591,10 @@ class Harness:
         # push URL is read separately from the fetch URL $REPO came from.
         self.fake.script(
             "git",
-            ["-C", CHECKOUT_ROOT, "remote", "get-url", "--push", "origin"],
-            stdout=f"https://github.com/{push_repo}.git\n",
+            ["-C", CHECKOUT_ROOT, "remote", "get-url", "--push", "--all", "origin"],
+            stdout="".join(
+                f"https://github.com/{one}.git\n" for one in push_repos
+            ),
         )
         if failing_git is not None:
             self.fake.script(
@@ -1924,7 +1926,7 @@ class MutationBoundaryTests(unittest.TestCase):
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 completed, harness = self.execute(
-                    relative_path, push_repo="someone-else/kanban"
+                    relative_path, push_repos=("someone-else/kanban",)
                 )
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertIn("does not reach the repository", completed.stderr)
@@ -1941,10 +1943,47 @@ class MutationBoundaryTests(unittest.TestCase):
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 completed, harness = self.execute(
-                    relative_path, push_repo="Coghex/Kanban"
+                    relative_path, push_repos=("Coghex/Kanban",)
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 self.assertIn(REMOTE_DELETE, harness.git_calls())
+
+    def test_a_second_push_url_naming_another_repository_deletes_nothing(self):
+        # `remote.origin.pushurl` is multi-valued and `git push origin` writes
+        # to every one of them, so validating the first is not validating the
+        # push: a checkout whose first URL is this repository and whose second
+        # is a foreign one would delete the same-named branch over there too.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path,
+                    push_repos=(REPO_SLUG, "someone-else/kanban"),
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("does not reach", completed.stderr)
+                for call in harness.git_calls():
+                    self.assertNotIn("--delete", call, call)
+
+    def test_several_push_urls_all_naming_this_repository_are_accepted(self):
+        # Non-vacuity for the check above: it must not simply refuse every
+        # multi-URL remote.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path, push_repos=(REPO_SLUG, "Coghex/Kanban")
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn(REMOTE_DELETE, harness.git_calls())
+
+    def test_a_remote_with_no_push_url_at_all_deletes_nothing(self):
+        # The `seen` half of the check: an empty listing is not "every URL
+        # matches", it is nothing to have checked.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(relative_path, push_repos=())
+                self.assertNotEqual(completed.returncode, 0)
+                for call in harness.git_calls():
+                    self.assertNotIn("--delete", call, call)
 
     def test_the_gate_is_re_read_before_the_merge(self):
         # Two runs means two of each read, which is what makes the refresh
