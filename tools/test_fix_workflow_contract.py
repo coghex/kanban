@@ -168,8 +168,8 @@ REQUIRED_PHRASES = {
         "no check state, which is why it precedes the\n   rollup test below."
     ),
     "the-scratch-file-lives-outside-the-checkout": (
-        "`mktemp` puts that file OUTSIDE the checkout, and the `rm` is not "
-        "optional."
+        "Argument-free `mktemp` is portable across BSD/macOS and GNU/Linux, "
+        "and puts that file OUTSIDE the checkout; the `rm` is not optional."
     ),
     "nothing-may-be-left-in-the-working-tree": (
         "Nothing this workflow does may leave a file in the working tree"
@@ -911,9 +911,15 @@ class WorkingTreeHygieneTests(unittest.TestCase):
             targets = [t for _, t in self._redirect_targets(read(path))]
             self.assertIn('"$ROLLUP"', targets, path)
 
-    def test_the_scratch_path_is_made_with_mktemp(self):
+    def test_the_scratch_path_uses_portable_argument_free_mktemp(self):
         for path in FIX_ASSETS:
-            self.assertIn("mktemp -t kanban-rollup", read(path), path)
+            text = read(path)
+            self.assertIn('ROLLUP="$(mktemp)"', text, path)
+            self.assertNotIn(
+                "mktemp -t",
+                text,
+                f"{path} uses BSD -t syntax that GNU mktemp rejects without Xs",
+            )
 
     def test_the_scratch_path_is_assigned_before_it_is_redirected_into(self):
         # A reader executes the fence top to bottom. An assignment that came

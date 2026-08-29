@@ -133,13 +133,14 @@ what make the next paragraph possible and `gh pr view --json statusCheckRollup`
 omits them:
 
 ```bash
-ROLLUP="$(mktemp -t kanban-rollup)"
+ROLLUP="$(mktemp)"
 gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){pullRequest(number:<pr>){commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){totalCount nodes{__typename ... on CheckRun{name status conclusion startedAt completedAt checkSuite{app{slug}}} ... on StatusContext{context state createdAt creator{login}}}}}}}}}}}' > "$ROLLUP"
 # ... read $ROLLUP for every branch below, then:
 rm -f "$ROLLUP"
 ```
 
-`mktemp` puts that file OUTSIDE the checkout, and the `rm` is not optional.
+Argument-free `mktemp` is portable across BSD/macOS and GNU/Linux, and puts
+that file OUTSIDE the checkout; the `rm` is not optional.
 Nothing this workflow does may leave a file in the working tree: CLAUDE.md's
 hygiene rule is explicit about scratch files, `tools/drain_prs.py` has to
 relocate any untracked file it finds before a fast-forward, and step 4 tells
