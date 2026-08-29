@@ -31,7 +31,10 @@ created above it.
   Its gate fails closed and is evaluated twice — once to decide, and again
   immediately before the merge, because labels, the head, and the check set are
   all mutable. It resolves the authenticated GitHub login, reads the whole
-  paginated comment feed rather than a bounded window, and requires the
+  paginated comment feed rather than a bounded window — through a temporary
+  file outside the checkout, since that feed is the one unbounded input and an
+  argument long enough to carry it exceeds the system limit on exactly the long
+  pull requests the pagination exists to read — and requires the
   globally newest marker that login published to name the pull request's
   current head with `verdict=APPROVE`. That marker is the `pr-review:v2` shape
   the review coordinator publishes today, comma-joined `reviewers=` and

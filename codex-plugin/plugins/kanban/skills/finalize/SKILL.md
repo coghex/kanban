@@ -86,7 +86,8 @@ unless every condition below holds, and every later step is guarded on `$HEAD`.
 ```bash
 VIEWER="$(gh api user --jq .login)"
 PR_STATE="$(gh pr view "$PR" -R "$REPO" --json number,url,body,headRefOid,headRefName,baseRefName,labels,reviewDecision,mergeable,mergeStateStatus,closingIssuesReferences)"
-PR_COMMENTS="$(gh api --paginate --slurp "repos/$REPO/issues/$PR/comments?per_page=100")"
+PR_COMMENTS="$(mktemp)"
+gh api --paginate --slurp "repos/$REPO/issues/$PR/comments?per_page=100" > "$PR_COMMENTS"
 PR_CHECKS="$(gh pr checks "$PR" -R "$REPO" --json name,state,bucket)"
 HEAD="$(python3 - "$REPO" "$VIEWER" "$PR_STATE" "$PR_COMMENTS" "$PR_CHECKS" <<'PY'
 import json
@@ -130,8 +131,14 @@ repo = sys.argv[1].strip()
 viewer = sys.argv[2].strip()
 try:
     state = json.loads(sys.argv[3])
-    pages = json.loads(sys.argv[4])
-except ValueError:
+    # The comment feed arrives as a file rather than as an argument. It is the
+    # one input here that grows without bound -- pagination exists precisely
+    # because a pull request can carry more comments than one page holds -- and
+    # a long enough feed passed on argv exceeds the system argument limit, so
+    # the validator would fail to start on exactly the pull requests the paging
+    # is there to support.
+    pages = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+except (OSError, ValueError):
     state = None
     pages = None
 checks_text = sys.argv[5].strip()
@@ -390,6 +397,7 @@ if unfinished:
 sys.stdout.write(head + "\n")
 PY
 )"
+rm -f "$PR_COMMENTS"
 ```
 
 What that gate requires, and why each part is what it is:
@@ -398,13 +406,21 @@ What that gate requires, and why each part is what it is:
   published counts, so an unresolved login refuses rather than accepting every
   marker in the feed. Logins are compared case-insensitively; GitHub does not
   preserve case in a way that may decide this.
-- **The complete comment feed.** A pull request's `comments` field returns a
+- **The complete comment feed, read from a file.** A pull request's `comments` field returns a
   bounded window, so on a long pull request the newest marker can fall outside
   it and an older verdict wins. The paginated issue-comments endpoint is read
   whole and
   flattened, then ordered newest-first by `created_at` with the comment id
   breaking ties, so the marker chosen is the globally newest one and the choice
-  does not depend on the order GitHub happened to return.
+  does not depend on the order GitHub happened to return. It goes through a
+  temporary file rather than an argument because it is the one input that grows
+  without bound: a feed long enough to need the paging exceeds the system
+  argument limit, and the gate would then fail to start on exactly the pull
+  requests the paging is there to support. Argument-free `mktemp` is portable
+  across BSD/macOS and GNU/Linux and puts that file OUTSIDE the checkout, and
+  the `rm` is not optional — CLAUDE.md forbids leaving a scratch file in the
+  tree, and `tools/drain_prs.py` would otherwise have to relocate it before a
+  fast-forward.
 - **The marker the coordinator publishes today.** That is
   `<!-- pr-review:v2 reviewers=… models=… head=… verdict=… -->`, and both of
   its list fields are comma-joined, so `reviewers=claude,codex` is an ordinary

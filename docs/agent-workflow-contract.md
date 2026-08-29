@@ -1519,8 +1519,11 @@ state.
   `[workflow]` table overridden by `[repositories."<owner>/<name>".workflow]`,
   exactly as the bundled coordinator, the drainer and the board resolve them,
   and compared with case folded on both sides as `hasLabel` does. It requires
-  the authenticated login resolved; the complete paginated issue-comment feed read and ordered
-  newest-first; and the globally newest marker *that login published* to be a
+  the authenticated login resolved; the complete paginated issue-comment feed
+  read through a temporary file outside the checkout — that feed is the one
+  unbounded input, and an argument long enough to carry it exceeds the system
+  limit on exactly the long pull requests the pagination exists to read — and
+  ordered newest-first; and the globally newest marker *that login published* to be a
   well-formed `pr-review:v2` marker — the current coordinator's shape,
   including its comma-joined `reviewers=` and `models=` fields — or the legacy
   `pr-review:v1` spelling, naming the pull request's current `headRefOid` with
@@ -1786,8 +1789,8 @@ rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKI
 sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
 tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
 grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
-mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | no
-rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md | kanban | supported | no
+mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
+rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
 ```
 
@@ -1997,9 +2000,14 @@ counterpart, for the reason the next paragraph gives.
 
 `mktemp-cli` and `rm-cli` are `mandatory: no` for the same shape of reason:
 `fix` writes the check rollup it diagnoses from to a temporary file OUTSIDE the
-worked checkout and deletes it, because CLAUDE.md's hygiene rule forbids leaving
-a scratch file in the tree and `tools/drain_prs.py` would otherwise have to
-relocate it before every fast-forward. `mktemp-cli` is also `tools/docs_land.sh`'s.
+worked checkout and deletes it, and `finalize` (issue #544) does the same with
+the paginated comment feed its review gate is decided from — that feed is the
+one input which grows without bound, and passing it as an argument would exceed
+the system argument limit on exactly the long pull requests the pagination
+exists to read. Both write outside the tree and delete afterwards, because
+CLAUDE.md's hygiene rule forbids leaving a scratch file in it and
+`tools/drain_prs.py` would otherwise have to relocate it before every
+fast-forward. `mktemp-cli` is also `tools/docs_land.sh`'s.
 
 `find-cli` and `head-cli` are `mandatory: no`: they are only needed to locate
 one of the installed Codex plugin's own vendored scripts from inside a workflow

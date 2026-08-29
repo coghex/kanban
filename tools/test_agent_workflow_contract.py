@@ -615,9 +615,11 @@ FIX_SURFACE_EXPECTED_COMMANDS = {
 # the repository identity is reduced from, and the post-merge cleanup; `sed`
 # performs both of those reductions; and `python3` is the review-marker gate,
 # which decides against JSON those `gh` reads already returned rather than
-# making a request of its own. `mktemp` and `rm` are deliberately absent: the
-# gate passes its inputs on argv, so unlike `fix` this workflow writes no
-# scratch file anywhere and has none to remove. `grep` is the one exact-match
+# making a request of its own. `mktemp` and `rm` are the gate's: it reads the
+# paginated comment feed through a temporary file outside the checkout and
+# removes it, because that feed is the one input growing without bound and an
+# argument long enough to carry it exceeds the system limit -- on exactly the
+# long pull requests the pagination exists to read. `grep` is the one exact-match
 # test the cleanup makes -- is the primary checkout on this pull request's base
 # branch? -- and this pair is that row's first packaged consumer. `awk` reads
 # the `git worktree list --porcelain` record properly, so the merged pull
@@ -629,7 +631,9 @@ FINALIZE_SURFACE_EXPECTED_COMMANDS = {
         "gh",
         "git",
         "grep",
+        "mktemp",
         "python3",
+        "rm",
         "sed",
     },
     "codex-plugin/plugins/kanban/skills/finalize/SKILL.md": {
@@ -637,7 +641,9 @@ FINALIZE_SURFACE_EXPECTED_COMMANDS = {
         "gh",
         "git",
         "grep",
+        "mktemp",
         "python3",
+        "rm",
         "sed",
     },
 }
@@ -2701,7 +2707,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
                         "gh-cli",
                         "git-cli",
                         "grep-cli",
+                        "mktemp-cli",
                         "python3-cli",
+                        "rm-cli",
                         "sed-cli",
                     },
                 )

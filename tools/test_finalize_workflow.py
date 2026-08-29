@@ -1464,6 +1464,69 @@ class GateDecisionTests(unittest.TestCase):
                     "GitHub reported no checks on this head",
                 )
 
+    def test_a_feed_far_larger_than_the_argument_limit_still_decides(self):
+        # The reason the feed goes through a file. Passing it on argv fails at
+        # `getconf ARG_MAX` -- on exactly the long pull requests the pagination
+        # exists to read -- and the failure is silent in the worst way: the
+        # validator never starts, $HEAD stays empty, and finalize can never
+        # succeed however good the approval is. The padding is comment BODIES,
+        # so it is the shape a real long feed has.
+        limit = int(
+            subprocess.run(
+                ["getconf", "ARG_MAX"], capture_output=True, text=True, check=True
+            ).stdout.strip()
+        )
+        padding = "x" * 4096
+        bulk = [
+            comment(index + 10, "2026-07-%02dT00:00:00Z" % (index % 28 + 1), padding)
+            for index in range(limit // 4096 + 16)
+        ]
+        pages = [
+            bulk,
+            [comment(1, "2026-08-01T00:00:00Z", coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"]))],
+        ]
+        payload = json.dumps(pages)
+        self.assertGreater(len(payload), limit)
+        # The control, so this is a regression test rather than a large fixture
+        # that happens to pass: handing THIS payload to a process as an
+        # argument really does fail on this platform, which is what the file
+        # avoids.
+        with self.assertRaises(OSError):
+            subprocess.run(
+                ["true", payload],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=False,
+            )
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertApproved(self.decide(relative_path, pages=pages))
+
+    def test_the_feed_is_not_passed_as_an_argument(self):
+        # The mechanism the size test above depends on, pinned directly: the
+        # gate names a file and reads it, rather than receiving the feed.
+        for relative_path in RENDERED_ASSETS:
+            fence = gate_fence(relative_path)
+            with self.subTest(asset=relative_path):
+                self.assertIn('PR_COMMENTS="$(mktemp)"', fence)
+                self.assertIn("Path(sys.argv[4]).read_text", fence)
+
+    def test_the_gate_removes_the_file_it_wrote(self):
+        # CLAUDE.md forbids leaving a scratch file behind, and the drainer has
+        # to relocate any untracked file before a fast-forward.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                harness = Harness(Path(tempfile.mkdtemp(dir=directory.name)))
+                harness.script_github()
+                completed = harness.run(
+                    gate_fence(relative_path)
+                    + '\nprintf "left=%s\\n" "$(ls "$PR_COMMENTS" 2>/dev/null)"\n'
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn("left=\n", completed.stdout)
+
     def test_a_feed_with_no_marker_at_all_refuses(self):
         pages = [[comment(1, "2026-08-01T00:00:00Z", "looks good to me")]]
         for relative_path in RENDERED_ASSETS:
