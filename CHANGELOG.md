@@ -23,6 +23,11 @@ created above it.
   request. `finalize` runs on the pull request the user names, in the turn the
   user asks for it.
 
+  It takes one positive pull request number and checks that it is one before
+  reading anything: `gh` accepts a branch name or a URL wherever a number goes,
+  so an unvalidated target would let `/finalize some-branch` merge whatever pull
+  request that branch has open.
+
   Its gate fails closed and is evaluated twice — once to decide, and again
   immediately before the merge, because labels, the head, and the check set are
   all mutable. It resolves the authenticated GitHub login, reads the whole

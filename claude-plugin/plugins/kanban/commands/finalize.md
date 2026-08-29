@@ -58,7 +58,25 @@ PR="$ARGUMENTS"
 `$ARGUMENTS` is what Claude Code substitutes before the session reads this file.
 
 If no number was supplied, infer it from the current worktree's branch and
-confirm it with the user before proceeding. Never guess it from the Done column.
+confirm it with the user before proceeding, setting `PR` to the number they
+confirm. Never guess it from the Done column.
+
+Then, whichever of those it came from, require it to be one positive pull
+request number before anything is read:
+
+```bash
+[ -n "$PR" ] && [ "$PR" = "${PR%%[!0-9]*}" ] && [ "$PR" != "0" ] || PR=""
+: "${PR:?a pull request number must be exactly one positive number; nothing has been read}"
+```
+
+This is not decoration. GitHub's CLI accepts a branch name or a URL wherever a
+pull request number goes — the `pr view` and `pr merge` subcommands both do — so
+an unvalidated `$PR` lets `/finalize some-branch` gate and then **merge**
+whatever pull request that branch happens to have open, one nobody named. An empty `$PR` is refused for the same
+reason: it must be the number that was confirmed, not the absence that prompted
+the question. The test rejects an empty value, a non-numeric one, a negative or
+zero one, and anything carrying a second token, and it runs before the first
+`gh` call rather than after, so a rejected invocation reads nothing at all.
 
 ## 2. The gate (FAIL CLOSED)
 

@@ -1499,7 +1499,12 @@ state.
   after drainer recovery (§2.4) has established that manual finalization is the
   appropriate fallback for one named pull request. A pull request merely being
   ready is not an invocation.
-- **Inputs:** one positive pull request number. The repository identity is
+- **Inputs:** one positive pull request number, validated as exactly that
+  before the first GitHub read: `gh` accepts a branch name or a URL wherever a
+  pull request number goes, so an unvalidated target would let
+  `$finalize some-branch` / `/finalize some-branch` gate and then merge whatever
+  pull request that branch has open. An empty, non-numeric, non-positive, or
+  multi-token value is refused having read nothing. The repository identity is
   resolved once from the checkout's `origin` remote before the first GitHub
   read, reported to the user, and passed as `-R "$REPO"` on every
   repository-addressed `gh` call; the paginated issue-comment feed embeds

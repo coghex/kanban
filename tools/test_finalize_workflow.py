@@ -56,6 +56,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -89,6 +90,8 @@ PARAMETER_REFUSAL_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:\?([^}]*)\}")
 # with. Enumerated so the scan above is measured against a known set rather
 # than against whatever it happens to find.
 EXPECTED_REFUSAL_WORDS = (
+    "a pull request number must be exactly one positive number; nothing has "
+    "been read",
     "the finalize gate refused; nothing is merged, closed, removed, or deleted",
     "the merge is not confirmed; close nothing, remove nothing, delete nothing",
     "the primary checkout is not on the base branch of this pull request; "
@@ -626,6 +629,11 @@ class Harness:
 
 def gate_fence(relative_path: str) -> str:
     return fence_containing(read(relative_path), "VIEWER=")
+
+
+def target_fence(relative_path: str) -> str:
+    """The validation the pull request number passes before anything is read."""
+    return fence_containing(read(relative_path), "PR%%")
 
 
 # The cleanup chain, in the order the asset runs it, by the tokens that
@@ -1986,6 +1994,71 @@ class MutationBoundaryTests(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             self.assertNoMutation(harness)
+
+
+class TargetValidationTests(unittest.TestCase):
+    """One positive pull request number, established before the first read.
+
+    `gh pr view` and `gh pr merge` both accept a branch name or a URL where a
+    number goes, so an unvalidated target lets `finalize some-branch` gate and
+    then MERGE whatever pull request that branch has open -- one nobody named.
+    The validation therefore runs ahead of every GitHub call rather than after,
+    and these drive it with the gate appended so a rejected value is proved to
+    read nothing at all.
+    """
+
+    REJECTED = {
+        "an empty invocation": "",
+        "a branch name": "some-branch",
+        "a pull request URL": "https://github.com/coghex/kanban/pull/573",
+        "a negative number": "-573",
+        "zero": "0",
+        "a number with a trailing token": "573 --admin",
+        "two numbers": "573 574",
+        "a number with a suffix": "573x",
+        "whitespace alone": "   ",
+    }
+
+    def run_with(self, relative_path: str, value: str):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        harness = Harness(Path(directory.name))
+        harness.script_github()
+        script = (
+            f'PR={shlex.quote(value)}\n'
+            + target_fence(relative_path)
+            + "\n"
+            + gate_fence(relative_path)
+        )
+        return harness.run(script), harness
+
+    def test_every_rejected_target_reads_nothing(self):
+        for relative_path in RENDERED_ASSETS:
+            for reason, value in self.REJECTED.items():
+                with self.subTest(asset=relative_path, target=reason):
+                    completed, harness = self.run_with(relative_path, value)
+                    self.assertNotEqual(completed.returncode, 0, completed.stdout)
+                    self.assertIn("exactly one positive number", completed.stderr)
+                    self.assertEqual(harness.gh_calls(), [])
+
+    def test_a_positive_number_is_accepted(self):
+        # Non-vacuity: the validation must not simply refuse everything.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.run_with(relative_path, PR_NUMBER)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertNotEqual(harness.gh_calls(), [])
+
+    def test_the_validation_precedes_every_github_call(self):
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            first_call = GH_INVOCATION_RE.search(content)
+            with self.subTest(asset=relative_path):
+                self.assertLess(
+                    content.index(target_fence(relative_path)),
+                    first_call.start(),
+                    f"{relative_path}: a GitHub call precedes the target check",
+                )
 
 
 class NoRemoteWriteTests(unittest.TestCase):
