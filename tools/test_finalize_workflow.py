@@ -783,7 +783,7 @@ class RegistrationTests(unittest.TestCase):
     def test_the_source_names_every_workflow_through_a_token(self):
         self.assertEqual(
             REFERENCED_WORKFLOWS,
-            {"finalize", "drain-prs", "pr-review", "pr-rereview"},
+            {"finalize", "drain-prs", "pr-review", "pr-rereview", "fix"},
         )
 
 
@@ -1296,6 +1296,50 @@ class GateDecisionTests(unittest.TestCase):
                     "mergeable=CONFLICTING",
                 )
 
+    def test_a_branch_behind_its_base_refuses(self):
+        # The case `mergeable` alone walks straight past: MERGEABLE and BEHIND
+        # together mean the head has not seen the base tip the reviewed code
+        # would land on. Merging it with --admin skips the branch update and
+        # the fresh review the drainer would have required.
+        state = pull_request_state(merge_state="BEHIND")
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(relative_path, states=[state]),
+                    "mergeStateStatus=BEHIND",
+                )
+
+    def test_an_unstable_merge_state_refuses(self):
+        state = pull_request_state(merge_state="UNSTABLE")
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(relative_path, states=[state]),
+                    "mergeStateStatus=UNSTABLE",
+                )
+
+    def test_a_protected_branch_requirement_is_ready(self):
+        # parseMergeState maps a MERGEABLE + BLOCKED pair to MergeProtected,
+        # which mergeStateReady accepts: it is the branch-protection
+        # requirement `--admin` exists to clear. Refusing it would leave this
+        # workflow unable to finalize anything on a protected branch.
+        state = pull_request_state(merge_state="BLOCKED")
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertApproved(self.decide(relative_path, states=[state]))
+
+    def test_every_other_merge_state_refuses(self):
+        # MergeUnknown is the catch-all in parseMergeState, and it is not a
+        # clearance either.
+        for merge_state in ("DRAFT", "HAS_HOOKS", "", "SOMETHING_NEW"):
+            state = pull_request_state(merge_state=merge_state)
+            for relative_path in RENDERED_ASSETS:
+                with self.subTest(asset=relative_path, merge_state=merge_state):
+                    self.assertRefused(
+                        self.decide(relative_path, states=[state]),
+                        "mergeStateStatus=" + (merge_state or "unset"),
+                    )
+
     def test_an_uncomputed_merge_state_is_not_a_clearance(self):
         state = pull_request_state(mergeable="UNKNOWN", merge_state="UNKNOWN")
         for relative_path in RENDERED_ASSETS:
@@ -1451,6 +1495,12 @@ class MutationBoundaryTests(unittest.TestCase):
                 ]
             },
             "a merge conflict": {"states": [pull_request_state(mergeable="CONFLICTING")]},
+            "a head behind its base": {
+                "states": [pull_request_state(merge_state="BEHIND")]
+            },
+            "an unstable merge state": {
+                "states": [pull_request_state(merge_state="UNSTABLE")]
+            },
             "an approval by the pull request's own brand": {
                 "pages": [
                     [

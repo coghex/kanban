@@ -44,9 +44,15 @@ created above it.
   absent — the same global-then-per-repository resolution the coordinator, the
   drainer and the board make, so a repository that renamed its verdict labels
   is read correctly rather than having every approval refused. A `mergeable`
-  that is not exactly `MERGEABLE` and any check that is not successful refuse
-  too. A refusal merges nothing, closes nothing, removes no worktree, and
-  deletes no branch.
+  that is not exactly `MERGEABLE`, a merge state that is not ready, and any
+  check that is not successful refuse too. Readiness mirrors Kanban's own
+  `mergeStateReady`: `CLEAN`, and a `BLOCKED` state on a `MERGEABLE` pull
+  request, which is the branch-protection requirement `--admin` clears.
+  `BEHIND` and `UNSTABLE` refuse — `mergeable` says whether a merge would be
+  clean, not whether it should happen now, and a head that has not seen its
+  base tip belongs in `/fix` and the drainer's branch-update-and-rereview path
+  rather than here. A refusal merges nothing, closes nothing, removes no
+  worktree, and deletes no branch.
 
   It merges with `--admin --merge --match-head-commit`, the same call the
   drainer makes, and never `--squash`, `--rebase`, or GitHub auto-merge —

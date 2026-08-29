@@ -329,6 +329,24 @@ mergeable = str(state.get("mergeable") or "").upper()
 if mergeable != "MERGEABLE":
     refuse("GitHub reports mergeable=" + (mergeable or "unset"), False)
 
+# mergeable answers "would this merge cleanly", never "should it merge now".
+# parseMergeState in src/Kanban/GitHub/Decode.hs and mergeStateReady in
+# src/Kanban/Workflow.hs are mirrored exactly: CLEAN is ready, and so is a
+# BLOCKED state on a MERGEABLE pull request, which is the branch-protection
+# requirement the MergeProtected state models and the one --admin is for.
+# BEHIND, UNSTABLE, a BLOCKED state that is not MERGEABLE, and every other
+# value are not ready. The mergeable test is repeated inside the condition
+# rather than assumed from the refusal above, so the mirror stays readable
+# against Decode.hs and survives a reordering here.
+merge_state = str(state.get("mergeStateStatus") or "").upper()
+ready = merge_state == "CLEAN" or (
+    merge_state == "BLOCKED" and mergeable == "MERGEABLE"
+)
+if not ready:
+    refuse(
+        "GitHub reports mergeStateStatus=" + (merge_state or "unset"), False
+    )
+
 if not checks_text:
     refuse("GitHub reported no checks on this head", False)
 try:
@@ -410,6 +428,19 @@ What that gate requires, and why each part is what it is:
 - **`mergeable` exactly `MERGEABLE`.** `CONFLICTING` is a real merge conflict and
   `UNKNOWN` means GitHub has not finished computing mergeability; neither is a
   clearance, and merging on either is how an unresolved conflict lands.
+- **A merge state that is actually ready.** `mergeable` answers whether the
+  merge *would* be clean, never whether it *should* happen now: a pull request
+  is routinely `MERGEABLE` while its `mergeStateStatus` is `BEHIND` — its head
+  has not seen the base tip the reviewed code will land on — or `UNSTABLE`,
+  where a check is failing. Merging either with `--admin` would push straight
+  past the branch update and the fresh review the drainer would have required.
+  So `parseMergeState` and `mergeStateReady` are mirrored exactly: `CLEAN` is
+  ready, and a `BLOCKED` state on a `MERGEABLE` pull request is ready too —
+  that is the branch-protection requirement the `MergeProtected` state models,
+  and clearing it is precisely what `--admin` is for. Everything else refuses,
+  `BEHIND` and `UNSTABLE` included. A `BEHIND` pull request is not finalized
+  here: it is updated and rereviewed first, which is
+  {{cmd:fix}}'s branch to take, not this one.
 - **Every check successful.** Any check whose bucket is not `pass` or `skipping`
   refuses, and so does an empty or unreadable check set — "no checks reported"
   is what a conflicted pull request looks like, not what a green one does. This
