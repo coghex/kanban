@@ -368,6 +368,32 @@ FORBIDDEN_INVOCATION_FLAGS = (
 )
 
 
+# Tokens that would mean this coordinator resolved a roster ASSIGNMENT cell
+# rather than merely reading the loaded provider set. D-2 as amended is a
+# promise about the values it hands a spawn, not about whether it may read the
+# roster, so the line between the two is drawn here.
+ASSIGNMENT_RESOLUTION_TOKENS = (
+    "resolve_assignment",
+    "assignment_for",
+    "nested_review_assignment",
+    "Assignment(",
+    "NESTED_REVIEW_MODEL",
+    "NESTED_REVIEW_EFFORT",
+    ".effort",
+)
+
+
+def assignment_resolution_tokens(source: str) -> list[str]:
+    """Every assignment-resolution token this source names, in scan order.
+
+    A function rather than a loop inside one test, so the planted-violation
+    control below can run the SAME scan against a source that really does
+    resolve a cell. A control that only checked its own planted string would
+    keep passing if this scan were deleted outright.
+    """
+    return [token for token in ASSIGNMENT_RESOLUTION_TOKENS if token in source]
+
+
 class PackagedCodeInvocationTests(unittest.TestCase):
     """Structural coverage over the coordinator's own code, not just its
     JSON manifests: the nested reviewer subprocess calls in invoke_codex/
@@ -416,34 +442,31 @@ class PackagedCodeInvocationTests(unittest.TestCase):
         source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn("kanban_models", source)
         self.assertIn("def operating_mode(", source)
-        for forbidden in (
-            "resolve_assignment",
-            "assignment_for",
-            "nested_review_assignment",
-            "Assignment(",
-            "NESTED_REVIEW_MODEL",
-            "NESTED_REVIEW_EFFORT",
-            ".effort",
-        ):
-            with self.subTest(token=forbidden):
-                self.assertNotIn(
-                    forbidden,
-                    source,
-                    "the Codex coordinator reads the loaded provider set and "
-                    f"resolves no assignment cell, but names {forbidden!r}",
-                )
+        self.assertEqual(
+            assignment_resolution_tokens(source),
+            [],
+            "the Codex coordinator reads the loaded provider set and resolves "
+            "no assignment cell",
+        )
 
     def test_the_no_assignment_scan_actually_detects_a_planted_violation(self):
-        # The control on the control: the token scan above must fail on a
-        # coordinator that really did resolve a cell, or it would pass just as
-        # happily against a file that had stopped reading the roster at all.
-        planted = REVIEW_COORDINATOR.read_text(encoding="utf-8").replace(
-            "    if mode == models.SINGLE_AGENT_MODE:",
-            "    kanban_models().resolve_assignment('pr_review', 'codex')\n"
-            "    if mode == models.SINGLE_AGENT_MODE:",
+        # The control on the control, and it has to run the SAME scan the test
+        # above runs: asserting only that the planted string is present would
+        # keep passing with that scan deleted.
+        source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
+        anchor = "    if mode == models.SINGLE_AGENT_MODE:\n"
+        self.assertEqual(
+            source.count(anchor),
+            1,
+            f"planted-violation fixture is stale: {anchor!r} is not unique",
+        )
+        planted = source.replace(
+            anchor,
+            "    kanban_models().resolve_assignment('pr_review', 'codex')\n" + anchor,
             1,
         )
-        self.assertIn("resolve_assignment", planted)
+        self.assertNotEqual(planted, source, "the planting changed nothing")
+        self.assertEqual(assignment_resolution_tokens(planted), ["resolve_assignment"])
 
     def test_the_forbidden_flag_scan_actually_detects_a_planted_violation(self):
         # Guards against the regex/substring scan above silently matching
