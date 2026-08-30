@@ -359,6 +359,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/fix/SKILL.md",
     "codex-plugin/plugins/kanban/skills/finalize/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
+    "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
@@ -419,15 +420,18 @@ TRUSTED_SPEC_SURFACE_FILES = {
 # the three tools/ modules the document workflows invoke, so each copy's own
 # external commands are reconciled against the manifest rather than inheriting
 # the tracked original's row. Issue #483's model-roster reader is vendored the
-# same way and covered here with them, in the Claude bundle alone: the Codex
-# coordinator is forbidden model and effort values, so the roster never reaches
-# that bundle and it ships no copy. Both readers spawn nothing at all, which is
-# a pin rather than an omission: a future edit that made either shell out would
-# have to declare that here.
+# same way and covered here with them; since issue #572 BOTH bundles carry a
+# copy, because both coordinators read the roster's loaded provider set to
+# route. What still differs is what each does with it -- the Claude copy
+# resolves an assignment cell and pins it, the Codex copy resolves none (D-2) --
+# and that is a routing fact rather than an external command, so both readers
+# still spawn nothing at all. Their empty sets are pins rather than omissions:
+# a future edit that made either shell out would have to declare it here.
 DOCUMENT_MECHANISM_SURFACE_FILES = {
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py": {"git"},
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py": {"git"},
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py": set(),
+    "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py": set(),
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py": {"git"},
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py": {"git"},
     "claude-plugin/plugins/kanban/scripts/kanban_config.py": set(),

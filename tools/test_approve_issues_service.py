@@ -1933,6 +1933,39 @@ class OutcomeDispatchTests(ApprovalFixture):
         self.assertNotEqual(first["run_id"], second["run_id"])
         self.assertTrue(first["run_id"])
 
+    def test_unavailable_is_a_clean_polling_state_that_resumes_by_itself(self):
+        # Issue #572. A roster that loads no agent is a deliberate operating
+        # state, not a failure: the controller logs it, stays healthy, opens no
+        # incident and no barrier, mutates nothing, and waits the ORDINARY
+        # interval rather than backing off -- so the poll that follows the
+        # operator adding a provider back picks the queue up again on its own.
+        for _ in range(3):
+            self.dispatch(
+                "unavailable",
+                message="The model roster loads no agent (no-agent operating mode).",
+            )
+        self.assertEqual(self.waits, [30.0, 30.0, 30.0])
+        stored = self.stored_status()
+        self.assertEqual(stored["state"], service.STATE_RUNNING)
+        self.assertIn("no-agent", stored["message"])
+        self.assertEqual(stored["mutations"], 0)
+        self.assertIsNone(service.read_barrier(self.job_))
+        self.assertEqual(self.incidents(), [])
+        # And the next real pass proceeds normally, with no state to clear.
+        self.dispatch("advanced", issue=3, model_called=True)
+        self.assertEqual(self.stored_status()["mutations"], 1)
+        self.assertEqual(self.waits[-1], service.ADVANCE_DELAY_SECONDS)
+
+    def test_unavailable_names_no_issue_and_is_not_a_mutating_outcome(self):
+        # The two set memberships the document contract turns on, asserted
+        # here rather than left to the backend's own validator: an outcome
+        # inside BACKEND_ISSUE_OUTCOMES would be required to carry a number,
+        # and one inside MUTATING_OUTCOMES would advance the count a poller
+        # reads as "GitHub changed".
+        self.assertIn("unavailable", service.BACKEND_OUTCOMES)
+        self.assertNotIn("unavailable", service.BACKEND_ISSUE_OUTCOMES)
+        self.assertNotIn("unavailable", service.Controller.MUTATING_OUTCOMES)
+
     def test_changes_requested_opens_the_barrier_without_waiting(self):
         self.dispatch("changes_requested", issue=5, model_called=True)
         self.assertEqual(self.waits, [])

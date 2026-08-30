@@ -296,10 +296,19 @@ coordinator publishes the model it spawned as verified fact. This is a
 deliberate, reviewed divergence from §2.2's general "brand only, no pinned
 model" policy for this one nested-spawn path, and from
 [codex-plugin/](../codex-plugin/README.md)'s otherwise-identical
-coordinator copy, which still leaves it unpinned and ships no copy of the
-reader at all; see
+coordinator copy, which still leaves it unpinned; see
 `CODEX_NESTED_REVIEW_MODEL`/`CLAUDE_NESTED_REVIEW_MODEL` in
-`scripts/review_pr.py` for the exact fallback values. Dual review runs its two
+`scripts/review_pr.py` for the exact fallback values.
+
+Since issue #572 that copy ships the reader too, and the divergence is
+narrower than it was: BOTH coordinators load a `kanban_models.py` from beside
+themselves to read the roster's `agents` list, because that list is what
+decides who reviews a pull request at all — two providers route cross-brand as
+they always have, one provider routes every pull request to itself whatever
+its origin marker says, and none refuses the workflow outright, publishing
+nothing. What still belongs to this copy alone is resolving an *assignment
+cell* and pinning its model and effort; the Codex copy resolves none and
+passes neither (D-2). Dual review runs its two
 reviewers strictly one at a time, each in its own unpredictably-named,
 read-only temp directory torn down before the next begins — never two
 reviewers' source trees on disk at once.
@@ -330,8 +339,10 @@ runs) checks that:
 - the coordinator's nested-reviewer compiled fallbacks match the exact
   values the `roles.pr_review.*` cells of `models.toml.example` declare —
   the cells Kanban's own review invocation resolves — so the two cannot
-  silently drift apart, and `scripts/kanban_models.py` stays byte-identical
-  to `tools/kanban_models.py`;
+  silently drift apart, and all three copies of the reader
+  (`scripts/kanban_models.py`, `tools/kanban_models.py`, and the Codex
+  bundle's own) stay byte-identical, with the diagnostic naming whichever
+  drifted;
 - handed an issue number, the bundled coordinator refuses it by name rather
   than surfacing `gh`'s raw resolver error, reading twice and writing nothing.
 

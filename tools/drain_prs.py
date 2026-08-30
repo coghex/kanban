@@ -96,11 +96,27 @@ SHUTDOWN_CLEANUP_BUDGET_SECONDS = 8.0
 SHUTDOWN_MIN_COMMAND_TIMEOUT_SECONDS = 1.0
 MAX_BACKOFF_ATTEMPTS = 16
 MAX_CONSECUTIVE_GLOBAL_FAILURES = 3
-# The stale-head rereview's model and effort: the roster's `drain_rereview`
-# codex cell rather than two literals. Resolved per drain cycle rather than
+# The stale-head rereview's provider, model and effort: the roster's
+# `drain_rereview` cell for the provider this installation's operating mode
+# selects, rather than three literals. Resolved per drain cycle rather than
 # frozen at import, so an operator's roster edit takes effect on the next pass
 # without restarting the managed service.
+#
+# `None` is a real, non-failing state: a no-agent roster loads no provider to
+# rereview with, and the drainer keeps merging every eligible pull request
+# anyway (D-11). Only a pull request that actually reaches a stale-head
+# rereview fails closed, and it does so by recording an ackable incident rather
+# than by stopping the service. The pair is kept together because the provider
+# is as much a part of "which model runs" as the model is: the published
+# marker's `reviewer=` token, the prompt's reviewer identity and the executable
+# all come from it.
+FINALIZE_PROVIDER: str | None = None
 FINALIZE_ASSIGNMENT: kanban_models.Assignment | None = None
+# The whole loaded provider set for the same cycle, which is a wider question
+# than which provider the rereview runs on: dual mode rereviews as Codex while
+# still recognising a Claude review as one this installation performs. `None`
+# means "not resolved this cycle", which an empty tuple does not.
+FINALIZE_LOADED_PROVIDERS: tuple[str, ...] | None = None
 NTFY_URL = os.environ.get("KANBAN_DRAINER_NTFY_URL")
 # The private namespace an autostash snapshot is anchored under, written down
 # once: the ref every anchor is created at, the pattern the startup sweep
@@ -310,10 +326,27 @@ def log(message: str) -> None:
     append_log_line(line)
 
 
-def refresh_finalize_assignment() -> kanban_models.Assignment:
-    """Re-read the roster's `drain_rereview.codex` cell for this drain cycle.
+def finalize_provider(roster: kanban_models.ModelRoster) -> str | None:
+    """Which provider this roster's operating mode rereviews a stale head with.
 
-    A roster this cannot resolve stops the drainer where it stands, naming the
+    Dual selects Codex, exactly as before this had a choice to make: the
+    drainer's one spawn has always been the Codex reviewer, and a host with no
+    roster file must stay byte-identical to that. Single-agent selects the one
+    loaded provider, whichever brand it is. No-agent selects none, which is a
+    state and not a failure -- see FINALIZE_ASSIGNMENT.
+    """
+    mode = kanban_models.operating_mode_for(roster)
+    if mode == kanban_models.NO_AGENT_MODE:
+        return None
+    if mode == kanban_models.SINGLE_AGENT_MODE:
+        return roster.agents[0]
+    return "codex"
+
+
+def refresh_finalize_assignment() -> kanban_models.Assignment | None:
+    """Re-read the roster's selected `drain_rereview` cell for this drain cycle.
+
+    A roster this cannot READ stops the drainer where it stands, naming the
     file and the defect: the alternative is a stale-head rereview spawned on
     the compiled defaults an operator believes they replaced, published under a
     model claim this process cannot back. `ModelUnavailableError` is the
@@ -321,29 +354,81 @@ def refresh_finalize_assignment() -> kanban_models.Assignment:
     run, and nothing was retried or substituted -- and is the one failure class
     both the pass loop and the candidate loop deliberately re-raise rather than
     absorb into a per-PR cooldown.
+
+    A roster that reads perfectly well and loads no provider is the opposite
+    case and must never be confused with it (D-11). It returns `None` here, the
+    pass goes on to merge every eligible pull request, and only a pull request
+    that actually needs a rereview fails closed -- with an incident, not an
+    exit.
     """
-    global FINALIZE_ASSIGNMENT
+    global FINALIZE_PROVIDER, FINALIZE_ASSIGNMENT, FINALIZE_LOADED_PROVIDERS
     try:
-        FINALIZE_ASSIGNMENT = kanban_models.resolve_assignment(
-            "drain_rereview", "codex"
+        roster = kanban_models.load_roster()
+        provider = finalize_provider(roster)
+        FINALIZE_ASSIGNMENT = (
+            None if provider is None else roster.assignment_for("drain_rereview", provider)
         )
     except kanban_models.KanbanModelsError as exc:
+        FINALIZE_PROVIDER = None
         FINALIZE_ASSIGNMENT = None
+        FINALIZE_LOADED_PROVIDERS = None
         raise ModelUnavailableError(
             f"{exc}; no stale-head rereview was attempted"
         ) from exc
+    FINALIZE_PROVIDER = provider
+    FINALIZE_LOADED_PROVIDERS = roster.agents
     return FINALIZE_ASSIGNMENT
 
 
-def finalize_assignment() -> kanban_models.Assignment:
+def finalize_assignment() -> kanban_models.Assignment | None:
     """This cycle's assignment, resolving it if the cycle boundary has not.
 
     The single-PR entry point runs no cycle loop, so the resolution has to be
     reachable from the consumer as well as from the boundary that refreshes it.
+    A cached `None` is indistinguishable from "not resolved yet", so the
+    resolution is repeated rather than cached-as-absent; it is a file read, and
+    reading it again is cheaper than the two states being confused.
     """
     if FINALIZE_ASSIGNMENT is None:
         return refresh_finalize_assignment()
     return FINALIZE_ASSIGNMENT
+
+
+def finalize_reviewer_provider() -> str | None:
+    """The provider `finalize_assignment()` resolved for, resolving if needed.
+
+    One spelling, so the executable that is spawned, the identity the prompt
+    claims, the token the published marker carries and the brand the
+    verification accepts can never name different providers.
+    """
+    if FINALIZE_ASSIGNMENT is None:
+        refresh_finalize_assignment()
+    return FINALIZE_PROVIDER
+
+
+def marker_provider_accepted(marker_provider: str) -> bool:
+    """Whether a published review marker's brand counts for this installation.
+
+    An existing marker recovers a stale approval only when the brand that
+    published it is one this installation actually reviews with. Dual mode
+    loads both, so a host with no roster file accepts exactly what it accepted
+    before this existed. Single-agent loads one, and the other brand's marker
+    comes from a reviewer the operator removed from the pipeline -- letting it
+    recover an approval would merge on a review this installation no longer
+    performs, and it cannot satisfy the `drain_rereview` cell that is now the
+    only one selectable.
+
+    No-agent loads nothing, and the question does not apply: D-11 confines that
+    mode's fail-closed behavior to the pull requests that actually reach a
+    stale-head rereview, so a pull request whose approval is already backed by
+    a current-head marker keeps exactly the treatment it has today.
+    """
+    if FINALIZE_LOADED_PROVIDERS is None:
+        refresh_finalize_assignment()
+    loaded = FINALIZE_LOADED_PROVIDERS
+    if not loaded:
+        return True
+    return marker_provider in loaded
 
 
 def notify_model_failure(
@@ -1064,14 +1149,6 @@ def latest_review_details(
         if details is not None:
             return details
     return None
-
-
-def latest_review_marker(ctx: RepoContext, number: int) -> tuple[str, str] | None:
-    details = latest_review_details(ctx, number)
-    if details is None:
-        return None
-    _, head, verdict = details
-    return head, verdict
 
 
 def parse_check_name(item: dict[str, Any]) -> str | None:
@@ -2352,9 +2429,10 @@ def prepare_review_worktree(
     pr: dict[str, Any],
 ) -> Path:
     # Always a throwaway detached worktree, never a matched live one. The
-    # stale-head rereviewer runs Codex with approvals and the sandbox
-    # bypassed, so pointing it at a solve worktree would let it read a HEAD
-    # behind the head under review and write over uncommitted work.
+    # stale-head rereviewer runs with approvals and the sandbox bypassed,
+    # whichever provider the roster selected, so pointing it at a solve
+    # worktree would let it read a HEAD behind the head under review and write
+    # over uncommitted work.
     tmpdir = Path(
         tempfile.mkdtemp(prefix=f"drain-prs-rereview-{pr['number']}-")
     )
@@ -2373,8 +2451,22 @@ def prepare_review_worktree(
     return tmpdir
 
 
-def drain_rereview_prompt(ctx: RepoContext, number: int, expected_head: str) -> str:
-    return f"""You are GPT-5.6-Terra, the final drain-queue reviewer for PR #{number} in {ctx.repo_slug}.
+def drain_rereview_prompt(
+    ctx: RepoContext,
+    number: int,
+    expected_head: str,
+    *,
+    provider: str,
+    assignment: kanban_models.Assignment,
+) -> str:
+    """The rereviewer's instructions, in the identity the roster selected.
+
+    Both the identity claim and the marker token come from the resolved
+    assignment rather than from literals: the reviewer that actually runs, the
+    reviewer the prompt says it is, and the reviewer the published marker
+    names have to be the same one, and a literal here is how they stop being.
+    """
+    return f"""You are {assignment.display}, the final drain-queue reviewer for PR #{number} in {ctx.repo_slug}.
 
 The queue detected an unexpected push after approval. Review only: do not edit files, commit, push, merge, close issues, or remove worktrees.
 
@@ -2384,14 +2476,57 @@ Pass `--repo {ctx.repo_slug}` to every `gh` command below. Never rely on gh's ow
 2. Read the linked issue and authoritative comments, PR body, checks, latest prior `<!-- pr-review:v1 ... -->` comment (or legacy `<!-- codex-review ... -->` comment), new commits, and full merge-base diff.
 3. For every prior blocking concern, state Resolved, Partially resolved, or Unresolved with file/line evidence. Review the complete current diff for regressions and unmet issue requirements. Nits never block.
 4. Re-fetch the head before publishing. If it changed, do not comment or label.
-5. Post APPROVE or CHANGES REQUESTED as a PR comment (`gh pr comment {number} --repo {ctx.repo_slug}`) ending with exactly `<!-- pr-review:v1 reviewer=codex head=<reviewed_head> verdict=APPROVE -->` or `<!-- pr-review:v1 reviewer=codex head=<reviewed_head> verdict=CHANGES_REQUESTED -->`.
+5. Post APPROVE or CHANGES REQUESTED as a PR comment (`gh pr comment {number} --repo {ctx.repo_slug}`) ending with exactly `<!-- pr-review:v1 reviewer={provider} head=<reviewed_head> verdict=APPROVE -->` or `<!-- pr-review:v1 reviewer={provider} head=<reviewed_head> verdict=CHANGES_REQUESTED -->`.
 6. Re-fetch the head, then switch `{APPROVE_LABEL}` / `{CHANGES_LABEL}` to match the verdict using `gh pr edit {number} --repo {ctx.repo_slug}`. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
 
 Report the verdict, concern statuses, new findings, reviewed head, and comment/label status.
 """
 
 
-def rereview_pr_with_codex(
+def rereview_command(
+    provider: str,
+    assignment: kanban_models.Assignment,
+    review_path: Path,
+    output_file: Path,
+) -> list[str]:
+    """The argument vector for one provider's stale-head rereview.
+
+    The one place a brand's argv shape lives, so the two spawns cannot drift
+    apart in what they pin. Both bypass approvals: this reviewer has to post a
+    comment and switch a label, so a read-only or ask-first policy would leave
+    it unable to publish the verdict the drainer then verifies.
+    """
+    if provider == "codex":
+        return [
+            "codex",
+            "exec",
+            "--ignore-user-config",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--ephemeral",
+            "-m",
+            assignment.model,
+            "-c",
+            f'model_reasoning_effort="{assignment.effort}"',
+            "-C",
+            str(review_path),
+            "-o",
+            str(output_file),
+            "-",
+        ]
+    return [
+        "claude",
+        "-p",
+        "--model",
+        assignment.model,
+        "--effort",
+        assignment.effort,
+        "--permission-mode",
+        "bypassPermissions",
+        "--no-session-persistence",
+    ]
+
+
+def rereview_pr_with_model(
     ctx: RepoContext,
     pr: dict[str, Any],
     *,
@@ -2403,9 +2538,21 @@ def rereview_pr_with_codex(
     # roster this cannot resolve refuses the rereview rather than describing
     # one it will not run.
     assignment = finalize_assignment()
+    provider = finalize_reviewer_provider()
+    if assignment is None or provider is None:
+        # Unreachable from the recovery sweep, which records an incident and
+        # keeps sweeping rather than calling here at all. Stated anyway,
+        # because this function is also the single-PR entry point's, and a
+        # spawn site that assumed an assignment it never checked would build
+        # argv out of None.
+        raise ModelUnavailableError(
+            "the model roster loads no agent "
+            f"({kanban_models.NO_AGENT_MODE} operating mode), so no stale-head "
+            f"rereview was attempted for PR #{number}"
+        )
     log(
         f"PR #{number}: unexpected push changed the approved head; "
-        f"running {assignment.model}@{assignment.effort} rereview of "
+        f"running {provider} {assignment.model}@{assignment.effort} rereview of "
         f"{expected_head[:12]}"
     )
     if dry_run:
@@ -2413,7 +2560,9 @@ def rereview_pr_with_codex(
 
     review_path = prepare_review_worktree(ctx, pr)
     output_file = Path(tempfile.gettempdir()) / f"drain-prs-rereview-{number}.out"
-    prompt = drain_rereview_prompt(ctx, number, expected_head)
+    prompt = drain_rereview_prompt(
+        ctx, number, expected_head, provider=provider, assignment=assignment
+    )
 
     try:
         # The same pre-launch guards the conflict reviewer applies. The
@@ -2437,26 +2586,23 @@ def rereview_pr_with_codex(
                 f"not match expected PR head {expected_head[:12]}."
             )
         try:
-            run(
-                [
-                    "codex",
-                    "exec",
-                    "--ignore-user-config",
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "--ephemeral",
-                    "-m",
-                    assignment.model,
-                    "-c",
-                    f'model_reasoning_effort="{assignment.effort}"',
-                    "-C",
-                    str(review_path),
-                    "-o",
-                    str(output_file),
-                    "-",
-                ],
+            proc = run(
+                rereview_command(provider, assignment, review_path, output_file),
                 cwd=review_path,
                 input_text=prompt,
             )
+            if provider != "codex":
+                # Codex writes its own transcript through `-o`; the Claude CLI
+                # has no such flag, so the same file is written here. The
+                # failure diagnostics below name that file either way, and an
+                # operator must not have to know which brand ran to find it.
+                try:
+                    output_file.write_text(proc.stdout or "", encoding="utf-8")
+                except OSError as exc:
+                    log(
+                        f"PR #{number}: could not record the rereview "
+                        f"transcript at {output_file}: {exc}"
+                    )
         except DrainError as exc:
             notify_model_failure(
                 ctx,
@@ -2480,29 +2626,53 @@ def rereview_pr_with_codex(
             )
             return refreshed
 
-        marker = latest_review_marker(ctx, number)
+        # Provider as well as head and verdict. The marker is read through
+        # latest_review_details rather than latest_review_marker precisely so
+        # the brand survives: this verifies the reviewer the roster SELECTED
+        # actually published, and a marker from the other brand -- an older
+        # canonical review that happens to sit at this head -- cannot stand in
+        # for the assignment that was just spawned.
+        details = latest_review_details(ctx, number)
+        published = (
+            None
+            if details is None
+            else (details[0], details[1], details[2])
+        )
         if has_label(refreshed, APPROVE_LABEL) and not has_label(
             refreshed, CHANGES_LABEL
         ):
-            if marker != (expected_head.lower(), "APPROVE"):
+            if published != (provider, expected_head.lower(), "APPROVE"):
                 raise DrainError(
-                    f"PR #{number}: Codex rereview applied {APPROVE_LABEL!r} "
-                    "without a matching current-head pr-review marker."
+                    f"PR #{number}: {provider} rereview applied {APPROVE_LABEL!r} "
+                    f"without a matching current-head {provider} pr-review marker."
                 )
-            log(f"PR #{number}: Codex rereview approved {expected_head[:12]}")
+            log(f"PR #{number}: {provider} rereview approved {expected_head[:12]}")
         elif has_label(refreshed, CHANGES_LABEL) and not has_label(
             refreshed, APPROVE_LABEL
         ):
-            if marker != (expected_head.lower(), "CHANGES_REQUESTED"):
+            if published != (provider, expected_head.lower(), "CHANGES_REQUESTED"):
                 raise DrainError(
-                    f"PR #{number}: Codex rereview applied {CHANGES_LABEL!r} "
-                    "without a matching current-head pr-review marker."
+                    f"PR #{number}: {provider} rereview applied {CHANGES_LABEL!r} "
+                    f"without a matching current-head {provider} pr-review marker."
                 )
-            log(f"PR #{number}: Codex rereview requested changes")
+            log(f"PR #{number}: {provider} rereview requested changes")
         else:
             raise DrainError(
-                f"PR #{number}: Codex rereview returned without exactly one "
+                f"PR #{number}: {provider} rereview returned without exactly one "
                 f"verdict label; inspect {output_file}."
+            )
+        # The incident this pull request may be carrying is discharged the
+        # moment a model-backed rereview publishes for its head, rather than
+        # waiting for the next pass's reconciliation to notice.
+        resolved = drain_prs_service.resolve_no_agent_incident(
+            ctx.path,
+            number,
+            f"PR #{number} was rereviewed by {provider} at {expected_head[:12]}.",
+        )
+        if resolved is not None:
+            log(
+                f"PR #{number}: resolved no-agent rereview incident "
+                f"{resolved['incident_id']}"
             )
         return refreshed
     finally:
@@ -2559,11 +2729,18 @@ def recover_stale_approval(
             continue
 
         if has_label(pr, APPROVE_LABEL):
-            marker = latest_review_marker(ctx, number)
-            if marker == (current_head.lower(), "APPROVE"):
+            # Read through latest_review_details, not latest_review_marker: the
+            # brand that published the marker decides whether it counts here,
+            # and discarding it is what let a review from a provider this
+            # installation no longer loads recover a stale approval.
+            details = latest_review_details(ctx, number)
+            if details is not None and details[1:] == (
+                current_head.lower(),
+                "APPROVE",
+            ) and marker_provider_accepted(details[0]):
                 log(
-                    f"PR #{number}: found an approved review marker for the new head "
-                    f"{current_head[:12]}"
+                    f"PR #{number}: found an approved {details[0]} review marker "
+                    f"for the new head {current_head[:12]}"
                 )
                 remember_approved_head(state, number, current_head)
                 return True
@@ -2606,9 +2783,24 @@ def recover_stale_approval(
         if entry.get("last_rereviewed_head") == current_head:
             continue
 
+        if finalize_assignment() is None:
+            # No provider is loaded, so this head cannot be rereviewed at all.
+            # Record it and keep sweeping. Reporting recovery work here would
+            # skip run_drain_pass for the entire cycle (see the caller), which
+            # is how one unmergeable pull request would stall every other
+            # eligible one behind a merge nobody can unblock -- the opposite of
+            # D-11's "never refuse to start, keep merging". `last_rereviewed_head`
+            # deliberately stays where it is: nothing reviewed this head, and
+            # recording it as rereviewed would suppress the real rereview the
+            # moment a provider is added back.
+            record_no_agent_rereview_incident(
+                ctx, number, current_head, dry_run=dry_run
+            )
+            continue
+
         entry["last_rereviewed_head"] = current_head
         try:
-            refreshed = rereview_pr_with_codex(ctx, pr, dry_run=dry_run)
+            refreshed = rereview_pr_with_model(ctx, pr, dry_run=dry_run)
         except DrainError:
             # Publication/verification failures must remain retryable rather
             # than permanently suppressing this head after one attempt.
@@ -4191,6 +4383,125 @@ def record_merge_conflict(
     )
 
 
+def record_no_agent_rereview_incident(
+    ctx: RepoContext,
+    number: int,
+    head: str,
+    *,
+    dry_run: bool,
+) -> None:
+    """Record that one PR's stale head needs a rereview no provider can run.
+
+    The mirror of `record_merge_conflict_incident`, and deliberately shaped
+    like it: one open per-PR incident, no label touched, nothing merged, and
+    the drainer still running. `record_no_agent_incident` is idempotent on
+    (repository, kind, pull request), so the existing incident is looked up
+    first only to keep the log honest about which pass opened it.
+    """
+    if dry_run:
+        log(
+            f"PR #{number}: head {head[:12]} needs a rereview and no agent is "
+            "loaded; would record an open drainer incident and leave it unmerged"
+        )
+        return
+    existing = drain_prs_service.find_open_no_agent_incident(ctx.path, number)
+    if existing is not None:
+        log(
+            f"PR #{number}: stale head still needs a rereview and no agent is "
+            f"loaded; incident {existing[1]['incident_id']} is already open"
+        )
+        return
+    incident = drain_prs_service.record_no_agent_incident(
+        repo_path=ctx.path,
+        pull_request=number,
+        head=head,
+    )
+    log(
+        f"PR #{number}: head {head[:12]} needs a rereview and the roster loads "
+        f"no agent; recorded incident {incident['incident_id']} and left it "
+        "unmerged"
+    )
+
+
+def reconcile_no_agent_incidents(
+    ctx: RepoContext, state: dict[str, Any], *, dry_run: bool
+) -> None:
+    """Resolve no-agent incidents whose PR no longer needs a rereview.
+
+    One place, enumerating the terminal states rather than resolving from each
+    branch that reaches one: a pull request stops owing a stale-head rereview
+    for several unrelated reasons, and an undischarged incident is invisible to
+    everything except the operator staring at it.
+
+    A pull request still owes one -- and its incident stays open -- only while
+    it is open, its recorded approved head differs from its current head, it
+    carries neither verdict label, and no current-head APPROVE marker stands.
+    Only a confirmed reading closes one: a pull request that cannot be read
+    keeps its incident, exactly as the conflict reconciler does.
+    """
+    if dry_run:
+        return
+    for incident in drain_prs_service.open_no_agent_incidents(ctx.path):
+        number = incident.get("pull_request")
+        if not isinstance(number, int):
+            log(
+                f"Incident {incident.get('incident_id')} names no pull request; "
+                "leaving it open"
+            )
+            continue
+        try:
+            pr = get_pr(ctx, number)
+        except DrainError as exc:
+            log(
+                f"PR #{number}: could not confirm whether it still needs a "
+                f"rereview; keeping its incident open: {exc}"
+            )
+            continue
+        entry = state["prs"].get(str(number))
+        if pr.get("state") != "OPEN":
+            note = f"PR #{number} is no longer open."
+        elif entry is None:
+            note = f"PR #{number} is no longer in the drain queue."
+        elif entry.get("approved_head") == pr["headRefOid"]:
+            note = f"PR #{number}'s head is no longer ahead of its approval."
+        elif has_label(pr, CHANGES_LABEL):
+            note = f"PR #{number} has a changes-requested verdict; no rereview is owed."
+        else:
+            try:
+                details = latest_review_details(ctx, number)
+            except DrainError as exc:
+                log(
+                    f"PR #{number}: could not read its review markers; keeping "
+                    f"its incident open: {exc}"
+                )
+                continue
+            # `marker_provider_accepted` and not a bare head/verdict match,
+            # because this asks the same question `recover_stale_approval`
+            # asks of the same marker and the two answers have to be one
+            # answer. They diverge exactly where it matters: an operator who
+            # repairs a no-agent install by loading ONE provider leaves behind
+            # current-head markers published by the brand that is now
+            # unloaded, which recovery refuses -- so accepting one here would
+            # retire the only signal that this pull request is still waiting
+            # for a rereview it has not had.
+            if (
+                details is not None
+                and details[1:] == (pr["headRefOid"].lower(), "APPROVE")
+                and marker_provider_accepted(details[0])
+            ):
+                note = (
+                    f"PR #{number} carries a current-head {details[0]} approval."
+                )
+            else:
+                continue
+        resolved = drain_prs_service.resolve_no_agent_incident(ctx.path, number, note)
+        if resolved is not None:
+            log(
+                f"PR #{number}: resolved no-agent rereview incident "
+                f"{resolved['incident_id']}"
+            )
+
+
 def reconcile_conflict_incidents(ctx: RepoContext, *, dry_run: bool) -> None:
     """Resolve conflict incidents whose PR is no longer conflicted.
 
@@ -5021,6 +5332,7 @@ def loop(
         # before it starts changing anything.
         refresh_finalize_assignment()
         reconcile_conflict_incidents(ctx, dry_run=dry_run)
+        reconcile_no_agent_incidents(ctx, state, dry_run=dry_run)
         try:
             recovered = recover_stale_approval(ctx, state, dry_run=dry_run)
         except ModelUnavailableError:

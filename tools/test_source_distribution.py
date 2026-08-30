@@ -292,15 +292,20 @@ PROVIDER_MANIFESTS = (
 # and "the tree ships" is the guarantee that was already true while these files
 # existed only under tools/. Naming them here is what makes an unpacked release
 # prove it carries them.
-# The model-roster reader joins them for the Claude bundle only. Its
-# coordinator resolves the pr_review cells through a copy loaded from beside
-# itself; the Codex bundle deliberately carries none, because its coordinator
-# is forbidden model and effort values and the roster never reaches it.
+# The model-roster reader joins them for BOTH bundles since issue #572: each
+# coordinator loads a copy from beside itself to read the roster's loaded
+# provider set, which is what decides who reviews a pull request. What the two
+# do with it still differs -- the Claude copy resolves the `pr_review` cells
+# and pins them, the Codex copy resolves no cell and passes no model or effort
+# (D-2) -- but a release that shipped either coordinator without its reader
+# would install a workflow that cannot route at all. Eight modules, four per
+# bundle.
 BUNDLED_MECHANISM_MODULES = (
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
+    "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",

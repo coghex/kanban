@@ -110,6 +110,16 @@ UI_HS = REPO_ROOT / "src" / "Kanban" / "UI.hs"
 MODELS_TOML_EXAMPLE = REPO_ROOT / "models.toml.example"
 TRACKED_ROSTER_READER = REPO_ROOT / "tools" / "kanban_models.py"
 BUNDLED_ROSTER_READER = PLUGIN_ROOT / "scripts" / "kanban_models.py"
+CODEX_ROSTER_READER = (
+    REPO_ROOT
+    / "codex-plugin"
+    / "plugins"
+    / "kanban"
+    / "skills"
+    / "pr-review"
+    / "scripts"
+    / "kanban_models.py"
+)
 REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review" / "Canonical.hs"
 # Since issue #444 the record's own location is resolved for both managed
 # installations by one module, and Review/Canonical.hs asks it rather than
@@ -1468,25 +1478,38 @@ class NumberKindGuardTests(unittest.TestCase):
 
 
 class BundledRosterReaderTests(unittest.TestCase):
-    """The reader ships in two homes, held identical the way kanban_config.py's
-    copies are.
+    """The reader ships in three homes, held identical the way
+    kanban_config.py's copies are.
 
-    Byte equality is what keeps two copies one reader: the coordinator resolves
-    its cells through the bundled one and every other Python consumer through
-    the tracked original, and a bundle whose compiled defaults had drifted
-    would spawn a different model from the backend that gates the same
-    pipeline. The Codex bundle's absence is asserted by its own suite, where
-    the no-pinning contract it belongs to lives."""
+    Byte equality is what keeps three copies one reader: each coordinator
+    reads the roster through the copy beside itself and every other Python
+    consumer through the tracked original, and a copy whose compiled defaults
+    or loaded-provider semantics had drifted would route -- and, for the
+    Claude copy, spawn -- differently from the backend that gates the same
+    pipeline. All three are compared here rather than only the two that
+    existed before #572, and the diagnostic names the copy that drifted so a
+    failure says which file to repair.
+    """
 
-    def test_the_bundled_reader_is_identical_to_its_tracked_source(self):
-        self.assertEqual(
-            BUNDLED_ROSTER_READER.read_bytes(),
-            TRACKED_ROSTER_READER.read_bytes(),
-            "claude-plugin's kanban_models.py has drifted from "
-            "tools/kanban_models.py; the two copies are the same reader, not a "
-            "fork. Repair: cp tools/kanban_models.py "
-            "claude-plugin/plugins/kanban/scripts/kanban_models.py",
+    def bundled_copies(self):
+        return (
+            ("claude-plugin/plugins/kanban/scripts/kanban_models.py", BUNDLED_ROSTER_READER),
+            (
+                "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
+                CODEX_ROSTER_READER,
+            ),
         )
+
+    def test_every_bundled_reader_is_identical_to_its_tracked_source(self):
+        for relative_path, copy in self.bundled_copies():
+            with self.subTest(copy=relative_path):
+                self.assertEqual(
+                    copy.read_bytes(),
+                    TRACKED_ROSTER_READER.read_bytes(),
+                    f"{relative_path} has drifted from tools/kanban_models.py; "
+                    "the three copies are the same reader, not a fork. Repair: "
+                    f"cp tools/kanban_models.py {relative_path}",
+                )
 
     def test_the_bundled_reader_carries_the_managed_asset_marker(self):
         # The issue-review installer links the tracked original beside

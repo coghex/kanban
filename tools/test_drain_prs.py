@@ -26,6 +26,8 @@ from pathlib import Path
 from unittest import mock
 
 import drain_prs
+import drain_prs_service
+import kanban_models
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -62,7 +64,15 @@ class AgentPromptRepoScopingTests(unittest.TestCase):
     silently target the fork inside these spawned-agent prompts."""
 
     def test_drain_rereview_prompt_requires_repo_on_every_gh_command(self):
-        prompt = drain_prs.drain_rereview_prompt(make_ctx(), 89, "a" * 40)
+        prompt = drain_prs.drain_rereview_prompt(
+            make_ctx(),
+            89,
+            "a" * 40,
+            provider="codex",
+            assignment=kanban_models.DEFAULT_ROSTER.assignment_for(
+                "drain_rereview", "codex"
+            ),
+        )
         self.assertIn("--repo upstream-owner/kanban", prompt)
         self.assertIn("gh pr comment 89 --repo upstream-owner/kanban", prompt)
         self.assertIn("gh pr edit 89 --repo upstream-owner/kanban", prompt)
@@ -162,6 +172,325 @@ class BranchUpdateCarriedApprovalTests(unittest.TestCase):
                 self.assertFalse(
                     drain_prs.branch_update_carried_approval(settled, MOVED_HEAD)
                 )
+
+
+class NoAgentStaleHeadIncidentTests(unittest.TestCase):
+    """Issue #572, requirements 25 through 27: a pull request that needs a
+    stale-head rereview no loaded provider can run is recorded and left
+    unmerged, while the drainer goes on working.
+
+    The incident directory is redirected to a temporary runtime root, because
+    the real one belongs to whoever is running the suite, and notification is
+    disabled for the same reason `NTFY_URL` is unset by default.
+    """
+
+    HEAD = "b" * 40
+    APPROVED_HEAD = "a" * 40
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.incident_root = self.root / "runtime"
+        self.incident_root.mkdir()
+        for name, value in (
+            ("RUNTIME_ROOT", self.incident_root),
+            ("LOG_ROOT", self.root / "logs"),
+            ("NTFY_URL", None),
+        ):
+            patched = mock.patch.object(drain_prs_service, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+        # No provider loaded, resolved once and cached for the whole case the
+        # way a drain cycle caches it.
+        for name, value in (
+            ("FINALIZE_ASSIGNMENT", None),
+            ("FINALIZE_PROVIDER", None),
+            ("FINALIZE_LOADED_PROVIDERS", ()),
+        ):
+            patched = mock.patch.object(drain_prs, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+        refresh = mock.patch.object(
+            drain_prs, "refresh_finalize_assignment", return_value=None
+        )
+        refresh.start()
+        self.addCleanup(refresh.stop)
+        (self.root / ".git").mkdir()
+        self.ctx = drain_prs.RepoContext(
+            path=self.root,
+            repo_slug="coghex/kanban",
+            repo_name="kanban",
+            default_branch="master",
+        )
+
+    def state(self, **entry):
+        return {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 0,
+            "active_pr": None,
+            "prs": {
+                "42": {
+                    "approved_head": self.APPROVED_HEAD,
+                    "last_rereviewed_head": None,
+                    "consecutive_failures": 0,
+                    "retry_after_attempt": 0,
+                    "last_attempt": 0,
+                    "last_error": None,
+                    "cleanup": None,
+                    **entry,
+                }
+            },
+        }
+
+    def pr(self, **overrides):
+        value = {
+            "number": 42,
+            "state": "OPEN",
+            "headRefOid": self.HEAD,
+            "headRefName": "issue-42-topic",
+            "labels": [],
+            "statusCheckRollup": [],
+        }
+        value.update(overrides)
+        return value
+
+    def open_incidents(self):
+        return drain_prs_service.open_no_agent_incidents(self.root)
+
+    def recover(self, pr, state):
+        with mock.patch.object(drain_prs, "get_pr", return_value=pr):
+            with mock.patch.object(drain_prs, "rereview_pr_with_model") as spawn:
+                recovered = drain_prs.recover_stale_approval(
+                    self.ctx, state, dry_run=False
+                )
+        spawn.assert_not_called()
+        return recovered
+
+    def test_a_stale_head_records_one_incident_and_reports_no_recovery_work(self):
+        # Reporting recovery work would skip run_drain_pass for the entire
+        # cycle, stalling every other eligible pull request behind a merge
+        # nobody can unblock -- the opposite of "never refuse to start, keep
+        # merging".
+        state = self.state()
+        self.assertFalse(self.recover(self.pr(), state))
+        incidents = self.open_incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["kind"], drain_prs_service.NO_AGENT_INCIDENT_KIND)
+        self.assertEqual(incidents[0]["pull_request"], 42)
+        self.assertEqual(incidents[0]["head"], self.HEAD)
+        # Nothing recorded this head as rereviewed, so the real rereview still
+        # runs the moment a provider is added back.
+        self.assertIsNone(state["prs"]["42"]["last_rereviewed_head"])
+
+    def test_repeated_passes_do_not_accumulate_duplicates(self):
+        state = self.state()
+        for _ in range(3):
+            self.assertFalse(self.recover(self.pr(), state))
+        self.assertEqual(len(self.open_incidents()), 1)
+
+    def test_the_incident_kind_fits_the_incidents_panel_budget(self):
+        # The board's incidents panel has a fixed interior width, and a row
+        # wider than the widest it already draws is invisible rather than an
+        # error, so a new kind may not exceed the longest existing one.
+        self.assertLessEqual(
+            len(drain_prs_service.NO_AGENT_INCIDENT_KIND),
+            len(drain_prs_service.CLEANUP_INCIDENT_KIND),
+        )
+
+    def test_the_pass_starts_and_keeps_merging_every_other_eligible_pr(self):
+        # Requirement 25, at the loop that used to die before any queue
+        # decision. `refresh_finalize_assignment()` runs first and no longer
+        # raises, so the pass goes on to read the queue and hand the eligible
+        # pull requests to `run_drain_pass` -- including while PR #42 sits
+        # unmergeable behind its own incident.
+        other = self.pr(number=99, headRefOid="c" * 40, headRefName="issue-99-topic")
+        # The loop reads its own state from disk, so PR #42's stale entry has
+        # to be there for the sweep to reach it at all.
+        drain_prs.save_drain_state(self.ctx, self.state(), dry_run=False)
+        with mock.patch.object(drain_prs, "get_pr", return_value=self.pr()):
+            with mock.patch.object(
+                drain_prs, "get_open_approved_prs", return_value=[other]
+            ):
+                with mock.patch.object(drain_prs, "run_drain_pass") as pass_:
+                    drain_prs.loop(
+                        self.ctx,
+                        interval=1,
+                        once=True,
+                        dry_run=False,
+                        gates=drain_prs.GateConfig(
+                            required_ci_check=None, required_review_check=None
+                        ),
+                    )
+        pass_.assert_called_once()
+        self.assertEqual(
+            [item["number"] for item in pass_.call_args.args[1]], [99]
+        )
+        self.assertEqual(len(self.open_incidents()), 1)
+
+    def test_a_dry_run_records_nothing(self):
+        state = self.state()
+        with mock.patch.object(drain_prs, "get_pr", return_value=self.pr()):
+            drain_prs.recover_stale_approval(self.ctx, state, dry_run=True)
+        self.assertEqual(self.open_incidents(), [])
+
+    def reconcile(self, pr, state, *, details=None):
+        with mock.patch.object(drain_prs, "get_pr", return_value=pr):
+            with mock.patch.object(
+                drain_prs, "latest_review_details", return_value=details
+            ):
+                drain_prs.reconcile_no_agent_incidents(self.ctx, state, dry_run=False)
+
+    def test_every_terminal_condition_resolves_the_incident(self):
+        approve = ("codex", self.HEAD.lower(), "APPROVE")
+        cases = {
+            "closed": (self.pr(state="CLOSED"), self.state(), None),
+            "merged": (self.pr(state="MERGED"), self.state(), None),
+            "head no longer stale": (
+                self.pr(headRefOid=self.APPROVED_HEAD),
+                self.state(),
+                None,
+            ),
+            "left the queue": (self.pr(), {"prs": {}}, None),
+            "changes requested": (
+                self.pr(labels=[{"name": drain_prs.CHANGES_LABEL}]),
+                self.state(),
+                None,
+            ),
+            "current-head approval": (self.pr(), self.state(), approve),
+        }
+        for name, (pr, state, details) in cases.items():
+            with self.subTest(condition=name):
+                self.recover(self.pr(), self.state())
+                self.assertEqual(len(self.open_incidents()), 1)
+                self.reconcile(pr, state, details=details)
+                self.assertEqual(self.open_incidents(), [], name)
+
+    def test_a_wrong_brand_marker_cannot_clear_the_incident_after_a_mode_change(self):
+        # The transition an operator makes to repair a no-agent install: one
+        # provider is loaded, so the incident's own premise is gone -- but the
+        # pull request may still owe a rereview, because the current-head
+        # marker it carries was published by the brand that is NOT loaded.
+        # `recover_stale_approval` already refuses that marker, so resolving
+        # the incident on it here would clear the only standing signal that
+        # this pull request is waiting. The two paths ask one question through
+        # one predicate.
+        self.recover(self.pr(), self.state())
+        self.assertEqual(len(self.open_incidents()), 1)
+        with mock.patch.object(drain_prs, "FINALIZE_LOADED_PROVIDERS", ("claude",)):
+            self.reconcile(
+                self.pr(),
+                self.state(),
+                details=("codex", self.HEAD.lower(), "APPROVE"),
+            )
+            self.assertEqual(
+                len(self.open_incidents()),
+                1,
+                "a marker from the unloaded brand resolved the incident",
+            )
+            # The loaded brand's own current-head approval does clear it, so
+            # the check above is a provider test rather than a blanket refusal.
+            self.reconcile(
+                self.pr(),
+                self.state(),
+                details=("claude", self.HEAD.lower(), "APPROVE"),
+            )
+        self.assertEqual(self.open_incidents(), [])
+
+    def test_a_pull_request_that_still_needs_a_rereview_keeps_its_incident(self):
+        self.recover(self.pr(), self.state())
+        # Still open, still stale-headed, no verdict label, and the newest
+        # marker is for the OLD head.
+        self.reconcile(
+            self.pr(),
+            self.state(),
+            details=("codex", self.APPROVED_HEAD.lower(), "APPROVE"),
+        )
+        self.assertEqual(len(self.open_incidents()), 1)
+
+    def test_an_unreadable_pull_request_keeps_its_incident(self):
+        # Fail-closed the way the conflict reconciler is: only a confirmed
+        # reading closes one.
+        self.recover(self.pr(), self.state())
+        with mock.patch.object(
+            drain_prs, "get_pr", side_effect=drain_prs.DrainError("gh is down")
+        ):
+            drain_prs.reconcile_no_agent_incidents(
+                self.ctx, self.state(), dry_run=False
+            )
+        self.assertEqual(len(self.open_incidents()), 1)
+
+    def test_a_successful_rereview_resolves_the_incident_at_once(self):
+        # Requirement 27's last clause: the incident does not wait for the
+        # next pass's reconciliation once a model-backed rereview publishes.
+        self.recover(self.pr(), self.state())
+        self.assertEqual(len(self.open_incidents()), 1)
+        approved = self.pr(labels=[{"name": drain_prs.APPROVE_LABEL}])
+        with mock.patch.object(drain_prs, "FINALIZE_PROVIDER", "claude"):
+            with mock.patch.object(
+                drain_prs,
+                "FINALIZE_ASSIGNMENT",
+                kanban_models.DEFAULT_ROSTER.assignment_for("drain_rereview", "claude"),
+            ):
+                with mock.patch.object(drain_prs, "prepare_review_worktree", return_value=self.root):
+                    with mock.patch.object(drain_prs, "get_pr", return_value=approved):
+                        with mock.patch.object(
+                            drain_prs,
+                            "latest_review_details",
+                            return_value=("claude", self.HEAD.lower(), "APPROVE"),
+                        ):
+                            with mock.patch.object(
+                                drain_prs, "remove_worktree"
+                            ):
+                                with mock.patch.object(
+                                    drain_prs,
+                                    "run",
+                                    side_effect=self._clean_worktree_runner(),
+                                ):
+                                    drain_prs.rereview_pr_with_model(
+                                        self.ctx, approved, dry_run=False
+                                    )
+        self.assertEqual(self.open_incidents(), [])
+
+    def test_a_wrong_provider_marker_fails_the_post_spawn_verification(self):
+        # Requirement 31 at the spawn's own verification: the reviewer the
+        # roster selected has to be the one that published, or an older
+        # canonical review sitting at this head would stand in for the
+        # rereview that was just run.
+        approved = self.pr(labels=[{"name": drain_prs.APPROVE_LABEL}])
+        with mock.patch.object(drain_prs, "FINALIZE_PROVIDER", "claude"):
+            with mock.patch.object(
+                drain_prs,
+                "FINALIZE_ASSIGNMENT",
+                kanban_models.DEFAULT_ROSTER.assignment_for("drain_rereview", "claude"),
+            ):
+                with mock.patch.object(drain_prs, "prepare_review_worktree", return_value=self.root):
+                    with mock.patch.object(drain_prs, "get_pr", return_value=approved):
+                        with mock.patch.object(
+                            drain_prs,
+                            "latest_review_details",
+                            return_value=("codex", self.HEAD.lower(), "APPROVE"),
+                        ):
+                            with mock.patch.object(drain_prs, "remove_worktree"):
+                                with mock.patch.object(
+                                    drain_prs,
+                                    "run",
+                                    side_effect=self._clean_worktree_runner(),
+                                ):
+                                    with self.assertRaises(drain_prs.DrainError) as caught:
+                                        drain_prs.rereview_pr_with_model(
+                                            self.ctx, approved, dry_run=False
+                                        )
+        self.assertIn("claude pr-review marker", str(caught.exception))
+
+    def _clean_worktree_runner(self):
+        """Answer the git probes around the spawn, and the spawn itself."""
+
+        def fake_run(args, **kwargs):
+            stdout = self.HEAD if "rev-parse" in args else ""
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        return fake_run
 
 
 class WaitForBranchUpdatePolicyTests(unittest.TestCase):
@@ -488,7 +817,7 @@ class RosterBackedDrainRereviewTests(unittest.TestCase):
                             # this fixture answers with nothing. The argv log
                             # below is what proves the model call really ran.
                             with contextlib.suppress(drain_prs.DrainError):
-                                drain_prs.rereview_pr_with_codex(
+                                drain_prs.rereview_pr_with_model(
                                     make_ctx(), pr, dry_run=False
                                 )
         argv = json.loads(log.read_text(encoding="utf-8"))
@@ -544,7 +873,7 @@ class RosterBackedDrainRereviewTests(unittest.TestCase):
         with self.rooted():
             with mock.patch.object(drain_prs, "prepare_review_worktree") as prepare:
                 with self.assertRaises(drain_prs.ModelUnavailableError):
-                    drain_prs.rereview_pr_with_codex(make_ctx(), pr, dry_run=False)
+                    drain_prs.rereview_pr_with_model(make_ctx(), pr, dry_run=False)
         prepare.assert_not_called()
 
     def test_the_assignment_is_re_read_rather_than_frozen(self):
@@ -565,3 +894,192 @@ class RosterBackedDrainRereviewTests(unittest.TestCase):
         for later in ("recover_stale_approval(", "get_open_approved_prs(", "run_drain_pass("):
             with self.subTest(step=later):
                 self.assertLess(refresh, loop_body.index(later))
+
+
+# A stand-in `claude`: the same recorder as FAKE_CODEX, for a CLI that writes
+# its transcript to stdout instead of to a `-o` path.
+FAKE_CLAUDE = """#!{interpreter}
+import json, sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+Path({log!r}).write_text(json.dumps(argv), encoding="utf-8")
+sys.stdin.read()
+sys.stdout.write("done\\n")
+"""
+
+
+class LoadedProviderDrainRereviewTests(RosterBackedDrainRereviewTests):
+    """Issue #572: which provider the stale-head rereview runs on comes from
+    the roster's operating mode, and a roster that loads none is a state the
+    drainer keeps working in rather than a failure that stops it.
+
+    Inherits the roster harness above, including its per-case reset of the
+    module-level cache: that cache is process-wide, and a case that left one
+    behind would decide the next one's answer.
+    """
+
+    def setUp(self):
+        super().setUp()
+        for name in ("FINALIZE_PROVIDER", "FINALIZE_LOADED_PROVIDERS"):
+            patched = mock.patch.object(drain_prs, name, None)
+            patched.start()
+            self.addCleanup(patched.stop)
+
+    def roster_with(self, agents: str) -> None:
+        self.write_roster(
+            MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
+                'agents = ["codex", "claude"]', f"agents = {agents}"
+            )
+        )
+
+    def test_dual_mode_still_selects_codex_exactly_as_before(self):
+        # Requirement 36's floor for this consumer: a host with no roster file
+        # resolves the same cell it always did.
+        with self.rooted():
+            assignment = drain_prs.refresh_finalize_assignment()
+            self.assertEqual(drain_prs.finalize_reviewer_provider(), "codex")
+        self.assertEqual(
+            (assignment.model, assignment.effort), ("gpt-5.6-terra", "medium")
+        )
+
+    def test_single_agent_selects_the_sole_loaded_providers_cell(self):
+        for agents, provider, expected in (
+            ('["claude"]', "claude", ("claude-opus-5", "medium")),
+            ('["codex"]', "codex", ("gpt-5.6-terra", "medium")),
+        ):
+            with self.subTest(agents=agents):
+                drain_prs.FINALIZE_ASSIGNMENT = None
+                self.roster_with(agents)
+                with self.rooted():
+                    assignment = drain_prs.refresh_finalize_assignment()
+                    self.assertEqual(drain_prs.finalize_reviewer_provider(), provider)
+                self.assertEqual((assignment.model, assignment.effort), expected)
+
+    def test_a_no_agent_roster_resolves_to_nothing_without_raising(self):
+        # Requirement 25. The per-cycle resolution is what a no-agent install
+        # used to die on, ahead of every queue decision; it must now simply
+        # report that there is no assignment.
+        self.roster_with("[]")
+        with self.rooted():
+            self.assertIsNone(drain_prs.refresh_finalize_assignment())
+            self.assertIsNone(drain_prs.finalize_reviewer_provider())
+            self.assertEqual(drain_prs.FINALIZE_LOADED_PROVIDERS, ())
+
+    def test_a_claude_only_roster_spawns_claude_with_that_cells_values(self):
+        # Requirement 30, end to end at the spawn boundary: the executable,
+        # the model and the effort all come from `drain_rereview.claude`.
+        self.roster_with('["claude"]')
+        log = self.root / "claude.argv.json"
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        script = bin_dir / "claude"
+        script.write_text(
+            FAKE_CLAUDE.format(interpreter=sys.executable, log=str(log)),
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+        worktree = self.root / "review"
+        worktree.mkdir()
+        pr = {"number": 7, "headRefOid": "a" * 40, "headRefName": "topic"}
+        with self.rooted():
+            drain_prs.refresh_finalize_assignment()
+            with mock.patch.object(drain_prs, "prepare_review_worktree", return_value=worktree):
+                with mock.patch.object(drain_prs, "get_pr", return_value=pr):
+                    with mock.patch.object(
+                        drain_prs,
+                        "run",
+                        side_effect=self._claude_recording(worktree, log, bin_dir),
+                    ):
+                        with contextlib.suppress(drain_prs.DrainError):
+                            drain_prs.rereview_pr_with_model(
+                                make_ctx(), pr, dry_run=False
+                            )
+        argv = json.loads(log.read_text(encoding="utf-8"))
+        self.assertEqual(argv[0], "-p")
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-5")
+        self.assertEqual(argv[argv.index("--effort") + 1], "medium")
+        self.assertIn("bypassPermissions", argv)
+        # No Codex flag leaked into the other brand's vector.
+        self.assertNotIn("-m", argv)
+        self.assertNotIn("exec", argv)
+
+    def _claude_recording(self, worktree, log, bin_dir):
+        def fake_run(args, **kwargs):
+            if args[0] != "claude":
+                stdout = "a" * 40 if "rev-parse" in args else ""
+                return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+            with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+                return subprocess.run(
+                    args,
+                    cwd=str(worktree),
+                    text=True,
+                    capture_output=True,
+                    input=kwargs.get("input_text"),
+                )
+
+        return fake_run
+
+    def test_the_prompt_and_marker_name_the_selected_provider(self):
+        # Requirement 30's other half. The identity the prompt claims and the
+        # marker token it is told to publish both come from the resolved
+        # assignment, so the reviewer that runs, the reviewer the prompt says
+        # it is, and the reviewer the marker names cannot disagree.
+        for agents, provider, display in (
+            ('["claude"]', "claude", "Opus 5 medium"),
+            ('["codex"]', "codex", "GPT-5.6-Terra medium"),
+        ):
+            with self.subTest(agents=agents):
+                drain_prs.FINALIZE_ASSIGNMENT = None
+                self.roster_with(agents)
+                with self.rooted():
+                    assignment = drain_prs.refresh_finalize_assignment()
+                prompt = drain_prs.drain_rereview_prompt(
+                    make_ctx(), 7, "a" * 40, provider=provider, assignment=assignment
+                )
+                self.assertIn(f"You are {display},", prompt)
+                self.assertIn(f"pr-review:v1 reviewer={provider} head=", prompt)
+                other = "codex" if provider == "claude" else "claude"
+                self.assertNotIn(f"reviewer={other}", prompt)
+
+    def test_a_no_agent_rereview_refuses_at_the_spawn_boundary_too(self):
+        # Unreachable from the recovery sweep, which records an incident
+        # instead, but stated at the spawn as well: the single-PR entry point
+        # reaches this function directly, and argv built out of None is not a
+        # failure mode worth having.
+        self.roster_with("[]")
+        pr = {"number": 7, "headRefOid": "a" * 40, "headRefName": "topic"}
+        with self.rooted():
+            with mock.patch.object(drain_prs, "prepare_review_worktree") as prepare:
+                with self.assertRaises(drain_prs.ModelUnavailableError) as caught:
+                    drain_prs.rereview_pr_with_model(make_ctx(), pr, dry_run=False)
+        prepare.assert_not_called()
+        self.assertIn("no-agent", str(caught.exception))
+
+    def test_a_marker_from_an_unloaded_provider_cannot_recover_an_approval(self):
+        # Requirement 31. In dual mode both brands are reviewers this
+        # installation performs, so both markers count -- which is what keeps
+        # a host with no roster file byte-identical to master. In single-agent
+        # mode the other brand's marker comes from a reviewer that was removed
+        # from the pipeline and cannot satisfy the selected cell.
+        cases = (
+            ('["codex", "claude"]', {"codex": True, "claude": True}),
+            ('["claude"]', {"codex": False, "claude": True}),
+            ('["codex"]', {"codex": True, "claude": False}),
+            # No provider is loaded, so this installation judges no marker's
+            # provenance: D-11 confines the no-agent fail-closed to the pull
+            # requests that actually reach a rereview.
+            ("[]", {"codex": True, "claude": True}),
+        )
+        for agents, expected in cases:
+            for marker_provider, accepted in expected.items():
+                with self.subTest(agents=agents, marker=marker_provider):
+                    drain_prs.FINALIZE_ASSIGNMENT = None
+                    drain_prs.FINALIZE_LOADED_PROVIDERS = None
+                    self.roster_with(agents)
+                    with self.rooted():
+                        self.assertEqual(
+                            drain_prs.marker_provider_accepted(marker_provider),
+                            accepted,
+                        )

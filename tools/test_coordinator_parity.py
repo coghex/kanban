@@ -12,13 +12,20 @@ and verifies the nested reviewer's model/effort where the Codex copy leaves
 both to the host installation.
 
 Since issue #483 that exception is roster-backed rather than two pairs of
-literals: the Claude copy loads a bundled `kanban_models.py` from beside itself
-and resolves `roles.pr_review.<provider>` through it, keeping its four
+literals: a copy of `kanban_models.py` ships beside each coordinator and the
+Claude copy resolves `roles.pr_review.<provider>` through it, keeping its four
 constants as the compiled fallbacks that reader is handed on a host with no
-roster file. That widened the divergence -- an import, a loader, and a resolver
--- without changing what it is *about*, which is why those lines are recorded
-below rather than excluded: the Codex copy still passes no model or effort and
-still ships no reader (tools/test_codex_plugin.py asserts both).
+roster file.
+
+Issue #572 narrowed the divergence back down again. Both copies now read the
+roster's loaded provider set to route -- so the sibling reader, its
+`importlib.util` import, its loader function, and loaded-provider routing are
+shared code and are no longer recorded below. What remains is the pinning
+exception itself, and only that: the Claude copy resolves an assignment cell
+and pins its model and effort onto the nested spawn, publishing them as
+verified fact in the `pr-review:v2` marker, while the Codex copy resolves no
+cell and still passes no model or effort to anything
+(tools/test_codex_plugin.py asserts that directly).
 
 Nothing enforced that description, and the drift it invites is not
 hypothetical: commit 4525a35 added the issue-vs-pull-request number guard to
@@ -70,8 +77,6 @@ CODEX_COORDINATOR = (
 # exception rather than a snapshot of whatever the two files happen to be.
 DOCUMENTED_DIVERGENCE = '''\
 @@
-+import importlib.util  # loads the model-roster reader beside this file
-@@
 +
 +# Canonical nested-reviewer model/effort (issue #77 round-2 review). Unlike
 +# the self-reviewed known-origin case, invoke_codex/invoke_claude below
@@ -92,46 +97,7 @@ DOCUMENTED_DIVERGENCE = '''\
 +CODEX_NESTED_REVIEW_EFFORT = "xhigh"
 +CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-5"
 +CLAUDE_NESTED_REVIEW_EFFORT = "xhigh"
-+
-+_KANBAN_MODELS_MODULE = None
-+
-+
-+def kanban_models():
-+    """The model-roster reader, loaded from beside this coordinator.
-+
-+    From beside itself and never from `tools/`: an installed bundle has no
-+    `tools/` sibling, and a plain `import` would resolve one only when this
-+    file happens to run out of a checkout -- silently reading a different
-+    copy's compiled defaults there and failing everywhere else. Loaded once and
-+    memoized, the way the document mechanism loads its own siblings, and
-+    registered in `sys.modules` before execution because that module declares
-+    dataclasses, which resolve their own class's `__module__` through
-+    `sys.modules` while the class body is still being processed.
-+    """
-+    global _KANBAN_MODELS_MODULE
-+    if _KANBAN_MODELS_MODULE is not None:
-+        return _KANBAN_MODELS_MODULE
-+    source = Path(__file__).resolve().parent / "kanban_models.py"
-+    name = "_kanban_models_for_review_coordinator"
-+    try:
-+        spec = importlib.util.spec_from_file_location(name, source)
-+        if spec is None or spec.loader is None:
-+            raise ImportError(f"no loader for {source}")
-+        module = importlib.util.module_from_spec(spec)
-+        sys.modules[name] = module
-+        try:
-+            spec.loader.exec_module(module)
-+        except BaseException:
-+            sys.modules.pop(name, None)
-+            raise
-+    except Exception as error:  # noqa: BLE001 - reported, never raised bare
-+        raise WorkflowError(
-+            f"This bundle's model-roster reader at {source} could not be "
-+            f"loaded, so no nested review was performed: {error}"
-+        ) from error
-+    _KANBAN_MODELS_MODULE = module
-+    return module
-+
+@@
 +
 +def nested_review_assignment(provider: str):
 +    """The `roles.pr_review.<provider>` cell this coordinator spawns on.

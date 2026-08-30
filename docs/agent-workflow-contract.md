@@ -151,17 +151,28 @@ arithmetic, which §2.3 owns.
   same way as solve — through that provider's adapter record, here through its
   `adapterPullRequestProcess` — running the named canonical command:
   `pr-review` and `pr-rereview`
-  always run on the opposite brand from the PR's origin marker; `pr-revise`
+  run on the opposite brand from the PR's origin marker whenever the roster
+  loads both providers; `pr-revise`
   and `repair` run on the PR's own origin brand and each internally invokes
-  exactly one canonical `pr-rereview` after pushing a fix. `authoredOnOwnBrand`
+  exactly one canonical `pr-rereview` after pushing a fix. Both bundled
+  coordinators collapse that routing to the one loaded provider in
+  single-agent mode — every pull request, whatever its origin marker, and
+  including an unknown or external one — and refuse the workflow outright in
+  no-agent mode, publishing nothing and changing no label (issue #572). The
+  Haskell side of that collapse is MODEL-10 and is not yet implemented.
+  `authoredOnOwnBrand`
   is the single predicate that decides which side of that split an action is
   on, and brand routing, model selection, and preflight all read it. Which of
   the four the `r` key selects is §7 of `docs/design.md`; `repair`'s own
   behavior is §2.7 below.
 - **Who may self-review:** the bundled coordinator's `--self-review` skips the
   nested reviewer spawn and lets the calling session review directly, which is
-  sound only when Kanban spawned that session as the opposite-brand reviewer —
-  the `pr-review`/`pr-rereview` side of the split above. The coordinator cannot
+  sound only when Kanban spawned that session as the reviewer the pull request
+  routes to — the `pr-review`/`pr-rereview` side of the split above. In dual
+  mode that is the opposite brand; in single-agent mode it is the one loaded
+  provider, and a declaration naming that provider is accepted even where it
+  shares the pull request's own origin brand, because it is the reviewer
+  Kanban itself selected for the `pr_review` role. The coordinator cannot
   observe who invoked it, so the caller declares its own brand through
   `--self-review-as` and the coordinator refuses any single-reviewer route
   whose declaration is absent or is not the routed reviewer's brand, returning
@@ -170,9 +181,15 @@ arithmetic, which §2.3 owns.
   pull request's own origin brand and therefore never pass the flag; stating it
   here as a checked precondition is what keeps a session that reached
   `pr-review` on its own pull request — an auto-solve loop reviewing the PR it
-  just opened — from reviewing its own work under the opposite brand's name.
-  An unknown or external origin routes to both brands, where `--self-review`
-  stays non-operative as it always has rather than being refused.
+  just opened — from reviewing its own work under another reviewer's name in
+  dual mode. In single-agent mode there is no other name to borrow: that
+  session's brand IS the route, so the same declaration is accepted and the
+  review is same-brand by design (D-8), degrading review independence to
+  whatever distinct `solve` and `pr_review` assignments the roster provides
+  rather than to nothing. In dual mode an unknown or external origin routes to
+  both brands, where `--self-review` stays non-operative as it always has
+  rather than being refused; single-agent mode collapses that route too, so
+  the declaration becomes operative there.
 - **Inputs:** PR number, PR origin marker, action
   (`PullRequestReview` | `PullRequestRereview` | `PullRequestRevision` |
   `PullRequestRepair`),
@@ -239,12 +256,17 @@ arithmetic, which §2.3 owns.
   handed on a host carrying no `~/.config/kanban/models.toml`. A roster file
   that is present and will not load refuses the nested review instead of
   spawning those fallbacks, because this coordinator publishes the model it
-  spawned as verified fact. The Codex bundle ships no copy of that reader and
-  passes no model or effort at all, which `tools/test_codex_plugin.py` asserts
-  rather than assumes.
+  spawned as verified fact. Since issue #572 the Codex bundle ships a copy of
+  that reader too, at
+  `codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py`,
+  because both coordinators read the roster's `agents` list to route. The
+  exception is unchanged and is now exactly this: only the Claude copy
+  resolves an assignment *cell* and pins its model and effort. The Codex copy
+  resolves none and passes no model or effort at all, which
+  `tools/test_codex_plugin.py` asserts rather than assumes.
   `tools/test_claude_plugin.py` holds the coordinator's
-  compiled fallbacks against those cells, so the two lanes still cannot
-  silently diverge.
+  compiled fallbacks against those cells and all three copies of the reader
+  byte-identical to each other, so the lanes still cannot silently diverge.
   See [claude-plugin/README.md](../claude-plugin/README.md) for the
   rationale; this remains a host-configuration concern for the Codex
   plugin's own nested call.
@@ -304,11 +326,52 @@ arithmetic, which §2.3 owns.
     The resolved assignment is what a published marker's `models=` field
     records and what §2.3.1's reconciliation accepts as current, so changing
     either half of it retires standing approvals and forces rereview.
-    `tools/drain_prs.py` resolves `roles.drain_rereview.codex` the same way for
-    its stale-head rereview, re-read once per drain cycle so a roster edit
+    `tools/drain_prs.py` resolves the `roles.drain_rereview` cell for the
+    provider its operating mode selects (below) the same way for its
+    stale-head rereview, re-read once per drain cycle so a roster edit
     takes effect without restarting the managed service; a roster it cannot
-    resolve stops that drainer where it stands rather than rereviewing on a
+    read stops that drainer where it stands rather than rereviewing on a
     model it cannot claim.
+  - **Which provider the backend routes to** comes from the same roster's
+    `agents` list, read as the operating mode `src/Kanban/Models.hs` derives
+    (issue #572, D-8). Only the loaded providers' `issue_gate` cells are
+    resolved at all, so a Claude-only host no longer refuses for want of a
+    Codex reviewer it will never spawn.
+    - **dual** — two providers loaded, which is what an absent roster file
+      means. Every routing decision, published marker, and result document is
+      exactly what it was before this existed.
+    - **single-agent** — one provider loaded. `reviewers_for_origin` and the
+      rereview route both collapse to that provider whatever the origin marker
+      says, and an unmarked issue's `--legacy-policy dual` route collapses with
+      them. `--legacy-policy hold` still holds: an unmarked issue's provenance
+      is unknown, and the collapse decides which reviewer a route names rather
+      than creating one the policy withheld. A published rereview marker's
+      `trigger=` field is *not* collapsed — it records the parent review's
+      changes-requesting reviewers, which is what
+      `expected_reviewers_for_record` validates it against. Because the route
+      is half of a marker's identity, an approval published under the other
+      brand stops matching and a fresh review is required; that is the design's
+      stated consequence of a mode change, not a defect.
+    - **no-agent** — no provider loaded. `--check`, a single-issue `--review`,
+      and `--rereview` return the ordinary per-issue result shape with
+      `approved: false`, `required_reviewers` and `required_models` both the
+      string `"none"`, and one reason naming the mode; they exit 2, read no
+      issue, spawn no model, publish no comment, and change no label. An
+      ordered `--review` batch returns the batch shape with every requested
+      number still in `remaining_issues`, `stopped_at: null`, and a
+      `stop_reason` naming the mode, and exits 2. `--review-queue` returns its
+      version-1 document with the queue-level outcome `unavailable`,
+      `issue: null`, `model_called: false`, and exits **zero**: a deliberate
+      operating state is not a backend failure. `approve_issues_service.py`
+      admits that outcome, treats it as non-mutating, opens no incident and no
+      changes-requested barrier, records the message, and polls again at its
+      ordinary interval, so adding a provider back resumes the service by
+      itself. `--self-test` still runs, spawning no reviewer and answering no
+      gate question.
+    A roster that is present and *unusable* is none of these three: it keeps
+    the refusal above, naming the file and the defect. The two must never be
+    reported as one — a defective file described to an operator as a
+    deliberate board-only install is a defect nobody is told to repair.
   - The backend's manual `--review` form also accepts two or more issue
     numbers. It processes that explicit list from left to right under one
     approval lock, stops normally at the first `CHANGES_REQUESTED` verdict,
@@ -636,8 +699,21 @@ reimplement the removal, and `--check` remains read-only.
   spawn outside that backend is the §2.8 dashboard's read-only user-manager
   version probe, which manages no job. The drainer's own PR-merge loop
   (`tools/drain_prs.py`) shells out to `git` and `gh` for every repository
-  operation, and, only for automated stale-head rereview rounds, to
-  `codex exec`. Every executable these Python tools spawn is declared in the
+  operation, and, only for automated stale-head rereview rounds, to whichever
+  of `codex exec` or `claude -p` the roster's operating mode selects: Codex in
+  dual mode, exactly as before, and the sole loaded provider in single-agent
+  mode (issue #572). In no-agent mode it spawns neither and never stops for it
+  — the drainer starts and keeps merging every eligible pull request, and only
+  a pull request that actually reaches a stale-head rereview is left unmerged,
+  recorded as one open ackable `no-agent-mode` per-PR incident that clears
+  itself once that pull request no longer needs a rereview. That is distinct
+  from a roster that is present and unreadable, which still stops the drainer
+  where it stands. Both the prompt's reviewer identity and the published
+  `pr-review:v1` marker's `reviewer=` token come from the resolved assignment,
+  and the drainer verifies the published marker's provider as well as its head
+  and verdict; a current-head marker whose brand this installation does not
+  load cannot recover a stale approval either.
+  Every executable these Python tools spawn is declared in the
   §4 manifest and reconciled against it the same way the Haskell and
   packaged-workflow surfaces are: every non-test module under `tools/` is a
   scanned surface, so `launchctl` and `systemctl` each carry both a manifest
@@ -1759,9 +1835,13 @@ names without listing it again. Issue #370 vendored `kanban_config.py` into both
 plugin bundles beside the document mechanism that reads it, and the copies are
 held byte-identical to `tools/kanban_config.py` by
 `tools/test_document_workflow_contract.py`. Issue #483 vendored
-`kanban_models.py` into the Claude bundle alone on the same terms, held
-byte-identical by `tools/test_claude_plugin.py`; it appears in no row below
-because it writes down no managed location of its own. Being identical by test is what
+`kanban_models.py` into the Claude bundle on the same terms and issue #572
+vendored it into the Codex bundle as well, beside that bundle's own
+coordinator, because both coordinators read the roster's loaded provider set
+to route; all three copies are held byte-identical by
+`tools/test_claude_plugin.py`, whose diagnostic names the one that drifted.
+Neither copy appears in a row below, because that module writes down no
+managed location of its own. Being identical by test is what
 makes a copy a copy rather than a second definition, which is the property these
 rows exist to protect — the managed locations that module writes down are still
 stated once, and a copy that drifted from that statement would fail before it
@@ -2669,11 +2749,17 @@ brand's asset speaking a tool its declaration does not carry.
   `tools/test_install_issue_review.py`).
 - **No credential, personal model preference, private endpoint, or
   machine-specific path may be tracked as a required asset.**
-  `DRAIN_PRS_CLAUDE_REVIEW_MODEL`, `KANBAN_DRAINER_NTFY_URL`,
+  `KANBAN_DRAINER_NTFY_URL`,
   `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, `KANBAN_ISSUE_REVIEW_NTFY_URL`, and the
   four `APPROVE_ISSUES_*_MODEL` / `APPROVE_ISSUES_*_EFFORT` overrides §2.3
   documents are optional environment overrides with no tracked default value,
-  not required configuration.
+  not required configuration. `DRAIN_PRS_CLAUDE_REVIEW_MODEL` was one and is
+  retired: `tools/drain_prs.py` reads it nowhere, and
+  `tools/test_drain_prs_workflow.py` pins it as an absence in both bundles'
+  rendered drain-prs assets. The drainer's Claude stale-head rereview, added
+  by issue #572, takes its model and effort from the roster's
+  `roles.drain_rereview.claude` cell alone and introduces no override of its
+  own.
 - **A new tracked module under `tools/` does not reach a live install by
   itself.** Both service installations link a fixed module set beside the
   script they install, resolved when that install was made, so a module added

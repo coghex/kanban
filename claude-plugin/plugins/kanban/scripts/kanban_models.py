@@ -26,14 +26,17 @@ must never have an agent quietly run on the old one. A present file is likewise
 a complete roster rather than a sparse patch over the defaults: every loaded
 provider a role applies to must resolve from the file itself.
 
-This module ships in two homes, held byte-identical the way `kanban_config.py`'s
+This module ships in three homes, held byte-identical the way `kanban_config.py`'s
 copies are: `tools/kanban_models.py`, which the issue-review and drainer
-installers link beside the scripts that import it, and
-`claude-plugin/plugins/kanban/scripts/kanban_models.py`, because an installed
-coordinator runs from its bundle with no `tools/` sibling and must load the
-reader from beside itself. The Codex bundle deliberately carries no copy: its
-coordinator is forbidden model and effort values, and the roster never reaches
-it.
+installers link beside the scripts that import it, and one copy beside each
+bundled review coordinator --
+`claude-plugin/plugins/kanban/scripts/kanban_models.py` and
+`codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py` --
+because an installed coordinator runs from its bundle with no `tools/` sibling
+and must load the reader from beside itself. The two coordinator copies read
+different things out of it: the Claude one resolves `roles.pr_review` cells and
+pins them, while the Codex one reads only `agents` for the operating mode and
+still passes no model or effort to anything (D-2).
 """
 
 from __future__ import annotations
@@ -190,6 +193,38 @@ class ModelRoster:
                 f'model roster has no "roles.{role}.{provider}" assignment',
             )
         return assignment
+
+
+# The operating-mode names, mirroring Kanban.Models.operatingModeLabel exactly.
+# Both sides of the language boundary report a mode to the same operator, so
+# there is one spelling of each and it lives here.
+DUAL_MODE = "dual"
+SINGLE_AGENT_MODE = "single-agent"
+NO_AGENT_MODE = "no-agent"
+OPERATING_MODES = (DUAL_MODE, SINGLE_AGENT_MODE, NO_AGENT_MODE)
+
+
+def operating_mode_for(roster: ModelRoster) -> str:
+    """The mode a roster's own `agents` list derives (D-8).
+
+    Mirrors `Kanban.Models.operatingModeFor`, counting rather than matching
+    pair by pair so a third compiled provider widens dual instead of falling
+    through to a mode it does not mean.
+
+    Deliberately NOT the Python twin of `loadedOperatingMode`. That function
+    maps a load failure to no-agent because the dashboard needs a total value
+    for a mode it must draw; these consumers refuse on an unusable roster
+    instead (#483's requirement 3), and reporting a defective file to an
+    operator as a deliberate board-only install would hide the defect. A
+    roster that will not load never reaches this function at all: loading
+    raises first.
+    """
+    count = len(roster.agents)
+    if count == 0:
+        return NO_AGENT_MODE
+    if count == 1:
+        return SINGLE_AGENT_MODE
+    return DUAL_MODE
 
 
 def role_applicability(role: str) -> tuple[str, ...]:

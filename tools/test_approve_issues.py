@@ -393,20 +393,261 @@ class RosterBackedIssueGateTests(unittest.TestCase):
         self.assertIn(str(roster), proc.stderr)
         self.assertIn("is invalid", proc.stderr)
 
-    def test_an_unloadable_provider_cell_refuses_rather_than_defaulting(self):
-        # A valid single-agent roster is not a file to repair, but this gate
-        # still routes to both brands, so a cell it cannot resolve refuses the
-        # same way. Which brands it routes to is MODEL-8's question, not this
-        # slice's -- and answering it by quietly spawning a compiled default
-        # would be the wrong answer to it.
+    def test_only_the_loaded_providers_gate_cells_are_resolved(self):
+        # Issue #483 refused a single-agent roster outright here, because this
+        # gate still routed to both brands and a cell it could not resolve was
+        # therefore a real refusal. Issue #572 makes "not loaded" a routing
+        # fact instead: a Claude-only host reviews with Claude, so only that
+        # provider's cell is resolved and nothing about the file is wrong.
+        # Replaced rather than deleted, so the two never both fail to hold.
         self.write_roster(
             MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
                 'agents = ["codex", "claude"]', 'agents = ["claude"]'
             )
         )
         module = self.backend()
+        self.assertIsNone(module.MODEL_ROSTER_ERROR)
+        self.assertEqual(module.OPERATING_MODE, "single-agent")
+        self.assertEqual(module.LOADED_PROVIDERS, ("claude",))
+        self.assertEqual(sorted(module.ISSUE_GATE_ASSIGNMENTS), ["claude"])
+        self.assertEqual(module.CLAUDE_REVIEWER.model, "claude-opus-5")
+        # The unloaded brand's constants stay at the never-a-model sentinel,
+        # which nothing routes to and no spawn can reach.
+        self.assertEqual(
+            module.CODEX_REVIEWER.model, module.UNRESOLVED_ASSIGNMENT_VALUE
+        )
+
+
+class LoadedProviderRoutingTests(RosterBackedIssueGateTests):
+    """Issue #572: the roster's `agents` list is a routing fact.
+
+    Inherits the re-import harness above for the same reason it exists: the
+    mode is frozen at import with everything else, so a case that read the
+    module this suite already imported would answer for whatever roster the
+    host running the suite carries.
+    """
+
+    ORDINARY = {
+        "id": 1,
+        "body": "Clarification",
+        "user": {"login": "owner"},
+        "author_association": "OWNER",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "html_url": "https://example.invalid/c1",
+    }
+
+    def roster_with(self, agents: str) -> None:
+        self.write_roster(
+            MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
+                'agents = ["codex", "claude"]', f"agents = {agents}"
+            )
+        )
+
+    def context(self, module):
+        return module.RepoContext(
+            path=self.root,
+            repo_slug="coghex/kanban",
+            default_branch="master",
+        )
+
+    def test_dual_mode_routing_is_exactly_what_it_was(self):
+        # Requirement 36's floor, asserted rather than observed: a host with no
+        # roster file makes every routing decision the way it did before any of
+        # this existed.
+        module = self.backend()
+        self.assertEqual(module.OPERATING_MODE, "dual")
+        self.assertEqual(
+            module.reviewers_for_origin("claude", "dual"), [module.CODEX_REVIEWER]
+        )
+        self.assertEqual(
+            module.reviewers_for_origin("codex", "dual"), [module.CLAUDE_REVIEWER]
+        )
+        self.assertEqual(
+            module.reviewers_for_origin(None, "dual"),
+            [module.CODEX_REVIEWER, module.CLAUDE_REVIEWER],
+        )
+        self.assertEqual(module.reviewers_for_origin(None, "hold"), [])
+
+    def test_single_agent_routes_every_origin_to_the_loaded_provider(self):
+        for agents, attribute in (('["claude"]', "CLAUDE_REVIEWER"), ('["codex"]', "CODEX_REVIEWER")):
+            with self.subTest(agents=agents):
+                self.roster_with(agents)
+                module = self.backend()
+                loaded = getattr(module, attribute)
+                self.assertEqual(module.OPERATING_MODE, "single-agent")
+                for origin in ("claude", "codex", None):
+                    self.assertEqual(
+                        module.reviewers_for_origin(origin, "dual"),
+                        [loaded],
+                        f"origin {origin!r} did not collapse to the loaded provider",
+                    )
+
+    def test_legacy_hold_still_holds_in_single_agent_mode(self):
+        # The one route the collapse must not create. `--legacy-policy hold`
+        # is an operator decision about an issue whose provenance is unknown,
+        # and #483's untouched-legacy-policy contract keeps it.
+        self.roster_with('["claude"]')
+        module = self.backend()
+        self.assertEqual(module.reviewers_for_origin(None, "hold"), [])
+        # And the marker arithmetic still reads that empty route as unapproved
+        # rather than as an approval nobody is required for.
+        self.assertFalse(
+            module.marker_matches(
+                {"spec": "s", "origin": "legacy", "reviewers": "", "models": ""},
+                spec_sha="s",
+                origin=None,
+                reviewers=[],
+            )
+        )
+
+    def test_single_agent_collapses_the_rereview_route_but_not_its_trigger(self):
+        # The trigger records the parent review's changes-requesting set,
+        # which expected_reviewers_for_record validates a published marker
+        # against; collapsing it would invalidate existing rereview markers.
+        self.roster_with('["codex"]')
+        module = self.backend()
+        parent_body = (
+            "### Reviewer summaries\n"
+            "- **GPT-5.6-Sol — CHANGES REQUESTED:** Scope needs a decision.\n\n"
+            "<!-- issue-review:v2 spec=" + "a" * 64 + " origin=claude "
+            "reviewers=codex models=gpt-5.6-sol@xhigh base=" + "b" * 40 + " "
+            "verdict=CHANGES_REQUESTED -->"
+        )
+        parent = {**self.ORDINARY, "id": 4, "body": parent_body}
+        record = module.latest_review_record([parent])
+        self.assertIsNotNone(record)
+        reviewers, trigger = module.rereview_reviewers(*record)
+        self.assertEqual(reviewers, [module.CODEX_REVIEWER])
+        self.assertEqual(trigger, "codex")
+
+    def test_a_no_agent_roster_is_a_mode_rather_than_a_roster_error(self):
+        self.roster_with("[]")
+        module = self.backend()
+        self.assertIsNone(module.MODEL_ROSTER_ERROR)
+        self.assertEqual(module.OPERATING_MODE, "no-agent")
+        self.assertEqual(module.LOADED_PROVIDERS, ())
+        self.assertEqual(module.ISSUE_GATE_ASSIGNMENTS, {})
+
+    def test_an_unusable_roster_is_never_reported_as_no_agent(self):
+        # The two states that must never be confused. A file the operator
+        # broke keeps #483's refusal, naming the file and the defect, and does
+        # not acquire a mode.
+        self.write_roster("schema_version = 1\nagents = 7\n")
+        module = self.backend()
         self.assertIsNotNone(module.MODEL_ROSTER_ERROR)
-        self.assertIn("codex", module.MODEL_ROSTER_ERROR)
+        self.assertIsNone(module.OPERATING_MODE)
+        self.assertFalse(module.no_agent_mode())
+        self.assertNotIn("no-agent", module.MODEL_ROSTER_ERROR)
+
+    def test_no_agent_single_issue_modes_answer_without_touching_github(self):
+        # Requirement 5. Every per-issue mode returns the ordinary shape with
+        # the route reported as the string "none", and none of them reads the
+        # issue, takes the approval lock, or reviews anything.
+        self.roster_with("[]")
+        module = self.backend()
+        stubs = {}
+        with contextlib.ExitStack() as stack:
+            for name in ("get_issue", "get_comments", "acquire_lock", "process_issue"):
+                stubs[name] = stack.enter_context(mock.patch.object(module, name))
+            single = module.review_one(self.context(module), 42, legacy_policy="dual")
+            rereview = module.rereview_one(self.context(module), 42, legacy_policy="dual")
+        for name, stub in stubs.items():
+            self.assertFalse(stub.called, f"{name} ran in no-agent mode")
+        for status in (single, rereview):
+            self.assertFalse(status["approved"])
+            self.assertEqual(status["issue"], 42)
+            self.assertEqual(status["required_reviewers"], "none")
+            self.assertEqual(status["required_models"], "none")
+            self.assertEqual(len(status["reasons"]), 1)
+            self.assertIn("no-agent", status["reasons"][0])
+
+    def test_a_no_agent_route_reads_differently_from_a_held_one(self):
+        # Requirement 9's whole point: a reader must be able to tell "this
+        # installation deliberately reviews nothing" from "this issue has no
+        # route", which is what an unmarked issue under `--legacy-policy hold`
+        # reports as JSON null. The no-agent document says the string "none"
+        # instead, so an approval published while two providers were loaded
+        # cannot read as merely absent.
+        self.roster_with("[]")
+        module = self.backend()
+        no_agent = module.no_agent_issue_result(42)
+        self.assertEqual(no_agent["required_reviewers"], "none")
+        self.assertEqual(no_agent["required_models"], "none")
+        held_status = module.current_gate_status(
+            {
+                "number": 42,
+                "body": "Legacy body",
+                "labels": [],
+                "state": "OPEN",
+                "url": "https://example.invalid/42",
+            },
+            [],
+            legacy_policy="hold",
+        )
+        self.assertIsNone(held_status["required_reviewers"])
+        self.assertIsNone(held_status["required_models"])
+
+    def test_a_no_agent_batch_keeps_every_requested_number_in_order(self):
+        # Requirement 6. Nothing was examined, so the caller's ordering is all
+        # that survives, and the reason travels in stop_reason where the
+        # non-JSON path can print it too.
+        self.roster_with("[]")
+        module = self.backend()
+        with mock.patch.object(module, "acquire_lock") as lock:
+            status = module.review_batch(
+                self.context(module), [9, 8, 7], legacy_policy="dual"
+            )
+        lock.assert_not_called()
+        self.assertFalse(status["approved"])
+        self.assertTrue(status["batch"])
+        self.assertEqual(status["requested_issues"], [9, 8, 7])
+        self.assertEqual(status["processed_issues"], [])
+        self.assertEqual(status["remaining_issues"], [9, 8, 7])
+        self.assertEqual(status["results"], [])
+        self.assertIsNone(status["stopped_at"])
+        self.assertIn("no-agent", status["stop_reason"])
+
+    def test_a_no_agent_queue_reports_unavailable_without_an_issue(self):
+        # Requirement 7. The version-1 schema is unchanged and the outcome is
+        # queue-level, so it carries no issue number -- which the document's
+        # own validator enforces, since `unavailable` is deliberately outside
+        # REVIEW_QUEUE_ISSUE_OUTCOMES.
+        self.roster_with("[]")
+        module = self.backend()
+        with mock.patch.object(module, "review_queue_scan") as scan:
+            with mock.patch.object(module, "acquire_lock") as lock:
+                result = module.review_queue(self.context(module), legacy_policy="dual")
+        scan.assert_not_called()
+        lock.assert_not_called()
+        self.assertEqual(result["outcome"], "unavailable")
+        self.assertEqual(result["schema"], module.REVIEW_QUEUE_SCHEMA)
+        self.assertEqual(result["version"], 1)
+        self.assertIsNone(result["issue"])
+        self.assertFalse(result["model_called"])
+        self.assertIn("no-agent", result["message"])
+        self.assertNotIn("unavailable", module.REVIEW_QUEUE_ISSUE_OUTCOMES)
+
+    def test_self_test_still_runs_in_every_mode(self):
+        # Requirement 8. It spawns no reviewer and answers no gate question, so
+        # a host that loads one provider or none must still be able to run it.
+        for agents in ('["codex", "claude"]', '["claude"]', '["codex"]', "[]"):
+            with self.subTest(agents=agents):
+                self.roster_with(agents)
+                module = self.backend()
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    module.self_test()
+                self.assertIn("self-test passed", out.getvalue())
+                # And the pin it takes for the duration is released.
+                self.assertEqual(
+                    module.OPERATING_MODE,
+                    {
+                        '["codex", "claude"]': "dual",
+                        '["claude"]': "single-agent",
+                        '["codex"]': "single-agent",
+                        "[]": "no-agent",
+                    }[agents],
+                )
 
 
 class InstalledConfigReferenceTests(unittest.TestCase):

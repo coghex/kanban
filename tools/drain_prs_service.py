@@ -516,6 +516,13 @@ NTFY_URL = configured_ntfy_url()
 CRASH_INCIDENT_KIND = "drainer-exit"
 CONFLICT_INCIDENT_KIND = "merge-conflict"
 CLEANUP_INCIDENT_KIND = "cleanup-pending"
+# A pull request whose approved head moved needs a rereview, and this
+# installation's roster loads no provider to run one on. The drainer keeps
+# running and keeps merging every other eligible pull request; only this one is
+# left unmerged (D-11). Kept to `cleanup-pending`'s width or shorter: the
+# board's incidents panel has a fixed interior budget, and a row wider than the
+# widest it already draws is invisible rather than an error.
+NO_AGENT_INCIDENT_KIND = "no-agent-mode"
 CONFLICT_SUMMARY_FILES = 3
 CLEANUP_SUMMARY_STEPS = 3
 INTERVAL_SECONDS = 60
@@ -2428,6 +2435,25 @@ def find_open_conflict_incident(
     )
 
 
+def find_open_no_agent_incident(
+    repo_path: Path, pull_request: int
+) -> tuple[Path, dict[str, Any]] | None:
+    return find_open_pr_incident(
+        incident_job(repo_path), pull_request, NO_AGENT_INCIDENT_KIND
+    )
+
+
+def open_no_agent_incidents(repo_path: Path) -> list[dict[str, Any]]:
+    incidents: list[dict[str, Any]] = []
+    for path in incident_files(
+        incident_job(repo_path), open_only=True, kind=NO_AGENT_INCIDENT_KIND
+    ):
+        incident = read_json(path)
+        if incident is not None:
+            incidents.append(incident)
+    return incidents
+
+
 def open_conflict_incidents(repo_path: Path) -> list[dict[str, Any]]:
     incidents: list[dict[str, Any]] = []
     for path in incident_files(
@@ -2592,6 +2618,44 @@ def record_cleanup_incident(
     )
 
 
+def record_no_agent_incident(
+    *,
+    repo_path: Path,
+    pull_request: int,
+    head: str,
+) -> dict[str, Any]:
+    """Record that one PR needs a rereview no loaded provider can run.
+
+    Like the merge-conflict incident and unlike a crash, this never asks the
+    drainer to exit: every other approved pull request keeps draining, and this
+    one waits. `record_pr_incident` is idempotent on (repository, kind, pull
+    request), so a pull request that keeps reaching this state across many
+    passes has one incident rather than one per pass. `refresh` is deliberately
+    not used: the reported head is the head that could not be rereviewed, and a
+    head that moves again is a different situation the drainer re-examines on
+    its own terms.
+    """
+    return record_pr_incident(
+        job=incident_job(repo_path),
+        pull_request=pull_request,
+        kind=NO_AGENT_INCIDENT_KIND,
+        summary=(
+            f"PR #{pull_request}'s approved head moved to {head[:12]}, and the "
+            "model roster loads no agent to rereview it with."
+        ),
+        payload={"head": head},
+        notes=[
+            "The drainer is still running and keeps draining every other "
+            "approved PR.",
+            "Add a provider to the roster's `agents` list to restore the "
+            "stale-head rereview; this incident clears itself once this PR no "
+            "longer needs one.",
+        ],
+        title="PR drainer has no agent for a stale-head rereview",
+        tags="warning,no_entry_sign",
+    )
+
+
 def resolve_pr_incident(
     job: DrainerJob, pull_request: int, kind: str, note: str
 ) -> dict[str, Any] | None:
@@ -2621,6 +2685,14 @@ def resolve_cleanup_incident(
 ) -> dict[str, Any] | None:
     return resolve_pr_incident(
         incident_job(repo_path), pull_request, CLEANUP_INCIDENT_KIND, note
+    )
+
+
+def resolve_no_agent_incident(
+    repo_path: Path, pull_request: int, note: str
+) -> dict[str, Any] | None:
+    return resolve_pr_incident(
+        incident_job(repo_path), pull_request, NO_AGENT_INCIDENT_KIND, note
     )
 
 
@@ -2659,10 +2731,11 @@ def resolve_crash_incidents(job: DrainerJob, note: str) -> list[Path]:
     An intentional stop ends the supervisor, so a `drainer-exit` incident --
     including a legacy one predating the `kind` field, which `incident_kind`
     reads as that kind -- is genuinely over. It discharges nothing else: a stop
-    makes no pull request mergeable and completes no post-merge step, so a
-    `merge-conflict` or `cleanup-pending` incident stays open for the poll that
-    can actually clear it. `acknowledge_incident` remains the operator's manual
-    dismissal, for an incident of any kind.
+    makes no pull request mergeable, completes no post-merge step, and loads no
+    provider, so a `merge-conflict`, `cleanup-pending`, or `no-agent-mode`
+    incident stays open for the poll that can actually clear it.
+    `acknowledge_incident` remains the operator's manual dismissal, for an
+    incident of any kind.
     """
     resolved: list[Path] = []
     for path in incident_files(job, open_only=True, kind=CRASH_INCIDENT_KIND):
@@ -3067,8 +3140,8 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser(
         "stop",
         help=(
-            "Stop the PR drainer and clear its crash incidents. A merge-conflict "
-            "or cleanup incident stays open; clear it with `ack`."
+            "Stop the PR drainer and clear its crash incidents. A merge-conflict, "
+            "cleanup, or no-agent incident stays open; clear it with `ack`."
         ),
     )
     subparsers.add_parser("status", help="Show live state and the latest open incident.")

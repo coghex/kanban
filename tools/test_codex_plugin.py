@@ -368,6 +368,32 @@ FORBIDDEN_INVOCATION_FLAGS = (
 )
 
 
+# Tokens that would mean this coordinator resolved a roster ASSIGNMENT cell
+# rather than merely reading the loaded provider set. D-2 as amended is a
+# promise about the values it hands a spawn, not about whether it may read the
+# roster, so the line between the two is drawn here.
+ASSIGNMENT_RESOLUTION_TOKENS = (
+    "resolve_assignment",
+    "assignment_for",
+    "nested_review_assignment",
+    "Assignment(",
+    "NESTED_REVIEW_MODEL",
+    "NESTED_REVIEW_EFFORT",
+    ".effort",
+)
+
+
+def assignment_resolution_tokens(source: str) -> list[str]:
+    """Every assignment-resolution token this source names, in scan order.
+
+    A function rather than a loop inside one test, so the planted-violation
+    control below can run the SAME scan against a source that really does
+    resolve a cell. A control that only checked its own planted string would
+    keep passing if this scan were deleted outright.
+    """
+    return [token for token in ASSIGNMENT_RESOLUTION_TOKENS if token in source]
+
+
 class PackagedCodeInvocationTests(unittest.TestCase):
     """Structural coverage over the coordinator's own code, not just its
     JSON manifests: the nested reviewer subprocess calls in invoke_codex/
@@ -389,26 +415,58 @@ class PackagedCodeInvocationTests(unittest.TestCase):
                     offenders.append(f"{flag!r} appears in {match.group(0).splitlines()[0]}")
         self.assertEqual(offenders, [], "\n".join(offenders))
 
-    def test_the_codex_bundle_ships_no_model_roster_reader(self):
-        # The negative control for issue #483's deferral. The Claude bundle
-        # vendors kanban_models.py beside its coordinator and resolves the
-        # pr_review cells through it; this bundle deliberately does not,
-        # because D-2 as amended keeps its coordinator's delegation contract
-        # and the roster has nothing to say to a spawn that pins nothing.
-        # Asserted rather than assumed, so a later slice cannot hand this
-        # bundle model values by accident.
-        strays = sorted(
+    def test_the_codex_bundle_reader_resolves_no_assignment_cell(self):
+        # Issue #483 left a negative control here asserting this bundle
+        # shipped NO roster reader at all. Issue #572 makes that false -- both
+        # coordinators now read the roster's loaded provider set, because that
+        # set is what decides who reviews a pull request -- so it is replaced
+        # in the same pull request by the narrower rule that is still true and
+        # still load-bearing, leaving no window where neither holds.
+        #
+        # D-2 as amended is a promise about the VALUES this coordinator hands
+        # a spawn, not about whether it may read the roster. So: exactly one
+        # reader ships, beside the coordinator that loads it; the coordinator
+        # really does import it; and nothing in it resolves an assignment cell
+        # or names a model or effort. `FORBIDDEN_INVOCATION_FLAGS` above is the
+        # other half, covering the argument vectors themselves.
+        readers = sorted(
             str(path.relative_to(REPO_ROOT))
             for path in CODEX_PLUGIN_ROOT.rglob("kanban_models.py")
         )
         self.assertEqual(
-            strays,
-            [],
-            "the Codex bundle must ship no model-roster reader: its "
-            "coordinator passes no model or effort and has no cell to resolve",
+            readers,
+            ["codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py"],
+            "the Codex bundle ships exactly one model-roster reader, beside "
+            "the coordinator that loads it from its own directory",
         )
         source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
-        self.assertNotIn("kanban_models", source)
+        self.assertIn("kanban_models", source)
+        self.assertIn("def operating_mode(", source)
+        self.assertEqual(
+            assignment_resolution_tokens(source),
+            [],
+            "the Codex coordinator reads the loaded provider set and resolves "
+            "no assignment cell",
+        )
+
+    def test_the_no_assignment_scan_actually_detects_a_planted_violation(self):
+        # The control on the control, and it has to run the SAME scan the test
+        # above runs: asserting only that the planted string is present would
+        # keep passing with that scan deleted.
+        source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
+        anchor = "    if mode == models.SINGLE_AGENT_MODE:\n"
+        self.assertEqual(
+            source.count(anchor),
+            1,
+            f"planted-violation fixture is stale: {anchor!r} is not unique",
+        )
+        planted = source.replace(
+            anchor,
+            "    kanban_models().resolve_assignment('pr_review', 'codex')\n" + anchor,
+            1,
+        )
+        self.assertNotEqual(planted, source, "the planting changed nothing")
+        self.assertEqual(assignment_resolution_tokens(planted), ["resolve_assignment"])
 
     def test_the_forbidden_flag_scan_actually_detects_a_planted_violation(self):
         # Guards against the regex/substring scan above silently matching
