@@ -983,10 +983,17 @@ class PortableBackendTests(unittest.TestCase):
         # reviewer those assets used to pin. Read out of the backend rather
         # than imported, because what a vendoring drop is safe against is what
         # the tracked file says, not what this suite's host resolved.
+        #
+        # Issue #572 moved that resolution off `resolve_assignment` and onto
+        # the loaded roster itself, so only the LOADED providers' cells are
+        # resolved -- a Claude-only host must review with Claude rather than
+        # refuse for want of a Codex cell. The claim held here is unchanged:
+        # the cell is still where the default comes from.
         source = (REPO_ROOT / "tools" / "approve_issues.py").read_text(encoding="utf-8")
         self.assertIn(
-            'kanban_models.resolve_assignment("issue_gate", provider)', source
+            '_MODEL_ROSTER.assignment_for("issue_gate", provider)', source
         )
+        self.assertIn("for provider in LOADED_PROVIDERS", source)
         self.assertIn(
             'PRIMARY_CLAUDE_MODEL = gate_model("claude", "APPROVE_ISSUES_CLAUDE_MODEL")',
             source,

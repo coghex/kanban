@@ -389,26 +389,61 @@ class PackagedCodeInvocationTests(unittest.TestCase):
                     offenders.append(f"{flag!r} appears in {match.group(0).splitlines()[0]}")
         self.assertEqual(offenders, [], "\n".join(offenders))
 
-    def test_the_codex_bundle_ships_no_model_roster_reader(self):
-        # The negative control for issue #483's deferral. The Claude bundle
-        # vendors kanban_models.py beside its coordinator and resolves the
-        # pr_review cells through it; this bundle deliberately does not,
-        # because D-2 as amended keeps its coordinator's delegation contract
-        # and the roster has nothing to say to a spawn that pins nothing.
-        # Asserted rather than assumed, so a later slice cannot hand this
-        # bundle model values by accident.
-        strays = sorted(
+    def test_the_codex_bundle_reader_resolves_no_assignment_cell(self):
+        # Issue #483 left a negative control here asserting this bundle
+        # shipped NO roster reader at all. Issue #572 makes that false -- both
+        # coordinators now read the roster's loaded provider set, because that
+        # set is what decides who reviews a pull request -- so it is replaced
+        # in the same pull request by the narrower rule that is still true and
+        # still load-bearing, leaving no window where neither holds.
+        #
+        # D-2 as amended is a promise about the VALUES this coordinator hands
+        # a spawn, not about whether it may read the roster. So: exactly one
+        # reader ships, beside the coordinator that loads it; the coordinator
+        # really does import it; and nothing in it resolves an assignment cell
+        # or names a model or effort. `FORBIDDEN_INVOCATION_FLAGS` above is the
+        # other half, covering the argument vectors themselves.
+        readers = sorted(
             str(path.relative_to(REPO_ROOT))
             for path in CODEX_PLUGIN_ROOT.rglob("kanban_models.py")
         )
         self.assertEqual(
-            strays,
-            [],
-            "the Codex bundle must ship no model-roster reader: its "
-            "coordinator passes no model or effort and has no cell to resolve",
+            readers,
+            ["codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py"],
+            "the Codex bundle ships exactly one model-roster reader, beside "
+            "the coordinator that loads it from its own directory",
         )
         source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
-        self.assertNotIn("kanban_models", source)
+        self.assertIn("kanban_models", source)
+        self.assertIn("def operating_mode(", source)
+        for forbidden in (
+            "resolve_assignment",
+            "assignment_for",
+            "nested_review_assignment",
+            "Assignment(",
+            "NESTED_REVIEW_MODEL",
+            "NESTED_REVIEW_EFFORT",
+            ".effort",
+        ):
+            with self.subTest(token=forbidden):
+                self.assertNotIn(
+                    forbidden,
+                    source,
+                    "the Codex coordinator reads the loaded provider set and "
+                    f"resolves no assignment cell, but names {forbidden!r}",
+                )
+
+    def test_the_no_assignment_scan_actually_detects_a_planted_violation(self):
+        # The control on the control: the token scan above must fail on a
+        # coordinator that really did resolve a cell, or it would pass just as
+        # happily against a file that had stopped reading the roster at all.
+        planted = REVIEW_COORDINATOR.read_text(encoding="utf-8").replace(
+            "    if mode == models.SINGLE_AGENT_MODE:",
+            "    kanban_models().resolve_assignment('pr_review', 'codex')\n"
+            "    if mode == models.SINGLE_AGENT_MODE:",
+            1,
+        )
+        self.assertIn("resolve_assignment", planted)
 
     def test_the_forbidden_flag_scan_actually_detects_a_planted_violation(self):
         # Guards against the regex/substring scan above silently matching

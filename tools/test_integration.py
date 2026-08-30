@@ -1916,7 +1916,7 @@ class StaleHeadRereviewIsolationTests(WorktreeFixture):
     def _script_approving_rereview(self):
         pr_json = dict(self.pr, labels=[{"name": drain_prs.APPROVE_LABEL}])
         self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
-        # latest_review_marker() pages the comment feed through the REST API
+        # latest_review_details() pages the comment feed through the REST API
         # rather than the bounded `gh pr view --json comments` window.
         self.fake.script(
             "gh",
@@ -1943,7 +1943,7 @@ class StaleHeadRereviewIsolationTests(WorktreeFixture):
 
     def _rereview(self):
         with mock.patch.dict(os.environ, self.fake.environ_overrides()):
-            return drain_prs.rereview_pr_with_codex(self.ctx, self.pr, dry_run=False)
+            return drain_prs.rereview_pr_with_model(self.ctx, self.pr, dry_run=False)
 
     def test_matched_dirty_stale_worktree_is_not_reused_and_is_left_untouched(self):
         # An interrupted solve: a live worktree on the PR's branch, sitting

@@ -14,10 +14,20 @@ different reason.
   loop, its five-round cap, "only Claude may restore `reviewed:approve`", and
   `DRAIN_PRS_CLAUDE_REVIEW_MODEL` are pinned as absences, and what replaced each
   is pinned as text: one open per-PR incident that touches no label and creates
-  no worktree, and one agent spawn resolved from the roster's `drain_rereview`
-  codex cell per drain cycle. An asset is the program an agent executes top to
-  bottom, so a stale claim left in it is a stale instruction, not a stale
-  comment.
+  no worktree, and one agent spawn per drain cycle resolved from the
+  `drain_rereview` cell the roster's operating mode selects -- the codex cell in
+  dual mode, the sole loaded provider's cell in single-agent mode, and no spawn
+  at all in no-agent mode, where the drainer keeps merging and records a
+  `no-agent-mode` incident for the one pull request it cannot rereview (issue
+  #572). An asset is the program an agent executes top to bottom, so a stale
+  claim left in it is a stale instruction, not a stale comment.
+
+  `RETIRED_CLAIMS` keeps pinning the literal display name `Claude Opus 5` as an
+  ABSENCE even though the roster's `drain_rereview.claude` cell now resolves to
+  that model in a Claude-only install. The retired claim was a *standing* Claude
+  reviewer this drainer does not have; the roster-selected one is named by its
+  cell rather than by a model literal, which is why the rendered text describes
+  the provider and the cell and never spells a Claude model out.
 * **The portable controller resolution.** Requirement 3, and the one rule here
   that a string comparison would under-test: both copies hardcoded a macOS path,
   which ignores `KANBAN_DRAINER_INSTALL_DIR`, ignores an `--install-dir`
@@ -98,6 +108,10 @@ RETIRED_CLAIMS = {
     "the removed cross-review loop": "cross-review",
     "the removed five-round cap": "five review rounds",
     "the false approval-authority claim": "Only Claude may restore",
+    # Still an absence, and deliberately so: see the module docstring. The
+    # roster-selected Claude rereviewer is named by its `drain_rereview` cell,
+    # never by this display literal, so the two cannot be confused in the
+    # rendered text.
     "the removed Claude reviewer": "Claude Opus 5",
 }
 
@@ -819,10 +833,12 @@ class DrainerDescriptionTests(unittest.TestCase):
                 relative_path,
             )
             self.assertIn(
-                "the drainer rereviews that exact head as Codex, in a "
-                "throwaway detached worktree, at the model and effort the "
-                "roster's `drain_rereview` codex cell names — GPT-5.6-Terra at "
-                "medium by default.",
+                "the drainer rereviews that exact head in a throwaway detached "
+                "worktree, at the provider, model and effort the roster's "
+                "`drain_rereview` cell names for this installation's operating "
+                "mode: the codex cell — GPT-5.6-Terra at medium by default — "
+                "when both providers are loaded, and the sole loaded provider's "
+                "own cell when one is.",
                 flattened,
                 relative_path,
             )
@@ -834,12 +850,33 @@ class DrainerDescriptionTests(unittest.TestCase):
                 relative_path,
             )
 
-    def test_a_failed_model_selection_stops_the_drainer_outright(self):
+    def test_an_unreadable_roster_or_model_stops_the_drainer_outright(self):
         for relative_path in RENDERED_ASSETS:
             self.assertIn(
-                "If the selected model cannot be resolved or run, the drainer "
-                "stops where it stands with no retry and no fallback; the "
-                "managed service then opens an incident and notifies.",
+                "If the roster file is present and cannot be read, or the "
+                "selected model cannot be run, the drainer stops where it "
+                "stands with no retry and no fallback; the managed service then "
+                "opens an incident and notifies.",
+                flat(read(relative_path)),
+                relative_path,
+            )
+
+    def test_a_no_agent_roster_keeps_merging_and_records_one_incident(self):
+        # The other half of the same paragraph, and the distinction the
+        # drainer's own code draws: an unreadable roster is a file to repair
+        # and stops the pass, while a roster that loads nothing is a
+        # deliberate state the drainer goes on working in. An asset that
+        # carried only the first sentence would have an operator restart a
+        # service that is running correctly.
+        for relative_path in RENDERED_ASSETS:
+            self.assertIn(
+                "A roster that loads no provider at all is a different thing "
+                "and never stops the drainer. It starts, and it keeps merging "
+                "every eligible pull request; only a pull request that actually "
+                "reaches a stale-head rereview is left unmerged, with one open "
+                "`no-agent-mode` per-PR incident recording it. That incident "
+                "clears by itself once that pull request no longer needs a "
+                "rereview, or through `ack`.",
                 flat(read(relative_path)),
                 relative_path,
             )

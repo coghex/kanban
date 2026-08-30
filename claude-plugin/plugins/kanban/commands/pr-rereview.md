@@ -5,7 +5,7 @@ argument-hint: "[PR number]"
 
 # Rereview Pull Request
 
-Require one positive PR number in `$ARGUMENTS`. Read and follow the complete `/pr-review` policy — including its self-review protocol and the `--self-review-as claude` declaration gating it, which holds only where Kanban spawned this session as the canonical opposite-brand reviewer rather than on the pull request's own origin brand — then use its bundled coordinator in rereview mode:
+Require one positive PR number in `$ARGUMENTS`. Read and follow the complete `/pr-review` policy — including its self-review protocol and the `--self-review-as claude` declaration gating it, which holds only where Kanban spawned this session as the canonical reviewer this pull request routes to — the opposite brand when the roster loads both providers, the sole loaded provider when it loads one — rather than on the pull request's own origin brand where nothing routes to it — then use its bundled coordinator in rereview mode:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py" \
@@ -26,7 +26,8 @@ Require a prior authenticated-user `pr-review:v1` or `pr-review:v2` comment befo
 Read the returned `"status"`, exactly as in `/pr-review`:
 
 - `"blocked"`: stop, per the gate above.
-- `"self_review_refused"`: this session's declared brand is not the reviewer this pull request routes to, so it is running on the PR's own origin brand and may not review it. Nothing was published and no label changed. Rerun the same command with both `--self-review` and `--self-review-as` dropped, so the coordinator spawns the opposite-brand reviewer itself; never review it yourself instead.
+- `"no_agent_mode"`: this installation's model roster loads no provider, so the coordinator has no reviewer to route to and refused before reading the pull request. Nothing was published and no label changed, and no rerun of this command can change that. Stop and report it: adding a provider to the roster's `agents` list is the operator's decision, never this session's.
+- `"self_review_refused"`: this session's declared brand is not the reviewer this pull request routes to, so it may not review it. Nothing was published and no label changed. Rerun the same command with both `--self-review` and `--self-review-as` dropped, so the coordinator spawns the routed reviewer itself — the opposite brand when the roster loads both providers, and the sole loaded provider when it loads one; never review it yourself instead. A declaration that MATCHES the routed reviewer is not refused: on a single-agent roster every pull request routes to the one loaded provider, so a matching `--self-review-as` is the normal path and returns `"awaiting_self_review"` even where that reviewer shares the pull request's own origin brand.
 - `"awaiting_self_review"` (the normal known-origin case): read `"instructions"` completely. It gives you the prior comments and requires you to verify every previous blocker against the current head as well as inspect the complete current change for regressions and new blockers. Perform the rereview yourself, write your result as a JSON file matching the given schema, then publish it:
 
   ```bash

@@ -91,11 +91,18 @@ BACKEND_RESULT_VERSION = 1
 BACKEND_RESULT_FIELDS = frozenset(
     {"schema", "version", "outcome", "issue", "model_called", "message"}
 )
+# `unavailable` is the backend reporting that its roster loads no agent, so no
+# issue can be reviewed at all. It is admitted at version 1 because it changes
+# no existing document's shape and is unreachable outside no-agent mode. It is
+# deliberately outside MUTATING_OUTCOMES and outside the retry/busy backoff
+# set, which lands it on dispatch()'s ordinary running path: the message is
+# logged and this controller polls again at its normal interval, so adding a
+# provider to the roster resumes the service without an incident to clear.
 BACKEND_OUTCOMES = frozenset(
-    {"idle", "advanced", "changes_requested", "retry", "busy"}
+    {"idle", "advanced", "changes_requested", "retry", "busy", "unavailable"}
 )
-# The outcomes that name the issue they are about; `idle` and `busy` are about
-# the queue and carry no number.
+# The outcomes that name the issue they are about; `idle`, `busy`, and
+# `unavailable` are about the queue and carry no number.
 BACKEND_ISSUE_OUTCOMES = frozenset({"advanced", "changes_requested", "retry"})
 BACKEND_NAME = "approve_issues.py"
 

@@ -59,18 +59,32 @@ LEGACY_CLAUDE_MODEL = "claude-fable-5"
 # and an effort variable per provider -- so an operator cannot move one and be
 # left with the other.
 #
-# A roster file that is present and unusable resolves to no assignment at all
-# and is remembered in MODEL_ROSTER_ERROR. This backend then refuses every mode
-# rather than reviewing (main() below), because falling back to the compiled
-# defaults from a file the operator edited is exactly the silent-old-model path
-# D-3 forbids. A cell a valid roster cannot supply -- a single-agent roster
-# asked for the other brand's reviewer -- refuses the same way: which brands
-# this gate routes to is not this slice's to change.
+# Only the LOADED providers are resolved. `agents` is what the operator loads
+# (D-8/D-10), and a provider outside it is a routing fact rather than a defect:
+# a Claude-only host must review with Claude, not refuse because it cannot name
+# a Codex reviewer it will never spawn. OPERATING_MODE is that same list read
+# as a mode, in the vocabulary Kanban.Models.operatingModeLabel uses.
+#
+# A roster file that is present and unusable is a different thing entirely and
+# stays one: it resolves to no assignment at all, is remembered in
+# MODEL_ROSTER_ERROR, and makes this backend refuse every mode rather than
+# reviewing (main() below), because falling back to the compiled defaults from
+# a file the operator edited is exactly the silent-old-model path D-3 forbids.
+# It is deliberately NOT reported as no-agent mode: no-agent is a deliberate
+# board-only install, and describing a broken file that way would hide the
+# defect the operator has to repair. OPERATING_MODE is None for it, so every
+# mode-keyed branch below falls through to the refusal instead of picking an
+# arm.
 MODEL_ROSTER_ERROR: str | None = None
+OPERATING_MODE: str | None = None
+LOADED_PROVIDERS: tuple[str, ...] = ()
 try:
+    _MODEL_ROSTER = kanban_models.load_roster()
+    LOADED_PROVIDERS = _MODEL_ROSTER.agents
+    OPERATING_MODE = kanban_models.operating_mode_for(_MODEL_ROSTER)
     ISSUE_GATE_ASSIGNMENTS = {
-        provider: kanban_models.resolve_assignment("issue_gate", provider)
-        for provider in ("codex", "claude")
+        provider: _MODEL_ROSTER.assignment_for("issue_gate", provider)
+        for provider in LOADED_PROVIDERS
     }
 except kanban_models.KanbanModelsError as _roster_error:
     MODEL_ROSTER_ERROR = str(_roster_error)
@@ -145,12 +159,28 @@ REVIEW_QUEUE_SCHEMA_VERSION = 1
 REVIEW_QUEUE_RESULT_FIELDS = frozenset(
     {"schema", "version", "outcome", "issue", "model_called", "message"}
 )
+# `unavailable` joins them at version 1 rather than at a new version: it is a
+# document a version-1 reader was already built to refuse if it cannot act on
+# it, and it is reachable only in no-agent mode, so no dual-mode document
+# changes shape. See no_agent_queue_result for what the controller does with it.
 REVIEW_QUEUE_OUTCOMES = frozenset(
-    {"idle", "advanced", "changes_requested", "retry", "busy"}
+    {"idle", "advanced", "changes_requested", "retry", "busy", "unavailable"}
 )
-# The outcomes that name the issue they are about. `idle` and `busy` are about
-# the queue rather than any one issue and carry no number.
+# The outcomes that name the issue they are about. `idle`, `busy`, and
+# `unavailable` are about the queue rather than any one issue and carry no
+# number.
 REVIEW_QUEUE_ISSUE_OUTCOMES = frozenset({"advanced", "changes_requested", "retry"})
+# The no-agent operating mode's one vocabulary. Every surface that reports it --
+# a per-issue result, an ordered batch's stop reason, the queue document, and
+# the human-readable prints all four of those have -- builds its text from
+# these, so an operator reading any two sees the same mode named the same way,
+# with the same label Kanban's own settings screen shows.
+NO_AGENT_ROUTE = "none"
+NO_AGENT_MESSAGE = (
+    f"The model roster loads no agent ({kanban_models.NO_AGENT_MODE} operating "
+    "mode), so canonical issue review is unavailable. Add a provider to the "
+    "roster's `agents` list to restore it."
+)
 # The one bounded document --reconcile-approvals writes to stdout, versioned
 # the same way --review-queue's is so a caller can refuse a document it was not
 # built to read. Separate schema and version from the queue's: the two modes
@@ -652,14 +682,66 @@ def issue_origin(body: str) -> str | None:
     return next(iter(origins), None)
 
 
-def reviewers_for_origin(origin: str | None, legacy_policy: str) -> list[Reviewer]:
+def no_agent_mode() -> bool:
+    """Whether this installation deliberately loads no reviewer at all (D-8).
+
+    False for a roster that is present and unusable: that is
+    MODEL_ROSTER_ERROR's refusal, answered first by main() and again by
+    require_model_roster() at the spawn boundary. The two states must never
+    collapse into one -- a defective file reported to an operator as a
+    deliberate board-only install is a defect they are never told to repair.
+    """
+    return OPERATING_MODE == kanban_models.NO_AGENT_MODE
+
+
+def collapse_route(
+    reviewers: list[Reviewer], *, mode: str | None, loaded: tuple[str, ...]
+) -> list[Reviewer]:
+    """The loaded-provider projection of a cross-brand route (D-8).
+
+    Dual mode is every route unchanged, which is what keeps a host with no
+    `models.toml` byte-identical to the pipeline before this existed.
+    Single-agent collapses every route to the one loaded provider whatever the
+    origin marker says, because that provider is the only reviewer this
+    installation can spawn. No-agent has no reviewer to name at all; the modes
+    that could act on a route refuse before they reach one, and `marker_matches`
+    already reads an empty list as unapproved for any that does not.
+    """
+    if mode == kanban_models.NO_AGENT_MODE:
+        return []
+    if mode == kanban_models.SINGLE_AGENT_MODE:
+        return [reviewer_for_key(loaded[0])]
+    return reviewers
+
+
+def reviewers_for_origin(
+    origin: str | None,
+    legacy_policy: str,
+    *,
+    mode: str | None = None,
+    loaded: tuple[str, ...] | None = None,
+) -> list[Reviewer]:
+    """Which reviewers an issue's own provenance routes it to.
+
+    `mode` and `loaded` default to this installation's own, and are parameters
+    only so --self-test can ask the same question of all three modes on a host
+    that runs exactly one of them.
+    """
+    mode = OPERATING_MODE if mode is None else mode
+    loaded = LOADED_PROVIDERS if loaded is None else loaded
     if origin == "claude":
-        return [CODEX_REVIEWER]
-    if origin == "codex":
-        return [CLAUDE_REVIEWER]
-    if legacy_policy == "dual":
-        return [CODEX_REVIEWER, CLAUDE_REVIEWER]
-    return []
+        route = [CODEX_REVIEWER]
+    elif origin == "codex":
+        route = [CLAUDE_REVIEWER]
+    elif legacy_policy == "dual":
+        route = [CODEX_REVIEWER, CLAUDE_REVIEWER]
+    else:
+        # `--legacy-policy hold` still holds, in every mode. An unmarked
+        # issue's provenance is unknown and the operator asked for it to be
+        # held; the single-agent collapse decides WHICH reviewer a route names
+        # and never conjures one where the policy says there is none.
+        return []
+    return collapse_route(route, mode=mode, loaded=loaded)
 
 
 def canonical_comment(comment: dict[str, Any]) -> dict[str, Any]:
@@ -885,8 +967,21 @@ def review_verdicts(
 
 
 def rereview_reviewers(
-    comment: dict[str, Any], marker: dict[str, str]
+    comment: dict[str, Any],
+    marker: dict[str, str],
+    *,
+    mode: str | None = None,
+    loaded: tuple[str, ...] | None = None,
 ) -> tuple[list[Reviewer], str]:
+    """The rereview route, and the trigger a published marker must carry.
+
+    Only the FIRST element collapses to the loaded provider set. The trigger
+    keeps naming the parent review's changes-requesting reviewers, because
+    `expected_reviewers_for_record` validates a published rereview marker's
+    `trigger` field against those parent verdicts rather than against routing.
+    Collapsing it too would invalidate every existing rereview marker for a
+    reason a mode change does not justify.
+    """
     if marker.get("verdict") != "CHANGES_REQUESTED":
         raise ApproveError("Issue rereview requires a CHANGES_REQUESTED parent review")
     changes = {
@@ -895,13 +990,25 @@ def rereview_reviewers(
         if verdict == "CHANGES_REQUESTED"
     }
     if changes == {CODEX_REVIEWER.key}:
-        return [CLAUDE_REVIEWER], CODEX_REVIEWER.key
-    if changes == {CLAUDE_REVIEWER.key}:
-        return [CODEX_REVIEWER], CLAUDE_REVIEWER.key
-    if changes == {CODEX_REVIEWER.key, CLAUDE_REVIEWER.key}:
-        return [CODEX_REVIEWER], f"{CODEX_REVIEWER.key}+{CLAUDE_REVIEWER.key}"
-    raise ApproveError(
-        "CHANGES_REQUESTED review has no identifiable changes-requesting reviewer"
+        route, trigger = [CLAUDE_REVIEWER], CODEX_REVIEWER.key
+    elif changes == {CLAUDE_REVIEWER.key}:
+        route, trigger = [CODEX_REVIEWER], CLAUDE_REVIEWER.key
+    elif changes == {CODEX_REVIEWER.key, CLAUDE_REVIEWER.key}:
+        route, trigger = (
+            [CODEX_REVIEWER],
+            f"{CODEX_REVIEWER.key}+{CLAUDE_REVIEWER.key}",
+        )
+    else:
+        raise ApproveError(
+            "CHANGES_REQUESTED review has no identifiable changes-requesting reviewer"
+        )
+    return (
+        collapse_route(
+            route,
+            mode=OPERATING_MODE if mode is None else mode,
+            loaded=LOADED_PROVIDERS if loaded is None else loaded,
+        ),
+        trigger,
     )
 
 
@@ -1053,6 +1160,84 @@ def current_gate_status(
         "labels": sorted(labels),
         "reasons": reasons,
     }
+
+
+def no_agent_issue_result(number: int) -> dict[str, Any]:
+    """The per-issue document every no-agent gate answer returns.
+
+    Exactly the field set `current_gate_status` produces, plus the
+    `pipeline_incident` `apply_pipeline_circuit_breaker` adds, so a caller
+    parses one shape in every mode. Built without reading GitHub at all: with
+    no reviewer to route to there is nothing an issue read could change about
+    the answer, and making no call is what guarantees this mode publishes no
+    comment and moves no label.
+
+    `required_reviewers` and `required_models` are the STRING "none", not JSON
+    null. Null is what an unmarked issue under `--legacy-policy hold` already
+    reports, and a reader has to be able to tell a deliberate capability
+    absence from an issue that merely has no route -- including one approved
+    while two providers were loaded.
+    """
+    return {
+        "approved": False,
+        "issue": number,
+        "url": None,
+        "origin": None,
+        "required_reviewers": NO_AGENT_ROUTE,
+        "required_models": NO_AGENT_ROUTE,
+        "spec_sha": None,
+        "review_marker": None,
+        "labels": [],
+        "reasons": [NO_AGENT_MESSAGE],
+        "pipeline_incident": None,
+    }
+
+
+def no_agent_batch_result(numbers: list[int]) -> dict[str, Any]:
+    """An ordered `--review` batch that reviewed nothing, in the batch shape.
+
+    Every requested issue stays in `remaining_issues` in its requested order,
+    because none was examined and the caller's ordering is the only thing that
+    survives. `stopped_at` is null -- no issue is the barrier -- while
+    `stop_reason` still names the mode, which is a field combination the
+    changes-requested path never produces and the one main() prints for a
+    batch that stopped at no issue.
+    """
+    return {
+        "approved": False,
+        "batch": True,
+        "requested_issues": list(numbers),
+        "processed_issues": [],
+        "remaining_issues": list(numbers),
+        "stopped_at": None,
+        "stop_reason": NO_AGENT_MESSAGE,
+        "results": [],
+    }
+
+
+def no_agent_queue_result() -> dict[str, Any]:
+    """One `--review-queue` pass in no-agent mode.
+
+    A queue-level outcome, so it carries no issue number, and `unavailable`
+    rather than `idle`: an idle queue means every issue is reviewed, while this
+    means none can be. It exits zero because it is a deliberate, non-mutating
+    operating state and not a backend failure -- and because
+    `approve_issues_service` treats an outcome outside its mutating set and
+    outside {changes_requested, busy, retry} as an ordinary running status,
+    logging the message and polling again at the ordinary interval. Adding a
+    provider to `agents` therefore resumes the installed service by itself,
+    with no incident to acknowledge and no barrier to clear.
+    """
+    return validate_review_queue_result(
+        review_queue_result(
+            "unavailable",
+            issue=None,
+            model_called=False,
+            message=NO_AGENT_MESSAGE,
+        ),
+        approved=None,
+        model_ran=False,
+    )
 
 
 def open_pipeline_incidents(repo_path: Path) -> list[dict[str, Any]]:
@@ -1985,6 +2170,11 @@ def review_one(
     *,
     legacy_policy: str,
 ) -> dict[str, Any]:
+    # Ahead of the incident read, the lock, and every GitHub call, for the
+    # reason no_agent_issue_result gives: this mode can answer without any of
+    # them, and answering without them is what proves it mutated nothing.
+    if no_agent_mode():
+        return no_agent_issue_result(number)
     incident = blocking_pipeline_incident(ctx.path, number)
     if incident is not None:
         raise pipeline_halt_error(incident)
@@ -2004,6 +2194,8 @@ def review_batch(
 ) -> dict[str, Any]:
     if len(numbers) < 2:
         raise ApproveError("An ordered review batch requires at least two issue numbers")
+    if no_agent_mode():
+        return no_agent_batch_result(numbers)
 
     lock = acquire_lock(ctx, mode="batch", issue_numbers=numbers)
     results: list[dict[str, Any]] = []
@@ -2050,6 +2242,8 @@ def rereview_one(
     *,
     legacy_policy: str,
 ) -> dict[str, Any]:
+    if no_agent_mode():
+        return no_agent_issue_result(number)
     incident = blocking_pipeline_incident(ctx.path, number)
     if incident is not None:
         raise pipeline_halt_error(incident)
@@ -2977,6 +3171,12 @@ def review_queue(ctx: RepoContext, *, legacy_policy: str) -> dict[str, Any]:
     can move, and a specification can be edited, so the pre-scan's candidate is
     a hint and the locked scan's candidate is the decision.
     """
+    # Before even the incident read: with no provider loaded there is nothing
+    # this pass could do about an incident either, and a document that reports
+    # the mode is more useful to the controller than a halt it cannot clear.
+    if no_agent_mode():
+        return no_agent_queue_result()
+
     # The repository-wide question first, and before the inventory: a
     # scope-less incident halts every issue, so there is nothing to enumerate.
     incident = blocking_pipeline_incident(ctx.path, None)
@@ -3150,6 +3350,64 @@ def open_invalid_incident(
 
 
 def self_test() -> None:
+    """The offline checks, answered identically on every installation.
+
+    Routing is pinned to a two-provider roster for the duration rather than
+    read off this host's own: --self-test must still run on a single-agent or
+    no-agent installation (D-8), and it spawns no reviewer and answers no gate
+    question about a real issue in any mode. The single-agent and no-agent
+    collapses are then asserted explicitly below, so all three modes are
+    covered wherever this runs. A roster that is present and unusable never
+    reaches here at all -- main() refuses on MODEL_ROSTER_ERROR first, which is
+    the separate contract #483 established.
+    """
+    global OPERATING_MODE, LOADED_PROVIDERS
+    global CODEX_REVIEWER, CLAUDE_REVIEWER, PRIMARY_CODEX_MODEL, PRIMARY_CLAUDE_MODEL
+    saved = (
+        OPERATING_MODE,
+        LOADED_PROVIDERS,
+        CODEX_REVIEWER,
+        CLAUDE_REVIEWER,
+        PRIMARY_CODEX_MODEL,
+        PRIMARY_CLAUDE_MODEL,
+    )
+    # The reviewer identity is pinned alongside the mode, to the compiled
+    # defaults this file already carries. A single-agent installation leaves
+    # the unloaded brand's cells at UNRESOLVED_ASSIGNMENT_VALUE, which is
+    # deliberately not a model any CLI accepts and contains spaces; spelling it
+    # into one of the fixture markers below would produce a marker this file's
+    # own parser cannot read, and the assertions would then fail for a reason
+    # that has nothing to do with what they check.
+    codex_cell = kanban_models.DEFAULT_ROSTER.assignment_for("issue_gate", "codex")
+    claude_cell = kanban_models.DEFAULT_ROSTER.assignment_for("issue_gate", "claude")
+    OPERATING_MODE, LOADED_PROVIDERS = kanban_models.DUAL_MODE, ("codex", "claude")
+    CODEX_REVIEWER = Reviewer(
+        CODEX_REVIEWER.key,
+        CODEX_REVIEWER.display_name,
+        codex_cell.model,
+        codex_cell.effort,
+    )
+    CLAUDE_REVIEWER = Reviewer(
+        CLAUDE_REVIEWER.key,
+        CLAUDE_REVIEWER.display_name,
+        claude_cell.model,
+        claude_cell.effort,
+    )
+    PRIMARY_CODEX_MODEL, PRIMARY_CLAUDE_MODEL = codex_cell.model, claude_cell.model
+    try:
+        _self_test_body()
+    finally:
+        (
+            OPERATING_MODE,
+            LOADED_PROVIDERS,
+            CODEX_REVIEWER,
+            CLAUDE_REVIEWER,
+            PRIMARY_CODEX_MODEL,
+            PRIMARY_CLAUDE_MODEL,
+        ) = saved
+
+
+def _self_test_body() -> None:
     global PIPELINE_INCIDENT_DIR
     # A pull request must be recognised from `url` alone: every other field
     # get_issue requests looks identical for both kinds.
@@ -3218,6 +3476,21 @@ def self_test() -> None:
     assert reviewers_for_origin("claude", "dual") == [CODEX_REVIEWER]
     assert reviewers_for_origin("codex", "dual") == [CLAUDE_REVIEWER]
     assert reviewers_for_origin(None, "dual") == [CODEX_REVIEWER, CLAUDE_REVIEWER]
+    assert reviewers_for_origin(None, "hold") == []
+    # Single-agent collapses every route to the loaded provider whatever the
+    # origin says, including the unmarked issue's dual route -- but never the
+    # held one, which stays empty because the operator asked for it to be held.
+    for loaded, reviewer in (("claude", CLAUDE_REVIEWER), ("codex", CODEX_REVIEWER)):
+        single = {"mode": kanban_models.SINGLE_AGENT_MODE, "loaded": (loaded,)}
+        assert reviewers_for_origin("claude", "dual", **single) == [reviewer]
+        assert reviewers_for_origin("codex", "dual", **single) == [reviewer]
+        assert reviewers_for_origin(None, "dual", **single) == [reviewer]
+        assert reviewers_for_origin(None, "hold", **single) == []
+    # No-agent names no reviewer at all, and marker_matches reads that as
+    # unapproved for anything that reaches it.
+    none_loaded = {"mode": kanban_models.NO_AGENT_MODE, "loaded": ()}
+    for origin in ("claude", "codex", None):
+        assert reviewers_for_origin(origin, "dual", **none_loaded) == []
     assert spec_fingerprint(issue, [ordinary, marker_comment]) == spec_sha
     marker = latest_review_marker([ordinary, marker_comment])
     assert marker_matches(
@@ -3337,6 +3610,15 @@ def self_test() -> None:
     parent_record = latest_review_record([ordinary, legacy_parent])
     assert parent_record is not None
     assert rereview_reviewers(*parent_record) == ([CLAUDE_REVIEWER], "codex")
+    # Only the route collapses; the trigger keeps naming the parent's
+    # changes-requesting set, which expected_reviewers_for_record validates a
+    # published marker against.
+    assert rereview_reviewers(
+        *parent_record, mode=kanban_models.SINGLE_AGENT_MODE, loaded=("codex",)
+    ) == ([CODEX_REVIEWER], "codex")
+    assert rereview_reviewers(
+        *parent_record, mode=kanban_models.NO_AGENT_MODE, loaded=()
+    ) == ([], "codex")
     repaired_issue = {
         **legacy_issue,
         "body": "Legacy body with the scope decision resolved",
@@ -3496,6 +3778,42 @@ def self_test() -> None:
         # And a scoped incident never stops the daemon from starting.
         assert blocking_pipeline_incident(scoped_repo, None) is None
     PIPELINE_INCIDENT_DIR = original_incident_dir
+    # The no-agent documents, whose whole job is to be distinguishable from an
+    # issue that is merely unreviewed: the route is the string "none" rather
+    # than the null an unmarked issue under `--legacy-policy hold` reports, and
+    # every one of them names the mode.
+    no_agent_single = no_agent_issue_result(42)
+    assert no_agent_single["issue"] == 42
+    assert not no_agent_single["approved"]
+    assert no_agent_single["required_reviewers"] == NO_AGENT_ROUTE
+    assert no_agent_single["required_models"] == NO_AGENT_ROUTE
+    assert no_agent_single["reasons"] == [NO_AGENT_MESSAGE]
+    assert set(no_agent_single) == {
+        "approved",
+        "issue",
+        "url",
+        "origin",
+        "required_reviewers",
+        "required_models",
+        "spec_sha",
+        "review_marker",
+        "labels",
+        "reasons",
+        "pipeline_incident",
+    }
+    no_agent_batch = no_agent_batch_result([9, 8, 7])
+    assert no_agent_batch["remaining_issues"] == [9, 8, 7]
+    assert no_agent_batch["processed_issues"] == []
+    assert no_agent_batch["results"] == []
+    assert no_agent_batch["stopped_at"] is None
+    assert no_agent_batch["stop_reason"] == NO_AGENT_MESSAGE
+    no_agent_queue = no_agent_queue_result()
+    assert no_agent_queue["outcome"] == "unavailable"
+    assert no_agent_queue["issue"] is None
+    assert no_agent_queue["model_called"] is False
+    assert no_agent_queue["version"] == REVIEW_QUEUE_SCHEMA_VERSION
+    assert kanban_models.NO_AGENT_MODE in no_agent_queue["message"]
+    assert "unavailable" not in REVIEW_QUEUE_ISSUE_OUTCOMES
     print("approve-issues.py self-test passed")
 
 
@@ -3712,15 +4030,21 @@ def main() -> None:
             ),
         }
         if args.check is not None:
-            issue = get_issue(ctx, args.check)
-            comments = get_comments(ctx, args.check)
-            status = apply_pipeline_circuit_breaker(
-                current_gate_status(
-                    issue, comments, legacy_policy=args.legacy_policy
-                ),
-                ctx.path,
-                issue_number=args.check,
-            )
+            # The same guard review_one and rereview_one take, at the one place
+            # --check assembles its own status: this mode reads no issue at all,
+            # which keeps the read-only mode read-only in the strongest sense.
+            if no_agent_mode():
+                status = no_agent_issue_result(args.check)
+            else:
+                issue = get_issue(ctx, args.check)
+                comments = get_comments(ctx, args.check)
+                status = apply_pipeline_circuit_breaker(
+                    current_gate_status(
+                        issue, comments, legacy_policy=args.legacy_policy
+                    ),
+                    ctx.path,
+                    issue_number=args.check,
+                )
             if args.json:
                 print(json.dumps(status, indent=2, sort_keys=True))
             else:
@@ -3747,10 +4071,22 @@ def main() -> None:
                     )
                 if status["stopped_at"] is not None:
                     print(f"stopped at issue #{status['stopped_at']}: requests changes")
+                elif status["stop_reason"] is not None:
+                    # A batch can stop at no issue at all -- the no-agent mode
+                    # reviews none of them -- and the reason must reach the
+                    # non-JSON reader too, who would otherwise see an empty
+                    # result list and no explanation for it.
+                    print(status["stop_reason"])
             else:
                 print("approved" if status["approved"] else "not approved")
                 for reason in status["reasons"]:
                     print(f"- {reason}")
+            # Every other outcome of these modes exits zero, including a
+            # published CHANGES_REQUESTED: the review ran and answered. A
+            # no-agent refusal answered nothing, so it exits 2 the way --check
+            # reports an unapproved issue.
+            if no_agent_mode():
+                raise SystemExit(2)
             return
         if args.review_queue:
             emit_review_queue_result(
@@ -3776,6 +4112,8 @@ def main() -> None:
                 print("approved" if status["approved"] else "not approved")
                 for reason in status["reasons"]:
                     print(f"- {reason}")
+            if no_agent_mode():
+                raise SystemExit(2)
             return
         # None asks only the repository-wide question: an issue-scoped
         # incident must not stop the daemon, it only removes the issue it

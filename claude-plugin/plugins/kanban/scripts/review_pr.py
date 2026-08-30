@@ -448,12 +448,98 @@ def origin_from_body(body: str) -> str | None:
     return matches[0].group(1)
 
 
-def route_reviewers(origin: str | None) -> list[Reviewer]:
+def reviewer_for_key(key: str) -> Reviewer:
+    if key == CODEX_REVIEWER.key:
+        return CODEX_REVIEWER
+    if key == CLAUDE_REVIEWER.key:
+        return CLAUDE_REVIEWER
+    raise WorkflowError(f"Unknown reviewer brand {key!r}")
+
+
+def model_roster():
+    """This host's roster, read through the reader beside this coordinator.
+
+    A roster file that is present and will not load refuses the whole workflow
+    rather than routing on the compiled defaults: an operator who edited it
+    must never have this coordinator review with a provider they removed. That
+    refusal is deliberately distinct from the no-agent operating mode below --
+    one is a file to repair, the other is a deliberate board-only install.
+    """
+    models = kanban_models()
+    try:
+        return models.load_roster()
+    except models.KanbanModelsError as error:
+        raise WorkflowError(f"{error}; no review was performed") from error
+
+
+def operating_mode() -> tuple[str, tuple[str, ...]]:
+    """This host's operating mode and its loaded provider set, together.
+
+    Returned as a pair because every caller needs both and reading them from
+    two loads could straddle an edit of the file between them.
+    """
+    roster = model_roster()
+    return kanban_models().operating_mode_for(roster), roster.agents
+
+
+def route_reviewers(
+    origin: str | None,
+    *,
+    mode: str | None = None,
+    loaded: tuple[str, ...] | None = None,
+) -> list[Reviewer]:
+    """Which reviewers this pull request's origin routes it to.
+
+    Dual mode is the cross-brand routing this workflow has always done, with
+    an unknown or external origin falling through to both. Single-agent
+    collapses every origin -- known, unknown, and external alike -- to the one
+    loaded provider, because that provider is the only reviewer this
+    installation can spawn; the opposite-brand promise is a property of a
+    two-provider roster, not of the workflow. No-agent routes to nobody, and
+    the callers refuse before they can act on the empty list.
+
+    `mode` and `loaded` default to this host's own and are parameters only so
+    --self-test can ask about all three modes wherever it runs.
+    """
+    if mode is None or loaded is None:
+        mode, loaded = operating_mode()
+    models = kanban_models()
+    if mode == models.NO_AGENT_MODE:
+        return []
+    if mode == models.SINGLE_AGENT_MODE:
+        return [reviewer_for_key(loaded[0])]
     if origin == "claude":
         return [CODEX_REVIEWER]
     if origin == "codex":
         return [CLAUDE_REVIEWER]
     return [CODEX_REVIEWER, CLAUDE_REVIEWER]
+
+
+# The status a no-agent refusal reports. Its own status rather than a generic
+# error, so a caller can tell "this installation deliberately spawns nothing"
+# from a workflow that failed.
+NO_AGENT_STATUS = "no_agent_mode"
+
+
+def no_agent_refusal(number: int) -> tuple[int, dict[str, Any]]:
+    """Refuse the whole workflow because no provider is loaded.
+
+    Taken before the pull request is read, so nothing is published, no label is
+    switched, and no reviewer is spawned. Non-zero, because the caller asked
+    for a review and did not get one.
+    """
+    return 1, {
+        "pr": number,
+        "status": NO_AGENT_STATUS,
+        "route": "",
+        "error": (
+            "The model roster loads no agent "
+            f"({kanban_models().NO_AGENT_MODE} operating mode), so this "
+            "coordinator has no reviewer to route to. Nothing was published "
+            "and no label was changed. Add a provider to the roster's "
+            "`agents` list to restore pull-request review."
+        ),
+    }
 
 
 def pr_origin(pr: dict[str, Any]) -> str | None:
@@ -1377,11 +1463,18 @@ def workflow(
     config_path: str | None = None,
     explicit_repo: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
+    # The mode question first, ahead of every GitHub read: an installation that
+    # loads no provider cannot review this pull request whatever it says, and
+    # refusing here is what makes "publishes nothing, changes no label"
+    # structural rather than a promise about later branches.
+    mode, loaded = operating_mode()
+    if mode == kanban_models().NO_AGENT_MODE:
+        return no_agent_refusal(number)
     repo = resolve_repository(root, config_path, explicit_repo)
     pr = pr_view(root, repo, number)
     gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     origin = pr_origin(pr)
-    reviewers = route_reviewers(origin)
+    reviewers = route_reviewers(origin, mode=mode, loaded=loaded)
     base = {
         "pr": number,
         "url": pr["url"],
@@ -1419,14 +1512,32 @@ def workflow(
                 else f"--self-review-as {self_review_as} is not the {reviewer.key} reviewer "
                 "this pull request routes to"
             )
+            # The remedy has to describe the reviewer this route actually
+            # names. In single-agent mode omitting the flag spawns the SAME
+            # brand -- that is the whole point of a one-provider roster -- so
+            # the dual-mode wording would be telling the caller something this
+            # installation cannot do. The refusal itself is unchanged either
+            # way: a mismatched or absent declaration is still refused, which
+            # is what stops a solver self-reviewing under another brand's name.
+            if mode == kanban_models().SINGLE_AGENT_MODE:
+                remedy = (
+                    f"This installation loads only {reviewer.key}, so every pull "
+                    f"request routes to it whatever its origin; omit --self-review "
+                    f"so this coordinator spawns the {reviewer.key} reviewer, or "
+                    f"pass --self-review-as {reviewer.key} if this session is that "
+                    "reviewer."
+                )
+            else:
+                remedy = (
+                    f"A pr-origin:{origin} pull request is reviewed by "
+                    f"{reviewer.key}; omit --self-review so this coordinator spawns "
+                    f"the {reviewer.key} reviewer instead of publishing a same-brand "
+                    "review."
+                )
             return 1, {
                 **base,
                 "status": "self_review_refused",
-                "error": (
-                    f"{problem}. A pr-origin:{origin} pull request is reviewed by "
-                    f"{reviewer.key}; omit --self-review so this coordinator spawns the "
-                    f"{reviewer.key} reviewer instead of publishing a same-brand review."
-                ),
+                "error": f"{problem}. {remedy}",
             }
     if not gate["approved"]:
         if dry_run:
@@ -1506,6 +1617,9 @@ def publish_verdict(
     whatever the caller provides, it is the same safe-publish machinery
     the nested-reviewer path uses, just fed an externally-supplied result
     instead of one from a spawned subprocess."""
+    mode, loaded = operating_mode()
+    if mode == kanban_models().NO_AGENT_MODE:
+        return no_agent_refusal(number)
     repo = resolve_repository(root, config_path, explicit_repo)
     pr = pr_view(root, repo, number)
     if pr["headRefOid"] != expected_head:
@@ -1520,7 +1634,7 @@ def publish_verdict(
             "rerun $pr-review/$pr-rereview to get a fresh context before publishing"
         )
     origin = pr_origin(pr)
-    reviewers = route_reviewers(origin)
+    reviewers = route_reviewers(origin, mode=mode, loaded=loaded)
     if len(reviewers) != 1:
         raise WorkflowError(
             "PR origin is no longer a single known brand; rerun $pr-review/$pr-rereview "
@@ -1559,9 +1673,23 @@ def self_test() -> None:
     assert origin_from_body("<!-- pr-origin:codex -->\ntext") is None
     assert origin_from_body("<!-- pr-origin:codex -->\n<!-- pr-origin:codex -->") is None
     assert origin_from_body("<!-- pr-origin:unknown -->") is None
-    assert [item.key for item in route_reviewers(None)] == ["codex", "claude"]
-    assert [item.key for item in route_reviewers("claude")] == ["codex"]
-    assert [item.key for item in route_reviewers("codex")] == ["claude"]
+    # Routing is asked of all three modes explicitly rather than of this
+    # host's own, so --self-test answers the same questions on a dual, a
+    # single-agent and a no-agent installation alike.
+    dual = {"mode": "dual", "loaded": ("codex", "claude")}
+    assert [item.key for item in route_reviewers(None, **dual)] == ["codex", "claude"]
+    assert [item.key for item in route_reviewers("claude", **dual)] == ["codex"]
+    assert [item.key for item in route_reviewers("codex", **dual)] == ["claude"]
+    for brand in ("codex", "claude"):
+        single = {"mode": "single-agent", "loaded": (brand,)}
+        for origin in (None, "codex", "claude"):
+            assert [item.key for item in route_reviewers(origin, **single)] == [brand]
+    none_loaded = {"mode": "no-agent", "loaded": ()}
+    for origin in (None, "codex", "claude"):
+        assert route_reviewers(origin, **none_loaded) == []
+    refusal_code, refusal = no_agent_refusal(7)
+    assert refusal_code == 1 and refusal["status"] == NO_AGENT_STATUS
+    assert "no-agent" in refusal["error"]
     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:claude -->"}) is None
     assert pr_origin({"isCrossRepository": False, "body": "<!-- pr-origin:claude -->"}) == "claude"
     assert aggregate_verdict([{"verdict": "APPROVE"}, {"verdict": "APPROVE"}]) == "APPROVE"

@@ -116,14 +116,22 @@ idle. Nothing polls on an agent's behalf, and no agent process is held open
 between drain cycles.
 
 Its one agent spawn is the stale-approved-head rereview. When an approved pull
-request's head changes unexpectedly, the drainer rereviews that exact head as
-Codex, in a throwaway detached worktree, at the model and effort the roster's
-`drain_rereview` codex cell names — GPT-5.6-Terra at medium by default. That
-cell is re-read on each drain cycle, so a roster edit takes effect on the next
-pass without restarting the managed service. Do not substitute interactive
-defaults during recovery. If the selected model cannot be resolved or run, the
-drainer stops where it stands with no retry and no fallback; the managed service
-then opens an incident and notifies.
+request's head changes unexpectedly, the drainer rereviews that exact head in a
+throwaway detached worktree, at the provider, model and effort the roster's
+`drain_rereview` cell names for this installation's operating mode: the codex
+cell — GPT-5.6-Terra at medium by default — when both providers are loaded, and
+the sole loaded provider's own cell when one is. That cell is re-read on each
+drain cycle, so a roster edit takes effect on the next pass without restarting
+the managed service. Do not substitute interactive defaults during recovery. If
+the roster file is present and cannot be read, or the selected model cannot be
+run, the drainer stops where it stands with no retry and no fallback; the
+managed service then opens an incident and notifies.
+
+A roster that loads no provider at all is a different thing and never stops the
+drainer. It starts, and it keeps merging every eligible pull request; only a
+pull request that actually reaches a stale-head rereview is left unmerged, with
+one open `no-agent-mode` per-PR incident recording it. That incident clears by
+itself once that pull request no longer needs a rereview, or through `ack`.
 
 An eligible merge conflict is not repaired. The drainer records one open per-PR
 incident naming the conflicting files and stops merging that pull request — it
