@@ -1263,11 +1263,17 @@ def workflow_names_from_paths(prefix: str, paths) -> set[str]:
     Both shapes are matched exactly rather than by taking a path's first
     component, because those are not the same question once a bundle ships
     anything else: a `skills/<name>/` directory carrying scripts and no
-    `SKILL.md` ships no workflow at all -- `tools/plugin_bundle_gate.py`
-    derives the installable set by the same rule, and the janitor census
-    directory issue #574 added is the first such directory. The first
-    component of `skills/janitor/scripts/census.py` is a helper's directory
-    name, and counting it would move every README total below by one.
+    `SKILL.md` ships no workflow at all, and `tools/plugin_bundle_gate.py`
+    derives the installable set by the same rule. Issue #574 created the first
+    such directory when it vendored the janitor census a slice ahead of the
+    body that calls it, and issue #575 added that body, so `skills/janitor/`
+    now ships both a `SKILL.md` and a `scripts/` sibling. Neither state is the
+    one this rule is written for: a first-component reading counts the helper
+    directory as a workflow while no `SKILL.md` is there to justify it, and
+    goes on counting `skills/janitor/scripts/census.py` as a second `janitor`
+    once one is. The exact-shape match is right in both, and the synthetic
+    listing below drives it over a directory of each shape rather than over
+    whatever the tree happens to hold today.
 
     Pure, and separate from the `git ls-files` call, so the rule can be driven
     over a listing that contains such a directory rather than only over

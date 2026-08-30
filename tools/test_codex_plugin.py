@@ -21,11 +21,12 @@ the last Codex-only document gap; and issues #393, #410, #427, #430, #462, and
 #511 vendored the rendered $triage roadmap, its $retriage refresh, the
 $push-docs documentation-landing workflow, the $backlog-review backlog audit,
 the $project-review history audit, the $drain-prs drainer control surface, the
-$fix approved-pull-request workflow, and — issue #544, the last of the eight —
-the $finalize manual merge fallback, which had no Codex copy at all before this
-slice rendered one.
+$fix approved-pull-request workflow, the $finalize manual merge fallback, which
+had no Codex copy at all before that slice rendered one, and — issue #575, the
+seventh of the arc's eight, leaving only $autosolve — the $janitor pipeline
+housekeeping audit.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all twenty-two); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
+(all twenty-three); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
 own Haskell code spawns by name (the five above). Every later set is user- or
 daemon-invoked and deliberately excluded from that parity pinning; the
 breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
@@ -209,6 +210,21 @@ PULL_REQUEST_FIX_SKILL_NAMES = {"fix"}
 # tools/test_finalize_workflow.py.
 FINALIZE_SKILL_NAMES = {"finalize"}
 
+# The pipeline housekeeping audit vendored by issue #575, slice VEND-9, and
+# the seventh of the arc's eight commands. Rendered from
+# tools/command_sources/janitor.md the way the seven sets above are, and like
+# them user-invoked and excluded from Haskell name parity. It is its own
+# category rather than another pull-request or drainer name because its
+# subject is neither: it audits the repository's own local state -- worktrees,
+# branches, refs, stashes and recovery objects -- and reaches GitHub only to
+# confirm a candidate the census already named. It is also the one skill
+# delivered in two pull requests: issue #574 shipped
+# skills/janitor/scripts/census.py with no SKILL.md beside it, which is why
+# SCRIPTS_ONLY_SKILL_DIRECTORIES below held `janitor` until this slice and is
+# empty again now. Its behavioral assertions live in
+# tools/test_janitor_workflow.py.
+JANITOR_SKILL_NAMES = {"janitor"}
+
 # What a Codex installation must actually discover under skills/.
 EXPECTED_SKILL_NAMES = (
     HASKELL_PARITY_SKILL_NAMES
@@ -221,18 +237,27 @@ EXPECTED_SKILL_NAMES = (
     | DRAINER_SKILL_NAMES
     | PULL_REQUEST_FIX_SKILL_NAMES
     | FINALIZE_SKILL_NAMES
+    | JANITOR_SKILL_NAMES
 )
 
 # Directories under skills/ that ship helper scripts and NO SKILL.md, so Codex
 # discovers no workflow for them. Issue #574 vendored the janitor census this
-# way on purpose: the program lands one slice ahead of the command body that
+# way on purpose -- the program lands one slice ahead of the command body that
 # will call it, and tools/plugin_bundle_gate.py derives a shipped workflow only
 # from a direct `<skill>/SKILL.md`, so a scripts-only directory adds nothing to
-# the gate's set and nothing to either manifest's workflow listing. Named here
-# rather than tolerated by loosening the discovery check to "directories with a
-# SKILL.md": that loosening would also stop noticing a real skill whose
-# SKILL.md went missing, which is the failure the check exists for.
-SCRIPTS_ONLY_SKILL_DIRECTORIES = {"janitor"}
+# the gate's set and nothing to either manifest's workflow listing -- and issue
+# #575 added that command body, so `janitor` moved into EXPECTED_SKILL_NAMES
+# above and this allowlist is empty again. It stays as a named constant rather
+# than being deleted, because the split it exists for is the arc's normal shape
+# for a command with a helper program, and because deleting it is the same
+# loosening it was written to refuse: a discovery check reduced to "directories
+# with a SKILL.md" would also stop noticing a real skill whose SKILL.md went
+# missing, which is the failure the check exists for. Empty is therefore an
+# assertion in its own right -- every directory under skills/ is invokable
+# today -- and it is what makes
+# test_every_skills_directory_has_the_shape_it_is_declared_with below
+# non-vacuous.
+SCRIPTS_ONLY_SKILL_DIRECTORIES: frozenset[str] = frozenset()
 
 # Keys that would let a packaged manifest silently override the model,
 # reasoning effort, sandbox/approval policy, or working directory Kanban's
@@ -508,24 +533,42 @@ class SkillDiscoveryTests(unittest.TestCase):
             SCRIPTS_ONLY_SKILL_DIRECTORIES & EXPECTED_SKILL_NAMES, set()
         )
 
-    def test_a_scripts_only_directory_ships_scripts_and_no_skill_md(self):
-        # Non-vacuity for the allowlist: a name on it has to be what it claims
-        # to be. A SKILL.md appearing there would make the directory invokable
-        # while the discovery check above went on subtracting it, which is
-        # exactly the silent shipment issue #574 says it does not make.
-        for name in sorted(SCRIPTS_ONLY_SKILL_DIRECTORIES):
+    def test_every_skills_directory_has_the_shape_it_is_declared_with(self):
+        # Non-vacuity for the allowlist, driven over every directory rather
+        # than over the allowlist alone: a loop over an allowlist that is
+        # empty today would assert nothing at all. A declared scripts-only
+        # directory must really carry scripts and no SKILL.md -- a SKILL.md
+        # appearing there would make it invokable while the discovery check
+        # above went on subtracting it -- and every other directory must
+        # carry the SKILL.md that makes it discoverable, which is what
+        # catches a packaged skill whose body went missing.
+        directories = sorted(
+            path for path in SKILLS_ROOT.iterdir() if path.is_dir()
+        )
+        self.assertTrue(directories, "skills/ is empty")
+        for directory in directories:
+            name = directory.name
             with self.subTest(directory=name):
-                directory = SKILLS_ROOT / name
-                self.assertFalse(
-                    (directory / "SKILL.md").exists(),
-                    f"skills/{name} carries a SKILL.md, so it is a packaged "
-                    "workflow and belongs in EXPECTED_SKILL_NAMES",
-                )
-                self.assertTrue(
-                    sorted((directory / "scripts").glob("*.py")),
-                    f"skills/{name} ships no scripts, so it has no reason to "
-                    "be in the bundle at all",
-                )
+                if name in SCRIPTS_ONLY_SKILL_DIRECTORIES:
+                    self.assertFalse(
+                        (directory / "SKILL.md").exists(),
+                        f"skills/{name} carries a SKILL.md, so it is a "
+                        "packaged workflow and belongs in "
+                        "EXPECTED_SKILL_NAMES",
+                    )
+                    self.assertTrue(
+                        sorted((directory / "scripts").glob("*.py")),
+                        f"skills/{name} ships no scripts, so it has no "
+                        "reason to be in the bundle at all",
+                    )
+                else:
+                    self.assertTrue(
+                        (directory / "SKILL.md").exists(),
+                        f"skills/{name} carries no SKILL.md, so Codex "
+                        "discovers no workflow for it; either restore the "
+                        "body or declare it in "
+                        "SCRIPTS_ONLY_SKILL_DIRECTORIES",
+                    )
 
     def test_the_bundle_gate_ships_no_workflow_for_a_scripts_only_directory(self):
         # The gate is the authority on what a Codex installation can invoke
@@ -551,7 +594,8 @@ class SkillDiscoveryTests(unittest.TestCase):
             | PROJECT_REVIEW_SKILL_NAMES
             | DRAINER_SKILL_NAMES
             | PULL_REQUEST_FIX_SKILL_NAMES
-            | FINALIZE_SKILL_NAMES,
+            | FINALIZE_SKILL_NAMES
+            | JANITOR_SKILL_NAMES,
         )
         self.assertEqual(DRAFTING_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
         self.assertEqual(ROADMAP_SKILL_NAMES & DRAFTING_SKILL_NAMES, set())
@@ -605,6 +649,21 @@ class SkillDiscoveryTests(unittest.TestCase):
                 | PROJECT_REVIEW_SKILL_NAMES
                 | DRAINER_SKILL_NAMES
                 | PULL_REQUEST_FIX_SKILL_NAMES
+            ),
+            set(),
+        )
+        self.assertEqual(
+            JANITOR_SKILL_NAMES
+            & (
+                DRAFTING_SKILL_NAMES
+                | DOCUMENT_SKILL_NAMES
+                | ROADMAP_SKILL_NAMES
+                | PUBLICATION_SKILL_NAMES
+                | BACKLOG_SKILL_NAMES
+                | PROJECT_REVIEW_SKILL_NAMES
+                | DRAINER_SKILL_NAMES
+                | PULL_REQUEST_FIX_SKILL_NAMES
+                | FINALIZE_SKILL_NAMES
             ),
             set(),
         )
@@ -2033,7 +2092,7 @@ class ManifestListingParityTests(unittest.TestCase):
     without describing it fails here.
 
     Parity is per field, not pooled: an installation that reads only the
-    short description must see the same twenty-two as one that reads only the
+    short description must see the same twenty-three as one that reads only the
     keywords. Non-workflow metadata -- the `kanban` keyword, the display
     name, developer, category, and capabilities -- is not a listing and is
     left alone.

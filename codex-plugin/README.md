@@ -8,16 +8,20 @@ canonical issue-review workflows a user or the review daemon invokes directly:
 #229 it also packages
 the design and report document workflows a user invokes directly — `$design-epic`,
 `$process-design-doc`, `$draft-report`, `$note-problem`, and `$process-report` —
-and since issues #393, #410, #427, #430, #462, #511, and #544 the `$triage`
-roadmap
+and since issues #393, #410, #427, #430, #462, #511, #544, and #575 the
+`$triage` roadmap
 workflow, its `$retriage` refresh, the `$push-docs` documentation-landing
 workflow, the `$backlog-review` backlog audit, the `$project-review` history
 audit, the `$drain-prs` drainer control surface, the `$fix`
-approved-pull-request workflow, and the `$finalize` manual merge fallback, each
+approved-pull-request workflow, the `$finalize` manual merge fallback, and the
+`$janitor` pipeline housekeeping audit, each
 rendered into both bundles from one authored source by `tools/render_command_sources.py`.
 `$finalize` is the one of those with no personal Codex copy to reconcile
 against: the single Claude copy was the source, and this skill is what
 rendering it produced.
+`$janitor` is the one delivered in two pull requests: issue #574 shipped its
+`skills/janitor/scripts/census.py` helper with nothing invokable, and issue
+#575 added the `SKILL.md` that reasons over the snapshot it emits.
 It exists so a
 clean Codex installation can perform these actions without depending on any
 developer's personal skill collection. See
@@ -63,13 +67,13 @@ Verify discovery:
 codex plugin list
 ```
 
-`kanban@kanban` should show as `installed, enabled`, and all twenty-two workflow
+`kanban@kanban` should show as `installed, enabled`, and all twenty-three workflow
 names should be available as `$solve`, `$pr-review`, `$pr-rereview`,
 `$pr-revise`, `$issue`, `$autoissue`, `$issue-review`, `$issue-rereview`,
 `$repair`, `$design-epic`, `$process-design-doc`, `$draft-report`,
 `$note-problem`, `$process-report`, `$triage`, `$retriage`, `$push-docs`,
-`$backlog-review`, `$project-review`, `$drain-prs`, `$fix`, and `$finalize` in
-any Codex session run
+`$backlog-review`, `$project-review`, `$drain-prs`, `$fix`, `$finalize`, and
+`$janitor` in any Codex session run
 from this checkout.
 
 Verified against Codex CLI `codex-cli 0.144.6` (`codex --version`), the
@@ -81,14 +85,14 @@ without those subcommands cannot install this plugin.
 
 Kanban's own CLI spawns five of these by name: the first four, plus `$repair`,
 which `r` selects for a Done pull request whose status is a problem (issue
-#127). The other seventeen are drafting, readiness-gate, document, roadmap,
+#127). The other eighteen are drafting, readiness-gate, document, roadmap,
 documentation-landing, backlog-audit, history-audit, drainer-control,
-approved-pull-request, and manual-finalization workflows a user or the review
-daemon invokes directly;
+approved-pull-request, manual-finalization, and pipeline-housekeeping
+workflows a user or the review daemon invokes directly;
 see
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md) and
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md).
-`$repair` is not part of either declared surface. Only those seventeen are
+`$repair` is not part of either declared surface. Only those eighteen are
 excluded from the Haskell invocation-parity pinning in
 `tools/test_codex_plugin.py`, which covers exactly the names Kanban's own
 code spawns.
@@ -117,6 +121,7 @@ code spawns.
 | `skills/drain-prs/` | `$drain-prs` | Controls and recovers this repository's service-managed approved-PR drainer through its installed controller — `status`, `install`, `start`, `stop`, `restart`, `logs`, `incident`, `ack`, and `recover`. Resolves the controller from `KANBAN_DRAINER_INSTALL_DIR`, the XDG data root, then `~/Library/Application Support` rather than a hardcoded path, and passes both `--path "$ROOT"` and `--repo "$REPO"` on every invocation. Resolves the repository identity through the remote the shared Kanban configuration's `remote_name` names, so a fork checkout whose board is pointed at upstream asserts the upstream identity the controller expects. Makes no GitHub call of its own, creates no second watcher, and runs only on an explicit request. Paired with the Claude `/drain-prs` command. |
 | `skills/fix/` | `$fix` | Clears the one remaining obstacle in front of an **already-approved** pull request. Refuses any pull request that is not approved under the configured `approval_mode`, refuses one whose `pr-origin` marker names the other brand, and never removes a blocking label to proceed. Resolves a merge conflict, updates a branch that is behind its base, and fixes a failed check in the pull request's own worktree before handing off one canonical rereview. Fails closed rather than guessing: a check rollup that cannot be read completely, a `BLOCKED` or `UNSTABLE` merge state, and a still-running check each stop the run without mutating anything. **Never retries a check** — `tools/drain_prs.py` remains the only component that reruns one. Runs only on an explicit request to fix or unblock: asking why a pull request cannot merge is answered by reporting the obstacle and stopping. Paired with the Claude `/fix` command. |
 | `skills/finalize/` | `$finalize` | Legacy **manual fallback** for merging one named reviewed pull request when the service-managed PR drainer cannot be used. Never the ordinary merge path and never taken on an agent's own initiative: `tools/drain_prs.py` keeps owning eligible merges. Resolves the repository once and passes `-R "$REPO"` on every `gh` call. It finalizes onto the repository's **default branch** only, since a retargeted pull request keeps both its approval label and its head-bound marker; the base is re-read immediately before the merge, and the residual instant between that read and the merge is documented as accepted, being the merge primitive's exposure that `tools/drain_prs.py` shares. Its gate fails closed — it resolves the authenticated login, reads the whole paginated comment feed, and requires the globally newest marker that login published (`pr-review:v2`, with the legacy `pr-review:v1` spelling still honoured) to name the current `headRefOid` with `verdict=APPROVE` and a `reviewers=` set that excludes the pull request's own brand, alongside `reviewed:approve` present, `reviewed:changes` absent, `mergeable` exactly `MERGEABLE`, a merge state Kanban's own `mergeStateReady` calls ready (so `BEHIND` and `UNSTABLE` refuse), and every check successful. Any refusal merges nothing, closes nothing, removes no worktree, and deletes no branch. Merges with `--admin --merge --match-head-commit`, never `--squash` or `--rebase`, and cleans up only after GitHub confirms the merge, as one `&&` chain that a first failure ends — never deleting a cross-repository head here, never fast-forwarding a primary checkout that is not on the pull request's base branch, identifying both the branch deletions and the worktree it removes by the reviewed head rather than by a name or a path pattern, writing to no git remote at all — it deletes no remote branch, leaving that to GitHub's own `delete_branch_on_merge`, to the drainer, or to a human — and closing a linked issue only when the closing reference names this repository. Paired with the Claude `/finalize` command. |
+| `skills/janitor/` | `$janitor` | Audits one repository's agent-pipeline state — claims and issue worktrees, every registered worktree, workflow branches and refs, pull-request and drainer health, stashes and drainer recovery objects, stray content, and default-branch drift — and mutates nothing until the user approves individual items. Reasons over the `janitor-census/v1` snapshot this skill's own `scripts/census.py` emits (issue #574) rather than hand-walking the repository, resolving that helper under `$CODEX_HOME` and stopping before its first read if it cannot be found. Resolves the repository once and passes `-R "$REPO"` on every `gh` call. A `null` or unavailable collection in the census is an anomaly to diagnose, never a clean result. Bulk `all-safe` approval covers only the five fully-proved gates — worktree removal, branch deletion, review metadata prune, tracking-ref prune, and the default fast-forward — and excludes dirty or unmerged work, limbo worktrees, permanent-worktree content, every recovery object, coordinated-test worktrees, and any ambiguous disposition. Remote branch deletions go one push per branch, since one already-gone name aborts a multi-branch delete client-side. Paired with the Claude `/janitor` command. |
 
 The five document workflows are user-invoked only. Kanban's CLI never spawns
 one, because each has a mandatory human approval stop in the middle; see
@@ -251,14 +256,14 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the skills directory contains exactly the twenty-two packaged workflows
-  plus the one scripts-only directory declared beside them — `skills/janitor/`,
-  which ships a helper program and no `SKILL.md`, so the bundle gate derives no
-  workflow from it and neither manifest lists one — and
+- the skills directory contains exactly the twenty-three packaged workflows —
+  the scripts-only allowlist beside that check is empty again now that issue
+  #575 gave `skills/janitor/` the `SKILL.md` issue #574 deliberately withheld,
+  and every directory under `skills/` must carry one — and
   the five Kanban spawns exactly match the `$`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  seventeen user-invoked skills;
+  eighteen user-invoked skills;
 - `draft-issues` is absent, keeping the Claude-only breadth boundary;
 - no packaged manifest sets model/effort/sandbox/approval/working-directory
   configuration, and every packaged skill — drafting skills included — has a
@@ -287,7 +292,7 @@ resolves from its own installed bundle while the working directory is the
 repository being solved. `$issue-rereview` reads the issue timeline through
 that same copy and adds none of its own.
 
-`tools/test_agent_workflow_contract.py` reconciles all twenty-two skills' own bash
+`tools/test_agent_workflow_contract.py` reconciles all twenty-three skills' own bash
 surface against the manifest in
 [docs/agent-workflow-contract.md §4](../docs/agent-workflow-contract.md#4-dependency-manifest),
 including the user-scoped backend install path the drafting, issue-review, and

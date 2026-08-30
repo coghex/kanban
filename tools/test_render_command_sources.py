@@ -25,10 +25,10 @@ that. Since VEND-1 (issue #393) the registry also holds `triage`, since
 issue #410 `push-docs`, since VEND-2 (issue #427) `retriage`, since
 VEND-3 (issue #430) `backlog-review`, since VEND-4 (issue #462)
 `project-review`, since VEND-5 (issue #511) `drain-prs`, since VEND-7
-(issue #544) `finalize`, and -- authored
+(issue #544) `finalize`, since VEND-9 (issue #575) `janitor`, and -- authored
 directly against this mechanism rather than vendored from a personal copy --
-`fix`, all eight of which do render into both bundles, so the same class pins
-the shipped sets at twenty-three and twenty-two and pins which registered
+`fix`, all nine of which do render into both bundles, so the same class pins
+the shipped sets at twenty-four and twenty-three and pins which registered
 source belongs to which kind.
 """
 
@@ -48,7 +48,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_COMMANDS_PREFIX = "claude-plugin/plugins/kanban/commands"
 CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 
-# The shipped sets: Claude's twenty-three names, and Codex's the same set minus
+# The shipped sets: Claude's twenty-four names, and Codex's the same set minus
 # Claude-only `draft-issues`. Pinned as counts and as the one documented
 # difference rather than as a third copy of the name list, which
 # tools/test_claude_plugin.py and tools/test_codex_plugin.py already assert.
@@ -58,9 +58,12 @@ CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 # `backlog-review`, by one more in VEND-4, which vendored `project-review`,
 # by one more in VEND-5, which vendored `drain-prs`, by one more when
 # `fix` was authored directly against this mechanism rather than vendored from
-# a personal copy, and by one more in VEND-7, which vendored `finalize`.
-SHIPPED_CLAUDE_COUNT = 23
-SHIPPED_CODEX_COUNT = 22
+# a personal copy, by one more in VEND-7, which vendored `finalize`, and by one
+# more in VEND-9, which vendored `janitor` -- whose Codex directory already
+# existed, shipping issue #574's census helper and no SKILL.md, so that bundle
+# gained a workflow without gaining a directory.
+SHIPPED_CLAUDE_COUNT = 24
+SHIPPED_CODEX_COUNT = 23
 CLAUDE_ONLY_WORKFLOW = "draft-issues"
 
 # The registered sources that render into the two bundles rather than under
@@ -75,6 +78,7 @@ SHIPPING_SOURCE_NAMES = {
     "drain-prs",
     "fix",
     "finalize",
+    "janitor",
 }
 
 FIXTURE_SOURCE = "tools/command_sources/fixture-command.md"
