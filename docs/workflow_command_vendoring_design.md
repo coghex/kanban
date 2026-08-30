@@ -155,8 +155,7 @@ should name the workflow it actually means:
 
 - `retriage` invokes `/triage`
 - `janitor` and `finalize` invoke `/drain-prs`
-- `autosolve` invokes `/solve`, `/pr-review`, `/pr-rereview`, `/finalize`,
-  `/issue`
+- `autosolve` invokes `/solve`, `/pr-review`, `/pr-rereview` and `/finalize`
 
 Each such reference is made precise as part of its own slice. A slice landing
 before its target is vendored leaves the reference resolving as it does today.
@@ -267,10 +266,15 @@ and tells it to pass `--self-review`. Under `autosolve` that is false — the
 session is Claude and it authored the PR — so `autosolve` instructs the session
 to ignore it.
 
-That override stays where it is, stated in `autosolve` alone. `pr-review` is not
-amended to describe the exception, and no caller-brand check is added here:
-either would change behavior in a file this arc does not otherwise touch, which
-D-2 rules out.
+That override stays in `autosolve` and nowhere else. `pr-review` is not amended
+to describe the exception, and no caller-brand check is added here: either would
+change behavior in a file this arc does not otherwise touch, which D-2 rules
+out.
+
+Only the Claude personal copy carries the override, so the Codex render gains it
+under D-7 rather than inheriting it — with its own brand's premise, since the
+false assertion there is that the author of a `pr-origin:codex` pull request is
+the canonical Claude reviewer.
 
 Teaching the review coordinator to refuse a self-review of a PR its caller wrote
 would remove the need for the override entirely — and **#303 already did it**.
@@ -878,17 +882,18 @@ Arc-level signals:
 
 - **Outcome:** `kanban:autosolve` ships in both bundles; personal copies retire.
 - **Scope:** reconcile 39 differing lines; re-point `/solve`, `/pr-review`,
-  `/pr-rereview`, `/finalize` and `/issue`; preserve the `--self-review`
-  override and the two recorded owner decisions verbatim; register and retire.
+  `/pr-rereview` and `/finalize` — neither personal copy invokes `/issue`;
+  preserve the `--self-review` override and the two recorded owner decisions
+  verbatim; register and retire.
 - **Phase:** 3
 - **Depends on:** `VEND-0`, `VEND-7`
 - **Ordering:** `critical path` within phase 3 — it orchestrates the others and
   is the most exposed to their names changing.
 - **Relevant decisions:** D-1, D-2, D-4, D-5, D-7, D-8
 - **Acceptance signals:** an autosolve run reaches `reviewed:approve` through a
-  genuine Codex review — the published result reports `"status": "reviewed"`
-  with a `reviewers=codex` marker, never `awaiting_self_review` — and still
-  stops short of merging.
+  genuine opposite-brand review — demonstrated from Claude, whose published
+  result reports `"status": "reviewed"` with a `reviewers=codex` marker rather
+  than `awaiting_self_review` — and still stops short of merging.
 - **Out of scope:** auto-finalizing, and dropping the sandbox bypass. Both are
   decisions the owner made deliberately; revisiting either is a separate issue.
 - **Open questions:** `None`
