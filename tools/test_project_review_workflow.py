@@ -41,20 +41,19 @@ handling, and the clean-batch rule that writes no report but still preserves its
 cursor are vendored as they read today, so each is pinned rather than merely
 rendered.
 
-Issue #548 replaced the last of that preserved behavior that was wrong: the
-boundary rule updated "only when the user asks to preserve a new endpoint", so
-a completed batch left nothing durable behind, and a clean batch — forbidden to
-write an empty report — left not even a filename to recover from. The
-replacement is a vendored mechanism rather than more prose, because prose was
-already what claimed the cursor was preserved. `project_review_cursor.py` ships
-in both bundles, owns the state document and the reconciliation built from it,
-and is exercised here as real state transitions: a clean first batch followed by
-a fresh second invocation that starts immediately below it, a finding-bearing
-batch recording the same endpoint, an interleaved direct commit inside a
-report's claimed interval, an explicit exclusion, and a report whose coverage
-overlaps the naive selection. Each of those carries its own negative control —
-delete the recorded endpoint, or vary only it — because an assertion that still
-holds once the endpoint is gone was never testing the endpoint.
+Issue #548 added the vendored cursor mechanism but inverted PR-mode traversal:
+it treated the repository's fixed exclusive older boundary as a moving
+resume-below frontier. `project_review_cursor.py` still ships in both bundles
+and owns the state document and reconciliation, but PR batches now record exact
+reviewed and excluded coverage while every fresh invocation starts again at the
+newest merged PR and walks toward the same boundary. These tests exercise that
+behavior as real state transitions: clean and finding-bearing batches preserve
+coverage without moving the boundary, a newly merged PR is selected ahead of
+older durable coverage, explicit exclusions persist, legacy prose boundaries
+migrate without losing exceptional reviewed PRs, and direct mode retains its
+moving older-history frontier. Each transition carries a negative control that
+varies the relevant coverage or boundary field, so the assertions prove which
+part of the state actually governs selection.
 
 The prose pins stay beside them and neither half stands in for the other: the
 rendered asset is the program an agent executes, so what it says about the
@@ -192,16 +191,16 @@ LISTING_REACH = {
     ),
     "the count is checked against the selection": (
         "The question the reach check has to answer is not whether the listing "
-        "holds twelve rows; it is whether twelve *selectable* rows survive "
-        "below the recorded endpoint once coverage and exclusions come out."
+        "holds twelve rows; it is whether the listing reaches the recorded "
+        "boundary and whether twelve *selectable* rows survive above it once "
+        "coverage and exclusions come out."
     ),
-    "a listing that ends at the endpoint selects nothing": (
-        "**A listing that ends at the endpoint passes every count check and "
-        "selects nothing**, so the count is checked against the selection "
-        "rather than against the page."
+    "a page must reach the boundary": (
+        "A page that does not contain the boundary cannot prove where the "
+        "sweep must stop, even when its first twelve rows are selectable."
     ),
-    "the two answers are never collapsed": (
-        "its answer to a short batch is one of two things that must never be "
+    "the three answers are never collapsed": (
+        "its answer to a short batch is one of three things that must never be "
         "collapsed"
     ),
     "truncated means raise and re-list": (
@@ -244,16 +243,18 @@ EXHAUSTION_DISPOSITIONS = {
     "a short count is the tail, not an error": (
         "**`\"exhausted\": true`** — the batch came up short and the listing "
         "came back with fewer rows than `$LIMIT`, which is the whole of the "
-        "repository's merged history. **This is not an error at all.** It is "
-        "the tail of the sweep. Review every PR that does remain, say the "
-        "batch was short and why, and treat PR history as exhausted so the "
-        "next `continue` enters direct mode."
+        "repository's merged history and no PR boundary ended the scan. "
+        "**This is not an error at all.** It is the tail of an unbounded "
+        "sweep."
     ),
     "a small repository is the same case": (
         "A repository with fewer merged PRs than the batch size meets this on "
-        "its first batch, and is reviewed the same way — including one whose "
-        "listing comes back empty, which reviews no PR and enters direct mode "
-        "straight away."
+        "its first batch and is reviewed the same way."
+    ),
+    "reaching a boundary is not exhaustion": (
+        "**`\"boundary_reached\": true`** — every selectable PR above the "
+        "exclusive boundary has been reviewed or skipped. Stop the PR sweep "
+        "there."
     ),
 }
 
@@ -465,10 +466,10 @@ CURSOR_RULE = {
     "the cursor belongs to the reviewed repository": (
         "It lives in that repository rather than travelling with this command"
     ),
-    "every batch records, unasked": (
-        "Every completed batch records its endpoint there with no separate user "
-        "request — the oldest reviewed merged PR in PR mode, the oldest "
-        "reviewed first-parent commit by SHA in direct mode"
+    "PR batches record coverage, not a moving boundary": (
+        "Every completed PR batch instead records the exact PRs reviewed, plus "
+        "any exclusions, so the next invocation can start at merged HEAD, skip "
+        "durable coverage, and continue toward the same boundary."
     ),
     "direct mode takes no coverage from a report": (
         "In this mode a report contributes no coverage at all. A first-parent "
@@ -477,9 +478,9 @@ CURSOR_RULE = {
         "report that states its interval held no direct commits has been wrong "
         "about eight of them, and a commit erased that way is erased for good."
     ),
-    "a clean batch records the same endpoint": (
-        "**a clean batch records its endpoint exactly as a finding-bearing "
-        "batch does**"
+    "a clean batch records the same coverage": (
+        "**A clean batch records reviewed coverage exactly as a finding-bearing "
+        "batch does.**"
     ),
     "selection precedes review, not the report": (
         "Selection is the helper's too, and it happens before any unit is "
@@ -487,7 +488,7 @@ CURSOR_RULE = {
     ),
     "the helper reconciles record and reports": (
         "`select` reads the candidate history on stdin, reconciles the recorded "
-        "endpoint with the `docs/project_review_*.md` reports beside it, and "
+        "coverage with the `docs/project_review_*.md` reports beside it, and "
         "returns the batch."
     ),
 }
@@ -498,21 +499,21 @@ CURSOR_RULE = {
 # actually implements them is `CursorSelectionTests`' business, and neither
 # half stands in for the other.
 RECONCILIATION_RULES = {
+    "selection starts at merged HEAD": (
+        "**PR selection always starts at merged HEAD.** The boundary is the "
+        "exclusive stop, never the starting position."
+    ),
     "merge order, not numeric order": (
-        "**The recorded endpoint is merge order, not numeric order.** It "
-        "identifies the oldest selected PR by `mergedAt`, and it is a "
-        "cumulative exclusive coverage frontier rather than the last run's "
-        "stopping place."
+        "**The recorded PR boundary is merge order, not numeric order.** The "
+        "helper resolves it in the `mergedAt`-sorted history before deciding "
+        "where to stop."
     ),
     "a report covers only what it identifies": (
         "**A report covers only the PRs it explicitly identifies**, which is "
         "what its filename endpoints name — never every number between them."
     ),
-    "a report says what to skip, not where to resume": (
-        "a report says what to skip and never where to resume: resuming below "
-        "one would drop whatever it skipped inside its own interval, "
-        "permanently, while resuming above one costs a re-review of two "
-        "announced units."
+    "a report says what to skip, not where to begin or stop": (
+        "a report says what to skip and never where to begin or stop."
     ),
     "a report never covers a direct commit": (
         "**A report never establishes direct-commit coverage.** A first-parent "
@@ -528,11 +529,18 @@ RECONCILIATION_RULES = {
     "the first run on an unrecorded repository": (
         "A repository holding reports but no record yet — every repository, the "
         "first time this runs — therefore starts at the head of its history and "
-        "skips the units its reports name. Say so, and offer `--start` once"
+        "skips the units its reports name. With no boundary it keeps walking "
+        "the complete PR history across batches by recording exact reviewed "
+        "units."
     ),
-    "a gap is announced, not dropped": (
-        "a unit above the resumed position that no record and no report covers "
-        "is reported, never silently dropped."
+    "an uncovered unit is selected, not reported as a gap": (
+        "An uncovered unit above the boundary is selected in newest-first "
+        "order, never reduced to a warning while the workflow continues below "
+        "it."
+    ),
+    "the original boundary document migrates": (
+        "The helper also migrates the original human-authored `stop before PR "
+        "#N` boundary document"
     ),
 }
 
@@ -549,7 +557,7 @@ RANGE_BOUND = {
     ),
     "the override stays out until asked for": (
         "Add `--override-boundary` only when the user explicitly overrides the "
-        "recorded endpoint; unlike the two range flags it has a correct "
+        "recorded boundary; unlike the two range flags it has a correct "
         "default and is never implied, so it stays out of the invocation until "
         "a user asks for it."
     ),
@@ -579,8 +587,9 @@ RANGE_BOUND = {
 COUNT_IS_NOT_A_POSITION = (
     "**A count is a batch size, not a position.** An explicit count changes how "
     "many units this batch takes and nothing else. Only an explicit PR number, "
-    "commit SHA, range, or boundary override moves where the sweep resumes, and "
-    "a unit the user excluded is never selected again by a later invocation."
+    "commit SHA, or range changes this batch's requested start; a boundary "
+    "override changes the exclusive stop for that requested batch, and a unit "
+    "the user excluded is never selected again by a later invocation."
 )
 
 # Correction 2: the `DOCS_WT="$ROOT"` fallback is gone rather than merely
@@ -621,7 +630,7 @@ RECORDING_LISTING_REACH = {
     ),
     "recording nothing is the outcome to refuse": (
         "Recording nothing is the one outcome to refuse here: the batch is "
-        "already reviewed, and a completed batch with no durable endpoint is "
+        "already reviewed, and a completed batch with no durable coverage is "
         "exactly the state this cursor exists to prevent."
     ),
 }
@@ -631,8 +640,8 @@ RECORDING_LISTING_REACH = {
 # cursor write is not a completed batch.
 RECORD_STEP = {
     "recorded last": (
-        "**Record the cursor last.** Advance it only after every selected unit "
-        "has been reviewed and any required report has been written and "
+        "**Record the cursor last.** Record coverage only after every selected "
+        "unit has been reviewed and any required report has been written and "
         "validated, so a failed report or a failed cursor write is never "
         "reported as a completed batch"
     ),
@@ -642,13 +651,12 @@ RECORD_STEP = {
     "an empty batch records nothing": (
         "A batch that selected nothing records nothing and is not a completed "
         "batch: the helper refuses an empty `--reviewed` with an empty "
-        "`--exclude` rather than moving a frontier no unit was reviewed below."
+        "`--exclude` unless the user explicitly supplied a new PR boundary."
     ),
     "merged, never replaced": (
         "`record` merges rather than replaces: an earlier exclusion survives a "
-        "later batch, and the endpoint only ever moves older, so a batch taken "
-        "above the frontier under an explicit override does not drag the "
-        "frontier back up with it."
+        "later batch, a PR boundary stays fixed, and the direct endpoint only "
+        "ever moves older."
     ),
 }
 
@@ -749,10 +757,10 @@ PRESERVED_BEHAVIOR = {
         '`python3 "$CURSOR" read --root "$DOCS_WT" --repo "$REPO"` rather than '
         "from the last completed range or a report name"
     ),
-    "the completion message names the recorded endpoint": (
+    "the completion message names the boundary and progress": (
         "link the report, state its unprocessed finding count, list fixed-later "
-        "and already-tracked findings briefly, and name the endpoint the record "
-        "now holds."
+        "and already-tracked findings briefly, and name the PR boundary and "
+        "durable progress the record now holds."
     ),
     "publication is a separate request": (
         "Do not commit, publish, or push the report or the cursor unless the "
@@ -762,14 +770,15 @@ PRESERVED_BEHAVIOR = {
     ),
 }
 
-# The clean-batch rule, which is its own requirement-9 clause because it is the
-# one path that ends with no report at all and still has to move the cursor.
+# The clean-batch rule is its own requirement-9 clause because it is the one
+# path that ends with no report at all and still has to preserve durable review
+# coverage.
 CLEAN_BATCH = (
     "If a batch is clean, do not create an empty report unless explicitly "
-    "requested. Say the range was clean and record its endpoint anyway — a "
-    "clean batch is a completed batch, and the run that follows it resumes "
-    "immediately below it without needing anything this session still "
-    "remembers."
+    "requested. Say the range was clean and record its reviewed units anyway — "
+    "a clean batch is a completed batch, and the run that follows starts at "
+    "the latest merge, skips that durable coverage, and continues toward the "
+    "same boundary without needing anything this session still remembers."
 )
 
 # The write destination, which is the primary checkout's exclusion as much as
@@ -1605,7 +1614,7 @@ class CursorTransitionCase(unittest.TestCase):
             **kwargs,
         )
 
-    def record(self, selection, mode="pr", exclude=()):
+    def record(self, selection, mode="pr", exclude=(), boundary=None):
         listing = PR_LISTING if mode == "pr" else list(DIRECT_HISTORY)
         updated = self.module.record(
             self.state(),
@@ -1613,6 +1622,7 @@ class CursorTransitionCase(unittest.TestCase):
             self.module.normalize_candidates(mode, listing),
             [self.units(selection)] if isinstance(selection, (int, str)) else self.units(selection),
             list(exclude),
+            boundary=boundary,
         )
         document = self.module.load_document(self.worktree)
         document.setdefault("repositories", {})[REPO] = updated
@@ -1649,7 +1659,7 @@ class CursorTransitionCase(unittest.TestCase):
         """Delete the record, leaving the reports and the history untouched.
 
         The negative control every transition below owes: if an assertion still
-        holds once the endpoint is gone, the endpoint was not what produced it.
+        holds once the record is gone, durable state was not what produced it.
         """
         self.module.document_path(self.worktree).unlink()
 
@@ -1657,7 +1667,7 @@ class CursorTransitionCase(unittest.TestCase):
 class CursorSelectionTests(CursorTransitionCase):
     """Requirement 3 and requirement 9: the transitions, not the prose."""
 
-    def test_a_clean_batch_records_and_the_next_invocation_starts_below_it(self):
+    def test_a_clean_batch_records_and_the_next_invocation_starts_at_head(self):
         # The defect, end to end. A clean batch writes no report, so before
         # this mechanism it left nothing at all behind and the next invocation
         # re-selected the batch it had just finished.
@@ -1671,15 +1681,15 @@ class CursorSelectionTests(CursorTransitionCase):
 
         second = self.select(count=3)
         self.assertEqual(self.units(second), [466, 465, 464])
-        self.assertEqual(second["origin"], "recorded-endpoint")
+        self.assertEqual(second["origin"], "history-head")
 
-        # Remove the endpoint and the second invocation repeats the first --
+        # Remove the durable reviewed set and the second invocation repeats the first --
         # which is exactly what was observed twice while
         # docs/project_review_466-399.md was being produced.
         self.forget_the_cursor()
         self.assertEqual(self.units(self.select(count=3)), [470, 468, 471])
 
-    def test_a_finding_bearing_batch_records_the_same_endpoint_as_a_clean_one(self):
+    def test_a_finding_bearing_batch_records_the_same_coverage_as_a_clean_one(self):
         # Requirement 1: the two batches differ only in whether a report was
         # also written, so the state they leave has to be identical.
         clean = self.record(self.select(count=3))
@@ -1695,29 +1705,22 @@ class CursorSelectionTests(CursorTransitionCase):
         finding_bearing = self.record(selection)
         self.assertEqual(json.dumps(finding_bearing, sort_keys=True), reference)
         self.assertEqual(self.units(self.select(count=3)), [466, 465, 464])
-        # Named rather than left to the equality above, which two runs that
-        # both recorded nothing would also satisfy.
-        self.assertEqual(
-            finding_bearing["pr"]["endpoint"],
-            {"number": 471, "merged_at": "2026-08-18T00:00:00Z"},
-        )
+        self.assertIsNone(finding_bearing["pr"]["endpoint"])
+        self.assertEqual(finding_bearing["pr"]["reviewed"], [468, 470, 471])
 
-    def test_the_frontier_is_merge_order_rather_than_numeric_order(self):
-        # First spec addition of this issue's review. #468 is the smallest
-        # number in the first batch and #471 is its oldest merge, so a numeric
-        # cursor would resume at #467 and hand #471 back to be reviewed twice.
-        state = self.record(self.select(count=3))
-        self.assertEqual(state["pr"]["endpoint"]["number"], 471)
-        self.assertNotIn(471, self.units(self.select(count=6)))
+    def test_the_boundary_is_exclusive_and_resolved_in_merge_order(self):
+        self.record([], boundary=471)
+        selection = self.select(count=6)
+        self.assertEqual(self.units(selection), [470, 468])
+        self.assertEqual(selection["origin"], "recorded-boundary")
+        self.assertTrue(selection["boundary_reached"])
 
-        # The control keeps the same three reviewed units out of the way and
-        # varies only the endpoint, so what it demonstrates is the endpoint's
-        # doing: a cursor that kept the smallest *number* resumes above #471
-        # and hands it back to be reviewed a second time.
-        numeric = json.loads(json.dumps(state))
-        numeric["pr"]["reviewed"] = []
-        numeric["pr"]["endpoint"] = {"number": 468, "merged_at": "2026-08-19T00:00:00Z"}
-        self.assertIn(471, self.units(self.select(count=6, state=numeric)))
+        numeric = self.module.empty_state()
+        numeric["pr"]["endpoint"] = {
+            "number": 468,
+            "merged_at": "2026-08-19T00:00:00Z",
+        }
+        self.assertEqual(self.units(self.select(count=6, state=numeric)), [470])
 
     def test_a_report_whose_coverage_overlaps_the_naive_selection_is_skipped(self):
         # The second correction the real sweep had to make: the batch below
@@ -1729,7 +1732,8 @@ class CursorSelectionTests(CursorTransitionCase):
         selection = self.select(count=3)
         self.assertEqual(self.units(selection), [466, 463, 462])
         self.assertEqual(
-            [entry["unit"] for entry in selection["skipped"]], [465, 464]
+            [entry["unit"] for entry in selection["skipped"]],
+            [470, 468, 471, 465, 464],
         )
 
         # Without the report the same invocation takes the two units back, so
@@ -1780,7 +1784,6 @@ class CursorSelectionTests(CursorTransitionCase):
         # endpoint past it would otherwise be indistinguishable from having
         # reviewed it.
         self.record(self.select(count=3), exclude=[466])
-        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 471)
         self.assertEqual(self.units(self.select(count=3)), [465, 464, 463])
 
         self.record(self.select(count=2))
@@ -1825,14 +1828,11 @@ class CursorSelectionTests(CursorTransitionCase):
             self.select(count=3, end=9999)
         self.assertIn("the range ends at pull request #9999", str(caught.exception))
 
-    def test_a_range_entirely_above_the_resume_point_is_refused(self):
-        # Silence would be worse than a stop here: an end above the resumed
-        # position selects nothing, and an empty batch reported as a completed
-        # one is how a range gets skipped.
-        self.record(self.select(count=3))
+    def test_a_range_cannot_cross_the_boundary_without_an_override(self):
+        self.record([], boundary=464)
         with self.assertRaises(self.module.CursorError) as caught:
-            self.select(count=3, end=470)
-        self.assertIn("newer than where this sweep resumes", str(caught.exception))
+            self.select(count=9, start=470, end=463)
+        self.assertIn("beyond recorded boundary #464", str(caught.exception))
 
     def test_a_count_changes_the_batch_size_and_not_the_position(self):
         # Correction 1. Both selections begin at the same unit; only how many
@@ -1867,17 +1867,14 @@ class CursorSelectionTests(CursorTransitionCase):
         self.assertNotIn(466, self.units(overridden))
         self.assertEqual(self.units(overridden)[0], 470)
 
-    def test_units_above_the_resume_position_are_reported_as_gaps(self):
-        # Requirement 5's "never silently dropped". A user who reviews an
-        # older batch first -- by supplying a starting PR -- leaves newer
-        # units unreviewed above the endpoint that batch records. They are not
-        # selected from there, so they are named instead.
+    def test_units_above_an_older_batch_are_selected_from_head_not_reported_as_gaps(self):
+        self.record([], boundary=461)
         self.record(self.select(count=2, start=465))
-        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 464)
         later = self.select(count=9)
-        self.assertEqual(self.units(later), [463, 462, 461])
-        self.assertEqual(later["gaps"], [470, 468, 471, 466])
-        self.assertTrue(later["exhausted"])
+        self.assertEqual(self.units(later), [470, 468, 471, 466, 463, 462])
+        self.assertEqual(later["gaps"], [])
+        self.assertTrue(later["boundary_reached"])
+        self.assertFalse(later["exhausted"])
 
     def test_a_report_never_moves_the_resume_position(self):
         # The other half of "a report covers only what it identifies": if a
@@ -1928,33 +1925,27 @@ class BoundedListingTests(CursorTransitionCase):
     """Round 1's blocker: a page is not a history, and the two must not read
     alike.
 
-    `gh pr list --limit N` returns the newest N merges. A sweep resuming below
-    a recorded endpoint is walking *away* from that page's newest end, so the
-    units it wants are the first to fall off — and the page that no longer
-    holds them looks exactly like a repository that has run out of merged pull
-    requests. Reading the first as the second moves the sweep to direct mode
-    with merged work still unreviewed behind it, permanently.
+    `gh pr list --limit N` returns the newest N merges. A fixed boundary can
+    fall beyond that page even when the selectable head rows are all present,
+    so the page cannot prove that a short batch has reached the stop rather
+    than merely running out of listed candidates. Reading truncation as either
+    the boundary or repository tail can leave merged work unreviewed or enter
+    direct mode prematurely.
     """
 
-    def test_a_page_ending_at_the_endpoint_is_truncated_rather_than_exhausted(self):
-        self.record(self.select(count=3))
-        endpoint = self.state()["pr"]["endpoint"]["number"]
+    def test_a_page_ending_at_the_boundary_stops_there(self):
+        self.record([], boundary=471)
+        boundary = self.state()["pr"]["endpoint"]["number"]
 
-        # The page reaches the endpoint and stops there: every count check
-        # against the page passes, and the selection is empty.
+        # The page reaches the boundary and proves the exclusive stop.
         page = self.page(3)
-        self.assertEqual(page[-1]["number"], endpoint)
+        self.assertEqual(page[-1]["number"], boundary)
         selection = self.select(count=3, candidates=page, listing_limit=3)
-        self.assertEqual(selection["selected"], [])
+        self.assertEqual(self.units(selection), [470, 468])
         self.assertTrue(selection["short"])
-        self.assertTrue(selection["truncated"])
+        self.assertTrue(selection["boundary_reached"])
+        self.assertFalse(selection["truncated"])
         self.assertFalse(selection["exhausted"])
-
-        # Raising the limit is the only remedy it needs, and it works.
-        wider = self.select(count=3, candidates=self.page(6), listing_limit=6)
-        self.assertEqual(self.units(wider), [466, 465, 464])
-        self.assertFalse(wider["short"])
-        self.assertFalse(wider["truncated"])
 
     def test_a_page_under_its_limit_that_comes_up_short_is_the_tail(self):
         # The other half, and the reason the two answers cannot be collapsed
@@ -2000,7 +1991,7 @@ class BoundedListingTests(CursorTransitionCase):
         self.assertNotIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
 
     def test_an_endpoint_off_the_page_asks_for_a_wider_one(self):
-        self.record(self.select(count=6))
+        self.record([], boundary=464)
         page = self.page(3)
         with self.assertRaises(self.module.CursorError) as caught:
             self.select(count=3, candidates=page, listing_limit=3)
@@ -2046,7 +2037,8 @@ class BoundedListingTests(CursorTransitionCase):
         recorded = self.module.record(
             self.state(), "pr", widened, reviewed, listing_limit=40
         )
-        self.assertEqual(recorded["pr"]["endpoint"]["number"], 471)
+        self.assertIsNone(recorded["pr"]["endpoint"])
+        self.assertEqual(recorded["pr"]["reviewed"], [468, 470, 471])
 
     def test_an_absent_unit_in_a_complete_listing_is_still_refused_outright(self):
         # The negative control for the rule above: the softer refusal must be
@@ -2216,6 +2208,63 @@ class CursorDocumentTests(CursorTransitionCase):
         self.assertIn(self.module.CURSOR_MARKER, text)
         self.assertIn("# Project review sweep cursor", text)
 
+    def test_the_original_stop_before_document_migrates_without_losing_exceptions(self):
+        self.module.document_path(self.worktree).write_text(
+            "# Project Review Boundaries\n\n"
+            "Repository-specific exclusive endpoints.\n\n"
+            "- `coghex/kanban` — stop before PR #466 in merge-date order. "
+            "PR #471 merged later and was already reviewed, so skip it.\n",
+            encoding="utf-8",
+        )
+        state = self.state()
+        self.assertEqual(state["pr"]["endpoint"]["number"], 466)
+        self.assertEqual(state["pr"]["reviewed"], [466, 471])
+        selection = self.select(count=9)
+        self.assertEqual(self.units(selection), [470, 468])
+        self.assertTrue(selection["boundary_reached"])
+
+        self.record(selection)
+        text = self.module.document_path(self.worktree).read_text(encoding="utf-8")
+        self.assertIn(self.module.CURSOR_MARKER, text)
+        self.assertEqual(self.state()["pr"]["endpoint"]["merged_at"],
+                         "2026-08-17T00:00:00Z")
+
+    def test_a_v1_resume_frontier_migrates_to_coverage_not_a_boundary(self):
+        old = {
+            "version": self.module.LEGACY_SCHEMA_VERSION,
+            "repositories": {
+                REPO: {
+                    "pr": {
+                        "endpoint": {
+                            "number": 466,
+                            "merged_at": "2026-08-17T00:00:00Z",
+                        },
+                        "reviewed": [468, 470, 471],
+                    },
+                    "direct": {"endpoint": None, "reviewed": []},
+                    "excluded": {"prs": [], "commits": []},
+                }
+            },
+        }
+        self.module.document_path(self.worktree).write_text(
+            "# Project review sweep cursor\n\n"
+            f"{self.module.LEGACY_CURSOR_MARKER}\n\n"
+            f"```json\n{json.dumps(old)}\n```\n",
+            encoding="utf-8",
+        )
+
+        migrated = self.module.load_document(self.worktree)
+        state = self.module.state_for(migrated, REPO)
+        self.assertEqual(migrated["version"], self.module.SCHEMA_VERSION)
+        self.assertIsNone(state["pr"]["endpoint"])
+        self.assertEqual(state["pr"]["reviewed"], [466, 468, 470, 471])
+        self.assertEqual(self.units(self.select(count=3)), [465, 464, 463])
+
+        self.record(self.select(count=3))
+        text = self.module.document_path(self.worktree).read_text(encoding="utf-8")
+        self.assertIn(self.module.CURSOR_MARKER, text)
+        self.assertNotIn(self.module.LEGACY_CURSOR_MARKER, text)
+
     def test_an_unparseable_document_stops_the_run(self):
         for spelling, body in (
             ("no marker", "# Project review sweep cursor\n\nnothing here.\n"),
@@ -2230,7 +2279,7 @@ class CursorDocumentTests(CursorTransitionCase):
             (
                 "a reviewed entry that is not a pull request",
                 f'{self.module.CURSOR_MARKER}\n\n```json\n'
-                '{"version": 1, "repositories": {"o/r": {"pr": '
+                f'{{"version": {self.module.SCHEMA_VERSION}, "repositories": {{"o/r": {{"pr": '
                 '{"reviewed": ["nope"]}}}}\n```\n',
             ),
         ):
@@ -2253,14 +2302,14 @@ class CursorDocumentTests(CursorTransitionCase):
 class CursorRecordTests(CursorTransitionCase):
     """The review's fifth spec addition: how a completed batch is folded in."""
 
-    def test_the_endpoint_only_ever_moves_older(self):
-        # A batch taken above the frontier -- after an explicit override, say
-        # -- must not drag the frontier back up with it, or every unit between
-        # the two positions is quietly dropped from the sweep.
-        self.record(self.select(count=6))
+    def test_the_pr_boundary_never_moves_without_an_explicit_request(self):
+        self.record([], boundary=464)
         self.assertEqual(self.state()["pr"]["endpoint"]["number"], 464)
-        self.record(self.select(count=2, override_boundary=True))
+        self.record(self.select(count=2))
         self.assertEqual(self.state()["pr"]["endpoint"]["number"], 464)
+
+        self.record([], boundary=461)
+        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 461)
 
     def test_recording_preserves_an_earlier_exclusion(self):
         self.record(self.select(count=2), exclude=[471])
@@ -2311,9 +2360,9 @@ class CursorCommandLineTests(CursorTransitionCase):
             "select", "--mode", "pr", "--count", "3", "--candidates", str(listing)
         )
         self.assertEqual([entry["number"] for entry in second["selected"]], [466, 465, 464])
-        self.assertEqual(
-            self.run_cli("read")["state"]["pr"]["endpoint"]["number"], 471
-        )
+        state = self.run_cli("read")["state"]["pr"]
+        self.assertIsNone(state["endpoint"])
+        self.assertEqual(state["reviewed"], [468, 470, 471])
 
     def test_a_range_bound_holds_through_the_command_line(self):
         # The surface the asset invokes, since that is where `--end` is spelled

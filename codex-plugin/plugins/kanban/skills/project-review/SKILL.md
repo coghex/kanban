@@ -70,8 +70,9 @@ An explicit count, PR number, commit SHA, or range overrides the default.
 
 **A count is a batch size, not a position.** An explicit count changes how many
 units this batch takes and nothing else. Only an explicit PR number, commit SHA,
-range, or boundary override moves where the sweep resumes, and a unit the user
-excluded is never selected again by a later invocation.
+or range changes this batch's requested start; a boundary override changes the
+exclusive stop for that requested batch, and a unit the user excluded is never
+selected again by a later invocation.
 
 Resolve the reviewed repository's docs worktree once, by branch and never by a
 hard-coded path. It is both where the sweep cursor is read and where a finished
@@ -110,26 +111,34 @@ the defect this mechanism closes.
 `$DOCS_WT/docs/project_review_boundaries.md`, the sweep cursor for the
 repository under review. It lives in that repository rather than travelling with
 this command: it is one consumer's state, so shipping it would put every
-consumer's cursor in every install. Every completed batch records its endpoint
-there with no separate user request — the oldest reviewed merged PR in PR mode,
-the oldest reviewed first-parent commit by SHA in direct mode — and **a clean
-batch records its endpoint exactly as a finding-bearing batch does**.
+consumer's cursor in every install.
+
+The two modes use different cursor meanings. In PR mode the recorded endpoint is
+an **exclusive older boundary**: default selection starts at the newest merged
+PR and stops before that boundary. It does not resume below it, and completing a
+batch does not move it. Every completed PR batch instead records the exact PRs
+reviewed, plus any exclusions, so the next invocation can start at merged HEAD,
+skip durable coverage, and continue toward the same boundary. **A clean batch
+records reviewed coverage exactly as a finding-bearing batch does.** The PR
+boundary changes only when the user explicitly requests a new one. In direct
+mode the endpoint remains a moving older-history frontier and advances to the
+oldest commit the completed batch reviewed.
 
 Selection is the helper's too, and it happens before any unit is reviewed rather
 than in the report-writing step. `select` reads the candidate history on stdin,
-reconciles the recorded endpoint with the `docs/project_review_*.md` reports
-beside it, and returns the batch. Four rules govern what that reconciliation may
+reconciles the recorded coverage with the `docs/project_review_*.md` reports
+beside it, and returns the batch. Five rules govern what that reconciliation may
 conclude, and each one is a mistake this sweep has already made:
 
-- **The recorded endpoint is merge order, not numeric order.** It identifies the
-  oldest selected PR by `mergedAt`, and it is a cumulative exclusive coverage
-  frontier rather than the last run's stopping place.
+- **PR selection always starts at merged HEAD.** The boundary is the exclusive
+  stop, never the starting position. A newly merged PR therefore enters the next
+  batch even after older work has already been recorded.
+- **The recorded PR boundary is merge order, not numeric order.** The helper
+  resolves it in the `mergedAt`-sorted history before deciding where to stop.
 - **A report covers only the PRs it explicitly identifies**, which is what its
   filename endpoints name — never every number between them. A batch that
   skipped most of its interval is the ordinary case, so a report says what to
-  skip and never where to resume: resuming below one would drop whatever it
-  skipped inside its own interval, permanently, while resuming above one costs
-  a re-review of two announced units.
+  skip and never where to begin or stop.
 - **A report never establishes direct-commit coverage.** A first-parent commit
   inside a reviewed interval is either covered by the recorded endpoint or
   selected; a report's prose about the commits in its interval decides nothing,
@@ -139,20 +148,26 @@ conclude, and each one is a mistake this sweep has already made:
   malformed, foreign, or ambiguous cursor refuses before review rather than
   guessing. Report the helper's own message.
 
-Announce the helper's `origin`, `gaps`, and skipped units with the batch: a unit
-above the resumed position that no record and no report covers is reported,
-never silently dropped.
+Announce the helper's `origin`, boundary, and skipped units with the batch. An
+uncovered unit above the boundary is selected in newest-first order, never
+reduced to a warning while the workflow continues below it.
 
 A repository holding reports but no record yet — every repository, the first
 time this runs — therefore starts at the head of its history and skips the units
-its reports name. Say so, and offer `--start` once: the user names the oldest
-unit they know was reviewed, that batch records an endpoint, and every
-invocation after it is positioned by the record alone.
+its reports name. With no boundary it keeps walking the complete PR history
+across batches by recording exact reviewed units. The helper also migrates the
+original human-authored `stop before PR #N` boundary document, including any
+exceptional reviewed PRs its prose names, and writes the canonical form on the
+next successful `record`. A version-1 machine cursor from the regressed
+resume-below workflow migrates differently: its PR endpoint becomes reviewed
+coverage and is cleared as a boundary, so the corrected sweep cannot mistake a
+moving frontier for permission to skip all older history.
 
 ### PR mode
 
-While an older merged PR remains at the cursor, take the next 12 merged PRs
-newest-first — or the requested count, at-and-below a supplied starting PR.
+While an unreviewed merged PR remains above the boundary, take the next 12
+merged PRs newest-first from the current history head — or the requested count,
+at-and-below a supplied starting PR.
 Over-fetch and sort by `mergedAt` yourself, because `gh`'s own ordering is not
 merge order; `select` does that sort on the listing you hand it, so hand it the
 whole listing rather than a slice you ordered by number:
@@ -167,7 +182,7 @@ gh pr list -R "$REPO" --state merged --limit "$LIMIT" --json number,title,merged
 older — and are empty when the user supplied none; an empty `--start` or
 `--end` is no bound at all, so one invocation covers both cases. Add
 `--override-boundary` only when the user explicitly overrides the recorded
-endpoint; unlike the two range flags it has a correct default and is never
+boundary; unlike the two range flags it has a correct default and is never
 implied, so it stays out of the invocation until a user asks for it.
 
 **A range needs both of its endpoints.** `$RANGE_START` alone is a starting
@@ -183,12 +198,12 @@ request that ended and neither the page nor the history.
 it.** Start `$LIMIT` at the requested count plus a margin for the over-fetch —
 40 covers the 12-unit default — and declare it to `select`. The question the
 reach check has to answer is not whether the listing holds twelve rows; it is
-whether twelve *selectable* rows survive below the recorded endpoint once
-coverage and exclusions come out. **A listing that ends at the endpoint passes
-every count check and selects nothing**, so the count is checked against the
-selection rather than against the page.
+whether the listing reaches the recorded boundary and whether twelve
+*selectable* rows survive above it once coverage and exclusions come out. A
+page that does not contain the boundary cannot prove where the sweep must stop,
+even when its first twelve rows are selectable.
 
-`select` answers it, and its answer to a short batch is one of two things that
+`select` answers it, and its answer to a short batch is one of three things that
 must never be collapsed:
 
 - **`"truncated": true`** — the batch came up short and the listing came back at
@@ -199,12 +214,15 @@ must never be collapsed:
   inherits the gap.
 - **`"exhausted": true`** — the batch came up short and the listing came back
   with fewer rows than `$LIMIT`, which is the whole of the repository's merged
-  history. **This is not an error at all.** It is the tail of the sweep. Review
-  every PR that does remain, say the batch was short and why, and treat PR
-  history as exhausted so the next `continue` enters direct mode. A repository
-  with fewer merged PRs than the batch size meets this on its first batch, and
-  is reviewed the same way — including one whose listing comes back empty, which
-  reviews no PR and enters direct mode straight away.
+  history and no PR boundary ended the scan. **This is not an error at all.** It
+  is the tail of an unbounded sweep. Review every PR that does remain, say the
+  batch was short and why, and treat PR history as exhausted so the next
+  `continue` enters direct mode. A repository with fewer merged PRs than the
+  batch size meets this on its first batch and is reviewed the same way.
+- **`"boundary_reached": true`** — every selectable PR above the exclusive
+  boundary has been reviewed or skipped. Stop the PR sweep there. This is not
+  PR-history exhaustion and does not enter direct mode or select anything below
+  the boundary.
 
 `select` refuses rather than guessing when a supplied starting PR or the
 recorded endpoint is absent, and its refusal separates the same two causes:
@@ -226,7 +244,9 @@ PR.
 
 ### Direct mode
 
-After PR history is exhausted, the entry point depends on whether there was any.
+After an **unbounded** PR sweep reports `"exhausted": true`, the entry point
+depends on whether there was any PR history. Reaching an exclusive PR boundary
+does not enter direct mode.
 
 - **PR history existed.** Continue from the first-parent parent of the earliest
   PR-owned commit already reviewed.
@@ -461,14 +481,19 @@ because it was landed.
 
 ## Complete and continue
 
-**Record the cursor last.** Advance it only after every selected unit has been
-reviewed and any required report has been written and validated, so a failed
-report or a failed cursor write is never reported as a completed batch:
+**Record the cursor last.** Record coverage only after every selected unit has
+been reviewed and any required report has been written and validated, so a
+failed report or a failed cursor write is never reported as a completed batch:
 
 ```bash
 gh pr list -R "$REPO" --state merged --limit "$LIMIT" --json number,title,mergedAt,body,url \
   | python3 "$CURSOR" record --root "$DOCS_WT" --repo "$REPO" --mode pr --reviewed "$REVIEWED" --exclude "$EXCLUDED" --listing-limit "$LIMIT"
 ```
+
+That PR-mode call merges the reviewed and excluded units and preserves the
+exclusive boundary. Add `--boundary "$NEW_BOUNDARY"` only when the user
+explicitly asks to establish or replace that stop; an ordinary completed batch
+never moves it.
 
 **The recording listing is taken under the same rule, and needs it more.** It is
 taken after the batch was reviewed and its report written, which can be a long
@@ -477,25 +502,26 @@ off a bounded page — so the `$LIMIT` that reached the batch at selection time
 need not reach it now. Declare it, and raise it and list again whenever `record`
 reports a reviewed or excluded unit absent from a listing that came back at its
 own limit. Recording nothing is the one outcome to refuse here: the batch is
-already reviewed, and a completed batch with no durable endpoint is exactly the
+already reviewed, and a completed batch with no durable coverage is exactly the
 state this cursor exists to prevent.
 
 Direct mode records the same way against the same first-parent walk it selected
 from, with `--mode direct` and the reviewed SHAs. A batch that selected nothing
 records nothing and is not a completed batch: the helper refuses an empty
-`--reviewed` with an empty `--exclude` rather than moving a frontier no unit
-was reviewed below. `record` merges rather than
-replaces: an earlier exclusion survives a later batch, and the endpoint only
-ever moves older, so a batch taken above the frontier under an explicit override
-does not drag the frontier back up with it.
+`--reviewed` with an empty `--exclude` unless the user explicitly supplied a
+new PR boundary. `record` merges rather than replaces: an earlier exclusion
+survives a later batch, a PR boundary stays fixed, and the direct endpoint only
+ever moves older.
 
 In the completion message, link the report, state its unprocessed finding
 count, list fixed-later and already-tracked findings briefly, and name the
-endpoint the record now holds.
+PR boundary and durable progress the record now holds.
 
 If a batch is clean, do not create an empty report unless explicitly requested.
-Say the range was clean and record its endpoint anyway — a clean batch is a
-completed batch, and the run that follows it resumes immediately below it
-without needing anything this session still remembers. On `continue`, review the
-next older batch; after PR history, switch to direct mode. At the initial commit,
-report that history is exhausted rather than restarting or widening the batch.
+Say the range was clean and record its reviewed units anyway — a clean batch is
+a completed batch, and the run that follows starts at the latest merge, skips
+that durable coverage, and continues toward the same boundary without needing
+anything this session still remembers. On `continue`, review the next uncovered
+batch above the boundary; enter direct mode only after an unbounded PR history
+is exhausted. At the initial commit, report that history is exhausted rather
+than restarting or widening the batch.
