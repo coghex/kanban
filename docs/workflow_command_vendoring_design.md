@@ -24,7 +24,7 @@ concrete precondition
 - [x] VEND-4. Vendor project-review — [#462]
 - [x] VEND-5. Vendor drain-prs — [#511]
 - [x] VEND-6. Vendor the janitor census helper — [#574]
-- [ ] VEND-9. Vendor the janitor command over the census
+- [x] VEND-9. Vendor the janitor command over the census — [#575]
 - [x] VEND-7. Vendor finalize — [#544]
 - [ ] VEND-8. Vendor autosolve
 
