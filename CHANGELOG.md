@@ -64,12 +64,21 @@ created above it.
   approved — a gate that reads the dry run's `stderr`, where Git actually
   writes it, and that is one `&&` chain so the prune is unreachable in a shell
   without `set -e`. A stash is dropped only while its selector still resolves
-  to the object the report recorded: a selector is a position in a reflog, so
+  to the object the report recorded, and the drop is verified afterwards
+  against the object Git says it took: a selector is a position in a reflog, so
   anyone pushing a stash in between shifts it, and dropping `stash@{0}` would
-  destroy work the run never inspected. And releasing a stale claim is two
+  destroy work the run never inspected. A mismatch is restored with
+  `git stash store` before the item fails, so the remaining window between the
+  check and the drop loses nothing. And releasing a stale claim is two
   independent commands, since a claim is an assignee *or* a `wip` label: a
   label-only claim needs the label removal alone, and several assignees need
   one removal each.
+
+  The census helper both bundles ship now passes `--no-prune` on the `--fetch`
+  refresh. `fetch.prune` is an ordinary configuration, and under it that
+  refresh would have deleted every stale origin-tracking ref during the
+  read-only pass — before one was reported, let alone approved — which is the
+  opposite of what the per-item deletion gate above exists for.
 
   A stash is judged by its own delta rather than by diffing its
   files against the current branch, with list numbering, emphasis, and

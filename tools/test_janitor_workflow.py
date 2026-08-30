@@ -60,6 +60,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -483,10 +484,17 @@ class Harness:
             ["worktree", "remove"],
             ["branch", "-d"],
             ["push", "origin"],
-            ["stash", "drop"],
             ["update-ref", "-d"],
         ):
             self.fake.script("git", ["-C", CHECKOUT_ROOT, *tail], stdout="")
+        # `git stash drop` names the object it dropped, and the asset reads
+        # that name back to prove it dropped the approved one. A fixture that
+        # printed nothing would make every drop look like a mismatch.
+        self.fake.script(
+            "git",
+            ["-C", CHECKOUT_ROOT, "stash", "drop"],
+            stdout=f"Dropped {STASH} ({self.stash_head})\n",
+        )
         self.fake.script(
             "git", ["-C", PRIMARY_WORKTREE, "merge", "--ff-only"], stdout=""
         )
@@ -1211,7 +1219,8 @@ class RealGitApplyTests(HarnessCase):
                 self.assertEqual(self.registered_records(work), {work.name})
 
     def stash_drop_lines(self, relative_path: str) -> str:
-        """The guarded stash drop, both of its lines."""
+        """The guarded stash drop: from its `rev-parse` guard through the
+        check that re-raises a mismatch after the restore."""
         fence = self.fences(relative_path)["deletions"].splitlines()
         index = [
             position
@@ -1220,8 +1229,46 @@ class RealGitApplyTests(HarnessCase):
         ]
         self.assertEqual(len(index), 1)
         guard = index[0]
-        self.assertIn("stash drop", fence[guard + 1])
-        return "\n".join(fence[guard : guard + 2])
+        end = [
+            position
+            for position, line in enumerate(fence)
+            if position > guard and line.strip() == '[ "$DROPPED_SHA" = "$STASH_SHA" ]'
+        ]
+        self.assertEqual(len(end), 1, "the drop has no closing verification")
+        block = "\n".join(fence[guard : end[0] + 1])
+        self.assertIn("stash drop", block)
+        self.assertIn("stash store", block)
+        return block
+
+    def racing_git(self, work: Path, name: str) -> Path:
+        """A `git` on PATH that pushes a stash the instant a drop is asked for.
+
+        The window this closes is between two Git processes, so nothing the
+        asset writes can be made to lose it -- it has to be lost, and the
+        recovery observed. A shim that runs `git stash push` immediately
+        before delegating the drop reproduces exactly the interleaving a
+        person in another worktree, or the drainer's autostash, produces.
+        """
+        real = shutil.which("git")
+        self.assertIsNotNone(real)
+        bin_dir = work.parent / "racing-bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        shim = bin_dir / "git"
+        shim.write_text(
+            "#!/bin/sh\n"
+            "for arg in \"$@\"; do\n"
+            "  if [ \"$arg\" = drop ]; then\n"
+            f"    : > {shlex.quote(str(work / name))}\n"
+            f"    {shlex.quote(real)} -C {shlex.quote(str(work))} add {shlex.quote(name)}\n"
+            f"    {shlex.quote(real)} -C {shlex.quote(str(work))} stash push -q -m {shlex.quote(name)}\n"
+            "    break\n"
+            "  fi\n"
+            "done\n"
+            f"exec {shlex.quote(real)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        return bin_dir
 
     def stash_entries(self, work: Path) -> list[str]:
         listing = self.git("stash", "list", "--format=%H", cwd=work).stdout
@@ -1254,6 +1301,32 @@ class RealGitApplyTests(HarnessCase):
                 )
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertEqual(self.stash_entries(work), [intruder, approved])
+
+    def test_a_stash_pushed_between_the_guard_and_the_drop_is_restored(self):
+        # The window the guard alone cannot close: the check passes, and the
+        # reflog shifts before `stash drop` resolves the selector. The drop
+        # then takes an unapproved stash -- which is put back, and the item
+        # fails, so nothing is lost and nothing is reported as done.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                work = self.repository()
+                approved = self.push_stash(work, "approved")
+                bin_dir = self.racing_git(work, "intruder")
+                result = self.run_fence(
+                    self.stash_drop_lines(relative_path),
+                    work,
+                    STASH="stash@{0}",
+                    STASH_SHA=approved,
+                    PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                entries = self.stash_entries(work)
+                self.assertIn(
+                    approved, entries, "the approved stash was dropped anyway"
+                )
+                self.assertEqual(
+                    len(entries), 2, "the unapproved stash was not restored"
+                )
 
     def test_a_stash_still_at_its_recorded_object_is_dropped(self):
         # The control: nothing moved, and the approved stash goes.

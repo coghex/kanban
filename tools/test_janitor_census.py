@@ -465,5 +465,71 @@ class RetainLedgerTests(CensusFixture):
         self.assertEqual(document["counts"]["retained_items"], 1)
 
 
+class FetchDoesNotPruneTests(CensusFixture):
+    """`--fetch` refreshes `origin` and removes nothing.
+
+    The janitor workflow this program feeds treats a stale origin-tracking ref
+    as an anomaly the user approves individually, and deletes it one ref at a
+    time with the value the report recorded. A refresh that pruned would delete
+    every one of them during the read-only pass, before any was reported --
+    which `fetch.prune=true` is enough to cause, since it is an ordinary
+    configuration and not an exotic one. The program therefore passes
+    `--no-prune` rather than leaving the behavior to the host.
+    """
+
+    def stale_tracking_refs(self):
+        listing = git(self.repo, "for-each-ref", "--format=%(refname)", "refs/remotes")
+        return sorted(line for line in listing.splitlines() if line.strip())
+
+    def make_a_stale_tracking_ref(self) -> str:
+        """A `refs/remotes/origin/*` ref whose branch is gone from origin.
+
+        The branch is removed in the origin repository rather than through a
+        `push --delete` from this clone, because that is how a tracking ref
+        actually goes stale: somebody else deleted the branch, and this clone
+        still carries the ref. Deleting it through this clone's own push would
+        remove the tracking ref along with it and leave nothing to test.
+        """
+        git(self.repo, "checkout", "-q", "-b", "issue-4-gone")
+        git(self.repo, "push", "-q", "-u", "origin", "issue-4-gone")
+        git(self.repo, "checkout", "-q", "master")
+        git(self.root / "origin.git", "branch", "-D", "issue-4-gone")
+        ref = "refs/remotes/origin/issue-4-gone"
+        self.assertIn(ref, self.stale_tracking_refs())
+        return ref
+
+    def fetch(self, **config):
+        for key, value in config.items():
+            git(self.repo, "config", key, value)
+        with self.pinned_environment():
+            return census.census(self.repo, fetch=True, local_only=True)
+
+    def test_a_pruning_configuration_does_not_delete_a_stale_ref(self):
+        ref = self.make_a_stale_tracking_ref()
+        document = self.fetch(**{"fetch.prune": "true"})
+        self.assertIn(ref, self.stale_tracking_refs())
+        # And it is still reported, which is the point: the workflow's
+        # per-item deletion gate has something to approve.
+        self.assertIn(
+            ref, [row["ref"] for row in document["stale_tracking_refs"]]
+        )
+
+    def test_the_control_shows_git_would_have_pruned_it(self):
+        # Non-vacuity: without `--no-prune`, this exact configuration removes
+        # the ref. Driven through git rather than through a second census, so
+        # the control measures the tool's behavior and not this module's.
+        ref = self.make_a_stale_tracking_ref()
+        git(self.repo, "config", "fetch.prune", "true")
+        git(self.repo, "fetch", "origin")
+        self.assertNotIn(ref, self.stale_tracking_refs())
+
+    def test_the_fetch_is_spelled_with_no_prune_in_both_shipped_copies(self):
+        for path in CENSUS_COPIES:
+            with self.subTest(copy=str(path)):
+                source = path.read_text(encoding="utf-8")
+                self.assertIn('"fetch", "--no-prune", "origin"', source)
+                self.assertNotIn('"fetch", "origin"', source)
+
+
 if __name__ == "__main__":
     unittest.main()

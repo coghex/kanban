@@ -596,7 +596,16 @@ def census(repo: Path, *, fetch: bool, local_only: bool) -> dict[str, Any]:
     root = Path(git(repo, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
     warnings: list[str] = []
     if fetch:
-        done = git(root, "fetch", "origin", check=False)
+        # --no-prune is not a default this can be left to infer: `fetch.prune`
+        # is an ordinary configuration a user or a repository may set true, and
+        # under it this refresh would delete every stale origin-tracking ref
+        # before the census had even reported one. The janitor workflow this
+        # program feeds treats a stale tracking ref as an anomaly the user
+        # approves individually, so a fetch that pruned them would destroy the
+        # very state it exists to inventory, and would do it during the
+        # read-only pass. Passed explicitly so the behavior is the program's
+        # rather than the host's.
+        done = git(root, "fetch", "--no-prune", "origin", check=False)
         if done.returncode != 0:
             warnings.append(f"git fetch origin failed: {(done.stderr or done.stdout).strip()}")
     default = default_branch(root)

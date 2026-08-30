@@ -298,7 +298,13 @@ git -C "$ROOT" worktree remove "$WORKTREE"
 git -C "$ROOT" branch -d "$BRANCH"
 git -C "$ROOT" push origin "--force-with-lease=refs/heads/$BRANCH:$SHA" ":refs/heads/$BRANCH"
 [ "$(git -C "$ROOT" rev-parse --verify --quiet "$STASH^{commit}")" = "$STASH_SHA" ] &&
-  git -C "$ROOT" stash drop "$STASH"
+  DROPPED="$(git -C "$ROOT" stash drop "$STASH")" &&
+  DROPPED_SHA="${DROPPED##*\(}" &&
+  DROPPED_SHA="${DROPPED_SHA%\)}" &&
+  { [ "$DROPPED_SHA" = "$STASH_SHA" ] ||
+      git -C "$ROOT" stash store -m "janitor: restored an unapproved stash" \
+        "$DROPPED_SHA"; } &&
+  [ "$DROPPED_SHA" = "$STASH_SHA" ]
 git -C "$ROOT" update-ref -d "$REF" "$REF_SHA"
 git -C "$ROOT" update-ref -d "$TRACKING_REF" "$TRACKING_SHA"
 ```
@@ -311,18 +317,31 @@ after the `ls-remote` proof loses work nothing ever reviewed. The
 proof and the deletion then describe the same commit.
 
 **A stash selector is a position in a reflog, not an identity**, which is why
-the drop is guarded by the object id the report recorded rather than run on the
-selector alone. Anyone who runs `git stash push` between the report and the
-apply — a person in another worktree, a drainer autostash — shifts every
-selector down by one, and `git stash drop stash@{0}` then destroys work this run
-never inspected and the user never approved. Re-resolving the selector to its
-recorded object immediately before its own drop refuses that item instead;
-report the mismatch and re-run the census rather than dropping whatever now sits
-at that position. Dropping highest selector index first is still required, and
-covers a different shift: the one this run causes itself, as each drop moves
-every lower selector. The object check is what covers a shift this run did not
-cause. Record each selector and its full object id in the report before
-anything is dropped.
+the drop above is three steps rather than one. Anyone who runs `git stash push`
+between the report and the apply — a person in another worktree, a drainer
+autostash — shifts every selector down by one, and a bare
+`git stash drop stash@{0}` then destroys work this run never inspected and the
+user never approved. Dropping highest selector index first covers only the
+shifts this run causes itself, as each drop moves every lower selector.
+
+Re-resolving the selector to its recorded object immediately before its own drop
+refuses the item when the shift already happened. It cannot refuse a shift that
+lands *between* that check and the drop, because those are two Git processes and
+nothing holds the reflog still across them — so the drop is verified afterwards
+as well. `git stash drop` names the object it dropped, and a dropped stash
+commit stays reachable through that id, so a mismatch is put straight back with
+`git stash store` and the item then fails. Nothing is lost either way, which is
+the invariant that matters; the restored stash returns at the top of the list,
+so re-run the census before touching stashes again rather than reusing the
+selectors the report was written with.
+
+Taking Git's index lock around both steps would close the window instead — a
+concurrent `git stash push` cannot write the index — and it is deliberately not
+done: creating that lock by hand blocks every other operation in the repository,
+strands the lock if the run dies, and is the same hand-editing of a lock file
+this workflow forbids for the drainer. A recoverable mistake is better than a
+wedged repository. Record each selector and its full object id in the report
+before anything is dropped.
 
 **The expected value on `update-ref -d` is mandatory, and must be the full SHA
 the report recorded.** It deletes the ref only while it still equals that value,
