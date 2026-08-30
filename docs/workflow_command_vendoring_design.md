@@ -544,9 +544,9 @@ VEND-6 ships no replacement.
 Two consequences worth stating. VEND-6 depends on nothing in the arc and can land
 first, in parallel with VEND-7 or VEND-8, because it renders no file and so
 VEND-0's one-file-per-brand outcome does not bind it. And the umbrella epic #373
-still carries a single `VEND-6. Vendor janitor` checklist line, which is now
-drift: the next `/process-design-doc` run reconciles it into two, with approval,
-before it drafts either.
+carried a single `VEND-6. Vendor janitor` checklist line, which this split turned
+into drift; the `/process-design-doc` run that filed VEND-6 as #574 reconciled it
+into two on 2026-08-30, with approval, before drafting either.
 
 *Recorded 2026-08-27, on the owner's instruction to split whatever needed it.*
 
