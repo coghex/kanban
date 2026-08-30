@@ -409,6 +409,38 @@ class RetainLedgerTests(CensusFixture):
         self.assertIsNone(document["retain_ledger"]["items"])
         self.assertIsNone(document["counts"]["retained_items"])
 
+    def test_a_ledger_symlink_is_unreadable_rather_than_absent(self):
+        # `Path.exists()` follows the link, so a dangling `janitor-retain.json`
+        # answered "absent" -- `items: []` -- for an entry the operator can see
+        # in the directory listing. Presence is a question about the directory
+        # entry, and an entry that cannot be followed is the unreadable case.
+        # The resolvable link is here too, because the rule this file has
+        # always applied is that a ledger must be a regular, non-symlink file:
+        # both spellings must land on `None`, and the second is what proves the
+        # first is not passing merely because the target was missing.
+        ledger = self.common_dir / census.RETAIN_LEDGER
+        target = self.root / "elsewhere.json"
+        target.write_text(
+            json.dumps({"schema": "janitor-retain/v1", "items": [LEDGER_ITEM]}),
+            encoding="utf-8",
+        )
+        for label, destination in (
+            ("dangling", self.root / "no-such-ledger.json"),
+            ("resolvable", target),
+        ):
+            with self.subTest(link=label):
+                ledger.symlink_to(destination)
+                self.addCleanup(ledger.unlink, missing_ok=True)
+                try:
+                    document = self.run_census()
+                finally:
+                    ledger.unlink()
+                self.assertEqual(document["retain_ledger"]["present"], True)
+                self.assertIsNone(document["retain_ledger"]["items"])
+                self.assertIsNone(document["counts"]["retained_items"])
+                self.assertEqual(len(document["warnings"]), 1)
+                self.assertIn("retain ledger unreadable", document["warnings"][0])
+
     def test_the_ledger_is_read_from_the_common_directory(self):
         # Written once, read from a *different* linked worktree of the same
         # repository. A `--git-dir` read would find nothing there.

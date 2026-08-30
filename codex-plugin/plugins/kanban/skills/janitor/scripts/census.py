@@ -306,9 +306,16 @@ def retain_ledger(common_dir: Path, warnings: list[str]) -> dict[str, Any]:
     could not be read. An unreadable ledger reported as an empty one would tell
     the janitor that nothing is retained, which is the reading under which it
     would propose deleting everything the ledger was protecting.
+
+    Presence is `os.path.lexists`, not `Path.exists()`: the question is whether
+    a directory entry is there, not whether following it lands on a file. A
+    dangling symlink is an entry that exists and cannot be read, so it belongs
+    in the unreadable case below; `exists()` follows the link and would answer
+    "absent" -- `items: []` -- for a ledger the operator can see in the
+    directory listing.
     """
     path = common_dir / RETAIN_LEDGER
-    if not path.exists():
+    if not os.path.lexists(path):
         return {"present": False, "items": []}
     result: dict[str, Any] = {"present": True, "path": str(path), "items": None}
     try:
