@@ -251,7 +251,10 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the skills directory contains exactly the twenty-two packaged workflows, and
+- the skills directory contains exactly the twenty-two packaged workflows
+  plus the one scripts-only directory declared beside them — `skills/janitor/`,
+  which ships a helper program and no `SKILL.md`, so the bundle gate derives no
+  workflow from it and neither manifest lists one — and
   the five Kanban spawns exactly match the `$`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
@@ -291,8 +294,11 @@ including the user-scoped backend install path the drafting, issue-review, and
 issue-rereview skills name, the `$CODEX_HOME` cache root `$issue-rereview`
 searches for its vendored helper,
 the `git`/`awk`/`gh` commands the document skills resolve their
-docs worktree and tracker state with, and the `gh` surface of both bundled
-Python assets — the review coordinator and `$solve`'s trusted-comment helper.
+docs worktree and tracker state with, and the external-command surface of all
+nine bundled Python assets — the review coordinator and its model-roster
+reader, `$solve`'s trusted-comment helper, the three document-workflow
+modules, `$project-review`'s sweep cursor, and the janitor census with the
+configuration module beside it.
 
 `tools/test_repair_workflow_contract.py` pins `$repair`'s own behavioral
 contract — the ordered diagnosis branches, worktree selection and safe push,

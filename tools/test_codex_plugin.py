@@ -223,6 +223,17 @@ EXPECTED_SKILL_NAMES = (
     | FINALIZE_SKILL_NAMES
 )
 
+# Directories under skills/ that ship helper scripts and NO SKILL.md, so Codex
+# discovers no workflow for them. Issue #574 vendored the janitor census this
+# way on purpose: the program lands one slice ahead of the command body that
+# will call it, and tools/plugin_bundle_gate.py derives a shipped workflow only
+# from a direct `<skill>/SKILL.md`, so a scripts-only directory adds nothing to
+# the gate's set and nothing to either manifest's workflow listing. Named here
+# rather than tolerated by loosening the discovery check to "directories with a
+# SKILL.md": that loosening would also stop noticing a real skill whose
+# SKILL.md went missing, which is the failure the check exists for.
+SCRIPTS_ONLY_SKILL_DIRECTORIES = {"janitor"}
+
 # Keys that would let a packaged manifest silently override the model,
 # reasoning effort, sandbox/approval policy, or working directory Kanban's
 # own CLI spawn already pins (docs/agent-workflow-contract.md §2.1-§2.2).
@@ -480,7 +491,48 @@ class PackagedCodeInvocationTests(unittest.TestCase):
 class SkillDiscoveryTests(unittest.TestCase):
     def test_skills_directory_contains_exactly_the_packaged_workflows(self):
         found = {path.name for path in SKILLS_ROOT.iterdir() if path.is_dir()}
-        self.assertEqual(found, EXPECTED_SKILL_NAMES)
+        self.assertEqual(found - SCRIPTS_ONLY_SKILL_DIRECTORIES, EXPECTED_SKILL_NAMES)
+
+    def test_every_directory_under_skills_is_a_workflow_or_a_declared_helper(self):
+        # The other direction, and what keeps the subtraction above honest: a
+        # directory is either one of the packaged workflows or one of the
+        # declared scripts-only helpers, and nothing may be both.
+        found = {path.name for path in SKILLS_ROOT.iterdir() if path.is_dir()}
+        self.assertEqual(
+            found - EXPECTED_SKILL_NAMES,
+            SCRIPTS_ONLY_SKILL_DIRECTORIES,
+            "a directory under skills/ is neither a packaged workflow nor a "
+            "declared scripts-only helper",
+        )
+        self.assertEqual(
+            SCRIPTS_ONLY_SKILL_DIRECTORIES & EXPECTED_SKILL_NAMES, set()
+        )
+
+    def test_a_scripts_only_directory_ships_scripts_and_no_skill_md(self):
+        # Non-vacuity for the allowlist: a name on it has to be what it claims
+        # to be. A SKILL.md appearing there would make the directory invokable
+        # while the discovery check above went on subtracting it, which is
+        # exactly the silent shipment issue #574 says it does not make.
+        for name in sorted(SCRIPTS_ONLY_SKILL_DIRECTORIES):
+            with self.subTest(directory=name):
+                directory = SKILLS_ROOT / name
+                self.assertFalse(
+                    (directory / "SKILL.md").exists(),
+                    f"skills/{name} carries a SKILL.md, so it is a packaged "
+                    "workflow and belongs in EXPECTED_SKILL_NAMES",
+                )
+                self.assertTrue(
+                    sorted((directory / "scripts").glob("*.py")),
+                    f"skills/{name} ships no scripts, so it has no reason to "
+                    "be in the bundle at all",
+                )
+
+    def test_the_bundle_gate_ships_no_workflow_for_a_scripts_only_directory(self):
+        # The gate is the authority on what a Codex installation can invoke
+        # (requirement 9). Read it directly rather than restating its rule.
+        shipped = plugin_bundle_gate.tracked_skill_names(REPO_ROOT, SKILLS_PREFIX)
+        self.assertEqual(shipped, EXPECTED_SKILL_NAMES)
+        self.assertEqual(shipped & SCRIPTS_ONLY_SKILL_DIRECTORIES, set())
 
     def test_discovery_is_a_strict_superset_of_the_haskell_parity_set(self):
         # The two concepts must stay distinct: discovery covers every packaged

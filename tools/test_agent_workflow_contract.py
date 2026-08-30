@@ -365,6 +365,8 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py",
+    "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
+    "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py",
 ]
 
 # The tracked Claude plugin's own packaged workflows (issue #77): the same
@@ -403,6 +405,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
+    "claude-plugin/plugins/kanban/scripts/census.py",
 ]
 
 # Both bundles' vendored trusted-comment issue-spec helper (issue #238). Each is
@@ -427,16 +430,51 @@ TRUSTED_SPEC_SURFACE_FILES = {
 # and that is a routing fact rather than an external command, so both readers
 # still spawn nothing at all. Their empty sets are pins rather than omissions:
 # a future edit that made either shell out would have to declare it here.
+#
+# Issue #574's janitor census is vendored on the same terms and pinned here
+# with them, along with the third `kanban_config.py` copy it loads from beside
+# itself. What this extractor recovers from the census is `git` and `gh`
+# only: its two remaining spawns pass `sys.executable` as the first element of
+# the argument list, which is not a string literal, so
+# CENSUS_DYNAMIC_EXECUTABLES below pins those separately rather than letting
+# them pass as "nothing discovered".
 DOCUMENT_MECHANISM_SURFACE_FILES = {
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py": {"git"},
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py": {"git"},
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py": set(),
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py": set(),
+    "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py": {"git", "gh"},
+    "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py": set(),
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py": {"git"},
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py": {"git"},
     "claude-plugin/plugins/kanban/scripts/kanban_config.py": set(),
     "claude-plugin/plugins/kanban/scripts/kanban_models.py": set(),
+    "claude-plugin/plugins/kanban/scripts/census.py": {"git", "gh"},
 }
+
+# Both shipped copies of the janitor census, and the manifest rows each one
+# has to carry. `discovered_python_commands` reads a literal first argument
+# only, so the census's two `sys.executable` spawns -- the drainer controller
+# and the optional test coordinator -- reach no extractor at all; the pin
+# below names the spelling those calls use and the row that covers it, and
+# CensusDynamicExecutableTests holds the tree to both.
+CENSUS_SURFACE_FILES = (
+    "claude-plugin/plugins/kanban/scripts/census.py",
+    "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
+)
+CENSUS_DYNAMIC_EXECUTABLES = {"sys.executable": "python3"}
+# Every manifest row both census copies must appear in: the commands the
+# literal extractor finds, the command its dynamic spawns resolve to, the two
+# drainer install-directory rows its controller resolution is grounded in, and
+# the external cache root its optional coordinator probe reads.
+CENSUS_DECLARING_ROWS = (
+    "gh-cli",
+    "git-cli",
+    "python3-cli",
+    "drainer-install-dir",
+    "drainer-install-dir-xdg",
+    "codex-plugin-cache-root",
+)
 
 # The seven drafting and canonical issue-review assets vendored by issue #118,
 # plus the two issue-rereview repair assets vendored by issue #240. All nine
@@ -3635,6 +3673,162 @@ class ProviderAdapterBoundaryTests(unittest.TestCase):
             haskell_import_names("import System.Processes (proc)\n", "System.Process"),
             set(),
         )
+
+
+class CensusDynamicExecutableTests(unittest.TestCase):
+    """Issue #574. The janitor census spawns two programs through
+    `sys.executable` rather than through a literal command name, and
+    `discovered_python_commands` deliberately ignores a non-literal first
+    argument. So listing the census on a brand surface reconciles its `git` and
+    `gh` calls and reconciles *nothing at all* about the drainer controller and
+    the test-coordinator probe -- the two spawns the whole slice is about.
+
+    These hold both halves: that the set of non-literal spawns in the shipped
+    program is exactly the one spelling pinned above, and that the command that
+    spelling resolves to is declared by a manifest row naming both copies. A
+    third spelling, or a copy dropped from a row, fails here.
+    """
+
+    def setUp(self):
+        self.manifest = parse_manifest()
+
+    @staticmethod
+    def dynamic_spawn_spellings(content):
+        """How each `run`-family call in `content` names its executable, for
+        the calls whose first argument is not a string literal.
+
+        By AST rather than by regex: the point is to enumerate what the regex
+        extractor cannot see, so reusing its pattern would enumerate nothing.
+        """
+        spellings = set()
+        for node in ast.walk(ast.parse(content)):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            function = node.func
+            name = (
+                function.attr
+                if isinstance(function, ast.Attribute)
+                else function.id
+                if isinstance(function, ast.Name)
+                else None
+            )
+            if name is None:
+                continue
+            if "run" not in name and name not in {
+                "Popen", "check_call", "check_output", "call"
+            }:
+                continue
+            argv = node.args[0]
+            if not isinstance(argv, (ast.List, ast.Tuple)) or not argv.elts:
+                continue
+            first = argv.elts[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                continue
+            spellings.add(ast.unparse(first))
+        return spellings
+
+    def test_the_census_dynamic_spawns_are_exactly_the_pinned_spelling(self):
+        for relative_path in CENSUS_SURFACE_FILES:
+            with self.subTest(surface=relative_path):
+                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                self.assertEqual(
+                    self.dynamic_spawn_spellings(content),
+                    set(CENSUS_DYNAMIC_EXECUTABLES),
+                    f"{relative_path} spawns a program through a spelling this "
+                    "contract does not pin; declare the command it resolves to "
+                    "in docs/agent-workflow-contract.md and name it in "
+                    "CENSUS_DYNAMIC_EXECUTABLES",
+                )
+                # ...and the literal extractor really does miss them, which is
+                # why this test exists at all.
+                self.assertEqual(
+                    discovered_python_commands(content),
+                    DOCUMENT_MECHANISM_SURFACE_FILES[relative_path],
+                )
+
+    def test_every_row_the_census_owes_names_both_shipped_copies(self):
+        rows = {row["id"]: row for row in self.manifest}
+        for row_id in CENSUS_DECLARING_ROWS:
+            for relative_path in CENSUS_SURFACE_FILES:
+                with self.subTest(row=row_id, surface=relative_path):
+                    self.assertIn(
+                        relative_path,
+                        rows[row_id]["files"],
+                        f"{row_id} must declare {relative_path}; the census "
+                        "resolves or spawns what that row names",
+                    )
+
+    def test_the_dynamic_spawns_resolve_to_a_declared_executable(self):
+        executable_rows = {
+            row["token"]: row for row in self.manifest if row["kind"] == "executable"
+        }
+        for spelling, command in sorted(CENSUS_DYNAMIC_EXECUTABLES.items()):
+            with self.subTest(spelling=spelling):
+                self.assertIn(
+                    command,
+                    executable_rows,
+                    f"the census spawns {spelling}, which runs {command!r}; "
+                    "declare it in docs/agent-workflow-contract.md",
+                )
+
+    def test_the_drainer_rows_are_grounded_by_written_spellings_only(self):
+        # The reviewer's amendment to issue #574: each census copy must carry
+        # the two install-directory tokens as literal grounding *without*
+        # resolving through them. Strip the comment and docstring lines that
+        # write them down and the tokens are gone -- which is the grounding
+        # check failing -- while the call that actually resolves the controller
+        # is still there.
+        rows = {row["id"]: row for row in self.manifest}
+        tokens = [
+            rows["drainer-install-dir"]["token"],
+            rows["drainer-install-dir-xdg"]["token"],
+        ]
+        for relative_path in CENSUS_SURFACE_FILES:
+            with self.subTest(surface=relative_path):
+                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                # `ast.unparse` drops comments on its own, so removing the
+                # docstrings leaves exactly the code.
+                executable = ast.unparse(strip_docstrings(ast.parse(content)))
+                for token in tokens:
+                    self.assertIn(token, content, relative_path)
+                    self.assertNotIn(
+                        token,
+                        executable,
+                        f"{relative_path} now spells {token!r} in code; the "
+                        "drainer rows must be grounded by the comment beside "
+                        "the resolution, not by a hardcoded path",
+                    )
+                self.assertIn(
+                    "kanban_config_module().drainer_install_dir()",
+                    executable,
+                    f"{relative_path} must resolve the drainer install "
+                    "directory through kanban_config.drainer_install_dir()",
+                )
+
+
+def strip_docstrings(tree):
+    """`tree` with every module, class, and function docstring removed.
+
+    The census grounds two manifest rows in prose beside the code that
+    resolves them, so proving the prose is what grounds them means removing it
+    and asking again.
+    """
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)) or not body:
+            continue
+        first = body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            if len(body) == 1:
+                body[0] = ast.Pass()
+            else:
+                del body[0]
+    return tree
 
 
 if __name__ == "__main__":

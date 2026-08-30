@@ -1,0 +1,1155 @@
+"""Shared TOML configuration loader for approve_issues.py, drain_prs.py, and
+publish_coordination_doc.py.
+
+Schema is documented in config.toml.example at the repo root and mirrors
+src/Kanban/Config.hs field-for-field (Haskell CamelCase -> Python snake_case).
+Both sides must agree on the same file; see that module for the semantics
+this loader replicates (default path, missing-file defaults, malformed/
+invalid-value errors, unknown-key warnings, global-only keys, canonical
+lowercase repository keys and the ASCII-folded lookup that selects them,
+repository override merge/array-replacement rules).
+
+This module is also the one place two Kanban services' own managed locations
+-- their install directories, their discovery records, and their log
+directories -- are written down, for every platform each one has a convention
+on. It is the only tracked module installed alongside both `approve_issues.py`
+and `drain_prs_service.py`, so it is the only one that each service's
+installer and installed copy can both import -- which is what keeps those
+locations from being restated once per component, or answered for one platform
+only. See default_issue_review_install_dir(), default_drainer_install_dir(),
+and the resolvers below each.
+
+Issue #370 gave it a third home. `publish_coordination_doc.py` reads a
+repository's declared publication lane through this loader; byte-identical
+copies of all three modules therefore ship in both tracked plugin bundles, held
+identical by tools/test_document_workflow_contract.py.
+
+That lane is `workflow.direct_publication_paths`, and it is deliberately NOT
+`workflow.coordination_paths`. #370 originally reused the drainer's key, which
+made one declaration answer two unrelated permissions -- "the drainer may merge
+past this path" and "an agent may push this document unattended" -- so a
+repository could not have the first without the second. The two keys share an
+entry grammar and the coverage predicate below; they share nothing else.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+import tomllib
+from dataclasses import dataclass, field, replace
+from pathlib import Path, PurePosixPath
+
+
+# Identity marker for this tracked asset; see the same constant in
+# approve_issues.py for why installed files are recognized by content
+# rather than by path.
+KANBAN_MANAGED_ASSET = "kanban-managed-asset:issue-review/kanban_config.py"
+
+
+class KanbanConfigError(Exception):
+    pass
+
+
+# The Kanban-managed install location for the canonical issue-review backend
+# (docs/agent-workflow-contract.md §5), spelled here once. `approve_issues.py`,
+# `install_issue_review.py` and `setup_workflows.py` all import it rather than
+# rebuilding it, so `--install-dir` cannot move one component's idea of the
+# default without moving every component's.
+ISSUE_REVIEW_INSTALL_DIR_ENV = "KANBAN_ISSUE_REVIEW_INSTALL_DIR"
+
+# Every managed issue-review location, on every supported platform, spelled
+# whole exactly once and only here. Each literal is a `personal-path` token in
+# docs/agent-workflow-contract.md §4 declaring this file, so a spelling that
+# drifts from the manifest fails tools/test_agent_workflow_contract.py rather
+# than shipping. The XDG fallbacks are written as one string rather than
+# joined component by component for that reason too: the manifest reconciles a
+# literal, not an expression.
+_MACOS_INSTALL_DIR = "/Library/Application Support/kanban/issue-review"
+_MACOS_LOG_DIR = "/Library/Logs/kanban/issue-review"
+_XDG_INSTALL_DIR_FALLBACK = "/.local/share/kanban/issue-review"
+_XDG_LOG_DIR_FALLBACK = "/.local/state/kanban/issue-review"
+_ISSUE_REVIEW_RECORD_NAME = "config.json"
+
+
+def is_macos() -> bool:
+    """The one platform question these resolvers ask, spelled the way
+    tools/service_manager.py's own branch point spells it.
+
+    Public because it is also the platform question
+    `tools/install_drainer.py` asks before relocating a pre-XDG `~/Library`
+    installation: that decision is "is this platform macOS?", never "do the
+    two directories differ?", and a second spelling of it there could answer
+    differently from the resolvers whose output it relocates.
+    """
+    return sys.platform == "darwin"
+
+
+def _home_relative(suffix: str) -> Path:
+    return Path(f"{Path.home()}{suffix}")
+
+
+def _xdg_issue_review_dir(env_name: str, home_relative_fallback: str) -> Path:
+    """This namespace under an XDG base directory, resolved exactly as
+    default_config_path() below resolves $XDG_CONFIG_HOME: the variable when
+    it is set, the conventional home-relative directory when it is not."""
+    base = os.environ.get(env_name)
+    if base:
+        return Path(base) / "kanban" / "issue-review"
+    return _home_relative(home_relative_fallback)
+
+
+def _macos_issue_review_install_dir() -> Path:
+    return _home_relative(_MACOS_INSTALL_DIR)
+
+
+def _xdg_issue_review_install_dir() -> Path:
+    return _xdg_issue_review_dir("XDG_DATA_HOME", _XDG_INSTALL_DIR_FALLBACK)
+
+
+def default_issue_review_install_dir() -> Path:
+    """Where a *fresh* issue-review install goes on this host: this platform's
+    own convention and only that -- macOS keeps `~/Library/Application
+    Support`, every other platform takes the XDG data directory. Where an
+    install that already exists *is* is the different question
+    installed_issue_review_dir() answers by probing both.
+
+    Resolved per call rather than frozen at import, exactly as
+    default_config_path() below is: freezing it would bind whatever $HOME and
+    $XDG_DATA_HOME held when the module first loaded, which a test that
+    redirects them -- or any process that changes them -- would then silently
+    escape.
+    """
+    if is_macos():
+        return _macos_issue_review_install_dir()
+    return _xdg_issue_review_install_dir()
+
+
+def default_issue_review_log_dir() -> Path:
+    """Where the installed backend writes its daily logs: the second managed
+    location this module owns, and the default `approve_issues.py --log-dir`
+    carries. `--log-dir` moves it; ISSUE_REVIEW_INSTALL_DIR_ENV deliberately
+    does not, because logs are not part of the installation that variable
+    relocates. Per call for the same reason as above."""
+    if is_macos():
+        return _home_relative(_MACOS_LOG_DIR)
+    return _xdg_issue_review_dir("XDG_STATE_HOME", _XDG_LOG_DIR_FALLBACK)
+
+
+def installed_issue_review_dir() -> Path:
+    """Where an issue-review installation *already is*.
+
+    The XDG location first and the `~/Library` location second, on both
+    platforms, so that nothing an operator already installed has to move: a
+    macOS host that installed under XDG keeps that install, and a Linux host
+    that inherited a `~/Library` install keeps that one. Only when neither is
+    occupied is the answer this platform's write path above, which is what a
+    fresh install gets.
+
+    Occupancy is the discovery record's, tested with os.path.lexists rather
+    than is_file, so a higher-precedence candidate that is *occupied but
+    invalid* -- a dangling symlink, a directory where the record belongs --
+    still selects that installation. Silently reading such a candidate as
+    absent and resolving the lower-precedence one is the fail-closed hole
+    tools/approve_issues_service.py's resolve_backend and
+    src/Kanban/Review/Canonical.hs avoid on the record's contents; this probe
+    avoids it on the record's location, and leaves them to report what is
+    wrong with the record they then read.
+    """
+    for candidate in (
+        _xdg_issue_review_install_dir(),
+        _macos_issue_review_install_dir(),
+    ):
+        if os.path.lexists(candidate / _ISSUE_REVIEW_RECORD_NAME):
+            return candidate
+    return default_issue_review_install_dir()
+
+
+def issue_review_record_path() -> Path:
+    """Where the installer records which backend it actually installed, so
+    Kanban discovers an `--install-dir` installation it never saw the option
+    for. Fixed rather than install-dir-relative on purpose: a dashboard that
+    inherits no environment still has to find it, so the record's own path is
+    the one thing that cannot move -- neither `--install-dir` nor
+    ISSUE_REVIEW_INSTALL_DIR_ENV relocates it. Read by
+    src/Kanban/Review/Canonical.hs and by both packaged PR coordinators;
+    written only by tools/install_issue_review.py."""
+    return installed_issue_review_dir() / _ISSUE_REVIEW_RECORD_NAME
+
+
+def issue_review_install_dir() -> Path:
+    """The install directory an issue-review component should treat as its
+    own. The environment override wins, exactly as it does for every consumer
+    that resolves the backend; the default is the directory the discovery
+    record lives in, which is why a backend installed under `~/Library` keeps
+    resolving itself -- and keeps its install-dir-relative runtime and
+    incident state -- on a host whose fresh-install default is XDG."""
+    override = os.environ.get(ISSUE_REVIEW_INSTALL_DIR_ENV)
+    if override and override.strip():
+        return Path(override).expanduser()
+    return installed_issue_review_dir()
+
+
+# The PR drainer's own managed locations (docs/agent-workflow-contract.md §4),
+# the second service this module owns the paths of. Everything above about the
+# issue-review backend applies here for the same reasons: `drain_prs_service.py`,
+# `install_drainer.py` and `drain_prs.py` all resolve through these rather than
+# rebuilding them, so `--install-dir` cannot move one component's idea of the
+# default without moving every component's.
+DRAINER_INSTALL_DIR_ENV = "KANBAN_DRAINER_INSTALL_DIR"
+
+# Every managed drainer location, on every supported platform, spelled whole
+# exactly once and only here -- the rule the issue-review literals above
+# follow, and for the same reason: each is a `personal-path` token in
+# docs/agent-workflow-contract.md §4 declaring this file, so a spelling that
+# drifts from the manifest fails tools/test_agent_workflow_contract.py rather
+# than shipping.
+#
+# The install directory is deliberately *not* spelled a second time: it is the
+# directory its own discovery record lives in, which is the relationship
+# `DEFAULT_INSTALL_DIR` has always had to `DISCOVERY_RECORD_PATH` in
+# tools/drain_prs_service.py. That keeps each manifest row's token a substring
+# of one literal here rather than a pair of literals that can drift apart.
+_MACOS_DRAINER_RECORD = "/Library/Application Support/kanban/pr-drainer/config.json"
+_XDG_DRAINER_RECORD_FALLBACK = "/.local/share/kanban/pr-drainer/config.json"
+_MACOS_DRAINER_LOG_DIR = "/Library/Logs/kanban/pr-drainer"
+_XDG_DRAINER_LOG_DIR_FALLBACK = "/.local/state/kanban/pr-drainer"
+# The same two directories as home-relative suffixes, taken from the record
+# literals above rather than restated.
+_MACOS_DRAINER_INSTALL_DIR = str(PurePosixPath(_MACOS_DRAINER_RECORD).parent)
+_XDG_DRAINER_INSTALL_DIR_FALLBACK = str(
+    PurePosixPath(_XDG_DRAINER_RECORD_FALLBACK).parent
+)
+# The namespace the two XDG fallbacks spell home-relatively, for the branch
+# where $XDG_DATA_HOME or $XDG_STATE_HOME names the base directory itself.
+_DRAINER_NAMESPACE = ("kanban", "pr-drainer")
+# Every environment variable the resolvers below read, named once so a
+# component that has to carry this installation's context somewhere else --
+# `drain_prs_service.service_definition`, into the job a service manager
+# starts -- carries exactly the set that decides the answers, rather than a
+# list of its own that can fall behind this one.
+DRAINER_PATH_VARIABLES = ("XDG_DATA_HOME", "XDG_STATE_HOME")
+_DRAINER_RECORD_NAME = PurePosixPath(_MACOS_DRAINER_RECORD).name
+
+
+def _xdg_drainer_dir(env_name: str, home_relative_fallback: str) -> Path:
+    """This namespace under an XDG base directory, by the rule
+    tools/service_manager.py's `_systemd_user_dir` already applies to
+    $XDG_CONFIG_HOME: the variable when it names an *absolute* directory, the
+    conventional home-relative directory when it is unset, empty, or relative.
+
+    Absolute-only rather than merely non-empty, so the drainer's managed paths
+    and the systemd unit that runs it interpret the environment identically. A
+    relative value would otherwise resolve against whatever working directory
+    each of them happened to have, which is not a base directory the two could
+    ever agree on. `_xdg_issue_review_dir` above keeps its own rule; that
+    resolver is PATH-1's and is not this one's to change.
+    """
+    base = os.environ.get(env_name, "")
+    if base and os.path.isabs(base):
+        return Path(base).joinpath(*_DRAINER_NAMESPACE)
+    return _home_relative(home_relative_fallback)
+
+
+def macos_drainer_install_dir() -> Path:
+    """The `~/Library`-spelled install directory, named on every platform.
+
+    macOS's own write path, and on any other platform the location a drainer
+    installed before this arc is at -- which is what makes it the directory
+    tools/install_drainer.py migrates away from there, and never on macOS,
+    where it equals default_drainer_install_dir() below.
+    """
+    return _home_relative(_MACOS_DRAINER_INSTALL_DIR)
+
+
+def macos_drainer_log_dir() -> Path:
+    """The `~/Library`-spelled log root, on the same terms."""
+    return _home_relative(_MACOS_DRAINER_LOG_DIR)
+
+
+def _xdg_drainer_install_dir() -> Path:
+    return _xdg_drainer_dir("XDG_DATA_HOME", _XDG_DRAINER_INSTALL_DIR_FALLBACK)
+
+
+def default_drainer_install_dir() -> Path:
+    """Where a *fresh* drainer install goes on this host: this platform's own
+    convention and only that. Where an install that already exists *is* is the
+    different question installed_drainer_dir() answers by probing both.
+
+    Resolved per call rather than frozen here, exactly as the issue-review
+    resolvers above are, so a test that redirects $HOME or the XDG base
+    directories -- or a migration that changes which install exists -- is not
+    escaped by a value bound when this module first loaded. The consumers that
+    want one answer per process bind it themselves; see
+    tools/drain_prs_service.py's module constants.
+    """
+    if is_macos():
+        return macos_drainer_install_dir()
+    return _xdg_drainer_install_dir()
+
+
+def default_drainer_log_dir() -> Path:
+    """Where every repository's per-slug log directory hangs off.
+
+    Single-valued per platform rather than probed: DRAINER_INSTALL_DIR_ENV
+    relocates the script links and the runtime root beneath them, never the
+    logs, so there is no second location for a probe to prefer. A Linux
+    migration moves an existing `~/Library` log tree here rather than leaving
+    the host with two.
+    """
+    if is_macos():
+        return macos_drainer_log_dir()
+    return _xdg_drainer_dir("XDG_STATE_HOME", _XDG_DRAINER_LOG_DIR_FALLBACK)
+
+
+def installed_drainer_dir() -> Path:
+    """Where a drainer installation *already is*.
+
+    The XDG location first and the `~/Library` location second, on both
+    platforms, on exactly the terms installed_issue_review_dir() above
+    explains: nothing an operator already installed has to move, occupancy is
+    the discovery record's and is tested with os.path.lexists so an occupied
+    but invalid candidate still selects its installation, and only when
+    neither is occupied is the answer this platform's write path.
+    """
+    for candidate in (_xdg_drainer_install_dir(), macos_drainer_install_dir()):
+        if os.path.lexists(candidate / _DRAINER_RECORD_NAME):
+            return candidate
+    return default_drainer_install_dir()
+
+
+def drainer_record_path() -> Path:
+    """Where the installer records which jobs it actually installed, so Kanban
+    discovers an `--install-dir` installation it never saw the option for.
+    Fixed rather than install-dir-relative on purpose: a dashboard that
+    inherits no environment still has to find it, so neither `--install-dir`
+    nor DRAINER_INSTALL_DIR_ENV relocates it. Read by src/Kanban/Drainer.hs;
+    written by tools/install_drainer.py and tools/drain_prs_service.py."""
+    return installed_drainer_dir() / _DRAINER_RECORD_NAME
+
+
+def drainer_install_dir_override() -> Path | None:
+    """The install directory DRAINER_INSTALL_DIR_ENV names, or None when it
+    names none. The one place that variable is read, so the controller's own
+    install directory and the installer's default destination cannot disagree
+    about whether it was set."""
+    override = os.environ.get(DRAINER_INSTALL_DIR_ENV)
+    if override and override.strip():
+        return Path(override).expanduser()
+    return None
+
+
+def drainer_install_dir() -> Path:
+    """The install directory a drainer component should treat as its own: the
+    environment override when there is one, and otherwise the directory the
+    discovery record lives in -- which is why an install under `~/Library`
+    keeps resolving itself, and keeps its install-dir-relative runtime and
+    incident state, on a host whose fresh-install default is XDG."""
+    override = drainer_install_dir_override()
+    return override if override is not None else installed_drainer_dir()
+
+
+APPROVAL_MODES = {"label", "review", "either"}
+BLOCKING_SEVERITIES = {"red", "amber"}
+
+
+@dataclass(frozen=True)
+class WorkflowConfig:
+    approval_label: str = "reviewed:approve"
+    changes_requested_label: str = "reviewed:changes"
+    blocked_labels: frozenset[str] = frozenset({"blocked"})
+    tracker_labels: frozenset[str] = frozenset({"epic"})
+    additional_tracker_section_headings: tuple[str, ...] = ()
+    approval_mode: str = "label"
+    blocking_severity: str = "red"
+    # Display-only: which label names the dashboard tints as problems and as
+    # UI concerns in its label chips. Python workers carry them so the shared
+    # schema stays one schema — a documented key must not warn as unknown —
+    # but nothing here reads their styling meaning.
+    problem_style_labels: frozenset[str] = frozenset()
+    ui_style_labels: frozenset[str] = frozenset()
+    # Case-sensitive, repository-relative coordination declarations: an exact
+    # file path, or a directory ending in `/` that covers every descendant by
+    # whole path component -- `docs/notes/` covers `docs/notes/a.md` and never
+    # a sibling such as `docs/notes-old/a.md`; no globs, no string prefixes.
+    #
+    # This key answers ONE question: may drain_prs.py merge a candidate whose
+    # only distance from the default branch is a change to covered paths,
+    # without a branch update? It does NOT grant an agent a publication lane.
+    # Until this split it did both (issue #370 reused it as the lane), and the
+    # collision was live: declaring a path so the drainer could merge past it
+    # also authorized every document workflow to publish it unattended, one
+    # default-branch push per disposition -- and each push made the drainer
+    # merge master into every approved PR, restarting that PR's CI under
+    # cancel-in-progress. Publication now reads direct_publication_paths below.
+    # Empty by default, which is no merge exception.
+    coordination_paths: frozenset[str] = frozenset()
+    # The AGENT PUBLICATION lane, and the only key publish_coordination_doc.py
+    # reads: which documents a workflow may push straight to the publication
+    # branch in the run that approves the mutation. Same entry grammar and the
+    # same coordination_paths_cover predicate as above -- an entry means one
+    # thing everywhere -- but a separate declaration, because "the drainer may
+    # merge past this" and "an agent may publish this unattended" are different
+    # permissions with different costs.
+    #
+    # Empty by default, and that default is the safe one: a workflow whose
+    # document is not covered applies its approved mutation to the working copy,
+    # records it in refs/kanban/applied-locally/*, reports not-published, and
+    # lets the edits accumulate for a human to land in one batch. Declaring a
+    # path here opts that document into unattended pushes; leaving this key out
+    # entirely is a deliberate, supported configuration.
+    #
+    # Kanban's own lane never comes from here: it comes from
+    # docs/agent-workflow-contract.md §7, tracked beside the documents it
+    # classifies, so configuration can neither open nor close it.
+    direct_publication_paths: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class LimitsConfig:
+    # Rendered-card excerpt height, and nothing else. There are no
+    # open-connection caps to configure: a board refresh follows both open
+    # connections to their final page (docs/design.md section 13).
+    excerpt_lines: int = 3
+
+
+@dataclass(frozen=True)
+class TimeoutsConfig:
+    github_seconds: int = 30
+    codex_seconds: int = 10
+    claude_seconds: int = 45
+    # A deliberate `kanban --ping` submits a model prompt, so it is bounded
+    # separately from the account-status reads above, which only fetch a
+    # number (docs/design.md section 14).
+    ping_codex_seconds: int = 120
+    ping_claude_seconds: int = 120
+
+
+@dataclass(frozen=True)
+class UsageCommandConfig:
+    argv: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class UsageConfig:
+    codex_command: UsageCommandConfig | None = None
+    # Kanban.Config.usageCodexEstimatedPercentPerSolveRound. Carried even
+    # though no Python consumer renders it: this schema mirrors the Haskell
+    # one field for field, and a key it did not know would be reported as
+    # unknown by every tool that loads the same file.
+    codex_estimated_percent_per_solve_round: int | None = None
+    claude_command: UsageCommandConfig | None = None
+    claude_estimated_percent_per_solve_round: int | None = None
+
+
+# Per-field overrides for [workflow]/[limits]/[timeouts], decoded identically
+# at the global and per-repository level. A field left None inherits the
+# base value; a repository array field replaces the global array in full.
+@dataclass(frozen=True)
+class WorkflowOverride:
+    approval_label: str | None = None
+    changes_requested_label: str | None = None
+    blocked_labels: frozenset[str] | None = None
+    tracker_labels: frozenset[str] | None = None
+    additional_tracker_section_headings: tuple[str, ...] | None = None
+    approval_mode: str | None = None
+    blocking_severity: str | None = None
+    problem_style_labels: frozenset[str] | None = None
+    ui_style_labels: frozenset[str] | None = None
+    coordination_paths: frozenset[str] | None = None
+    direct_publication_paths: frozenset[str] | None = None
+
+
+@dataclass(frozen=True)
+class LimitsOverride:
+    excerpt_lines: int | None = None
+
+
+@dataclass(frozen=True)
+class TimeoutsOverride:
+    github_seconds: int | None = None
+    codex_seconds: int | None = None
+    claude_seconds: int | None = None
+    ping_codex_seconds: int | None = None
+    ping_claude_seconds: int | None = None
+
+
+@dataclass(frozen=True)
+class RepositoryOverride:
+    workflow: WorkflowOverride = field(default_factory=WorkflowOverride)
+    limits: LimitsOverride = field(default_factory=LimitsOverride)
+    timeouts: TimeoutsOverride = field(default_factory=TimeoutsOverride)
+    # Kanban.Config.repositoryOverridePath. Not an override at all: it
+    # declares where this repository is checked out on this machine, and is
+    # what makes the table a member of the dashboard's repository roster.
+    # Carried here so the shared schema stays one schema -- a documented key
+    # must not warn as unknown -- but no Python worker reads it.
+    path: str | None = None
+
+
+@dataclass(frozen=True)
+class RawConfig:
+    cache: bool = True
+    remote_name: str = "origin"
+    workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
+    limits: LimitsConfig = field(default_factory=LimitsConfig)
+    timeouts: TimeoutsConfig = field(default_factory=TimeoutsConfig)
+    usage: UsageConfig = field(default_factory=UsageConfig)
+    repositories: dict[str, RepositoryOverride] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ResolvedConfig:
+    cache: bool
+    remote_name: str
+    workflow: WorkflowConfig
+    limits: LimitsConfig
+    timeouts: TimeoutsConfig
+    usage: UsageConfig
+
+
+# --------------------------------------------- coordination-path coverage --
+#
+# The one definition of what a declared path entry covers, shared by BOTH
+# `workflow.coordination_paths` and `workflow.direct_publication_paths`.
+# drain_prs.py's base-advance decision reads the first and
+# publish_coordination_doc.py's consuming-repository eligibility reads the
+# second; they call these helpers so an entry is written and read the same way
+# in either key. Sharing the grammar is not sharing the permission -- the keys
+# answer different questions and a path in one implies nothing about the other.
+
+
+def coordination_path_covers(declared: str, path: str) -> bool:
+    """Whether one coordination declaration covers `path`.
+
+    An entry ending in `/` declares a directory and covers every descendant,
+    compared by whole path component: `docs/notes/` covers `docs/notes/a.md`
+    and never a sibling such as `docs/notes-old/a.md`. Any other entry names
+    one file exactly -- no globs, no string prefixes, no extension matching.
+    A directory entry whose component prefix is empty (`/` alone, or `./`)
+    would cover every path in the repository; it grants nothing here, and
+    empty_prefix_coordination_declarations below is how a consumer reports it
+    rather than silently honouring or silently dropping it.
+    """
+    if not declared.endswith("/"):
+        return declared == path
+    prefix = PurePosixPath(declared.rstrip("/")).parts
+    if not prefix:
+        return False
+    return PurePosixPath(path).parts[: len(prefix)] == prefix
+
+
+def coordination_paths_cover(declared, path: str) -> bool:
+    """Whether any of the declared coordination entries covers `path`."""
+    return any(coordination_path_covers(entry, path) for entry in declared)
+
+
+def empty_prefix_coordination_declarations(declared) -> list[str]:
+    """The declared entries whose directory prefix is empty, sorted.
+
+    `PurePosixPath("").parts` and `PurePosixPath(".").parts` are both `()`,
+    so entries such as `/`, `//`, or `./` would match every path if the
+    trailing-slash comparison ran on them. They are invalid declarations
+    rather than broad ones: each consumer refuses to treat one as coverage
+    and reports it, because an operator who wrote one meant something this
+    schema cannot express.
+    """
+    return sorted(
+        entry
+        for entry in declared
+        if entry.endswith("/") and not PurePosixPath(entry.rstrip("/")).parts
+    )
+
+
+def default_config_path() -> Path:
+    # Matches Kanban.Config.defaultConfigPath (getXdgDirectory XdgConfig):
+    # honor $XDG_CONFIG_HOME when set, so the dashboard and these tools agree
+    # on the same file.
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        return Path(xdg_config_home) / "kanban" / "config.toml"
+    return Path.home() / ".config" / "kanban" / "config.toml"
+
+
+def parse_repository_name(raw_value: str) -> str:
+    """Derives a display OWNER/NAME slug from a git remote URL.
+
+    Deliberately permissive, and *not* the same accept set as
+    Kanban.Repository.parseRepositoryName: it keeps the last two nonempty
+    segments of anything, so a plain local path remote such as
+    `/tmp/acme/widgets.git` still names `acme/widgets`. That is what lets
+    approve_issues.py and drain_prs.py address a fixture repository that has
+    no GitHub URL at all, and it is why this value is only ever used to build
+    `gh` arguments and log lines.
+
+    Anything that has to *name a canonical GitHub repository* — the drainer's
+    per-repository job identity above all — must use parse_github_repository
+    below instead, which mirrors the Haskell parser's accept set exactly.
+    """
+    stripped = raw_value.strip()
+    for prefix in ("https://", "http://", "ssh://", "git://"):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix) :]
+            break
+    normalized = stripped.replace("git@github.com", "github.com").replace(":", "/").rstrip("/")
+    segments = [segment for segment in normalized.split("/") if segment]
+    if len(segments) < 2:
+        raise KanbanConfigError(f"cannot derive OWNER/NAME from repository value: {raw_value}")
+    owner, name = segments[-2], segments[-1]
+    if name.endswith(".git"):
+        name = name[: -len(".git")]
+    if not owner or not name:
+        raise KanbanConfigError(f"cannot derive OWNER/NAME from repository value: {raw_value}")
+    return f"{owner}/{name}"
+
+
+# The canonical-identity parser. Every rule below is a transcription of
+# src/Kanban/Repository.hs, function for function, because the two sides have
+# to agree on which checkouts name a GitHub repository at all: Kanban selects
+# the drainer's job record by the identity it resolved, and this module derives
+# the job's launchd label from the identity the checkout's remote resolved to.
+# A value one side accepts and the other rejects would present as a drainer
+# that is installed and simultaneously not installed.
+_GITHUB_URL_SCHEMES = ("https://", "ssh://", "git://")
+_GITHUB_HOSTS = ("github.com", "www.github.com")
+# Kanban.Repository.isIdentityCharacter, and Data.Char.isDigit, which are both
+# ASCII-only — str.isdigit() is not, and would accept a non-ASCII port.
+_GITHUB_IDENTITY = re.compile(r"\A[A-Za-z0-9._-]+\Z")
+_GITHUB_PORT = re.compile(r"\A[0-9]+\Z")
+
+
+def _github_host_of(authority: str) -> str:
+    """Kanban.Repository.hostOf: drops optional userinfo, which may itself
+    contain '@'."""
+    return authority.rsplit("@", 1)[-1]
+
+
+def _is_github_host(host: str) -> bool:
+    return host.lower() in _GITHUB_HOSTS
+
+
+def _is_github_authority(authority: str) -> bool:
+    host, separator, port = _github_host_of(authority).partition(":")
+    if not _is_github_host(host):
+        return False
+    return not separator or bool(_GITHUB_PORT.fullmatch(port))
+
+
+def _github_owner_name(path: str) -> str | None:
+    """Exactly OWNER/NAME[.git], with leading and trailing slashes ignored. An
+    extra path segment is ambiguous rather than ignorable, so it fails."""
+    segments = [segment for segment in path.split("/") if segment]
+    if len(segments) != 2:
+        return None
+    owner, name = segments
+    if name.endswith(".git"):
+        name = name[: -len(".git")]
+    if not _GITHUB_IDENTITY.fullmatch(owner) or not _GITHUB_IDENTITY.fullmatch(name):
+        return None
+    return f"{owner}/{name}"
+
+
+def _github_url_identity(after_scheme: str) -> str | None:
+    authority, _, path = after_scheme.partition("/")
+    if not _is_github_authority(authority):
+        return None
+    return _github_owner_name(path)
+
+
+def _github_scp_identity(value: str) -> str | None:
+    """SCP-style [user@]host:path. The colon starts the path rather than a
+    port, so git@github.com:22/owner/name is a three-segment path and fails. A
+    slash before the colon means git reads the value as a local path."""
+    authority, separator, path = value.partition(":")
+    if not separator or "/" in authority or "@" not in authority:
+        return None
+    if not _is_github_host(_github_host_of(authority)):
+        return None
+    return _github_owner_name(path)
+
+
+def _github_remote_identity(value: str) -> str | None:
+    lowered = value.lower()
+    for scheme in _GITHUB_URL_SCHEMES:
+        if lowered.startswith(scheme):
+            return _github_url_identity(value[len(scheme) :])
+    return _github_scp_identity(value)
+
+
+def parse_github_repository(raw_value: str) -> str:
+    """Derives OWNER/NAME for a value that must name a repository on
+    github.com, accepting exactly what Kanban.Repository.parseRepositoryName
+    accepts: the bare OWNER/NAME form, and https://, ssh://, or git:// URLs
+    and git@github.com: SCP shorthand pointing at github.com. Foreign hosts,
+    http://, extra path segments, local paths, and identity segments carrying
+    anything outside [A-Za-z0-9._-] all fail closed."""
+    stripped = raw_value.strip()
+    identity = None
+    # Kanban.Repository.bareIdentity: URL authority punctuation means this is
+    # not a bare OWNER/NAME, so a remote URL cannot slip through as one.
+    if ":" not in stripped and "@" not in stripped:
+        identity = _github_owner_name(stripped)
+    if identity is None:
+        identity = _github_remote_identity(stripped)
+    if identity is None:
+        raise KanbanConfigError(
+            "cannot derive a github.com OWNER/NAME from repository value: "
+            f"{raw_value}"
+        )
+    return identity
+
+
+def normalize_github_repository(raw_value: str) -> str:
+    """The canonical identity, case-folded. GitHub owner and repository names
+    are case-insensitive, so two spellings that differ only in case name one
+    repository and must resolve to one drainer — otherwise two clones of the
+    same repository could drain it concurrently."""
+    return parse_github_repository(raw_value).lower()
+
+
+def _join(path: str, key: str) -> str:
+    return f"{path}.{key}" if path else key
+
+
+def _collect_unknown(table: dict, path: str, warnings: list[str]) -> None:
+    for key in table:
+        warnings.append(f"unknown configuration key: {_join(path, key)}")
+
+
+def _pop_bool(table: dict, key: str, path: str, default: bool) -> bool:
+    if key not in table:
+        return default
+    value = table.pop(key)
+    if not isinstance(value, bool):
+        raise KanbanConfigError(f"{_join(path, key)} must be a boolean")
+    return value
+
+
+def _pop_nonempty_str(table: dict, key: str, path: str, default: str | None = None) -> str | None:
+    if key not in table:
+        return default
+    value = table.pop(key)
+    full = _join(path, key)
+    if not isinstance(value, str):
+        raise KanbanConfigError(f"{full} must be a string")
+    if not value:
+        raise KanbanConfigError(f"{full} must be a non-empty string")
+    return value
+
+
+def _pop_str_list(table: dict, key: str, path: str) -> list[str] | None:
+    if key not in table:
+        return None
+    value = table.pop(key)
+    full = _join(path, key)
+    if not isinstance(value, list):
+        raise KanbanConfigError(f"{full} must be an array of strings")
+    result: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item:
+            raise KanbanConfigError(f"{full}[{index}] must be a non-empty string")
+        result.append(item)
+    return result
+
+
+# A 64-bit Int's range. Python's arbitrary-precision ints don't overflow
+# themselves, but the Haskell dashboard decodes every one of these fields as
+# a bounded `Int`, so this loader rejects the same out-of-range values to
+# keep both sides' validation semantics identical.
+_MAX_INT64 = 2**63 - 1
+_MICROSECONDS_PER_SECOND = 1_000_000
+_MAX_TIMEOUT_SECONDS = _MAX_INT64 // _MICROSECONDS_PER_SECOND
+
+
+def _pop_positive_int(table: dict, key: str, path: str) -> int | None:
+    if key not in table:
+        return None
+    value = table.pop(key)
+    full = _join(path, key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise KanbanConfigError(f"{full} must be an integer")
+    if value <= 0:
+        raise KanbanConfigError(f"{full} must be a positive integer")
+    if value > _MAX_INT64:
+        raise KanbanConfigError(f"{full} must not exceed {_MAX_INT64}")
+    return value
+
+
+def _pop_positive_timeout_seconds(table: dict, key: str, path: str) -> int | None:
+    value = _pop_positive_int(table, key, path)
+    if value is not None and value > _MAX_TIMEOUT_SECONDS:
+        raise KanbanConfigError(
+            f"{_join(path, key)} must not be large enough to overflow when converted to microseconds"
+        )
+    return value
+
+
+def _pop_enum(table: dict, key: str, path: str, choices: set[str]) -> str | None:
+    if key not in table:
+        return None
+    value = table.pop(key)
+    full = _join(path, key)
+    if value not in choices:
+        raise KanbanConfigError(
+            f"{full} must be one of {sorted(choices)}; got {value!r}"
+        )
+    return value
+
+
+def _pop_table(table: dict, key: str, path: str) -> tuple[dict, str] | None:
+    if key not in table:
+        return None
+    value = table.pop(key)
+    child_path = _join(path, key)
+    if not isinstance(value, dict):
+        raise KanbanConfigError(f"{child_path} must be a table")
+    return dict(value), child_path
+
+
+def _merge(base, override):
+    updates = {name: value for name, value in vars(override).items() if value is not None}
+    return replace(base, **updates) if updates else base
+
+
+def _parse_workflow_override(value: dict, path: str, warnings: list[str]) -> WorkflowOverride:
+    table = dict(value)
+    approval_label = _pop_nonempty_str(table, "approval_label", path)
+    changes_requested_label = _pop_nonempty_str(table, "changes_requested_label", path)
+    blocked_labels = _pop_str_list(table, "blocked_labels", path)
+    tracker_labels = _pop_str_list(table, "tracker_labels", path)
+    headings = _pop_str_list(table, "additional_tracker_section_headings", path)
+    approval_mode = _pop_enum(table, "approval_mode", path, APPROVAL_MODES)
+    blocking_severity = _pop_enum(table, "blocking_severity", path, BLOCKING_SEVERITIES)
+    problem_style_labels = _pop_str_list(table, "problem_style_labels", path)
+    ui_style_labels = _pop_str_list(table, "ui_style_labels", path)
+    coordination_paths = _pop_str_list(table, "coordination_paths", path)
+    direct_publication_paths = _pop_str_list(
+        table, "direct_publication_paths", path
+    )
+    _collect_unknown(table, path, warnings)
+    return WorkflowOverride(
+        approval_label=approval_label,
+        changes_requested_label=changes_requested_label,
+        blocked_labels=frozenset(blocked_labels) if blocked_labels is not None else None,
+        tracker_labels=frozenset(tracker_labels) if tracker_labels is not None else None,
+        additional_tracker_section_headings=(
+            tuple(headings) if headings is not None else None
+        ),
+        approval_mode=approval_mode,
+        blocking_severity=blocking_severity,
+        problem_style_labels=(
+            frozenset(problem_style_labels) if problem_style_labels is not None else None
+        ),
+        ui_style_labels=frozenset(ui_style_labels) if ui_style_labels is not None else None,
+        coordination_paths=(
+            frozenset(coordination_paths) if coordination_paths is not None else None
+        ),
+        direct_publication_paths=(
+            frozenset(direct_publication_paths)
+            if direct_publication_paths is not None
+            else None
+        ),
+    )
+
+
+def _parse_limits_override(value: dict, path: str, warnings: list[str]) -> LimitsOverride:
+    table = dict(value)
+    excerpt_lines = _pop_positive_int(table, "excerpt_lines", path)
+    # max_open_issues and max_open_pull_requests are gone from the schema, so a
+    # file that still sets them reaches _collect_unknown like any other
+    # unrecognized key: one warning apiece, and no effect.
+    _collect_unknown(table, path, warnings)
+    return LimitsOverride(
+        excerpt_lines=excerpt_lines,
+    )
+
+
+def _parse_timeouts_override(value: dict, path: str, warnings: list[str]) -> TimeoutsOverride:
+    table = dict(value)
+    github_seconds = _pop_positive_timeout_seconds(table, "github_seconds", path)
+    codex_seconds = _pop_positive_timeout_seconds(table, "codex_seconds", path)
+    claude_seconds = _pop_positive_timeout_seconds(table, "claude_seconds", path)
+    ping_codex_seconds = _pop_positive_timeout_seconds(table, "ping_codex_seconds", path)
+    ping_claude_seconds = _pop_positive_timeout_seconds(table, "ping_claude_seconds", path)
+    _collect_unknown(table, path, warnings)
+    return TimeoutsOverride(
+        github_seconds=github_seconds,
+        codex_seconds=codex_seconds,
+        claude_seconds=claude_seconds,
+        ping_codex_seconds=ping_codex_seconds,
+        ping_claude_seconds=ping_claude_seconds,
+    )
+
+
+def _parse_command_argv(value, path: str) -> UsageCommandConfig:
+    if not isinstance(value, list):
+        raise KanbanConfigError(f"{path} must be an array")
+    if not value:
+        raise KanbanConfigError(f"{path} must be a non-empty array")
+    for item in value:
+        if not isinstance(item, str):
+            raise KanbanConfigError(f"{path} entries must be strings")
+    if not value[0]:
+        raise KanbanConfigError(f"{path} executable must be a non-empty string")
+    return UsageCommandConfig(argv=tuple(value))
+
+
+# Kanban.Config.parseSolveRoundPercent. A whole percentage of a window, so
+# anything outside 1 through 100 is an error rather than a clamped value; zero
+# in particular has to go, because the round count divides by it. bool is a
+# subclass of int in Python but not a TOML integer, and the Haskell matcher
+# rejects `true` outright, so it is rejected here for the same reason every
+# other integer key rejects it.
+def _pop_solve_round_percent(table: dict, key: str, path: str) -> int | None:
+    if key not in table:
+        return None
+    value = table.pop(key)
+    full = _join(path, key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise KanbanConfigError(f"{full} must be an integer")
+    if value < 1 or value > 100:
+        raise KanbanConfigError(f"{full} must be a whole percentage from 1 through 100")
+    return value
+
+
+def _parse_usage_provider(table: dict, key: str, path: str, warnings: list[str]):
+    """Both keys a provider table may carry, neither gating the other.
+
+    Returns (command, estimated_percent_per_solve_round). A table holding only
+    the estimate is valid configuration: the estimate then describes whatever
+    windows the built-in probe reports.
+    """
+    popped = _pop_table(table, key, path)
+    if popped is None:
+        return (None, None)
+    provider_table, child_path = popped
+    command = provider_table.pop("command", None)
+    parsed_command = (
+        _parse_command_argv(command, _join(child_path, "command")) if command is not None else None
+    )
+    estimate = _pop_solve_round_percent(
+        provider_table, "estimated_percent_per_solve_round", child_path
+    )
+    _collect_unknown(provider_table, child_path, warnings)
+    return (parsed_command, estimate)
+
+
+def _parse_usage_table(value: dict, path: str, warnings: list[str]) -> UsageConfig:
+    table = dict(value)
+    codex_command, codex_estimate = _parse_usage_provider(table, "codex", path, warnings)
+    claude_command, claude_estimate = _parse_usage_provider(table, "claude", path, warnings)
+    _collect_unknown(table, path, warnings)
+    return UsageConfig(
+        codex_command=codex_command,
+        codex_estimated_percent_per_solve_round=codex_estimate,
+        claude_command=claude_command,
+        claude_estimated_percent_per_solve_round=claude_estimate,
+    )
+
+
+# Kanban.Config.isCanonicalKeyCharacter. A repository override key is a
+# configuration identifier, not another spelling of --repo input: exactly one
+# canonical lowercase GitHub owner/name pair. That rejects uppercase,
+# surrounding whitespace, URL and SCP remote syntax, repeated or extra
+# slashes, and a missing segment by character and shape alone; a .git suffix
+# needs its own rejection because every character in it is otherwise legal.
+_CANONICAL_REPOSITORY_SEGMENT = re.compile(r"[a-z0-9._-]+")
+
+# Kanban.Config.asciiLowercase. str.lower() would apply Unicode mappings the
+# Haskell side does not; under this mapping a non-ASCII identity simply
+# matches no canonical key, which is the correct outcome on both sides.
+_ASCII_LOWERCASE = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+)
+
+
+def _is_canonical_repository_key(key: str) -> bool:
+    segments = key.split("/")
+    if len(segments) != 2:
+        return False
+    owner, name = segments
+    if not _CANONICAL_REPOSITORY_SEGMENT.fullmatch(owner):
+        return False
+    return bool(_CANONICAL_REPOSITORY_SEGMENT.fullmatch(name)) and not name.endswith(".git")
+
+
+def _parse_repositories_table(
+    value: dict, path: str, warnings: list[str]
+) -> dict[str, RepositoryOverride]:
+    repos: dict[str, RepositoryOverride] = {}
+    for repo_key, repo_value in value.items():
+        child_path = f'{path}."{repo_key}"'
+        if not _is_canonical_repository_key(repo_key):
+            raise KanbanConfigError(
+                f"{child_path} is not a canonical repository key; "
+                'expected lowercase OWNER/NAME such as "coghex/kanban"'
+            )
+        if not isinstance(repo_value, dict):
+            raise KanbanConfigError(f"{child_path} must be a table")
+        repo_table = dict(repo_value)
+        for forbidden in ("cache", "remote_name", "usage"):
+            if forbidden in repo_table:
+                raise KanbanConfigError(
+                    f"{child_path}.{forbidden} is not valid in a repository override; "
+                    "it is global-only"
+                )
+        workflow_override = WorkflowOverride()
+        popped = _pop_table(repo_table, "workflow", child_path)
+        if popped is not None:
+            sub_value, sub_path = popped
+            workflow_override = _parse_workflow_override(sub_value, sub_path, warnings)
+        limits_override = LimitsOverride()
+        popped = _pop_table(repo_table, "limits", child_path)
+        if popped is not None:
+            sub_value, sub_path = popped
+            limits_override = _parse_limits_override(sub_value, sub_path, warnings)
+        timeouts_override = TimeoutsOverride()
+        popped = _pop_table(repo_table, "timeouts", child_path)
+        if popped is not None:
+            sub_value, sub_path = popped
+            timeouts_override = _parse_timeouts_override(sub_value, sub_path, warnings)
+        checkout_path = _pop_checkout_path(repo_table, child_path)
+        _collect_unknown(repo_table, child_path, warnings)
+        repos[repo_key] = RepositoryOverride(
+            workflow=workflow_override,
+            limits=limits_override,
+            timeouts=timeouts_override,
+            path=checkout_path,
+        )
+    return repos
+
+
+def _pop_checkout_path(table: dict, path: str) -> str | None:
+    """Kanban.Config.parseCheckoutPath. A roster `path` names one checkout on
+    this machine, and is validated as the literal string the file carries --
+    before any expansion or resolution, so `~/work/repo` is a non-absolute
+    value rather than a home-relative one, because nothing here expands it. A
+    relative value has no defensible meaning to degrade into: the file is read
+    from a fixed XDG location but consumed by workers running from other
+    directories, so the same file would name different checkouts depending on
+    where the reader was launched. That is why this is the one roster mistake
+    that is a load-time error rather than a degraded entry."""
+    value = _pop_nonempty_str(table, "path", path)
+    if value is not None and not os.path.isabs(value):
+        raise KanbanConfigError(f"{_join(path, 'path')} must be an absolute path to a checkout")
+    return value
+
+
+def _decode(data: dict) -> tuple[RawConfig, list[str]]:
+    warnings: list[str] = []
+    table = dict(data)
+
+    cache = _pop_bool(table, "cache", "", True)
+    remote_name = _pop_nonempty_str(table, "remote_name", "", "origin")
+
+    workflow_override = WorkflowOverride()
+    popped = _pop_table(table, "workflow", "")
+    if popped is not None:
+        value, child_path = popped
+        workflow_override = _parse_workflow_override(value, child_path, warnings)
+
+    limits_override = LimitsOverride()
+    popped = _pop_table(table, "limits", "")
+    if popped is not None:
+        value, child_path = popped
+        limits_override = _parse_limits_override(value, child_path, warnings)
+
+    timeouts_override = TimeoutsOverride()
+    popped = _pop_table(table, "timeouts", "")
+    if popped is not None:
+        value, child_path = popped
+        timeouts_override = _parse_timeouts_override(value, child_path, warnings)
+
+    usage = UsageConfig()
+    popped = _pop_table(table, "usage", "")
+    if popped is not None:
+        value, child_path = popped
+        usage = _parse_usage_table(value, child_path, warnings)
+
+    repositories: dict[str, RepositoryOverride] = {}
+    popped = _pop_table(table, "repositories", "")
+    if popped is not None:
+        value, child_path = popped
+        repositories = _parse_repositories_table(value, child_path, warnings)
+
+    _collect_unknown(table, "", warnings)
+
+    raw = RawConfig(
+        cache=cache,
+        remote_name=remote_name,
+        workflow=_merge(WorkflowConfig(), workflow_override),
+        limits=_merge(LimitsConfig(), limits_override),
+        timeouts=_merge(TimeoutsConfig(), timeouts_override),
+        usage=usage,
+        repositories=repositories,
+    )
+    _validate_raw_config(raw)
+    return raw, warnings
+
+
+def _validate_workflow_label_distinctness(context: str, workflow: WorkflowConfig) -> None:
+    # The resolved approval and changes-requested labels must be distinct
+    # from each other and from the fixed "reviewed:revised" protocol label,
+    # for every selectable repository, not merely the global table: a
+    # repository override that only sets one of the two labels can still
+    # collide once merged with the global value of the other.
+    approval = workflow.approval_label.casefold()
+    changes = workflow.changes_requested_label.casefold()
+    if approval == changes:
+        raise KanbanConfigError(
+            f"{context}.approval_label and {context}.changes_requested_label must not "
+            f"resolve to the same label ({workflow.approval_label})"
+        )
+    if approval == "reviewed:revised":
+        raise KanbanConfigError(
+            f"{context}.approval_label must not resolve to the reserved reviewed:revised label"
+        )
+    if changes == "reviewed:revised":
+        raise KanbanConfigError(
+            f"{context}.changes_requested_label must not resolve to the reserved reviewed:revised label"
+        )
+
+
+def _validate_raw_config(raw: RawConfig) -> None:
+    _validate_workflow_label_distinctness("workflow", raw.workflow)
+    for name, override in raw.repositories.items():
+        _validate_workflow_label_distinctness(
+            f'repositories."{name}".workflow', _merge(raw.workflow, override.workflow)
+        )
+
+
+def load_raw_config(explicit_path: str | None) -> tuple[RawConfig, list[str]]:
+    path = Path(explicit_path).expanduser() if explicit_path else default_config_path()
+    if not path.exists():
+        return RawConfig(), []
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        raise KanbanConfigError(f"configuration file {path} is invalid: {exc}") from exc
+    except OSError as exc:
+        raise KanbanConfigError(f"could not read configuration file {path}: {exc}") from exc
+    try:
+        raw, warnings = _decode(data)
+    except KanbanConfigError as exc:
+        raise KanbanConfigError(f"configuration file {path} is invalid: {exc}") from exc
+    return raw, [f"configuration file {path}: {message}" for message in warnings]
+
+
+def resolve_config(owner_slash_name: str, raw: RawConfig) -> ResolvedConfig:
+    # Override keys are canonical lowercase, so the lookup is the one place
+    # the identity is folded, exactly as in Kanban.Config.resolveConfig.
+    # Callers keep passing their own repo slug, which still names the
+    # repository for `gh`, REST paths, and remote comparison.
+    override = raw.repositories.get(
+        owner_slash_name.translate(_ASCII_LOWERCASE), RepositoryOverride()
+    )
+    return ResolvedConfig(
+        cache=raw.cache,
+        remote_name=raw.remote_name,
+        workflow=_merge(raw.workflow, override.workflow),
+        limits=_merge(raw.limits, override.limits),
+        timeouts=_merge(raw.timeouts, override.timeouts),
+        usage=raw.usage,
+    )

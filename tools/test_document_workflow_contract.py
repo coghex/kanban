@@ -1266,6 +1266,21 @@ MECHANISM_MODULES = (
     "kanban_config.py",
 )
 
+# Issue #574's janitor census is not a member of the set above: it has no
+# `tools/` source, so there is nothing for it to be identical *to*. What it
+# does share is the configuration reader -- it loads `kanban_config.py` from
+# beside itself exactly as `publish_coordination_doc.py` does -- and the Codex
+# bundle has no shared scripts root, so that bundle carries a second copy of
+# the reader inside the janitor skill. Wherever the census ships, the module
+# beside it is held to `tools/kanban_config.py` here, by the same rule and with
+# the same repair as the process-report copy.
+CENSUS_SCRIPTS_DIRS = {
+    "claude": "scripts",
+    "codex": "skills/janitor/scripts",
+}
+CENSUS_MODULE = "census.py"
+CENSUS_CONFIG_MODULE = "kanban_config.py"
+
 # `Path(__file__).resolve().parent / "<name>"` — how each mechanism module
 # names a sibling it loads at run time. Read out of the source rather than
 # listed, so a module that grows a fourth sibling dependency has to ship it in
@@ -2623,6 +2638,34 @@ class BundledMechanismTests(unittest.TestCase):
                         f"Repair: cp tools/{name} "
                         f"{(self.bundled_dir(bundle) / name).relative_to(REPO_ROOT)}",
                     )
+
+    def census_scripts_dir(self, bundle):
+        return BUNDLE_ROOTS[bundle] / CENSUS_SCRIPTS_DIRS[bundle]
+
+    def test_every_bundle_ships_the_census_with_its_configuration_module(self):
+        for bundle in sorted(BUNDLE_ROOTS):
+            for name in (CENSUS_MODULE, CENSUS_CONFIG_MODULE):
+                with self.subTest(bundle=bundle, module=name):
+                    self.assertTrue(
+                        (self.census_scripts_dir(bundle) / name).is_file(),
+                        f"the {bundle} bundle does not ship {name} beside its "
+                        "janitor census, so the census resolves no drainer "
+                        "wherever the bundle installs",
+                    )
+
+    def test_the_census_configuration_copy_is_identical_to_its_tracked_source(self):
+        for bundle in sorted(BUNDLE_ROOTS):
+            with self.subTest(bundle=bundle):
+                copy = self.census_scripts_dir(bundle) / CENSUS_CONFIG_MODULE
+                self.assertEqual(
+                    copy.read_bytes(),
+                    (MECHANISM_SOURCE_DIR / CENSUS_CONFIG_MODULE).read_bytes(),
+                    f"{bundle}'s census-side {CENSUS_CONFIG_MODULE} has "
+                    f"drifted from tools/{CENSUS_CONFIG_MODULE}; the bundled "
+                    "copies are the same mechanism, not a fork. Repair: cp "
+                    f"tools/{CENSUS_CONFIG_MODULE} "
+                    f"{copy.relative_to(REPO_ROOT)}",
+                )
 
     def sibling_closure(self):
         """Every module the mechanism reaches by loading a sibling, transitively.

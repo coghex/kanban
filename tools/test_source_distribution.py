@@ -298,13 +298,22 @@ PROVIDER_MANIFESTS = (
 # do with it still differs -- the Claude copy resolves the `pr_review` cells
 # and pins them, the Codex copy resolves no cell and passes no model or effort
 # (D-2) -- but a release that shipped either coordinator without its reader
-# would install a workflow that cannot route at all. Eight modules, four per
-# bundle.
+# would install a workflow that cannot route at all.
+# Issue #574's janitor census joins them on the same terms: it is the janitor
+# workflow's whole read side, and it loads a configuration module from beside
+# itself the way the publication module does, so a bundle that shipped the
+# census without that sibling would resolve no drainer at all. The Codex bundle
+# needs its own second copy of `kanban_config.py` because it has no shared
+# scripts root -- each skill carries what it loads.
+# Eleven modules: five in the Claude bundle and six in the Codex bundle.
 BUNDLED_MECHANISM_MODULES = (
+    "claude-plugin/plugins/kanban/scripts/census.py",
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
+    "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
+    "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
@@ -848,8 +857,9 @@ class SourceDistributionTest(unittest.TestCase):
             BUNDLED_MECHANISM_MODULES,
             "Both provider bundles must carry the publication, tracker "
             "transaction, and configuration modules their document workflows "
-            "invoke, and the Claude bundle its review coordinator's model "
-            "roster reader; a bundle that ships the workflows without them "
+            "invoke, each bundle its review coordinator's model roster "
+            "reader, and each the janitor census with the configuration "
+            "module beside it; a bundle that ships the workflows without them "
             "installs a command that fails closed in every repository.",
         )
 
