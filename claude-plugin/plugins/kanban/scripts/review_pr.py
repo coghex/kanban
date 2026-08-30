@@ -125,19 +125,33 @@ def nested_review_assignment(provider: str):
     except models.KanbanModelsError as error:
         raise WorkflowError(f"{error}; no nested review was performed") from error
 
+MAX_REVIEW_SUMMARY_CHARS = 4000
+MAX_REVIEW_BLOCKER_BODY_CHARS = 2000
+MAX_REVIEW_BLOCKING_CONCERNS = 30
+
+
 REVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "verdict": {"type": "string", "enum": ["APPROVE", "CHANGES_REQUESTED"]},
-        "summary": {"type": "string"},
+        "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_REVIEW_SUMMARY_CHARS,
+        },
         "blocking_concerns": {
             "type": "array",
+            "maxItems": MAX_REVIEW_BLOCKING_CONCERNS,
             "items": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
                     "line": {"type": "string"},
-                    "body": {"type": "string"},
+                    "body": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_REVIEW_BLOCKER_BODY_CHARS,
+                    },
                 },
                 "required": ["path", "line", "body"],
                 "additionalProperties": False,
@@ -954,7 +968,7 @@ The current working directory is a read-only extraction of the exact PR head. In
 
 Review only. Do not edit files, access GitHub, publish, label, commit, push, or merge. Evaluate correctness, regressions, missing required tests, scope, and satisfaction of the effective review contract. Use CHANGES_REQUESTED only for concrete human-action blockers; do not block on optional style preferences. Use APPROVE only when there are no blocking concerns.
 
-Return only the requested structured result. Keep the summary concise. Each blocker must have an actionable repository-relative path, line (or an empty string if no single line applies), and explanation.
+Return only the requested structured result. The summary must contain non-whitespace text and be no more than {MAX_REVIEW_SUMMARY_CHARS} characters. Include no more than {MAX_REVIEW_BLOCKING_CONCERNS} blockers. Each blocker must have an actionable repository-relative path, line (or an empty string if no single line applies), and a non-blank explanation no more than {MAX_REVIEW_BLOCKER_BODY_CHARS} characters long.
 
 REVIEW_PAYLOAD:
 {json.dumps(context, indent=2, sort_keys=True)}
@@ -978,7 +992,7 @@ Review only. Do not edit files, publish a comment or label yourself, commit, pus
 Write a JSON file matching exactly this schema:
 {json.dumps(REVIEW_SCHEMA, indent=2)}
 
-Each blocker must have an actionable repository-relative path, line (or an empty string if no single line applies), and explanation. Keep the summary concise.
+The summary must contain non-whitespace text and be no more than {MAX_REVIEW_SUMMARY_CHARS} characters. Include no more than {MAX_REVIEW_BLOCKING_CONCERNS} blockers. Each blocker must have an actionable repository-relative path, line (or an empty string if no single line applies), and a non-blank explanation no more than {MAX_REVIEW_BLOCKER_BODY_CHARS} characters long.
 
 REVIEW_PAYLOAD:
 {json.dumps(context, indent=2, sort_keys=True)}
@@ -993,17 +1007,34 @@ def validate_review(value: Any, reviewer: Reviewer, model: str = UNVERIFIED_MODE
     concerns = value.get("blocking_concerns")
     if verdict not in {"APPROVE", "CHANGES_REQUESTED"}:
         raise WorkflowError(f"{reviewer.display_name} returned an invalid verdict")
-    if not isinstance(summary, str) or not summary.strip() or len(summary) > 4000:
-        raise WorkflowError(f"{reviewer.display_name} returned an invalid summary")
-    if not isinstance(concerns, list) or len(concerns) > 30:
-        raise WorkflowError(f"{reviewer.display_name} returned invalid blocking concerns")
+    if not isinstance(summary, str):
+        raise WorkflowError(f"{reviewer.display_name} returned a non-string summary")
+    if not summary.strip():
+        raise WorkflowError(f"{reviewer.display_name} returned a blank summary")
+    if len(summary) > MAX_REVIEW_SUMMARY_CHARS:
+        raise WorkflowError(
+            f"{reviewer.display_name} returned a {len(summary)}-character summary; "
+            f"the limit is {MAX_REVIEW_SUMMARY_CHARS}"
+        )
+    if not isinstance(concerns, list):
+        raise WorkflowError(f"{reviewer.display_name} returned non-list blocking concerns")
+    if len(concerns) > MAX_REVIEW_BLOCKING_CONCERNS:
+        raise WorkflowError(
+            f"{reviewer.display_name} returned {len(concerns)} blocking concerns; "
+            f"the limit is {MAX_REVIEW_BLOCKING_CONCERNS}"
+        )
     for concern in concerns:
         if not isinstance(concern, dict) or set(concern) != {"path", "line", "body"}:
             raise WorkflowError(f"{reviewer.display_name} returned a malformed blocker")
         if not all(isinstance(concern[key], str) for key in ("path", "line", "body")):
             raise WorkflowError(f"{reviewer.display_name} returned a malformed blocker")
-        if not concern["body"].strip() or len(concern["body"]) > 2000:
-            raise WorkflowError(f"{reviewer.display_name} returned an invalid blocker body")
+        if not concern["body"].strip():
+            raise WorkflowError(f"{reviewer.display_name} returned a blank blocker body")
+        if len(concern["body"]) > MAX_REVIEW_BLOCKER_BODY_CHARS:
+            raise WorkflowError(
+                f"{reviewer.display_name} returned a {len(concern['body'])}-character "
+                f"blocker body; the limit is {MAX_REVIEW_BLOCKER_BODY_CHARS}"
+            )
     if verdict == "APPROVE" and concerns:
         raise WorkflowError(f"{reviewer.display_name} approved with blocking concerns")
     if verdict == "CHANGES_REQUESTED" and not concerns:
