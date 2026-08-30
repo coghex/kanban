@@ -707,14 +707,18 @@ FINALIZE_SURFACE_EXPECTED_COMMANDS = {
 # one rule -- `sed` reduces the origin URL to `owner/name` and extracts the
 # record names the metadata prune would remove, and `grep` subtracts the
 # approved ones from that list, which is what refuses a prune that would reach
-# an item the user never approved.
+# an item the user never approved. `mktemp` and `rm` hold that listing outside
+# the audited checkout: Git writes it to stderr, and a pipe would discard the
+# dry run's own exit status that the gate's `&&` chain has to test.
 JANITOR_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/janitor.md": {
         "awk",
         "gh",
         "git",
         "grep",
+        "mktemp",
         "python3",
+        "rm",
         "sed",
     },
     "codex-plugin/plugins/kanban/skills/janitor/SKILL.md": {
@@ -724,7 +728,9 @@ JANITOR_SURFACE_EXPECTED_COMMANDS = {
         "git",
         "grep",
         "head",
+        "mktemp",
         "python3",
+        "rm",
         "sed",
     },
 }
@@ -2858,6 +2864,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                         "sed-cli",
                         "awk-cli",
                         "grep-cli",
+                        "mktemp-cli",
+                        "rm-cli",
                         "find-cli",
                         "head-cli",
                     },

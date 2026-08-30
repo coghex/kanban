@@ -61,9 +61,15 @@ created above it.
   through `git fetch --prune`, which would also remove refs the run never
   reported. `git worktree prune --expire now` is the one operation with no
   per-item form, so it is refused unless every record its dry run names was
-  approved. And releasing a stale claim is two independent commands, since a
-  claim is an assignee *or* a `wip` label: a label-only claim needs the label
-  removal alone, and several assignees need one removal each.
+  approved — a gate that reads the dry run's `stderr`, where Git actually
+  writes it, and that is one `&&` chain so the prune is unreachable in a shell
+  without `set -e`. A stash is dropped only while its selector still resolves
+  to the object the report recorded: a selector is a position in a reflog, so
+  anyone pushing a stash in between shifts it, and dropping `stash@{0}` would
+  destroy work the run never inspected. And releasing a stale claim is two
+  independent commands, since a claim is an assignee *or* a `wip` label: a
+  label-only claim needs the label removal alone, and several assignees need
+  one removal each.
 
   A stash is judged by its own delta rather than by diffing its
   files against the current branch, with list numbering, emphasis, and

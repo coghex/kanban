@@ -1894,8 +1894,8 @@ rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKI
 sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
 grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
-mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
-rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md | kanban | supported | no
+mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
+rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
 ```
 
@@ -2129,7 +2129,12 @@ still declares no `personal-path` row of its own, for the reason the
 
 `mktemp-cli` and `rm-cli` are `mandatory: no` for the same shape of reason:
 `fix` writes the check rollup it diagnoses from to a temporary file OUTSIDE the
-worked checkout and deletes it, and `finalize` (issue #544) does the same with
+worked checkout and deletes it, `janitor` (issue #575) does the same with the
+`worktree prune --dry-run` listing its metadata-prune gate subtracts the
+approved records from — a pipe would have discarded the dry run's own exit
+status, which the gate's `&&` chain has to test, since a failed dry run and a
+listing with nothing unapproved in it produce the same empty result — and
+`finalize` (issue #544) does the same with
 the paginated comment feed its review gate is decided from — that feed is the
 one input which grows without bound, and passing it as an argument would exceed
 the system argument limit on exactly the long pull requests the pagination

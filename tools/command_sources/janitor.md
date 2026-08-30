@@ -304,7 +304,8 @@ the apply is refused rather than deleted:
 git -C "$ROOT" worktree remove "$WORKTREE"
 git -C "$ROOT" branch -d "$BRANCH"
 git -C "$ROOT" push origin "--force-with-lease=refs/heads/$BRANCH:$SHA" ":refs/heads/$BRANCH"
-git -C "$ROOT" stash drop "$STASH"
+[ "$(git -C "$ROOT" rev-parse --verify --quiet "$STASH^{commit}")" = "$STASH_SHA" ] &&
+  git -C "$ROOT" stash drop "$STASH"
 git -C "$ROOT" update-ref -d "$REF" "$REF_SHA"
 git -C "$ROOT" update-ref -d "$TRACKING_REF" "$TRACKING_SHA"
 ```
@@ -314,9 +315,21 @@ Delete a remote branch one push per branch, and never with a bare `--delete`:
 that deletes whatever the branch points at *now*, so a branch someone pushed to
 after the `ls-remote` proof loses work nothing ever reviewed. The
 `--force-with-lease` naming the recorded SHA refuses that push instead, and the
-proof and the deletion then describe the same commit. Drop stashes highest
-selector index first, so the remaining selectors do not shift under the next
-drop, and record each selector and its full object id before dropping it.
+proof and the deletion then describe the same commit.
+
+**A stash selector is a position in a reflog, not an identity**, which is why
+the drop is guarded by the object id the report recorded rather than run on the
+selector alone. Anyone who runs `git stash push` between the report and the
+apply — a person in another worktree, a drainer autostash — shifts every
+selector down by one, and `git stash drop stash@{0}` then destroys work this run
+never inspected and the user never approved. Re-resolving the selector to its
+recorded object immediately before its own drop refuses that item instead;
+report the mismatch and re-run the census rather than dropping whatever now sits
+at that position. Dropping highest selector index first is still required, and
+covers a different shift: the one this run causes itself, as each drop moves
+every lower selector. The object check is what covers a shift this run did not
+cause. Record each selector and its full object id in the report before
+anything is dropped.
 
 **The expected value on `update-ref -d` is mandatory, and must be the full SHA
 the report recorded.** It deletes the ref only while it still equals that value,
@@ -333,19 +346,40 @@ saw.
 for**, so it is refused unless every record it would remove is approved:
 
 ```bash
-UNAPPROVED="$(git -C "$ROOT" worktree prune --dry-run --expire now --verbose \
-  | sed -n 's#^Removing worktrees/\([^:]*\):.*#\1#p' \
-  | grep -vxF "$APPROVED_RECORDS" || :)"
-[ -z "$UNAPPROVED" ]
-git -C "$ROOT" worktree prune --expire now
+LISTING="$(mktemp)"
+STATUS=0
+git -C "$ROOT" worktree prune --dry-run --expire now --verbose >"$LISTING" 2>&1 &&
+  UNAPPROVED="$(sed -n 's#^Removing worktrees/\([^:]*\):.*#\1#p' "$LISTING" \
+    | grep -vxF "$APPROVED_RECORDS" || :)" &&
+  [ -z "$UNAPPROVED" ] &&
+  git -C "$ROOT" worktree prune --expire now || STATUS=$?
+rm -f "$LISTING"
+[ "$STATUS" = 0 ]
 ```
 
 `$APPROVED_RECORDS` is the newline-separated list of record names the user
-approved, and an empty one refuses every prune. The `|| :` is there because
-`grep` exits non-zero when it matches nothing, which here is the good case:
-no record was named that the user did not approve. A record the dry run names that
+approved, and an empty one refuses every prune. A record the dry run names that
 is not on that list stops the prune: report the unapproved records and ask,
 rather than pruning them because they happened to be in the way.
+
+Three details in that block are load-bearing. **`2>&1` is not tidiness:** Git
+writes the `Removing worktrees/…` diagnostics to *stderr*, so a pipeline reading
+stdout alone sees an empty listing, subtracts nothing from it, and prunes every
+record including the ones nobody approved — a gate that reads as one and is not.
+**It is one `&&` chain** so the prune is unreachable unless the dry run
+succeeded and the subtraction came back empty; a plain sequence of lines would
+run the prune anyway in a shell without `set -e`, which is most of them. And the
+listing goes through `mktemp` rather than a pipe so the dry run's own exit status
+is what the chain tests: a failed dry run produces no matching lines either, and
+would otherwise read exactly like "nothing unapproved". The `|| :` is only for
+`grep`, which exits non-zero when it matches nothing — here the good case, since
+that means no record was named that the user did not approve. `rm -f` sits
+outside the chain so the temporary listing is removed on the refusing path too,
+and it is written outside the audited checkout, as `fix` and `finalize` write
+theirs — with the chain's own status carried around it in `$STATUS` and
+re-raised afterwards, so a cleanup that succeeds cannot report a refusal as a
+success. `$UNAPPROVED` still holds the offending record names at that point:
+name them.
 
 **Releasing a stale claim is two independent commands**, because a claim is an
 assignee *or* a `wip` label and may be either, both, or several assignees:

@@ -162,6 +162,7 @@ ISSUE = "7"
 PULL_REQUEST = "42"
 BRANCH = "issue-7-example"
 STASH = "stash@{0}"
+STASH_SHA = "ccddeeff00112233445566778899aabbccddeeff"
 WORKTREE = "/tmp/worktrees/coghex/kanban/issue-7-example"
 REF = "refs/drain-prs/autostash/abc"
 REF_SHA = "8877665544332211009988776655443322110099"
@@ -173,7 +174,10 @@ ASSIGNEE = "coghex"
 # What `git worktree prune --dry-run --expire now --verbose` prints, in the
 # format git actually uses, for two prunable records. The workflow subtracts the
 # approved names from this listing, so the fixture is the listing rather than
-# the names.
+# the names -- and it is scripted on STDERR, which is where git writes it. A
+# fixture on stdout would let a gate that reads stdout alone pass here while
+# pruning every record in a real repository, which is exactly the failure
+# RealGitApplyTests drives against git itself.
 PRUNE_DRY_RUN = (
     "Removing worktrees/issue-3-gone: gitdir file points to non-existent location\n"
     "Removing worktrees/issue-9-other: gitdir file points to non-existent location\n"
@@ -334,6 +338,27 @@ def contains_run(arguments: list[str], needle: list[str]) -> bool:
     )
 
 
+def isolated_git_env(root: Path) -> dict[str, str]:
+    """An environment in which `git` reads none of this developer's config.
+
+    A real-Git test that inherited `~/.gitconfig` would pass or fail on
+    whatever the host happens to configure -- `stash.showPatch`, a default
+    branch name, a commit template -- rather than on the asset.
+    """
+    (root / "home").mkdir(parents=True, exist_ok=True)
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(root / "home"),
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+        "GIT_CONFIG_GLOBAL": str(root / "gitconfig"),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "janitor test",
+        "GIT_AUTHOR_EMAIL": "janitor@example.invalid",
+        "GIT_COMMITTER_NAME": "janitor test",
+        "GIT_COMMITTER_EMAIL": "janitor@example.invalid",
+    }
+
+
 def census_option_names(brand: str) -> set[str]:
     """The long options the shipped census program actually accepts.
 
@@ -364,11 +389,12 @@ class Harness:
 
     def __init__(self, root: Path, brand: str, *, install_helper: bool = True,
                  decoy_helper: bool = False, approved_records=PRUNABLE_RECORDS,
-                 prune_dry_run: str = PRUNE_DRY_RUN):
+                 prune_dry_run: str = PRUNE_DRY_RUN, stash_head: str = STASH_SHA):
         self.root = root
         self.brand = brand
         self.approved_records = tuple(approved_records)
         self.prune_dry_run = prune_dry_run
+        self.stash_head = stash_head
         self.fake = fake_cli.FakeCli(root)
         for binary in ("gh", "git"):
             self.fake.install(binary)
@@ -437,7 +463,7 @@ class Harness:
         self.fake.script(
             "git",
             ["-C", CHECKOUT_ROOT, "worktree", "prune", "--dry-run"],
-            stdout=self.prune_dry_run,
+            stderr=self.prune_dry_run,
         )
         self.fake.script(
             "git",
@@ -446,6 +472,11 @@ class Harness:
         )
         self.fake.script(
             "git", ["-C", CHECKOUT_ROOT, "stash", "show", "-p"], stdout="diff --git\n"
+        )
+        self.fake.script(
+            "git",
+            ["-C", CHECKOUT_ROOT, "rev-parse", "--verify", "--quiet"],
+            stdout=self.stash_head + "\n",
         )
         for tail in (
             ["worktree", "prune", "--expire"],
@@ -482,6 +513,7 @@ class Harness:
             "PR": PULL_REQUEST,
             "BRANCH": BRANCH,
             "STASH": STASH,
+            "STASH_SHA": STASH_SHA,
             "WORKTREE": WORKTREE,
             "REF": REF,
             "REF_SHA": REF_SHA,
@@ -975,17 +1007,7 @@ class RemoteDeletionLeaseTests(HarnessCase):
         """A remote with `master` and `feature`, and `feature`'s recorded tip."""
         remote = root / "remote.git"
         work = root / "work"
-        env = {
-            "PATH": os.environ.get("PATH", ""),
-            "HOME": str(root / "home"),
-            "GIT_CONFIG_GLOBAL": str(root / "gitconfig"),
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_AUTHOR_NAME": "janitor test",
-            "GIT_AUTHOR_EMAIL": "janitor@example.invalid",
-            "GIT_COMMITTER_NAME": "janitor test",
-            "GIT_COMMITTER_EMAIL": "janitor@example.invalid",
-        }
-        (root / "home").mkdir(parents=True, exist_ok=True)
+        env = isolated_git_env(root)
         self.git_env = env
 
         def git(*args, cwd=None):
@@ -1082,6 +1104,171 @@ class RemoteDeletionLeaseTests(HarnessCase):
                 result = self.push(relative_path, work, recorded)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertNotIn(f"refs/heads/{BRANCH}", self.remote_heads(work))
+
+
+class RealGitApplyTests(HarnessCase):
+    """The two apply-path gates, driven against Git itself.
+
+    Both exist because a scripted `git` can only answer the question the
+    scenario already believes: the metadata-prune gate reads a diagnostic Git
+    writes to *stderr*, and the stash drop names a reflog position that shifts
+    under any other writer. A fixture that put the listing on stdout, or that
+    never pushed a competing stash, would let both gates pass here while
+    destroying unapproved state in a real repository. These run in a plain
+    `sh -c` with no `set -e`, which is the shell an agent actually has.
+    """
+
+    def git(self, *args, cwd=None, env=None, check=True):
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd) if cwd else None,
+            env=env or self.git_env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        if check:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def repository(self) -> Path:
+        root = self.temporary_directory()
+        self.git_env = isolated_git_env(root)
+        work = root / "work"
+        self.git("init", "-q", "-b", DEFAULT_BRANCH, str(work))
+        (work / "a").write_text("a\n", encoding="utf-8")
+        self.git("add", "a", cwd=work)
+        self.git("commit", "-qm", "one", cwd=work)
+        return work
+
+    def run_fence(self, fence: str, work: Path, **variables):
+        """`fence` under a plain `sh -c`, with no errexit."""
+        env = dict(self.git_env)
+        env["ROOT"] = str(work)
+        env.update(variables)
+        return subprocess.run(
+            ["sh", "-c", fence],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def prunable_repository(self) -> tuple[Path, list[str]]:
+        """A repository with two registered worktree records whose
+        directories are gone, so the dry run names both."""
+        work = self.repository()
+        names = ["record-one", "record-two"]
+        for name in names:
+            self.git("worktree", "add", "-q", str(work.parent / name), "-b", name,
+                     cwd=work)
+        for name in names:
+            shutil.rmtree(work.parent / name)
+        listing = self.git(
+            "worktree", "prune", "--dry-run", "--expire", "now", "--verbose", cwd=work
+        )
+        # The premise of the whole gate, asserted rather than assumed: Git puts
+        # these lines on stderr, and a gate reading stdout sees nothing.
+        self.assertEqual(listing.stdout, "")
+        for name in names:
+            self.assertIn(f"Removing worktrees/{name}", listing.stderr)
+        return work, names
+
+    def registered_records(self, work: Path) -> set[str]:
+        porcelain = self.git("worktree", "list", "--porcelain", cwd=work).stdout
+        return {
+            Path(line[len("worktree ") :]).name
+            for line in porcelain.splitlines()
+            if line.startswith("worktree ")
+        }
+
+    def test_a_prune_that_would_reach_an_unapproved_record_is_refused(self):
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                work, names = self.prunable_repository()
+                before = self.registered_records(work)
+                result = self.run_fence(
+                    self.fences(relative_path)["metadata-prune"],
+                    work,
+                    APPROVED_RECORDS=names[0],
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.registered_records(work), before)
+
+    def test_a_prune_whose_records_are_all_approved_runs(self):
+        # The control. Without it the refusal above would pass over a gate
+        # that reads an empty listing and refuses everything, which is the
+        # other way to be wrong about stderr.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                work, names = self.prunable_repository()
+                result = self.run_fence(
+                    self.fences(relative_path)["metadata-prune"],
+                    work,
+                    APPROVED_RECORDS="\n".join(names),
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.registered_records(work), {work.name})
+
+    def stash_drop_lines(self, relative_path: str) -> str:
+        """The guarded stash drop, both of its lines."""
+        fence = self.fences(relative_path)["deletions"].splitlines()
+        index = [
+            position
+            for position, line in enumerate(fence)
+            if "rev-parse --verify --quiet" in line
+        ]
+        self.assertEqual(len(index), 1)
+        guard = index[0]
+        self.assertIn("stash drop", fence[guard + 1])
+        return "\n".join(fence[guard : guard + 2])
+
+    def stash_entries(self, work: Path) -> list[str]:
+        listing = self.git("stash", "list", "--format=%H", cwd=work).stdout
+        return [line for line in listing.splitlines() if line.strip()]
+
+    def push_stash(self, work: Path, name: str) -> str:
+        (work / name).write_text(name + "\n", encoding="utf-8")
+        self.git("add", name, cwd=work)
+        self.git("stash", "push", "-q", "-m", name, cwd=work)
+        return self.git("rev-parse", "stash@{0}", cwd=work).stdout.strip()
+
+    def test_a_stash_pushed_after_the_report_is_not_dropped(self):
+        # The selector the report recorded now names somebody else's stash.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                work = self.repository()
+                approved = self.push_stash(work, "approved")
+                # Another writer -- a person, or the drainer's autostash --
+                # pushes between the report and the apply, shifting every
+                # selector down by one.
+                intruder = self.push_stash(work, "intruder")
+                self.assertNotEqual(approved, intruder)
+                self.assertEqual(self.stash_entries(work), [intruder, approved])
+
+                result = self.run_fence(
+                    self.stash_drop_lines(relative_path),
+                    work,
+                    STASH="stash@{0}",
+                    STASH_SHA=approved,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.stash_entries(work), [intruder, approved])
+
+    def test_a_stash_still_at_its_recorded_object_is_dropped(self):
+        # The control: nothing moved, and the approved stash goes.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                work = self.repository()
+                approved = self.push_stash(work, "approved")
+                result = self.run_fence(
+                    self.stash_drop_lines(relative_path),
+                    work,
+                    STASH="stash@{0}",
+                    STASH_SHA=approved,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.stash_entries(work), [])
 
 
 class RepositoryScopeTests(unittest.TestCase):
