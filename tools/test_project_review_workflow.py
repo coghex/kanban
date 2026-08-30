@@ -190,14 +190,13 @@ LISTING_REACH = {
         "selection knows it.**"
     ),
     "the count is checked against the selection": (
-        "The question the reach check has to answer is not whether the listing "
-        "holds twelve rows; it is whether the listing reaches the recorded "
-        "boundary and whether twelve *selectable* rows survive above it once "
-        "coverage and exclusions come out."
+        "The reach check asks whether the listing reaches the boundary and "
+        "whether twelve *selectable* rows survive above it once coverage and "
+        "exclusions come out."
     ),
     "a page must reach the boundary": (
-        "A page that does not contain the boundary cannot prove where the "
-        "sweep must stop, even when its first twelve rows are selectable."
+        "a page that does not contain the boundary cannot prove where the "
+        "sweep must stop even when its first twelve rows are selectable."
     ),
     "the three answers are never collapsed": (
         "its answer to a short batch is one of three things that must never be "
@@ -534,9 +533,14 @@ RECONCILIATION_RULES = {
         "units."
     ),
     "an uncovered unit is selected, not reported as a gap": (
-        "An uncovered unit above the boundary is selected in newest-first "
+        "an uncovered unit above the boundary is selected in newest-first "
         "order, never reduced to a warning while the workflow continues below "
         "it."
+    ),
+    "direct gaps are announced": (
+        "Direct mode retains a resume-below frontier, so every uncovered "
+        "commit above that frontier appears in `gaps` and must be announced; "
+        "never let the direct walk silently discard it."
     ),
     "the original boundary document migrates": (
         "The helper also migrates the original human-authored `stop before PR "
@@ -625,8 +629,8 @@ RECORDING_LISTING_REACH = {
     ),
     "raise and re-list on an absent unit": (
         "Declare it, and raise it and list again whenever `record` reports a "
-        "reviewed or excluded unit absent from a listing that came back at its "
-        "own limit."
+        "reviewed, excluded, or boundary unit absent from a listing that came "
+        "back at its own limit."
     ),
     "recording nothing is the outcome to refuse": (
         "Recording nothing is the one outcome to refuse here: the batch is "
@@ -652,6 +656,11 @@ RECORD_STEP = {
         "A batch that selected nothing records nothing and is not a completed "
         "batch: the helper refuses an empty `--reviewed` with an empty "
         "`--exclude` unless the user explicitly supplied a new PR boundary."
+    ),
+    "the boundary flag is explicit": (
+        "Add `--boundary \"$NEW_BOUNDARY\"` only when the user explicitly asks "
+        "to establish or replace that stop; an ordinary completed batch never "
+        "moves it."
     ),
     "merged, never replaced": (
         "`record` merges rather than replaces: an earlier exclusion survives a "
@@ -1722,6 +1731,16 @@ class CursorSelectionTests(CursorTransitionCase):
         }
         self.assertEqual(self.units(self.select(count=6, state=numeric)), [470])
 
+    def test_a_boundary_at_merged_head_is_an_empty_completed_pr_sweep(self):
+        self.record([], boundary=470)
+        selection = self.select(count=3)
+        self.assertEqual(self.units(selection), [])
+        self.assertTrue(selection["short"])
+        self.assertTrue(selection["boundary_reached"])
+        self.assertFalse(selection["bounded"])
+        self.assertFalse(selection["truncated"])
+        self.assertFalse(selection["exhausted"])
+
     def test_a_report_whose_coverage_overlaps_the_naive_selection_is_skipped(self):
         # The second correction the real sweep had to make: the batch below
         # the cursor was already covered by a separate report, and nothing
@@ -1777,6 +1796,16 @@ class CursorSelectionTests(CursorTransitionCase):
             self.units(self.select(mode="direct", count=3)),
             list(DIRECT_HISTORY[:3]),
         )
+
+    def test_direct_mode_reports_uncovered_units_above_its_resume_frontier(self):
+        first = self.select(
+            mode="direct", count=2, start=DIRECT_HISTORY[3]
+        )
+        self.record(first, mode="direct")
+
+        later = self.select(mode="direct", count=5)
+        self.assertEqual(later["gaps"], list(DIRECT_HISTORY[:3]))
+        self.assertEqual(self.units(later), list(DIRECT_HISTORY[5:]))
 
     def test_an_explicitly_excluded_unit_is_never_selected_again(self):
         # Requirement 4 and the review's second spec addition: an exclusion is
@@ -1944,7 +1973,21 @@ class BoundedListingTests(CursorTransitionCase):
         self.assertEqual(self.units(selection), [470, 468])
         self.assertTrue(selection["short"])
         self.assertTrue(selection["boundary_reached"])
+        self.assertFalse(selection["bounded"])
         self.assertFalse(selection["truncated"])
+        self.assertFalse(selection["exhausted"])
+
+    def test_an_unbounded_short_page_at_its_limit_is_truncated(self):
+        state = self.module.empty_state()
+        state["pr"]["reviewed"] = [470, 468]
+        selection = self.select(
+            count=3, state=state, candidates=self.page(3), listing_limit=3
+        )
+        self.assertEqual(self.units(selection), [471])
+        self.assertTrue(selection["short"])
+        self.assertFalse(selection["bounded"])
+        self.assertFalse(selection["boundary_reached"])
+        self.assertTrue(selection["truncated"])
         self.assertFalse(selection["exhausted"])
 
     def test_a_page_under_its_limit_that_comes_up_short_is_the_tail(self):
@@ -2213,7 +2256,8 @@ class CursorDocumentTests(CursorTransitionCase):
             "# Project Review Boundaries\n\n"
             "Repository-specific exclusive endpoints.\n\n"
             "- `coghex/kanban` — stop before PR #466 in merge-date order. "
-            "PR #471 merged later and was already reviewed, so skip it.\n",
+            "PR #471 merged later and was already reviewed, so skip it. "
+            "Issue #999 records why.\n",
             encoding="utf-8",
         )
         state = self.state()
@@ -2385,6 +2429,37 @@ class CursorCommandLineTests(CursorTransitionCase):
         )
         self.assertEqual(len(unbounded["selected"]), len(PR_HISTORY))
         self.assertFalse(unbounded["bounded"])
+
+    def test_boundary_recording_round_trips_through_the_command_line(self):
+        listing = self.worktree / "listing.json"
+        listing.write_text(json.dumps(PR_LISTING), encoding="utf-8")
+
+        self.run_cli(
+            "record", "--mode", "pr", "--candidates", str(listing),
+            "--boundary", "#466",
+        )
+        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 466)
+
+        # The asset omits this flag ordinarily, but a templated empty value is
+        # still no request to replace the existing boundary.
+        self.run_cli(
+            "record", "--mode", "pr", "--candidates", str(listing),
+            "--reviewed", "470", "--boundary", "",
+        )
+        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 466)
+
+        self.run_cli(
+            "record", "--mode", "pr", "--candidates", str(listing),
+            "--boundary", "464",
+        )
+        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 464)
+
+        with self.assertRaises(self.module.CursorError) as caught:
+            self.run_cli(
+                "record", "--mode", "pr", "--candidates", str(listing),
+                "--boundary", "466,464",
+            )
+        self.assertIn("one exclusive older boundary", str(caught.exception))
 
     def test_a_direct_candidate_listing_may_be_the_plain_sha_walk(self):
         # `git log --first-parent --format=%H` prints one SHA per line, which

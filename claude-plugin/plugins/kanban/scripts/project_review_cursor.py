@@ -251,7 +251,7 @@ def parse_legacy_document(text: str):
             "merged_at": "legacy-exclusive-boundary",
         }
         state["pr"]["reviewed"] = sorted(
-            {int(number) for number in re.findall(r"#(\d+)", match.group(0))}
+            {int(number) for number in re.findall(r"\bPR #(\d+)", match.group(0))}
         )
         repositories[repo] = state
     return document
@@ -635,7 +635,7 @@ def select(
                 f"the range ends at {supplied_end}, which is newer than its "
                 "starting point, so the range holds nothing to review."
             )
-    elif boundary_key is not None and stop <= begin:
+    elif start is not None and boundary_key is not None and stop <= begin:
         raise CursorError(
             "the requested start is at or beyond the recorded PR boundary. "
             "Override the boundary explicitly to cross it."
@@ -655,6 +655,11 @@ def select(
         if len(selected) == count:
             break
 
+    gaps = [
+        keys[index]
+        for index in range(0, begin)
+        if keys[index] not in covered and keys[index] not in excluded
+    ]
     short = len(selected) < count
     # A batch the requested range ended is short by request. Reporting it as
     # truncated would send the workflow raising a limit that cannot help, and
@@ -663,7 +668,7 @@ def select(
     boundary_reached = (
         mode == "pr" and boundary_key is not None and end is None and short
     )
-    bounded = short and (end is not None or boundary_key is not None)
+    bounded = end is not None and short
     return {
         "mode": mode,
         "count": count,
@@ -673,7 +678,7 @@ def select(
         "boundary": boundary,
         "selected": selected,
         "skipped": skipped,
-        "gaps": [],
+        "gaps": gaps,
         "covered": sorted(covered & set(keys), key=lambda key: position[key]),
         "excluded": sorted(excluded),
         "reports": coverage["reports"],
@@ -686,8 +691,8 @@ def select(
         # be on the next one, while `exhausted` means the history ran out. A
         # sweep that reads the first as the second enters direct mode with
         # merged pull requests still unreviewed behind it.
-        "truncated": short and partial and not bounded,
-        "exhausted": short and not partial and not bounded,
+        "truncated": short and partial and not bounded and not boundary_reached,
+        "exhausted": short and not partial and not bounded and not boundary_reached,
     }
 
 

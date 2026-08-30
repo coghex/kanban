@@ -160,9 +160,12 @@ conclude, and each one is a mistake this sweep has already made:
   malformed, foreign, or ambiguous cursor refuses before review rather than
   guessing. Report the helper's own message.
 
-Announce the helper's `origin`, boundary, and skipped units with the batch. An
-uncovered unit above the boundary is selected in newest-first order, never
-reduced to a warning while the workflow continues below it.
+Announce the helper's `origin`, boundary or frontier, `gaps`, and skipped units
+with the batch. In default PR mode an uncovered unit above the boundary is
+selected in newest-first order, never reduced to a warning while the workflow
+continues below it. Direct mode retains a resume-below frontier, so every
+uncovered commit above that frontier appears in `gaps` and must be announced;
+never let the direct walk silently discard it.
 
 A repository holding reports but no record yet — every repository, the first
 time this runs — therefore starts at the head of its history and skips the units
@@ -207,13 +210,15 @@ target — the batch stops there whatever the count still had left, and reports
 request that ended and neither the page nor the history.
 
 **`$LIMIT` is not a constant, and `--listing-limit` is how the selection knows
-it.** Start `$LIMIT` at the requested count plus a margin for the over-fetch —
-40 covers the 12-unit default — and declare it to `select`. The question the
-reach check has to answer is not whether the listing holds twelve rows; it is
-whether the listing reaches the recorded boundary and whether twelve
-*selectable* rows survive above it once coverage and exclusions come out. A
-page that does not contain the boundary cannot prove where the sweep must stop,
-even when its first twelve rows are selectable.
+it.** With no boundary, start `$LIMIT` at the requested count plus a margin for
+the over-fetch — 40 covers the 12-unit default. With a recorded boundary, start
+with a limit expected to reach it on the first listing; use a generous value
+when its distance is uncertain, because a page that does not contain the
+boundary cannot prove where the sweep must stop even when its first twelve rows
+are selectable. Declare the chosen limit to `select`, and retain any raised
+value for the later `record` call. The reach check asks whether the listing
+reaches the boundary and whether twelve *selectable* rows survive above it once
+coverage and exclusions come out.
 
 `select` answers it, and its answer to a short batch is one of three things that
 must never be collapsed:
@@ -514,10 +519,10 @@ taken after the batch was reviewed and its report written, which can be a long
 way after the batch was selected, and merges landing in between push older rows
 off a bounded page — so the `$LIMIT` that reached the batch at selection time
 need not reach it now. Declare it, and raise it and list again whenever `record`
-reports a reviewed or excluded unit absent from a listing that came back at its
-own limit. Recording nothing is the one outcome to refuse here: the batch is
-already reviewed, and a completed batch with no durable coverage is exactly the
-state this cursor exists to prevent.
+reports a reviewed, excluded, or boundary unit absent from a listing that came
+back at its own limit. Recording nothing is the one outcome to refuse here: the
+batch is already reviewed, and a completed batch with no durable coverage is
+exactly the state this cursor exists to prevent.
 
 Direct mode records the same way against the same first-parent walk it selected
 from, with `--mode direct` and the reviewed SHAs. A batch that selected nothing
