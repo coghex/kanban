@@ -18,10 +18,15 @@ writes its endpoint through `record` after the batch is complete. Both halves
 are exercised by `tools/test_project_review_workflow.py` as real state
 transitions rather than as sentences found in a rendered asset.
 
-Three rules shape everything below, and each one is a defect that was observed
+Four rules shape everything below, and each one is a defect that was observed
 rather than a preference:
 
-* **The record is the only authority for coverage.** A report's filename
+* **PR mode starts at merged HEAD and stops at its boundary.** The PR endpoint
+  is an exclusive older boundary, not a resume-below frontier. Every default
+  invocation scans newest-first from the latest merge, skips durable coverage,
+  and never crosses that boundary. This is what lets merges that landed after
+  the previous review be audited instead of reported as gaps and discarded.
+* **The record is the durable authority for coverage.** A report's filename
   interval is a claim about a batch, not an enumeration of it: the report named
   `463-455` reviewed #463, #456 and #455 and nothing between them, so reading
   its interval as nine reviewed pull requests would erase six unreviewed ones.
@@ -36,18 +41,17 @@ rather than a preference:
   inside its interval while eight did. So a first-parent commit is covered when the record
   says it was reviewed, and is otherwise selectable — never dropped because some
   report's prose claimed its interval was empty.
-* **The frontier is merge order, not numeric order.** `mergedAt` orders pull
-  requests; the number does not. The batch named `466-399` reviewed #466, #467,
-  #465, #464, #406 … in that order, so a cursor holding "the smallest number
-  reviewed" would describe a batch that never happened.
+* **The boundary is merge order, not numeric order.** `mergedAt` orders pull
+  requests; the number does not. The helper therefore resolves the named PR
+  inside the sorted merged history before it decides where the exclusive stop
+  lies.
 
-A bounded listing is the fourth rule, and the one a count check cannot express.
+A bounded listing is the fifth rule, and the one a count check cannot express.
 `gh pr list --limit N` returns a page, and the question a sweep has to answer is
 not whether that page holds twelve rows — it is whether twelve *selectable* rows
-survive below the recorded endpoint once coverage and exclusions come out. A
-page that ends at the endpoint satisfies every count check and selects nothing,
-and a workflow reading that as the tail of history moves to direct mode leaving
-older merged pull requests unreviewed for good. So the caller declares the limit
+survive above the recorded boundary once coverage and exclusions come out. A
+page that does not reach the boundary cannot prove where to stop, even when its
+first twelve rows are selectable. So the caller declares the limit
 it used, and a short batch is reported as `truncated` when the page came back at
 that limit and `exhausted` only when it came back under it. The same distinction
 governs a refusal: a unit absent from a page at its own limit means raise the
@@ -80,16 +84,22 @@ DOCUMENT_RELATIVE_PATH = "docs/project_review_boundaries.md"
 # The reports the workflow writes, which are reconciled alongside the record.
 REPORT_GLOB = "project_review_*.md"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
 
 # The document is Markdown so a human can read it in the docs worktree, and its
 # payload is one fenced JSON object so this module is the only thing that has to
 # understand it. The marker is what the parser anchors on: a document without it
 # is not this document, whatever else it may contain.
-CURSOR_MARKER = "<!-- project-review:cursor:v1 -->"
+CURSOR_MARKER = "<!-- project-review:cursor:v2 -->"
+LEGACY_CURSOR_MARKER = "<!-- project-review:cursor:v1 -->"
 
 PAYLOAD_RE = re.compile(
     re.escape(CURSOR_MARKER) + r"\s*```json\n(?P<payload>.*?)\n```",
+    re.DOTALL,
+)
+LEGACY_PAYLOAD_RE = re.compile(
+    re.escape(LEGACY_CURSOR_MARKER) + r"\s*```json\n(?P<payload>.*?)\n```",
     re.DOTALL,
 )
 
@@ -97,11 +107,11 @@ MODES = ("pr", "direct")
 
 DOCUMENT_HEADER = """# Project review sweep cursor
 
-Machine-owned state for the `project-review` workflow: the oldest unit each
-completed batch reviewed, per repository, plus the units a user explicitly
-excluded. A clean batch records its endpoint exactly as a finding-bearing batch
-does, which is what lets a later invocation carrying no conversational state
-resume immediately below it.
+Machine-owned state for the `project-review` workflow: each repository's
+exclusive older PR boundary, the units completed batches reviewed, the direct
+history endpoint, and the units a user explicitly excluded. PR selection always
+starts at the latest merge and stops before its boundary; a clean batch records
+reviewed coverage exactly as a finding-bearing batch does.
 
 Written by `project_review_cursor.py`. Edit it through that helper rather than
 by hand: the payload below is parsed strictly, and an edit it cannot read stops
@@ -119,6 +129,12 @@ the next sweep instead of being ignored.
 SHA_RE = re.compile(r"\A[0-9a-f]{4,40}\Z")
 
 REPO_RE = re.compile(r"\A[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
+
+LEGACY_BOUNDARY_RE = re.compile(
+    r"^- `(?P<repo>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)`\s+—\s+"
+    r"stop before PR #(?P<boundary>\d+)(?P<tail>[^\n]*(?:\n  [^\n]*)*)",
+    re.MULTILINE,
+)
 
 
 class CursorError(RuntimeError):
@@ -153,7 +169,14 @@ def document_path(root) -> Path:
 def parse_document(text: str, source: str) -> dict:
     """The state a cursor document holds, or a refusal naming what stopped it."""
     match = PAYLOAD_RE.search(text)
+    legacy_machine_state = False
     if match is None:
+        match = LEGACY_PAYLOAD_RE.search(text)
+        legacy_machine_state = match is not None
+    if match is None:
+        legacy = parse_legacy_document(text)
+        if legacy is not None:
+            return legacy
         raise CursorError(
             f"{source} carries no {CURSOR_MARKER} block, so it is not a "
             "project-review cursor. Move it aside or repair it; a sweep will "
@@ -166,18 +189,71 @@ def parse_document(text: str, source: str) -> dict:
     if not isinstance(document, dict):
         raise CursorError(f"{source} holds a cursor payload that is not an object.")
     version = document.get("version")
-    if version != SCHEMA_VERSION:
+    expected_version = LEGACY_SCHEMA_VERSION if legacy_machine_state else SCHEMA_VERSION
+    if version != expected_version:
         raise CursorError(
             f"{source} declares cursor schema version {version!r}; this helper "
-            f"reads version {SCHEMA_VERSION}."
+            f"expected version {expected_version} for its marker."
         )
     repositories = document.get("repositories")
     if not isinstance(repositories, dict):
         raise CursorError(f"{source} declares no `repositories` object.")
+    migrated = empty_document()
     for name, state in repositories.items():
         if not REPO_RE.match(str(name)):
             raise CursorError(f"{source} names {name!r}, which is not an owner/name.")
-        repositories[name] = _validated_state(state, f"{source}: {name}")
+        validated = _validated_state(state, f"{source}: {name}")
+        if legacy_machine_state:
+            validated = migrate_v1_state(validated)
+        migrated["repositories"][name] = validated
+    return migrated
+
+
+def migrate_v1_state(state: dict) -> dict:
+    """Turn the released resume-below PR frontier into exact coverage.
+
+    Version 1 advanced `pr.endpoint` to the oldest reviewed PR in every batch.
+    Treating that value as version 2's fixed stop would silently erase all
+    older history. Retain it as reviewed coverage and remove it as a boundary;
+    direct mode's endpoint already had the intended moving-frontier meaning.
+    """
+    migrated = json.loads(json.dumps(state))
+    endpoint = migrated["pr"]["endpoint"]
+    if endpoint is not None:
+        migrated["pr"]["reviewed"] = sorted(
+            set(migrated["pr"]["reviewed"]) | {endpoint["number"]}
+        )
+        migrated["pr"]["endpoint"] = None
+    return migrated
+
+
+def parse_legacy_document(text: str):
+    """Migrate the original human-authored exclusive-boundary document.
+
+    The old document's continuation lines may name exceptional reviewed PRs
+    above the boundary (Synarchy's #1411 is the observed case), so every PR
+    number in that repository's bullet is retained as reviewed coverage. The
+    next successful `record` writes the canonical machine-owned form.
+    """
+    matches = list(LEGACY_BOUNDARY_RE.finditer(text))
+    if not matches:
+        return None
+    document = empty_document()
+    repositories = document["repositories"]
+    for match in matches:
+        repo = match.group("repo")
+        if repo in repositories:
+            raise CursorError(f"legacy cursor names {repo!r} more than once.")
+        state = empty_state()
+        boundary = int(match.group("boundary"))
+        state["pr"]["endpoint"] = {
+            "number": boundary,
+            "merged_at": "legacy-exclusive-boundary",
+        }
+        state["pr"]["reviewed"] = sorted(
+            {int(number) for number in re.findall(r"\bPR #(\d+)", match.group(0))}
+        )
+        repositories[repo] = state
     return document
 
 
@@ -474,10 +550,11 @@ def select(
 ) -> dict:
     """The next batch, and everything the workflow has to announce about it.
 
-    The position is the recorded frontier's; `count` is only how many units to
-    take from it. That split is the whole of the resume contract — a user who
-    asks for twenty units is asking for a bigger batch, not for the sweep to
-    start somewhere else.
+    PR mode always starts at merged HEAD unless the user supplies a start. Its
+    recorded endpoint is an exclusive older stop boundary; durable reviewed,
+    report, and exclusion coverage is skipped while walking towards it. Direct
+    mode keeps the older-history resume frontier because its batches really do
+    continue beneath the previous one.
 
     A range has two endpoints and `start` is only one of them. Without `end`,
     the count keeps filling past the older endpoint whenever coverage or an
@@ -503,7 +580,17 @@ def select(
     excluded = set(resolve_all(mode, excluded, keys))
 
     endpoint = state[mode]["endpoint"]
-    frontier = None
+    frontier = endpoint if mode == "direct" else None
+    boundary = endpoint if mode == "pr" else None
+    boundary_key = None
+    stop = len(candidates)
+    if boundary is not None and not override_boundary:
+        recorded_key = boundary["number"]
+        boundary_key = resolve_key(mode, recorded_key, keys)
+        if boundary_key is None:
+            raise CursorError(_absent_endpoint_message(mode, recorded_key, partial))
+        stop = position[boundary_key]
+
     if start is not None:
         supplied_start, start = start, resolve_key(mode, start, keys)
         if start is None:
@@ -518,8 +605,7 @@ def select(
         begin = 0
         covered = set()
         origin = "boundary-override"
-    elif endpoint is not None:
-        frontier = endpoint
+    elif mode == "direct" and endpoint is not None:
         recorded_key = endpoint["number"] if mode == "pr" else endpoint["sha"]
         endpoint_key = resolve_key(mode, recorded_key, keys)
         if endpoint_key is None:
@@ -527,28 +613,33 @@ def select(
         begin = position[endpoint_key] + 1
         origin = "recorded-endpoint"
     else:
-        # Reports never set the position, only what to skip once it is set.
-        # A report's filename endpoints are the two units it certainly
-        # reviewed; everything between them may or may not have been, so
-        # resuming *below* a report would drop whatever it skipped inside its
-        # own interval and drop it permanently. Resuming above one costs a
-        # re-review of two announced units instead, and only one of those two
-        # errors can be noticed afterwards.
+        # Reports and recorded PRs say what to skip, never where to begin.
+        # Starting at merged HEAD is what catches work that landed after the
+        # prior review and fills every uncovered gap before the fixed boundary.
         begin = 0
-        origin = "history-head"
+        origin = "recorded-boundary" if boundary_key is not None else "history-head"
 
-    stop = len(candidates)
     if end is not None:
         supplied_end, end = end, resolve_key(mode, end, keys)
         if end is None:
             raise CursorError(_absent_end_message(mode, supplied_end, partial))
-        stop = position[end] + 1
+        requested_stop = position[end] + 1
+        if boundary_key is not None and requested_stop > stop:
+            raise CursorError(
+                f"the range ends at {supplied_end}, beyond recorded boundary "
+                f"#{boundary_key}. Override the boundary explicitly to cross it."
+            )
+        stop = requested_stop
         if stop <= begin:
             raise CursorError(
-                f"the range ends at {supplied_end}, which is newer than where "
-                "this sweep resumes, so the range holds nothing to review. "
-                "Name its newer endpoint too, or override the boundary."
+                f"the range ends at {supplied_end}, which is newer than its "
+                "starting point, so the range holds nothing to review."
             )
+    elif start is not None and boundary_key is not None and stop <= begin:
+        raise CursorError(
+            "the requested start is at or beyond the recorded PR boundary. "
+            "Override the boundary explicitly to cross it."
+        )
 
     selected = []
     skipped = []
@@ -574,6 +665,9 @@ def select(
     # truncated would send the workflow raising a limit that cannot help, and
     # reporting it as exhausted would tell the sweep that PR history had run
     # out when only the user's range had.
+    boundary_reached = (
+        mode == "pr" and boundary_key is not None and end is None and short
+    )
     bounded = end is not None and short
     return {
         "mode": mode,
@@ -581,6 +675,7 @@ def select(
         "origin": origin,
         "begin_index": begin,
         "frontier": frontier,
+        "boundary": boundary,
         "selected": selected,
         "skipped": skipped,
         "gaps": gaps,
@@ -589,14 +684,15 @@ def select(
         "reports": coverage["reports"],
         "short": short,
         "bounded": bounded,
+        "boundary_reached": boundary_reached,
         "range_end": end,
         # Two different answers to one short batch, and collapsing them is the
         # defect: `truncated` means the page ran out and the missing units may
         # be on the next one, while `exhausted` means the history ran out. A
         # sweep that reads the first as the second enters direct mode with
         # merged pull requests still unreviewed behind it.
-        "truncated": short and partial and not bounded,
-        "exhausted": short and not partial and not bounded,
+        "truncated": short and partial and not bounded and not boundary_reached,
+        "exhausted": short and not partial and not bounded and not boundary_reached,
     }
 
 
@@ -695,12 +791,14 @@ def record(
     reviewed: list,
     excluded=None,
     listing_limit=None,
+    boundary=None,
 ) -> dict:
-    """Fold a completed batch into the state, and never let the frontier back up.
+    """Fold a completed batch into durable coverage.
 
-    Merging rather than replacing is what keeps a user's earlier exclusion from
-    being erased by a later batch, and what makes the endpoint a cumulative
-    coverage frontier instead of "wherever the last run happened to stop".
+    PR batches add reviewed coverage while preserving their exclusive older
+    boundary. That boundary changes only through the explicit `boundary`
+    argument. Direct batches keep their older-history frontier and advance it
+    to the oldest commit the completed batch reviewed.
     """
     if mode not in MODES:
         raise CursorError(f"unknown mode {mode!r}")
@@ -713,6 +811,10 @@ def record(
         _resolved_or_raise(mode, unit, keys, "excluded", partial)
         for unit in (excluded or [])
     ]
+    if boundary is not None:
+        if mode != "pr":
+            raise CursorError("only PR mode has an exclusive older boundary.")
+        boundary = _resolved_or_raise(mode, boundary, keys, "boundary", partial)
     # Everything already recorded is re-spelled the way this history spells it,
     # so a state written from a `--format=%h` walk and one written from a
     # `%H` walk converge rather than accumulating two names for one commit.
@@ -729,15 +831,37 @@ def record(
     # a short page than a wrong claim -- and refusing it as a wrong claim would
     # leave a completed batch with no durable endpoint at all, which is the
     # defect this module exists to close.
-    if not reviewed and not excluded:
-        raise CursorError("a completed batch records at least one reviewed or excluded unit.")
+    if not reviewed and not excluded and boundary is None:
+        raise CursorError(
+            "a completed batch records at least one reviewed or excluded unit, "
+            "or an explicitly requested PR boundary."
+        )
 
     updated[mode]["reviewed"] = sorted(set(updated[mode]["reviewed"]) | set(reviewed))
     updated["excluded"][excluded_field] = sorted(
         set(updated["excluded"][excluded_field]) | set(excluded)
     )
 
-    if reviewed:
+    if mode == "pr":
+        recorded = updated["pr"]["endpoint"]
+        if boundary is not None:
+            candidate = candidates[position[boundary]]
+            updated["pr"]["endpoint"] = {
+                "number": candidate["number"],
+                "merged_at": candidate["merged_at"],
+            }
+        elif recorded is not None:
+            recorded_key = resolve_key(mode, recorded["number"], keys)
+            if recorded_key is None:
+                raise CursorError(
+                    _absent_endpoint_message(mode, recorded["number"], partial)
+                )
+            candidate = candidates[position[recorded_key]]
+            updated["pr"]["endpoint"] = {
+                "number": candidate["number"],
+                "merged_at": candidate["merged_at"],
+            }
+    elif reviewed:
         oldest = max(reviewed, key=lambda unit: position[unit])
         updated[mode]["endpoint"] = _advanced_endpoint(
             mode,
@@ -859,6 +983,10 @@ def build_parser() -> argparse.ArgumentParser:
     recorder.add_argument("--listing-limit", type=int)
     recorder.add_argument("--reviewed", default="", help="the units this batch reviewed")
     recorder.add_argument("--exclude", default="", help="units the user excluded from every later batch")
+    recorder.add_argument(
+        "--boundary",
+        help="an explicitly requested exclusive older PR boundary",
+    )
     return parser
 
 
@@ -895,6 +1023,9 @@ def main(argv=None) -> int:
             )
         )
 
+    boundary = _unit_list(args.mode, args.boundary)
+    if len(boundary) > 1:
+        raise CursorError("a PR sweep has one exclusive older boundary.")
     updated = record(
         state,
         args.mode,
@@ -902,6 +1033,7 @@ def main(argv=None) -> int:
         _unit_list(args.mode, args.reviewed),
         _unit_list(args.mode, args.exclude),
         listing_limit=args.listing_limit,
+        boundary=boundary[0] if boundary else None,
     )
     document.setdefault("repositories", {})[args.repo] = updated
     path = write_document(args.root, document)
