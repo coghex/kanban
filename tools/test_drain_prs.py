@@ -366,6 +366,37 @@ class NoAgentStaleHeadIncidentTests(unittest.TestCase):
                 self.reconcile(pr, state, details=details)
                 self.assertEqual(self.open_incidents(), [], name)
 
+    def test_a_wrong_brand_marker_cannot_clear_the_incident_after_a_mode_change(self):
+        # The transition an operator makes to repair a no-agent install: one
+        # provider is loaded, so the incident's own premise is gone -- but the
+        # pull request may still owe a rereview, because the current-head
+        # marker it carries was published by the brand that is NOT loaded.
+        # `recover_stale_approval` already refuses that marker, so resolving
+        # the incident on it here would clear the only standing signal that
+        # this pull request is waiting. The two paths ask one question through
+        # one predicate.
+        self.recover(self.pr(), self.state())
+        self.assertEqual(len(self.open_incidents()), 1)
+        with mock.patch.object(drain_prs, "FINALIZE_LOADED_PROVIDERS", ("claude",)):
+            self.reconcile(
+                self.pr(),
+                self.state(),
+                details=("codex", self.HEAD.lower(), "APPROVE"),
+            )
+            self.assertEqual(
+                len(self.open_incidents()),
+                1,
+                "a marker from the unloaded brand resolved the incident",
+            )
+            # The loaded brand's own current-head approval does clear it, so
+            # the check above is a provider test rather than a blanket refusal.
+            self.reconcile(
+                self.pr(),
+                self.state(),
+                details=("claude", self.HEAD.lower(), "APPROVE"),
+            )
+        self.assertEqual(self.open_incidents(), [])
+
     def test_a_pull_request_that_still_needs_a_rereview_keeps_its_incident(self):
         self.recover(self.pr(), self.state())
         # Still open, still stale-headed, no verdict label, and the newest

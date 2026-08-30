@@ -4475,9 +4475,19 @@ def reconcile_no_agent_incidents(
                     f"its incident open: {exc}"
                 )
                 continue
-            if details is not None and details[1:] == (
-                pr["headRefOid"].lower(),
-                "APPROVE",
+            # `marker_provider_accepted` and not a bare head/verdict match,
+            # because this asks the same question `recover_stale_approval`
+            # asks of the same marker and the two answers have to be one
+            # answer. They diverge exactly where it matters: an operator who
+            # repairs a no-agent install by loading ONE provider leaves behind
+            # current-head markers published by the brand that is now
+            # unloaded, which recovery refuses -- so accepting one here would
+            # retire the only signal that this pull request is still waiting
+            # for a rereview it has not had.
+            if (
+                details is not None
+                and details[1:] == (pr["headRefOid"].lower(), "APPROVE")
+                and marker_provider_accepted(details[0])
             ):
                 note = (
                     f"PR #{number} carries a current-head {details[0]} approval."
