@@ -238,8 +238,10 @@ beside each gate is the case that most often reads as a pass and is not.
   dirt is untracked files has a non-empty status and stays item-level.
 - **Branch deletion:** no worktree and no open PR, the full SHA recorded, and
   the tip merged into the remote default branch; for a remote branch,
-  `ls-remote` additionally proves the branch still exists at that SHA, and
-  remote deletions go **one push per branch**. *Near-miss:* a tip merged into
+  `ls-remote` additionally proves the branch still exists at that SHA, the
+  deletion carries that SHA as a `--force-with-lease` so the proof and the push
+  describe one commit, and remote deletions go **one push per branch**.
+  *Near-miss:* a tip merged into
   the local default branch but not into the remote one is unmerged for this
   gate; and a remote name `ls-remote` no longer lists is a stale tracking ref
   rather than a deletion target — one already-gone branch name aborts an
@@ -283,29 +285,82 @@ python3 "$CENSUS" --repo "$ROOT" --fetch
 ```
 
 Recheck each item's gates immediately before its own command and skip anything
-that changed. Apply items individually, recording deleted branch and ref SHAs
-in the result. Each command below is a template too: every variable in it comes
-from the approved item, and `$DEFAULT` from the census's own `default_branch`. Never use `rm -rf`, force-remove a dirty worktree, delete an
-unmerged branch, drop unproved recovery state, force-push, reset, or hand-edit
-the drainer's locks, queue state, scheduler state, or incidents.
+that changed. **Every command below acts on one approved item and nothing else.**
+A partial approval is the normal result of §4, so a command that would also reach
+an item the user did not approve is refused rather than run. Apply items
+individually, recording deleted branch and ref SHAs in the result. Never use
+`rm -rf`, force-remove a dirty worktree, delete an unmerged branch, drop
+unproved recovery state, force-push, reset, or hand-edit the drainer's locks,
+queue state, scheduler state, or incidents.
+
+Each command is a template: every variable in it comes from the approved item,
+and `$DEFAULT` from the census's own `default_branch`.
+
+**Per-item deletions.** Each names one target exactly and carries the value the
+report recorded for it, so a target another actor moved between the report and
+the apply is refused rather than deleted:
 
 ```bash
-git -C "$ROOT" worktree prune --expire now
-git -C "$ROOT" fetch --prune origin
 git -C "$ROOT" worktree remove "$WORKTREE"
 git -C "$ROOT" branch -d "$BRANCH"
-git -C "$ROOT" push origin --delete "$BRANCH"
+git -C "$ROOT" push origin "--force-with-lease=refs/heads/$BRANCH:$SHA" ":refs/heads/$BRANCH"
 git -C "$ROOT" stash drop "$STASH"
-git -C "$ROOT" update-ref -d "$REF" "$SHA"
-gh issue edit "$ISSUE" -R "$REPO" --remove-assignee "$ASSIGNEE" --remove-label wip
+git -C "$ROOT" update-ref -d "$REF" "$REF_SHA"
+git -C "$ROOT" update-ref -d "$TRACKING_REF" "$TRACKING_SHA"
 ```
 
 Remove a worktree by its exact registered path, never by a reconstructed one.
-Drop stashes highest selector index first, so the remaining selectors do not
-shift under the next drop, and record each selector and its full object id
-before dropping it. The expected SHA on `update-ref -d` is mandatory: it
-deletes the ref only while it still equals that value, which is what keeps a
-ref another actor moved between the report and the apply from being deleted.
+Delete a remote branch one push per branch, and never with a bare `--delete`:
+that deletes whatever the branch points at *now*, so a branch someone pushed to
+after the `ls-remote` proof loses work nothing ever reviewed. The
+`--force-with-lease` naming the recorded SHA refuses that push instead, and the
+proof and the deletion then describe the same commit. Drop stashes highest
+selector index first, so the remaining selectors do not shift under the next
+drop, and record each selector and its full object id before dropping it.
+
+**The expected value on `update-ref -d` is mandatory, and must be the full SHA
+the report recorded.** It deletes the ref only while it still equals that value,
+which is what keeps a ref another actor moved from being deleted — and an
+all-zero value is not a weak guard but the opposite of one: Git reads it as
+"expect no ref" and deletes unconditionally. An empty or unrecorded value is a
+missing recheck, so stop and re-report rather than substituting anything for it.
+A stale origin-tracking ref is deleted the same way, one ref at a time:
+`git fetch --prune origin` would additionally remove every other ref that
+happens to be stale, including refs this run never reported and the user never
+saw.
+
+**The worktree metadata prune is the one operation Git offers no per-item form
+for**, so it is refused unless every record it would remove is approved:
+
+```bash
+UNAPPROVED="$(git -C "$ROOT" worktree prune --dry-run --expire now --verbose \
+  | sed -n 's#^Removing worktrees/\([^:]*\):.*#\1#p' \
+  | grep -vxF "$APPROVED_RECORDS" || :)"
+[ -z "$UNAPPROVED" ]
+git -C "$ROOT" worktree prune --expire now
+```
+
+`$APPROVED_RECORDS` is the newline-separated list of record names the user
+approved, and an empty one refuses every prune. The `|| :` is there because
+`grep` exits non-zero when it matches nothing, which here is the good case:
+no record was named that the user did not approve. A record the dry run names that
+is not on that list stops the prune: report the unapproved records and ask,
+rather than pruning them because they happened to be in the way.
+
+**Releasing a stale claim is two independent commands**, because a claim is an
+assignee *or* a `wip` label and may be either, both, or several assignees:
+
+```bash
+gh issue edit "$ISSUE" -R "$REPO" --remove-assignee "$ASSIGNEE"
+gh issue edit "$ISSUE" -R "$REPO" --remove-label wip
+```
+
+Run the first once per assignee the census recorded, and the second only when
+the issue actually carries `wip`. A label-only claim runs the second alone: a
+single combined command would pass an empty assignee and fail before it reached
+the label, leaving the claim exactly as it was. A claim with several assignees
+needs one removal each, rather than one call that drops the first and reports
+the claim released. Neither command touches issue content or approval labels.
 
 The default fast-forward runs in the worktree that actually has the default
 branch checked out, resolved from the porcelain listing rather than assumed to

@@ -113,8 +113,11 @@ REPOSITORY_SCOPED_CALLS = (
     "number,state,mergedAt,labels",
     'gh pr view "$PR" -R "$REPO" --json headRefOid,labels,commits',
     'gh pr checks "$PR" -R "$REPO" --json name,state,bucket',
-    'gh issue edit "$ISSUE" -R "$REPO" --remove-assignee "$ASSIGNEE" '
-    "--remove-label wip",
+    # Two commands, not one: a claim is an assignee OR a `wip` label, so a
+    # combined call passes an empty assignee on a label-only claim and fails
+    # before it reaches the label.
+    'gh issue edit "$ISSUE" -R "$REPO" --remove-assignee "$ASSIGNEE"',
+    'gh issue edit "$ISSUE" -R "$REPO" --remove-label wip',
 )
 # The one call whose repository binding is in its path rather than in a flag,
 # because `gh api` takes no `-R`. It is an enumerated exception, not a pattern:
@@ -139,14 +142,16 @@ FENCE_MARKERS = (
     ("checks", "gh pr checks"),
     ("recovery", "stash show -p"),
     ("census-refresh", 'python3 "$CENSUS" --repo "$ROOT" --fetch'),
-    ("apply", "worktree prune --expire now"),
+    ("deletions", 'worktree remove "$WORKTREE"'),
+    ("metadata-prune", "worktree prune --expire now"),
+    ("claim-release", "gh issue edit"),
     ("fast-forward", "merge --ff-only"),
 )
 FENCE_COUNT = len(FENCE_MARKERS)
 # Everything an agent runs before the report-and-stop. The two census fences
 # are byte-identical, so they are addressed by index rather than by content.
 PRE_APPROVAL_FENCES = tuple(range(0, 9))
-APPLY_FENCES = (9, 10, 11)
+APPLY_FENCES = (9, 10, 11, 12, 13)
 
 # The scenario every run below is scripted against.
 REPO_SLUG = "coghex/kanban"
@@ -159,8 +164,21 @@ BRANCH = "issue-7-example"
 STASH = "stash@{0}"
 WORKTREE = "/tmp/worktrees/coghex/kanban/issue-7-example"
 REF = "refs/drain-prs/autostash/abc"
+REF_SHA = "8877665544332211009988776655443322110099"
+TRACKING_REF = "refs/remotes/origin/issue-3-gone"
+TRACKING_SHA = "aabbccddeeff00112233445566778899aabbccdd"
 SHA = "1a2b3c4d5e6f70819293a4b5c6d7e8f900112233"
 ASSIGNEE = "coghex"
+
+# What `git worktree prune --dry-run --expire now --verbose` prints, in the
+# format git actually uses, for two prunable records. The workflow subtracts the
+# approved names from this listing, so the fixture is the listing rather than
+# the names.
+PRUNE_DRY_RUN = (
+    "Removing worktrees/issue-3-gone: gitdir file points to non-existent location\n"
+    "Removing worktrees/issue-9-other: gitdir file points to non-existent location\n"
+)
+PRUNABLE_RECORDS = ("issue-3-gone", "issue-9-other")
 
 WORKTREE_LISTING = (
     f"worktree {PRIMARY_WORKTREE}\nHEAD {SHA}\nbranch refs/heads/{DEFAULT_BRANCH}\n"
@@ -189,15 +207,25 @@ CENSUS_DOCUMENT = json.dumps(
 # ignored the gap would report the read as a mutation.
 GIT_MUTATIONS = {
     "prune worktree metadata": ["worktree", "prune", "--expire"],
-    "prune tracking refs": ["fetch", "--prune"],
     "remove a worktree": ["worktree", "remove"],
     "delete a local branch": ["branch", "-d"],
-    "delete a remote branch": ["push", "origin", "--delete"],
+    "delete a remote branch": ["push", "origin"],
     "drop a stash": ["stash", "drop"],
     "delete a ref": ["update-ref", "-d"],
     "fast-forward the default branch": ["merge", "--ff-only"],
 }
 GH_MUTATIONS = {"release a claim": ["issue", "edit"]}
+
+# The bulk operations this workflow does NOT perform, because each reaches
+# every eligible target rather than the approved one. `fetch --prune` removes
+# every stale tracking ref, including refs this run never reported, and a bare
+# `--delete` push deletes whatever the branch points at now rather than the
+# commit the report proved. Both are named in the body's prose, saying why they
+# are not used, so the absence is asserted over the fences alone.
+FORBIDDEN_IN_FENCES = {
+    "a bulk tracking-ref prune": "fetch --prune",
+    "an unleased remote deletion": "push origin --delete",
+}
 
 
 def read(relative_path: str) -> str:
@@ -335,9 +363,12 @@ class Harness:
     """
 
     def __init__(self, root: Path, brand: str, *, install_helper: bool = True,
-                 decoy_helper: bool = False):
+                 decoy_helper: bool = False, approved_records=PRUNABLE_RECORDS,
+                 prune_dry_run: str = PRUNE_DRY_RUN):
         self.root = root
         self.brand = brand
+        self.approved_records = tuple(approved_records)
+        self.prune_dry_run = prune_dry_run
         self.fake = fake_cli.FakeCli(root)
         for binary in ("gh", "git"):
             self.fake.install(binary)
@@ -406,7 +437,7 @@ class Harness:
         self.fake.script(
             "git",
             ["-C", CHECKOUT_ROOT, "worktree", "prune", "--dry-run"],
-            stdout="",
+            stdout=self.prune_dry_run,
         )
         self.fake.script(
             "git",
@@ -418,10 +449,9 @@ class Harness:
         )
         for tail in (
             ["worktree", "prune", "--expire"],
-            ["fetch", "--prune", "origin"],
             ["worktree", "remove"],
             ["branch", "-d"],
-            ["push", "origin", "--delete"],
+            ["push", "origin"],
             ["stash", "drop"],
             ["update-ref", "-d"],
         ):
@@ -440,6 +470,7 @@ class Harness:
         self.fake.script("gh", ["api", "--paginate", "--slurp"], stdout="[]\n")
         self.fake.script("gh", ["pr", "checks", PULL_REQUEST], stdout="[]\n")
         self.fake.script("gh", ["issue", "edit", ISSUE], stdout="")
+        self.fake.script("gh", ["issue", "edit", ISSUE], stdout="")
 
     def environment(self) -> dict[str, str]:
         env = {
@@ -453,9 +484,13 @@ class Harness:
             "STASH": STASH,
             "WORKTREE": WORKTREE,
             "REF": REF,
+            "REF_SHA": REF_SHA,
+            "TRACKING_REF": TRACKING_REF,
+            "TRACKING_SHA": TRACKING_SHA,
             "SHA": SHA,
             "ASSIGNEE": ASSIGNEE,
             "DEFAULT": DEFAULT_BRANCH,
+            "APPROVED_RECORDS": "\n".join(self.approved_records),
         }
         if self.brand == "claude":
             env["CLAUDE_PLUGIN_ROOT"] = str(self.plugin_root)
@@ -500,6 +535,11 @@ class HarnessCase(unittest.TestCase):
         harness = Harness(Path(directory.name), brand, **kwargs)
         harness.script_commands()
         return harness
+
+    def temporary_directory(self) -> Path:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return Path(directory.name)
 
     def fences(self, relative_path: str) -> dict[str, str]:
         return named_fences(read(relative_path))
@@ -750,7 +790,7 @@ class MutationBoundaryTests(HarnessCase):
             with self.subTest(asset=relative_path):
                 harness = self.harness(BRAND_OF[relative_path])
                 result = harness.run(
-                    self.script(relative_path, (0, 1, 11))
+                    self.script(relative_path, (0, 1, 13))
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 merges = [
@@ -761,6 +801,287 @@ class MutationBoundaryTests(HarnessCase):
                 self.assertEqual(len(merges), 1)
                 self.assertEqual(merges[0][:2], ["-C", PRIMARY_WORKTREE])
                 self.assertNotEqual(PRIMARY_WORKTREE, CHECKOUT_ROOT)
+
+
+class PerItemApprovalTests(HarnessCase):
+    """Every apply-path command reaches the approved item and nothing else.
+
+    A partial approval is the ordinary result of §4 -- the user takes one group
+    or three ids out of a longer report -- so a command that also reaches an
+    unapproved item destroys state nobody agreed to lose, while the run reports
+    success.
+    """
+
+    def test_the_metadata_prune_refuses_an_unapproved_record(self):
+        # `git worktree prune` has no per-record form, so the body gates it on
+        # every record the dry run names being approved. Here the dry run names
+        # two and only one is approved.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                harness = self.harness(
+                    BRAND_OF[relative_path], approved_records=(PRUNABLE_RECORDS[0],)
+                )
+                result = harness.run(self.script(relative_path, (0, 1, 11)))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(
+                    any(
+                        contains_run(call, ["worktree", "prune", "--expire"])
+                        for call in harness.git_calls()
+                    ),
+                    "the prune ran even though it would remove an unapproved record",
+                )
+
+    def test_the_metadata_prune_runs_when_every_record_is_approved(self):
+        # The control: the same fence, the same listing, the whole set
+        # approved. Without it the refusal above would pass over a gate that
+        # refuses everything.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                harness = self.harness(BRAND_OF[relative_path])
+                result = harness.run(self.script(relative_path, (0, 1, 11)))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(
+                    any(
+                        contains_run(call, ["worktree", "prune", "--expire"])
+                        for call in harness.git_calls()
+                    )
+                )
+
+    def test_an_empty_approval_refuses_the_prune(self):
+        # Nothing approved is not everything approved. `grep -vxF ""` matches
+        # every non-empty line, so the subtraction leaves the whole listing.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                harness = self.harness(BRAND_OF[relative_path], approved_records=())
+                result = harness.run(self.script(relative_path, (0, 1, 11)))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(
+                    any(
+                        contains_run(call, ["worktree", "prune", "--expire"])
+                        for call in harness.git_calls()
+                    )
+                )
+
+    def test_a_stale_tracking_ref_is_deleted_one_ref_at_a_time(self):
+        # `git fetch --prune origin` would remove every stale tracking ref,
+        # including refs this run never reported. The body deletes the reported
+        # one by name, with the value the report recorded.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                harness = self.harness(BRAND_OF[relative_path])
+                result = harness.run(self.script(relative_path, (0, 1, 10)))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                deletions = [
+                    call
+                    for call in harness.git_calls()
+                    if contains_run(call, ["update-ref", "-d"])
+                ]
+                self.assertEqual(len(deletions), 2)
+                self.assertIn(
+                    ["-C", CHECKOUT_ROOT, "update-ref", "-d", TRACKING_REF, TRACKING_SHA],
+                    deletions,
+                )
+                self.assertIn(
+                    ["-C", CHECKOUT_ROOT, "update-ref", "-d", REF, REF_SHA],
+                    deletions,
+                )
+
+    def test_no_fence_reaches_for_a_bulk_operation(self):
+        # Asserted over the fences rather than the whole file, because the
+        # prose names both of these deliberately, to say why they are not used.
+        for relative_path in RENDERED_ASSETS:
+            fences = "\n".join(bash_fences(read(relative_path)))
+            for label, spelling in sorted(FORBIDDEN_IN_FENCES.items()):
+                with self.subTest(asset=relative_path, forbidden=label):
+                    self.assertNotIn(spelling, fences)
+            with self.subTest(asset=relative_path, prose="the reason is given"):
+                self.assertEqual(
+                    missing(
+                        read(relative_path),
+                        (
+                            "`git fetch --prune origin` would additionally remove "
+                            "every other ref that happens to be stale",
+                            "never with a bare `--delete`",
+                        ),
+                    ),
+                    [],
+                )
+
+    def test_a_claim_release_is_two_independent_commands(self):
+        # A `wip`-only claim has no assignee to remove. Run the label command
+        # alone and prove it is a complete release on its own.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                fence = self.fences(relative_path)["claim-release"]
+                label_line = [
+                    line for line in fence.splitlines() if "--remove-label" in line
+                ]
+                self.assertEqual(len(label_line), 1)
+                harness = self.harness(BRAND_OF[relative_path])
+                result = harness.run(
+                    self.script(relative_path, (0, 1)) + "\n" + label_line[0]
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = harness.gh_calls()
+                self.assertEqual(len(calls), 1)
+                self.assertIn("--remove-label", calls[0])
+                self.assertNotIn("--remove-assignee", calls[0])
+
+    def test_no_single_call_assumes_an_assignee_and_a_label(self):
+        # The defect the split closes: one call carrying both flags fails on a
+        # label-only claim before it reaches the label, leaving the claim in
+        # place while the run reports it released.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                for call in gh_invocations(read(relative_path)):
+                    if "issue edit" not in call:
+                        continue
+                    with self.subTest(call=call):
+                        self.assertFalse(
+                            "--remove-assignee" in call and "--remove-label" in call,
+                            "one call cannot serve a label-only claim and an "
+                            "assigned one",
+                        )
+                self.assertEqual(
+                    missing(
+                        read(relative_path),
+                        (
+                            "Run the first once per assignee the census recorded, "
+                            "and the second only when the issue actually carries "
+                            "`wip`.",
+                            "A claim with several assignees needs one removal each",
+                        ),
+                    ),
+                    [],
+                )
+
+
+class RemoteDeletionLeaseTests(HarnessCase):
+    """The remote deletion is driven against a real Git remote.
+
+    `ls-remote` proving the branch exists at a SHA is a read, and a read is
+    stale the instant it returns. The only thing that makes the proof and the
+    deletion describe one commit is the lease on the push, so it is asserted by
+    moving the branch between the two and watching the push refuse.
+    """
+
+    def push_line(self, relative_path: str) -> str:
+        fence = self.fences(relative_path)["deletions"]
+        lines = [line for line in fence.splitlines() if " push origin " in line]
+        self.assertEqual(len(lines), 1, "expected exactly one remote deletion")
+        return lines[0]
+
+    def build(self, root: Path) -> tuple[Path, str]:
+        """A remote with `master` and `feature`, and `feature`'s recorded tip."""
+        remote = root / "remote.git"
+        work = root / "work"
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(root / "home"),
+            "GIT_CONFIG_GLOBAL": str(root / "gitconfig"),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "janitor test",
+            "GIT_AUTHOR_EMAIL": "janitor@example.invalid",
+            "GIT_COMMITTER_NAME": "janitor test",
+            "GIT_COMMITTER_EMAIL": "janitor@example.invalid",
+        }
+        (root / "home").mkdir(parents=True, exist_ok=True)
+        self.git_env = env
+
+        def git(*args, cwd=None):
+            result = subprocess.run(
+                ["git", *args],
+                cwd=str(cwd) if cwd else None,
+                env=env,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+
+        git("init", "-q", "--bare", "-b", DEFAULT_BRANCH, str(remote))
+        git("init", "-q", "-b", DEFAULT_BRANCH, str(work))
+        (work / "a").write_text("a\n", encoding="utf-8")
+        git("add", "a", cwd=work)
+        git("commit", "-qm", "one", cwd=work)
+        git("remote", "add", "origin", str(remote), cwd=work)
+        git("push", "-q", "-u", "origin", DEFAULT_BRANCH, cwd=work)
+        git("checkout", "-qb", BRANCH, cwd=work)
+        (work / "b").write_text("b\n", encoding="utf-8")
+        git("add", "b", cwd=work)
+        git("commit", "-qm", "two", cwd=work)
+        git("push", "-q", "-u", "origin", BRANCH, cwd=work)
+        recorded = git("rev-parse", BRANCH, cwd=work).strip()
+        return work, recorded
+
+    def remote_heads(self, work: Path) -> str:
+        return subprocess.run(
+            ["git", "ls-remote", "--heads", "origin"],
+            cwd=str(work),
+            env=self.git_env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        ).stdout
+
+    def push(self, relative_path: str, work: Path, sha: str):
+        script = "set -e\n" + self.push_line(relative_path)
+        env = dict(self.git_env)
+        env.update({"ROOT": str(work), "BRANCH": BRANCH, "SHA": sha})
+        return subprocess.run(
+            ["sh", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def test_a_branch_that_moved_after_the_proof_is_not_deleted(self):
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                root = self.temporary_directory()
+                work, recorded = self.build(root)
+                # Someone pushes to the branch between the `ls-remote` proof
+                # and the apply. The recorded SHA is now stale.
+                (work / "c").write_text("c\n", encoding="utf-8")
+                subprocess.run(
+                    ["git", "add", "c"], cwd=str(work), env=self.git_env, check=True
+                )
+                subprocess.run(
+                    ["git", "commit", "-qm", "three"],
+                    cwd=str(work),
+                    env=self.git_env,
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "push", "-q", "origin", BRANCH],
+                    cwd=str(work),
+                    env=self.git_env,
+                    check=True,
+                )
+                moved = subprocess.run(
+                    ["git", "rev-parse", BRANCH],
+                    cwd=str(work),
+                    env=self.git_env,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+                self.assertNotEqual(moved, recorded)
+
+                result = self.push(relative_path, work, recorded)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"refs/heads/{BRANCH}", self.remote_heads(work))
+
+    def test_a_branch_still_at_the_recorded_tip_is_deleted(self):
+        # The control: the same line, the same repository, nothing moved.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                root = self.temporary_directory()
+                work, recorded = self.build(root)
+                result = self.push(relative_path, work, recorded)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(f"refs/heads/{BRANCH}", self.remote_heads(work))
 
 
 class RepositoryScopeTests(unittest.TestCase):
@@ -841,6 +1162,8 @@ ALL_SAFE_GATES = {
             "the full SHA recorded",
             "the tip merged into the remote default branch",
             "`ls-remote` additionally proves the branch still exists at that SHA",
+            "the deletion carries that SHA as a `--force-with-lease` so the proof "
+            "and the push describe one commit",
             "remote deletions go **one push per branch**",
         ),
         "near_miss": (

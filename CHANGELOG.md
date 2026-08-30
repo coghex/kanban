@@ -50,10 +50,22 @@ created above it.
   worktrees, and any ambiguous disposition are excluded from bulk approval and
   always need item-level say-so.
 
-  Remote branch deletions go one push per branch, because one already-gone
-  branch name aborts an entire multi-branch `git push origin --delete`
-  client-side — nothing gets deleted while the report reads as though
-  everything did. A stash is judged by its own delta rather than by diffing its
+  Every apply-path command reaches the approved item and nothing else, because
+  a partial approval is the ordinary result. Remote branch deletions go one
+  push per branch — one already-gone branch name aborts an entire multi-branch
+  `git push origin --delete` client-side, so nothing gets deleted while the
+  report reads as though everything did — and each carries the proved SHA as a
+  `--force-with-lease`, so a branch someone pushed to after the `ls-remote`
+  proof is refused rather than losing work nothing reviewed. A stale
+  origin-tracking ref is deleted by name with its recorded value rather than
+  through `git fetch --prune`, which would also remove refs the run never
+  reported. `git worktree prune --expire now` is the one operation with no
+  per-item form, so it is refused unless every record its dry run names was
+  approved. And releasing a stale claim is two independent commands, since a
+  claim is an assignee *or* a `wip` label: a label-only claim needs the label
+  removal alone, and several assignees need one removal each.
+
+  A stash is judged by its own delta rather than by diffing its
   files against the current branch, with list numbering, emphasis, and
   whitespace normalized, and a line that never landed may be superseded rather
   than missing. The repository is resolved once from the session's checkout,

@@ -701,14 +701,19 @@ FINALIZE_SURFACE_EXPECTED_COMMANDS = {
 # `ls-remote`, `stash show -p`, and every mutation the apply step performs;
 # `gh` is the targeted confirmation of a candidate the census already named,
 # plus the one write this workflow makes, releasing a stale claim; `python3`
-# runs the vendored census; `sed` reduces the origin URL to `owner/name`; and
-# `awk` selects, from the porcelain listing, the worktree the default branch is
-# actually checked out in, so the fast-forward never runs in the wrong one.
+# runs the vendored census; `awk` selects, from the porcelain listing, the
+# worktree the default branch is actually checked out in, so the fast-forward
+# never runs in the wrong one; and `sed` and `grep` do two jobs each side of
+# one rule -- `sed` reduces the origin URL to `owner/name` and extracts the
+# record names the metadata prune would remove, and `grep` subtracts the
+# approved ones from that list, which is what refuses a prune that would reach
+# an item the user never approved.
 JANITOR_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/janitor.md": {
         "awk",
         "gh",
         "git",
+        "grep",
         "python3",
         "sed",
     },
@@ -717,6 +722,7 @@ JANITOR_SURFACE_EXPECTED_COMMANDS = {
         "find",
         "gh",
         "git",
+        "grep",
         "head",
         "python3",
         "sed",
@@ -2851,6 +2857,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                         "python3-cli",
                         "sed-cli",
                         "awk-cli",
+                        "grep-cli",
                         "find-cli",
                         "head-cli",
                     },
