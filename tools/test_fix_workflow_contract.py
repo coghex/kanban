@@ -1256,6 +1256,36 @@ BUNDLE_READMES = {
 HASKELL_SPAWNED = {"solve", "pr-review", "pr-rereview", "pr-revise", "repair"}
 
 
+def workflow_names_from_paths(prefix: str, paths) -> set[str]:
+    """The workflows `paths` ships, by each brand's own asset shape.
+
+    Claude ships `commands/<name>.md`; Codex ships `skills/<name>/SKILL.md`.
+    Both shapes are matched exactly rather than by taking a path's first
+    component, because those are not the same question once a bundle ships
+    anything else: a `skills/<name>/` directory carrying scripts and no
+    `SKILL.md` ships no workflow at all -- `tools/plugin_bundle_gate.py`
+    derives the installable set by the same rule, and the janitor census
+    directory issue #574 added is the first such directory. The first
+    component of `skills/janitor/scripts/census.py` is a helper's directory
+    name, and counting it would move every README total below by one.
+
+    Pure, and separate from the `git ls-files` call, so the rule can be driven
+    over a listing that contains such a directory rather than only over
+    whatever the tree happens to hold today.
+    """
+    names = set()
+    for path in paths:
+        tail = path[len(prefix) :].lstrip("/")
+        if not tail:
+            continue
+        parts = tail.split("/")
+        if len(parts) == 1 and parts[0].endswith(".md"):
+            names.add(parts[0].removesuffix(".md"))
+        elif len(parts) == 2 and parts[1] == "SKILL.md":
+            names.add(parts[0])
+    return names
+
+
 def shipped_workflow_names(prefix: str) -> set[str]:
     """Every workflow the tracked bundle at `prefix` actually ships."""
     import subprocess
@@ -1267,14 +1297,7 @@ def shipped_workflow_names(prefix: str) -> set[str]:
         text=True,
         check=True,
     ).stdout.split()
-    names = set()
-    for path in listed:
-        tail = path[len(prefix) :].lstrip("/")
-        if not tail:
-            continue
-        # Claude ships commands/<name>.md; Codex ships skills/<name>/SKILL.md.
-        names.add(tail.split("/")[0].removesuffix(".md"))
-    return names
+    return workflow_names_from_paths(prefix, listed)
 
 
 class BundleReadmeInventoryTests(unittest.TestCase):
@@ -1288,6 +1311,47 @@ class BundleReadmeInventoryTests(unittest.TestCase):
             self.assertGreaterEqual(len(names), 20, brand)
             self.assertIn("fix", names, brand)
             self.assertTrue(HASKELL_SPAWNED < names, brand)
+
+    def test_a_scripts_only_directory_ships_no_workflow(self):
+        # The rule the README totals rest on, driven over a listing that holds
+        # both shapes plus a helper directory. Taking a path's first component
+        # would recover "helper" here, and would inflate every total below.
+        prefix = "codex-plugin/plugins/kanban/skills"
+        self.assertEqual(
+            workflow_names_from_paths(
+                prefix,
+                [
+                    f"{prefix}/solve/SKILL.md",
+                    f"{prefix}/solve/scripts/trusted_issue_spec.py",
+                    f"{prefix}/helper/scripts/census.py",
+                    f"{prefix}/helper/scripts/kanban_config.py",
+                ],
+            ),
+            {"solve"},
+        )
+        # ...and the Claude shape is still a flat `<name>.md`, so a file one
+        # level down is not a command either.
+        claude = "claude-plugin/plugins/kanban/commands"
+        self.assertEqual(
+            workflow_names_from_paths(
+                claude, [f"{claude}/solve.md", f"{claude}/scripts/census.py"]
+            ),
+            {"solve"},
+        )
+
+    def test_the_codex_half_agrees_with_the_installable_bundle_gate(self):
+        # One rule, one spelling: `tools/plugin_bundle_gate.py` is the
+        # authority on what a Codex installation can invoke, so the set these
+        # README counts are taken from has to be the set it derives. Bound to
+        # the real tree, so a helper directory that started shipping a
+        # SKILL.md would move both sides together rather than only one.
+        import plugin_bundle_gate
+
+        prefix = BUNDLE_READMES["codex"][1]
+        self.assertEqual(
+            shipped_workflow_names(prefix),
+            plugin_bundle_gate.tracked_skill_names(REPO_ROOT, prefix),
+        )
 
     def test_every_readme_names_every_workflow_it_ships(self):
         missing = []
