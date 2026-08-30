@@ -431,7 +431,12 @@ fresh install is dual and identical to today.
   become mode-aware rather than silently bypassed. The roster's per-role
   assignments still apply, so review independence degrades gracefully to
   cross-model-within-brand (Sonnet solves, Opus reviews) rather than
-  vanishing. Origin markers keep being written (D-12) so a later return to
+  vanishing — *when the operator's roster makes it available*. Owner
+  clarification, 2026-08-29: that is a consequence of distinct `solve` and
+  `pr_review` assignments, not an invariant anything enforces. A roster may
+  legally assign one provider the same model to both roles, and neither
+  coordinator validates or promises model inequality; nothing refuses a
+  same-model single-agent review. Origin markers keep being written (D-12) so a later return to
   dual mode finds valid provenance. The inventory exposed that the embedded
   issue-review client speaks only the Codex app-server protocol
   (`src/Kanban/Review.hs`); D-13 closes that gap inside this arc — the
@@ -832,9 +837,15 @@ concrete proposal before any implementation.
   flags and ships no copy of the reader at all; the byte-identity gate fails
   when either of the reader's two copies drifts; the parity gate fails when
   any roster-backed copy's fallback drifts from the tracked defaults.
+  *Superseded in part by MODEL-11 (#572):* the Codex plugin copy now ships a
+  third byte-identical copy of the reader and loads it to read the roster's
+  `agents` list, and the byte-identity gate compares all three. It still
+  spawns with no model or effort flags and resolves no assignment cell, which
+  is the half of this signal D-2 as amended actually protects.
 - **Out of scope:** changing which brand any script routes to; giving the
   Codex plugin copy pins — D-2 as amended keeps its delegation contract, and
-  the roster never reaches it.
+  the roster never reaches it. *(The second clause is superseded by MODEL-11:
+  the roster does reach that bundle, for routing only. The pins do not.)*
 - **Open questions:** None
 
 ### MODEL-5. Extend the settings screen to edit role assignments
@@ -983,9 +994,20 @@ concrete proposal before any implementation.
   loaded provider regardless of origin, unmarked-origin dual review collapses
   to one reviewer, the drainer degrades gracefully (D-11), and
   `docs/agent-workflow-contract.md` §2.2/§2.3 describe the modes.
+  Single-agent review stays on the *normal* self-reviewed path: Kanban's own
+  invocation already spawned the session for the `pr_review` role, so a
+  matching `--self-review-as <loaded provider>` is accepted and returns
+  `awaiting_self_review` even though the routed reviewer shares the pull
+  request's origin brand. It is not turned into a nested spawn, and the
+  `self_review_refused` guard is unchanged for a declaration that is absent
+  or names the unloaded brand.
 - **Scope:** mode resolution in `tools/kanban_models.py`, routing in the
-  three review scripts, the drainer's fail-closed incident arm, contract
-  updates, and the parity gates extended to mode-aware behavior.
+  three review scripts, the drainer's fail-closed incident arm — including
+  its Claude spawn on `drain_rereview.claude` (D-14) — contract
+  updates, the tracked `drain-prs` command source and the four
+  `self_review_refused` recovery assets, the Codex bundle's own
+  `kanban_models.py` copy, and the parity gates extended to mode-aware
+  behavior.
 - **Phase:** 4
 - **Depends on:** MODEL-4, MODEL-8
 - **Ordering:** not on the critical path

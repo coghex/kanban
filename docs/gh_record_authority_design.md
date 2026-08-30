@@ -434,8 +434,9 @@ decoded with `.:?` reads a pre-change record unchanged, with the owner absent,
 which is exactly what it is. `WorkerState` already carries a
 `Maybe ProcessIdentity` on a durable record for this reason, behind a
 hand-written decoder using `.:?` and `.!=`
-(`src/Kanban/Worker/Types.hs:185,197-210`); `OwnedProcessGroup` uses the derived
-instance today (`Process.hs:84-85`), so it gains one of its own.
+(`src/Kanban/Worker/Types.hs:185,197-210`); `OwnedProcessGroup` keeps its derived
+instance (`Process.hs:103-104`), whose generic decoder reads a missing optional
+key as `Nothing` and so needs no hand-written counterpart.
 
 What attribution buys under D-1 is narrower than it would have been under a
 coordinating design, and worth stating exactly: with one board per repository,
@@ -537,9 +538,10 @@ It changes one message.
 
 **Consequences:** no schema migration, no invalidation, and no first-upgrade
 cost at all. The schema version stays available for a future change that really
-is incompatible. `OwnedProcessGroup` gains a hand-written `FromJSON` in place of
-the derived one. No slice of this arc carries a durable schema change, which
-retires the bundling tension D-5 had accepted. Under D-1 the value remains crash
+is incompatible. `OwnedProcessGroup` keeps its derived `FromJSON`, which
+already decodes a record written before the change with the owner absent.
+No slice of this arc carries a durable schema change, which retires the
+bundling tension D-5 had accepted. Under D-1 the value remains crash
 recovery and honest messages rather than live-group protection. D-8's path
 migration is not in tension with any of this: it moves a filename and leaves the
 envelope alone.
@@ -892,8 +894,8 @@ that did not become a separate delivery artifact.
   legacy discovery pass and its restart-safe migration; lease acquisition during
   dashboard startup and release at exit, with the run-and-exit modes taking no
   lease; the refusal diagnostic, its `getLock` PID, and its exit status; an
-  optional owner `ProcessIdentity` on `OwnedProcessGroup` behind a hand-written
-  backward-compatible decoder; capture of the dashboard's identity for new
+  optional owner `ProcessIdentity` on `OwnedProcessGroup`, backward-compatible
+  through its derived decoder; capture of the dashboard's identity for new
   entries; the corrected inherited-record wording; and the
   `design.md` amendments — §3's new non-goal with its witness declaration, §15's
   retired cross-process sentence, and §16's narrowed cache-path sentence. §17 is
