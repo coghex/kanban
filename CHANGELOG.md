@@ -15,6 +15,78 @@ created above it.
 
 ### Unreleased
 
+- A new packaged workflow, `/janitor` (Codex: `$janitor`), audits one
+  repository's agent-pipeline state and cleans up only what the user approves:
+  stale claims and issue worktrees, every registered worktree, workflow
+  branches and refs, pull-request and drainer health, stashes and drainer
+  recovery objects, stray content, and default-branch drift. It reports first
+  and mutates nothing until individual items are approved.
+
+  It reasons over the `janitor-census/v1` snapshot the `scripts/census.py`
+  helper vendored into both bundles emits, rather than hand-walking the
+  repository. Each brand resolves that helper from its own install location —
+  `${CLAUDE_PLUGIN_ROOT}/scripts/census.py` for Claude, a search under
+  `${CODEX_HOME:-$HOME/.codex}/plugins/cache` scoped to this skill's own
+  `scripts/` for Codex — and a helper that cannot be resolved stops the run
+  before its first read rather than after it, since every judgement the
+  workflow makes is made over that document.
+
+  A `null` or unavailable collection in the census is an anomaly to diagnose,
+  never a clean or empty result: an unreadable worktree is not a clean one, and
+  an unreadable retain ledger is not an empty one. The repository-local
+  retention ledger is a reminder rather than an exemption — every recorded
+  target and its `review_when` condition is revalidated on each run, a stale or
+  contradicted entry is reported as a decision, and no ledger entry is written
+  before explicit approval.
+
+  Bulk `all-safe` approval covers exactly five fully-proved gates — worktree
+  removal, branch deletion, review metadata prune, tracking-ref prune, and the
+  default fast-forward — and each names the near-miss that most often reads as
+  a pass: a worktree whose only dirt is untracked files, a tip merged into the
+  local default but not the remote one, a prune the `--expire now` dry run does
+  not name, a `refs/remotes/` entry that proves nothing on its own, and a
+  default branch that is ahead or diverged. Dirty or unmerged work, limbo
+  worktrees, permanent-worktree content, every recovery object, coordinated-test
+  worktrees, and any ambiguous disposition are excluded from bulk approval and
+  always need item-level say-so.
+
+  Every apply-path command reaches the approved item and nothing else, because
+  a partial approval is the ordinary result. Remote branch deletions go one
+  push per branch — one already-gone branch name aborts an entire multi-branch
+  `git push origin --delete` client-side, so nothing gets deleted while the
+  report reads as though everything did — and each carries the proved SHA as a
+  `--force-with-lease`, so a branch someone pushed to after the `ls-remote`
+  proof is refused rather than losing work nothing reviewed. A stale
+  origin-tracking ref is deleted by name with its recorded value rather than
+  through `git fetch --prune`, which would also remove refs the run never
+  reported. `git worktree prune --expire now` is the one operation with no
+  per-item form, so it is refused unless every record its dry run names was
+  approved — a gate that reads the dry run's `stderr`, where Git actually
+  writes it, and that is one `&&` chain so the prune is unreachable in a shell
+  without `set -e`. A stash is dropped only while its selector still resolves
+  to the object the report recorded, and the drop is verified afterwards
+  against the object Git says it took: a selector is a position in a reflog, so
+  anyone pushing a stash in between shifts it, and dropping `stash@{0}` would
+  destroy work the run never inspected. A mismatch is restored with
+  `git stash store` before the item fails, so the remaining window between the
+  check and the drop loses nothing. And releasing a stale claim is two
+  independent commands, since a claim is an assignee *or* a `wip` label: a
+  label-only claim needs the label removal alone, and several assignees need
+  one removal each.
+
+  The census helper both bundles ship now passes `--no-prune` on the `--fetch`
+  refresh. `fetch.prune` is an ordinary configuration, and under it that
+  refresh would have deleted every stale origin-tracking ref during the
+  read-only pass — before one was reported, let alone approved — which is the
+  opposite of what the per-item deletion gate above exists for.
+
+  A stash is judged by its own delta rather than by diffing its
+  files against the current branch, with list numbering, emphasis, and
+  whitespace normalized, and a line that never landed may be superseded rather
+  than missing. The repository is resolved once from the session's checkout,
+  announced before the first census run, and passed as `-R "$REPO"` on every
+  `gh` call.
+
 - A new packaged workflow, `/finalize` (Codex: `$finalize`), is the manual
   fallback for merging one reviewed pull request when the service-managed PR
   drainer cannot be used. It is not the ordinary merge path and is never taken

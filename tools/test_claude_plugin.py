@@ -25,14 +25,15 @@ post-#239 tracked Codex skills; issue #328 completed the report side with
 #511 vendored the rendered /triage roadmap, its /retriage refresh, the
 /push-docs documentation-landing workflow, the /backlog-review backlog audit,
 the /project-review history audit, the /drain-prs drainer control surface, the
-/fix approved-pull-request workflow, and — issue #544, the last of the eight —
-the /finalize manual merge fallback.
+/fix approved-pull-request workflow, the /finalize manual merge fallback, and —
+issue #575, the seventh of the arc's eight, leaving only /autosolve — the
+/janitor pipeline housekeeping audit.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all twenty-three); HASKELL_PARITY_COMMAND_NAMES is the
+commands directory (all twenty-four); HASKELL_PARITY_COMMAND_NAMES is the
 strictly smaller set Kanban's own Haskell code spawns by name (the five
 above). The drafting, document, roadmap, documentation-landing,
-backlog-audit, history-audit, drainer-control, approved-pull-request, and
-manual-finalization workflows
+backlog-audit, history-audit, drainer-control, approved-pull-request,
+manual-finalization, and pipeline-housekeeping workflows
 are user- or daemon-invoked and are deliberately excluded from that parity
 pinning; see
 docs/drafting-workflow-contract.md and docs/document-workflow-contract.md,
@@ -230,6 +231,20 @@ PULL_REQUEST_FIX_COMMAND_NAMES = {"fix"}
 # tools/test_finalize_workflow.py.
 FINALIZE_COMMAND_NAMES = {"finalize"}
 
+# The pipeline housekeeping audit vendored by issue #575, slice VEND-9, and
+# the seventh of the arc's eight commands. Rendered from
+# tools/command_sources/janitor.md the way the seven sets above are, and like
+# them user-invoked and excluded from Haskell name parity. It is its own
+# category rather than another pull-request or drainer name because its
+# subject is neither: it audits the repository's own local state -- worktrees,
+# branches, refs, stashes and recovery objects -- and reaches GitHub only to
+# confirm a candidate the census already named. It is also the only packaged
+# command that reads a bundled helper program shipped by an earlier slice:
+# claude-plugin/plugins/kanban/scripts/census.py landed with issue #574 and
+# nothing invokable, and this command is what invokes it. Its behavioral
+# assertions live in tools/test_janitor_workflow.py.
+JANITOR_COMMAND_NAMES = {"janitor"}
+
 # What a Claude Code installation must actually discover in commands/.
 EXPECTED_COMMAND_NAMES = (
     HASKELL_PARITY_COMMAND_NAMES
@@ -242,6 +257,7 @@ EXPECTED_COMMAND_NAMES = (
     | DRAINER_COMMAND_NAMES
     | PULL_REQUEST_FIX_COMMAND_NAMES
     | FINALIZE_COMMAND_NAMES
+    | JANITOR_COMMAND_NAMES
 )
 
 # Keys that would let a packaged command's frontmatter or manifest silently
@@ -388,7 +404,8 @@ class CommandDiscoveryTests(unittest.TestCase):
             | PROJECT_REVIEW_COMMAND_NAMES
             | DRAINER_COMMAND_NAMES
             | PULL_REQUEST_FIX_COMMAND_NAMES
-            | FINALIZE_COMMAND_NAMES,
+            | FINALIZE_COMMAND_NAMES
+            | JANITOR_COMMAND_NAMES,
         )
         self.assertEqual(DRAFTING_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
         self.assertEqual(ROADMAP_COMMAND_NAMES & DRAFTING_COMMAND_NAMES, set())
@@ -442,6 +459,21 @@ class CommandDiscoveryTests(unittest.TestCase):
                 | PROJECT_REVIEW_COMMAND_NAMES
                 | DRAINER_COMMAND_NAMES
                 | PULL_REQUEST_FIX_COMMAND_NAMES
+            ),
+            set(),
+        )
+        self.assertEqual(
+            JANITOR_COMMAND_NAMES
+            & (
+                DRAFTING_COMMAND_NAMES
+                | DOCUMENT_COMMAND_NAMES
+                | ROADMAP_COMMAND_NAMES
+                | PUBLICATION_COMMAND_NAMES
+                | BACKLOG_COMMAND_NAMES
+                | PROJECT_REVIEW_COMMAND_NAMES
+                | DRAINER_COMMAND_NAMES
+                | PULL_REQUEST_FIX_COMMAND_NAMES
+                | FINALIZE_COMMAND_NAMES
             ),
             set(),
         )

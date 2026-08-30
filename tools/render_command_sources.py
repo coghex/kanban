@@ -292,6 +292,30 @@ COMMAND_SOURCES = (
             "tools/test_finalize_workflow.py rather than carried over."
         ),
     ),
+    CommandSource(
+        name="janitor",
+        source="tools/command_sources/janitor.md",
+        claude_commands_dir=CLAUDE_COMMANDS_DIR,
+        codex_skills_dir=CODEX_SKILLS_DIR,
+        note=(
+            "VEND-9, and the seventh of the arc's eight commands: only "
+            "autosolve is left. It is the one slice split across two pull "
+            "requests -- issue #574 shipped its scripts/census.py with "
+            "nothing invokable, and this body reasons over that program's "
+            "janitor-census/v1 snapshot. Design D-12 resolved the widest "
+            "reconciliation in the arc after project-review's -- 143 "
+            "differing lines between a 23-line Claude copy that hand-walked "
+            "ten prose categories and a 134-line Codex copy built on the "
+            "census -- in the Codex copy's favour, because its compact-census "
+            "discipline, all-safe preservation gates, null-is-not-empty rule "
+            "and retention ledger are not reachable by rewording the other. "
+            "The Claude copy's stash judgement is folded into that structure "
+            "rather than discarded. D-13 keeps its two references/ files out "
+            "of both bundles, so like project-review this entry needs nothing "
+            "from the renderer the eight above did not; what those files "
+            "carried is body prose or is deliberately dropped."
+        ),
+    ),
 )
 
 

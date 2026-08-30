@@ -358,6 +358,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md",
     "codex-plugin/plugins/kanban/skills/fix/SKILL.md",
     "codex-plugin/plugins/kanban/skills/finalize/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/janitor/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
@@ -398,6 +399,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/drain-prs.md",
     "claude-plugin/plugins/kanban/commands/fix.md",
     "claude-plugin/plugins/kanban/commands/finalize.md",
+    "claude-plugin/plugins/kanban/commands/janitor.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
@@ -683,6 +685,49 @@ FINALIZE_SURFACE_EXPECTED_COMMANDS = {
         "gh",
         "git",
         "grep",
+        "mktemp",
+        "python3",
+        "rm",
+        "sed",
+    },
+}
+
+# Issue #575's pipeline housekeeping audit, pinned as two sets rather than one
+# because its brand blocks carry more than argument text: the Codex rendering
+# resolves this bundle's own census helper with a `find`/`head` search under
+# $CODEX_HOME, exactly the asymmetry the `fix` pair has, while the Claude
+# rendering reads ${CLAUDE_PLUGIN_ROOT} and needs neither program. `git` is the
+# audit itself -- the porcelain worktree listing, the prune dry run,
+# `ls-remote`, `stash show -p`, and every mutation the apply step performs;
+# `gh` is the targeted confirmation of a candidate the census already named,
+# plus the one write this workflow makes, releasing a stale claim; `python3`
+# runs the vendored census; `awk` selects, from the porcelain listing, the
+# worktree the default branch is actually checked out in, so the fast-forward
+# never runs in the wrong one; and `sed` and `grep` do two jobs each side of
+# one rule -- `sed` reduces the origin URL to `owner/name` and extracts the
+# record names the metadata prune would remove, and `grep` subtracts the
+# approved ones from that list, which is what refuses a prune that would reach
+# an item the user never approved. `mktemp` and `rm` hold that listing outside
+# the audited checkout: Git writes it to stderr, and a pipe would discard the
+# dry run's own exit status that the gate's `&&` chain has to test.
+JANITOR_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/janitor.md": {
+        "awk",
+        "gh",
+        "git",
+        "grep",
+        "mktemp",
+        "python3",
+        "rm",
+        "sed",
+    },
+    "codex-plugin/plugins/kanban/skills/janitor/SKILL.md": {
+        "awk",
+        "find",
+        "gh",
+        "git",
+        "grep",
+        "head",
         "mktemp",
         "python3",
         "rm",
@@ -2771,6 +2816,76 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # And the fix pair's asymmetry is not this pair's: nothing here is
         # searched for under $CODEX_HOME.
         self.assertEqual(claude & {"find", "head"}, set())
+
+    def test_the_janitor_assets_reach_exactly_the_pinned_commands(self):
+        # The housekeeping audit. Pinned per brand rather than as one shared
+        # set, because the Codex rendering really does reach two programs the
+        # Claude one does not; asserting equality against each brand's own set
+        # is what keeps a command leaking into the wrong rendering visible.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path, expected in sorted(
+            JANITOR_SURFACE_EXPECTED_COMMANDS.items()
+        ):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            # Both are assertions, not absences: this workflow cannot audit a
+            # repository without `git`, and cannot confirm one of the census's
+            # candidates without `gh`.
+            self.assertIn("git", found, relative_path)
+            self.assertIn("gh", found, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+            # Declared from the manifest's side too, and against the rows a
+            # reader consults to find out which assets speak each tool.
+            for name in sorted(expected):
+                row = next(
+                    row
+                    for row in self.manifest
+                    if row["kind"] == "executable" and row["token"] == name
+                )
+                self.assertIn(
+                    row["id"],
+                    {
+                        "gh-cli",
+                        "git-cli",
+                        "python3-cli",
+                        "sed-cli",
+                        "awk-cli",
+                        "grep-cli",
+                        "mktemp-cli",
+                        "rm-cli",
+                        "find-cli",
+                        "head-cli",
+                    },
+                )
+                self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_only_the_codex_janitor_asset_searches_for_its_census(self):
+        # The difference between the two renderings, asserted as the
+        # difference it actually is rather than as two sets that happen to
+        # differ. `${CLAUDE_PLUGIN_ROOT}` is a variable the runtime sets, so
+        # the Claude rendering resolves its helper without spawning anything;
+        # Codex has no such variable and searches its plugin cache instead.
+        claude = JANITOR_SURFACE_EXPECTED_COMMANDS[
+            "claude-plugin/plugins/kanban/commands/janitor.md"
+        ]
+        codex = JANITOR_SURFACE_EXPECTED_COMMANDS[
+            "codex-plugin/plugins/kanban/skills/janitor/SKILL.md"
+        ]
+        self.assertEqual(codex - claude, {"find", "head"})
+        self.assertEqual(claude - codex, set())
 
     def test_only_the_codex_fix_asset_searches_for_its_coordinator(self):
         # The asymmetry above, asserted as the difference it actually is
