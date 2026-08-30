@@ -26,7 +26,7 @@ concrete precondition
 - [x] VEND-6. Vendor the janitor census helper — [#574]
 - [x] VEND-9. Vendor the janitor command over the census — [#575]
 - [x] VEND-7. Vendor finalize — [#544]
-- [ ] VEND-8. Vendor autosolve
+- [x] VEND-8. Vendor autosolve — [#576]
 
 ## Epic contract
 
