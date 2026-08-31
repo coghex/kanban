@@ -37,6 +37,7 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` closed without 
 - [x] PH-10. A malformed issue halts approval for every issue in the repository — [#201]
 - [x] PH-11. Autostash anchor refs leak and are never reaped — [#202]
 - [x] PH-12. The only executing pull-request guard was an untracked local edit — [no-issue]
+- [ ] PH-13. An approved issue cannot be corrected without discarding its approval
 
 ---
 
@@ -911,3 +912,84 @@ now makes the daemon's compatibility path resolve to the canonical copy.
 - **Remaining uncertainty:** The general daemon-divergence question remains
   outside the repository contract recorded by PH-7. This machine no longer has
   the divergence.
+
+## Chapter 9 — Amending an approved issue
+
+### PH-13. An approved issue cannot be corrected without discarding its approval
+
+> **Captured note:** a trusted comment on a GitHub issue silently dismisses that
+> issue's reviewed:approve label, and there is no way to make a small correction
+> to an issue without paying for a full re-review. A trusted comment SHOULD
+> change the spec hash by default — that part is correct. But the commenter
+> should be able to opt out explicitly: if a trusted comment carries an override
+> marker, the hash must not change. The motivation is being able to make quick
+> single-line corrections to an issue without re-approving the whole thing.
+
+**Verification:** Verified — the behavior is exactly as described and is
+intended by construction; what is missing is the opt-out, and the mechanism it
+would extend already exists for a neighbouring case.
+
+**Evidence:**
+
+- `tools/approve_issues.py:795-808` — `spec_fingerprint` hashes the issue number,
+  title, body, filtered labels, and a list of canonicalized comments. Any change
+  to that comment list changes the fingerprint.
+- `tools/approve_issues.py:800-805` — the comment list already applies two
+  filters: `AUTOMATED_REVIEW_COMMENT_RE`, which excludes review-marker comments
+  so a published review cannot invalidate itself, and `is_spec_relevant_comment`.
+  The first is precedent that a body pattern may exclude a comment from the
+  fingerprint.
+- `tools/approve_issues.py:758-784` — `is_spec_relevant_comment` returns true for
+  any commenter whose `author_association` is OWNER, MEMBER or COLLABORATOR, or
+  who is the issue's reporter. Its own comment states the intent: "a reporter's
+  follow-up re-opens the gate", and an unprivileged drive-by must not be able to
+  invalidate an approval. There is no exemption for a comment that amends
+  nothing.
+- `tools/approve_issues.py:2574-2582` — when `marker_matches` fails against
+  `spec_fingerprint(issue, comments)`, the gate returns `{"kind": "stale"}` with
+  detail "no current opposite-agent v2 review marker matches this
+  specification", which reaches `remove_approval_label`
+  (`tools/approve_issues.py:2599`).
+- `tools/approve_issues.py:758-775` — the same comment records that this layer is
+  deliberately *wider* than the solve bundles' vendored
+  `trusted_issue_spec.py`, and instructs that the two not be re-aligned. An
+  override therefore belongs in this function or in `spec_fingerprint`'s filter,
+  not in the trusted-login helper.
+- Observed on `coghex/synarchy#1997`: `reviewed:approve` applied
+  2026-08-31T05:56:54Z, an OWNER comment at 16:15:46Z that was purely
+  informational (a deferral note pointing at a successor epic, changing no
+  requirement), and `reviewed:approve` removed at 16:22:30Z — about seven
+  minutes later.
+- Consequence in practice, same session: `coghex/synarchy#2001` holds
+  `reviewed:approve`, and a one-line correction to its `## Out of scope` section
+  (stale slice numbers whose referenced content is still correct) was
+  deliberately not posted, because the correction was worth less than the
+  approval it would have cost.
+
+**Handoff context:**
+
+- **Current behavior:** every comment by an OWNER, MEMBER, COLLABORATOR or the
+  issue reporter enters `spec_fingerprint`'s comment list, so posting one
+  changes the specification hash and the gate removes `reviewed:approve`. The
+  only comments exempt are those matching `AUTOMATED_REVIEW_COMMENT_RE`.
+- **Expected behavior:** the default stays as it is — an ordinary privileged
+  comment still re-opens the gate. A privileged commenter may additionally mark
+  a comment as non-amending with an explicit opt-in marker, and such a comment
+  is excluded from `spec_fingerprint`'s comment list, leaving the hash and any
+  current approval intact.
+- **Scope and constraints:** the marker must be explicit and author-applied, so
+  that omitting it is the safe default and no existing comment changes meaning
+  retroactively. It must not widen what the solve agent reads: per
+  `approve_issues.py:758-775` and `docs/agent-workflow-contract.md` §2.1, the
+  gate's comment set and the vendored `trusted_issue_spec.py` set are
+  deliberately different and must stay so. Because the marker suppresses a
+  safety check, an unprivileged commenter must not be able to use it — the
+  existing `is_spec_relevant_comment` privilege test is the natural place to
+  require. Both plugin bundles vendor their own copies, so any change needs the
+  tracked-copy sweep the repository already applies.
+- **Remaining uncertainty:** whether the override should be a fixed literal
+  (mirroring `AUTOMATED_REVIEW_COMMENT_RE`'s pattern approach) or carry
+  structure such as a reason; and whether an override comment should still be
+  visible to the solver as spec context while being excluded from the hash —
+  the captured note says the solver "wraps it into the canonical spec", which
+  is a read-path question this finding does not settle.
