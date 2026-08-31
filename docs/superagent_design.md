@@ -16,7 +16,7 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Add durable Mission Control for project agents
+- [x] EPIC. Add durable Mission Control for project agents — [#591]
 - [ ] SAG-1. Define the durable mission model and store
 - [ ] SAG-2. Expose a typed workflow action registry
 - [ ] SAG-10. Make issue review and revision runner-owned
