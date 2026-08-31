@@ -29,7 +29,7 @@ concrete precondition
 - [x] MODEL-8. Derive the operating mode from the loaded provider set — [#486]
 - [x] MODEL-9. Implement no-agent mode: board-only UI and spawn refusal — [#521]
 - [x] MODEL-12. Extract the provider adapter interface behind the agent flows — [#522]
-- [ ] MODEL-14. Hold either embedded-review process shape in the review client
+- [x] MODEL-14. Hold either embedded-review process shape in the review client — [#585]
 - [ ] MODEL-13. Implement the Claude embedded-review stream-json backend
 - [ ] MODEL-15. Serve Kanban's review tools to the Claude backend over a stdio MCP re-entry
 - [ ] MODEL-16. Reach steer and interrupt parity on the Claude backend
