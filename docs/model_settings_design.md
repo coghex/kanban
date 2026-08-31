@@ -29,10 +29,13 @@ concrete precondition
 - [x] MODEL-8. Derive the operating mode from the loaded provider set — [#486]
 - [x] MODEL-9. Implement no-agent mode: board-only UI and spawn refusal — [#521]
 - [x] MODEL-12. Extract the provider adapter interface behind the agent flows — [#522]
-- [ ] MODEL-13. Implement the Claude embedded-review backend — [deferred]: Q-12 must carry a signed-off decision in this document
+- [ ] MODEL-14. Hold either embedded-review process shape in the review client
+- [ ] MODEL-13. Implement the Claude embedded-review stream-json backend
+- [ ] MODEL-15. Serve Kanban's review tools to the Claude backend over a stdio MCP re-entry
+- [ ] MODEL-16. Reach steer and interrupt parity on the Claude backend
 - [ ] MODEL-10. Implement single-agent review routing in the Haskell flows
 - [x] MODEL-11. Make the Python gates and plugin reviews single-agent aware — [#572]
-- [ ] MODEL-6. Package the defaults and document the roster surface — [deferred]: #572 and the issues for MODEL-13 and MODEL-10 must all be merged
+- [ ] MODEL-6. Package the defaults and document the roster surface — [deferred]: #572 and the issues for MODEL-14, MODEL-13, MODEL-15, MODEL-16, and MODEL-10 must all be merged
 
 ## Epic contract
 
@@ -232,8 +235,9 @@ Two layers, deliberately provider-generic:
   operator who wants them unified assigns them the same values. Each role
   also carries a compiled *applicability* — which providers it can run on at
   all (D-14): `issue_revise` is Claude-only by construction (it names the
-  authenticated-Claude revision tool; a Codex-only install revises inside the
-  review thread itself), `drain_rereview` applies to both brands, and every
+  authenticated-Claude revision tool, which only a review thread that is not
+  itself Claude ever spawns — D-14 as amended), `drain_rereview` applies to
+  both brands, and every
   other role applies to both. Applicability is code structure, not
   configuration, so it lives beside the compiled role registry rather than in
   the file.
@@ -361,12 +365,13 @@ sessions and consume no roster value: `Ping.hs` (modelless by design, D-2)
 and the usage probes in `Codex.hs`/`Claude.hs`, which spawn provider CLIs
 only to read account status. The existing Codex
 app-server client (`Review.hs` and its seams) becomes the Codex
-implementation; a new Claude embedded-review backend (mechanism Q-12,
-deliberately open) becomes the Claude one, closing the last single-protocol
+implementation; a new Claude embedded-review backend (mechanism settled by
+D-15) becomes the Claude one, closing the last single-protocol
 component. The nested revision tool is Claude-only (D-14) and registers only
-when Claude is loaded: a Codex-only install carries no revision tool at all,
-and its review thread performs revisions itself rather than delegating to a
-nested spawn. This interface is deliberately the seed of the future
+when Claude is loaded and the review thread is not itself Claude: a
+Codex-only install carries no revision tool at all, and a Claude review
+thread carries none either — both revise inside the thread rather than
+delegating to a nested spawn. This interface is deliberately the seed of the future
 plugin arc: an external provider manifest system would populate exactly this
 record at load time instead of compiling it in, which is why that arc can be
 separate without rework here.
@@ -441,7 +446,7 @@ fresh install is dual and identical to today.
   issue-review client speaks only the Codex app-server protocol
   (`src/Kanban/Review.hs`); D-13 closes that gap inside this arc — the
   embedded review runs through the loaded provider's adapter backend
-  (MODEL-12, MODEL-13), so a Claude-only install keeps the action. The solve
+  (MODEL-12 through MODEL-16), so a Claude-only install keeps the action. The solve
   chooser auto-selects the loaded provider; usage and ping surfaces show only
   that provider.
 - **No-agent** — the board without the pipeline: solve, review, autosolve,
@@ -591,7 +596,8 @@ constructs agent-session provider processes (the modelless ping and the
 usage probes stay outside it by design); the existing Codex app-server
 client becomes
 its Codex implementation, and a Claude embedded-review backend is built
-beside it (mechanism Q-12, deliberately open). The external plugin system —
+beside it (mechanism Q-12, deliberately open at the time of this decision;
+resolved 2026-08-31 by D-15). The external plugin system —
 providers shipping manifests that declare their interfaces and protocols for
 load-time discovery — is deliberately a separate future arc that binds to
 this interface; the roster schema stays forward-compatible with it.
@@ -621,6 +627,76 @@ assignment grid is total; the Compiled defaults table in Design enumerates
 all thirteen. Consequences: MODEL-1 carries applicability and both new
 defaults; the defaults-reproduce-today guarantee is unchanged, because no
 dual-mode spawn consults either new assignment before its slice lands.
+
+**Amended 2026-08-31 (with D-15's signoff).** The registration rule stated
+above as "the nested revision tool registers only when Claude is loaded"
+becomes "only when Claude is loaded *and* the review thread is not itself
+Claude." A Claude review thread is already Claude and revises inline,
+exactly as a Codex-only install's Codex thread does, rather than spawning a
+nested Claude. Applicability and the compiled defaults are unchanged:
+`issue_revise` still applies to Claude alone, still carries
+`claude-sonnet-5 · high`, and a Claude-only install still validates it —
+the amendment governs which review threads register the tool, not which
+cells the roster must resolve. It changes no shipped behavior either:
+`adapterReviewTools` registers `claudeTool` unconditionally today
+(`ProviderAdapter.hs:144`) and the tool refuses at call time when the
+roster cannot resolve `issue_revise.claude` (`Review/Tools.hs:335-346`), so
+conditional registration is unimplemented design in both its forms.
+
+### D-15. The Claude embedded-review backend drives the CLI's stream-json channel and serves Kanban's tools over a stdio MCP re-entry
+
+Approved 2026-08-31, resolving Q-12 and unblocking MODEL-13.
+
+**Transport.** The backend runs `claude -p --verbose --input-format
+stream-json --output-format stream-json` as a long-lived child and speaks
+JSON lines over its stdio, as the Codex client speaks JSON-RPC to `codex
+app-server`. The roster's `issue_review.claude` assignment supplies
+`--model` and `--effort`; `--json-schema` carries the verdict schema Codex
+passes as `turn/start`'s `outputSchema`; `--include-partial-messages`
+supplies the transcript deltas. The Agent SDK is rejected: it is TypeScript
+and Python, so it would put a Node or Python sidecar in the release
+artifact to reach a transport the CLI already exposes over stdio.
+
+**Tools.** The CLI has no inline tool declaration, so Kanban's tools are
+served over MCP by Kanban's own binary re-entered as a stdio MCP server:
+`claude` spawns `kanban` in that mode and the child proxies each call back
+to the parent over a FIFO. This keeps one binary and one release artifact —
+`createNamedPipe` comes from the `unix` dependency the library already
+carries, where a localhost HTTP server would add `warp`, `wai`, and
+`http-types` to a terminal application. It keeps real tool schemas, so tool
+use is enforced by the protocol rather than coaxed by prose, and it
+preserves `githubRequestMatchesThread`'s per-thread authorization — a
+review thread may still only touch its own issue, which letting Claude Code
+run `gh` itself under an allowlist would have dropped.
+
+**Isolation.** The session launches hermetically: `--strict-mcp-config` so
+only Kanban's MCP server loads, and `--tools ""` so no built-in tool is
+available. A probe without them loaded the operator's own MCP servers and
+fired their `SessionStart` hook; the embedded review must not inherit the
+machine's Claude Code configuration.
+
+**One process per review thread.** The CLI process is a single
+conversation, so the Claude backend spawns one per thread where the Codex
+backend multiplexes threads on one app-server. `ReviewClient`'s per-thread
+maps assume the latter, so the arc owns making the client hold either
+shape.
+
+**Steer and interrupt parity is in scope.** Whether input written mid-turn
+steers that turn or queues behind it, and whether a control message cancels
+a running turn, were not established by the investigation. The arc
+establishes both and reaches parity with `turn/steer`'s `expectedTurnId`
+semantics — including issue #17's recoverable-rejection path — and with
+`turn/interrupt`. Shipping a backend that accepts a typed message only
+between turns was rejected because MODEL-10 routes the embedded review to
+whichever provider is loaded, and a review UI that behaves differently per
+provider is not the interchangeability that routing assumes.
+
+Consequences: D-13's consequences named two new slices; this decision
+splits the second into four — the review client learning to hold either
+process shape, the stream-json backend, the MCP tool re-entry, and
+steer/interrupt parity — and MODEL-10 routes only once all four have
+landed. The two unverified CLI behaviors become MODEL-16's first probe
+rather than an open question; nothing in the Codex path changes.
 
 ## Open questions
 
@@ -677,13 +753,75 @@ loaded provider regardless).
 
 ### Q-12. What mechanism backs the Claude embedded-review adapter?
 
-Deliberately open; affects MODEL-13 only. Claude has no app-server
-equivalent of Codex's JSON-RPC surface, so the backend will drive the
-authenticated `claude` CLI in print/stream mode, expose Kanban's review
-tools to it over MCP, use the Agent SDK, or combine these. The choice needs
-investigation of the CLI's current capabilities at implementation time and
-is resolved when MODEL-13 is processed: that slice stops and asks with a
-concrete proposal before any implementation.
+Resolved by D-15 (CLI stream-json transport, Kanban's tools over a stdio
+MCP re-entry, one process per review thread, steer and interrupt parity in
+scope). The question was held open for an investigation of the CLI's actual
+capabilities; that investigation ran on 2026-08-31 and its findings are
+preserved below as the evidence the decision rests on.
+
+#### What the Codex backend actually requires
+
+The parity target, read off the live client rather than recalled. Nine
+capabilities, each with the wire surface that supplies it today:
+
+| Capability | Codex app-server surface |
+| --- | --- |
+| Long-lived session process | `codex app-server --listen stdio://` (`ProviderAdapter.hs:159-171`) |
+| One session, many issue threads | `reviewThreadIssues :: MVar (Map Text Int)` (`Review/Client.hs:56`) |
+| Thread creation with cwd, model, system prompt | `thread/start` (`Review.hs:452-463`) |
+| Read-only sandbox and on-request approval | `sandbox`/`approvalPolicy` in `thread/start` |
+| Kanban-implemented tools | `dynamicTools` in `thread/start`, called back as `item/tool/call` (`Review.hs:696-733`) |
+| Per-turn effort and structured verdict | `effort` and `outputSchema` on `turn/start` (`Review.hs:556-567`) |
+| Streamed transcript deltas | `item/agentMessage/delta`, `item/commandExecution/outputDelta`, `item/reasoning/summaryTextDelta` (`Review.hs:681-683`) |
+| Mid-turn steering with a rejection path | `turn/steer` with `expectedTurnId` (`Review.hs:467-475`, issue #17) |
+| Cancellation | `turn/interrupt` (`Review.hs:519`) |
+
+#### What the `claude` CLI supplies (verified 2026-08-31, CLI 2.1.251)
+
+Probed directly, not read from documentation:
+
+- **Bidirectional JSON-lines over stdio exists.** `claude -p --verbose
+  --input-format stream-json --output-format stream-json` reads user
+  messages from stdin and writes typed events to stdout — structurally the
+  same shape as the app-server channel.
+- **One process carries many sequential turns.** A second user message
+  written to the same stdin after a turn ended was answered with the first
+  turn's context intact. Each turn re-emits `system`/`init`, and a result
+  line carrying `stop_reason`, `session_id`, cost and usage closes it, so
+  turn boundaries are observable.
+- **Deltas exist** via `--include-partial-messages`; `assistant` events
+  already carry `text` and `thinking` content blocks.
+- **Structured output exists** via `--json-schema`, enforced through a
+  synthetic `StructuredOutput` tool the model is pushed to call.
+- **Model and effort are launch flags**, `--model` and `--effort`, not
+  per-turn parameters as Codex's `turn/start` makes them. One process
+  therefore holds one assignment for its life — which D-7 already requires
+  of a session anyway.
+- **Kanban-implemented tools require MCP.** `--mcp-config` accepts stdio,
+  HTTP, SSE, and WebSocket servers. There is no inline tool declaration and
+  no `--permission-prompt-tool` in this build, so the app-server's
+  declare-inline-and-call-back arrangement has no direct equivalent.
+- **The ambient environment leaks in by default.** A bare probe loaded the
+  user's own MCP servers and fired a `SessionStart` hook. `--strict-mcp-config`
+  with `--tools ""` produced `tools: []` and `mcp_servers: []`; a hermetic
+  launch is available but must be asked for explicitly.
+- **Not yet verified:** whether input written mid-turn steers that turn or
+  queues behind it, and whether a control message cancels a running turn.
+  Both are steer/interrupt parity, not the transport itself.
+
+#### Consequences any answer inherits
+
+- The CLI process is one conversation, so the Claude backend is **one
+  process per review thread**, where Codex multiplexes threads on one
+  process. `ReviewClient` holds per-thread maps that assume the latter.
+- The Agent SDK is TypeScript and Python. Kanban is Haskell, so adopting it
+  means shipping and supervising a Node or Python sidecar — a new runtime
+  dependency in the release artifact, to reach a transport the CLI already
+  exposes over stdio.
+- `kanban_github_issue` is authorized per thread today
+  (`githubRequestMatchesThread`, `Review.hs:722,811`): a review thread may
+  only touch its own issue. Any mechanism that replaces it with Claude
+  Code's built-in `Bash` tool under a `gh` allowlist drops that boundary.
 
 ## Verification strategy
 
@@ -709,8 +847,8 @@ concrete proposal before any implementation.
   slices land.
 - Adapter integrity: the interface extraction (MODEL-12) lands with zero
   behavior change — no golden or argv expectation moves — and the Claude
-  backend (MODEL-13) mirrors the Codex client's fake-executable coverage,
-  including its failure vocabulary.
+  backend (MODEL-13, MODEL-15, MODEL-16) mirrors the Codex client's
+  fake-executable coverage, including its failure vocabulary.
 - Documentation consistency: `docs/design.md` §7/§16/§19 and
   `docs/agent-workflow-contract.md` §2.2 updated in the slices that change the
   behavior they describe.
@@ -939,32 +1077,96 @@ concrete proposal before any implementation.
   design.
 - **Open questions:** None
 
-### MODEL-13. Implement the Claude embedded-review backend
+### MODEL-14. Hold either embedded-review process shape in the review client
 
-> **Deferred 2026-08-25.** Q-12's CLI investigation was performed during
-> processing, but choosing the mechanism is a design decision this workflow
-> may not take inside an issue. Precondition: Q-12 resolved as a signed-off
-> decision here.
-
-- **Outcome:** the embedded issue review runs on Claude through its adapter
-  backend, with the review tool registry (the `gh` runner; the nested
-  revision tool registered only when Claude is loaded, per D-14 — a
-  Codex-only install carries no revision tool and revises inside the review
-  thread) and transcript/diagnostic parity with the Codex path; a
-  Claude-only install keeps the embedded review action.
-- **Scope:** the backend per Q-12's resolution, tool availability, failure
-  vocabulary parity through `Review.Diagnostics`, and fake-executable tests
-  mirroring the Codex client's coverage.
+- **Outcome:** `ReviewClient` and the review session's lifecycle stop
+  assuming one multiplexed provider process; a backend may own one process
+  per review thread or one process for all threads. A pure refactor: no
+  behavior change to the Codex path.
+- **Scope:** the client record's process fields and per-thread maps,
+  startup and shutdown, the tool registry's thread keying, reader-thread
+  ownership, and relocating affected tests.
 - **Phase:** 4
 - **Depends on:** MODEL-12
 - **Ordering:** critical path
-- **Relevant decisions:** D-13
-- **Acceptance signals:** fake-CLI tests run an embedded review end to end on
-  the Claude backend; the Codex path's tests are untouched.
-- **Out of scope:** single-agent routing (MODEL-10); any change to the Codex
-  backend beyond relocation already done in MODEL-12.
-- **Open questions:** Q-12 (deliberately open — this slice stops and asks
-  with a concrete mechanism proposal before implementation)
+- **Relevant decisions:** D-13, D-15
+- **Acceptance signals:** the full Haskell suite passes with no golden-frame
+  or wire-expectation updates; the Codex backend still runs every thread on
+  one app-server process; a fixture proves the client can hold two threads
+  on two distinct processes.
+- **Out of scope:** any Claude backend (MODEL-13); mode-keyed behavior.
+- **Open questions:** None
+
+### MODEL-13. Implement the Claude embedded-review stream-json backend
+
+- **Outcome:** the embedded issue review runs on Claude through its adapter
+  backend over `claude -p`'s stream-json channel (D-15) — hermetic launch,
+  roster-resolved model and effort, streamed transcript deltas, a structured
+  verdict from `--json-schema`, and failure-vocabulary parity through
+  `Review.Diagnostics`. No Kanban tools and no steering yet; nothing routes
+  to it until MODEL-10.
+- **Scope:** the stream-json client and its event decoding, the hermetic
+  launch flags, `adapterEmbeddedReview` for Claude, verdict decoding,
+  diagnostics parity, and fake-CLI tests mirroring the Codex client's
+  coverage.
+- **Phase:** 4
+- **Depends on:** MODEL-14
+- **Ordering:** critical path
+- **Relevant decisions:** D-13, D-14, D-15
+- **Acceptance signals:** fake-CLI tests run an embedded review end to end
+  on the Claude backend and decode its structured verdict; a launch asserts
+  `--strict-mcp-config` and `--tools ""`; the Codex path's tests are
+  untouched.
+- **Out of scope:** Kanban's review tools (MODEL-15); steer and interrupt
+  (MODEL-16); single-agent routing (MODEL-10).
+- **Open questions:** None
+
+### MODEL-15. Serve Kanban's review tools to the Claude backend over a stdio MCP re-entry
+
+- **Outcome:** `kanban_github_issue` and the question tool are available to
+  a Claude review thread, served by Kanban's own binary re-entered as a
+  stdio MCP server and proxied to the parent over a FIFO (D-15), with
+  `githubRequestMatchesThread`'s per-thread authorization preserved. No
+  nested revision tool, per D-14 as amended.
+- **Scope:** the MCP-server subcommand — internal machinery that only a
+  spawned `claude` invokes, not an operator-facing command — the FIFO
+  transport and its lifetime
+  against the `claude` child's, tool-schema translation from
+  `adapterReviewTools`, the authorization check, and fake-executable tests
+  covering a served call and a refused cross-issue call.
+- **Phase:** 4
+- **Depends on:** MODEL-13
+- **Ordering:** critical path
+- **Relevant decisions:** D-13, D-14, D-15
+- **Acceptance signals:** a fake-CLI test drives a review that calls
+  `kanban_github_issue` through the re-entry and receives Kanban's answer; a
+  call naming another thread's issue is refused; the Codex path's tool
+  registry is unchanged.
+- **Out of scope:** the nested revision tool on a Claude thread, which D-14
+  as amended removes; steer and interrupt (MODEL-16).
+- **Open questions:** None
+
+### MODEL-16. Reach steer and interrupt parity on the Claude backend
+
+- **Outcome:** a typed message reaches a running Claude turn with
+  `turn/steer`'s observable semantics — including issue #17's
+  recoverable-rejection path — and a cancellation stops a running turn as
+  `turn/interrupt` does, so MODEL-10 can route the embedded review to either
+  provider without a behavior difference.
+- **Scope:** establishing by probe whether mid-turn stdin steers that turn
+  or queues behind it and which control message cancels a turn, then
+  implementing parity, plus tests covering the steer-rejection recovery.
+- **Phase:** 4
+- **Depends on:** MODEL-13
+- **Ordering:** critical path
+- **Relevant decisions:** D-15
+- **Acceptance signals:** fake-CLI tests cover a delivered steer, a rejected
+  steer whose message is recovered, and an interrupt; the Codex path's tests
+  are untouched.
+- **Out of scope:** single-agent routing (MODEL-10).
+- **Open questions:** None. Whether mid-turn input steers or queues, and
+  which control message cancels a turn, are unestablished CLI facts this
+  slice settles by probe rather than design choices.
 
 ### MODEL-10. Implement single-agent review routing in the Haskell flows
 
@@ -976,7 +1178,7 @@ concrete proposal before any implementation.
   chooser and related UI, embedded-review provider selection, reviewer
   identity in prompts, and tests covering both single-provider variants.
 - **Phase:** 4
-- **Depends on:** MODEL-8, MODEL-3, MODEL-13
+- **Depends on:** MODEL-8, MODEL-3, MODEL-15, MODEL-16
 - **Ordering:** critical path
 - **Relevant decisions:** D-8, D-12
 - **Acceptance signals:** fixtures prove a Claude-origin PR reviews on Claude
@@ -1024,11 +1226,13 @@ concrete proposal before any implementation.
 > and `tools/test_source_distribution.py`'s `RELEASE_ROOT_FILES`, verified
 > against the release payload, which is the sdist tarball and the only artifact
 > kind. What remains is the documentation sweep, and its acceptance signal is an
-> arc-wide invariant that the arc's unlanded slices could re-violate — MODEL-13
-> would plausibly rewrite `docs/design.md:849`'s `issue_revise.claude` line, and
+> arc-wide invariant that the arc's unlanded slices could re-violate — MODEL-15
+> would plausibly rewrite `docs/design.md:849`'s `issue_revise.claude` line,
+> since D-14 as amended is what changes that tool's registration, and
 > #572 already edits the contract paragraph at `:224-248` that holds `:227`'s
-> model pair. Precondition: #572, MODEL-13, and MODEL-10 are all merged, so the
-> sweep runs once over final prose and stays true.
+> model pair. Precondition: #572, MODEL-14, MODEL-13, MODEL-15, MODEL-16, and
+> MODEL-10 are all merged, so the sweep runs once over final prose and stays
+> true.
 
 - **Outcome:** the tracked example roster ships in the release artifact
   beside `config.toml.example`; `docs/design.md` §16 documents the file and
