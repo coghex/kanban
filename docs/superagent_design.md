@@ -8,7 +8,7 @@ planner turns, and the existing workflow authorities underneath. The operator
 can give it one target, an explicit batch, or a broad instruction, leave,
 return later, and see what ran, what stopped, and what needs a decision.
 
-Design state: `exploring`
+Design state: `ready for issue processing`
 
 Status legend: `[ ]` unprocessed · `[#N]` linked to issue N · `[no-issue]`
 reviewed and deliberately not tracked separately · `[deferred]` blocked on a
@@ -1486,6 +1486,13 @@ unless their typed contract exposes an override.
 > links it to that arc's umbrella epic rather than to a child issue; the
 > outcome and acceptance signals below remain the contract that arc must meet.
 > The evidence is recorded under "Why the runner became its own arc" above.
+>
+> **Processing order across the two documents.** This entry cannot be linked
+> until the runner arc's own umbrella epic exists, so process
+> `docs/mission_runner_design.md`'s `EPIC` entry first and link this entry to
+> the issue that creates. Every `RUN-N` below names a slice of that document,
+> not of this one; no `RUN-N` appears in this document's ledger, and none
+> should.
 
 - **Scope:** Delegated in full to the mission runner arc: the per-repository
   service and its supervisor/scheduler runtime, installation and discovery,
@@ -1522,8 +1529,8 @@ unless their typed contract exposes an override.
   archive/delete controls, notification opt-in/error state, board-action reuse,
   help/key contract, responsive rendering, and golden/event tests.
 - **Phase:** 6 — operator surface.
-- **Depends on:** the mission runner arc's `RUN-1` (the service), `RUN-3`
-  (Kanban-side discovery, monitoring, and control), and `RUN-4` (the
+- **Depends on:** `SAG-3`, and the mission runner arc's `RUN-1` (the service),
+  `RUN-3` (Kanban-side discovery, monitoring, and control), and `RUN-4` (the
   `interrupted` state its recovery hotkey acts on) — not that arc in full, so
   scheduling policy, capacity waiting, upgrade drain, and the notification
   adapter do not block the console. Issue #421 is closed and the complete
