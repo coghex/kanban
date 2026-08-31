@@ -32,7 +32,7 @@ concrete precondition
 - [x] MODEL-14. Hold either embedded-review process shape in the review client — [#585]
 - [x] MODEL-13. Implement the Claude embedded-review stream-json backend — [#586]
 - [x] MODEL-15. Serve Kanban's review tools to the Claude backend over a stdio MCP re-entry — [#587]
-- [ ] MODEL-16. Reach steer and interrupt parity on the Claude backend
+- [x] MODEL-16. Deliver mid-turn guidance and cancellation on the Claude backend — [#588]
 - [ ] MODEL-10. Implement single-agent review routing in the Haskell flows
 - [x] MODEL-11. Make the Python gates and plugin reviews single-agent aware — [#572]
 - [ ] MODEL-6. Package the defaults and document the roster surface — [deferred]: #572 and the issues for MODEL-14, MODEL-13, MODEL-15, MODEL-16, and MODEL-10 must all be merged
@@ -691,12 +691,64 @@ between turns was rejected because MODEL-10 routes the embedded review to
 whichever provider is loaded, and a review UI that behaves differently per
 provider is not the interchangeability that routing assumes.
 
+**Superseded 2026-08-31 by D-16 as to steering.** The probe this paragraph
+required was performed, and it falsified the achievable half: the CLI has no
+operation that redirects a running turn, so `turn/steer`'s semantics cannot
+be reached directly and issue #17's recoverable-rejection path has no
+analogue. The interrupt half stands exactly as written. D-16 records what
+replaces the steer half; the rejection of "accepts a typed message only
+between turns" also stands, and is why the replacement is not simply
+queuing.
+
 Consequences: D-13's consequences named two new slices; this decision
 splits the second into four — the review client learning to hold either
 process shape, the stream-json backend, the MCP tool re-entry, and
-steer/interrupt parity — and MODEL-10 routes only once all four have
-landed. The two unverified CLI behaviors become MODEL-16's first probe
-rather than an open question; nothing in the Codex path changes.
+mid-turn guidance and cancellation — and MODEL-10 routes only once all four
+have landed. The two CLI behaviors this paragraph left unverified were
+probed on 2026-08-31; D-16 records what they turned out to be and what
+follows. Nothing in the Codex path changes.
+
+### D-16. Mid-turn guidance on the Claude backend interrupts the turn and lands as the next one
+
+Approved 2026-08-31, resolving what D-15's steer paragraph could not once its
+probe was performed (evidence under Q-12).
+
+**What the probe established.** Writing a user message to a running turn's
+stdin does not reach that turn — it queues, and the turn finishes first. The
+CLI has no operation that redirects a turn in flight. A `control_request`
+with `subtype: interrupt` does end one. And an interrupted turn's partial
+output remains in the conversation: a turn cut mid-sentence was followed by a
+turn that correctly reported how far it had got.
+
+**The decision.** A message typed during a running Claude turn interrupts
+that turn and is then sent as the next turn. That last probe result is what
+makes this a near-equivalent of a steer rather than a crude substitute: the
+model keeps everything it produced before the interrupt and reads the new
+guidance with that work in view. What is lost is the in-flight completion,
+not the accumulated context.
+
+**What it is not.** This is not `turn/steer`, and the design does not pretend
+otherwise. Two differences are accepted rather than engineered away:
+
+- The interrupted turn ends. A Codex steer leaves its turn running, so a
+  Claude thread shows a turn boundary where a Codex thread shows none.
+- Issue #17's recoverable-rejection path has no analogue, because there is no
+  steer request to reject. `ReviewSteerUndelivered` stays a Codex-path event.
+  The Claude path's failure mode is different in kind — an interrupt that
+  does not succeed — and is reported as its own failure rather than
+  reusing that event.
+
+**Rejected alternatives.** Letting the message queue until the turn ends was
+rejected for the reason D-15 already gave: MODEL-10 routes the embedded
+review to whichever provider is loaded, and a review that silently ignores
+typed guidance for the length of a turn is not interchangeable with one that
+acts on it. Offering the user a choice between interrupting and queuing was
+rejected as UI with no Codex counterpart, which is the divergence this arc is
+trying to remove rather than add.
+
+Consequences: MODEL-16 no longer carries a probe — it is done — and its
+outcome changes from steer parity to interrupt-and-resend, which also
+retitles the slice. Nothing in the Codex path changes.
 
 ## Open questions
 
@@ -754,8 +806,8 @@ loaded provider regardless).
 ### Q-12. What mechanism backs the Claude embedded-review adapter?
 
 Resolved by D-15 (CLI stream-json transport, Kanban's tools over a stdio
-MCP re-entry, one process per review thread, steer and interrupt parity in
-scope). The question was held open for an investigation of the CLI's actual
+MCP re-entry, one process per review thread) and, for mid-turn guidance and
+cancellation, by D-16. The question was held open for an investigation of the CLI's actual
 capabilities; that investigation ran on 2026-08-31 and its findings are
 preserved below as the evidence the decision rests on.
 
@@ -805,9 +857,20 @@ Probed directly, not read from documentation:
   user's own MCP servers and fired a `SessionStart` hook. `--strict-mcp-config`
   with `--tools ""` produced `tools: []` and `mcp_servers: []`; a hermetic
   launch is available but must be asked for explicitly.
-- **Not yet verified:** whether input written mid-turn steers that turn or
-  queues behind it, and whether a control message cancels a running turn.
-  Both are steer/interrupt parity, not the transport itself.
+- **Mid-turn input queues; it does not steer** (probed 2026-08-31). A user
+  message written to stdin three seconds into a running turn did not reach
+  that turn: the turn ran to completion and emitted `end_turn` with its full
+  output, and the injected message then began a second turn. The CLI has no
+  equivalent of `turn/steer`.
+- **A control message does cancel a running turn.** A `control_request` with
+  `subtype: interrupt` returned
+  `{"subtype":"success","response":{"still_queued":[]}}` and ended the turn
+  with a non-`end_turn` stop reason.
+- **An interrupted turn's partial output survives in context.** A turn cut
+  mid-sentence at "9. Nine planets used" was followed by a turn that
+  correctly answered which number it had reached. What an interrupt destroys
+  is the in-flight completion, not the work already produced. D-16 rests on
+  this.
 
 #### Consequences any answer inherits
 
@@ -1117,8 +1180,8 @@ Probed directly, not read from documentation:
   on the Claude backend and decode its structured verdict; a launch asserts
   `--strict-mcp-config` and `--tools ""`; the Codex path's tests are
   untouched.
-- **Out of scope:** Kanban's review tools (MODEL-15); steer and interrupt
-  (MODEL-16); single-agent routing (MODEL-10).
+- **Out of scope:** Kanban's review tools (MODEL-15); mid-turn guidance and
+  cancellation (MODEL-16); single-agent routing (MODEL-10).
 - **Open questions:** None
 
 ### MODEL-15. Serve Kanban's review tools to the Claude backend over a stdio MCP re-entry
@@ -1143,30 +1206,32 @@ Probed directly, not read from documentation:
   call naming another thread's issue is refused; the Codex path's tool
   registry is unchanged.
 - **Out of scope:** the nested revision tool on a Claude thread, which D-14
-  as amended removes; steer and interrupt (MODEL-16).
+  as amended removes; mid-turn guidance and cancellation (MODEL-16).
 - **Open questions:** None
 
-### MODEL-16. Reach steer and interrupt parity on the Claude backend
+### MODEL-16. Deliver mid-turn guidance and cancellation on the Claude backend
 
-- **Outcome:** a typed message reaches a running Claude turn with
-  `turn/steer`'s observable semantics — including issue #17's
-  recoverable-rejection path — and a cancellation stops a running turn as
-  `turn/interrupt` does, so MODEL-10 can route the embedded review to either
-  provider without a behavior difference.
-- **Scope:** establishing by probe whether mid-turn stdin steers that turn
-  or queues behind it and which control message cancels a turn, then
-  implementing parity, plus tests covering the steer-rejection recovery.
+- **Outcome:** a message typed during a running Claude turn interrupts that
+  turn and is sent as the next one (D-16), and an explicit cancellation stops
+  a running turn as `turn/interrupt` does — so MODEL-10 can route the
+  embedded review to either provider and typed guidance is acted on in both.
+- **Scope:** the `control_request`/`interrupt` exchange and its
+  acknowledgement, the interrupt-then-send sequence behind the same entry
+  point a Codex steer uses, reporting a failed interrupt as its own failure
+  rather than as `ReviewSteerUndelivered`, and fake-CLI tests for both.
 - **Phase:** 4
 - **Depends on:** MODEL-13
 - **Ordering:** critical path
-- **Relevant decisions:** D-15
-- **Acceptance signals:** fake-CLI tests cover a delivered steer, a rejected
-  steer whose message is recovered, and an interrupt; the Codex path's tests
-  are untouched.
-- **Out of scope:** single-agent routing (MODEL-10).
-- **Open questions:** None. Whether mid-turn input steers or queues, and
-  which control message cancels a turn, are unestablished CLI facts this
-  slice settles by probe rather than design choices.
+- **Relevant decisions:** D-15, D-16
+- **Acceptance signals:** fake-CLI tests cover a typed message that
+  interrupts a running turn and arrives as the next turn, an explicit
+  cancellation, and an interrupt that fails; the Codex path's steer tests,
+  including issue #17's recovery, are untouched.
+- **Out of scope:** single-agent routing (MODEL-10); any attempt to redirect
+  a running turn, which the CLI does not support (D-16);
+  `ReviewSteerUndelivered` on the Claude path.
+- **Open questions:** None. D-16 settled the mechanism against a performed
+  probe; no CLI fact this slice depends on is still unestablished.
 
 ### MODEL-10. Implement single-agent review routing in the Haskell flows
 
