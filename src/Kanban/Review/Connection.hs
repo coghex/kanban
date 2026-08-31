@@ -41,6 +41,7 @@ module Kanban.Review.Connection
     newReviewConnection,
     releaseConnectionSlot,
     reserveConnectionSlot,
+    takeAbandonedThreadStarts,
     takeConnection,
   )
 where
@@ -125,6 +126,26 @@ newReviewConnection identifier inputHandle processHandle managed =
     <*> newEmptyMVar
     <*> newEmptyMVar
     <*> newEmptyMVar
+
+-- | Take the issue numbers whose @thread\/start@ was still pending on this
+-- connection, removing them from the pending set.
+--
+-- A review still waiting for its first thread has no thread id, and so no
+-- identity a connection-scoped report can match it by; its issue number is
+-- the only thing naming it. Taking rather than reading is what keeps the two
+-- terminal paths a dying connection reaches — its output reader hitting EOF
+-- and its watcher reaping the process — from both reporting the same
+-- abandoned review.
+takeAbandonedThreadStarts :: ReviewConnection -> IO [Int]
+takeAbandonedThreadStarts connection =
+  modifyMVar connection.connectionPendingRequests $ \requests ->
+    pure
+      ( Map.filter (not . isThreadStart) requests,
+        [issueNumber | PendingThreadStart issueNumber <- Map.elems requests]
+      )
+  where
+    isThreadStart PendingThreadStart {} = True
+    isThreadStart _ = False
 
 markConnectionReadersStarted :: ReviewConnection -> IO ()
 markConnectionReadersStarted connection = writeIORef connection.connectionReadersStarted True

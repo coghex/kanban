@@ -87,6 +87,7 @@ import Spec.Support.Process
     readRecordedPids,
     shouldHaveBeenSwept,
     soleReviewConnection,
+    startFailures,
     threadOn,
     turnCompletions,
     twoConnectionsOf,
@@ -687,6 +688,31 @@ spec = do
                          (Just "{\"message\":\"no such turn\"}")
                          Nothing
                      ]
+        stopReviewClient client
+
+    it "fails the review whose thread never arrived when its connection dies first" $
+      withFakeReviewClient ProcessPerThread $ \_ client events -> do
+        beginIssueReview client 844 `shouldReturn` Right ()
+        beginIssueReview client 845 `shouldReturn` Right ()
+        (firstConnection, secondConnection) <- twoConnectionsOf client
+        -- The second review's thread/start is answered; the first's never is,
+        -- which is the state a session sits in between pressing r and the
+        -- provider naming its thread.
+        handleWireMessage
+          client
+          secondConnection
+          (WireResponse (Number 2) (Right (object ["thread" .= object ["id" .= ("thread-2" :: Text)]])))
+        killManagedProcess firstConnection.connectionManaged
+        void (waitForConnectionStops events 1)
+        recorded <- readIORef events
+        -- A session with no thread cannot be reached by a connection-scoped
+        -- stop, so without this it would sit at "starting" for good with no
+        -- connection behind it. Its issue number is what names it.
+        startFailures recorded `shouldSatisfy` any (\(issueNumber, _) -> issueNumber == 844)
+        startFailures recorded `shouldSatisfy` all (\(issueNumber, _) -> issueNumber == 844)
+        -- Reported once, not once per terminal path the dying connection
+        -- reaches.
+        length (filter ((== 844) . fst) (startFailures recorded)) `shouldBe` 1
         stopReviewClient client
 
     it "reports one connection's end against that connection alone, leaving the client usable" $

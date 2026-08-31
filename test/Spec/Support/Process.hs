@@ -44,6 +44,7 @@ module Spec.Support.Process
     twoConnectionsOf,
     waitForConnectionStops,
     turnCompletions,
+    startFailures,
     expectNoFurtherClientRequests,
     encodedValue,
     undeliveredSteers,
@@ -764,6 +765,11 @@ waitForConnectionStops events wanted = go (200 :: Int)
             then fail ("expected " <> show wanted <> " connection stop report(s), saw " <> show (length stops))
             else threadDelay 25000 >> go (remaining - 1)
     connectionStops recorded = [(connection, message) | ReviewConnectionStopped connection message <- recorded]
+
+-- | Every review reported as having failed to start, as issue number and
+-- message.
+startFailures :: [ReviewEvent] -> [(Int, Text)]
+startFailures recorded = [(issueNumber, message) | ReviewStartFailed issueNumber message <- recorded]
 
 turnCompletions :: [ReviewEvent] -> [ReviewEvent]
 turnCompletions = filter isCompletion

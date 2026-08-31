@@ -371,8 +371,12 @@ spec = do
             -- Still running on a connection that is still up. Reporting this
             -- one is the client-wide failure requirement 5 forbids.
             (2, ReviewRunning),
-            -- No thread yet, so it belongs to no connection and this
-            -- connection's end says nothing about it.
+            -- No thread yet, so a connection-scoped stop cannot reach it at
+            -- all. That is not the same as its review surviving: a review
+            -- whose thread never arrived is terminalized by the
+            -- 'ReviewStartFailed' the client raises for it by issue number
+            -- (Spec.Agent.Protocol), because it has no identity this
+            -- function could match it by.
             (3, ReviewStarting),
             (4, ReviewFinished)
           ]

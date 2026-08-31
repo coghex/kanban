@@ -188,6 +188,7 @@ import Kanban.Review.Connection
     newReviewConnection,
     releaseConnectionSlot,
     reserveConnectionSlot,
+    takeAbandonedThreadStarts,
     takeConnection,
   )
 import Kanban.Review.Diagnostics
@@ -823,8 +824,7 @@ readServerOutput client connection outputHandle = do
   case result of
     Left exception -> do
       terminalConnectionCleanup client connection
-      client.reviewEventSink
-        (connectionStoppedEvent client connection (backendSentence client <> " output closed: " <> exceptionText exception))
+      reportConnectionStopped client connection (backendSentence client <> " output closed: " <> exceptionText exception)
     Right () -> pure ()
   where
     readOne = do
@@ -856,18 +856,28 @@ readServerErrors client connection errorHandle = do
 diagnosticThread :: ReviewConnection -> ReviewThreadId
 diagnosticThread connection = ReviewThreadId connection.connectionId ""
 
--- | How the end of one connection is reported.
+-- | Report the end of one connection.
 --
 -- A shared-process backend multiplexes every thread onto its one connection,
 -- so that connection ending /is/ the client ending and the client-wide event
--- is the accurate one. A per-thread backend's client outlives its
--- connections: only the threads this one served are finished, and a new
--- review may still be started, so the connection is named and the client is
--- left alone.
-connectionStoppedEvent :: ReviewClient -> ReviewConnection -> Text -> ReviewEvent
-connectionStoppedEvent client connection message = case client.reviewBackend.backendProcessShape of
-  SharedProcess -> ReviewClientStopped message
-  ProcessPerThread -> ReviewConnectionStopped connection.connectionId message
+-- is the accurate one. It reaches every live session, including one still
+-- waiting for its first thread, so nothing needs naming separately.
+--
+-- A per-thread backend's client outlives its connections: only the threads
+-- this one served are finished, and a new review may still be started, so the
+-- connection is named and the client is left alone. That event can only reach
+-- a session through the thread it is running on — which is exactly what a
+-- review whose @thread\/start@ was still in flight never got. Such a review
+-- would otherwise sit at "starting" for good, with no connection behind it,
+-- so it is reported first and by issue number, the same way every other
+-- never-started review is.
+reportConnectionStopped :: ReviewClient -> ReviewConnection -> Text -> IO ()
+reportConnectionStopped client connection message = case client.reviewBackend.backendProcessShape of
+  SharedProcess -> client.reviewEventSink (ReviewClientStopped message)
+  ProcessPerThread -> do
+    abandoned <- takeAbandonedThreadStarts connection
+    mapM_ (\issueNumber -> client.reviewEventSink (ReviewStartFailed issueNumber message)) abandoned
+    client.reviewEventSink (ReviewConnectionStopped connection.connectionId message)
 
 watchServerProcess :: ReviewClient -> ReviewConnection -> IO ()
 watchServerProcess client connection = do
@@ -885,7 +895,7 @@ watchServerProcess client connection = do
   -- transcript open for the reviews still to come, so 'stopReviewClient'
   -- closes that one.
   when (client.reviewBackend.backendProcessShape == SharedProcess) (closeReviewLog client.reviewSessionLog)
-  client.reviewEventSink (connectionStoppedEvent client connection (renderExitCode client exitCode))
+  reportConnectionStopped client connection (renderExitCode client exitCode)
   -- Last, and after both reader signals above: this is the one signal
   -- 'stopReviewClient' waits on, so it must not be filled while any of this
   -- connection's loops could still run.
