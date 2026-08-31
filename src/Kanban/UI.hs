@@ -28,6 +28,7 @@ import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (forever, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -80,7 +81,7 @@ import Kanban.Worker
 import Kanban.Filter (defaultFilterCriteria)
 import Kanban.UI.Filter (refreshVisibleBoard)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
-import Kanban.UI.Notice (NoticeActivity (..), NoticeLife (..), NoticeState, currentNotice, emptyNoticeState, showNotice)
+import Kanban.UI.Notice (NoticeActivity (..), NoticeLife (..), NoticeState, currentNotice, currentNoticeInstance, emptyNoticeState, showNotice)
 import Kanban.UI.State (settleNoticeExpiry)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -136,6 +137,31 @@ runHeldDashboard authority options config repository roster = do
   refreshCoordinator <- newBoardRefreshCoordinator authority.authorityOwner config repository historyTraversal eventChannel
   let (initialUsage, initialUsageFreshness, usageNotice) = initialUsageState usageCacheLoad
       (initialHistory, historyNotice) = initialCompletedHistory completedCacheLoad
+  -- The startup line's diagnostic fragments, gathered once so the line that
+  -- shows them and the carry that keeps them until the first open outcome
+  -- ('startupReportApplied') cannot disagree about what they are.
+  let startupFragments =
+        catMaybes [usageNotice, historyNotice, settingsNotice]
+          -- What acquiring the repository had to say for itself. A refusal
+          -- never reaches here — it exited — so anything carried this far is
+          -- something the board opened in spite of, and the same notice line
+          -- the other startup problems use is where it belongs.
+          <> authority.authorityNotices
+          -- One fragment per roster entry the configuration names but this
+          -- machine cannot supply a checkout for. A degraded entry never
+          -- refuses the launch, and with no `path` configured anywhere there
+          -- are none of these, so the line reads exactly as it always has.
+          <> rosterDegradationNotices roster
+      -- A composed notice, and an active one: its first fragment names the
+      -- startup fetch still in flight, so the whole line — the settled
+      -- diagnostics composed after it included — lives until that fetch
+      -- settles (issue #590 requirements 7 and 8, as amended for composed
+      -- notices).
+      startupLine =
+        showNotice
+          (ActiveWhile StartupLoadRunning)
+          (startupNotice <> foldMap (" · " <>) startupFragments)
+          emptyNoticeState
   let initialState =
         AppState
           { appRepository = repository,
@@ -178,32 +204,20 @@ runHeldDashboard authority options config repository roster = do
             -- a previous run: an overlay always opens windowed, which is what
             -- keeps the board visible behind a freshly opened panel.
             appOverlayFullscreen = False,
-            -- A composed notice, and an active one: its first fragment names
-            -- the startup fetch still in flight, so the whole line — the
-            -- settled diagnostics composed after it included — lives until
-            -- that fetch settles and takes its ten seconds from there
-            -- (issue #590 requirements 7 and 8).
-            appNotice =
-              showNotice
-                (ActiveWhile StartupLoadRunning)
-                ( startupNotice
-                    <> maybe "" (" · " <>) usageNotice
-                    <> maybe "" (" · " <>) historyNotice
-                    <> maybe "" (" · " <>) settingsNotice
-                    -- What acquiring the repository had to say for itself. A
-                    -- refusal never reaches here — it exited — so anything
-                    -- carried this far is something the board opened in spite
-                    -- of, and the same notice line the other startup problems
-                    -- use is where it belongs.
-                    <> foldMap (" · " <>) authority.authorityNotices
-                    -- One fragment per roster entry the configuration names
-                    -- but this machine cannot supply a checkout for. A
-                    -- degraded entry never refuses the launch, and with no
-                    -- `path` configured anywhere there are none of these, so
-                    -- the line reads exactly as it always has.
-                    <> foldMap (" · " <>) (rosterDegradationNotices roster)
-                )
-                emptyNoticeState,
+            appNotice = startupLine,
+            -- Carried until the first open outcome composes the diagnostics
+            -- onto its own settled notice ('startupReportApplied'). With
+            -- nothing to report there is nothing to carry, and the startup
+            -- line behaves like any other active notice.
+            appStartupReport =
+              if null startupFragments
+                then Nothing
+                else
+                  Just
+                    ( StartupReport
+                        (Text.intercalate " · " startupFragments)
+                        (fromMaybe (-1) (currentNoticeInstance startupLine))
+                    ),
             -- Nothing has been fetched and nothing was restored, which is
             -- exactly what §7's loading panel stands for. 'startApplication'
             -- moves this to 'Loading' the moment the startup refresh is
@@ -328,7 +342,7 @@ startupNotice = "Loading open GitHub data · press " <> actionKeyText RefreshAll
 restoreStartupNotice :: NoticeState -> AppState -> AppState
 restoreStartupNotice initial state = case currentNotice initial of
   Nothing -> state
-  Just message -> noticeSetFor StartupLoadRunning message state
+  Just message -> recordStartupShown (noticeSetFor StartupLoadRunning message state)
 
 -- | What a stored completed generation seeds the dashboard with, and what it
 -- has to say for itself.

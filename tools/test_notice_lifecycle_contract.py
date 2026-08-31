@@ -4,8 +4,9 @@
 show a notice except through its lifecycle transitions -- that half of the
 contract is the type checker's. What the types cannot pin is *which* producers
 classify their notice as active: any call site spelling `ActiveWhile`,
-`noticeSetFor`, or `setNoticeFor` opts a notice out of the ten-second settled
-lifetime for as long as its declared activity runs. This module holds that
+`noticeSetFor`, `setNoticeFor`, or `noticeSetOverStartupReport` opts a notice
+out of the ten-second settled lifetime for as long as its declared activity
+runs. This module holds that
 inventory: the exact files, and the exact number of active-classification
 sites in each, so every producer outside the inventory is settled by
 construction and a new active site is a reviewed edit here rather than a
@@ -19,10 +20,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Every spelling that can classify a notice as active. `ActiveWhile` is the
-# one constructor of the active life, and the two helpers take a
-# `NoticeActivity` on their way to it; a new helper wrapping either belongs in
-# this family the moment it exists.
-ACTIVE_SPELLINGS = ("ActiveWhile", "noticeSetFor", "setNoticeFor")
+# one constructor of the active life, `noticeSetFor` and `setNoticeFor` take a
+# `NoticeActivity` on their way to it, and `noticeSetOverStartupReport` keeps
+# an outstanding startup line active by composing onto it; a new helper
+# wrapping any of these belongs in this family the moment it exists.
+ACTIVE_SPELLINGS = ("ActiveWhile", "noticeSetFor", "setNoticeFor", "noticeSetOverStartupReport")
 
 ACTIVE_TOKEN = re.compile(r"\b(?:" + "|".join(ACTIVE_SPELLINGS) + r")\b")
 
@@ -36,9 +38,12 @@ ACTIVE_SITES = {
     # The abstract machine itself: the `ActiveWhile` constructor's declaration
     # and the settle transition that reads it.
     "src/Kanban/UI/Notice.hs": 2,
-    # The pure entry point `noticeSetFor`: export list, signature, defining
-    # equation, and its body's `ActiveWhile`.
-    "src/Kanban/UI/Util.hs": 4,
+    # The pure entry point `noticeSetFor` (export list, signature, defining
+    # equation, and its body's `ActiveWhile`) and the composition
+    # `noticeSetOverStartupReport` (export list, signature, defining
+    # equation, and its `noticeSetFor`), which keeps a startup line carrying
+    # its one-time diagnostics active rather than replaced.
+    "src/Kanban/UI/Util.hs": 8,
     # The `EventM` wrapper `setNoticeFor` over the entry point: export list,
     # signature, defining equation, and the `noticeSetFor` it delegates to.
     "src/Kanban/UI/State.hs": 4,
@@ -50,15 +55,19 @@ ACTIVE_SITES = {
     # direct-merge carry, and both providers' usage-refresh notices, running
     # and already-running alike.
     "src/Kanban/UI/Refresh.hs": 5,
-    # The quit's `Stopping GitHub work…`, twice: the first press and the
-    # re-press while the cleanup is still settling.
-    "src/Kanban/UI/Events.hs": 2,
+    # The quit's `Stopping GitHub work…`, twice — the first press and the
+    # re-press while the cleanup is still settling — plus the history pause
+    # composed over an outstanding startup line.
+    "src/Kanban/UI/Events.hs": 3,
     # The drainer toggle's optimistic report and the direct merge's
     # `Merging PR #n…`.
     "src/Kanban/UI/PullRequest.hs": 2,
     # The approval service toggle's optimistic report, plus the helper's
     # import.
     "src/Kanban/UI/Approval.hs": 2,
+    # The usage results and the completed-cache warning, each composed over
+    # an outstanding startup line rather than allowed to replace it.
+    "src/Kanban/UI/Reconcile.hs": 3,
 }
 
 

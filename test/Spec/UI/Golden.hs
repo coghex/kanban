@@ -1543,6 +1543,7 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       appApprovalResult = Nothing,
       appDirectMergePending = Nothing,
       appDirectMergeResult = Nothing,
+      appStartupReport = Nothing,
       appBoardRefreshQueued = False,
       appRefreshCoordinator = refreshCoordinator,
       appQuitPending = False,

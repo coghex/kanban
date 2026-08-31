@@ -25,10 +25,12 @@ import Kanban.UI.Board (drawFooter)
 import Kanban.UI.Events (IncidentsAction (..), applyIncidentsAction)
 import Kanban.UI.Notice
 import Kanban.UI.PullRequest (directMergeResultApplied, drainerToggleApplied, drainerTogglePress)
+import Kanban.GitHub (GitHubResult (..))
+import Kanban.UI.Reconcile (boardRefreshOutcomeApplied, refreshSuccessNotice, usageRefreshApplied)
 import Kanban.UI.Refresh (historyPausedNotice)
 import Kanban.UI (restoreStartupNotice)
 import Kanban.UI.Theme (themeFor)
-import Kanban.UI.Types (AppState (..))
+import Kanban.UI.Types (AppState (..), BoardRefreshOutcome (..), StartupReport (..))
 import Kanban.UI.Util
   ( directMergeCarryApplied,
     noticeActivityLive,
@@ -40,6 +42,7 @@ import Kanban.UI.Util
     outstandingDirectMergeReport,
     settleNoticeLifecycle,
     shownNotice,
+    startupReportApplied,
   )
 import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures (epoch, testOptions)
@@ -62,6 +65,28 @@ spec = describe "notice lifecycle" $ do
 -- | A fresh quiet dashboard state.
 quietState :: IO AppState
 quietState = testAppState (Board Map.empty)
+
+-- | The startup diagnostics the launch examples carry, and the composed line
+-- 'runHeldDashboard' builds from them beside the loading fragment.
+startupDiagnostics :: Text.Text
+startupDiagnostics = "invalid usage cache"
+
+startupComposed :: Text.Text
+startupComposed = "Loading open GitHub data · press u to update · " <> startupDiagnostics
+
+-- | A dashboard exactly as launch leaves it: the composed startup line shown
+-- as instance zero, the diagnostics carried under that instance, and the
+-- startup fetch not yet claimed.
+launchedWithDiagnostics :: IO AppState
+launchedWithDiagnostics = do
+  state <- quietState
+  let line = showNotice (ActiveWhile StartupLoadRunning) startupComposed emptyNoticeState
+  pure
+    (at 0 state)
+      { appNotice = line,
+        appStartupReport = StartupReport startupDiagnostics <$> currentNoticeInstance line,
+        appBoardFreshness = NotLoaded
+      }
 
 -- | The state at @delta@ seconds past the fixture epoch, which is what
 -- 'handleEvent' stamping 'appNow' at the top of every event leaves behind.
@@ -149,13 +174,8 @@ categorySpec = describe "settled categories" $ do
       ]
 
   it "expires the composed startup notice ten seconds after the startup fetch settles" $ do
-    state <- quietState
-    let launched =
-          (at 0 state)
-            { appNotice = showNotice (ActiveWhile StartupLoadRunning) "Loading open GitHub data · press u to update · invalid usage cache" emptyNoticeState,
-              appBoardFreshness = NotLoaded
-            }
-        beforeFetch = settleAt 0 launched
+    launched <- launchedWithDiagnostics
+    let beforeFetch = settleAt 0 launched
         loading = settleAt 1 beforeFetch {appBoardFreshness = Loading}
         fetched = settleAt 30 loading {appBoardFreshness = Fresh epoch}
     -- Composed of an in-flight fragment and settled diagnostics, the whole
@@ -167,18 +187,12 @@ categorySpec = describe "settled categories" $ do
     shownNotice (expireAt 40 (shownInstance fetched) fetched) `shouldBe` Nothing
 
   it "keeps the startup diagnostics through the refreshes startup itself requests" $ do
-    state <- quietState
+    launched <- launchedWithDiagnostics
     -- The exact notice sequence 'startApplication' produces, through the
     -- same producers it calls: the composed startup line, the board
     -- announcement over the (empty) direct-merge carry, one usage
     -- announcement per provider, and then the restore.
-    let composed = "Loading open GitHub data · press u to update · invalid usage cache"
-        launched =
-          (at 0 state)
-            { appNotice = showNotice (ActiveWhile StartupLoadRunning) composed emptyNoticeState,
-              appBoardFreshness = NotLoaded
-            }
-        announced =
+    let announced =
           noticeSetFor (UsageRefreshRunning Claude) "Refreshing Claude usage…"
             . (\s -> s {appUsageFreshness = Map.insert Claude Loading s.appUsageFreshness})
             . noticeSetFor (UsageRefreshRunning Codex) "Refreshing Codex usage…"
@@ -189,16 +203,60 @@ categorySpec = describe "settled categories" $ do
         restored = settleAt 0 (restoreStartupNotice launched.appNotice announced)
     -- The announcements landed on the line, and the restore put the whole
     -- composed startup report back — diagnostics included — as a fresh
-    -- instance still riding the startup fetch.
+    -- instance still riding the startup fetch, with the carry re-stamped to
+    -- the instance actually displayed.
     shownNotice announced `shouldBe` Just "Refreshing Claude usage…"
-    shownNotice restored `shouldBe` Just composed
+    shownNotice restored `shouldBe` Just startupComposed
     armed restored `shouldBe` Nothing
-    shownNotice (settleAt 15 restored) `shouldBe` Just composed
-    -- The startup fetch settles: the usual ten seconds from there, whatever
-    -- the usage refreshes are still doing.
-    let fetched = settleAt 30 restored {appBoardFreshness = Fresh epoch}
-    armed fetched `shouldBe` Just (shownInstance fetched, deadlineAt 30)
-    shownNotice (expireAt 40 (shownInstance fetched) fetched) `shouldBe` Nothing
+    shownNotice (settleAt 15 restored) `shouldBe` Just startupComposed
+    fmap (.startupReportShownInstance) restored.appStartupReport `shouldBe` Just (shownInstance restored)
+
+  it "composes a usage result onto the startup line instead of replacing it" $ do
+    launched <- launchedWithDiagnostics
+    -- Claude's usage answer lands while the startup fetch is still running,
+    -- through the same transition the event applies. The line keeps its
+    -- loading fragment and diagnostics, gains the result, and stays active.
+    let loading = launched {appBoardFreshness = Loading}
+        answered = settleAt 2 (usageRefreshApplied Claude "Claude" [] (UsageSnapshot [] epoch) (at 2 loading))
+    shownNotice answered `shouldBe` Just (startupComposed <> " · Claude usage refreshed")
+    armed answered `shouldBe` Nothing
+    shownNotice (settleAt 15 answered) `shouldBe` Just (startupComposed <> " · Claude usage refreshed")
+    fmap (.startupReportShownInstance) answered.appStartupReport `shouldBe` Just (shownInstance answered)
+    -- Once the diagnostics are retired, the same transition is an ordinary
+    -- replacement.
+    let retired = answered {appStartupReport = Nothing}
+        replaced = usageRefreshApplied Claude "Claude" [] (UsageSnapshot [] epoch) retired
+    shownNotice replaced `shouldBe` Just "Claude usage refreshed"
+
+  it "composes the diagnostics onto the first publication, which takes the ordinary ten seconds" $ do
+    launched <- launchedWithDiagnostics
+    -- The startup fetch publishes through the real reconciliation
+    -- transition, over the line still carrying the diagnostics.
+    let loading = at 20 launched {appBoardFreshness = Loading}
+        outcome = BoardRefreshCompleted (Right (GitHubResult (RepoSnapshot [] [] epoch) []))
+        successNotice = refreshSuccessNotice (RepoSnapshot [] [] epoch) []
+        published = settleAt 20 (startupReportApplied loading (directMergeCarryApplied loading (boardRefreshOutcomeApplied outcome loading)))
+    shownNotice published `shouldBe` Just (successNotice <> " · " <> startupDiagnostics)
+    published.appStartupReport `shouldBe` Nothing
+    armed published `shouldBe` Just (shownInstance published, deadlineAt 20)
+    shownNotice (expireAt 30 (shownInstance published) published) `shouldBe` Nothing
+    -- A second publication finds nothing to compose: the diagnostics rode
+    -- exactly one outcome.
+    let again = settleAt 40 (startupReportApplied published (directMergeCarryApplied published (boardRefreshOutcomeApplied outcome (at 40 published))))
+    shownNotice again `shouldBe` Just successNotice
+
+  it "retires the diagnostics at the first publication once anything else ended their line" $ do
+    launched <- launchedWithDiagnostics
+    -- An unrelated action replaced the startup line before the fetch
+    -- published — the user has stopped looking at it, so the publication
+    -- must not resurrect the diagnostics.
+    let loading = launched {appBoardFreshness = Loading}
+        replaced = at 20 (noticeSet "Review started" loading)
+        outcome = BoardRefreshCompleted (Right (GitHubResult (RepoSnapshot [] [] epoch) []))
+        successNotice = refreshSuccessNotice (RepoSnapshot [] [] epoch) []
+        published = settleAt 20 (startupReportApplied replaced (directMergeCarryApplied replaced (boardRefreshOutcomeApplied outcome replaced)))
+    shownNotice published `shouldBe` Just successNotice
+    published.appStartupReport `shouldBe` Nothing
 
 instanceSpec :: Spec
 instanceSpec = describe "instance identity" $ do

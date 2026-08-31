@@ -26,7 +26,14 @@ created above it.
   The expiry arrives as an ordinary application event from a local one-shot
   timer, so the footer redraws and a fullscreen overlay reclaims the rows the
   notice held even when nothing else is happening; `Esc` and every existing
-  clearing interaction still dismiss a notice early. Each displayed notice is
+  clearing interaction still dismiss a notice early. The startup line's
+  diagnostics — an invalid cache, a settings problem, an authority notice, a
+  degraded roster entry — are reported nowhere else, so they now genuinely
+  ride the loading fragment until the first board publication: startup's own
+  refresh announcements, a usage result, and a history pause compose onto
+  the line instead of replacing it, and the first outcome carries the
+  diagnostics behind its own notice for the ordinary ten seconds before
+  retiring them. Each displayed notice is
   its own instance, so a replacement — identical text included — always gets a
   full new lifetime, an expiry armed for an older instance can never remove a
   newer one, and the direct-merge result carry is now keyed to the instance it

@@ -141,7 +141,7 @@ dispatchEvent event = do
     -- clears the line.
     (_, AppEvent (BoardHistoryPaused resetAt)) -> do
       modify (\current -> current {appCompletedStatus = CompletedHistoryPaused resetAt})
-      setNotice (historyPausedNotice state.appTimeZone resetAt)
+      modify (noticeSetOverStartupReport (historyPausedNotice state.appTimeZone resetAt))
     (_, AppEvent (BoardHistoryUpdated generation historyOutcome)) -> applyBoardHistory generation historyOutcome
     (_, AppEvent (BoardRefreshShutdownFinished verdict)) -> completeDashboardQuit verdict
     (_, AppEvent (CodexRefreshFinished result)) -> applyCodexRefresh result

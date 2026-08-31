@@ -26,12 +26,16 @@ module Kanban.UI.Util
     noticeSet,
     noticeSetFor,
     noticeSetOverDirectMergeResult,
+    noticeSetOverStartupReport,
     directMergeCarryApplied,
     outstandingDirectMergeReport,
+    outstandingStartupReport,
     overflowText,
     recordDirectMergeShown,
+    recordStartupShown,
     settleNoticeLifecycle,
     shownNotice,
+    startupReportApplied,
     primaryTrackerNumber,
     pullRequestActionText,
     pullRequestSessionLabel,
@@ -485,6 +489,58 @@ directMergeCarryApplied before state =
 recordDirectMergeShown :: AppState -> DirectMergeReport -> DirectMergeReport
 recordDirectMergeShown state report =
   report {directMergeReportShownInstance = fromMaybe (-1) (currentNoticeInstance state.appNotice)}
+
+-- | The startup diagnostics still worth carrying, on exactly the rule
+-- 'outstandingDirectMergeReport' applies to a merge result: only while the
+-- notice instance they were last shown as is the one displayed now.
+outstandingStartupReport :: Maybe Int -> Maybe StartupReport -> Maybe StartupReport
+outstandingStartupReport displayed report = do
+  candidate <- report
+  if displayed == Just candidate.startupReportShownInstance then Just candidate else Nothing
+
+-- | Show an event's notice without ending the startup line it would land on.
+--
+-- The startup diagnostics ride the line until the first open outcome, but a
+-- usage result or a history pause can arrive while that fetch is still
+-- running; replacing the line would discard diagnostics reported nowhere
+-- else. While the report is outstanding the message is composed onto the
+-- line instead — still active, because the loading fragment it keeps names
+-- the fetch still in flight — and once it is not, this is exactly
+-- 'noticeSet'.
+noticeSetOverStartupReport :: Text -> AppState -> AppState
+noticeSetOverStartupReport message state =
+  case outstandingStartupReport (currentNoticeInstance state.appNotice) state.appStartupReport of
+    Nothing -> noticeSet message state
+    Just _ ->
+      let composed = fromMaybe "" (shownNotice state) <> " · " <> message
+          shown = noticeSetFor StartupLoadRunning composed state
+       in recordStartupShown shown
+
+-- | Compose the startup diagnostics onto the notice a published open outcome
+-- just produced, and retire the carry for good: the settled composition takes
+-- the ordinary ten seconds, and no later publish can resurrect the
+-- diagnostics — least of all when a dismissal or an unrelated replacement
+-- already ended them, which the instance comparison against @before@ reads as
+-- nothing left to compose. @before@ is the state the outcome was applied
+-- over, where "were they still displayed?" has to be answered.
+startupReportApplied :: AppState -> AppState -> AppState
+startupReportApplied before state =
+  case outstandingStartupReport (currentNoticeInstance before.appNotice) before.appStartupReport of
+    Nothing -> state {appStartupReport = Nothing}
+    Just report ->
+      let composed = fromMaybe "" (shownNotice state) <> " · " <> report.startupReportDiagnostics
+       in (noticeSet composed state) {appStartupReport = Nothing}
+
+-- | Stamp the carried startup report with the instance of the notice just
+-- displayed, so the next outstanding question compares against what is
+-- actually on screen.
+recordStartupShown :: AppState -> AppState
+recordStartupShown state =
+  state
+    { appStartupReport =
+        (\report -> report {startupReportShownInstance = fromMaybe (-1) (currentNoticeInstance state.appNotice)})
+          <$> state.appStartupReport
+    }
 
 -- | The activity text for a terminal or pending 'SolveFailed' outcome,
 -- distinguishing the persistent-worker deadline and a preflight-detected

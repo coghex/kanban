@@ -39,6 +39,7 @@ module Kanban.UI.Types
     SolveDetail (..),
     SolvePhase (..),
     SolveSession,
+    StartupReport (..),
     openDataView,
     withModelRoster,
     withSessionDetail,
@@ -875,6 +876,13 @@ data AppState = AppState
     -- gets, and the refresh it triggers would otherwise overwrite it before
     -- it could be read.
     appDirectMergeResult :: Maybe DirectMergeReport,
+    -- | The startup line's one-time diagnostics, carried until the first
+    -- open outcome publishes. 'Nothing' from birth when startup had nothing
+    -- to report, and 'Nothing' for good once the first outcome composes the
+    -- diagnostics onto its own notice — or finds them already dismissed.
+    -- See 'DirectMergeReport' for why the carrier records the notice
+    -- instance it was last shown as.
+    appStartupReport :: Maybe StartupReport,
     -- | A board refresh that could not start because a cycle was already in
     -- flight. An in-flight fetch may have read GitHub before a change this
     -- dashboard made landed, so it does not satisfy a request that has to
@@ -935,5 +943,25 @@ data ColumnSearch = ColumnSearch
 data DirectMergeReport = DirectMergeReport
   { directMergeReportResult :: Text,
     directMergeReportShownInstance :: Int
+  }
+  deriving stock (Eq, Show)
+
+-- | The startup diagnostics — an invalid cache, a settings problem, an
+-- authority notice, a degraded roster entry — together with the identity of
+-- the notice instance they were last shown as.
+--
+-- These fragments are reported nowhere else, so they ride the startup line
+-- until the first open generation publishes: an event notice arriving during
+-- the load composes onto the line rather than replacing it
+-- ('Kanban.UI.Util.noticeSetOverStartupReport'), and the first outcome
+-- composes them onto its own settled notice for the ordinary ten seconds
+-- ('Kanban.UI.Util.startupReportApplied'), which also retires the carry for
+-- good. The instance comparison is the same rule 'DirectMergeReport' states:
+-- a carry is honoured only while what is on screen is still the instance it
+-- last wrote, so a manual dismissal or an unrelated action's replacement
+-- retires the diagnostics rather than letting a later publish resurrect them.
+data StartupReport = StartupReport
+  { startupReportDiagnostics :: Text,
+    startupReportShownInstance :: Int
   }
   deriving stock (Eq, Show)

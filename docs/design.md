@@ -309,11 +309,20 @@ Responsive behavior:
   merge, a quit settling its cleanup — stays for as long as that operation
   does, and takes the ordinary ten seconds from the moment it settles; a
   composed notice is active while any of its fragments names such an
-  operation, the startup line's diagnostics riding its loading fragment. Every
-  displayed notice is its own instance: replacing, composing, or repeating
-  one — identical text included — starts a fresh ten-second lifetime, and an
-  expiry armed for an older instance can never remove a newer one. The
-  duration is fixed application behavior, not a configuration setting.
+  operation. The startup line's diagnostics — an invalid cache, a settings
+  problem, an authority notice, a degraded roster entry — are reported
+  nowhere else, so they ride its loading fragment until the first open
+  generation publishes: an event notice arriving during the load — a usage
+  result, a history pause, a completed-cache warning — composes onto the
+  line rather than replacing it, and the first
+  outcome's own notice carries the diagnostics behind it as a settled
+  composition that takes the ordinary ten seconds and retires them for good.
+  A manual dismissal or an unrelated action's replacement retires them
+  early, and no later publication recreates them. Every displayed notice is
+  its own instance: replacing, composing, or repeating one — identical text
+  included — starts a fresh ten-second lifetime, and an expiry armed for an
+  older instance can never remove a newer one. The duration is fixed
+  application behavior, not a configuration setting.
 - An open overlay is drawn in one of two extents, and `f` (section 7) moves it
   between them. Windowed is the box each overlay has always declared, centered
   over the board. Fullscreen spans the terminal less one column of application
