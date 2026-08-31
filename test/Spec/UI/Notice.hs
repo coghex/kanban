@@ -26,6 +26,7 @@ import Kanban.UI.Events (IncidentsAction (..), applyIncidentsAction)
 import Kanban.UI.Notice
 import Kanban.UI.PullRequest (directMergeResultApplied, drainerToggleApplied, drainerTogglePress)
 import Kanban.UI.Refresh (historyPausedNotice)
+import Kanban.UI (restoreStartupNotice)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types (AppState (..))
 import Kanban.UI.Util
@@ -162,6 +163,40 @@ categorySpec = describe "settled categories" $ do
     armed beforeFetch `shouldBe` Nothing
     armed loading `shouldBe` Nothing
     -- The last in-flight part settled, so the ten seconds start here.
+    armed fetched `shouldBe` Just (shownInstance fetched, deadlineAt 30)
+    shownNotice (expireAt 40 (shownInstance fetched) fetched) `shouldBe` Nothing
+
+  it "keeps the startup diagnostics through the refreshes startup itself requests" $ do
+    state <- quietState
+    -- The exact notice sequence 'startApplication' produces, through the
+    -- same producers it calls: the composed startup line, the board
+    -- announcement over the (empty) direct-merge carry, one usage
+    -- announcement per provider, and then the restore.
+    let composed = "Loading open GitHub data · press u to update · invalid usage cache"
+        launched =
+          (at 0 state)
+            { appNotice = showNotice (ActiveWhile StartupLoadRunning) composed emptyNoticeState,
+              appBoardFreshness = NotLoaded
+            }
+        announced =
+          noticeSetFor (UsageRefreshRunning Claude) "Refreshing Claude usage…"
+            . (\s -> s {appUsageFreshness = Map.insert Claude Loading s.appUsageFreshness})
+            . noticeSetFor (UsageRefreshRunning Codex) "Refreshing Codex usage…"
+            . (\s -> s {appUsageFreshness = Map.insert Codex Loading s.appUsageFreshness})
+            . (\s -> s {appBoardFreshness = Loading})
+            . noticeSetOverDirectMergeResult (ActiveWhile BoardRefreshRunning) "Refreshing GitHub…"
+            $ launched
+        restored = settleAt 0 (restoreStartupNotice launched.appNotice announced)
+    -- The announcements landed on the line, and the restore put the whole
+    -- composed startup report back — diagnostics included — as a fresh
+    -- instance still riding the startup fetch.
+    shownNotice announced `shouldBe` Just "Refreshing Claude usage…"
+    shownNotice restored `shouldBe` Just composed
+    armed restored `shouldBe` Nothing
+    shownNotice (settleAt 15 restored) `shouldBe` Just composed
+    -- The startup fetch settles: the usual ten seconds from there, whatever
+    -- the usage refreshes are still doing.
+    let fetched = settleAt 30 restored {appBoardFreshness = Fresh epoch}
     armed fetched `shouldBe` Just (shownInstance fetched, deadlineAt 30)
     shownNotice (expireAt 40 (shownInstance fetched) fetched) `shouldBe` Nothing
 

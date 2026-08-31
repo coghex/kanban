@@ -42,8 +42,10 @@ ACTIVE_SITES = {
     # The `EventM` wrapper `setNoticeFor` over the entry point: export list,
     # signature, defining equation, and the `noticeSetFor` it delegates to.
     "src/Kanban/UI/State.hs": 4,
-    # The composed startup notice, riding the startup fetch.
-    "src/Kanban/UI.hs": 1,
+    # The composed startup notice, riding the startup fetch: shown at
+    # launch, and re-shown by `restoreStartupNotice` over the announcements
+    # the startup refreshes themselves make.
+    "src/Kanban/UI.hs": 2,
     # `Refreshing GitHub…` / `GitHub refresh is already running` over the
     # direct-merge carry, and both providers' usage-refresh notices, running
     # and already-running alike.

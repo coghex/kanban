@@ -14,6 +14,7 @@ module Kanban.UI
   ( drawApplication,
     initialCompletedHistory,
     loadStartupCaches,
+    restoreStartupNotice,
     runDashboard,
     startupBoard,
     startupNotice,
@@ -79,7 +80,7 @@ import Kanban.Worker
 import Kanban.Filter (defaultFilterCriteria)
 import Kanban.UI.Filter (refreshVisibleBoard)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
-import Kanban.UI.Notice (NoticeActivity (..), NoticeLife (..), emptyNoticeState, showNotice)
+import Kanban.UI.Notice (NoticeActivity (..), NoticeLife (..), NoticeState, currentNotice, emptyNoticeState, showNotice)
 import Kanban.UI.State (settleNoticeExpiry)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -318,6 +319,17 @@ startupBoard workflowConfig now = deriveBoard workflowConfig (RepoSnapshot [] []
 startupNotice :: Text
 startupNotice = "Loading open GitHub data · press " <> actionKeyText RefreshAll <> " to update"
 
+-- | Re-show the composed startup line over the refresh announcements startup
+-- itself just made: a fresh instance of the same text, still riding the
+-- startup fetch. Without this the diagnostics composed after the loading
+-- fragment — an invalid cache, a settings problem, a degraded roster entry —
+-- would be discarded by the very announcements the startup refreshes make,
+-- before anything had drawn them.
+restoreStartupNotice :: NoticeState -> AppState -> AppState
+restoreStartupNotice initial state = case currentNotice initial of
+  Nothing -> state
+  Just message -> noticeSetFor StartupLoadRunning message state
+
 -- | What a stored completed generation seeds the dashboard with, and what it
 -- has to say for itself.
 --
@@ -365,10 +377,18 @@ startApplication = do
   vty <- getVtyHandle
   liftIO (enableMouseIfSupported (Vty.outputIface vty))
   startAllRefreshes
+  -- 'startAllRefreshes' announces each refresh it starts, which on any later
+  -- press is the whole report. At startup those announcements land on top of
+  -- the composed startup line, whose loading fragment already names the same
+  -- fetch — and whose diagnostics are reported nowhere else. Put the startup
+  -- line back: it stays the notice for as long as the startup fetch runs,
+  -- and takes its ten seconds from the moment that fetch settles (issue #590
+  -- requirements 7 and 8, as amended for composed notices).
+  modify (restoreStartupNotice initialNotice)
   -- The same settle 'handleEvent' runs after every event, run once for the
-  -- start event itself: whatever the refreshes above left on the notice line
-  -- is classified — and armed, if any of it managed to settle before the
-  -- first real event — rather than waiting unclassified for one to arrive.
+  -- start event itself: whatever the work above left on the notice line is
+  -- classified — and armed, if any of it managed to settle before the first
+  -- real event — rather than waiting unclassified for one to arrive.
   settleNoticeExpiry initialNotice
   state <- get
   void . liftIO . forkIO $ discoverWorkers state.appRepository >>= writeBChan state.appEventChannel . WorkerDiscoveryFinished
