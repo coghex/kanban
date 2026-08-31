@@ -37,6 +37,7 @@ import Kanban.Review (ReviewStage (..))
 import Kanban.Settings (defaultSettings)
 import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
 import Kanban.UI.SessionCore (newAgentSession)
+import Kanban.UI.Notice (emptyNoticeState)
 import Kanban.UI.Types
   ( AgentSession (..),
     AppState (..),
@@ -95,7 +96,7 @@ testAppState board = do
         appIncidentSelection = IncidentSelection Nothing 0,
         appOverlay = Nothing,
         appOverlayFullscreen = False,
-        appNotice = Nothing,
+        appNotice = emptyNoticeState,
         appBoardFreshness = Fresh epoch,
         appOpenSnapshot = Nothing,
         appLastSuccessfulFetch = Just epoch,

@@ -297,6 +297,23 @@ Responsive behavior:
   its own box: the row along the bottom of the terminal is where they are
   named. None of that adds rows to section 7's table or to the help overlay,
   which stay the complete list of the bindings they already document.
+- The footer's notice line is transient by time as well as by interaction. A
+  settled notice — one reporting a finished fact, whatever its producer,
+  category, or severity — disappears on its own ten seconds after it becomes
+  the current notice, unless a key, click, or replacing notice removes it
+  sooner; the expiry redraws the frame and reclaims every row the wrapped
+  notice occupied, exactly as an `Esc` dismissal does, with no other input or
+  background event needed. A notice explicitly reporting an operation the
+  application still tracks in progress — the startup load, a running board or
+  usage refresh, a PR-drainer or approval-service start or stop, a direct
+  merge, a quit settling its cleanup — stays for as long as that operation
+  does, and takes the ordinary ten seconds from the moment it settles; a
+  composed notice is active while any of its fragments names such an
+  operation, the startup line's diagnostics riding its loading fragment. Every
+  displayed notice is its own instance: replacing, composing, or repeating
+  one — identical text included — starts a fresh ten-second lifetime, and an
+  expiry armed for an older instance can never remove a newer one. The
+  duration is fixed application behavior, not a configuration setting.
 - An open overlay is drawn in one of two extents, and `f` (section 7) moves it
   between them. Windowed is the box each overlay has always declared, centered
   over the board. Fullscreen spans the terminal less one column of application
@@ -333,7 +350,7 @@ Initial bindings:
 | `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
 | `f` | Toggle the open overlay between its windowed box and fullscreen, in every overlay except the Codex/Claude solve chooser; a live-agent overlay answers it in normal mode, where insert mode types the letter into the draft instead, and with no overlay open the key does nothing |
-| `Esc` | Close an overlay or dismiss a transient error; in a live-agent overlay it is modal, returning an insert-mode session to normal and only then hiding the overlay, and it never reaches the dashboard's own quit |
+| `Esc` | Close an overlay or dismiss any notice early, ahead of its ten-second lifetime; in a live-agent overlay it is modal, returning an insert-mode session to normal and only then hiding the overlay, and it never reaches the dashboard's own quit |
 | `r` | Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session; a no-op on a collapsed or childless epic header |
 | `S` | Choose Codex or Claude and start/reopen an issue solve through PR creation |
 | `A` | Choose Codex or Claude and start/reopen the full autosolve review loop |
@@ -2284,7 +2301,10 @@ above are unchanged, and persistence the user switched off is not a failure.
   remaining budget is at or below the reserve, which is what makes the reserve a
   balance that survives rather than one the last page may spend, and the board
   reports `History paused · GitHub limit resets <time>` through the existing
-  notice line using GitHub's reported reset. It resumes on its own once that
+  notice line using GitHub's reported reset. That notice is a settled report,
+  not a progress notice: it takes the ordinary ten-second lifetime (section 6),
+  while the pause itself keeps being reported by the footer's durable
+  completed-generation status for as long as it lasts. It resumes on its own once that
   reset has passed, or once a later foreground page reports sufficient budget —
   a paused history job cannot produce that page itself, which is why the
   foreground's counts.
@@ -2692,11 +2712,15 @@ above are unchanged, and persistence the user switched off is not a failure.
   nowhere else — so the refresh the same result requires must not be what
   removes it from the screen. It is carried in front of the refresh's own
   notices and dropped once the required refresh has actually published, not
-  once whichever fetch happened to be in flight did. It is carried only while
-  what is on screen is still the notice it last wrote, so every way a notice
-  ends — either `Esc`, an overlay opening, a moved selection, another action
-  reporting — also ends the result behind it, and a dismissed merge report can
-  never be recreated by the refresh it required.
+  once whichever fetch happened to be in flight did. While the composed line
+  reports that refresh as running it is an active notice and does not expire;
+  once the refresh settles, the settled result receives the ordinary
+  ten-second lifetime. The carry is keyed to the notice instance it last
+  wrote — never to the text, which a later notice could repeat — so every way
+  a notice ends — `Esc`, an overlay opening, a moved selection, another
+  action reporting, or the ten-second expiry — also ends the result behind
+  it, and a dismissed or expired merge report can never be recreated by the
+  refresh it required.
 - The canonical drainer, controller, and safety-first installer are versioned
   with Kanban under `tools/`. The installer creates stable per-user links in
   that same resolved directory — unless `--install-dir` or
@@ -2986,10 +3010,12 @@ above are unchanged, and persistence the user switched off is not a failure.
   it reported is what still stands after it.
 - Worker results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, resize, provider result, active review
-  event/spinner tick, or explicit terminal repaint.
-- There are no periodic network or Git polls. The only timers are the two
-  ten-second local service status checks: the PR drainer's and the issue
-  approval service's.
+  event/spinner tick, notice expiry, or explicit terminal repaint.
+- There are no periodic network or Git polls. The only recurring timers are
+  the two ten-second local service status checks — the PR drainer's and the
+  issue approval service's — plus one local one-shot timer per settled
+  notice, which delivers that notice's ten-second expiry (section 6) as an
+  ordinary application event and triggers the redraw that reclaims its rows.
 - Board and usage refresh independently.
 - Codex and Claude failures are independent of one another.
 - A refresh records its completion time and whether displayed data is fresh,
@@ -3757,8 +3783,8 @@ is implementation history rather than a second status checklist.
 
 Exit criteria: the application is warning-clean, fixture/integration tests pass,
 idle CPU is effectively zero apart from the inexpensive local service status
-timer, and every network call is attributable to startup or an explicit
-refresh key.
+timer and the one-shot notice-expiry timer a settled notice arms (section 15),
+and every network call is attributable to startup or an explicit refresh key.
 
 ## 20. Deferred ideas
 

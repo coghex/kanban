@@ -38,7 +38,7 @@ import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Search
 import Kanban.UI.Selection (openSearchResult, selectedEntry)
 import Kanban.UI.Types
-import Kanban.UI.Util (entriesForBoard, safeIndex, selectedRow)
+import Kanban.UI.Util (entriesForBoard, noticeSet, safeIndex, selectedRow, shownNotice)
 import Spec.Support.App (testAppState, withReviewSession)
 import Spec.Support.Fixtures (baseIssue)
 import Test.Hspec
@@ -578,12 +578,12 @@ transferSpec = describe "transferring to another column" $ do
     searching <- transferring
     -- Issues is the leftmost column and Done the rightmost, so these two
     -- presses resolve to the column already searched.
-    let noticed = searching {appNotice = Just "Collapsed epic #700"}
+    let noticed = noticeSet "Collapsed epic #700" searching
         atLeft = applySearchInput (SearchTransfer (-1)) noticed
         onDone = transferSearchTo Done noticed
         atRight = applySearchInput (SearchTransfer 1) onDone
     atLeft `shouldBe'` noticed
-    atLeft.appNotice `shouldBe` Just "Collapsed epic #700"
+    shownNotice atLeft `shouldBe` Just "Collapsed epic #700"
     (.searchColumn) <$> onDone.appSearch `shouldBe` Just Done
     atRight `shouldBe'` onDone
 
@@ -774,7 +774,7 @@ approvalFacts state =
     state.appApprovalStatus.approvalDetail,
     state.appApprovalBusy,
     state.appApprovalTransition,
-    state.appNotice
+    shownNotice state
   )
 
 -- | State equality without the fields no transition here is about, since
@@ -853,7 +853,7 @@ mouseSpec = describe "mouse precedence" $ do
     -- The toggle ran: the drainer is on its way up and the press said so.
     ((.appDrainerStatus.drainerState) <$> press searching) `shouldBe` Just DrainerStarting
     ((.appDrainerBusy) <$> press searching) `shouldBe` Just True
-    ((.appNotice) <$> press searching) `shouldBe` Just (Just "Starting PR drainer…")
+    (shownNotice <$> press searching) `shouldBe` Just (Just "Starting PR drainer…")
     -- And the search is exactly where it was, still on its query.
     ((.appSearch) <$> press searching) `shouldBe` Just searching.appSearch
     ((.appSelectedColumn) <$> press searching) `shouldBe` Just searching.appSelectedColumn
@@ -885,7 +885,7 @@ mouseSpec = describe "mouse precedence" $ do
     ((.appApprovalStatus.approvalState) <$> press searching) `shouldBe` Just ApprovalStarting
     ((.appApprovalStatus.approvalDetail) <$> press searching) `shouldBe` Just "starting…"
     ((.appApprovalBusy) <$> press searching) `shouldBe` Just True
-    ((.appNotice) <$> press searching) `shouldBe` Just (Just "Starting issue approval service…")
+    (shownNotice <$> press searching) `shouldBe` Just (Just "Starting issue approval service…")
     -- And it is the key's own press, field for field, not a second one that
     -- happens to agree about the status.
     (approvalFacts <$> press searching) `shouldBe` Just (approvalFacts (fst (approvalTogglePress (installed searching))))

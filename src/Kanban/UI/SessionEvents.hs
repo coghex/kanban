@@ -50,6 +50,7 @@ import Kanban.Domain (ItemId (..))
 import Kanban.UI.Types
 import Kanban.UI.Filter (readOnlyHistoryRefusalFor)
 import Kanban.UI.State (closeOverlay, setNotice, toggleOverlayFullscreen)
+import Kanban.UI.Util (noticeCleared)
 import Kanban.UI.SessionCore
 import Kanban.UI.Session
 import Kanban.UI.Transcript
@@ -254,7 +255,7 @@ cycleSession ops current = do
   case nextSessionKey current (sessionKeys ops state) of
     Nothing -> pure ()
     Just next -> do
-      modify (\updated -> updated {appOverlay = Just (ops.sessionOpsOverlay next), appNotice = Nothing})
+      modify (\updated -> noticeCleared updated {appOverlay = Just (ops.sessionOpsOverlay next)})
       presentTranscriptTail
       armEligibleSessionTicks ops
 

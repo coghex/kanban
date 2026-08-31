@@ -121,6 +121,8 @@ import Kanban.UI.Session (reviewSessionInputLive)
 import Kanban.UI.SessionEvents (SessionOps (..), reviewSessionOps)
 import Kanban.UI.Solve (freshSolveTranscript)
 import Kanban.UI.State (plainTranscript)
+import Kanban.UI.Notice (NoticeLife (..), emptyNoticeState, showNotice)
+import Kanban.UI.Util (noticeSet)
 import Kanban.UI.Types
   ( AgentSession (..),
     AppEvent,
@@ -1158,17 +1160,19 @@ panelSummary OpenDataUnavailablePanel = "the OPEN DATA UNAVAILABLE panel"
 -- which of the two is drawn.
 panelState :: OpenDataPanel -> AppState -> AppState
 panelState OpenDataLoadingPanel state =
-  state
-    { appLastSuccessfulFetch = Nothing,
-      appBoardFreshness = Loading,
-      appNotice = Just "Refreshing GitHub…"
-    }
+  noticeSet
+    "Refreshing GitHub…"
+    state
+      { appLastSuccessfulFetch = Nothing,
+        appBoardFreshness = Loading
+      }
 panelState OpenDataUnavailablePanel state =
-  state
-    { appLastSuccessfulFetch = Nothing,
-      appBoardFreshness = Unavailable unavailableReason,
-      appNotice = Just ("GitHub refresh failed: " <> unavailableReason)
-    }
+  noticeSet
+    ("GitHub refresh failed: " <> unavailableReason)
+    state
+      { appLastSuccessfulFetch = Nothing,
+        appBoardFreshness = Unavailable unavailableReason
+      }
 
 unavailableReason :: Text
 unavailableReason = "AUTH REQUIRED: gh: Bad credentials (HTTP 401)"
@@ -1508,7 +1512,7 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       appIncidentSelection = IncidentSelection Nothing 0,
       appOverlay = Nothing,
       appOverlayFullscreen = False,
-      appNotice = Just "Cached GitHub snapshot loaded · press u to update",
+      appNotice = showNotice SettledNotice "Cached GitHub snapshot loaded · press u to update" emptyNoticeState,
       appBoardFreshness = Fresh goldenFetchedAt,
       appLastSuccessfulFetch = Just goldenFetchedAt,
       appOpenGeneration = 0,

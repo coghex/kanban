@@ -79,6 +79,8 @@ import Kanban.Worker
 import Kanban.Filter (defaultFilterCriteria)
 import Kanban.UI.Filter (refreshVisibleBoard)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
+import Kanban.UI.Notice (NoticeActivity (..), NoticeLife (..), emptyNoticeState, showNotice)
+import Kanban.UI.State (settleNoticeExpiry)
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.Theme
@@ -175,8 +177,14 @@ runHeldDashboard authority options config repository roster = do
             -- a previous run: an overlay always opens windowed, which is what
             -- keeps the board visible behind a freshly opened panel.
             appOverlayFullscreen = False,
+            -- A composed notice, and an active one: its first fragment names
+            -- the startup fetch still in flight, so the whole line — the
+            -- settled diagnostics composed after it included — lives until
+            -- that fetch settles and takes its ten seconds from there
+            -- (issue #590 requirements 7 and 8).
             appNotice =
-              Just
+              showNotice
+                (ActiveWhile StartupLoadRunning)
                 ( startupNotice
                     <> maybe "" (" · " <>) usageNotice
                     <> maybe "" (" · " <>) historyNotice
@@ -193,7 +201,8 @@ runHeldDashboard authority options config repository roster = do
                     -- `path` configured anywhere there are none of these, so
                     -- the line reads exactly as it always has.
                     <> foldMap (" · " <>) (rosterDegradationNotices roster)
-                ),
+                )
+                emptyNoticeState,
             -- Nothing has been fetched and nothing was restored, which is
             -- exactly what §7's loading panel stands for. 'startApplication'
             -- moves this to 'Loading' the moment the startup refresh is
@@ -352,9 +361,15 @@ drawApplication state =
 
 startApplication :: EventM Name AppState ()
 startApplication = do
+  initialNotice <- (.appNotice) <$> get
   vty <- getVtyHandle
   liftIO (enableMouseIfSupported (Vty.outputIface vty))
   startAllRefreshes
+  -- The same settle 'handleEvent' runs after every event, run once for the
+  -- start event itself: whatever the refreshes above left on the notice line
+  -- is classified — and armed, if any of it managed to settle before the
+  -- first real event — rather than waiting unclassified for one to arrive.
+  settleNoticeExpiry initialNotice
   state <- get
   void . liftIO . forkIO $ discoverWorkers state.appRepository >>= writeBChan state.appEventChannel . WorkerDiscoveryFinished
   case state.appDrainerController of

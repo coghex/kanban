@@ -15,6 +15,25 @@ created above it.
 
 ### Unreleased
 
+- Every settled footer notice now disappears on its own ten seconds after it
+  settles, instead of sitting in the yellow line until an unrelated press
+  cleared it. The rule covers every producer and severity alike — startup
+  diagnostics, refusals, errors, action and service results, `Claude usage
+  refreshed` — while a notice that explicitly reports an operation the
+  application still tracks in progress (a running board or usage refresh, a
+  service start or stop, a direct merge, a settling quit) stays for as long as
+  that operation does and takes its ten seconds from the moment it settles.
+  The expiry arrives as an ordinary application event from a local one-shot
+  timer, so the footer redraws and a fullscreen overlay reclaims the rows the
+  notice held even when nothing else is happening; `Esc` and every existing
+  clearing interaction still dismiss a notice early. Each displayed notice is
+  its own instance, so a replacement — identical text included — always gets a
+  full new lifetime, an expiry armed for an older instance can never remove a
+  newer one, and the direct-merge result carry is now keyed to the instance it
+  last wrote rather than to text a later notice could repeat. The notice line
+  itself became an abstract lifecycle state (`Kanban.UI.Notice`), which is
+  what keeps any future producer from bypassing the rule.
+
 - The six document workflows that hand a document to
   `publish_coordination_doc.py` — `/process-design-doc`, `/process-report` and
   `/note-problem` in both brands — now report the ordinary publication outcome

@@ -95,11 +95,11 @@ openIssueSolveChooser workflow issue = do
     Just notice -> setNotice notice
     Nothing -> case reusableSolveSession workflow issue.issueNumber state.appSolveSessions of
       Just _ -> openExistingSolveOverlay issue.issueNumber
-      Nothing -> modify (\current -> current {appOverlay = Just (SolveChooser workflow issue), appNotice = Nothing})
+      Nothing -> modify (\current -> noticeCleared current {appOverlay = Just (SolveChooser workflow issue)})
 
 openExistingSolveOverlay :: Int -> EventM Name AppState ()
 openExistingSolveOverlay issueNumber = do
-  modify (\current -> current {appOverlay = Just (SolveOverlay issueNumber), appNotice = Nothing})
+  modify (\current -> noticeCleared current {appOverlay = Just (SolveOverlay issueNumber)})
   presentTranscriptTail
 
 -- | The base-board key that starts each workflow, named from the one table
@@ -162,7 +162,7 @@ startIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState
 startIssueSolve issue workflow brand = do
   state <- get
   case solveStartDecision state issue workflow brand of
-    SolveStartRefused notice -> modify (\current -> current {appOverlay = Nothing, appNotice = Just notice})
+    SolveStartRefused notice -> modify (\current -> noticeSet notice current {appOverlay = Nothing})
     SolveStartReopen -> openExistingSolveOverlay issue.issueNumber
     SolveStartFresh -> startFreshIssueSolve issue workflow brand
 
@@ -211,11 +211,11 @@ startFreshIssueSolve issue workflow brand = do
             }
   modify
     ( \current ->
-        current
-          { appSolveSessions = Map.insert issue.issueNumber session current.appSolveSessions,
-            appOverlay = Just (SolveOverlay issue.issueNumber),
-            appNotice = Nothing
-          }
+        noticeCleared
+          current
+            { appSolveSessions = Map.insert issue.issueNumber session current.appSolveSessions,
+              appOverlay = Just (SolveOverlay issue.issueNumber)
+            }
     )
   presentTranscriptTail
   launchSolveInvocation issue.issueNumber workflow brand Nothing ResumeAnswer ""
@@ -336,7 +336,7 @@ submitSolveInput issueNumber = do
         Just progress <- session.sessionDetail.solveSessionAutoProgress,
         progress.autoSolveStage == AutoReviewing,
         Just pullRequestNumber <- progress.autoSolvePullRequest -> do
-          modify (\current -> current {appOverlay = Just (PullRequestReviewOverlay pullRequestNumber), appNotice = Nothing})
+          modify (\current -> noticeCleared current {appOverlay = Just (PullRequestReviewOverlay pullRequestNumber)})
           presentTranscriptTail
       | session.sessionPhase /= SolveAttention -> setNotice "This solve session is not waiting for input"
       | Text.null (Text.strip session.sessionInput) -> setNotice "Type an answer before pressing Enter"

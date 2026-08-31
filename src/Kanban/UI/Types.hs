@@ -104,6 +104,7 @@ import Kanban.Solve
     SolverBrand (..)
     )
 import Kanban.Models (ModelRoster, OperatingMode, ProviderName, RecordedAssignment, RoleName, RosterLoadError, loadedOperatingMode)
+import Kanban.UI.Notice (NoticeState)
 import Kanban.Settings
   ( Settings (..)
     )
@@ -680,6 +681,13 @@ data AppEvent
   | WorkerRegistered WorkerDescriptor
   | WorkerProtocolEvent WorkerDescriptor WorkerEvent
   | WorkerDiscoveryFinished [WorkerDescriptor]
+  | -- | A displayed notice instance's ten seconds elapsed. It carries the
+    -- instance identity the timer was armed for, on the same superseded-
+    -- generation reasoning as the animation ticks above: an expiry belonging
+    -- to a replaced or dismissed instance — even one whose text a newer
+    -- notice repeats — finds a different identity displayed and is dropped
+    -- rather than allowed to clear it (issue #590 requirement 5).
+    NoticeExpired Int
   | CanonicalIssueReviewProcessStarted Int ManagedProcess
   | CanonicalIssueReviewFinished Int ReviewStage (Either Text CanonicalIssueReviewResult)
 
@@ -773,7 +781,13 @@ data AppState = AppState
     -- 'Kanban.UI.State.settleOverlayFullscreen' enforces after every event
     -- rather than at each of the many sites that assign 'appOverlay'.
     appOverlayFullscreen :: Bool,
-    appNotice :: Maybe Text,
+    -- | The transient footer line, as the abstract lifecycle state
+    -- "Kanban.UI.Notice" alone can move: every producer shows a notice
+    -- through its transitions, every settled instance expires ten seconds
+    -- after it settles, and 'Kanban.UI.Util.settleNoticeLifecycle' — run
+    -- after every event — is what classifies the displayed instance against
+    -- the tracked operations in 'Kanban.UI.Util.noticeActivityLive'.
+    appNotice :: NoticeState,
     appBoardFreshness :: Freshness,
     -- | The newest complete open generation, kept beside the board it derived.
     -- The board alone cannot answer requirement 8: reconciling a completed
@@ -905,17 +919,21 @@ data ColumnSearch = ColumnSearch
   }
   deriving stock (Eq, Show)
 
--- | A landed merge's result, together with the notice it was last shown as.
+-- | A landed merge's result, together with the identity of the notice
+-- instance it was last shown as.
 --
 -- The second field is what keeps the result from outliving its own report.
 -- Some two dozen places clear or replace 'appNotice' -- both Esc handlers,
--- every overlay that opens, every selection move -- and each of them means
--- the user has stopped looking at this result. None of them can be asked to
--- remember that a second field exists, and a list of sites that must is a
--- list that will be incomplete again the next time one is added. Comparing
--- against what was actually put on screen needs no such list.
+-- every overlay that opens, every selection move, and now the ten-second
+-- expiry -- and each of them means the user has stopped looking at this
+-- result. None of them can be asked to remember that a second field exists,
+-- and a list of sites that must is a list that will be incomplete again the
+-- next time one is added. Comparing against the instance actually put on
+-- screen needs no such list -- and unlike the text comparison it replaced,
+-- it cannot let a later notice that happens to repeat the same words adopt a
+-- retired report, because an instance identity is never reissued.
 data DirectMergeReport = DirectMergeReport
   { directMergeReportResult :: Text,
-    directMergeReportShown :: Text
+    directMergeReportShownInstance :: Int
   }
   deriving stock (Eq, Show)

@@ -113,7 +113,7 @@ moveColumn delta = modify $ \state ->
   let current = fromEnum state.appSelectedColumn
       maximumColumn = fromEnum (maxBound :: BoardColumn)
       next = max 0 (min maximumColumn (current + delta))
-   in state {appSelectedColumn = toEnum next, appEnsureSelectionVisible = True, appNotice = Nothing}
+   in noticeCleared state {appSelectedColumn = toEnum next, appEnsureSelectionVisible = True}
 
 selectBoundary :: Bool -> EventM Name AppState ()
 selectBoundary selectLast = modify $ \state ->
@@ -121,8 +121,8 @@ selectBoundary selectLast = modify $ \state ->
       rows = selectableRows state column
       target = if selectLast then safeLast rows else safeIndex 0 rows
    in case target of
-        Nothing -> state {appEnsureSelectionVisible = True, appNotice = Nothing}
-        Just row -> state {appSelectedRows = Map.insert column row state.appSelectedRows, appEnsureSelectionVisible = True, appNotice = Nothing}
+        Nothing -> noticeCleared state {appEnsureSelectionVisible = True}
+        Just row -> noticeCleared state {appSelectedRows = Map.insert column row state.appSelectedRows, appEnsureSelectionVisible = True}
 
 toggleSelectedTracker :: EventM Name AppState ()
 toggleSelectedTracker = modify $ \state ->
@@ -130,7 +130,7 @@ toggleSelectedTracker = modify $ \state ->
       entries = entriesFor state column
       currentRow = selectedRow state column
    in case safeIndex currentRow entries >>= entryPrimaryTrackerNumber of
-        Nothing -> state {appEnsureSelectionVisible = True, appNotice = Just ("Focus an epic header or child before pressing " <> actionKeyText ToggleEpic)}
+        Nothing -> noticeSet ("Focus an epic header or child before pressing " <> actionKeyText ToggleEpic) state {appEnsureSelectionVisible = True}
         Just trackerNumber ->
           let firstRow = maybe currentRow id (findIndex ((== Just trackerNumber) . entryPrimaryTrackerNumber) entries)
            in toggleTrackerState column firstRow trackerNumber state
@@ -152,9 +152,9 @@ toggleTrackerState column row trackerNumber state
     -- that row's anchor; 'reseatSearch' is a no-op with no search open.
     toggled = anchorAt state column row
     retarget expandedTrackers notice =
-      reseatSearch
-        toggled
-        state
+      noticeSet notice
+        . reseatSearch toggled
+        $ state
           { appSelectedColumn = column,
             appExpandedTrackers = expandedTrackers,
             appSelectedRows =
@@ -162,8 +162,7 @@ toggleTrackerState column row trackerNumber state
                 expandedTrackers
                 state.appVisibleBoard
                 (Map.insert column row state.appSelectedRows),
-            appEnsureSelectionVisible = True,
-            appNotice = Just notice
+            appEnsureSelectionVisible = True
           }
 
 openSelectedDetails :: EventM Name AppState ()
@@ -174,12 +173,12 @@ openSelectedDetailsIn state =
   case selectedEntry state of
     Just entry@(Tracked trackingContext _)
       | primaryTrackerNumber trackingContext `Set.notMember` expandedTrackersFor state state.appSelectedColumn ->
-          state {appNotice = Just ("Press " <> actionKeyText ToggleEpic <> " to expand this epic")}
+          noticeSet ("Press " <> actionKeyText ToggleEpic <> " to expand this epic") state
       | otherwise -> openEntry entry
     Just entry -> openEntry entry
-    Nothing -> state {appNotice = Just "No item is selected in this column"}
+    Nothing -> noticeSet "No item is selected in this column" state
   where
-    openEntry entry = state {appOverlay = Just (DetailsOverlay (entryItem entry)), appNotice = Nothing}
+    openEntry entry = noticeCleared state {appOverlay = Just (DetailsOverlay (entryItem entry))}
 
 -- | Enter on a search result: open its details the way the board always does,
 -- then end search on the identity that was opened, so the restored column is

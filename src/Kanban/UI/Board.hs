@@ -11,6 +11,7 @@ module Kanban.UI.Board
     drainerLabel,
     drawBase,
     drawCardFrame,
+    drawFooter,
     drawLiveActivity,
     emptyColumnText,
     filterChipText,
@@ -1163,7 +1164,7 @@ drawFooter state =
     . vBox
     $ [ withAttr footerAttr (txt (boardHintLine state)),
         withAttr dimAttr (txt (boardFreshnessText state <> " · " <> completedHistoryStatusText state)),
-        maybe emptyWidget (withAttr noticeAttr . txtWrap) state.appNotice
+        maybe emptyWidget (withAttr noticeAttr . txtWrap) (shownNotice state)
       ]
 
 -- | Which hint line the footer is showing: the surface that currently has the
