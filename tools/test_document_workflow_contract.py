@@ -35,6 +35,14 @@ disposition, but it appends to a report that already exists and may already be
 classified `coordination`, so it publishes in the same run without ever
 acquiring a tracker transaction.
 
+Issue #577 added the reporting dimension to §9. The publication clauses above
+say what an asset must state about the mechanism; the quiet clauses say what a
+run may then tell the user about the result. PublicationTests pins both, with
+the four DRAFTING_ASSETS as the negative control for the six-asset silence rule
+and the two NOTE_ASSETS joining them as the control for the four-asset
+transaction rule, because note-problem publishes without ever acquiring a
+transaction.
+
 Issue #458 added §10, the one part of this contract about what happens after an
 arc ends. §3.1's state machine has a single transition and no third value, so a
 closed arc leaves its processing apparatus in place; that is right for an arc
@@ -356,6 +364,19 @@ CONTRACT_STATEMENTS = {
     "publication-failure-has-three-states": (
         "reported with all three states rather than collapsed into one"
     ),
+    # Issue #577: §9.5's reporting half. The three statements below are one
+    # rule in three parts, and each part is the one a later edit could drop on
+    # its own — the silence, its exact boundary, and the fact that it ends the
+    # report rather than the run.
+    "publication-ordinary-outcome-is-silent": (
+        "The ordinary outcome is reported by saying nothing about it"
+    ),
+    "publication-other-outcomes-stay-loud": (
+        "Every other outcome keeps its full report, each for its own reason"
+    ),
+    "publication-silence-is-only-the-report": (
+        "That silence is a rule about the report, not about the work"
+    ),
     # Issue #327: §9.6's tracker transaction, and §9.5's extension. What is
     # pinned here is the contract the four processing assets are held to below;
     # the mechanism's behavior is executed by tools/test_tracker_transaction.py
@@ -461,6 +482,19 @@ CONTRACT_STATEMENTS = {
     "transaction-failure-report-adds-tracker-state": (
         "Tracker state is reported beside those three, never instead of them"
     ),
+    # Issue #577 round 1. The rule above used to reach "every unpublished
+    # outcome", which includes the recorded not-published result the same
+    # section now closes quietly — the contract requiring and forbidding the
+    # same report. What separates them is the transaction resolving, not the
+    # publication happening, so the boundary is pinned rather than left to the
+    # word "failure" carrying it alone.
+    "transaction-report-scope-is-failure": (
+        "The scope of that report is failure, not the absence of a publication"
+    ),
+    "transaction-unresolved-record-is-a-failure": (
+        "a transaction that could not resolve is an unpublished failure by this "
+        "rule however ordinary the helper's result was"
+    ),
     # Issue #458: §10's arc-apparatus lifecycle. Every substantive clause is
     # pinned on its own key rather than as one paragraph-sized fragment,
     # because a §10 that still discusses the apparatus somewhere proves
@@ -526,8 +560,14 @@ CONTRACT_STATEMENTS = {
 # Issue #315: what each processing asset must state about publication. These
 # are policy and delegation, not mechanism — the sequence lives in
 # tools/publish_coordination_doc.py and is executed by its own tests.
+# Issue #577 reworded two of these rather than retiring them. The step still
+# runs in the same run and still names the write root, the path and the blob —
+# for the outcomes that need naming — so what changed is the sentence, not the
+# rule, and the fragment moves with it.
 PUBLICATION_CLAUSES = {
-    "publishes-in-the-same-run": "publish the approved mutation in this same run",
+    "publishes-in-the-same-run": (
+        "hand the approved mutation to the publication helper in this same run"
+    ),
     "is-never-batched": (
         "never batched or deferred merely to reduce commit or push frequency"
     ),
@@ -631,8 +671,113 @@ PUBLICATION_CLAUSES = {
         "on the publication branch"
     ),
     "names-the-write-root-and-the-blob": (
-        "name the write root, the document path, and the preserved approved_blob "
-        "rather than describing the run as complete on the branch"
+        "needs the write root, the document path, and the preserved "
+        "approved_blob named plainly"
+    ),
+}
+
+# Issue #577: what those same six assets must state about *reporting* the
+# result, which is a different question from what the helper does with it. The
+# ordinary healthy outcome — not-published, an applied write outcome, and a
+# recorded applied_record — is a settled mechanism working as designed, and an
+# asset that had the run narrate it turned three dispositions of one document
+# into three recitals of the publication apparatus. Silence is pinned here for
+# the same reason the noisy policy was pinned above: it is the asset's whole
+# observable behavior, so an edit that quietly restored the narration would
+# otherwise pass.
+#
+# `applied-is-not-landed` stays in PUBLICATION_CLAUSES rather than moving or
+# retiring: the durability fact is what forbids publishing by hand and what
+# stops a stranded transaction reading as a finished run, so it survives as an
+# instruction to the agent. What issue #577 changed is that it is no longer a
+# line of the report on the ordinary outcome, which is the clause below.
+QUIET_PUBLICATION_CLAUSES = {
+    "ordinary-outcome-is-silent": (
+        "the ordinary outcome is reported by saying nothing about it"
+    ),
+    # The conjunction, not any one of its parts: a not-published status whose
+    # write outcome is no-baseline, or whose applied_record is unrecorded, is
+    # not this case and is still reported in full.
+    "ordinary-outcome-is-the-exact-conjunction": (
+        "not-published, with a write_outcome of applied-over-baseline or "
+        'applied-over-local-predecessor and an applied_record of "recorded", is '
+        "the expected and healthy result"
+    ),
+    "suppressed-publication-vocabulary": (
+        "say nothing about publication, eligibility, lanes, worktrees, write "
+        "roots, blobs, or what still has to happen for the edit to land"
+    ),
+    # The distinction the whole change turns on, and the one an asset could
+    # most easily lose: what the run DOES is unchanged, and only what it SAYS
+    # is.
+    "silence-is-a-rule-about-the-report": (
+        "that silence is a rule about the report, not about the work"
+    ),
+    "the-helper-still-runs-on-that-outcome": (
+        "the helper is still invoked and its result is still inspected"
+    ),
+    "silence-is-never-a-skipped-step": (
+        "silence is what the run says at the end, never a step it skips"
+    ),
+    "durability-is-an-instruction-not-a-report-line": (
+        "that fact governs what this workflow may do, not what it tells the user"
+    ),
+    "every-other-outcome-keeps-its-full-report": (
+        "every other outcome keeps its full report"
+    ),
+    "unwritten-and-unrecorded-are-named-plainly": (
+        "a write_outcome of no-baseline or unrecognized-working-copy means "
+        "nothing was applied and the approved mutation survives only as "
+        'approved_blob; an applied_record of "unrecorded" means the write '
+        "cannot be proven and no later run may build on it"
+    ),
+    # A published run keeps its report for a reason that is not the others':
+    # the mutation is exactly where the next run will look for it, and what the
+    # report carries is verified success and the §9.5 changed-line summary.
+    "published-and-unmodelled-keep-their-own-reasons": (
+        "a publication is verified success with a changed-line summary the run "
+        "has to check, and an unmodelled status is a failure whose three states "
+        "are the only account of where the document went"
+    ),
+    "the-closing-report-omits-the-recording-step": (
+        "where the document was written, whether it reached the branch, and "
+        "what still has to happen to it are the recording step's business, and "
+        "on its ordinary outcome that step reports itself by saying nothing"
+    ),
+}
+
+# The result vocabulary the quiet rule must NOT swallow. Each of these names a
+# path on which the run still reports in full, and each is one substitution away
+# from the ordinary conjunction: a not-published status is quiet only when the
+# write outcome is one of the two applied ones AND the record reads "recorded".
+NON_ORDINARY_RESULT_LITERALS = (
+    "no-baseline",
+    "unrecognized-working-copy",
+    '"unrecorded"',
+    '"status": "published"',
+    "any other status",
+)
+
+# Scoped to the four processing assets, because note-problem acquires no
+# tracker transaction. This is the hazard in "report the disposition and stop":
+# both processing assets resolve their transaction AFTER handling the helper's
+# result, so an instruction to stop on the ordinary outcome would skip the
+# resolution and strand the record — a silence that lost work rather than
+# noise.
+QUIET_TRANSACTION_CLAUSES = {
+    "an-ordinary-result-does-not-end-the-run": (
+        "an ordinary helper result does not end the run"
+    ),
+    "local-resolution-still-runs": (
+        "the tracker transaction below is still resolved with --resolve "
+        "--source local"
+    ),
+    "only-a-resolved-transaction-is-quiet": (
+        "only a resolution that succeeds licenses the quiet report"
+    ),
+    "an-unresolved-transaction-keeps-its-report": (
+        "a transaction this run could not resolve keeps its full failure and "
+        "recovery report"
     ),
 }
 
@@ -1432,6 +1577,22 @@ def missing_publication_clauses(text):
     )
 
 
+def missing_quiet_publication_clauses(text):
+    """The issue #577 quiet-reporting clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in QUIET_PUBLICATION_CLAUSES.items() if clause not in asset
+    )
+
+
+def missing_quiet_transaction_clauses(text):
+    """The issue #577 transaction-before-silence clauses `text` no longer states."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in QUIET_TRANSACTION_CLAUSES.items() if clause not in asset
+    )
+
+
 def missing_no_create_clauses(text):
     """The note-problem no-creation clauses `text` no longer states, by key."""
     asset = canonical(text)
@@ -2091,12 +2252,21 @@ class OwningRepositoryTests(unittest.TestCase):
 class PublicationTests(unittest.TestCase):
     """Issue #315. The four processing assets delegate the publication
     mechanism to tools/publish_coordination_doc.py and keep only the policy
-    §9 states; the three drafting assets publish nothing at all.
+    §9 states; the four drafting assets publish nothing at all. note-problem
+    joined the publishing side in issue #328 without becoming a processing one,
+    so PUBLISHING_ASSETS is six and PROCESSING_ASSETS stays four.
 
     What is asserted here is that division. The mechanism's behavior is not
     prose to be pinned — tools/test_publish_coordination_doc.py executes it
     against temporary repositories, which is precisely what asserting it as
     prose could not do.
+
+    Issue #577 added the second dimension: not what the helper does with the
+    document, but what the run then tells the user about it. The ordinary
+    outcome is silent and every other one is not, and both halves are pinned —
+    the silence because an edit could restore the narration, and the rest
+    because a rule that silenced everything would be strictly worse than the
+    noise it replaced.
     """
 
     def asset_text(self, path):
@@ -2139,6 +2309,116 @@ class PublicationTests(unittest.TestCase):
                     self.assertEqual(
                         missing_publication_clauses(asset.replace(clause, "")), [key]
                     )
+
+    def test_every_publishing_asset_reports_the_ordinary_outcome_by_silence(self):
+        # Issue #577. The rule these assets gained: on the one settled outcome
+        # the run says nothing about publication at all.
+        for path in PUBLISHING_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_quiet_publication_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer states how the ordinary publication "
+                    f"outcome is reported: {missing}",
+                )
+
+    def test_removing_a_quiet_reporting_clause_from_an_asset_is_reported(self):
+        for path in PUBLISHING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in QUIET_PUBLICATION_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertEqual(
+                        missing_quiet_publication_clauses(asset.replace(clause, "")),
+                        [key],
+                    )
+
+    def test_no_drafting_asset_states_the_quiet_reporting_rule(self):
+        # The negative control. A fragment vague enough to match every asset
+        # would pass the two tests above while asserting nothing, so the four
+        # assets that hand no document to the helper must state none of it.
+        self.assertEqual(len(DRAFTING_ASSETS), 4)
+        for path in DRAFTING_ASSETS:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    sorted(missing_quiet_publication_clauses(self.asset_text(path))),
+                    sorted(QUIET_PUBLICATION_CLAUSES),
+                    f"{path} publishes nothing, so it can state no rule about "
+                    "reporting a publication result",
+                )
+
+    def test_the_quiet_rule_names_the_conjunction_rather_than_its_parts(self):
+        # Requirement 2, asserted as vocabulary rather than left to the clause
+        # fragments: silence covers exactly not-published + an applied write
+        # outcome + a recorded applied_record, and each neighbouring result is
+        # still named out loud in the same asset.
+        for path in PUBLISHING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for literal in NON_ORDINARY_RESULT_LITERALS:
+                with self.subTest(path=path, literal=literal):
+                    self.assertIn(
+                        literal.lower(),
+                        asset,
+                        f"{path} went quiet about {literal}, which is not the "
+                        "ordinary outcome and still owes the user a report",
+                    )
+
+    def test_the_durability_fact_survives_as_an_instruction(self):
+        # Issue #577 requirement 3, pinned as a decision rather than left to
+        # whichever resolution made the gate pass. The fact stopped being a line
+        # of the report; it did not stop being a rule, because it is what
+        # forbids publishing by hand and what keeps a stranded transaction from
+        # reading as a finished run.
+        self.assertIn("applied-is-not-landed", PUBLICATION_CLAUSES)
+        for path in PUBLISHING_ASSETS:
+            with self.subTest(path=path):
+                asset = canonical(self.asset_text(path))
+                self.assertIn(PUBLICATION_CLAUSES["applied-is-not-landed"], asset)
+                self.assertIn(
+                    QUIET_PUBLICATION_CLAUSES[
+                        "durability-is-an-instruction-not-a-report-line"
+                    ],
+                    asset,
+                )
+
+    def test_every_processing_asset_resolves_its_transaction_before_silence(self):
+        # The trap in "report the disposition and stop": both processing assets
+        # resolve their tracker transaction after handling the helper's result,
+        # so silence that ended the run there would strand the record.
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_quiet_transaction_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} lets an ordinary publication result end the run "
+                    f"before its tracker transaction resolves: {missing}",
+                )
+
+    def test_removing_a_transaction_before_silence_clause_is_reported(self):
+        for path in PROCESSING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in QUIET_TRANSACTION_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertEqual(
+                        missing_quiet_transaction_clauses(asset.replace(clause, "")),
+                        [key],
+                    )
+
+    def test_no_transactionless_asset_states_the_transaction_silence_rule(self):
+        # The second negative control, and the reason the two quiet dicts are
+        # separate: note-problem acquires no transaction, so a rule about
+        # resolving one before going quiet would be a record nothing writes.
+        controls = NOTE_ASSETS + DRAFTING_ASSETS
+        self.assertEqual(len(controls), 6)
+        for path in controls:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    sorted(missing_quiet_transaction_clauses(self.asset_text(path))),
+                    sorted(QUIET_TRANSACTION_CLAUSES),
+                    f"{path} acquires no tracker transaction, so it can state "
+                    "no rule about resolving one",
+                )
 
     def test_every_publishing_asset_invokes_the_helper(self):
         for path in PUBLISHING_ASSETS:

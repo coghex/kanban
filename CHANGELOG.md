@@ -15,6 +15,28 @@ created above it.
 
 ### Unreleased
 
+- The six document workflows that hand a document to
+  `publish_coordination_doc.py` — `/process-design-doc`, `/process-report` and
+  `/note-problem` in both brands — now report the ordinary publication outcome
+  by saying nothing about it. A repository whose
+  `workflow.direct_publication_paths` is empty is the intended configuration,
+  and on that outcome the helper returns `not-published` with the approved
+  mutation applied to the working copy and recorded. Each run used to narrate
+  that in full — which outcome it was, why publication was declined, the write
+  root, the document path, the preserved blob — so one session processing three
+  entries of one design document emitted the whole apparatus three times, and a
+  working mechanism read like a recurring problem.
+
+  Only the closing report changed. The helper is still invoked, its result is
+  still inspected, and the tracker transaction is still resolved before the run
+  closes; a run whose transaction could not resolve keeps its full failure and
+  recovery report however ordinary the publication result was. Every other
+  publication outcome keeps its full report too — an unwritten or unrecorded
+  one because the mutation is not where the next run will look for it, a
+  published one because it carries a changed-line summary the run has to check,
+  and an unmodelled status because its three states are the only account of
+  where the document went.
+
 - A new packaged workflow, `/autosolve` (Codex: `$autosolve`), runs `/solve`
   for one GitHub issue and then drives up to five opposite-brand review rounds
   — `/pr-review` in round one, `/pr-rereview` after each pushed fix — until the

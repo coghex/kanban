@@ -232,7 +232,16 @@ is in the same position: it exists locally but is absent from the publication
 tip, so the helper declines both to publish it and to write into it. Report that
 outcome plainly rather than describing the observation as captured.
 
-## Publish the approved mutation
+## Record the approved mutation
+
+**This step is not a push.** It is how the document gets written at all — the
+helper is the document's only writer. Whether that write ALSO lands on
+`$DOC_BRANCH` is the helper's decision and not yours, and for most repositories
+the answer is no: the mutation is applied to the docs worktree and left sitting
+there, and the owner lands the accumulated edits in one batch later. That is the
+designed outcome rather than a shortfall, so run this step even when you already
+know publication will be declined. Skipping it leaves the observation
+uncaptured, which is strictly worse than the thing you were trying to avoid.
 
 **Resolve this bundle's own mechanism first.** The helper ships with this
 plugin rather than with the repository being worked, and Kanban spawns this
@@ -268,11 +277,11 @@ record names; the helper will refuse to publish a different mutation while a
 record stands. This workflow creates no tracker item, so it acquires no tracker
 transaction — there is nothing here for one to record.
 
-Publish the approved mutation in this same run. The document is a durable
-cursor, and a cursor that only ever exists in one checkout is resumable only
-from that checkout. Publication is one more step of the observation that was
-already approved; it carries no second one, and it is never batched or deferred
-merely to reduce commit or push frequency.
+Hand the approved mutation to the publication helper in this same run. The
+document is a durable cursor, and a cursor that only ever exists in one checkout
+is resumable only from that checkout. This step is one more part of the
+observation that was already approved; it carries no second one, and it is never
+batched or deferred merely to reduce commit or push frequency.
 
 **Render the complete approved document and hand it over — do not write it
 yourself.** `tools/publish_coordination_doc.py` is the only writer of the
@@ -326,9 +335,9 @@ drainer's merge exception and grants no publication lane. An empty lane is the
 ordinary, intended configuration: it yields `not-published`, the approved
 mutation is applied to the working copy and recorded, and the edits accumulate
 in the docs worktree for a human to land in one batch. Do not treat that as a
-failure of the run, and never publish by hand to compensate for it. Do not
-reimplement, precede, or compensate for any part of it. Act on the one
-structured result it returns:
+failure of the run, never publish by hand to compensate for it, and do not
+narrate it to the user. Do not reimplement, precede, or compensate for any part
+of it. Act on the one structured result it returns:
 
 - **`"status": "published"`.** Say so, and quote the commit it reports together
   with its changed-line summary. Check that summary against the observation you
@@ -350,21 +359,47 @@ structured result it returns:
   applied on top of it — so successive approved mutations to a document its
   owner lands out of band accumulate rather than wedging on the first one. A
   working copy the helper did not write is never overwritten, and nothing is
-  applied over it. Say which outcome it was and why publication was declined.
-  This is the ordinary outcome for a `pr-atomic` document, not a failure of
-  this run.
+  applied over it.
 
   `applied_record` is the other half of that. The helper records what it wrote
   in its own reference, and only `"recorded"` — with `applied_ref` naming that
   reference — lets a later run continue over the working copy or a transaction
   resolve from it. `"unrecorded"` means the write happened and the record did
   not, so no later run may write over that document and no transaction may
-  resolve from it. Report that rather than an ordinary applied mutation.
+  resolve from it.
+
+  **The ordinary outcome is reported by saying nothing about it.**
+  `not-published`, with a `write_outcome` of `applied-over-baseline` or
+  `applied-over-local-predecessor` and an `applied_record` of `"recorded"`, is
+  the expected and healthy result: the approved mutation is in the working copy,
+  recorded, and waiting for its owner to batch it, which is exactly where that
+  owner wants it. So say nothing about publication, eligibility, lanes,
+  worktrees, write roots, blobs, or what still has to happen for the edit to
+  land — none of it is a decision the user has to make, and narrating a settled
+  mechanism on every run makes a working workflow read like a recurring problem.
+
+  **That silence is a rule about the report, not about the work.** Every step of
+  this section still runs on that outcome — the helper is still invoked and its
+  result is still inspected — and so does every step this workflow takes after
+  it. Silence is what the run says at the end, never a step it skips.
 
   **An applied mutation is not durable until the document's owner lands it on
-  the publication branch.** It exists in one write root and nowhere else, so
-  name the write root, the document path, and the preserved `approved_blob`
-  rather than describing the run as complete on the branch.
+  the publication branch.** That fact governs what this workflow may do, not
+  what it tells the user: it is why publishing by hand to compensate is
+  forbidden and why every outcome named below is reported out loud. On the
+  ordinary outcome it is not part of the report.
+
+  **Every other outcome keeps its full report.** A `write_outcome` of
+  `no-baseline` or `unrecognized-working-copy` means nothing was applied and the
+  approved mutation survives only as `approved_blob`; an `applied_record` of
+  `"unrecorded"` means the write cannot be proven and no later run may build on
+  it. Each of those needs the write root, the document path, and the preserved
+  `approved_blob` named plainly, because the mutation is not where the next run
+  will look for it. A `"published"` status and any other status keep the reports
+  described beside them for their own reasons — a publication is verified
+  success with a changed-line summary the run has to check, and an unmodelled
+  status is a failure whose three states are the only account of where the
+  document went.
 - **Any other status.** The document was not published. Report the three states
   the helper returns — whether the edit exists locally and in which worktree and
   path, whether a local publication commit exists and its ID, and whether the
@@ -383,19 +418,28 @@ structured result it returns:
 
 ## Handoff
 
-Report the key, verification classification, chapter, and resolved path, then
-what the helper actually did — and let that decide what you claim. The three
-outcomes are not interchangeable, because only two of them left an observation
-in the report:
+Report the key, verification classification, chapter, and resolved path. Read
+what the helper actually did — and let that decide what you claim, never what
+you narrate. On the ordinary outcome the closing report is the captured
+observation and the handoff fields below and nothing else: where the document
+was written, whether it reached the branch, and what still has to happen to it
+are the recording step's business, and on its ordinary outcome that step reports
+itself by saying nothing. The three outcomes are not interchangeable, because
+only two of them left an observation in the report:
 
 - **Published.** Report the commit and its changed-line summary, the report's
   outstanding checkbox count, and that the observation is captured unprocessed
   for `process-report` to dispose of, one finding per invocation.
-- **Not published, but the document was written.** The observation is in the
-  report in the write root and not on the publication branch — applied, and not
-  yet durable. Say both halves and why publication was declined, name the write
-  root and path, and say whether the helper recorded the write: an
-  `"unrecorded"` one is a report no later run may write over.
+- **Not published, but the document was written and recorded.** This is the
+  ordinary outcome, and the observation is captured exactly where its owner
+  wants it — in the report, in the docs worktree, waiting to be batched. Report
+  exactly what a published run reports, minus the commit and its summary: the
+  key, the classification, the chapter, the outstanding checkbox count, and
+  that the observation is captured unprocessed for `$process-report` to dispose
+  of. Say nothing about publication, eligibility, lanes, write roots, or blobs.
+  The one exception is an `applied_record` of `"unrecorded"`: that write cannot
+  be proven, no later run may write over the document, and it is reported
+  plainly with the write root and path.
 - **Nothing was written.** The report is unchanged and the observation is **not
   captured** — this is the outcome for a document absent from the publication
   tip, an unenrolled report included, and for a working copy the helper did
