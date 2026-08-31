@@ -33,7 +33,7 @@ concrete precondition
 - [x] MODEL-13. Implement the Claude embedded-review stream-json backend — [#586]
 - [x] MODEL-15. Serve Kanban's review tools to the Claude backend over a stdio MCP re-entry — [#587]
 - [x] MODEL-16. Deliver mid-turn guidance and cancellation on the Claude backend — [#588]
-- [ ] MODEL-10. Implement single-agent review routing in the Haskell flows
+- [x] MODEL-10. Implement single-agent review routing in the Haskell flows — [#589]
 - [x] MODEL-11. Make the Python gates and plugin reviews single-agent aware — [#572]
 - [ ] MODEL-6. Package the defaults and document the roster surface — [deferred]: #572 and the issues for MODEL-14, MODEL-13, MODEL-15, MODEL-16, and MODEL-10 must all be merged
 
