@@ -359,6 +359,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/fix/SKILL.md",
     "codex-plugin/plugins/kanban/skills/finalize/SKILL.md",
     "codex-plugin/plugins/kanban/skills/janitor/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/autosolve/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
@@ -400,6 +401,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/fix.md",
     "claude-plugin/plugins/kanban/commands/finalize.md",
     "claude-plugin/plugins/kanban/commands/janitor.md",
+    "claude-plugin/plugins/kanban/commands/autosolve.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
@@ -732,6 +734,35 @@ JANITOR_SURFACE_EXPECTED_COMMANDS = {
         "python3",
         "rm",
         "sed",
+    },
+}
+
+# Issue #576's autonomous solve-and-review loop, pinned per brand for the same
+# reason the janitor and fix pairs are: the Codex rendering resolves the review
+# coordinator with a `find`/`head` search under $CODEX_HOME, while the Claude
+# rendering reads ${CLAUDE_PLUGIN_ROOT} and spawns neither program. Everything
+# else is shared, and it is a short set because this workflow delegates rather
+# than implements. `gh` resolves the repository identity once and then reads
+# the pull request the delegated solve opened -- its body, for the origin
+# marker the whole review route depends on, and its labels, head and comments,
+# for the verdict; `python3` runs the coordinator's `--dry-run`, which is how a
+# round confirms it is routed to the opposite brand BEFORE a review is
+# performed rather than after one is published; and `git` supplies that
+# coordinator's `--path`. There is no mutation here at all: this workflow makes
+# no `gh` write, and every fix it drives is committed by the delegated steps in
+# the issue worktree.
+AUTOSOLVE_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/autosolve.md": {
+        "gh",
+        "git",
+        "python3",
+    },
+    "codex-plugin/plugins/kanban/skills/autosolve/SKILL.md": {
+        "find",
+        "gh",
+        "git",
+        "head",
+        "python3",
     },
 }
 
@@ -1632,16 +1663,31 @@ ART_POLICY_SOLVE_ASSETS = (
 )
 
 # Packaged assets that owe none of the rules below, so a rule broad enough to
-# match every Markdown file cannot pass vacuously. Neither bundle packages an
-# autosolve, so no packaged asset delegates to solve the way autoissue delegates
-# to issue; these four qualify instead by doing neither job. The issue-review
-# pair judges a filed issue and never drafts or implements, and the autoissue
-# pair delegates to its brand's issue-drafting workflow.
+# match every Markdown file cannot pass vacuously. These six qualify by
+# orchestrating or judging rather than implementing: the issue-review pair
+# judges a filed issue and never drafts or implements, and the autoissue and
+# autosolve pairs each delegate the work itself to another workflow.
+#
+# The autosolve pair joined this tuple when issue #576 vendored it, and the
+# classification is this slice's, not an inherited one. The art policy binds
+# the session that reads an issue's requirements and decides how to satisfy
+# them, and the shipped assets place it exactly there -- at step 6 of solve's
+# `## Work In Isolation`, between "implement the smallest solution" and "add or
+# extend a focused test". Autosolve reaches none of that: it delegates the
+# implementation to solve and then loops over review verdicts, so the session
+# that would encounter a missing texture is the solve session the policy
+# already binds, reading solve's own copy of the rule. Stating it again in the
+# orchestrator would give a second, unreachable statement of a rule whose
+# enforced copy is one delegation away -- which is the autoissue pair's
+# situation with the drafting-side policy exactly, and why that pair is a
+# control here rather than a subject.
 ART_POLICY_CONTROL_ASSETS = (
     "claude-plugin/plugins/kanban/commands/issue-review.md",
     "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
     "claude-plugin/plugins/kanban/commands/autoissue.md",
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
+    "claude-plugin/plugins/kanban/commands/autosolve.md",
+    "codex-plugin/plugins/kanban/skills/autosolve/SKILL.md",
 )
 
 # Lowercase: compared against art_policy_canonical() output. Every fragment lies
@@ -2887,6 +2933,63 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertEqual(codex - claude, {"find", "head"})
         self.assertEqual(claude - codex, set())
 
+    def test_the_autosolve_assets_reach_exactly_the_pinned_commands(self):
+        # The autonomous solve-and-review loop. Pinned per brand rather than as
+        # one shared set, for the same reason the janitor and fix pairs are:
+        # the Codex rendering really does reach two programs the Claude one
+        # does not.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path, expected in sorted(
+            AUTOSOLVE_SURFACE_EXPECTED_COMMANDS.items()
+        ):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            # Both are assertions, not absences. `gh` is how this workflow
+            # reads the origin marker its whole review route depends on and the
+            # verdict each round publishes; `python3` is the coordinator
+            # dry run that confirms the route before a review is performed.
+            self.assertIn("gh", found, relative_path)
+            self.assertIn("python3", found, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+            # Declared from the manifest's side too, and against the rows a
+            # reader consults to find out which assets speak each tool.
+            for name in sorted(expected):
+                row = next(
+                    row
+                    for row in self.manifest
+                    if row["kind"] == "executable" and row["token"] == name
+                )
+                self.assertIn(
+                    row["id"],
+                    {"gh-cli", "git-cli", "python3-cli", "find-cli", "head-cli"},
+                )
+                self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_only_the_codex_autosolve_asset_searches_for_its_coordinator(self):
+        # The difference between the two renderings, asserted as the difference
+        # it actually is rather than as two sets that happen to differ.
+        claude = AUTOSOLVE_SURFACE_EXPECTED_COMMANDS[
+            "claude-plugin/plugins/kanban/commands/autosolve.md"
+        ]
+        codex = AUTOSOLVE_SURFACE_EXPECTED_COMMANDS[
+            "codex-plugin/plugins/kanban/skills/autosolve/SKILL.md"
+        ]
+        self.assertEqual(codex - claude, {"find", "head"})
+        self.assertEqual(claude - codex, set())
+
     def test_only_the_codex_fix_asset_searches_for_its_coordinator(self):
         # The asymmetry above, asserted as the difference it actually is
         # rather than as two independent sets that happen to differ.
@@ -3675,8 +3778,10 @@ class ArtPolicyTests(unittest.TestCase):
 
     def test_the_art_rules_are_not_vacuous(self):
         # A rule broad enough to match every packaged asset would pass the check
-        # above while asserting nothing. The control assets neither draft nor
-        # solve, so none of them may state these rules.
+        # above while asserting nothing. The control assets orchestrate or judge
+        # rather than implement -- none of them is the session that reads an
+        # issue's requirements and decides how to satisfy them -- so none of
+        # them may state these rules.
         #
         # Reported as a plain list rather than through assertIn: these assets
         # canonicalize to thousands of characters, and a membership assertion

@@ -15,6 +15,48 @@ created above it.
 
 ### Unreleased
 
+- A new packaged workflow, `/autosolve` (Codex: `$autosolve`), runs `/solve`
+  for one GitHub issue and then drives up to five opposite-brand review rounds
+  — `/pr-review` in round one, `/pr-rereview` after each pushed fix — until the
+  pull request carries `reviewed:approve`. It never reviews, comments on,
+  labels, merges, or finalizes the pull request it authored; approval is where
+  the run ends and the merge stays a deliberate manual step.
+
+  It is the eighth and last of the workflow commands issue #373's arc vendors,
+  so with it every personal copy of a Kanban workflow command is retired and
+  every one of the eight is authored once in `tools/command_sources/` and
+  rendered into both bundles.
+
+  It is also the only slice in that arc the Claude copy won. Four things lived
+  only there and now ship in both brands: the preamble establishing that
+  `/solve` and the review workflows are delegated sub-steps whose own terminal
+  stop conditions do not end this run; the explicit override of `/solve`'s
+  `## Stop Condition`, whose `PR #<number> - <summary>` line is the handoff
+  into the review loop rather than a final answer; the `--self-review`
+  override, with the route confirmation that makes it checkable; and the
+  failure case for a published marker whose `reviewers` names this session's
+  own brand rather than the opposite one.
+
+  Every claim that depends on which brand is solving is rendered per brand
+  rather than as shared prose — the origin marker the pull request must end
+  with, the brand its marker routes the review to, the route the coordinator's
+  `--dry-run` must report beforehand, and the `reviewers` value the published
+  `pr-review:v2` marker must carry — so neither rendering can tell its reader
+  to expect the other brand's marker. The `--self-review` override stays in
+  this workflow alone: neither review workflow is amended, and the coordinator
+  guard issue #303 added already refuses an absent or mismatched
+  `--self-review-as` before any spawn, publish, or label switch, so the
+  instruction is belt-and-braces over an enforced guard rather than the only
+  thing preventing a same-brand publication.
+
+  Two reconciliations against this repository travel with it. The worktree
+  root is spelled `${WORKTREES_ROOT:-$HOME/worktrees}`, as
+  `docs/agent-workflow-contract.md` and both shipped `solve` assets spell it,
+  so a session with the variable unset resolves the directory `/solve` actually
+  used rather than one rooted at nothing. And the repository identity is
+  resolved once, announced before anything is claimed, and carried by every
+  `gh` call and by the coordinator invocation, which neither personal copy did.
+
 - A new packaged workflow, `/janitor` (Codex: `$janitor`), audits one
   repository's agent-pipeline state and cleans up only what the user approves:
   stale claims and issue worktrees, every registered worktree, workflow

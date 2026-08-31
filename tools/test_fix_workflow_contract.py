@@ -1225,6 +1225,12 @@ class RepairDelegationTests(unittest.TestCase):
 # wrong through several changes that grew it" -- and adding `fix` reproduced it
 # across seven sites in two READMEs before a review caught them. This turns the
 # whole-file audit into a gate.
+#
+# It has to stay ahead of the bundles it measures: the lookup below is a direct
+# subscript, so a bundle that grows past the last entry raises KeyError rather
+# than reporting a mismatched count, and the failure then names the map instead
+# of the README that is actually stale. Two spare entries beyond today's
+# totals, extended whenever a slice consumes one.
 NUMBER_WORDS = {
     15: "fifteen",
     16: "sixteen",
@@ -1236,6 +1242,8 @@ NUMBER_WORDS = {
     22: "twenty-two",
     23: "twenty-three",
     24: "twenty-four",
+    25: "twenty-five",
+    26: "twenty-six",
 }
 
 BUNDLE_READMES = {

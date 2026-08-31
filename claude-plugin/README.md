@@ -9,15 +9,18 @@ canonical issue-review workflows a user or the review daemon invokes directly:
 it also packages the design and report document workflows a user invokes
 directly — `/design-epic`, `/process-design-doc`, `/draft-report`,
 `/note-problem`, and `/process-report` — and since issues #393, #410, #427,
-#430, #462, #511, #544, and #575 the `/triage` roadmap workflow, its
+#430, #462, #511, #544, #575, and #576 the `/triage` roadmap workflow, its
 `/retriage` refresh,
 the `/push-docs` documentation-landing workflow, the `/backlog-review` backlog
 audit, the `/project-review` history audit, the `/drain-prs` drainer
 control surface, the `/fix` approved-pull-request workflow, the
-`/finalize` manual merge fallback, and the `/janitor` pipeline
-housekeeping audit, each rendered
+`/finalize` manual merge fallback, the `/janitor` pipeline
+housekeeping audit, and the `/autosolve` autonomous solve-and-review loop,
+each rendered
 into both bundles from one authored source by
-`tools/render_command_sources.py`. It exists so a
+`tools/render_command_sources.py`. `/autosolve` is the last of the eight
+commands that arc vendors, so with it every personal copy of a Kanban workflow
+command is retired. It exists so a
 clean Claude Code installation can perform these actions without depending on
 any developer's personal command collection. See
 [docs/agent-workflow-contract.md](../docs/agent-workflow-contract.md) for the
@@ -99,12 +102,13 @@ Verify discovery:
 claude plugin list
 ```
 
-`kanban@kanban` should be listed, and all twenty-four workflow names should be
+`kanban@kanban` should be listed, and all twenty-five workflow names should be
 available as `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/issue`,
 `/draft-issues`, `/autoissue`, `/issue-review`, `/issue-rereview`, `/repair`,
 `/design-epic`, `/process-design-doc`, `/draft-report`, `/note-problem`,
 `/process-report`, `/triage`, `/retriage`, `/push-docs`, `/backlog-review`,
-`/project-review`, `/drain-prs`, `/fix`, `/finalize`, and `/janitor`.
+`/project-review`, `/drain-prs`, `/fix`, `/finalize`, `/janitor`, and
+`/autosolve`.
 
 Verified against Claude Code `2.1.216` (`claude --version`), the version
 that provides the `claude plugin` / `claude plugin marketplace` subcommand
@@ -115,14 +119,15 @@ those subcommands cannot install this plugin.
 
 Kanban's own CLI spawns five of these by name: the first four, plus `/repair`,
 which `r` selects for a Done pull request whose status is a problem (issue
-#127). The other nineteen are drafting, readiness-gate, document, roadmap,
+#127). The other twenty are drafting, readiness-gate, document, roadmap,
 documentation-landing, backlog-audit, history-audit, drainer-control,
-approved-pull-request, manual-finalization, and pipeline-housekeeping
+approved-pull-request, manual-finalization, pipeline-housekeeping, and
+autonomous solve-and-review
 workflows a user or the review daemon invokes directly;
 see
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md) and
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md).
-`/repair` is not part of either declared surface. Only those nineteen are
+`/repair` is not part of either declared surface. Only those twenty are
 excluded from the Haskell invocation-parity pinning in
 `tools/test_claude_plugin.py`, which covers exactly the names Kanban's own
 code spawns.
@@ -153,6 +158,7 @@ code spawns.
 | `commands/fix.md` | `/fix` | Clears the one remaining obstacle in front of an **already-approved** pull request. Refuses any pull request that is not approved under the configured `approval_mode`, refuses one whose `pr-origin` marker names the other brand, and never removes a blocking label to proceed. Resolves a merge conflict, updates a branch that is behind its base, and fixes a failed check in the pull request's own worktree before handing off one canonical rereview. Fails closed rather than guessing: a check rollup that cannot be read completely, a `BLOCKED` or `UNSTABLE` merge state, and a still-running check each stop the run without mutating anything. **Never retries a check** — `tools/drain_prs.py` remains the only component that reruns one. Runs only on an explicit request to fix or unblock: asking why a pull request cannot merge is answered by reporting the obstacle and stopping. Paired with the Codex `$fix` skill. |
 | `commands/finalize.md` | `/finalize` | Legacy **manual fallback** for merging one named reviewed pull request when the service-managed PR drainer cannot be used. Never the ordinary merge path and never taken on an agent's own initiative: `tools/drain_prs.py` keeps owning eligible merges. Resolves the repository once and passes `-R "$REPO"` on every `gh` call. It finalizes onto the repository's **default branch** only, since a retargeted pull request keeps both its approval label and its head-bound marker; the base is re-read immediately before the merge, and the residual instant between that read and the merge is documented as accepted, being the merge primitive's exposure that `tools/drain_prs.py` shares. Its gate fails closed — it resolves the authenticated login, reads the whole paginated comment feed, and requires the globally newest marker that login published (`pr-review:v2`, with the legacy `pr-review:v1` spelling still honoured) to name the current `headRefOid` with `verdict=APPROVE` and a `reviewers=` set that excludes the pull request's own brand, alongside `reviewed:approve` present, `reviewed:changes` absent, `mergeable` exactly `MERGEABLE`, a merge state Kanban's own `mergeStateReady` calls ready (so `BEHIND` and `UNSTABLE` refuse), and every check successful. Any refusal merges nothing, closes nothing, removes no worktree, and deletes no branch. Merges with `--admin --merge --match-head-commit`, never `--squash` or `--rebase`, and cleans up only after GitHub confirms the merge, as one `&&` chain that a first failure ends — never deleting a cross-repository head here, never fast-forwarding a primary checkout that is not on the pull request's base branch, identifying both the branch deletions and the worktree it removes by the reviewed head rather than by a name or a path pattern, writing to no git remote at all — it deletes no remote branch, leaving that to GitHub's own `delete_branch_on_merge`, to the drainer, or to a human — and closing a linked issue only when the closing reference names this repository. Paired with the Codex `$finalize` skill. |
 | `commands/janitor.md` | `/janitor` | Audits one repository's agent-pipeline state — claims and issue worktrees, every registered worktree, workflow branches and refs, pull-request and drainer health, stashes and drainer recovery objects, stray content, and default-branch drift — and mutates nothing until the user approves individual items. Reasons over the `janitor-census/v1` snapshot this bundle's own `scripts/census.py` emits (issue #574) rather than hand-walking the repository, and stops before its first read if that helper cannot be resolved. Resolves the repository once and passes `-R "$REPO"` on every `gh` call. A `null` or unavailable collection in the census is an anomaly to diagnose, never a clean result. Bulk `all-safe` approval covers only the five fully-proved gates — worktree removal, branch deletion, review metadata prune, tracking-ref prune, and the default fast-forward — and excludes dirty or unmerged work, limbo worktrees, permanent-worktree content, every recovery object, coordinated-test worktrees, and any ambiguous disposition. Every apply-path command reaches the approved item and nothing else: the one operation Git offers no per-item form for, `git worktree prune --expire now`, is refused unless every record its dry run names is approved; a stale tracking ref is deleted by name with its recorded value rather than by `git fetch --prune`; and remote branch deletions go one push per branch, carrying the proved SHA as a `--force-with-lease` so a branch that moved after the `ls-remote` proof is refused instead of losing unreviewed work. A stash is dropped only while its selector still resolves to the object the report recorded, since a selector is a reflog position that any other writer shifts; the drop is verified afterwards against the object Git says it took, and a mismatch is put straight back with `git stash store` before the item fails. Releasing a stale claim is two independent commands, since a claim is an assignee *or* a `wip` label. Paired with the Codex `$janitor` skill. |
+| `commands/autosolve.md` | `/autosolve` | Runs `/solve` for one issue and then drives up to five opposite-brand review rounds — `/pr-review` in round one, `/pr-rereview` after each pushed fix — until the pull request carries `reviewed:approve`. **Never reviews, comments on, labels, merges, or finalizes the pull request it authored.** It overrides two things the workflows it delegates to say: `/solve`'s stop condition ends that workflow rather than this run, and the `--self-review` those review workflows instruct a canonical reviewer to pass is never passed here, because this session is the pull request's own origin brand rather than its reviewer. Confirms the route with the coordinator's `--dry-run` before trusting a verdict, requires the published `pr-review:v2` marker to name the current head and an opposite-brand `reviewers` value, and treats a marker naming its own brand as a publication failure rather than an approval. Resolves the repository once and passes `-R "$REPO"` on every `gh` call. Stops at approval and hands the merge back to the user; it never runs `/finalize`. Paired with the Codex `$autosolve` skill. |
 
 The five document commands are user-invoked only. Kanban's CLI never spawns
 one, because each has a mandatory human approval stop in the middle; see
@@ -323,11 +329,11 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the commands directory contains exactly the twenty-four packaged workflows,
+- the commands directory contains exactly the twenty-five packaged workflows,
   and the five Kanban spawns exactly match the `/`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  nineteen user-invoked commands;
+  twenty user-invoked commands;
 - the Codex-only document-workflow set is empty, so no counterpart is withheld
   from this bundle;
 - no packaged manifest sets model/effort/permission-mode/working-directory
@@ -358,7 +364,7 @@ changing what it is about. Nothing is excluded — not a function, not a comment
 issue-vs-pull-request number guard went eight days Codex-side only.
 
 `tools/test_agent_workflow_contract.py` reconciles this plugin's own bash
-surface (all twenty-four commands under
+surface (all twenty-five commands under
 `claude-plugin/plugins/kanban/commands/`)
 and
 all eight bundled Python assets — the review coordinator and its

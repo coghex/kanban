@@ -25,15 +25,16 @@ post-#239 tracked Codex skills; issue #328 completed the report side with
 #511 vendored the rendered /triage roadmap, its /retriage refresh, the
 /push-docs documentation-landing workflow, the /backlog-review backlog audit,
 the /project-review history audit, the /drain-prs drainer control surface, the
-/fix approved-pull-request workflow, the /finalize manual merge fallback, and —
-issue #575, the seventh of the arc's eight, leaving only /autosolve — the
-/janitor pipeline housekeeping audit.
+/fix approved-pull-request workflow, the /finalize manual merge fallback, the
+/janitor pipeline housekeeping audit, and -- issue #576, the eighth and last of
+that arc -- the /autosolve autonomous solve-and-review loop.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all twenty-four); HASKELL_PARITY_COMMAND_NAMES is the
+commands directory (all twenty-five); HASKELL_PARITY_COMMAND_NAMES is the
 strictly smaller set Kanban's own Haskell code spawns by name (the five
 above). The drafting, document, roadmap, documentation-landing,
 backlog-audit, history-audit, drainer-control, approved-pull-request,
-manual-finalization, and pipeline-housekeeping workflows
+manual-finalization, pipeline-housekeeping, and autonomous solve-and-review
+workflows
 are user- or daemon-invoked and are deliberately excluded from that parity
 pinning; see
 docs/drafting-workflow-contract.md and docs/document-workflow-contract.md,
@@ -245,6 +246,20 @@ FINALIZE_COMMAND_NAMES = {"finalize"}
 # assertions live in tools/test_janitor_workflow.py.
 JANITOR_COMMAND_NAMES = {"janitor"}
 
+# The autonomous solve-and-review loop vendored by issue #576, slice VEND-8,
+# and the eighth and last of the arc's commands: with it every personal copy of
+# a Kanban workflow command is retired. Rendered from
+# tools/command_sources/autosolve.md the way the eight sets above are, and like
+# them user-invoked and excluded from Haskell name parity -- Kanban's own
+# Haskell code spawns /solve and /pr-review directly and never this loop over
+# them. It is its own category rather than another solve or review name for the
+# reason it is excluded from parity at all: it performs neither job itself. It
+# delegates the implementation to /solve and the verdict to /pr-review and
+# /pr-rereview, and what it contributes is the loop and the prohibitions --
+# never review, label, merge, or finalize the pull request this session
+# authored. Its behavioral assertions live in tools/test_autosolve_workflow.py.
+AUTOSOLVE_COMMAND_NAMES = {"autosolve"}
+
 # What a Claude Code installation must actually discover in commands/.
 EXPECTED_COMMAND_NAMES = (
     HASKELL_PARITY_COMMAND_NAMES
@@ -258,6 +273,7 @@ EXPECTED_COMMAND_NAMES = (
     | PULL_REQUEST_FIX_COMMAND_NAMES
     | FINALIZE_COMMAND_NAMES
     | JANITOR_COMMAND_NAMES
+    | AUTOSOLVE_COMMAND_NAMES
 )
 
 # Keys that would let a packaged command's frontmatter or manifest silently
@@ -405,7 +421,8 @@ class CommandDiscoveryTests(unittest.TestCase):
             | DRAINER_COMMAND_NAMES
             | PULL_REQUEST_FIX_COMMAND_NAMES
             | FINALIZE_COMMAND_NAMES
-            | JANITOR_COMMAND_NAMES,
+            | JANITOR_COMMAND_NAMES
+            | AUTOSOLVE_COMMAND_NAMES,
         )
         self.assertEqual(DRAFTING_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
         self.assertEqual(ROADMAP_COMMAND_NAMES & DRAFTING_COMMAND_NAMES, set())
@@ -474,6 +491,28 @@ class CommandDiscoveryTests(unittest.TestCase):
                 | DRAINER_COMMAND_NAMES
                 | PULL_REQUEST_FIX_COMMAND_NAMES
                 | FINALIZE_COMMAND_NAMES
+            ),
+            set(),
+        )
+        # The autosolve loop is disjoint from every other category AND from the
+        # Haskell parity set, which the eight checks above do not need to say:
+        # it is the one vendored command whose name could plausibly belong to
+        # the set Kanban's own CLI spawns, since /solve is in that set and this
+        # wraps it.
+        self.assertEqual(
+            AUTOSOLVE_COMMAND_NAMES
+            & (
+                HASKELL_PARITY_COMMAND_NAMES
+                | DRAFTING_COMMAND_NAMES
+                | DOCUMENT_COMMAND_NAMES
+                | ROADMAP_COMMAND_NAMES
+                | PUBLICATION_COMMAND_NAMES
+                | BACKLOG_COMMAND_NAMES
+                | PROJECT_REVIEW_COMMAND_NAMES
+                | DRAINER_COMMAND_NAMES
+                | PULL_REQUEST_FIX_COMMAND_NAMES
+                | FINALIZE_COMMAND_NAMES
+                | JANITOR_COMMAND_NAMES
             ),
             set(),
         )

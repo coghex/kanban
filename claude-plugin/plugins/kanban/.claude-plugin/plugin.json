@@ -1,7 +1,7 @@
 {
   "name": "kanban",
-  "version": "1.30.0",
-  "description": "Kanban's Claude-side workflow bundle: the Kanban-invoked /solve, /pr-review, /pr-rereview, /pr-revise, /repair, plus the user-invoked approved-pull-request, drafting, canonical issue-review, design/report document, roadmap, documentation-landing, drainer-control, manual-finalization, and pipeline-housekeeping workflows /issue, /draft-issues, /autoissue, /issue-review, /issue-rereview, /design-epic, /process-design-doc, /draft-report, /note-problem, /process-report, /triage, /retriage, /push-docs, /backlog-review, /project-review, /drain-prs, /fix, /finalize, /janitor.",
+  "version": "1.31.0",
+  "description": "Kanban's Claude-side workflow bundle: the Kanban-invoked /solve, /pr-review, /pr-rereview, /pr-revise, /repair, plus the user-invoked approved-pull-request, drafting, canonical issue-review, design/report document, roadmap, documentation-landing, drainer-control, manual-finalization, pipeline-housekeeping, and autonomous solve-and-review workflows /issue, /draft-issues, /autoissue, /issue-review, /issue-rereview, /design-epic, /process-design-doc, /draft-report, /note-problem, /process-report, /triage, /retriage, /push-docs, /backlog-review, /project-review, /drain-prs, /fix, /finalize, /janitor, /autosolve.",
   "author": {
     "name": "Kanban"
   },
