@@ -21,6 +21,7 @@ import Brick
 import Control.Monad (when)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import Kanban.Review (ReviewThreadId)
 import Kanban.UI.Types
 import Kanban.UI.State
 
@@ -123,7 +124,7 @@ tailTranscript session = do
 -- events are addressed by thread id while the overlay selects a session by
 -- issue number, so a background session's output must not move the
 -- displayed one.
-tailReviewThread :: Text -> EventM Name AppState ()
+tailReviewThread :: ReviewThreadId -> EventM Name AppState ()
 tailReviewThread threadId = do
   state <- get
   mapM_ (tailTranscript . ReviewTranscript . fst) (findReviewSessionByThread threadId state)

@@ -33,6 +33,7 @@ module Spec.Support.Fixtures
     detailsFixtureBoard,
     testOptions,
     testResolvedConfig,
+    fixtureReviewThread,
     fullFixtureToml
   )
 where
@@ -44,6 +45,7 @@ import Data.Time (UTCTime (..), addUTCTime, fromGregorian, secondsToDiffTime)
 import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
 import Kanban.Config
 import Kanban.Domain
+import Kanban.Review (ConnectionId (..), ReviewThreadId (..))
 import Kanban.Workflow (deriveBoard)
 import Spec.Support.Json (fixtureRepositoryIdentity)
 
@@ -389,3 +391,14 @@ fullFixtureToml =
     <> "\n"
     <> "[repositories.\"other/repo\".workflow]\n"
     <> "approval_label = \"should-not-apply\"\n"
+
+-- | A review thread on a fixture connection.
+--
+-- A session addressed only by the provider's own thread id no longer exists:
+-- that id is unique within one connection, so the pair is what every review
+-- map is keyed by. Pure fixtures have no live client to take a connection
+-- from, so they name one, and every fixture naming the same one behaves as
+-- one connection's worth of threads -- which is the shape Codex's backend
+-- has anyway.
+fixtureReviewThread :: Text -> ReviewThreadId
+fixtureReviewThread = ReviewThreadId (ConnectionId 0)

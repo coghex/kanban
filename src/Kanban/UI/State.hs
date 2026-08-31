@@ -22,6 +22,7 @@ import Data.Maybe (fromMaybe )
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as Vty
+import Kanban.Review (ReviewThreadId)
 import Kanban.Solve
   ( AgentEvent (..),
     renderAgentEvent
@@ -110,13 +111,13 @@ settleOverlayFullscreen before state
 -- | Review protocol events are addressed by the app-server's thread id
 -- rather than by issue number, which is the one session lookup the shared
 -- key-addressed helpers in 'Kanban.UI.SessionEvents' cannot express.
-modifyReviewSessionByThread :: Text -> (ReviewSession -> ReviewSession) -> EventM Name AppState ()
+modifyReviewSessionByThread :: ReviewThreadId -> (ReviewSession -> ReviewSession) -> EventM Name AppState ()
 modifyReviewSessionByThread threadId update = modify $ \state ->
   case findReviewSessionByThread threadId state of
     Nothing -> state
     Just (issueNumber, _) -> state {appReviewSessions = Map.adjust update issueNumber state.appReviewSessions}
 
-findReviewSessionByThread :: Text -> AppState -> Maybe (Int, ReviewSession)
+findReviewSessionByThread :: ReviewThreadId -> AppState -> Maybe (Int, ReviewSession)
 findReviewSessionByThread threadId state =
   safeIndex 0
     [ (issueNumber, session)

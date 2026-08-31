@@ -140,7 +140,7 @@ import Kanban.UI.Types
     withModelRoster,
   )
 import Spec.Support.Board (inertRefreshCoordinator)
-import Spec.Support.Fixtures (itemNumber, testOptions, testResolvedConfig)
+import Spec.Support.Fixtures (fixtureReviewThread, itemNumber, testOptions, testResolvedConfig)
 import Spec.Support.Golden (attributeGrid, expectGolden, goldenPath)
 import Spec.Support.Render (FrameCell (..), frameRowText, renderFrameCells)
 import Spec.Support.Roster (cellOf, claudeOnlyRoster, distinctDisplays, noAgentRoster)
@@ -963,7 +963,7 @@ revisionSession press state =
         ReviewDetail
           { reviewSessionIssue = fixtureIssue solveFrameIssue,
             reviewSessionStage = IssueRevision,
-            reviewSessionThreadId = Just "thread-515",
+            reviewSessionThreadId = Just (fixtureReviewThread "thread-515"),
             reviewSessionTurnId = Nothing,
             reviewSessionPending = Nothing,
             reviewSessionUndelivered = []

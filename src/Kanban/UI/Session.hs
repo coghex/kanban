@@ -68,7 +68,8 @@ import Kanban.PullRequestFlow
     agentForAction
     )
 import Kanban.Review
-  ( ReviewStage (..)
+  ( ReviewStage (..),
+    ReviewThreadId (..)
     )
 import Kanban.Solve
   ( SolveWorkflow (..),
@@ -141,7 +142,10 @@ reviewAgentSessionEntry backendReady hasCanonicalProcess issueNumber session =
       agentSessionProvider = reviewProvider session.sessionDetail.reviewSessionStage,
       agentSessionStatus = reviewProcessStatus session.sessionPhase,
       agentSessionActivity = session.sessionActivity,
-      agentSessionId = shortSessionId <$> session.sessionDetail.reviewSessionThreadId,
+      -- The provider's own thread id, not the connection-qualified pair: it
+      -- is what the provider's own logs and the transcript name, so
+      -- qualifying it here would move what every review row displays.
+      agentSessionId = shortSessionId . (.reviewThreadProvider) <$> session.sessionDetail.reviewSessionThreadId,
       agentSessionLive = reviewSessionLive backendReady hasCanonicalProcess session,
       agentSessionProblem = session.sessionPhase == ReviewFailed
     }

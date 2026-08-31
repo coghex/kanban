@@ -138,10 +138,16 @@ Modules live in `src/Kanban/`; search the group that matches the change.
   `Preflight.Environment` stay outside it: none is an agent session.
   `Review` itself is the Codex app-server client and the
   compatibility facade every consumer imports; its seams live beside it —
-  `Review.Types` (wire and result payloads), `Review.Client` (the `ReviewClient`
+  `Review.Connection` (one provider connection, the pool of them a client holds,
+  and the thread identity that pairs a provider's own thread id with the
+  connection serving it), `Review.Types` (wire and result payloads),
+  `Review.Client` (the `ReviewClient`
   record and its tool registry), `Review.Tools` (the `gh` and `claude` tool runners),
   `Review.Canonical` (the `approve_issues.py` gate), `Review.Prompts` (instructions
   and JSON schemas), and `Review.Diagnostics` (shared failure vocabulary).
+  A backend declares in `ProviderAdapter` whether its review threads share one
+  process or take one each, and that is the only thing deciding whether starting
+  a review reuses the client's connection or spawns another.
 - `Drainer` with `tools/` — the service-managed PR drainer and its Python tests.
   One backend boundary in `tools/service_manager.py` drives launchd on macOS and
   systemd user units on Linux.

@@ -1,5 +1,5 @@
--- | The review session's runtime state: the 'ReviewClient' record and the
--- 'ToolRegistry' it owns.
+-- | The review session's runtime state: the 'ReviewClient' record, the pool
+-- of provider connections it holds, and the 'ToolRegistry' it owns.
 --
 -- Held below both "Kanban.Review.Tools" and "Kanban.Review" because the two
 -- share this state in opposite directions — the client record carries the
@@ -11,6 +11,7 @@ module Kanban.Review.Client
     ToolRegistry,
     attachToolProcess,
     drainToolRegistry,
+    killConnectionToolProcesses,
     killReviewTools,
     killThreadToolProcesses,
     newToolRegistry,
@@ -29,31 +30,36 @@ import Kanban.CommandCapture (CommandBounds)
 import Kanban.Domain (WorkflowConfig)
 import Kanban.Models (ModelRoster)
 import Kanban.Process (ManagedProcess, killManagedProcess)
-import Kanban.Review.Types (PendingRequest, ReviewEvent)
+import Kanban.ProviderAdapter (EmbeddedReviewBackend)
+import Kanban.Review.Connection (ConnectionId, ConnectionPool, ReviewThreadId (..))
+import Kanban.Review.Types (ReviewEvent)
 import Kanban.Transcript (SessionLog)
-import System.IO (Handle)
-import System.Process (ProcessHandle)
 
 data ReviewClient = ReviewClient
-  { reviewInput :: Handle,
-    reviewProcess :: ProcessHandle,
-    -- | The app-server's own pgid, captured at spawn time so shutdown can
-    -- still signal it after 'reviewProcess' has been reaped (see
-    -- 'ToolRegistry' and issue #16).
-    reviewProcessManaged :: ManagedProcess,
-    reviewWriteLock :: MVar (),
-    reviewNextRequestId :: IORef Int,
-    reviewPendingRequests :: MVar (Map Int PendingRequest),
+  { -- | The backend every one of this client's connections is spawned from,
+    -- retained rather than consulted once at startup because a backend that
+    -- gives each review thread its own process spawns again on every start.
+    -- It is also what says whether one connection ending is the whole client
+    -- ending.
+    reviewBackend :: EmbeddedReviewBackend,
+    -- | Every provider connection this client currently holds. One for the
+    -- whole of a shared-process backend's life; one per review thread for a
+    -- backend that gives each thread its own.
+    reviewConnections :: ConnectionPool,
     -- | The turn currently running on each thread, maintained from the
     -- @turn/started@ and @turn/completed@ notifications. The UI keeps its own
     -- copy for display, but a rejected steer has to be classified against
     -- what the wire has actually delivered *at that point in the stream*, and
-    -- notifications and responses are handled in order by the single
-    -- 'Kanban.Review.readServerOutput' thread — so this map, not the UI's
-    -- asynchronously updated session state, decides whether a rejected steer
-    -- can be resent (issue #17).
-    reviewActiveTurns :: MVar (Map Text Text),
-    reviewThreadIssues :: MVar (Map Text Int),
+    -- a connection's notifications and responses are handled in order by that
+    -- connection's single 'Kanban.Review.readServerOutput' thread — so this
+    -- map, not the UI's asynchronously updated session state, decides whether
+    -- a rejected steer can be resent (issue #17).
+    --
+    -- Keyed by 'ReviewThreadId' rather than the provider's own thread id:
+    -- two connections both naming a thread @thread-1@ would otherwise share
+    -- one entry and answer each other's steers.
+    reviewActiveTurns :: MVar (Map ReviewThreadId Text),
+    reviewThreadIssues :: MVar (Map ReviewThreadId Int),
     reviewToolRegistry :: ToolRegistry,
     reviewEventSink :: ReviewEvent -> IO (),
     reviewRepositoryRoot :: FilePath,
@@ -74,9 +80,13 @@ data ReviewClient = ReviewClient
     -- which is why the whole roster travels here rather than one resolved
     -- assignment.
     reviewModelRoster :: ModelRoster,
+    -- | The one transcript every connection's raw traffic is written to.
+    -- Client-wide rather than per-connection because it records the review
+    -- backend's session, not one process's share of it, so it is closed when
+    -- the /client/ is finished: with a shared process that is the moment its
+    -- one connection ends, and with a process per thread it is shutdown,
+    -- because such a client outlives its connections.
     reviewSessionLog :: Maybe SessionLog,
-    reviewOutputDone :: MVar (),
-    reviewErrorDone :: MVar (),
     -- | The bounds every @gh@ subprocess behind @kanban_github_issue@ runs
     -- under. Carried on the client rather than passed down, so the
     -- mutation-specific wrappers above 'Kanban.Review.Tools.runGitHubCommand'
@@ -119,7 +129,7 @@ data ToolRegistryState = ToolRegistryState
   }
 
 data ToolEntry = ToolEntry
-  { toolEntryThread :: Text,
+  { toolEntryThread :: ReviewThreadId,
     toolEntryProcess :: Maybe ManagedProcess
   }
 
@@ -129,7 +139,7 @@ newToolRegistry = ToolRegistry <$> newIORef 0 <*> newMVar (ToolRegistryState Fal
 -- | Reserve a slot for an about-to-be-spawned tool process. 'Nothing' means
 -- the registry is already closed (client shutdown has begun) — the caller
 -- must not spawn at all.
-reserveToolSlot :: ToolRegistry -> Text -> IO (Maybe Int)
+reserveToolSlot :: ToolRegistry -> ReviewThreadId -> IO (Maybe Int)
 reserveToolSlot registry threadId = do
   key <- atomicModifyIORef' registry.toolRegistryCounter (\next -> (next + 1, next))
   modifyMVar registry.toolRegistryState $ \state ->
@@ -159,10 +169,22 @@ releaseToolSlot registry key =
 -- | Kill and drop every entry owned by `threadId`. A still-pending
 -- reservation (no process yet) is simply dropped — its spawn discovers this
 -- via 'attachToolProcess' and kills the process itself.
-killThreadToolProcesses :: ToolRegistry -> Text -> IO ()
-killThreadToolProcesses registry threadId = do
+killThreadToolProcesses :: ToolRegistry -> ReviewThreadId -> IO ()
+killThreadToolProcesses registry threadId = killMatchingToolProcesses registry (\entry -> entry.toolEntryThread == threadId)
+
+-- | Kill and drop every entry owned by any thread on @connectionId@, leaving
+-- the registry open. What one connection ending has to reach: its own
+-- threads' in-flight tool calls, and nothing another connection is still
+-- serving. Full shutdown uses 'drainToolRegistry' instead, which also closes
+-- the registry.
+killConnectionToolProcesses :: ToolRegistry -> ConnectionId -> IO ()
+killConnectionToolProcesses registry connectionId =
+  killMatchingToolProcesses registry (\entry -> entry.toolEntryThread.reviewThreadConnection == connectionId)
+
+killMatchingToolProcesses :: ToolRegistry -> (ToolEntry -> Bool) -> IO ()
+killMatchingToolProcesses registry owned = do
   dropped <- modifyMVar registry.toolRegistryState $ \state ->
-    let (mine, rest) = Map.partition (\entry -> entry.toolEntryThread == threadId) state.toolRegistryEntries
+    let (mine, rest) = Map.partition owned state.toolRegistryEntries
      in pure (state {toolRegistryEntries = rest}, Map.elems mine)
   mapM_ killToolEntry dropped
 
@@ -179,7 +201,7 @@ drainToolRegistry registry = do
 killToolEntry :: ToolEntry -> IO ()
 killToolEntry entry = mapM_ killManagedProcess entry.toolEntryProcess
 
-killReviewTools :: ReviewClient -> Text -> IO ()
+killReviewTools :: ReviewClient -> ReviewThreadId -> IO ()
 killReviewTools client threadId = killThreadToolProcesses client.reviewToolRegistry threadId
 
 -- | Reserves a registry slot for the *whole* dispatched tool call before
@@ -191,7 +213,7 @@ killReviewTools client threadId = killThreadToolProcesses client.reviewToolRegis
 -- between the sequential subprocesses of one GitHub update — and still find
 -- and drain this same reservation, so a later subprocess of an
 -- already-cancelled call cannot spawn as if nothing happened.
-withReservedToolSlot :: ReviewClient -> Text -> (Int -> IO (Either Text a)) -> IO (Either Text a)
+withReservedToolSlot :: ReviewClient -> ReviewThreadId -> (Int -> IO (Either Text a)) -> IO (Either Text a)
 withReservedToolSlot client threadId action = do
   reserved <- reserveToolSlot client.reviewToolRegistry threadId
   case reserved of

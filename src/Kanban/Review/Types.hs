@@ -6,13 +6,15 @@
 --
 -- Deliberately free of handles, processes, and client state, so it sits
 -- below every other @Kanban.Review.*@ module and all of them can agree on
--- one set of payload types without a cycle.
+-- one set of payload types without a cycle. The one thing it does sit above
+-- is "Kanban.Review.Connection": a review event names the thread it happened
+-- on, and a thread is only identified by its connection and the provider's
+-- own id together.
 module Kanban.Review.Types
   ( CanonicalIssueReviewResult (..),
     ClaudeToolRequest (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
-    PendingRequest (..),
     ReviewAnswer (..),
     ReviewApproval (..),
     ReviewChoice (..),
@@ -59,8 +61,20 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import GHC.Generics (Generic)
 import Kanban.Domain (WorkflowConfig (..))
+import Kanban.Review.Connection (ConnectionId, ReviewThreadId)
 
-newtype ReviewRequestId = ReviewRequestId Value
+-- | A request the provider sent /this/ client, which the user answers later
+-- through 'Kanban.Review.answerReviewQuestion' or
+-- 'Kanban.Review.approveReviewAction'.
+--
+-- The connection travels with the wire id because the answer may be minutes
+-- behind the question, and two connections numbering their own server
+-- requests will reuse each other's ids. Only the pair says where the answer
+-- has to be written.
+data ReviewRequestId = ReviewRequestId
+  { reviewRequestConnection :: ConnectionId,
+    reviewRequestWireId :: Value
+  }
   deriving stock (Eq, Show)
 
 data ReviewQuestionKind = QuestionChoice | QuestionText
@@ -129,11 +143,11 @@ data CanonicalIssueReviewResult = CanonicalIssueReviewResult
   deriving stock (Eq, Show, Generic)
 
 data ReviewEvent
-  = ReviewThreadCreated Int Text
-  | ReviewTurnStarted Text Text
-  | ReviewOutput Text ReviewOutputKind Text
-  | ReviewQuestionRequested Text ReviewRequestId ReviewQuestion
-  | ReviewApprovalRequested Text ReviewRequestId ReviewApproval
+  = ReviewThreadCreated Int ReviewThreadId
+  | ReviewTurnStarted ReviewThreadId Text
+  | ReviewOutput ReviewThreadId ReviewOutputKind Text
+  | ReviewQuestionRequested ReviewThreadId ReviewRequestId ReviewQuestion
+  | ReviewApprovalRequested ReviewThreadId ReviewRequestId ReviewApproval
   | -- | A @kanban_run_claude@ call has started, carrying the thread and the
     -- @display@ of the @issue_revise.claude@ cell it resolved.
     --
@@ -142,20 +156,31 @@ data ReviewEvent
     -- restart can be handled first: a consumer that resolved the cell at
     -- handling time would name a replacement client's assignment, or none at
     -- all, for a call that is running on the roster this one captured.
-    ReviewClaudeStarted Text Text
-  | ReviewClaudeFinished Text (Either Text ())
-  | ReviewGitHubStarted Text Text
-  | ReviewGitHubFinished Text (Either Text Text)
-  | ReviewTurnCompleted Text ReviewTurnOutcome (Maybe Text) (Maybe (Text, ReviewResult))
+    ReviewClaudeStarted ReviewThreadId Text
+  | ReviewClaudeFinished ReviewThreadId (Either Text ())
+  | ReviewGitHubStarted ReviewThreadId Text
+  | ReviewGitHubFinished ReviewThreadId (Either Text Text)
+  | ReviewTurnCompleted ReviewThreadId ReviewTurnOutcome (Maybe Text) (Maybe (Text, ReviewResult))
   | ReviewStartFailed Int Text
-  | ReviewClientStopped Text
+  | -- | The client is finished: the one connection every thread was
+    -- multiplexed onto has ended, so nothing it was serving can continue.
+    -- Emitted only by a backend that shares one process across every review
+    -- thread, which is the only shape in which one connection ending is the
+    -- whole client ending.
+    ReviewClientStopped Text
+  | -- | One of several connections has ended while the client remains
+    -- usable. Only the threads this connection served are finished; a thread
+    -- on another connection is untouched, and a new review may still be
+    -- started. Emitted by a backend that gives each review thread its own
+    -- process.
+    ReviewConnectionStopped ConnectionId Text
   -- | A @turn/steer@ the app-server rejected whose text could not be resent
   -- automatically, carrying the thread, the turn the steer targeted, and the
   -- user's original message so the session can offer it back for a deliberate
   -- resend (issue #17). Emitted only when a turn is still active on the
   -- thread: with no active turn the message is resent as a new @turn/start@
   -- instead, and nothing is reported.
-  | ReviewSteerUndelivered Text Text Text
+  | ReviewSteerUndelivered ReviewThreadId Text Text
   | ReviewProtocolWarning Text
   deriving stock (Eq, Show)
 
@@ -163,18 +188,6 @@ data ReviewWireMessage
   = WireResponse Value (Either Value Value)
   | WireNotification Text Value
   | WireRequest Value Text Value
-  deriving stock (Eq, Show)
-
-data PendingRequest
-  = PendingThreadStart Int
-  | PendingTurnStart Text
-  -- | An in-flight @turn/steer@, retaining its thread, the @expectedTurnId@
-  -- it targeted, and the user's message. Without that context a rejection
-  -- could only be reported as a generic protocol warning, silently dropping
-  -- the typed feedback (issue #17). Interrupts and approval responses stay
-  -- 'PendingOther'.
-  | PendingSteer Text Text Text
-  | PendingOther
   deriving stock (Eq, Show)
 
 newtype ClaudeToolRequest = ClaudeToolRequest
