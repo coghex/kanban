@@ -360,6 +360,14 @@ parses §2 and fails if:
   existing-document subject requires;
 - this document drops §9's `pr-atomic` fail-closed rule, its one-artifact
   boundary, or its rule that publication is reported only on reachability;
+- a publishing asset drops §9.5's reporting rule — the silence on the ordinary
+  outcome, the exact conjunction that silence covers, the full report every
+  other outcome keeps, or the fact that silence ends the report rather than the
+  run — or a processing asset lets that silence reach §9.6's local resolution
+  and strand the record it was supposed to clear. The four drafting assets are
+  the negative control for the first, and they and the two `note-problem`
+  variants together are the control for the second, so a check broad enough to
+  match every asset fails rather than passing while asserting nothing;
 - a processing asset drops the §9.6 tracker-transaction clause for any one of
   its tracker-mutating branches — `EPIC` label creation, epic creation, epic
   adoption edit, child issue creation, child issue linking, an approved
@@ -593,6 +601,13 @@ or is invalid is not an absent declaration: it fails closed before anything is
 written or published, because a lane silently read as absent would leave a
 document its owner really did declare publishable sitting in one checkout.
 
+**An ordinary outcome is reported as one.** Because a repository without a lane
+is the common case rather than the exception, §9.5 has the declared assets close
+on it without narrating it: the approved mutation is applied and recorded, the
+run reports its own disposition or capture, and the absent lane, the write root
+and the preserved blob are not recited to the user on every pass. What is
+ordinary here is the configuration, so what the run says about it is nothing.
+
 ### 9.3 What a publication may contain
 
 A publication carries the single approved mutation to the one eligible document
@@ -744,10 +759,14 @@ other direction too. It says these bytes are what this module last wrote, and
 nothing at all about whether that mutation was ever landed anywhere.
 
 **An applied mutation is not yet a durable one.** It exists in one write root
-and on no branch, so a run reports the write root, the document path, and the
-preserved blob rather than a completed publication. What makes it durable is its
-owner landing the resulting document on the publication branch, by whatever lane
-that owner has.
+and on no branch, and what makes it durable is its owner landing the resulting
+document on the publication branch, by whatever lane that owner has. That is an
+instruction to the run rather than a line of its report: it is why no run
+publishes by hand to compensate for a declined lane, why a run never describes
+an applied mutation as complete on the branch, and why §9.6's unresolved record
+is reported rather than cleared. Where the write root, the document path and the
+preserved blob are named — the outcomes §9.5 keeps loud — they are named
+because the mutation is not where the next run will look for it.
 
 **Nothing the module does can leave the document deleted.** For the length of
 that instant the captured copy is the only one, so its content reaches the
@@ -823,14 +842,18 @@ publication branch. A push that appeared to succeed is not that verification.
 
 **Every** other outcome is an unpublished failure, reported with all three
 states rather than collapsed into one — including the ones the module never
-modelled. A caller branches on the result, so a traceback where a result
-belongs leaves it with nothing to report and no way to learn what became of its
-document — and being structured is not enough on its own: an unmodelled failure
-can happen after the document already holds the approved bytes, so the states
-are collected against the resolved write root and say where that edit is,
-rather than reporting it as unknown. Every failure that has a candidate commit
-names it in the same field, whichever step produced it; and cleanup, which runs on the way out with a failure often already
-propagating, may never raise at all — nor may the reporting that accompanies
+modelled. One result is not among them: a `not-published` whose `write_outcome`
+is one of the two applied ones and whose `applied_record` reads `"recorded"` is
+§9.2's empty lane working exactly as designed, so it is neither a failure nor
+owed the three-state report. A caller branches on the result, so a traceback
+where a result belongs leaves it with nothing to report and no way to learn
+what became of its document — and being structured is not enough on its own: an
+unmodelled failure can happen after the document already holds the approved
+bytes, so the states are collected against the resolved write root and say
+where that edit is, rather than reporting it as unknown. Every failure that has
+a candidate commit names it in the same field, whichever step produced it; and
+cleanup, which runs on the way out with a failure often already propagating,
+may never raise at all — nor may the reporting that accompanies
 it, whose own inputs must be defined on every path that can reach it, since an
 exception from either would replace the real error and skip the lock release on
 its way past. The states:
@@ -859,6 +882,33 @@ reports what it changed: an unintended rewrite of the rest of the document
 changes the same single path a correct publication does, so the changed-line
 summary, not the changed-path check, is what makes it visible to the run that
 caused it.
+
+**The ordinary outcome is reported by saying nothing about it.** A settled
+mechanism working as designed is not news, and a run that recited the declined
+lane, the write root and the preserved blob after every disposition made a
+healthy workflow read like a recurring problem — one session processing three
+entries of one design document emitted the whole apparatus three times. So on a
+`not-published` with an applied `write_outcome` and a `"recorded"`
+`applied_record`, a declared asset closes with its own workflow-specific report
+— the processing pair's disposition, document line and counts, the note pair's
+captured observation and its handoff fields — and says nothing about
+publication, eligibility, lanes, worktrees, write roots, blobs, or what still
+has to happen for the edit to land. None of that is a decision the user has to
+make.
+
+**Every other outcome keeps its full report, each for its own reason.** A
+`write_outcome` of `no-baseline` or `unrecognized-working-copy`, or an
+`applied_record` of `"unrecorded"`, is reported in full because the mutation is
+not where the next run will look for it. A published one is reported because it
+is verified success carrying the changed-line summary above, which the run has
+to check. An unmodelled status is reported because its three states are the only
+account of where the document went. The silence covers one conjunction and is
+never widened to a status, a write outcome, or a record on its own.
+
+**That silence is a rule about the report, not about the work.** The helper is
+still invoked, its result still inspected, and §9.6's transaction still resolved
+before the run closes. Silence is what a run says at the end, never a step it
+skips.
 
 ### 9.6 The tracker transaction
 
@@ -1022,9 +1072,15 @@ acquire no transaction. Where the module reports `not-published` with
 the approved content applied locally — the ordinary outcome for a `pr-atomic`,
 unmatched, or not-yet-tracked document under §9.1 and §9.2 — the same
 verification runs against the applied local document, which is the only evidence
-there is and a legitimate terminal state for such a document. That the document
-is one of those is *derived* rather than taken from the caller, and derivation
-takes two things: the same classification the publication module itself applies,
+there is and a legitimate terminal state for such a document. §9.5's silence
+does not reach this step: the local resolution still runs on that outcome, and
+only a resolution that succeeds licenses a quiet close. A record this run could
+not resolve keeps its full failure and recovery report however ordinary the
+publication result was — that report is the one thing the ordinary outcome never
+suppresses, because a stranded record is precisely what the next run needs
+told. That the document is one of those is *derived* rather than taken from the
+caller, and derivation takes two things: the same classification the publication
+module itself applies,
 and that module's own record of what it applied. Classification says only that
 it *would* decline to publish; a document somebody edited by hand looks
 identical from there. So the module records the exact content it wrote whenever

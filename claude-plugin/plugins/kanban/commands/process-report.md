@@ -573,13 +573,23 @@ planned step and whether it is planned, ambiguous, or confirmed, every confirmed
 tracker identity, and the one recovery action that is permitted next. Reconcile
 it before the next finding.
 
-## 6. Publish the approved mutation
+## 6. Record the approved mutation
 
-Publish the approved mutation in this same run. The document is a durable
-cursor, and a cursor that only ever exists in one checkout is resumable only
-from that checkout. Publication is one more step of the disposition that was
-already approved; it carries no second one, and it is never batched or deferred
-merely to reduce commit or push frequency.
+Hand the approved mutation to the publication helper in this same run. The
+document is a durable cursor, and a cursor that only ever exists in one checkout
+is resumable only from that checkout. This step is one more part of the
+disposition that was already approved; it carries no second one, and it is never
+batched or deferred merely to reduce commit or push frequency.
+
+**This step is not a push.** It is how the document gets written at all — the
+helper is the document's only writer. Whether that write ALSO lands on
+`$DOC_BRANCH` is the helper's decision and not yours, and for most repositories
+the answer is no: the mutation is applied to the docs worktree and left sitting
+there, and the owner lands the accumulated edits in one batch later. That is the
+designed outcome rather than a shortfall, so run this step even when you already
+know publication will be declined. Skipping it leaves the entry unmarked and the
+tracker transaction stranded, which is strictly worse than the thing you were
+trying to avoid.
 
 When a tracker transaction is open, record that it is being handed to
 publication before you hand it over, so an interruption inside publication is
@@ -642,9 +652,9 @@ drainer's merge exception and grants no publication lane. An empty lane is the
 ordinary, intended configuration: it yields `not-published`, the approved
 mutation is applied to the working copy and recorded, and the edits accumulate
 in the docs worktree for a human to land in one batch. Do not treat that as a
-failure of the run, and never publish by hand to compensate for it. Do not
-reimplement, precede, or compensate for any part of it. Act on the one
-structured result it returns:
+failure of the run, never publish by hand to compensate for it, and do not
+narrate it to the user. Do not reimplement, precede, or compensate for any part
+of it. Act on the one structured result it returns:
 
 - **`"status": "published"`.** Say so, and quote the commit it reports together
   with its changed-line summary. Check that summary against the disposition you
@@ -664,21 +674,53 @@ structured result it returns:
   applied on top of it — so successive approved mutations to a document its
   owner lands out of band accumulate rather than wedging on the first one. A
   working copy the helper did not write is never overwritten, and nothing is
-  applied over it. Say which outcome it was and why publication was declined.
-  This is the ordinary outcome for a `pr-atomic` document, not a failure of
-  this run.
+  applied over it.
 
   `applied_record` is the other half of that. The helper records what it wrote
   in its own reference, and only `"recorded"` — with `applied_ref` naming that
   reference — lets a later run continue over the working copy or a transaction
   resolve from it. `"unrecorded"` means the write happened and the record did
   not, so no later run may write over that document and no transaction may
-  resolve from it. Report that rather than an ordinary applied mutation.
+  resolve from it.
+
+  **The ordinary outcome is reported by saying nothing about it.**
+  `not-published`, with a `write_outcome` of `applied-over-baseline` or
+  `applied-over-local-predecessor` and an `applied_record` of `"recorded"`, is
+  the expected and healthy result: the approved mutation is in the working copy,
+  recorded, and waiting for its owner to batch it, which is exactly where that
+  owner wants it. So say nothing about publication, eligibility, lanes,
+  worktrees, write roots, blobs, or what still has to happen for the edit to
+  land — none of it is a decision the user has to make, and narrating a settled
+  mechanism on every run makes a working workflow read like a recurring problem.
+
+  **That silence is a rule about the report, not about the work.** Every step of
+  this section still runs on that outcome — the helper is still invoked and its
+  result is still inspected — and so does every step this workflow takes after
+  it. Silence is what the run says at the end, never a step it skips.
+
+  **Silence waits for the transaction.** An ordinary helper result does not end
+  the run: the tracker transaction below is still resolved with `--resolve
+  --source local`, and only a resolution that succeeds licenses the quiet
+  report. A transaction this run could not resolve keeps its full failure and
+  recovery report, however ordinary the publication result was.
 
   **An applied mutation is not durable until the document's owner lands it on
-  the publication branch.** It exists in one write root and nowhere else, so
-  name the write root, the document path, and the preserved `approved_blob`
-  rather than describing the run as complete on the branch.
+  the publication branch.** That fact governs what this workflow may do, not
+  what it tells the user: it is why publishing by hand to compensate is
+  forbidden and why every outcome named below is reported out loud. On the
+  ordinary outcome it is not part of the report.
+
+  **Every other outcome keeps its full report.** A `write_outcome` of
+  `no-baseline` or `unrecognized-working-copy` means nothing was applied and the
+  approved mutation survives only as `approved_blob`; an `applied_record` of
+  `"unrecorded"` means the write cannot be proven and no later run may build on
+  it. Each of those needs the write root, the document path, and the preserved
+  `approved_blob` named plainly, because the mutation is not where the next run
+  will look for it. A `"published"` status and any other status keep the reports
+  described beside them for their own reasons — a publication is verified
+  success with a changed-line summary the run has to check, and an unmodelled
+  status is a failure whose three states are the only account of where the
+  document went.
 - **Any other status.** The document was not published. Report the three states
   the helper returns — whether the edit exists locally and in which worktree and
   path, whether a local publication commit exists and its ID, and whether the
@@ -749,7 +791,12 @@ apply a second disposition over it and do not create tracker items for one:
 resolve that record first, or the run you just approved will be reported
 published while its mutation is absent from the document.
 
-Publication ends this finding. Do not select another.
+Recording the mutation ends this finding. Do not select another.
+
+On the ordinary outcome the closing report is the disposition and the counts
+below and nothing else: where the document was written, whether it reached the
+branch, and what still has to happen to it are the recording step's business,
+and on its ordinary outcome that step reports itself by saying nothing.
 
 Report, in this order: the disposition and its tracker link if any; the report
 line as it now reads; and the work the report still owes as two counts — the
