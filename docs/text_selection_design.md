@@ -247,6 +247,18 @@ flattens it into a `FrameSnapshot`. Later selection draws use that immutable
 snapshot; they do not reread the observer, because drawing the highlighted
 selection will itself become the newest Vty update.
 
+The Vty observer intentionally captures pixels, not Brick interaction metadata:
+a `Picture` contains no clickable names or extents. While the initial press is
+still being handled against the live widget tree, the gesture boundary therefore
+enumerates the current state's visible mouse-target names, obtains each current
+`Brick.Extent` through `lookupExtent`, ignores names with no mouse policy, and
+converts the remaining rectangles to stable semantic targets. It stores those
+targets, the overlay bounds and extent policy, and explicit application dispatch
+precedence beside the frame as one `FrozenPointerMap`. Parameterized targets
+retain item, tracker, session, incident, filter, or roster identity rather than
+only a row number. The map and picture come from the same completed render
+generation and remain immutable for the gesture and its completed highlight.
+
 Rejected alternative: give every Kanban widget a parallel text-coordinate
 map. It would duplicate wrapping, cropping, padding, dynamic borders, viewport
 translation, and overlay composition, and would need permanent reconciliation
@@ -283,6 +295,7 @@ Selection state is separate from board-card selection and has a distinct name,
 for example `TextSelection`. Its pure core contains:
 
 - the frozen frame;
+- the frozen coordinate-to-semantic-target pointer map;
 - an anchor screen point;
 - the current head screen point;
 - whether the gesture is still a pending click or has crossed into dragging;
@@ -314,7 +327,9 @@ Brick can deliver a mouse report as a named `MouseDown`/`MouseUp` whose
 location is relative to the matching clickable extent, or leave a report over
 inert content as a raw Vty event with absolute terminal coordinates. A small
 normalization boundary must combine the event with Brick's latest render
-extents and produce one absolute `FramePoint`. Every later gesture transition
+extents and produce one absolute `FramePoint` for the initial live press. After
+the raw frozen frame replaces the widget tree, the same boundary uses the saved
+`FrozenPointerMap` for absolute reports instead. Every later gesture transition
 operates on that common form. This is also what makes motion across adjacent
 cards, an overlay boundary, or unnamed text one continuous drag rather than a
 sequence of unrelated widget events.
@@ -381,12 +396,24 @@ therefore cancels the selection before the new-size redraw. Focus loss cancels
 a pending click so a release lost outside the terminal cannot activate it
 later.
 
-Because Brick's clickable extents belong to the frozen frame being presented,
-a pointer event is first resolved against those captured extents to the same
-stable intent the ordinary live surface exposes. Dismissal itself performs no
-extra validation and has no consume branch. Ordinary intent dispatch still
-re-resolves identity against current application state, so a target that
-vanished remains the existing safe no-op rather than acting on its replacement.
+Rendering a `FrameSnapshot` as one raw widget deliberately registers no Brick
+clickable extents, so every pointer event over the frozen presentation arrives
+as an absolute raw Vty event. A selection-owned pre-dispatch branch resolves
+that coordinate against the saved `FrozenPointerMap`, using the captured
+overlay-before-background and row/control-before-viewport-before-panel
+precedence, then combines the stable semantic target with the event's button
+and modifiers through the same pure mouse policy as the live surface. A
+coordinate outside a captured windowed overlay resolves to its ordinary
+outside-click intent; the same coordinate at a captured fullscreen overlay
+resolves to that surface's no-op policy.
+
+For a completed selection this branch first clears the highlight and feedback,
+then dispatches the resolved ordinary intent for the same input. Dismissal
+itself performs no extra validation and has no consume branch. Ordinary intent
+dispatch still re-resolves identity against current application state, so a
+target that vanished remains the existing safe no-op rather than acting on its
+replacement. Tests feed absolute raw events here on purpose: a named Brick
+`MouseDown` after the widget tree has been replaced would be a false proof.
 
 The selection highlight is reverse video applied as an attribute override while
 preserving the glyph and all unrelated URL/style data the terminal needs. It
@@ -648,9 +675,10 @@ ownership.
   candidate; a single release performs exactly its old action only after the
   D-7 sequence window expires; motion suppresses it; second and third
   clicks select without leaking an action; fourth click clears; stale click
-  timers and disappeared or replaced targets refuse rather than retarget;
-  right/middle/wheel paths remain byte-for-byte in their existing decision
-  tables.
+  timers and disappeared or replaced targets refuse rather than retarget; a
+  saved extent map resolves absolute raw events to the same stable target under
+  explicit overlap precedence; right/middle/wheel paths remain byte-for-byte in
+  their existing decision tables.
 - **Feedback tests:** a successful sink write creates the exact green
   `* copied *` chip and a fresh expiry generation; a ten-second expiry removes
   the chip but not the highlight; keyboard and mouse-button input remove both;
@@ -664,8 +692,10 @@ ownership.
 - **Lifecycle tests:** transcript and animation events during a drag update the
   underlying state without changing the frozen frame; release copies and
   leaves the highlighted frame; expiry changes only its feedback chip; the
-  next key or pointer input both dismisses the residue and performs its
-  ordinary action without a selection-owned consume branch;
+  next key or absolute raw pointer input both dismisses the residue and performs
+  its captured target's ordinary action without a selection-owned consume
+  branch; windowed-overlay outside clicks and fullscreen no-ops survive that
+  raw-event path;
   resize, focus loss, unexpected buttons, quit, and vanished targets cancel
   without an action.
 - **Autoscroll tests:** a frozen scene maps each edge band to at most one owner;
@@ -794,9 +824,11 @@ capability before TSEL-12 closes the epic.
   cancellation, and stale timeout without dispatching an action twice.
 - **Scope:** screen-coordinate recovery from Brick events; stable base-board
   click intents for cards, epics, filters, and sidebar controls; normalization
-  of named target-local and raw absolute mouse reports; target revalidation;
-  `MouseUp` handling; monotonic click-sequence timing and generation-stamped
-  expiry events; pure gesture transitions; replacement of the
+  of named target-local and raw absolute mouse reports; enumeration of the
+  current base-board names through `lookupExtent`; the immutable ordered
+  `FrozenPointerMap` and its pure absolute-coordinate resolver; target
+  revalidation; `MouseUp` handling; monotonic click-sequence timing and
+  generation-stamped expiry events; pure gesture transitions; replacement of the
   absence-of-release design witness.
 - **Phase:** gesture safety.
 - **Depends on:** `TSEL-2`.
@@ -805,8 +837,10 @@ capability before TSEL-12 closes the epic.
 - **Acceptance signals:** the existing pointer-claim inventory is preserved;
   every prior left-click target gains a sequence assertion; motion permanently
   suppresses its intent; second through fourth clicks never leak a single-click
-  action; stale timers and row replacement cannot retarget an intent; the new
-  semantic witness proves selection transitions cannot mutate workflow.
+  action; a saved map resolves a raw absolute event to the same stable target
+  under overlapping extents; stale timers and row replacement cannot retarget
+  an intent; the new semantic witness proves selection transitions cannot
+  mutate workflow.
 - **Out of scope:** visible highlight, frame capture at press, clipboard output,
   overlays and their controls.
 - **Open questions:** None.
@@ -817,11 +851,12 @@ capability before TSEL-12 closes the epic.
   highlights the visible frame, copies on release, retains the completed
   highlight, and never activates the starting control.
 - **Scope:** read the TSEL-3 snapshot at press; seat active selection state;
-  draw the TSEL-2 frozen highlighted frame; update on held-button motion;
-  invoke TSEL-4 on completion; dedicated green `* copied *` feedback with a
-  generation-stamped ten-second expiry; keyboard/mouse dismissal and frozen
-  frame lifecycle; base-board help and `docs/design.md` contract updates;
-  board golden and fake-clipboard tests.
+  capture and seat TSEL-5's live base-board pointer map; draw the TSEL-2 frozen
+  highlighted frame; update on held-button motion; invoke TSEL-4 on completion;
+  the high-precedence raw-pointer pre-dispatch path; dedicated green
+  `* copied *` feedback with a generation-stamped ten-second expiry;
+  keyboard/mouse dismissal and frozen frame lifecycle; base-board help and
+  `docs/design.md` contract updates; board golden and fake-clipboard tests.
 - **Phase:** first vertical capability.
 - **Depends on:** `TSEL-2`, `TSEL-3`, `TSEL-4`, `TSEL-5`.
 - **Ordering:** critical path.
@@ -829,9 +864,10 @@ capability before TSEL-12 closes the epic.
 - **Acceptance signals:** a headless event sequence selects known text from the
   real wide/minimum/narrow board frames and hands exactly that text to a fake
   sink; release retains the highlight; expiry removes only the green chip;
-  dismissal and ordinary dispatch both occur for the same next input;
-  click, right-click, and wheel regressions remain green; one local Ghostty
-  probe copies into the OS clipboard.
+  an absolute raw press at every captured card, epic, filter, and sidebar extent
+  both dismisses and performs that target's ordinary dispatch for the same
+  input; click, right-click, and wheel regressions remain green; one local
+  Ghostty probe copies into the OS clipboard.
 - **Out of scope:** selection beginning in overlays, viewport autoscroll, and
   visible multi-click selection.
 - **Open questions:** None.
@@ -863,11 +899,12 @@ capability before TSEL-12 closes the epic.
   transcripts, help, settings, process and incident panels, and the board
   visible around a windowed overlay, without triggering outside-click
   dismissal or a row/control action.
-- **Scope:** stable overlay click intents; selection precedence ahead of each
-  overlay decoder; windowed/fullscreen coordinate coverage; session normal and
-  insert modes; overlay/background crossing; word/line constructors on every
-  surface; per-surface golden and dispatch regression tests; help/contract
-  wording.
+- **Scope:** stable overlay click intents and extent-map entries; selection
+  precedence ahead of each overlay decoder; captured panel, viewport, row,
+  background, and outside-overlay bounds with explicit overlap precedence;
+  windowed/fullscreen coordinate coverage; session normal and insert modes;
+  overlay/background crossing; word/line constructors on every surface;
+  per-surface golden and dispatch regression tests; help/contract wording.
 - **Phase:** visible-surface coverage.
 - **Depends on:** `TSEL-7`.
 - **Ordering:** critical path.
@@ -875,8 +912,10 @@ capability before TSEL-12 closes the epic.
 - **Acceptance signals:** each overlay family has one click-without-motion and
   one suppressing-drag, one double-word, and one triple-line test; details and
   transcript selections copy wrapped visible text under D-8; a drag across a
-  windowed overlay boundary remains one selection; quadruple-clear and
-  ordinary outside/right-click policies still hold.
+  windowed overlay boundary remains one selection; absolute raw presses against
+  captured rows and controls reach their stable intents after dismissal;
+  windowed outside-click, fullscreen outside-no-op, quadruple-clear, and
+  ordinary right-click policies still hold.
 - **Out of scope:** content beyond the captured frame and autoscroll.
 - **Open questions:** None.
 
