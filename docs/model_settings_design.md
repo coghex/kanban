@@ -30,7 +30,7 @@ concrete precondition
 - [x] MODEL-9. Implement no-agent mode: board-only UI and spawn refusal — [#521]
 - [x] MODEL-12. Extract the provider adapter interface behind the agent flows — [#522]
 - [x] MODEL-14. Hold either embedded-review process shape in the review client — [#585]
-- [ ] MODEL-13. Implement the Claude embedded-review stream-json backend
+- [x] MODEL-13. Implement the Claude embedded-review stream-json backend — [#586]
 - [ ] MODEL-15. Serve Kanban's review tools to the Claude backend over a stdio MCP re-entry
 - [ ] MODEL-16. Reach steer and interrupt parity on the Claude backend
 - [ ] MODEL-10. Implement single-agent review routing in the Haskell flows
