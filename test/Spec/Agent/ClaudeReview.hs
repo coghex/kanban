@@ -280,6 +280,83 @@ spec = do
         map turnOutcomeOf (turnCompletions recorded) `shouldBe` [Just TurnSucceeded]
         map fst (turnStarts recorded) `shouldBe` [threadId]
 
+    -- The stderr half of requirement 4, and both halves of what makes it
+    -- worth anything: a per-thread process writes its diagnostics for the
+    -- one review it is serving, so they belong in that review's transcript
+    -- and they are tagged with the program that wrote them. Reported against
+    -- the empty thread they would be a notice about nothing, and tagged
+    -- @[codex]@ they would name a program the operator is not running.
+    --
+    -- The early line is the one that matters. The two readers run
+    -- concurrently, so stderr routinely arrives before the record that names
+    -- the thread — and a provider's complaints on the way up are exactly the
+    -- diagnostics worth keeping. The fake sleeps on either side of that
+    -- record so both orderings are the ones under test rather than whichever
+    -- two the scheduler happens to pick.
+    it "reports a per-thread process's stderr against its own review, tagged with its own brand" $
+      withClaudeReviewClient (["printf '%s\\n' 'warming up' >&2", "sleep 0.4"] <> reviewTurn <> ["sleep 0.4", "printf '%s\\n' 'still going' >&2", approvedResult 844]) $ \fixture -> do
+        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        recorded <-
+          waitForReviewEvents
+            "both diagnostics and a completed turn"
+            fixture.claudeReviewEvents
+            (\events -> length (diagnosticOutputs events) >= 2 && not (null (turnCompletions events)))
+        threadId <- soleThread recorded
+        diagnosticOutputs recorded
+          `shouldBe` [ (threadId, DiagnosticOutput ClaudeProvider, "warming up"),
+                       (threadId, DiagnosticOutput ClaudeProvider, "still going")
+                     ]
+        -- Held rather than dropped, and released only once the review exists
+        -- to hold it: the line the provider wrote first is reported after the
+        -- session it belongs to has been announced.
+        lifecycle recorded
+          `shouldBe` [ "ReviewThreadCreated",
+                       "ReviewOutput",
+                       "ReviewTurnStarted",
+                       "ReviewOutput",
+                       "ReviewOutput",
+                       "ReviewOutput",
+                       "ReviewTurnCompleted"
+                     ]
+
+    -- The buffer must not be able to swallow anything. A provider that dies
+    -- complaining never names a session, so nothing will ever claim what it
+    -- wrote; it is released unattributed, which is where every
+    -- shared-process diagnostic goes and where these went before they were
+    -- held at all.
+    it "still reports early stderr from a process that never names a session" $
+      withClaudeReviewClient ["printf '%s\\n' 'cannot start' >&2", "exit 4"] $ \fixture -> do
+        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        recorded <-
+          waitForReviewEvents
+            "the released diagnostic and the start failure"
+            fixture.claudeReviewEvents
+            (\events -> not (null (diagnosticOutputs events)) && not (null (startFailures events)))
+        map (\(threadId, outputKind, text) -> (threadId.reviewThreadProvider, outputKind, text)) (diagnosticOutputs recorded)
+          `shouldBe` [("", DiagnosticOutput ClaudeProvider, "cannot start")]
+        map fst (startFailures recorded) `shouldBe` [844]
+
+    -- A connection serves one review for its whole life, so the session its
+    -- provider names must be the one it named first. Adopting a later one
+    -- would carry the turn, its transcript and its verdict to a thread no
+    -- session is keyed by — and with the pending start already consumed,
+    -- nothing would announce that thread to anybody.
+    it "disregards a later record naming a different session, keeping the review's own thread" $
+      withClaudeReviewClient (reviewTurn <> [approvedResult 844, driftingSecondTurn]) $ \fixture -> do
+        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        recorded <-
+          waitForReviewEvents
+            "both turns"
+            fixture.claudeReviewEvents
+            ((>= 2) . length . turnCompletions)
+        threadId <- soleThread recorded
+        -- One thread, announced once, and both turns on it.
+        map fst (turnStarts recorded) `shouldBe` [threadId, threadId]
+        [completed | ReviewTurnCompleted completed _ _ _ <- recorded] `shouldBe` [threadId, threadId]
+        case [message | ReviewProtocolWarning ClaudeProvider message <- recorded] of
+          [message] -> message `shouldMention` "opened a turn on session someone-elses-session, not the one this review is running on"
+          other -> expectationFailure ("expected exactly one drift warning, got " <> show other)
+
     -- Requirement 6 and the review's diagnostic clause. Every surface this
     -- backend can fail on names the program the operator is actually
     -- running, and none of them names the other provider's.
@@ -414,6 +491,18 @@ spec = do
 reviewTurn :: [ByteString.ByteString]
 reviewTurn = claudeReviewTurn "weighing it" "reviewing it"
 
+-- | A second turn announcing a session this connection has never used, then
+-- completing normally. Only reachable by a provider that has already opened
+-- one, so it is appended after a first turn's result rather than replacing
+-- it.
+driftingSecondTurn :: ByteString.ByteString
+driftingSecondTurn =
+  ByteString.intercalate
+    "\n"
+    [ "printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"someone-elses-session\",\"uuid\":\"turn-drifted\"}\\n'",
+      approvedResult 844
+    ]
+
 -- | A turn that never ends for issue 844 and completes normally for anything
 -- else, so one client holds a stalled process and a healthy one at once.
 --
@@ -537,6 +626,12 @@ lifecycle = map name
     name ReviewOutput {} = "ReviewOutput"
     name ReviewTurnCompleted {} = "ReviewTurnCompleted"
     name other = show other
+
+-- | Every line a provider wrote to its stderr, as the thread it was reported
+-- against, the kind that names who wrote it, and the text.
+diagnosticOutputs :: [ReviewEvent] -> [(ReviewThreadId, ReviewOutputKind, Text)]
+diagnosticOutputs recorded =
+  [(threadId, outputKind, text) | (threadId, outputKind@DiagnosticOutput {}, text) <- reviewOutputs recorded]
 
 turnOutcomeOf :: ReviewEvent -> Maybe ReviewTurnOutcome
 turnOutcomeOf (ReviewTurnCompleted _ outcome _ _) = Just outcome

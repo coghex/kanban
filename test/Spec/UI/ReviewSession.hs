@@ -15,6 +15,7 @@ import Kanban.Models (ProviderName (..))
 import Kanban.Review
   ( ConnectionId (..),
     ReviewApproval (..),
+    ReviewOutputKind (..),
     ReviewThreadId (..),
     ReviewChoice (..),
     ReviewQuestion (..),
@@ -37,6 +38,7 @@ import Kanban.UI.Review
     epicReviewRefusalNotice,
     resolveReviewCancelAction,
     resolveReviewDigitAction,
+    reviewOutputPrefix,
     reviewProtocolWarningNotice,
     reviewSessionsNeedingArm,
   )
@@ -408,6 +410,19 @@ spec = do
     it "distinguishes the two for one and the same message" $
       map (`reviewProtocolWarningNotice` "unreadable") [CodexProvider, ClaudeProvider]
         `shouldBe` ["Codex protocol warning: unreadable", "Claude protocol warning: unreadable"]
+
+  -- The other place a review's display names a program. Diagnostic output is
+  -- the one output kind that is a line some process wrote rather than a part
+  -- of the conversation, so it is tagged with which process wrote it — and a
+  -- tag compiled in here would put the app-server's name on a CLI session's
+  -- stderr.
+  describe "the provider a diagnostic line is tagged with" $ do
+    it "keeps Codex's tag exactly as it was, and tags nothing else" $
+      map reviewOutputPrefix [AgentOutput, ReasoningOutput, CommandOutput, DiagnosticOutput CodexProvider]
+        `shouldBe` ["", "", "", "[codex] "]
+
+    it "tags a Claude session's stderr as Claude's" $
+      reviewOutputPrefix (DiagnosticOutput ClaudeProvider) `shouldBe` "[claude] "
 
   describe "review session liveness, quit protection, and the x gate" $ do
     -- issue #151: the processes overlay, the `x` gate that dispatches on

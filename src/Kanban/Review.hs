@@ -119,7 +119,7 @@ module Kanban.Review
   )
 where
 
-import Control.Concurrent (forkIO, modifyMVar, modifyMVar_, newMVar, putMVar, takeMVar, withMVar)
+import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newMVar, putMVar, takeMVar, withMVar)
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception (IOException, try)
 import Control.Monad (forever, void, when)
@@ -135,9 +135,8 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (atomicModifyIORef')
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -448,19 +447,19 @@ spawnReviewConnection client identifier = case backendAssignment client of
         (processManaged, groupLeaderProblem) <- managedProcess processHandle
         mapM_ (\value -> mapM_ (logMessage value "group-leadership-unverified") groupLeaderProblem) client.reviewSessionLog
         connection <- newReviewConnection identifier inputHandle processHandle processManaged
-        -- The thread this connection's stream is on, once its provider has
-        -- named it. Held beside the connection rather than on it because it
-        -- is the reader loops' own state: both of them attribute what they
-        -- read to it, and only they ever write it.
-        streamThread <- newIORef Nothing
+        -- What this connection's two readers share. Held beside the
+        -- connection rather than on it because it is the reader loops' own
+        -- state, and in one place because they use it together: see
+        -- 'StreamAttribution'.
+        attribution <- newMVar (StreamAttribution Nothing [])
         initialized <- completeHandshake client connection outputHandle
         case initialized of
           Nothing -> abandonConnection connection (sentenceLabel <> " initialization timed out")
           Just (Left message) -> abandonConnection connection message
           Just (Right ()) -> do
             markConnectionReadersStarted connection
-            void (forkIO (readProviderOutput client connection streamThread outputHandle >> putMVar connection.connectionOutputDone ()))
-            void (forkIO (readProviderErrors client connection streamThread errorHandle >> putMVar connection.connectionErrorDone ()))
+            void (forkIO (readProviderOutput client connection attribution outputHandle >> putMVar connection.connectionOutputDone ()))
+            void (forkIO (readProviderErrors client connection attribution errorHandle >> putMVar connection.connectionErrorDone ()))
             void (forkIO (watchServerProcess client connection))
             attached <- attachConnection client.reviewConnections connection
             if attached
@@ -959,8 +958,8 @@ sendValue client connection value = do
 -- The protocol is read once, here, rather than per line: which decoder a
 -- connection uses is fixed when it is spawned, and a dispatch inside the
 -- loop would suggest it could change mid-stream.
-readProviderOutput :: ReviewClient -> ReviewConnection -> IORef (Maybe ReviewThreadId) -> Handle -> IO ()
-readProviderOutput client connection streamThread outputHandle = do
+readProviderOutput :: ReviewClient -> ReviewConnection -> MVar StreamAttribution -> Handle -> IO ()
+readProviderOutput client connection attribution outputHandle = do
   result <- try (forever readOne) :: IO (Either IOException ())
   case result of
     Left exception -> do
@@ -974,38 +973,84 @@ readProviderOutput client connection streamThread outputHandle = do
         Right wireMessage -> handleWireMessage client connection wireMessage
       StreamJsonProtocol -> \line -> case decodeStreamRecord line of
         Left detail -> emitProtocolWarning client (streamDiagnostic client detail)
-        Right record -> handleStreamRecord client connection streamThread record
+        Right record -> handleStreamRecord client connection attribution record
     readOne = do
       strictLine <- ByteString.hGetLine outputHandle
       mapM_ (\sessionLog -> logRawLine sessionLog "stdout" strictLine) client.reviewSessionLog
       interpret (LazyByteString.fromStrict strictLine)
 
-readProviderErrors :: ReviewClient -> ReviewConnection -> IORef (Maybe ReviewThreadId) -> Handle -> IO ()
-readProviderErrors client connection streamThread errorHandle = do
-  result <- try (forever readOne) :: IO (Either IOException ())
-  case result of
-    Left _ -> pure ()
-    Right () -> pure ()
+-- | Read one connection's stderr to its end, reporting each line against
+-- the thread it belongs to and releasing whatever is still waiting for a
+-- thread when the stream ends.
+readProviderErrors :: ReviewClient -> ReviewConnection -> MVar StreamAttribution -> Handle -> IO ()
+readProviderErrors client connection attribution errorHandle = do
+  _ <- try (forever readOne) :: IO (Either IOException ())
+  releaseHeldDiagnostics client connection attribution
   where
     readOne = do
       strictLine <- ByteString.hGetLine errorHandle
       mapM_ (\sessionLog -> logRawLine sessionLog "stderr" strictLine) client.reviewSessionLog
-      let line = LazyByteString.fromStrict strictLine
-      threadId <- diagnosticThread connection streamThread
-      client.reviewEventSink (ReviewOutput threadId DiagnosticOutput (decodeLine line))
+      reportDiagnostic client connection attribution (decodeLine (LazyByteString.fromStrict strictLine))
 
--- | The thread a connection's stderr is reported against.
+-- | What this connection's two readers share: the thread its provider has
+-- named, and the diagnostics that arrived before it did.
+--
+-- One 'MVar' rather than two references because the two are decided
+-- together. A stderr line either goes to the thread or waits for it, and
+-- naming the thread both fixes the identity and releases what waited; two
+-- readers deciding those separately is how a line comes to be both held and
+-- emitted, or neither.
+data StreamAttribution = StreamAttribution
+  { attributedThread :: Maybe ReviewThreadId,
+    -- | Oldest first, as the provider wrote them.
+    heldDiagnostics :: [Text]
+  }
+
+-- | Report one line of a connection's stderr against the thread it belongs
+-- to.
 --
 -- A process that multiplexes every thread writes its diagnostics for the
--- whole process rather than for one of them, so there is no thread to name:
--- the empty provider id no session claims reaches the transcript of nothing,
--- which is what this did before a connection had an identity at all. A
--- process serving one review thread is the opposite case — everything it
--- writes to stderr belongs to that thread — so once its stream has named the
--- thread, that is where its diagnostics go.
-diagnosticThread :: ReviewConnection -> IORef (Maybe ReviewThreadId) -> IO ReviewThreadId
-diagnosticThread connection streamThread =
-  fromMaybe (ReviewThreadId connection.connectionId "") <$> readIORef streamThread
+-- process rather than for one of them, so there is no thread to name and
+-- none to wait for: the empty provider id no session claims reaches the
+-- transcript of nothing, which is what this did before a connection had an
+-- identity at all.
+--
+-- A process serving one review thread is the opposite case — everything it
+-- writes to stderr belongs to that thread — but its two readers run
+-- concurrently, so stderr routinely arrives before the stdout record that
+-- names the thread. Reporting those early lines unattributed would show the
+-- most interesting ones, the complaints a provider makes on the way up, as
+-- notices belonging to no review. They wait instead.
+reportDiagnostic :: ReviewClient -> ReviewConnection -> MVar StreamAttribution -> Text -> IO ()
+reportDiagnostic client connection attribution line = case client.reviewBackend.backendProcessShape of
+  SharedProcess -> emitDiagnostic client (unattributedThread connection) line
+  ProcessPerThread -> do
+    named <- modifyMVar attribution $ \state -> case state.attributedThread of
+      Just threadId -> pure (state, Just threadId)
+      Nothing -> pure (state {heldDiagnostics = state.heldDiagnostics <> [line]}, Nothing)
+    mapM_ (\threadId -> emitDiagnostic client threadId line) named
+
+-- | Release the diagnostics still waiting for a thread that will now never
+-- be named, against no thread at all.
+--
+-- They were written before the provider said anything about itself, which is
+-- usually why it never did, so they are the one account of what went wrong.
+-- Unattributed is where every shared-process diagnostic goes and is strictly
+-- better than dropping them; a thread that /is/ named takes them instead,
+-- and finds nothing left here.
+releaseHeldDiagnostics :: ReviewClient -> ReviewConnection -> MVar StreamAttribution -> IO ()
+releaseHeldDiagnostics client connection attribution = do
+  held <- modifyMVar attribution (\state -> pure (state {heldDiagnostics = []}, state.heldDiagnostics))
+  mapM_ (emitDiagnostic client (unattributedThread connection)) held
+
+emitDiagnostic :: ReviewClient -> ReviewThreadId -> Text -> IO ()
+emitDiagnostic client threadId line =
+  client.reviewEventSink (ReviewOutput threadId (DiagnosticOutput client.reviewBackend.backendProvider) line)
+
+-- | The thread an unattributable diagnostic is reported against: none of
+-- them. No session claims the empty provider id.
+unattributedThread :: ReviewConnection -> ReviewThreadId
+unattributedThread connection = ReviewThreadId connection.connectionId ""
 
 -- | Turn one decoded stream-json record into what it means for this
 -- connection's review.
@@ -1018,17 +1063,31 @@ diagnosticThread connection streamThread =
 -- a start that never produced a thread, and a connection that stopped — are
 -- 'reportConnectionStopped''s, because they are things a stream stopping
 -- means rather than things it says.
-handleStreamRecord :: ReviewClient -> ReviewConnection -> IORef (Maybe ReviewThreadId) -> StreamRecord -> IO ()
-handleStreamRecord client connection streamThread record = case record of
+handleStreamRecord :: ReviewClient -> ReviewConnection -> MVar StreamAttribution -> StreamRecord -> IO ()
+handleStreamRecord client connection attribution record = case record of
   StreamIgnored -> pure ()
   StreamTurnOpened providerThreadId turnId -> do
-    let threadId = ReviewThreadId connection.connectionId providerThreadId
-    writeIORef streamThread (Just threadId)
+    (threadId, drifted, released) <- attributeTurn providerThreadId
+    -- A connection serves one review for its whole life, so the session the
+    -- provider names must be the one it named first. A later record naming a
+    -- different one is reported and disregarded rather than followed: the
+    -- review's thread identity is what every map and every session is keyed
+    -- by, and adopting a new one would carry this turn, its transcript, and
+    -- its verdict away from the review that is waiting for them, with no
+    -- pending start left to announce the new thread to anybody.
+    when drifted $
+      emitProtocolWarning
+        client
+        (streamDiagnostic client ("opened a turn on session " <> providerThreadId <> ", not the one this review is running on"))
     -- Taken rather than read: the review has arrived, and an entry left
     -- behind would let this connection's death report a review that is
     -- already running as one that never started.
     opening <- takePendingThreadStarts connection
     mapM_ (announceThread threadId) opening
+    -- After the session exists and before its first turn: these were written
+    -- on the way up, and they belong to this review's transcript rather than
+    -- to a notice about nothing.
+    mapM_ (emitDiagnostic client threadId) released
     modifyMVar_ client.reviewActiveTurns (pure . Map.insert threadId turnId)
     client.reviewEventSink (ReviewTurnStarted threadId turnId)
   StreamDelta outputKind text ->
@@ -1039,6 +1098,15 @@ handleStreamRecord client connection streamThread record = case record of
       StreamVerdict text result -> ReviewTurnCompleted threadId TurnSucceeded Nothing (Just (text, result))
       StreamTurnFailure detail -> ReviewTurnCompleted threadId TurnFailed (Just (streamDiagnostic client detail)) Nothing
   where
+    -- The thread this turn runs on, whether the session drifted, and the
+    -- diagnostics that were waiting for a thread to belong to. Decided in one
+    -- step under the connection's own lock, so the stderr reader cannot slip
+    -- a line into a list this has already taken.
+    attributeTurn sessionId = modifyMVar attribution $ \state -> case state.attributedThread of
+      Just held -> pure (state, (held, held.reviewThreadProvider /= sessionId, []))
+      Nothing ->
+        let named = ReviewThreadId connection.connectionId sessionId
+         in pure (StreamAttribution (Just named) [], (named, False, state.heldDiagnostics))
     announceThread threadId issueNumber = do
       modifyMVar_ client.reviewThreadIssues (pure . Map.insert threadId issueNumber)
       client.reviewEventSink (ReviewThreadCreated issueNumber threadId)
@@ -1046,7 +1114,7 @@ handleStreamRecord client connection streamThread record = case record of
     -- already named. One that arrives before it is a protocol warning rather
     -- than an event attributed to a guess.
     onNamedThread what action = do
-      named <- readIORef streamThread
+      named <- attributedThread <$> readMVar attribution
       case named of
         Just threadId -> action threadId
         Nothing -> emitProtocolWarning client (streamDiagnostic client ("sent " <> what <> " before naming its session"))

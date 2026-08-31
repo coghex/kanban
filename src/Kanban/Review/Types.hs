@@ -113,7 +113,19 @@ data ReviewApproval =
     }
   deriving stock (Eq, Show)
 
-data ReviewOutputKind = AgentOutput | ReasoningOutput | CommandOutput | DiagnosticOutput
+data ReviewOutputKind
+  = AgentOutput
+  | ReasoningOutput
+  | CommandOutput
+  | -- | A line the provider wrote to its stderr, naming the provider that
+    -- wrote it.
+    --
+    -- The only output kind that identifies a program rather than a part of a
+    -- conversation, and so the only one that carries who. Its rendering is a
+    -- bracketed tag beside text the operator is meant to read as coming from
+    -- somewhere; a tag compiled in here would name the wrong somewhere as
+    -- soon as a second backend existed.
+    DiagnosticOutput ProviderName
   deriving stock (Eq, Show)
 
 data ReviewTurnOutcome = TurnSucceeded | TurnFailed | TurnInterrupted
