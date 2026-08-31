@@ -22,11 +22,11 @@ the last Codex-only document gap; and issues #393, #410, #427, #430, #462, and
 $push-docs documentation-landing workflow, the $backlog-review backlog audit,
 the $project-review history audit, the $drain-prs drainer control surface, the
 $fix approved-pull-request workflow, the $finalize manual merge fallback, which
-had no Codex copy at all before that slice rendered one, and — issue #575, the
-seventh of the arc's eight, leaving only $autosolve — the $janitor pipeline
-housekeeping audit.
+had no Codex copy at all before that slice rendered one, the $janitor pipeline
+housekeeping audit, and — issue #576, the eighth and last of that arc — the
+$autosolve autonomous solve-and-review loop.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all twenty-three); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
+(all twenty-four); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
 own Haskell code spawns by name (the five above). Every later set is user- or
 daemon-invoked and deliberately excluded from that parity pinning; the
 breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
@@ -225,6 +225,20 @@ FINALIZE_SKILL_NAMES = {"finalize"}
 # tools/test_janitor_workflow.py.
 JANITOR_SKILL_NAMES = {"janitor"}
 
+# The autonomous solve-and-review loop vendored by issue #576, slice VEND-8,
+# and the eighth and last of the arc's commands: with it every personal copy of
+# a Kanban workflow is retired. Rendered from
+# tools/command_sources/autosolve.md the way the nine sets above are, and like
+# them user-invoked and excluded from Haskell name parity -- Kanban's own
+# Haskell code spawns $solve and $pr-review directly and never this loop over
+# them. It is its own category rather than another solve or review name for the
+# reason it is excluded from parity at all: it performs neither job itself. It
+# delegates the implementation to $solve and the verdict to $pr-review and
+# $pr-rereview, and what it contributes is the loop and the prohibitions --
+# never review, label, merge, or finalize the pull request this session
+# authored. Its behavioral assertions live in tools/test_autosolve_workflow.py.
+AUTOSOLVE_SKILL_NAMES = {"autosolve"}
+
 # What a Codex installation must actually discover under skills/.
 EXPECTED_SKILL_NAMES = (
     HASKELL_PARITY_SKILL_NAMES
@@ -238,6 +252,7 @@ EXPECTED_SKILL_NAMES = (
     | PULL_REQUEST_FIX_SKILL_NAMES
     | FINALIZE_SKILL_NAMES
     | JANITOR_SKILL_NAMES
+    | AUTOSOLVE_SKILL_NAMES
 )
 
 # Directories under skills/ that ship helper scripts and NO SKILL.md, so Codex
@@ -595,7 +610,8 @@ class SkillDiscoveryTests(unittest.TestCase):
             | DRAINER_SKILL_NAMES
             | PULL_REQUEST_FIX_SKILL_NAMES
             | FINALIZE_SKILL_NAMES
-            | JANITOR_SKILL_NAMES,
+            | JANITOR_SKILL_NAMES
+            | AUTOSOLVE_SKILL_NAMES,
         )
         self.assertEqual(DRAFTING_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
         self.assertEqual(ROADMAP_SKILL_NAMES & DRAFTING_SKILL_NAMES, set())
@@ -664,6 +680,28 @@ class SkillDiscoveryTests(unittest.TestCase):
                 | DRAINER_SKILL_NAMES
                 | PULL_REQUEST_FIX_SKILL_NAMES
                 | FINALIZE_SKILL_NAMES
+            ),
+            set(),
+        )
+        # The autosolve loop is disjoint from every other category AND from the
+        # Haskell parity set, which the nine checks above do not need to say:
+        # it is the one vendored skill whose name could plausibly belong to the
+        # set Kanban's own CLI spawns, since $solve is in that set and this
+        # wraps it.
+        self.assertEqual(
+            AUTOSOLVE_SKILL_NAMES
+            & (
+                HASKELL_PARITY_SKILL_NAMES
+                | DRAFTING_SKILL_NAMES
+                | DOCUMENT_SKILL_NAMES
+                | ROADMAP_SKILL_NAMES
+                | PUBLICATION_SKILL_NAMES
+                | BACKLOG_SKILL_NAMES
+                | PROJECT_REVIEW_SKILL_NAMES
+                | DRAINER_SKILL_NAMES
+                | PULL_REQUEST_FIX_SKILL_NAMES
+                | FINALIZE_SKILL_NAMES
+                | JANITOR_SKILL_NAMES
             ),
             set(),
         )
@@ -2092,7 +2130,7 @@ class ManifestListingParityTests(unittest.TestCase):
     without describing it fails here.
 
     Parity is per field, not pooled: an installation that reads only the
-    short description must see the same twenty-three as one that reads only the
+    short description must see the same twenty-four as one that reads only the
     keywords. Non-workflow metadata -- the `kanban` keyword, the display
     name, developer, category, and capabilities -- is not a listing and is
     left alone.

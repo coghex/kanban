@@ -316,6 +316,37 @@ COMMAND_SOURCES = (
             "carried is body prose or is deliberately dropped."
         ),
     ),
+    CommandSource(
+        name="autosolve",
+        source="tools/command_sources/autosolve.md",
+        claude_commands_dir=CLAUDE_COMMANDS_DIR,
+        codex_skills_dir=CODEX_SKILLS_DIR,
+        note=(
+            "VEND-8, and the last of the arc's eight commands: with it every "
+            "personal copy is retired. It is the one entry whose body runs "
+            "other vendored workflows as its own steps rather than merely "
+            "naming them -- {{cmd:solve}} for the implementation, then "
+            "{{cmd:pr-review}} and {{cmd:pr-rereview}} for up to five review "
+            "rounds, handing the merge back through {{cmd:finalize}} -- which "
+            "is why it is the critical path within phase 3 and the most "
+            "exposed to the others' names changing. Unusually "
+            "for this arc D-7 resolved it in the Claude copy's favour: the "
+            "delegated-sub-step preamble, the override of solve's own stop "
+            "condition, the --self-review override and the own-brand "
+            "reviewers failure case all live only there, and all four now ship "
+            "in both brands. Its reconciliation against the repository is the "
+            "worktree root, respelled ${WORKTREES_ROOT:-$HOME/worktrees} as "
+            "the contract and both solve assets spell it, and the coordinator "
+            "guard issue #303 added, which makes the override "
+            "belt-and-braces rather than the only thing preventing a "
+            "same-brand publication. Every assertion that depends on which "
+            "brand is solving -- the origin marker, the reviewer it routes "
+            "to, the dry run's route and the published marker's reviewers "
+            "value -- is a brand block, because a Codex render telling its "
+            "reader to expect pr-origin:claude would route the whole loop to "
+            "the wrong reviewer."
+        ),
+    ),
 )
 
 
