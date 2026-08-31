@@ -866,11 +866,20 @@ its way past. The states:
 **Tracker state is reported beside those three, never instead of them.** A
 document state says what became of the cursor; it says nothing about the issues,
 labels, comments, and epic edits the run had already made by then, and those are
-the part nobody can undo. So every unpublished outcome of a run that acquired a
+the part nobody can undo. So every unpublished failure of a run that acquired a
 transaction under §9.6 also reports whether acquisition succeeded, the
 transaction state, each planned tracker step and whether it is planned,
 ambiguous, or confirmed, every confirmed tracker identity, and the one recovery
 action that is permitted next.
+
+**The scope of that report is failure, not the absence of a publication.** The
+ordinary recorded `not-published` result is not a failure — it is §9.2's empty
+lane working as designed — and §9.6 resolves its transaction from the applied
+local document, so nothing is left outstanding and that run closes quietly. What
+decides between the two is the resolution rather than the publication: a
+transaction that could not resolve is an unpublished failure by this rule
+however ordinary the helper's result was, and reports every one of the states
+above.
 
 A failed publication leaves the mutation recoverable and never diverges the
 checkout's default branch from its remote — the PR drainer fast-forwards that

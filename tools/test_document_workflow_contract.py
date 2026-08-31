@@ -482,6 +482,19 @@ CONTRACT_STATEMENTS = {
     "transaction-failure-report-adds-tracker-state": (
         "Tracker state is reported beside those three, never instead of them"
     ),
+    # Issue #577 round 1. The rule above used to reach "every unpublished
+    # outcome", which includes the recorded not-published result the same
+    # section now closes quietly — the contract requiring and forbidding the
+    # same report. What separates them is the transaction resolving, not the
+    # publication happening, so the boundary is pinned rather than left to the
+    # word "failure" carrying it alone.
+    "transaction-report-scope-is-failure": (
+        "The scope of that report is failure, not the absence of a publication"
+    ),
+    "transaction-unresolved-record-is-a-failure": (
+        "a transaction that could not resolve is an unpublished failure by this "
+        "rule however ordinary the helper's result was"
+    ),
     # Issue #458: §10's arc-apparatus lifecycle. Every substantive clause is
     # pinned on its own key rather than as one paragraph-sized fragment,
     # because a §10 that still discusses the apparatus somewhere proves
