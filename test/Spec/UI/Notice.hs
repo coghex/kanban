@@ -24,7 +24,17 @@ import Kanban.Drainer
 import Kanban.UI.Board (drawFooter)
 import Kanban.UI.Events (IncidentsAction (..), applyIncidentsAction)
 import Kanban.UI.Notice
+import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
+import Kanban.Solve (ResumeProvenance (..))
 import Kanban.UI.PullRequest (directMergeResultApplied, drainerToggleApplied, drainerTogglePress)
+import Kanban.UI.Worker (workerSessionEnsured)
+import Kanban.Worker
+  ( PullRequestWorkerTask (..),
+    WorkerDescriptor (..),
+    WorkerId (..),
+    WorkerSpec (..),
+    WorkerTask (..),
+  )
 import Kanban.GitHub (GitHubResult (..))
 import Kanban.UI.Reconcile (boardRefreshOutcomeApplied, refreshSuccessNotice, usageRefreshApplied)
 import Kanban.UI.Refresh (historyPausedNotice)
@@ -244,6 +254,26 @@ categorySpec = describe "settled categories" $ do
     -- exactly one outcome.
     let again = settleAt 40 (startupReportApplied published (directMergeCarryApplied published (boardRefreshOutcomeApplied outcome (at 40 published))))
     shownNotice again `shouldBe` Just successNotice
+
+  it "keeps the startup diagnostics when a persisted worker is discovered before the first publication" $ do
+    launched <- launchedWithDiagnostics
+    -- Worker discovery is forked at startup, so a recovered worker whose
+    -- pull request the empty startup board cannot show answers while the
+    -- fetch is still running. Its refusal composes onto the startup line —
+    -- through the very transition the discovery event runs — and the
+    -- diagnostics still ride to the first publication.
+    let loading = launched {appBoardFreshness = Loading}
+        discovered = settleAt 2 (workerSessionEnsured discoveredWorker (at 2 loading))
+        absentRefusal = "Persistent worker for PR #951 is running, but the PR is absent from the cached board; press u to refresh"
+    shownNotice discovered `shouldBe` Just (startupComposed <> " · " <> absentRefusal)
+    armed discovered `shouldBe` Nothing
+    shownNotice (settleAt 15 discovered) `shouldBe` Just (startupComposed <> " · " <> absentRefusal)
+    let outcome = BoardRefreshCompleted (Right (GitHubResult (RepoSnapshot [] [] epoch) []))
+        successNotice = refreshSuccessNotice (RepoSnapshot [] [] epoch) []
+        atPublish = at 20 discovered
+        published = settleAt 20 (startupReportApplied atPublish (directMergeCarryApplied atPublish (boardRefreshOutcomeApplied outcome atPublish)))
+    shownNotice published `shouldBe` Just (successNotice <> " · " <> startupDiagnostics)
+    armed published `shouldBe` Just (shownInstance published, deadlineAt 20)
 
   it "retires the diagnostics at the first publication once anything else ended their line" $ do
     launched <- launchedWithDiagnostics
@@ -490,3 +520,34 @@ durableSpec = describe "durable state" $ do
 runningObservation :: DrainerObservation
 runningObservation =
   DrainerObservation (DrainerStatus DrainerOn "on" DrainerServiceRunning Nothing) (Just [])
+
+-- | A recovered persistent pull-request worker, as discovery hands one to
+-- 'workerSessionEnsured'.
+discoveredWorker :: WorkerDescriptor
+discoveredWorker =
+  WorkerDescriptor
+    { workerDescriptorSpec =
+        WorkerSpec
+          { workerId = WorkerId "worker-1",
+            workerRepository = Repository "/tmp/example-project" "example" "project",
+            workerTask = PullRequestWorkerTaskKind (PullRequestWorkerTask 951 PullRequestClaude PullRequestReview),
+            workerExistingSession = Nothing,
+            workerExistingLogPath = Nothing,
+            workerResumeProvenance = ResumeAnswer,
+            workerUserMessage = "",
+            workerParent = Nothing,
+            workerCreatedAt = epoch,
+            workerMaxRuntimeSeconds = 60,
+            workerConfigPath = Nothing,
+            workerWorkflowConfig = defaultWorkflowConfig,
+            workerAssignment = Nothing
+          },
+      workerDescriptorSpecPath = "/tmp/worker-1.spec.json",
+      workerDescriptorRosterPath = "/tmp/worker-1.roster.toml",
+      workerDescriptorEventPath = "/tmp/worker-1.events.jsonl",
+      workerDescriptorStatePath = "/tmp/worker-1.state.json",
+      workerDescriptorAckPath = "/tmp/worker-1.ack",
+      workerDescriptorLeasePath = "/tmp/worker-1.lease",
+      workerDescriptorLeaseOwnerPath = "/tmp/worker-1.lease.owner",
+      workerDescriptorPendingTerminationPath = "/tmp/worker-1.terminating"
+    }

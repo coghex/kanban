@@ -68,6 +68,10 @@ ACTIVE_SITES = {
     # The usage results and the completed-cache warning, each composed over
     # an outstanding startup line rather than allowed to replace it.
     "src/Kanban/UI/Reconcile.hs": 3,
+    # A discovered worker's absent-item refusals, composed over an
+    # outstanding startup line for the same reason: discovery is forked at
+    # startup and routinely answers before the first publication.
+    "src/Kanban/UI/Worker.hs": 2,
 }
 
 
