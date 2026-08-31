@@ -8,7 +8,7 @@ planner turns, and the existing workflow authorities underneath. The operator
 can give it one target, an explicit batch, or a broad instruction, leave,
 return later, and see what ran, what stopped, and what needs a decision.
 
-Design state: `ready for issue processing`
+Design state: `exploring`
 
 Status legend: `[ ]` unprocessed · `[#N]` linked to issue N · `[no-issue]`
 reviewed and deliberately not tracked separately · `[deferred]` blocked on a
@@ -118,6 +118,38 @@ concrete precondition
   straight to `master` rather than through a pull request. Commit `2e2003e`
   added that row together with the matching `config.toml.example` and
   source-distribution exclusion entries when it landed this document.
+
+### Why the runner became its own arc
+
+Processing reached `SAG-9` on 2026-08-31 and stopped: the slice no longer fit
+one reviewable pull request, so it was returned here and promoted to its own
+arc rather than filed. The evidence, all measured against master `8983a33`:
+
+- Its scope carried fourteen clauses and its acceptance signals ten distinct
+  assertions, spanning a service runtime, an installer, service-manager
+  integration, a supervisor/scheduler split, arbitration, cascading
+  termination, recovery, status and incidents, log sealing, deadline
+  enforcement, notifications, scheduling policy, capacity retry, and upgrade
+  drain.
+- This repository has built two comparable services already, and each needed a
+  whole arc. Epic #318 — a simpler service than this one — was split into six
+  children. Three of them are subsumed by `SAG-9` wholesale, and their merged
+  pull requests measure `#359` at +4,865 across 2 files, `#363` at +5,156/−71
+  across 7 files, and `#364` at +3,634/−249 across 17 files: roughly 13,700
+  added lines for the part of `SAG-9` that has a precedent, before any of its
+  novel concerns.
+- The arc's own reviewer could not read the result. `review_pr.py`'s
+  instructions state that its JSON payload is authoritative for "the full patch
+  (`diff`)", so the whole diff is embedded in the reviewer's input, and a pull
+  request of that size risks exceeding the provider input limit outright.
+
+Splitting at implementation time was not an alternative: `/solve` produces one
+pull request per issue, so the decomposition has to be a tracker decision with
+dependency ordering rather than an improvisation by a solver.
+
+The runner arc keeps this document's `SAG-9` outcome and acceptance signals as
+its contract, and this arc's `Done when` is unchanged — epic #591 stays open
+until the runner arc completes.
 
 ## Desired experience
 
@@ -1449,13 +1481,17 @@ unless their typed contract exposes an override.
   observing its eligible registered children after Kanban exits, and a later
   dashboard replays the complete durable session tree and follows its live
   tail.
-- **Scope:** Per-repository mission controller service; installer/discovery;
-  service-manager integration and outer containment; lightweight supervisor and
-  scheduler split; mission arbitration and leases; start/wake, idle/wait, stop,
-  crash, and upgrade behavior; structured descendant ownership and cascading
-  termination; interrupted/manual recovery; durable status/incidents;
-  event-reader reattachment; session-log sealing; deadline enforcement; desktop
-  notification adapter; no-TUI and restart fixtures.
+> **Delivered by its own arc.** This slice outgrew one reviewable pull request
+> and is designed in `docs/mission_runner_design.md`. Processing this entry
+> links it to that arc's umbrella epic rather than to a child issue; the
+> outcome and acceptance signals below remain the contract that arc must meet.
+> The evidence is recorded under "Why the runner became its own arc" above.
+
+- **Scope:** Delegated in full to the mission runner arc: the per-repository
+  service and its supervisor/scheduler runtime, installation and discovery,
+  Kanban-side monitoring and control, descendant ownership and cascading
+  termination, scheduling and capacity and upgrade policy, and that arc's own
+  operating documentation.
 - **Phase:** 5 — persistent execution.
 - **Depends on:** `SAG-1`, `SAG-2`, `SAG-3`.
 - **Ordering:** `critical path`.
@@ -1486,8 +1522,12 @@ unless their typed contract exposes an override.
   archive/delete controls, notification opt-in/error state, board-action reuse,
   help/key contract, responsive rendering, and golden/event tests.
 - **Phase:** 6 — operator surface.
-- **Depends on:** `SAG-9`; issue #421 is closed and the complete key/layout
-  surface was re-audited on 2026-08-21.
+- **Depends on:** the mission runner arc's `RUN-1` (the service), `RUN-3`
+  (Kanban-side discovery, monitoring, and control), and `RUN-4` (the
+  `interrupted` state its recovery hotkey acts on) — not that arc in full, so
+  scheduling policy, capacity waiting, upgrade drain, and the notification
+  adapter do not block the console. Issue #421 is closed and the complete
+  key/layout surface was re-audited on 2026-08-21.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-1`, `D-4`, `D-9`, `D-12`, `D-15`, `D-17`,
   `D-18`, `D-21`, `D-23`, `D-24`, `D-30`.
@@ -1510,8 +1550,8 @@ unless their typed contract exposes an override.
   approval batch/service integration; multi-autosolve dispatch; batch UI
   summaries and tests.
 - **Phase:** 7 — batch orchestration.
-- **Depends on:** `SAG-3`, `SAG-9`, `SAG-4`; consume rather than duplicate epic #318's
-  canonical queue/service authority.
+- **Depends on:** `SAG-3`, `SAG-4`, and the mission runner arc's `RUN-1`;
+  consume rather than duplicate epic #318's canonical queue/service authority.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-3`, `D-5`, `D-6`, `D-7`, `D-8`, `D-10`,
   `D-13`, `D-19`, `D-20`, `D-22`, `D-26`, `D-27`.
