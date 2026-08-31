@@ -223,9 +223,9 @@ around the rendering boundary.
 
 ## Design
 
-The design below is a proposal pending the open questions. It records the
-recommended ownership boundaries so each foundation can land independently;
-it is not yet a user-approved final behavior contract.
+The design below records the approved behavior and ownership boundaries. Each
+foundation can land independently, while the decisions and delivery plan below
+are the contract that issue drafting and implementation must preserve.
 
 ### Exact-frame capture
 
@@ -290,7 +290,7 @@ for example `TextSelection`. Its pure core contains:
 - the selection mode (`Linear`, `Word`, or `RenderedLine`) and whether the
   result is active, completed, or cleared.
 
-The initial proposed geometry is conventional linear screen selection:
+The geometry is conventional linear screen selection:
 
 - a single row selects the columns between anchor and head;
 - the first and last rows are partial when the range spans rows;
@@ -300,8 +300,8 @@ The initial proposed geometry is conventional linear screen selection:
   right of the last selected nonblank atom; and
 - selected rows are joined with `\n`, with no additional final newline.
 
-Those whitespace rules remain proposals until tested against the reference
-terminal behavior and accepted. Word and line ranges use the same atom mask,
+Those whitespace rules are the accepted contract and must be tested against
+the reference terminal behavior. Word and line ranges use the same atom mask,
 highlight, and extraction path as a linear range; only construction of the
 range differs. A word is the maximal adjacent run in one of three classes:
 Unicode letters/marks/digits plus underscore, whitespace, or punctuation and
@@ -388,7 +388,7 @@ extra validation and has no consume branch. Ordinary intent dispatch still
 re-resolves identity against current application state, so a target that
 vanished remains the existing safe no-op rather than acting on its replacement.
 
-The proposed highlight is reverse video applied as an attribute override while
+The selection highlight is reverse video applied as an attribute override while
 preserving the glyph and all unrelated URL/style data the terminal needs. It
 must remain visible under `--color never`; reverse video is a structural
 selection indication rather than a color promise. Exact style is still subject
@@ -407,7 +407,7 @@ captured frame geometry nor displaces an ordinary notice.
 
 ### Clipboard boundary
 
-The recommended primary transport is OSC 52: UTF-8 selected text, base64
+The primary transport is OSC 52: UTF-8 selected text, base64
 encoded, written through the active Vty output. This reaches the local terminal
 emulator's OS clipboard even when Kanban runs through SSH, which a host-local
 `pbcopy`, `wl-copy`, or `xclip` cannot do. The encoder and writer should be

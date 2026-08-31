@@ -123,9 +123,10 @@ Measured against master `8983a33`.
 
 ### Not yet established
 
-- Whether the runner's discovery record should be a third `ManagedComponent`
-  or something the mission store itself carries is an implementation question
-  for `RUN-2`, not a product decision.
+- The exact runner discovery-record schema and component-specific path spelling
+  are implementation questions for `RUN-2`. Its ownership is settled: it is a
+  third managed component resolved through `ManagedPaths` and
+  `tools/kanban_config.py`, not a field in the mission store.
 - The exact incident vocabulary. `RUN-1` should follow `ApprovalService`'s
   `ApprovalIncident`/`ApprovalSeverity` shape rather than invent one, but the
   specific incident kinds fall out of implementation.
@@ -347,7 +348,7 @@ rewrite. The runner installs through `tools/service_manager.py`'s existing
 `ServiceManagerBackend` boundary, resolves its discovery record through the one
 per-language resolution point, transitions through `Kanban.ServiceProcess`, and
 follows the drainer's and approval service's status/incident shape. A third
-managed job adds a namespace and a component, not a second mechanism.
+managed job adds a namespace and a `ManagedComponent`, not a second mechanism.
 
 ### D-14. The runner installs per repository, and the host-wide budget is a later arc's
 
@@ -445,7 +446,7 @@ admission budget is deferred to the multi-repository arc.
 - **Phase:** 2 — installation.
 - **Depends on:** `RUN-1`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-13`.
+- **Relevant decisions:** `D-13`, `D-14`.
 - **Acceptance signals:** Install, reinstall, relocate, stale-record repair, and
   uninstall all succeed on launchd and on systemd user units; the record is
   found where an existing installation already sits, XDG spelling probed first;
@@ -534,7 +535,7 @@ admission budget is deferred to the multi-repository arc.
 - **Depends on:** every implemented slice; documentation for a deferred slice
   stays in this design rather than claiming shipped behavior.
 - **Ordering:** `critical path` for epic completion.
-- **Relevant decisions:** `D-1` through `D-13`.
+- **Relevant decisions:** `D-1` through `D-14`.
 - **Acceptance signals:** Documented commands and paths match tested behavior;
   every executable and durable record this arc adds has an authority and
   ownership entry; an operator can distinguish stopped, idle, waiting,
