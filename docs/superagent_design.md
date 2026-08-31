@@ -18,7 +18,7 @@ concrete precondition
 
 - [x] EPIC. Add durable Mission Control for project agents — [#591]
 - [x] SAG-1. Define the durable mission model and store — [#592]
-- [ ] SAG-2. Expose a typed workflow action registry
+- [x] SAG-2. Expose a typed workflow action registry — [#593]
 - [ ] SAG-10. Make issue review and revision runner-owned
 - [ ] SAG-3. Run and recover one mission outside the board selection
 - [ ] SAG-9. Keep active missions advancing without the dashboard
