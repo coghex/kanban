@@ -12,7 +12,9 @@ import qualified Data.Text
 import qualified Graphics.Vty as Vty
 import Kanban.Domain
 import Kanban.Review
-  ( ReviewApproval (..),
+  ( ConnectionId (..),
+    ReviewApproval (..),
+    ReviewThreadId (..),
     ReviewChoice (..),
     ReviewQuestion (..),
     ReviewQuestionKind (..),
@@ -26,6 +28,7 @@ import Kanban.UI.Reconcile (reconcileReviewSessions)
 import Kanban.UI.Review
   (
     forcedToNormalBy,
+    markReviewSessionsDisconnected,
     numberedChoicePrompt,
     reviewDigitActionFor, ReviewCancelAction (..),
     ReviewDigitAction (..),
@@ -93,10 +96,12 @@ import Kanban.UI.Types
 import Kanban.Worker (WorkerId (..))
 import Spec.Support.App (testAppState, testReviewSession)
 import Kanban.UI.Session (reviewSessionMode)
+import Spec.Support.Expect (shouldMention, shouldNotMention)
 import Spec.Support.Fixtures
   ( baseIssue,
     basePullRequest,
     fixtureBoard,
+    fixtureReviewThread,
     fixtureStandaloneEntry,
     fixtureTracker,
     fixtureTrackedEntry,
@@ -106,7 +111,7 @@ import Test.Hspec
 spec :: Spec
 spec = do
   describe "review overlay digit dispatch" $ do
-    let requestId = ReviewRequestId (String "req-1")
+    let requestId = ReviewRequestId (ConnectionId 0) (String "req-1")
         choices = [ReviewChoice "keep" "Keep compatibility" "Preserve callers", ReviewChoice "break" "Break compatibility" ""]
         textQuestion allowOther =
           ReviewQuestion
@@ -194,7 +199,7 @@ spec = do
                     reviewSessionPending =
                       Just
                         ( PendingReviewQuestion
-                            (ReviewRequestId "req-1")
+                            (ReviewRequestId (ConnectionId 0) "req-1")
                             ReviewQuestion
                               { reviewQuestionId = "scope",
                                 reviewQuestionHeader = "SCOPE",
@@ -297,8 +302,8 @@ spec = do
     -- pure routing extracted from 'cancelReviewSession' so each branch is
     -- unconditionally covered without an 'EventM' harness.
     it "routes a ready app-server turn to the interrupt-turn action, unchanged" $ do
-      resolveReviewCancelAction True (Just "thread-1") (Just "turn-1") IssueRevision ReviewRunning False
-        `shouldBe` ReviewCancelInterruptTurn "thread-1" "turn-1"
+      resolveReviewCancelAction True (Just (fixtureReviewThread "thread-1")) (Just "turn-1") IssueRevision ReviewRunning False
+        `shouldBe` ReviewCancelInterruptTurn (fixtureReviewThread "thread-1") "turn-1"
       resolveReviewCancelAction False Nothing Nothing IssueRevision ReviewStarting False
         `shouldBe` ReviewCancelNoActiveTurn
 
@@ -315,6 +320,68 @@ spec = do
         `shouldBe` ReviewCancelNotRunning
       resolveReviewCancelAction False Nothing Nothing InitialReview ReviewStarting False
         `shouldBe` ReviewCancelStillStarting
+
+  -- MODEL-14 requirement 5: a connection that ends is reported against the
+  -- review threads it served and never against threads served by another.
+  -- With one shared connection that is every session, which is what a Codex
+  -- backend still produces; with one of several per-thread connections it is
+  -- only the sessions on that connection, and the rest keep running.
+  describe "the sessions an ended provider connection terminalizes" $ do
+    let sessionOn threadId phase =
+          newAgentSession
+            0
+            phase
+            ""
+            Nothing
+            (ChatTranscript "" "" "")
+            ReviewDetail
+              { reviewSessionIssue = baseIssue 151 [],
+                reviewSessionStage = IssueRevision,
+                reviewSessionThreadId = threadId,
+                reviewSessionTurnId = Nothing,
+                reviewSessionPending = Nothing,
+                reviewSessionUndelivered = []
+              }
+        onFirst = Just (ReviewThreadId (ConnectionId 0) "thread-1")
+        onSecond = Just (ReviewThreadId (ConnectionId 1) "thread-1")
+        sessions =
+          Map.fromList
+            [ (1, sessionOn onFirst ReviewRunning),
+              (2, sessionOn onSecond ReviewRunning),
+              (3, sessionOn Nothing ReviewStarting),
+              (4, sessionOn onFirst ReviewFinished)
+            ]
+        phasesAfter ended = Map.map (.sessionPhase) (markReviewSessionsDisconnected ended "backend gone" sessions)
+
+    it "terminalizes every live session when the whole client stopped" $
+      phasesAfter Nothing
+        `shouldBe` Map.fromList
+          [ (1, ReviewFailed),
+            (2, ReviewFailed),
+            (3, ReviewFailed),
+            -- Already settled, so untouched: a finished revision is not
+            -- retroactively a disconnection.
+            (4, ReviewFinished)
+          ]
+
+    it "terminalizes only the sessions the ended connection was serving" $
+      phasesAfter (Just (ConnectionId 0))
+        `shouldBe` Map.fromList
+          [ (1, ReviewFailed),
+            -- Still running on a connection that is still up. Reporting this
+            -- one is the client-wide failure requirement 5 forbids.
+            (2, ReviewRunning),
+            -- No thread yet, so it belongs to no connection and this
+            -- connection's end says nothing about it.
+            (3, ReviewStarting),
+            (4, ReviewFinished)
+          ]
+
+    it "names the ended connection in the transcript of the sessions it claimed" $ do
+      let disconnected = markReviewSessionsDisconnected (Just (ConnectionId 1)) "backend gone" sessions
+          transcriptOf key = maybe "" (\session -> session.sessionTranscript.compactTranscript) (Map.lookup key disconnected)
+      transcriptOf 2 `shouldMention` "backend gone"
+      transcriptOf 1 `shouldNotMention` "backend gone"
 
   describe "review session liveness, quit protection, and the x gate" $ do
     -- issue #151: the processes overlay, the `x` gate that dispatches on
@@ -361,7 +428,7 @@ spec = do
               hasProcess <- [False, True],
               stage <- allStages,
               phase <- allPhases,
-              threadId <- [Nothing, Just "thread-1"],
+              threadId <- [Nothing, Just (fixtureReviewThread "thread-1")],
               turnId <- [Nothing, Just "turn-1"]
           ]
         -- The issue's rule restated independently of the code under test.
@@ -398,7 +465,7 @@ spec = do
       wrongAnswers quitBlocked `shouldBe` []
 
     it "keeps a waiting revision live and routes x to its interruptible turn" $ do
-      let waiting = (True, False, IssueRevision, ReviewWaiting, Just "thread-1", Just "turn-1")
+      let waiting = (True, False, IssueRevision, ReviewWaiting, Just (fixtureReviewThread "thread-1"), Just "turn-1")
           session = sessionFor waiting
       sharedLive waiting `shouldBe` True
       overlayLive waiting `shouldBe` True
@@ -419,9 +486,9 @@ spec = do
       mapM_
         (\inputs -> (inputs, sharedLive inputs, overlayLive inputs, quitBlocked inputs) `shouldBe` (inputs, False, False, False))
         [ (False, False, IssueRevision, ReviewStarting, Nothing, Nothing),
-          (False, False, IssueRevision, ReviewStarting, Just "thread-1", Just "turn-1"),
+          (False, False, IssueRevision, ReviewStarting, Just (fixtureReviewThread "thread-1"), Just "turn-1"),
           (True, False, IssueRevision, ReviewStarting, Nothing, Nothing),
-          (True, False, IssueRevision, ReviewStarting, Just "thread-1", Nothing),
+          (True, False, IssueRevision, ReviewStarting, Just (fixtureReviewThread "thread-1"), Nothing),
           (True, False, IssueRevision, ReviewStarting, Nothing, Just "turn-1")
         ]
 
@@ -445,7 +512,7 @@ spec = do
       -- the thread and turn IDs, so without the phase condition `q` would
       -- stay refused after the kill and a second `x` would pass the gate
       -- only to hit the no-live-process notice.
-      let killed = (True, False, IssueRevision, ReviewFailed, Just "thread-1", Just "turn-1")
+      let killed = (True, False, IssueRevision, ReviewFailed, Just (fixtureReviewThread "thread-1"), Just "turn-1")
       sharedLive killed `shouldBe` False
       overlayLive killed `shouldBe` False
       quitBlocked killed `shouldBe` False

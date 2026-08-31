@@ -36,7 +36,7 @@ import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
 import Kanban.Tracker (trackerFromIssue)
 import Kanban.UI.AutoSolve (boardPullRequestNumbers)
-import Kanban.Review (ReviewStage (..))
+import Kanban.Review (ReviewStage (..), ReviewThreadId)
 import Kanban.UI.Board (trackerHeaderText)
 import Kanban.UI.Events (mutatesSelectedWork, readOnlyHistoryGate, settledSessionRefusal)
 import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor, refreshVisibleBoard)
@@ -57,7 +57,7 @@ import Kanban.Worker
   )
 import Kanban.Workflow (deriveBoard, entryItem, itemLifecycleBadge)
 import Spec.Support.App (testAppState, testReviewSession)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, itemNumber)
+import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, fixtureReviewThread, itemNumber)
 import Test.Hspec
 
 spec :: Spec
@@ -773,9 +773,9 @@ withRevisionSession issueNumber = withReviewSessionDetail issueNumber Nothing
 -- | The same session once its turn has been started, which a later backend
 -- start must not launch a second time.
 withRunningRevisionSession :: Int -> AppState -> AppState
-withRunningRevisionSession issueNumber = withReviewSessionDetail issueNumber (Just "thread-1")
+withRunningRevisionSession issueNumber = withReviewSessionDetail issueNumber (Just (fixtureReviewThread "thread-1"))
 
-withReviewSessionDetail :: Int -> Maybe Text -> AppState -> AppState
+withReviewSessionDetail :: Int -> Maybe ReviewThreadId -> AppState -> AppState
 withReviewSessionDetail issueNumber threadId state =
   state {appReviewSessions = Map.singleton issueNumber session}
   where

@@ -18,13 +18,22 @@ import Kanban.Review
   ( CanonicalIssueReviewResult (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
+    ReviewAnswer (..),
     ReviewChoice (..),
+    ReviewConnection (..),
     ReviewEvent (..),
+    ReviewProcessShape (..),
     ReviewQuestion (..),
     ReviewQuestionKind (..),
     ReviewResult (..),
     ReviewStage (..),
+    ReviewTurnOutcome (..),
     ReviewWireMessage (..),
+    answerReviewQuestion,
+    approveReviewAction,
+    beginIssueReview,
+    reviewConnectionsForTesting,
+    stopReviewClient,
     decodeCanonicalIssueReviewResult,
     decodeClaudeToolPrompt,
     decodeGitHubIssueToolRequest,
@@ -66,14 +75,25 @@ import Spec.Support.Env
     withTemporaryCacheRoot,
   )
 import Spec.Support.Expect (isRight, shouldMention, shouldNotMention)
-import Spec.Support.Fixtures (baseIssue, testOptions)
+import Spec.Support.Fixtures (baseIssue, fixtureReviewThread, testOptions)
 import Spec.Support.Process
   ( encodedValue,
     expectNoFurtherClientRequests,
     managedProcessFor,
     nextClientRequest,
+    nextClientLine,
     plainChatTranscript,
     protocolWarnings,
+    readRecordedPids,
+    shouldHaveBeenSwept,
+    soleReviewConnection,
+    threadOn,
+    turnCompletions,
+    twoConnectionsOf,
+    waitForConnectionStops,
+    withFakeReviewClient,
+    withTwoConnectionReviewClient,
+    TwoConnectionClient (..),
     undeliveredSteers,
     withManagedShell,
     withRecordingReviewClient
@@ -324,21 +344,30 @@ spec = do
         steerRejected =
           WireResponse (Number 2) (Left (object ["message" .= ("expected turn is not active" :: Text)]))
         steerAccepted = WireResponse (Number 2) (Right (object []))
-        sendSteer client = do
-          sent <- sendReviewMessage client steerThread (Just targetTurn) steerMessage
-          sent `shouldBe` Right ()
+        -- The whole exchange runs on one connection, which is what a
+        -- message is now addressed by: 'steerThread' is the provider's own
+        -- id, and the identity the client keys its state on is that id
+        -- paired with the connection it arrived on.
+        withSteerConnection action =
+          withRecordingReviewClient $ \client wire events -> do
+            connection <- soleReviewConnection client
+            let deliver = handleWireMessage client connection
+                sendSteer = do
+                  sent <- sendReviewMessage client (threadOn connection steerThread) (Just targetTurn) steerMessage
+                  sent `shouldBe` Right ()
+            action connection deliver sendSteer wire events
 
     it "resends the message as a new turn/start when the turn it aimed at has already completed" $
-      withRecordingReviewClient $ \client wire events -> do
-        handleWireMessage client (turnStarted targetTurn)
-        sendSteer client
+      withSteerConnection $ \_ deliver sendSteer wire events -> do
+        deliver (turnStarted targetTurn)
+        sendSteer
         (steerMethod, steerParams) <- nextClientRequest wire
         steerMethod `shouldBe` "turn/steer"
         encodedValue steerParams `shouldMention` ("\"expectedTurnId\":\"" <> targetTurn <> "\"")
         -- The race the issue describes: the targeted turn finishes in the
         -- instant between Enter and the request arriving.
-        handleWireMessage client turnCompleted
-        handleWireMessage client steerRejected
+        deliver turnCompleted
+        deliver steerRejected
         (retryMethod, retryParams) <- nextClientRequest wire
         retryMethod `shouldBe` "turn/start"
         encodedValue retryParams `shouldMention` ("\"text\":\"" <> steerMessage <> "\"")
@@ -351,36 +380,36 @@ spec = do
         protocolWarnings recorded `shouldBe` []
 
     it "hands the message back undelivered, sending nothing, when a newer turn is already running" $
-      withRecordingReviewClient $ \client wire events -> do
-        handleWireMessage client (turnStarted targetTurn)
-        sendSteer client
+      withSteerConnection $ \connection deliver sendSteer wire events -> do
+        deliver (turnStarted targetTurn)
+        sendSteer
         void (nextClientRequest wire)
-        handleWireMessage client turnCompleted
-        handleWireMessage client (turnStarted newerTurn)
-        handleWireMessage client steerRejected
+        deliver turnCompleted
+        deliver (turnStarted newerTurn)
+        deliver steerRejected
         -- Silently applying the guidance to a turn the user never aimed at
         -- is exactly the misdirection the rejection is warning about.
         expectNoFurtherClientRequests wire
         recorded <- readIORef events
-        undeliveredSteers recorded `shouldBe` [ReviewSteerUndelivered steerThread targetTurn steerMessage]
+        undeliveredSteers recorded `shouldBe` [ReviewSteerUndelivered (threadOn connection steerThread) targetTurn steerMessage]
         protocolWarnings recorded `shouldBe` []
 
     it "hands the message back undelivered when the targeted turn is still the running one" $
-      withRecordingReviewClient $ \client wire events -> do
-        handleWireMessage client (turnStarted targetTurn)
-        sendSteer client
+      withSteerConnection $ \connection deliver sendSteer wire events -> do
+        deliver (turnStarted targetTurn)
+        sendSteer
         void (nextClientRequest wire)
-        handleWireMessage client steerRejected
+        deliver steerRejected
         expectNoFurtherClientRequests wire
         recorded <- readIORef events
-        undeliveredSteers recorded `shouldBe` [ReviewSteerUndelivered steerThread targetTurn steerMessage]
+        undeliveredSteers recorded `shouldBe` [ReviewSteerUndelivered (threadOn connection steerThread) targetTurn steerMessage]
 
     it "leaves an accepted steer alone: no retry and no undelivered state" $
-      withRecordingReviewClient $ \client wire events -> do
-        handleWireMessage client (turnStarted targetTurn)
-        sendSteer client
+      withSteerConnection $ \_ deliver sendSteer wire events -> do
+        deliver (turnStarted targetTurn)
+        sendSteer
         void (nextClientRequest wire)
-        handleWireMessage client steerAccepted
+        deliver steerAccepted
         expectNoFurtherClientRequests wire
         recorded <- readIORef events
         undeliveredSteers recorded `shouldBe` []
@@ -404,7 +433,7 @@ spec = do
               ReviewDetail
                 { reviewSessionIssue = baseIssue 17 [],
                   reviewSessionStage = InitialReview,
-                  reviewSessionThreadId = Just "thread-1",
+                  reviewSessionThreadId = Just (fixtureReviewThread "thread-1"),
                   reviewSessionTurnId = Just "turn-2",
                   reviewSessionPending = Nothing,
                   reviewSessionUndelivered = undelivered
@@ -451,6 +480,230 @@ spec = do
     it "renders nothing at all when no message is waiting" $
       renderWidgetLines (themeFor testOptions) 60 (drawUndeliveredSteers (undeliveredSession "" []))
         `shouldBe` []
+
+  -- MODEL-14: a review client holds a pool of provider connections rather
+  -- than one process. What that has to buy is isolation between them, and
+  -- every piece of state a client keys by thread or by request id is a place
+  -- two connections could resolve each other's entries: provider thread ids
+  -- and JSON-RPC ids are unique only within one connection, and two
+  -- connections numbering their own from the same start collide by
+  -- construction. These drive the colliding case directly.
+  describe "connection isolation within one review client" $ do
+    let collidingThread = "thread-1" :: Text
+        turnStartedOn :: Text -> ReviewWireMessage
+        turnStartedOn turnId =
+          WireNotification
+            "turn/started"
+            (object ["threadId" .= collidingThread, "turn" .= object ["id" .= turnId]])
+        turnCompletedOn =
+          WireNotification
+            "turn/completed"
+            (object ["threadId" .= collidingThread, "turn" .= object ["status" .= ("completed" :: Text)]])
+        questionRequest :: Int -> ReviewWireMessage
+        questionRequest wireId =
+          WireRequest
+            (Number (fromIntegral wireId))
+            "item/tool/call"
+            ( object
+                [ "tool" .= ("kanban_prompt_user" :: Text),
+                  "threadId" .= collidingThread,
+                  "arguments"
+                    .= object
+                      [ "id" .= ("scope" :: Text),
+                        "header" .= ("SCOPE" :: Text),
+                        "question" .= ("How far?" :: Text),
+                        "kind" .= ("text" :: Text)
+                      ]
+                ]
+            )
+        githubReadRequest :: Int -> Int -> ReviewWireMessage
+        githubReadRequest wireId issueNumber =
+          WireRequest
+            (Number (fromIntegral wireId))
+            "item/tool/call"
+            ( object
+                [ "tool" .= ("kanban_github_issue" :: Text),
+                  "threadId" .= collidingThread,
+                  "arguments" .= object ["operation" .= ("read" :: Text), "issue" .= issueNumber]
+                ]
+            )
+
+    it "gives two connections' identically named threads separate identities" $
+      withTwoConnectionReviewClient $ \fixture -> do
+        handleWireMessage fixture.twoConnectionClient fixture.firstConnection (turnStartedOn "turn-a")
+        handleWireMessage fixture.twoConnectionClient fixture.secondConnection (turnStartedOn "turn-b")
+        recorded <- readIORef fixture.twoConnectionEvents
+        -- Two threads, because the connection is half of the identity. Keyed
+        -- by the provider's id alone these would be one thread that started
+        -- twice, and the second start would have replaced the first.
+        recorded
+          `shouldBe` [ ReviewTurnStarted (threadOn fixture.firstConnection collidingThread) "turn-a",
+                       ReviewTurnStarted (threadOn fixture.secondConnection collidingThread) "turn-b"
+                     ]
+        threadOn fixture.firstConnection collidingThread
+          `shouldNotBe` threadOn fixture.secondConnection collidingThread
+
+    it "keeps each connection's active turn separate under a colliding thread id" $
+      withTwoConnectionReviewClient $ \fixture -> do
+        let client = fixture.twoConnectionClient
+        -- Both connections run a turn on their own "thread-1", and the
+        -- first's then completes. A steer the first connection rejects is
+        -- resent as a new turn precisely because that thread is idle; the
+        -- second connection's still-running turn must not make it look busy.
+        handleWireMessage client fixture.firstConnection (turnStartedOn "turn-a")
+        handleWireMessage client fixture.secondConnection (turnStartedOn "turn-b")
+        sendReviewMessage client (threadOn fixture.firstConnection collidingThread) (Just "turn-a") "keep going"
+          `shouldReturn` Right ()
+        (steerMethod, _) <- nextClientRequest fixture.firstWire
+        steerMethod `shouldBe` "turn/steer"
+        handleWireMessage client fixture.firstConnection turnCompletedOn
+        handleWireMessage client fixture.firstConnection (WireResponse (Number 2) (Left (object ["message" .= ("stale" :: Text)])))
+        (retryMethod, _) <- nextClientRequest fixture.firstWire
+        retryMethod `shouldBe` "turn/start"
+        recorded <- readIORef fixture.twoConnectionEvents
+        undeliveredSteers recorded `shouldBe` []
+        -- Nothing about that exchange reached the other connection.
+        expectNoFurtherClientRequests fixture.secondWire
+
+    it "answers a server request only on the connection that asked it" $
+      withTwoConnectionReviewClient $ \fixture -> do
+        let client = fixture.twoConnectionClient
+        -- The same wire id on both connections, which is what two providers
+        -- numbering their own server requests produce.
+        handleWireMessage client fixture.firstConnection (questionRequest 90)
+        handleWireMessage client fixture.secondConnection (questionRequest 90)
+        recorded <- readIORef fixture.twoConnectionEvents
+        (firstRequestId, secondRequestId) <- case recorded of
+          [ReviewQuestionRequested firstThread firstId _, ReviewQuestionRequested secondThread secondId _] -> do
+            firstThread `shouldBe` threadOn fixture.firstConnection collidingThread
+            secondThread `shouldBe` threadOn fixture.secondConnection collidingThread
+            firstId `shouldNotBe` secondId
+            pure (firstId, secondId)
+          other -> fail ("expected one question per connection, got " <> show other)
+        -- The user answers the second connection's question. Minutes may have
+        -- passed by then, so only the connection the request carried says
+        -- where the answer goes.
+        answerReviewQuestion client secondRequestId (ReviewAnswer [] (Just "as far as it takes"))
+          `shouldReturn` Right ()
+        answered <- nextClientLine fixture.secondWire
+        answered `shouldMention` "as far as it takes"
+        expectNoFurtherClientRequests fixture.firstWire
+        -- And the first connection's own question is still answerable, on its
+        -- own wire, which is what says the routing above chose rather than
+        -- simply preferring the last connection to speak.
+        approveReviewAction client firstRequestId True False `shouldReturn` Right ()
+        approved <- nextClientLine fixture.firstWire
+        approved `shouldMention` "\"decision\":\"accept\""
+        expectNoFurtherClientRequests fixture.secondWire
+
+    it "authorizes a GitHub tool call against its own connection's thread only" $
+      withTwoConnectionReviewClient $ \fixture -> do
+        let client = fixture.twoConnectionClient
+        -- The first connection's thread is the one that owns issue 844.
+        beginIssueReview client 844 `shouldReturn` Right ()
+        (threadMethod, _) <- nextClientRequest fixture.firstWire
+        threadMethod `shouldBe` "thread/start"
+        handleWireMessage
+          client
+          fixture.firstConnection
+          (WireResponse (Number 2) (Right (object ["thread" .= object ["id" .= collidingThread]])))
+        (turnMethod, _) <- nextClientRequest fixture.firstWire
+        turnMethod `shouldBe` "turn/start"
+        -- An empty PATH is what keeps the authorized control below from
+        -- spawning anything: 'runGitHubIssueTool' resolves @gh@ before it
+        -- runs, so an authorized call is observable by its own distinct
+        -- refusal rather than by a real GitHub read.
+        withEnvironmentValue "PATH" "/nonexistent-kanban-review-path" $ do
+          -- The same provider thread id on the other connection owns nothing.
+          handleWireMessage client fixture.secondConnection (githubReadRequest 91 844)
+          refused <- nextClientLine fixture.secondWire
+          refused `shouldMention` "may only access the issue owned by this review thread"
+          -- The control: on the connection that does own it, the identical
+          -- call is authorized and fails for an entirely different reason.
+          handleWireMessage client fixture.firstConnection (githubReadRequest 92 844)
+          authorized <- nextClientLine fixture.firstWire
+          authorized `shouldMention` "GitHub CLI was not found on PATH"
+          authorized `shouldNotMention` "may only access the issue owned by this review thread"
+
+  -- The process shape a backend declares, driven against a fake provider that
+  -- answers the handshake and nothing else. What is under test is how many
+  -- processes two reviews occupy, which connection resolves what, and what
+  -- shutdown reaps -- none of which the protocol above it can change.
+  describe "the connection a review thread runs on" $ do
+    it "serves every review from one process when the backend shares one" $
+      withFakeReviewClient SharedProcess $ \spawnLog client _ -> do
+        beginIssueReview client 844 `shouldReturn` Right ()
+        beginIssueReview client 845 `shouldReturn` Right ()
+        connections <- reviewConnectionsForTesting client
+        length connections `shouldBe` 1
+        pids <- readRecordedPids spawnLog
+        length pids `shouldBe` 1
+        stopReviewClient client
+        map (.connectionId) <$> reviewConnectionsForTesting client `shouldReturn` []
+
+    it "gives each review its own process when the backend does not share one" $
+      withFakeReviewClient ProcessPerThread $ \spawnLog client _ -> do
+        -- Nothing is spawned until a review needs a thread.
+        map (.connectionId) <$> reviewConnectionsForTesting client `shouldReturn` []
+        beginIssueReview client 844 `shouldReturn` Right ()
+        beginIssueReview client 845 `shouldReturn` Right ()
+        connections <- reviewConnectionsForTesting client
+        length connections `shouldBe` 2
+        pids <- readRecordedPids spawnLog
+        length pids `shouldBe` 2
+        stopReviewClient client
+        -- Requirement 4: shutdown stopped every connection and waited for
+        -- every loop they started, which is what makes the pool empty here
+        -- rather than merely emptying soon, and left no provider process.
+        map (.connectionId) <$> reviewConnectionsForTesting client `shouldReturn` []
+        mapM_ (\pid -> shouldHaveBeenSwept pid "a per-thread review connection") pids
+
+    it "resolves a response only against the connection it arrived on" $
+      withFakeReviewClient ProcessPerThread $ \_ client events -> do
+        beginIssueReview client 844 `shouldReturn` Right ()
+        beginIssueReview client 845 `shouldReturn` Right ()
+        (firstConnection, secondConnection) <- twoConnectionsOf client
+        -- Each connection numbered its own thread/start 2, so an id says
+        -- nothing on its own about which review a response belongs to.
+        handleWireMessage
+          client
+          firstConnection
+          (WireResponse (Number 2) (Right (object ["thread" .= object ["id" .= ("thread-1" :: Text)]])))
+        -- That created the first review's thread and sent its turn/start as
+        -- id 3, pending on the first connection and nowhere else.
+        let turnFailure = WireResponse (Number 3) (Left (object ["message" .= ("no such turn" :: Text)]))
+        handleWireMessage client secondConnection turnFailure
+        wrongConnection <- readIORef events
+        turnCompletions wrongConnection `shouldBe` []
+        -- The pending entry the wrong connection could not see is untouched,
+        -- so the right connection still resolves it, and resolves it once.
+        handleWireMessage client firstConnection turnFailure
+        handleWireMessage client firstConnection turnFailure
+        rightConnection <- readIORef events
+        turnCompletions rightConnection
+          `shouldBe` [ ReviewTurnCompleted
+                         (threadOn firstConnection "thread-1")
+                         TurnFailed
+                         (Just "{\"message\":\"no such turn\"}")
+                         Nothing
+                     ]
+        stopReviewClient client
+
+    it "reports one connection's end against that connection alone, leaving the client usable" $
+      withFakeReviewClient ProcessPerThread $ \_ client events -> do
+        beginIssueReview client 844 `shouldReturn` Right ()
+        beginIssueReview client 845 `shouldReturn` Right ()
+        (firstConnection, secondConnection) <- twoConnectionsOf client
+        killManagedProcess firstConnection.connectionManaged
+        stopped <- waitForConnectionStops events 1
+        map fst stopped `shouldSatisfy` all (== firstConnection.connectionId)
+        -- The client is not the connection: the survivor is still registered,
+        -- and a further review still starts against a backend that would be
+        -- reported as failed had the client-wide event been raised instead.
+        surviving <- reviewConnectionsForTesting client
+        map (.connectionId) surviving `shouldBe` [secondConnection.connectionId]
+        beginIssueReview client 846 `shouldReturn` Right ()
+        stopReviewClient client
 
   describe "Kanban.StreamReader" $ do
     it "reads every line through to EOF, forwarding each in order and never abandoning" $ do

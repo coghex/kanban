@@ -180,6 +180,7 @@ library kanban-internal
     Kanban.ProviderAdapter
     Kanban.Review.Canonical
     Kanban.Review.Client
+    Kanban.Review.Connection
     Kanban.Review.Diagnostics
     Kanban.Review.Prompts
     Kanban.Review.Tools

@@ -19,6 +19,7 @@ module Kanban.UI.Review
     chooseReviewOption,
     epicReviewRefusalNotice,
     forcedToNormalBy,
+    markReviewSessionsDisconnected,
     numberedChoicePrompt,
     resolveReviewCancelAction,
     reviewDigitActionFor,
@@ -71,8 +72,10 @@ import Kanban.Review
     ReviewQuestion (..),
     ReviewQuestionKind (..),
     ReviewRequestId,
+    ConnectionId,
     ReviewResult (..),
     ReviewStage (..),
+    ReviewThreadId (..),
     ReviewTurnOutcome (..),
     answerReviewQuestion,
     approveReviewAction,
@@ -319,14 +322,14 @@ undeliveredNotice = "Your message was not delivered — it is waiting in the rev
 -- path (the only resumable turn) and a canonical stage's process
 -- interrupt/kill escalation is unit-testable without an 'EventM' harness.
 data ReviewCancelAction
-  = ReviewCancelInterruptTurn Text Text
+  = ReviewCancelInterruptTurn ReviewThreadId Text
   | ReviewCancelInterruptProcess
   | ReviewCancelStillStarting
   | ReviewCancelNotRunning
   | ReviewCancelNoActiveTurn
   deriving stock (Eq, Show)
 
-resolveReviewCancelAction :: Bool -> Maybe Text -> Maybe Text -> ReviewStage -> ReviewPhase -> Bool -> ReviewCancelAction
+resolveReviewCancelAction :: Bool -> Maybe ReviewThreadId -> Maybe Text -> ReviewStage -> ReviewPhase -> Bool -> ReviewCancelAction
 resolveReviewCancelAction backendReady threadId turnId stage phase hasCanonicalProcess
   | backendReady, Just thread <- threadId, Just turn <- turnId = ReviewCancelInterruptTurn thread turn
   | hasCanonicalProcess = ReviewCancelInterruptProcess
@@ -842,7 +845,10 @@ applyReviewEvent reviewEvent = case reviewEvent of
       Just (issueNumber, _) -> armReviewTick issueNumber
       Nothing -> pure ()
   ReviewOutput threadId outputKind delta
-    | Text.null threadId ->
+    -- A connection's stderr belongs to no thread: the provider writes it for
+    -- the whole process, so it is shown as a notice rather than appended to
+    -- one session's transcript.
+    | Text.null threadId.reviewThreadProvider ->
         whenReviewOverlayOpen (\_ -> setNotice (reviewOutputPrefix outputKind <> sanitizeText delta))
     | otherwise -> do
         modifyReviewSessionByThread threadId
@@ -953,12 +959,26 @@ applyReviewEvent reviewEvent = case reviewEvent of
             }
       )
     setNotice (agentFailureNotice "Issue revision" message)
+  -- Every thread was multiplexed onto the connection that ended, so the
+  -- backend itself is finished and every live revision session with it.
   ReviewClientStopped message -> do
     modify
       ( \state ->
           state
             { appReviewBackend = ReviewBackendFailed message,
-              appReviewSessions = Map.map (markDisconnected message) state.appReviewSessions,
+              appReviewSessions = markReviewSessionsDisconnected Nothing message state.appReviewSessions,
+              appNotice = Just message
+            }
+      )
+    tailDisplayedTranscript
+  -- One connection of several ended. Only the sessions it was serving are
+  -- finished; the backend stays ready, because the threads on its other
+  -- connections are still running and a new review can still be started.
+  ReviewConnectionStopped endedConnection message -> do
+    modify
+      ( \state ->
+          state
+            { appReviewSessions = markReviewSessionsDisconnected (Just endedConnection) message state.appReviewSessions,
               appNotice = Just message
             }
       )
@@ -1000,14 +1020,7 @@ applyReviewEvent reviewEvent = case reviewEvent of
           standardTranscript = fromMaybe transcript.standardTranscript (Text.stripSuffix suffix transcript.standardTranscript),
           fullTranscript = fromMaybe transcript.fullTranscript (Text.stripSuffix suffix transcript.fullTranscript)
         }
-    markDisconnected message session
-      | session.sessionDetail.reviewSessionStage == IssueRevision && session.sessionPhase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting] =
-          session
-            { sessionPhase = ReviewFailed,
-              sessionActivity = "disconnected",
-              sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> message)
-            }
-      | otherwise = session
+
 
 -- | Which review sessions 'armVisibleReviewTicks' finds and re-arms:
 -- eligible to animate right now but not currently ticking, e.g. because
@@ -1048,3 +1061,32 @@ applyReviewAnimationTick = applySessionTick reviewSessionOps
 claudeTranscriptStart :: Text -> Text
 claudeTranscriptStart display =
   "\n[sonnet] Starting authenticated " <> display <> "…\n"
+
+-- | The sessions one ended provider connection terminalizes.
+--
+-- 'Nothing' is the whole client stopping: a backend that multiplexes every
+-- review thread onto one connection has nothing left running, so every live
+-- revision session is disconnected. @Just connection@ is one of several
+-- per-thread connections ending, and then only the sessions that connection
+-- was serving are: a session on a connection that is still up must keep
+-- running, and one that never reached a thread at all belongs to no
+-- connection yet, so nothing here claims it.
+--
+-- A session that already settled is left alone either way, which is why the
+-- stage and phase test applies to both.
+markReviewSessionsDisconnected :: Maybe ConnectionId -> Text -> Map Int ReviewSession -> Map Int ReviewSession
+markReviewSessionsDisconnected endedConnection message = Map.map disconnect
+  where
+    disconnect session
+      | not (servedByEndedConnection session) = session
+      | session.sessionDetail.reviewSessionStage == IssueRevision,
+        session.sessionPhase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting] =
+          session
+            { sessionPhase = ReviewFailed,
+              sessionActivity = "disconnected",
+              sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> message)
+            }
+      | otherwise = session
+    servedByEndedConnection session = case endedConnection of
+      Nothing -> True
+      Just connection -> fmap (.reviewThreadConnection) session.sessionDetail.reviewSessionThreadId == Just connection

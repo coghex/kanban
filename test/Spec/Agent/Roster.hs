@@ -118,11 +118,13 @@ import Kanban.Worker
   )
 import Spec.Support.App (testAppState, testPullRequestSession, testSolveSession)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, fixtureBoard)
+import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, fixtureBoard, fixtureReviewThread)
 import Spec.Support.Process
   ( encodedValue,
     expectNoFurtherClientRequests,
     nextClientRequest,
+    soleReviewConnection,
+    threadOn,
     runBoundedClaudeCall,
     withFakeClaudeCliUsing,
     withRecordingReviewClientUsing,
@@ -671,13 +673,14 @@ spec = do
     it "keeps the announced assignment through a backend torn down or replaced under it" $
       withRecordingReviewClientUsing distinctDisplays $ \running _ _ ->
         withRecordingReviewClientUsing defaultRoster $ \replacement _ _ -> do
-          let started = claudeStartedEvent running "thread-1"
+          runningThread <- threadOn <$> soleReviewConnection running <*> pure "thread-1"
+          let started = claudeStartedEvent running runningThread
           -- The two clients really do disagree, so the assertion can tell them
           -- apart at all.
           claudeStartDisplay replacement `shouldNotBe` claudeStartDisplay running
           case started of
             ReviewClaudeStarted thread display -> do
-              thread `shouldBe` "thread-1"
+              thread `shouldBe` runningThread
               -- Whatever the backend has become by the time this is handled --
               -- stopped, failed, or this second client -- the event still
               -- carries the first one's cell, and the line renders that.
@@ -859,7 +862,7 @@ spec = do
 -- read back out of the event itself rather than recomputed, so these
 -- assertions cannot pass against a payload the emitter never built.
 claudeStartDisplay :: ReviewClient -> Text
-claudeStartDisplay client = case claudeStartedEvent client "thread-probe" of
+claudeStartDisplay client = case claudeStartedEvent client (fixtureReviewThread "thread-probe") of
   ReviewClaudeStarted _ display -> display
   other -> error ("expected a Claude start event, got " <> show other)
 
@@ -1039,11 +1042,12 @@ assertReviewPayloadsFrom :: ModelRoster -> IO ()
 assertReviewPayloadsFrom roster =
   withRecordingReviewClientUsing roster $ \client wire _ -> do
     let cell = cellOf (assignmentFor roster IssueReviewRole CodexProvider)
+    connection <- soleReviewConnection client
     beginIssueReview client 844 `shouldReturn` Right ()
     (threadMethod, threadParams) <- nextClientRequest wire
     threadMethod `shouldBe` "thread/start"
     encodedValue threadParams `shouldMention` ("\"model\":\"" <> cell.assignmentModel <> "\"")
-    sendReviewMessage client "thread-1" Nothing "carry on" `shouldReturn` Right ()
+    sendReviewMessage client (threadOn connection "thread-1") Nothing "carry on" `shouldReturn` Right ()
     (turnMethod, turnParams) <- nextClientRequest wire
     turnMethod `shouldBe` "turn/start"
     encodedValue turnParams `shouldMention` ("\"effort\":\"" <> cell.assignmentEffort <> "\"")

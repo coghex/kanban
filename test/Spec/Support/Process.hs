@@ -32,7 +32,18 @@ module Spec.Support.Process
     isTerminal,
     withRecordingReviewClient,
     withRecordingReviewClientUsing,
+    withTwoConnectionReviewClient,
+    TwoConnectionClient (..),
+    withFakeReviewClient,
+    soleReviewConnection,
+    threadOn,
+    readRecordedPids,
+    shouldHaveBeenSwept,
     nextClientRequest,
+    nextClientLine,
+    twoConnectionsOf,
+    waitForConnectionStops,
+    turnCompletions,
     expectNoFurtherClientRequests,
     encodedValue,
     undeliveredSteers,
@@ -64,6 +75,7 @@ import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
 import Data.List (dropWhileEnd, find, findIndex, findIndices)
 import Data.Text (Text)
 import qualified Data.Text
+import qualified Data.Text.Encoding as TextEncoding
 import Data.Time (UTCTime (..))
 import Kanban.Domain
 import Kanban.ApprovalService (ApprovalBackend (..), ApprovalController (..))
@@ -80,14 +92,23 @@ import Kanban.Models (ModelRoster, RecordedAssignment, defaultRoster)
 import Kanban.PullRequestFlow (PullRequestFlowEvent (..))
 import Kanban.Review
   ( CommandBounds (..),
+    ConnectionId,
+    EmbeddedReviewBackend (..),
     GitHubIssueToolRequest (..),
     ReviewClient,
+    ReviewConnection (..),
     ReviewEvent (..),
+    ReviewProcessShape,
+    ReviewThreadId (..),
     ReviewWireMessage (..),
+    addRecordingReviewConnectionForTesting,
+    connectionId,
     decodeReviewWireMessage,
     newRecordingReviewClientForTesting,
     newReviewClientForTesting,
+    reviewConnectionsForTesting,
     runAuthenticatedClaude,
+    startResolvedReviewClient,
     runCanonicalCommand,
     runGitHubIssueTool,
     stopReviewClient,
@@ -126,7 +147,7 @@ import Kanban.Worker
   )
 import Spec.Support.Env (ignoringIOException, withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (requireJust)
-import Spec.Support.Fixtures (epoch)
+import Spec.Support.Fixtures (epoch, fixtureReviewThread)
 import Spec.Support.Roster (cellOf)
 import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.Environment (lookupEnv)
@@ -137,6 +158,7 @@ import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
 import System.Process
   ( CreateProcess (..),
     ProcessHandle,
+    StdStream (..),
     createProcess,
     getPid,
     proc,
@@ -546,6 +568,144 @@ withRecordingReviewClientUsing roster action = do
     (\(client, wire) -> stopReviewClient client >> hClose wire)
     (\(client, wire) -> action client wire events)
 
+-- | The one connection a testing review client holds.
+--
+-- A wire message is dispatched against the connection it arrived on, so a
+-- test that drives one needs that connection; the single-connection fixtures
+-- have exactly one, and this says so out loud rather than picking whichever
+-- the pool lists first.
+soleReviewConnection :: ReviewClient -> IO ReviewConnection
+soleReviewConnection client = do
+  connections <- reviewConnectionsForTesting client
+  case connections of
+    [connection] -> pure connection
+    other -> fail ("expected the testing review client to hold exactly one connection, it held " <> show (length other))
+
+-- | A review thread on a live fixture connection: the provider's own id
+-- paired with the connection serving it, which is the only identity a review
+-- map is keyed by.
+threadOn :: ReviewConnection -> Text -> ReviewThreadId
+threadOn connection = ReviewThreadId (connectionId connection)
+
+-- | A review client holding two independent recording connections.
+--
+-- What it makes observable is everything a single-connection client could
+-- not express: the same provider thread id, or the same server-request id,
+-- arriving on both must reach two separate sets of state, and an answer must
+-- go back only to the connection that asked.
+data TwoConnectionClient = TwoConnectionClient
+  { twoConnectionClient :: ReviewClient,
+    firstConnection :: ReviewConnection,
+    firstWire :: Handle,
+    secondConnection :: ReviewConnection,
+    secondWire :: Handle,
+    twoConnectionEvents :: IORef [ReviewEvent]
+  }
+
+withTwoConnectionReviewClient :: (TwoConnectionClient -> IO result) -> IO result
+withTwoConnectionReviewClient action = do
+  events <- newIORef []
+  bracket
+    ( do
+        (client, firstHandle) <- newRecordingReviewClientForTesting defaultRoster (\event -> modifyIORef events (<> [event]))
+        first <- soleReviewConnection client
+        (second, secondHandle) <- addRecordingReviewConnectionForTesting client
+        pure (TwoConnectionClient client first firstHandle second secondHandle events)
+    )
+    (\fixture -> stopReviewClient fixture.twoConnectionClient >> hClose fixture.firstWire >> hClose fixture.secondWire)
+    action
+
+-- | A backend whose provider is a fake executable on disk: it records its own
+-- pid, answers the initialize handshake the client waits for, and then drains
+-- its stdin until the client closes it.
+--
+-- Deliberately no further protocol. What a test built on this is about is
+-- connection /shape/ — how many processes two reviews occupy, which
+-- connection a response resolves against, and whether shutdown reaps every
+-- one — and a fake that also spoke the thread and turn protocol would answer
+-- those questions no better while being able to get them wrong.
+withFakeReviewBackend :: ReviewProcessShape -> (FilePath -> Repository -> EmbeddedReviewBackend -> IO result) -> IO result
+withFakeReviewBackend processShape action =
+  withTemporaryCacheRoot $ \temporaryRoot -> do
+    let repositoryRoot = temporaryRoot </> "repo"
+        spawnLog = temporaryRoot </> "spawned-pids"
+        fakeProvider = temporaryRoot </> "fake-app-server"
+    createDirectory repositoryRoot
+    ByteString.writeFile
+      fakeProvider
+      ( ByteString.unlines
+          [ "#!/bin/sh",
+            "echo \"$$\" >> \"" <> ByteString.pack spawnLog <> "\"",
+            "printf '%s\\n' '{\"id\":1,\"result\":{}}'",
+            -- Draining stdin is what keeps a client that writes a large
+            -- 'thread/start' from blocking on a full pipe, and reaching EOF
+            -- on it is how this exits when the client closes that end.
+            "cat >/dev/null"
+          ]
+      )
+    setFileMode fakeProvider 0o700
+    withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+      action
+        spawnLog
+        (Repository repositoryRoot "coghex" "kanban")
+        EmbeddedReviewBackend
+          { backendLabel = "fake app-server",
+            backendProcessShape = processShape,
+            backendProcess = \root ->
+              (proc fakeProvider [])
+                { cwd = Just root,
+                  std_in = CreatePipe,
+                  std_out = CreatePipe,
+                  std_err = CreatePipe,
+                  create_group = True
+                }
+          }
+
+-- | A live review client on that fake backend, plus the pid log its provider
+-- writes to and the events its sink recorded in order.
+--
+-- Shutdown is bracketed even though several of these tests call it
+-- themselves and assert on what it left: it is idempotent, and a failed
+-- assertion partway through must not leave fake providers running.
+withFakeReviewClient :: ReviewProcessShape -> (FilePath -> ReviewClient -> IORef [ReviewEvent] -> IO result) -> IO result
+withFakeReviewClient processShape action =
+  withFakeReviewBackend processShape $ \spawnLog repository backend -> do
+    events <- newIORef []
+    bracket
+      (startFakeReviewClient backend repository (\event -> modifyIORef events (<> [event])))
+      stopReviewClient
+      (\client -> action spawnLog client events)
+
+startFakeReviewClient :: EmbeddedReviewBackend -> Repository -> (ReviewEvent -> IO ()) -> IO ReviewClient
+startFakeReviewClient backend repository eventSink = do
+  started <- startResolvedReviewClient backend defaultRoster defaultWorkflowConfig repository eventSink
+  case started of
+    Right client -> pure client
+    Left message -> fail ("the fake review backend did not start: " <> Data.Text.unpack message)
+
+-- | Every pid a fake provider recorded, in spawn order. An absent log is no
+-- spawn rather than an error, so a test may assert on both.
+readRecordedPids :: FilePath -> IO [Int]
+readRecordedPids path = do
+  exists <- doesFileExist path
+  if not exists
+    then pure []
+    else do
+      written <- readFile path
+      mapM (\line -> requireJust ("a fake provider recorded an unreadable pid in " <> path) (readMaybe line)) (lines written)
+
+-- | Asserts a recorded process is gone. A killed process is already absent
+-- from this snapshot even before its parent reaps it, so no wait is needed.
+shouldHaveBeenSwept :: Int -> String -> Expectation
+shouldHaveBeenSwept pid description = do
+  snapshot <- readProcessSnapshot
+  case snapshot of
+    Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+    Right identities ->
+      case identityForPid pid identities of
+        Nothing -> pure ()
+        Just _ -> expectationFailure ("expected " <> description <> " (pid " <> show pid <> ") to have been terminated")
+
 -- | The next request the client wrote to its app-server, as method and
 -- params. Bounded so a missing write fails the test instead of hanging it.
 nextClientRequest :: Handle -> IO (Text, Value)
@@ -554,6 +714,17 @@ nextClientRequest wire = do
   case decodeReviewWireMessage (LazyByteString.fromStrict line) of
     Right (WireRequest _ method params) -> pure (method, params)
     other -> fail ("expected a client request on the wire, got " <> show other)
+
+-- | The next line the client wrote to one connection, raw.
+--
+-- A response to a server-originated request is asserted this way rather than
+-- decoded: what these tests are about is which pipe carried it, and a raw
+-- line cannot be read off the wrong one by a decoder that happens to accept
+-- both.
+nextClientLine :: Handle -> IO Text
+nextClientLine wire = do
+  line <- requireJust "the client wrote nothing to this connection" =<< timeout 2000000 (ByteString.hGetLine wire)
+  pure (TextEncoding.decodeUtf8 line)
 
 -- | Every write happens synchronously inside the handler under test, so by
 -- the time it returns the pipe holds everything it is ever going to hold;
@@ -567,6 +738,38 @@ expectNoFurtherClientRequests wire = do
 
 encodedValue :: Value -> Text
 encodedValue = Data.Text.pack . LazyByteString.unpack . encode
+
+-- | The two connections a client holds, in the order the pool allocated
+-- them, so a test can name "the first review's" and "the second review's"
+-- rather than whichever comes back first.
+twoConnectionsOf :: ReviewClient -> IO (ReviewConnection, ReviewConnection)
+twoConnectionsOf client = do
+  connections <- reviewConnectionsForTesting client
+  case connections of
+    [first, second] -> pure (first, second)
+    other -> fail ("expected the review client to hold two connections, it held " <> show (length other))
+
+-- | Wait until at least @wanted@ connections have been reported as stopped,
+-- returning every such report so far. Bounded so a report that never arrives
+-- fails the test instead of hanging it.
+waitForConnectionStops :: IORef [ReviewEvent] -> Int -> IO [(ConnectionId, Text)]
+waitForConnectionStops events wanted = go (200 :: Int)
+  where
+    go remaining = do
+      stops <- connectionStops <$> readIORef events
+      if length stops >= wanted
+        then pure stops
+        else
+          if remaining <= 0
+            then fail ("expected " <> show wanted <> " connection stop report(s), saw " <> show (length stops))
+            else threadDelay 25000 >> go (remaining - 1)
+    connectionStops recorded = [(connection, message) | ReviewConnectionStopped connection message <- recorded]
+
+turnCompletions :: [ReviewEvent] -> [ReviewEvent]
+turnCompletions = filter isCompletion
+  where
+    isCompletion ReviewTurnCompleted {} = True
+    isCompletion _ = False
 
 undeliveredSteers :: [ReviewEvent] -> [ReviewEvent]
 undeliveredSteers = filter isUndelivered
@@ -640,7 +843,7 @@ withFakeGitHubCli scriptLines bounds action =
 
 runBoundedGitHubTool :: Int -> ReviewClient -> GitHubIssueToolRequest -> IO (Either Text Text)
 runBoundedGitHubTool boundMicros client request = do
-  outcome <- timeout boundMicros (withReservedToolSlot client "thread-1" (\key -> runGitHubIssueTool client key request))
+  outcome <- timeout boundMicros (withReservedToolSlot client (fixtureReviewThread "thread-1") (\key -> runGitHubIssueTool client key request))
   requireJust "the GitHub tool call did not return within its bounded window" outcome
 
 -- | A fake @claude@ on a temporary PATH plus a review client whose Claude
@@ -681,7 +884,7 @@ withFakeClaudeCliUsing roster scriptLines bounds action =
 
 runBoundedClaudeCall :: Int -> ReviewClient -> Text -> IO (Either Text Text)
 runBoundedClaudeCall boundMicros client prompt = do
-  outcome <- timeout boundMicros (withReservedToolSlot client "thread-1" (\key -> runAuthenticatedClaude client key prompt))
+  outcome <- timeout boundMicros (withReservedToolSlot client (fixtureReviewThread "thread-1") (\key -> runAuthenticatedClaude client key prompt))
   requireJust "the Claude reviewer call did not return within its bounded window" outcome
 
 -- | Asserts the process a fixture recorded is gone by the time the runner

@@ -14,10 +14,13 @@ import Kanban.Process (killManagedProcess)
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Review
   ( CommandBounds (..),
+    ConnectionId (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
+    ReviewThreadId (..),
     attachToolProcess,
     drainToolRegistry,
+    killConnectionToolProcesses,
     killThreadToolProcesses,
     newReviewClientForTesting,
     newToolRegistry,
@@ -47,7 +50,7 @@ import Kanban.UI.Worker (orphanMessage)
 import Kanban.Worker (workerDeadlineReason)
 import Spec.Support.Env (waitForFileToExist, withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (requireJust, requireLeft, requireRight, shouldMention, shouldNotMention)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch)
+import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, fixtureReviewThread)
 import Spec.Support.Roster (cellOf)
 import Spec.Support.Process
   ( canonicalSessionLogText,
@@ -77,15 +80,15 @@ spec = do
       withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \processA ->
         withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \processB -> do
           registry <- newToolRegistry
-          keyA <- requireJust "expected a reservation for invocation A" =<< reserveToolSlot registry "thread-1"
-          keyB <- requireJust "expected a reservation for invocation B" =<< reserveToolSlot registry "thread-1"
+          keyA <- requireJust "expected a reservation for invocation A" =<< reserveToolSlot registry (fixtureReviewThread "thread-1")
+          keyB <- requireJust "expected a reservation for invocation B" =<< reserveToolSlot registry (fixtureReviewThread "thread-1")
           managedA <- managedProcessFor processA
           managedB <- managedProcessFor processB
           -- Under the old threadId-keyed map, the second `insert` here would
           -- have overwritten the first entry, leaving invocation A unkillable.
           attachToolProcess registry keyA managedA `shouldReturn` True
           attachToolProcess registry keyB managedB `shouldReturn` True
-          killThreadToolProcesses registry "thread-1"
+          killThreadToolProcesses registry (fixtureReviewThread "thread-1")
           timeout 3000000 (waitForProcess processA) `shouldReturn` Just (ExitFailure (-9))
           timeout 3000000 (waitForProcess processB) `shouldReturn` Just (ExitFailure (-9))
 
@@ -93,8 +96,8 @@ spec = do
       withManagedShell "true" $ \quickProcess ->
         withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \longProcess -> do
           registry <- newToolRegistry
-          keyA <- requireJust "expected a reservation for the quick invocation" =<< reserveToolSlot registry "thread-1"
-          keyB <- requireJust "expected a reservation for the long invocation" =<< reserveToolSlot registry "thread-1"
+          keyA <- requireJust "expected a reservation for the quick invocation" =<< reserveToolSlot registry (fixtureReviewThread "thread-1")
+          keyB <- requireJust "expected a reservation for the long invocation" =<< reserveToolSlot registry (fixtureReviewThread "thread-1")
           quickManaged <- managedProcessFor quickProcess
           longManaged <- managedProcessFor longProcess
           attachToolProcess registry keyA quickManaged `shouldReturn` True
@@ -115,26 +118,56 @@ spec = do
         withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \processB ->
           withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \otherThreadProcess -> do
             registry <- newToolRegistry
-            keyA <- requireJust "expected a reservation for thread-1's first invocation" =<< reserveToolSlot registry "thread-1"
-            keyB <- requireJust "expected a reservation for thread-1's second invocation" =<< reserveToolSlot registry "thread-1"
-            otherKey <- requireJust "expected a reservation for thread-2" =<< reserveToolSlot registry "thread-2"
+            keyA <- requireJust "expected a reservation for thread-1's first invocation" =<< reserveToolSlot registry (fixtureReviewThread "thread-1")
+            keyB <- requireJust "expected a reservation for thread-1's second invocation" =<< reserveToolSlot registry (fixtureReviewThread "thread-1")
+            otherKey <- requireJust "expected a reservation for thread-2" =<< reserveToolSlot registry (fixtureReviewThread "thread-2")
             managedA <- managedProcessFor processA
             managedB <- managedProcessFor processB
             otherManaged <- managedProcessFor otherThreadProcess
             attachToolProcess registry keyA managedA `shouldReturn` True
             attachToolProcess registry keyB managedB `shouldReturn` True
             attachToolProcess registry otherKey otherManaged `shouldReturn` True
-            killThreadToolProcesses registry "thread-1"
+            killThreadToolProcesses registry (fixtureReviewThread "thread-1")
             timeout 3000000 (waitForProcess processA) `shouldReturn` Just (ExitFailure (-9))
             timeout 3000000 (waitForProcess processB) `shouldReturn` Just (ExitFailure (-9))
             getProcessExitCode otherThreadProcess `shouldReturn` Nothing
             remaining <- drainToolRegistry registry
             length remaining `shouldBe` 1
 
+    -- MODEL-14: cancellation is keyed by the same identity the rest of the
+    -- client is, so two connections whose providers both call their thread
+    -- @thread-1@ own separate registry entries, and one connection ending
+    -- must reach only its own.
+    it "kills every invocation owned by a connection while a colliding thread id on another survives" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \endingProcess ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \survivingProcess -> do
+          registry <- newToolRegistry
+          let ending = ReviewThreadId (ConnectionId 0) "thread-1"
+              surviving = ReviewThreadId (ConnectionId 1) "thread-1"
+          ending `shouldNotBe` surviving
+          endingKey <- requireJust "expected a reservation on the ending connection" =<< reserveToolSlot registry ending
+          survivingKey <- requireJust "expected a reservation on the surviving connection" =<< reserveToolSlot registry surviving
+          endingManaged <- managedProcessFor endingProcess
+          survivingManaged <- managedProcessFor survivingProcess
+          attachToolProcess registry endingKey endingManaged `shouldReturn` True
+          attachToolProcess registry survivingKey survivingManaged `shouldReturn` True
+          killConnectionToolProcesses registry (ConnectionId 0)
+          timeout 3000000 (waitForProcess endingProcess) `shouldReturn` Just (ExitFailure (-9))
+          getProcessExitCode survivingProcess `shouldReturn` Nothing
+          -- The registry stays open: the threads on the other connections are
+          -- still running, and a further tool call on one of them must be
+          -- able to reserve.
+          stillOpen <- reserveToolSlot registry surviving
+          stillOpen `shouldNotBe` Nothing
+          remaining <- drainToolRegistry registry
+          length remaining `shouldBe` 1
+          mapM_ killManagedProcess remaining
+          timeout 3000000 (waitForProcess survivingProcess) `shouldReturn` Just (ExitFailure (-9))
+
     it "never lets a spawn that races full client shutdown escape the shutdown drain" $
       withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
         registry <- newToolRegistry
-        key <- requireJust "expected a reservation before shutdown begins" =<< reserveToolSlot registry "thread-1"
+        key <- requireJust "expected a reservation before shutdown begins" =<< reserveToolSlot registry (fixtureReviewThread "thread-1")
         -- Shutdown begins (and finds nothing to drain yet, since the process
         -- has not spawned/attached) while the reservation is still pending.
         drained <- drainToolRegistry registry
@@ -146,20 +179,20 @@ spec = do
         killManagedProcess managed
         timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
         -- The registry stays closed: no later invocation can register either.
-        reserveToolSlot registry "thread-1" `shouldReturn` Nothing
+        reserveToolSlot registry (fixtureReviewThread "thread-1") `shouldReturn` Nothing
 
     it "never lets a spawn that races same-thread cancellation escape, while leaving the registry open for later work" $
       withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
         registry <- newToolRegistry
-        key <- requireJust "expected a reservation before the cancellation lands" =<< reserveToolSlot registry "thread-1"
-        killThreadToolProcesses registry "thread-1"
+        key <- requireJust "expected a reservation before the cancellation lands" =<< reserveToolSlot registry (fixtureReviewThread "thread-1")
+        killThreadToolProcesses registry (fixtureReviewThread "thread-1")
         managed <- managedProcessFor process
         attachToolProcess registry key managed `shouldReturn` False
         killManagedProcess managed
         timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
         -- Unlike full shutdown, a per-thread cancellation does not close the
         -- registry: later work on the same thread still registers normally.
-        laterReservation <- reserveToolSlot registry "thread-1"
+        laterReservation <- reserveToolSlot registry (fixtureReviewThread "thread-1")
         laterReservation `shouldSatisfy` isJust
 
     it "still fences a same-thread cancellation landing between the sequential gh subprocesses of one GitHub update" $
@@ -170,7 +203,7 @@ spec = do
           -- same way 'withReservedToolSlot' holds a single key across every
           -- subprocess of 'runGitHubIssueUpdate' (e.g. the issue comment,
           -- then the label edit) -- not one reservation per subprocess.
-          key <- requireJust "expected a reservation for the whole update" =<< reserveToolSlot registry "thread-1"
+          key <- requireJust "expected a reservation for the whole update" =<< reserveToolSlot registry (fixtureReviewThread "thread-1")
           -- Subprocess 1 (e.g. the issue comment) runs to completion
           -- normally and its leader is swept, but the reservation itself is
           -- not released yet, since more subprocesses may still follow.
@@ -180,7 +213,7 @@ spec = do
           killManagedProcess managedOne
           -- A same-thread cancellation lands in the gap before subprocess 2
           -- (e.g. the label edit) ever spawns.
-          killThreadToolProcesses registry "thread-1"
+          killThreadToolProcesses registry (fixtureReviewThread "thread-1")
           -- Subprocess 2 reuses that very same reservation key and finds it
           -- already drained, so it must kill what it just spawned itself
           -- instead of running as though the cancellation never happened.
@@ -213,7 +246,7 @@ spec = do
             client <- newReviewClientForTesting defaultRoster githubCommandBounds repositoryRoot "coghex/kanban" (const (pure ()))
             finished <- newEmptyMVar
             let request = GitHubIssueToolRequest GitHubIssueRead 844 Nothing [] []
-            void . forkIO $ withReservedToolSlot client "thread-1" (\key -> runGitHubIssueTool client key request) >>= putMVar finished
+            void . forkIO $ withReservedToolSlot client (fixtureReviewThread "thread-1") (\key -> runGitHubIssueTool client key request) >>= putMVar finished
             waitForFileToExist markerPath 50
             stopReviewClient client
             result <- timeout 5000000 (takeMVar finished)

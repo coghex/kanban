@@ -94,7 +94,8 @@ import Kanban.Review
     ReviewEvent (..),
     ReviewQuestion (..),
     ReviewRequestId,
-    ReviewStage (..)
+    ReviewStage (..),
+    ReviewThreadId
     )
 import Kanban.Solve
   ( ResumeProvenance (..),
@@ -395,7 +396,11 @@ type ReviewSession = AgentSession ReviewPhase ReviewDetail
 data ReviewDetail = ReviewDetail
   { reviewSessionIssue :: Issue,
     reviewSessionStage :: ReviewStage,
-    reviewSessionThreadId :: Maybe Text,
+    -- | The review thread this session is running on, once the provider has
+    -- created one: the connection serving it plus the provider's own id for
+    -- it. Both halves are needed, because two connections may name a thread
+    -- the same and only the pair says which session an event belongs to.
+    reviewSessionThreadId :: Maybe ReviewThreadId,
     reviewSessionTurnId :: Maybe Text,
     reviewSessionPending :: Maybe PendingReviewInteraction,
     -- | Messages the app-server rejected as steers and that could not be

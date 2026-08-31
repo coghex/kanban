@@ -13,7 +13,10 @@
 -- The embedded review is the one asymmetric field. Codex carries the
 -- app-server backend that "Kanban.Review" relocated; Claude carries
 -- 'Nothing' until MODEL-13, and the refusal that absence produces is pinned
--- beside it so the slot cannot quietly become a fallback.
+-- beside it so the slot cannot quietly become a fallback. Its process shape
+-- is pinned there too: how many provider processes a backend's review
+-- threads occupy is what MODEL-14 made the client read rather than assume,
+-- and Codex's answer must not drift while it is the only backend shipped.
 --
 -- What a spawn site does with the record — resolving the executable,
 -- masking the spawn, registering the managed process — is covered where it
@@ -29,6 +32,7 @@ import Kanban.Domain (defaultWorkflowConfig)
 import Kanban.Models (ProviderName (..), allProviders, defaultRoster)
 import Kanban.Review
   ( EmbeddedReviewBackend (..),
+    ReviewProcessShape (..),
     claudeTool,
     embeddedReviewProvider,
     missingEmbeddedReviewMessage,
@@ -134,6 +138,15 @@ spec = do
             CreatePipe,
             True
           )
+
+    -- MODEL-14: the client reads this to decide whether starting a review
+    -- reuses the connection it has or spawns another, and whether one
+    -- connection ending is the whole client ending. Codex multiplexes every
+    -- review thread onto one @app-server@, which is what it declared
+    -- implicitly before the field existed.
+    it "declares that Codex's app-server serves every review thread from one process" $
+      fmap (.backendProcessShape) ((adapterFor CodexProvider).adapterEmbeddedReview)
+        `shouldBe` Just SharedProcess
 
     it "refuses by name for a provider Kanban ships no backend for" $
       missingEmbeddedReviewMessage ClaudeProvider

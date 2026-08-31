@@ -32,6 +32,7 @@ module Kanban.ProviderAdapter
   ( EmbeddedReviewBackend (..),
     ProcessRequest (..),
     ProviderAdapter (..),
+    ReviewProcessShape (..),
     adapterFor,
     adapterForBrand,
     brandForProvider,
@@ -68,6 +69,21 @@ data ProcessRequest = ProcessRequest
   }
   deriving stock (Eq, Show)
 
+-- | How many provider processes a backend's review threads occupy.
+--
+-- @codex app-server@ multiplexes every thread onto one process, so a client
+-- on it holds one connection for its whole life. A @claude@ process is a
+-- single conversation (D-15), so a backend built on it needs one connection
+-- per review thread. The client reads this to decide whether starting a
+-- review reuses the connection it has or spawns another, and whether one
+-- connection ending is the whole client ending or just that thread's.
+data ReviewProcessShape
+  = -- | One process serves every review thread.
+    SharedProcess
+  | -- | Each review thread gets a process of its own.
+    ProcessPerThread
+  deriving stock (Eq, Show)
+
 -- | How one provider's embedded issue-review backend is started.
 --
 -- Only Codex has one. Claude's is 'Nothing' until MODEL-13 fills it, which
@@ -80,7 +96,8 @@ data ProcessRequest = ProcessRequest
 -- which is the resolution timing this extraction had to preserve.
 data EmbeddedReviewBackend = EmbeddedReviewBackend
   { backendLabel :: Text,
-    backendProcess :: FilePath -> CreateProcess
+    backendProcess :: FilePath -> CreateProcess,
+    backendProcessShape :: ReviewProcessShape
   }
 
 -- | Everything Kanban needs to construct one provider's agent-session
@@ -160,6 +177,7 @@ codexEmbeddedReview :: EmbeddedReviewBackend
 codexEmbeddedReview =
   EmbeddedReviewBackend
     { backendLabel = "codex app-server",
+      backendProcessShape = SharedProcess,
       backendProcess = \repositoryRoot ->
         (proc "codex" ["app-server", "--listen", "stdio://"])
           { cwd = Just repositoryRoot,
