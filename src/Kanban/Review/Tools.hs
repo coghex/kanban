@@ -54,7 +54,7 @@ import Kanban.Models
   )
 import Kanban.Process (killManagedProcess, managedProcess)
 import Kanban.ProviderAdapter (ProcessRequest (..), ProviderAdapter (..), adapterFor)
-import Kanban.Review.Client (ReviewClient (..), attachToolProcess)
+import Kanban.Review.Client (ReviewClient (..), attachToolProcess, emitProtocolWarning)
 import Kanban.Review.Diagnostics
   ( claudeRevisionAgent,
     decodeClaudeBytes,
@@ -65,7 +65,6 @@ import Kanban.Review.Diagnostics
 import Kanban.Review.Types
   ( GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
-    ReviewEvent (..),
   )
 import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
@@ -253,7 +252,7 @@ runGitHubCommand client key ghPath arguments input = do
     Left exception -> pure (GitHubCommandFailed ("Could not start GitHub CLI: " <> exceptionText exception))
     Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
       (managed, groupLeaderProblem) <- managedProcess processHandle
-      mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
+      mapM_ (\problem -> emitProtocolWarning client ("process group leadership: " <> problem)) groupLeaderProblem
       attached <- attachToolProcess client.reviewToolRegistry key managed
       if not attached
         then killManagedProcess managed >> pure (GitHubCommandFailed "Review client is shutting down")
@@ -370,7 +369,7 @@ runResolvedAuthenticatedClaude client key prompt assignment = do
         Left exception -> pure (Left ("Could not start authenticated Claude CLI: " <> exceptionText exception))
         Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
           (managed, groupLeaderProblem) <- managedProcess processHandle
-          mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
+          mapM_ (\problem -> emitProtocolWarning client ("process group leadership: " <> problem)) groupLeaderProblem
           attached <- attachToolProcess client.reviewToolRegistry key managed
           if not attached
             then killManagedProcess managed >> pure (Left "Review client is shutting down")

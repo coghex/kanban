@@ -50,6 +50,7 @@ module Kanban.Models
     allProviders,
     allRoles,
     roleApplicability,
+    providerDisplayName,
     providerKey,
     parseProviderKey,
     roleKey,
@@ -139,6 +140,19 @@ roleApplicability _ = allProviders
 providerKey :: ProviderName -> Text
 providerKey CodexProvider = "codex"
 providerKey ClaudeProvider = "claude"
+
+-- | The provider's brand as prose names it, for a sentence a person reads
+-- rather than a key a file spells.
+--
+-- Held here beside 'providerKey' rather than at the surface that renders it,
+-- because a provider-aware diagnostic is raised in one place and displayed in
+-- another: the review client raises a protocol warning naming the provider
+-- whose backend it is running, and the terminal is what turns that into
+-- "Codex protocol warning". Two spellings of the brand is how one of them
+-- comes to name a provider the other no longer does.
+providerDisplayName :: ProviderName -> Text
+providerDisplayName CodexProvider = "Codex"
+providerDisplayName ClaudeProvider = "Claude"
 
 parseProviderKey :: Text -> Maybe ProviderName
 parseProviderKey key = lookup key [(providerKey provider, provider) | provider <- allProviders]

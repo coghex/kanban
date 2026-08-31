@@ -183,6 +183,7 @@ library kanban-internal
     Kanban.Review.Connection
     Kanban.Review.Diagnostics
     Kanban.Review.Prompts
+    Kanban.Review.Stream
     Kanban.Review.Tools
     Kanban.Review.Types
     Kanban.Solve.Event
@@ -241,6 +242,7 @@ test-suite kanban-test
     Spec.Agent.ManagedProcess.Lifecycle
     Spec.Agent.Ping
     Spec.Agent.Preflight
+    Spec.Agent.ClaudeReview
     Spec.Agent.Protocol
     Spec.Agent.PullRequestFlow
     Spec.Agent.Roster

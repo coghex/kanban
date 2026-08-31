@@ -11,6 +11,7 @@ module Kanban.Review.Client
     ToolRegistry,
     attachToolProcess,
     drainToolRegistry,
+    emitProtocolWarning,
     killConnectionToolProcesses,
     killReviewTools,
     killThreadToolProcesses,
@@ -30,9 +31,9 @@ import Kanban.CommandCapture (CommandBounds)
 import Kanban.Domain (WorkflowConfig)
 import Kanban.Models (ModelRoster)
 import Kanban.Process (ManagedProcess, killManagedProcess)
-import Kanban.ProviderAdapter (EmbeddedReviewBackend)
+import Kanban.ProviderAdapter (EmbeddedReviewBackend (..))
 import Kanban.Review.Connection (ConnectionId, ConnectionPool, ReviewThreadId (..))
-import Kanban.Review.Types (ReviewEvent)
+import Kanban.Review.Types (ReviewEvent (..))
 import Kanban.Transcript (SessionLog)
 
 data ReviewClient = ReviewClient
@@ -100,6 +101,18 @@ data ReviewClient = ReviewClient
     -- cost ten real minutes to reach from a test.
     reviewClaudeBounds :: CommandBounds
   }
+
+-- | Report something this client could not make sense of, under the brand of
+-- the backend it is actually running.
+--
+-- The one place a protocol warning is raised, because it is the one place
+-- that knows: the reader loops, the response dispatch, and the tool runners
+-- that reach it are shared by every backend and carry no provider of their
+-- own, so a warning built anywhere else would have to name a brand it had
+-- guessed.
+emitProtocolWarning :: ReviewClient -> Text -> IO ()
+emitProtocolWarning client message =
+  client.reviewEventSink (ReviewProtocolWarning client.reviewBackend.backendProvider message)
 
 -- | Tracks every externally spawned review-tool child process (each
 -- @kanban_run_claude@ invocation, each @gh@ subprocess behind

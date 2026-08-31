@@ -1,13 +1,21 @@
--- | The Codex app-server client that drives an interactive review session:
--- connection startup and shutdown, the JSON-RPC handshake, the reader
--- threads, and the dispatch of every wire message — including routing a tool
--- call to "Kanban.Review.Tools" and answering it.
+-- | The embedded issue-review client: connection startup and shutdown, the
+-- reader threads, and the dispatch of everything a provider sends back —
+-- including routing a tool call to "Kanban.Review.Tools" and answering it.
 --
 -- A client holds a /pool/ of connections rather than one process
 -- ("Kanban.Review.Connection"). Codex's backend shares one connection across
--- every review thread, which is what every function here does today; a
--- backend that gives each thread its own process routes through the same
--- code by acquiring a connection per review instead of reusing one.
+-- every review thread; Claude's gives each thread its own process, and both
+-- route through the same code by acquiring a connection per review or
+-- reusing the one they hold.
+--
+-- Two things about a backend the shared code cannot be written without, and
+-- both are read off the backend record rather than off the provider it
+-- belongs to. 'ReviewProcessShape' says how many processes a client's
+-- threads occupy, and so whether one connection ending is the whole client
+-- ending. 'ReviewProtocol' says whether starting a connection completes a
+-- handshake, and how one line of its output is read: 'AppServerProtocol' is
+-- the JSON-RPC exchange the rest of this module speaks, and
+-- 'StreamJsonProtocol' is the CLI channel "Kanban.Review.Stream" decodes.
 --
 -- Also the compatibility facade for the whole @Kanban.Review.*@ group: this
 -- module's export list is what "Kanban.UI", "Kanban.Preflight", and the
@@ -28,8 +36,10 @@ module Kanban.Review
     ReviewClient,
     ReviewConnection (..),
     ReviewEvent (..),
+    ReviewLaunch (..),
     ReviewOutputKind (..),
     ReviewProcessShape (..),
+    ReviewProtocol (..),
     ReviewQuestion (..),
     ReviewQuestionKind (..),
     ReviewRequestId (..),
@@ -38,6 +48,8 @@ module Kanban.Review
     ReviewThreadId (..),
     ReviewTurnOutcome (..),
     ReviewWireMessage (..),
+    StreamRecord (..),
+    StreamTurnResult (..),
     ToolRegistry,
     addRecordingReviewConnectionForTesting,
     answerReviewQuestion,
@@ -48,6 +60,7 @@ module Kanban.Review
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
     claudeCommandBounds,
+    claudeReviewArguments,
     claudeStartedEvent,
     claudeTool,
     decodeCanonicalIssueReviewResult,
@@ -56,8 +69,10 @@ module Kanban.Review
     decodeReviewQuestion,
     decodeReviewResult,
     decodeReviewWireMessage,
+    decodeStreamRecord,
     drainToolRegistry,
     embeddedReviewProvider,
+    finalOutputSchema,
     githubCommandBounds,
     githubIssueCommentArguments,
     githubIssueEditArguments,
@@ -86,6 +101,8 @@ module Kanban.Review
     resolveCanonicalIssueReviewer,
     resolveCanonicalIssueReviewerAt,
     reviewStageForLabels,
+    streamUserMessage,
+    unsupportedReviewOperationMessage,
     issueReviseAssignment,
     runAuthenticatedClaude,
     runCanonicalCommand,
@@ -118,8 +135,9 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
-import Data.IORef (atomicModifyIORef')
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -138,8 +156,11 @@ import Kanban.Process (killManagedProcess, managedProcess)
 import Kanban.ProviderAdapter
   ( EmbeddedReviewBackend (..),
     ProviderAdapter (..),
+    ReviewLaunch (..),
     ReviewProcessShape (..),
+    ReviewProtocol (..),
     adapterFor,
+    claudeReviewArguments,
   )
 import Kanban.Review.Canonical
   ( IssueReviewerRecord (..),
@@ -163,6 +184,7 @@ import Kanban.Review.Client
     ToolRegistry,
     attachToolProcess,
     drainToolRegistry,
+    emitProtocolWarning,
     killConnectionToolProcesses,
     killConnectionToolProcesses,
     killReviewTools,
@@ -188,13 +210,16 @@ import Kanban.Review.Connection
     newReviewConnection,
     releaseConnectionSlot,
     reserveConnectionSlot,
-    takeAbandonedThreadStarts,
     takeConnection,
+    takePendingThreadStarts,
   )
 import Kanban.Review.Diagnostics
   ( exceptionText,
     missingEmbeddedReviewMessage,
     outcomeUnknownDiagnostic,
+    reviewSessionDiagnostic,
+    sentenceCase,
+    unsupportedReviewOperationMessage,
   )
 import Kanban.Review.Prompts
   ( claudeTool,
@@ -204,6 +229,12 @@ import Kanban.Review.Prompts
     questionToolName,
     reviewDeveloperInstructions,
     reviewPrompt,
+  )
+import Kanban.Review.Stream
+  ( StreamRecord (..),
+    StreamTurnResult (..),
+    decodeStreamRecord,
+    streamUserMessage,
   )
 import Kanban.Review.Tools
   ( authenticatedClaudeArguments,
@@ -261,9 +292,6 @@ import System.Process
   )
 import System.Timeout (timeout)
 
--- | The cell the embedded issue-review thread itself runs on. Only Codex is
--- read: the Claude embedded-review backend is MODEL-13's, so
--- @issue_review.claude@ stays unconsulted here even when the roster loads it.
 -- | The event announcing a @kanban_run_claude@ call, carrying the display of
 -- the cell /this/ client resolves it from.
 --
@@ -288,12 +316,33 @@ claudeStartedEvent client threadId =
 embeddedReviewProvider :: ProviderName
 embeddedReviewProvider = CodexProvider
 
-issueReviewAssignment :: ModelRoster -> Either Text Assignment
-issueReviewAssignment roster =
-  either (Left . assignmentUnavailableMessage) Right (assignmentFor roster IssueReviewRole embeddedReviewProvider)
+-- | The cell an embedded issue review runs on: @issue_review@ for the
+-- provider whose backend is serving it.
+--
+-- One spelling, taking the provider, because two things resolve it and they
+-- must not be able to disagree. 'startReviewClient' asks before it has a
+-- client, for the provider its routing selected; everything inside a running
+-- client asks through 'backendAssignment' below, for the provider whose
+-- backend actually started. Those are the same cell for the backend an
+-- install routes to, and a second backend is exactly what would make two
+-- separate lookups drift apart.
+issueReviewAssignment :: ProviderName -> ModelRoster -> Either Text Assignment
+issueReviewAssignment provider roster =
+  either (Left . assignmentUnavailableMessage) Right (assignmentFor roster IssueReviewRole provider)
+
+-- | The cell a running client's own backend resolves.
+--
+-- Read through the backend rather than through 'embeddedReviewProvider'
+-- because everything downstream of it belongs to the provider that started:
+-- Codex's model and effort travel in @thread\/start@ and @turn\/start@,
+-- Claude's are argv (D-15), and the refusal a roster that cannot supply the
+-- cell produces has to name the provider whose backend is being refused.
+backendAssignment :: ReviewClient -> Either Text Assignment
+backendAssignment client =
+  issueReviewAssignment client.reviewBackend.backendProvider client.reviewModelRoster
 
 startReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
-startReviewClient roster workflowConfig repository eventSink = case issueReviewAssignment roster of
+startReviewClient roster workflowConfig repository eventSink = case issueReviewAssignment embeddedReviewProvider roster of
   -- Resolved before the app-server is spawned, not after: a roster that
   -- loads no Codex provider must start no process at all, and the backend's
   -- own failure surface already carries the reason to the UI. The cell is
@@ -314,7 +363,7 @@ startResolvedReviewClient :: EmbeddedReviewBackend -> ModelRoster -> WorkflowCon
 startResolvedReviewClient backend roster workflowConfig repository eventSink = do
   logResult <- openSessionLog repository "issue-revision-appserver" 0 Nothing
   sessionLog <- case logResult of
-    Left message -> eventSink (ReviewProtocolWarning message) >> pure Nothing
+    Left message -> eventSink (ReviewProtocolWarning backend.backendProvider message) >> pure Nothing
     Right value -> logMessage value "backend-started" backend.backendLabel >> pure (Just value)
   connections <- newConnectionPool
   activeTurns <- newMVar Map.empty
@@ -382,38 +431,49 @@ startReviewConnection client = do
 -- up here and releases the reservation, because nothing else has ever seen
 -- it.
 spawnReviewConnection :: ReviewClient -> ConnectionId -> IO (Either Text ReviewConnection)
-spawnReviewConnection client identifier = do
-  started <- try (createProcess processSpec) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
-  case started of
-    Left exception -> abandonSlot ("Could not start " <> label <> ": " <> exceptionText exception)
-    Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
-      hSetBuffering inputHandle LineBuffering
-      hSetBuffering outputHandle LineBuffering
-      (processManaged, groupLeaderProblem) <- managedProcess processHandle
-      mapM_ (\value -> mapM_ (logMessage value "group-leadership-unverified") groupLeaderProblem) client.reviewSessionLog
-      connection <- newReviewConnection identifier inputHandle processHandle processManaged
-      initialized <- timeout initializationTimeoutMicros (initializeConnection client connection outputHandle)
-      case initialized of
-        Nothing -> abandonConnection connection (sentenceLabel <> " initialization timed out")
-        Just (Left message) -> abandonConnection connection message
-        Just (Right ()) -> do
-          markConnectionReadersStarted connection
-          void (forkIO (readServerOutput client connection outputHandle >> putMVar connection.connectionOutputDone ()))
-          void (forkIO (readServerErrors client connection errorHandle >> putMVar connection.connectionErrorDone ()))
-          void (forkIO (watchServerProcess client connection))
-          attached <- attachConnection client.reviewConnections connection
-          if attached
-            then pure (Right connection)
-            else do
-              -- Shutdown drained the pool while this was starting, so no
-              -- drain will ever see this connection: it is stopped here, by
-              -- the only code that still holds it.
-              stopReviewConnection connection
-              awaitConnectionReaders connection
-              pure (Left (clientShuttingDownMessage client))
-    Right _ -> abandonSlot (sentenceLabel <> " did not provide all three standard streams")
+spawnReviewConnection client identifier = case backendAssignment client of
+  -- Resolved before the process, not after: a backend whose argv carries the
+  -- roster's model and effort cannot be launched without them, and one that
+  -- carries them on the wire would only reach the same refusal a moment
+  -- later with a provider process already running.
+  Left message -> abandonSlot message
+  Right assignment -> do
+    let processSpec = client.reviewBackend.backendProcess (ReviewLaunch client.reviewRepositoryRoot assignment)
+    started <- try (createProcess processSpec) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
+    case started of
+      Left exception -> abandonSlot ("Could not start " <> label <> ": " <> exceptionText exception)
+      Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
+        hSetBuffering inputHandle LineBuffering
+        hSetBuffering outputHandle LineBuffering
+        (processManaged, groupLeaderProblem) <- managedProcess processHandle
+        mapM_ (\value -> mapM_ (logMessage value "group-leadership-unverified") groupLeaderProblem) client.reviewSessionLog
+        connection <- newReviewConnection identifier inputHandle processHandle processManaged
+        -- The thread this connection's stream is on, once its provider has
+        -- named it. Held beside the connection rather than on it because it
+        -- is the reader loops' own state: both of them attribute what they
+        -- read to it, and only they ever write it.
+        streamThread <- newIORef Nothing
+        initialized <- completeHandshake client connection outputHandle
+        case initialized of
+          Nothing -> abandonConnection connection (sentenceLabel <> " initialization timed out")
+          Just (Left message) -> abandonConnection connection message
+          Just (Right ()) -> do
+            markConnectionReadersStarted connection
+            void (forkIO (readProviderOutput client connection streamThread outputHandle >> putMVar connection.connectionOutputDone ()))
+            void (forkIO (readProviderErrors client connection streamThread errorHandle >> putMVar connection.connectionErrorDone ()))
+            void (forkIO (watchServerProcess client connection))
+            attached <- attachConnection client.reviewConnections connection
+            if attached
+              then pure (Right connection)
+              else do
+                -- Shutdown drained the pool while this was starting, so no
+                -- drain will ever see this connection: it is stopped here, by
+                -- the only code that still holds it.
+                stopReviewConnection connection
+                awaitConnectionReaders connection
+                pure (Left (clientShuttingDownMessage client))
+      Right _ -> abandonSlot (sentenceLabel <> " did not provide all three standard streams")
   where
-    processSpec = client.reviewBackend.backendProcess client.reviewRepositoryRoot
     label = client.reviewBackend.backendLabel
     sentenceLabel = sentenceCase label
     abandonSlot message = do
@@ -422,6 +482,19 @@ spawnReviewConnection client identifier = do
     abandonConnection connection message = do
       stopReviewConnection connection
       abandonSlot message
+
+-- | Complete whatever a backend requires before anything may be sent, which
+-- for one of the two protocols is nothing at all.
+--
+-- The app-server answers an @initialize@ request and is not usable until it
+-- has, so the exchange is performed and bounded. The CLI streams as soon as
+-- it starts: there is no exchange to complete, nothing to wait for, and so
+-- nothing to time out on. The 'Maybe' is the timeout's, so the two arms
+-- agree on one shape.
+completeHandshake :: ReviewClient -> ReviewConnection -> Handle -> IO (Maybe (Either Text ()))
+completeHandshake client connection outputHandle = case client.reviewBackend.backendProtocol of
+  AppServerProtocol -> timeout initializationTimeoutMicros (initializeConnection client connection outputHandle)
+  StreamJsonProtocol -> pure (Just (Right ()))
 
 -- | Kill one connection's process group and close the handle its requests
 -- are written to. Never waits: the caller decides whether it also has to
@@ -436,9 +509,6 @@ clientShuttingDownMessage client = backendSentence client <> " client is shuttin
 
 connectionGoneMessage :: ReviewClient -> Text
 connectionGoneMessage client = backendSentence client <> " connection for this review has ended"
-
-sentenceCase :: Text -> Text
-sentenceCase value = Text.toUpper (Text.take 1 value) <> Text.drop 1 value
 
 -- | Builds a 'ReviewClient' holding one 'placeholderReviewBackend'
 -- connection, without the handshake and reader loops 'startReviewClient'
@@ -479,21 +549,30 @@ newReviewClientForTesting roster bounds repositoryRoot repositorySlug eventSink 
   _ <- addTestingReviewConnection client False
   pure client
 
+-- | The cell the placeholder backend is launched under. It ignores its
+-- launch entirely — @git --version@ takes no model — but a launch is what
+-- every backend is handed, and inventing one here keeps the fixture from
+-- depending on whatever roster a test happened to pass.
+placeholderAssignment :: Assignment
+placeholderAssignment = Assignment "placeholder" "none" "placeholder none"
+
 -- | The stand-in backend the testing constructors spawn: a harmless
 -- placeholder process (@git --version@, already an audited invocation of
 -- this codebase's own workflow) so shutdown still has a real, killable
 -- process to operate on.
 --
--- Shared-process shaped, so a fixture built on it behaves as the only
--- backend Kanban ships does. A test about the pool adds its second
--- connection explicitly rather than by starting a second review, which is
--- what keeps 'beginIssueReview' on these fixtures reaching the one
--- connection it always did.
+-- Shared-process shaped and app-server spoken, so a fixture built on it
+-- behaves as the backend an install routes to does. A test about the pool
+-- adds its second connection explicitly rather than by starting a second
+-- review, which is what keeps 'beginIssueReview' on these fixtures reaching
+-- the one connection it always did.
 placeholderReviewBackend :: EmbeddedReviewBackend
 placeholderReviewBackend =
   EmbeddedReviewBackend
     { backendLabel = "codex app-server",
+      backendProvider = CodexProvider,
       backendProcessShape = SharedProcess,
+      backendProtocol = AppServerProtocol,
       backendProcess = \_ ->
         (proc "git" ["--version"])
           { std_in = CreatePipe,
@@ -515,7 +594,7 @@ addTestingReviewConnection client recording = do
     ReservedConnection value -> pure value
     _ -> fail "the testing review client's connection pool refused a reservation"
   (Just processInput, Just _outputHandle, Just _errorHandle, processHandle) <-
-    createProcess (client.reviewBackend.backendProcess client.reviewRepositoryRoot)
+    createProcess (client.reviewBackend.backendProcess (ReviewLaunch client.reviewRepositoryRoot placeholderAssignment))
   (processManaged, _) <- managedProcess processHandle
   (inputHandle, readEnd) <-
     if not recording
@@ -620,7 +699,11 @@ initializeConnection client connection outputHandle = do
         ]
 
 beginIssueReview :: ReviewClient -> Int -> IO (Either Text ())
-beginIssueReview client issueNumber = case issueReviewAssignment client.reviewModelRoster of
+beginIssueReview client issueNumber = case backendAssignment client of
+  -- Consulted before a connection is acquired, so a roster that cannot
+  -- supply this backend's cell refuses with a visible reason and starts no
+  -- process at all. For a backend that gives each thread its own, acquiring
+  -- the connection *is* the spawn.
   Left message -> pure (Left message)
   Right assignment -> do
     -- The one place a review's connection is decided. A shared-process
@@ -630,7 +713,9 @@ beginIssueReview client issueNumber = case issueReviewAssignment client.reviewMo
     acquired <- acquireReviewConnection client
     case acquired of
       Left message -> pure (Left message)
-      Right connection -> sendRequest client connection (PendingThreadStart issueNumber) "thread/start" (threadParams assignment)
+      Right connection -> case client.reviewBackend.backendProtocol of
+        AppServerProtocol -> sendRequest client connection (PendingThreadStart issueNumber) "thread/start" (threadParams assignment)
+        StreamJsonProtocol -> openStreamedReview client connection issueNumber
   where
     threadParams assignment =
       object
@@ -643,11 +728,44 @@ beginIssueReview client issueNumber = case issueReviewAssignment client.reviewMo
           "dynamicTools" .= (adapterFor embeddedReviewProvider).adapterReviewTools client.reviewModelRoster client.reviewWorkflowConfig
         ]
 
+-- | Open a review on a backend whose process /is/ the thread.
+--
+-- There is nothing to create: the connection was spawned for this review
+-- alone, and the review begins by writing its first user message. The
+-- session id the provider announces on the way back is what finally names
+-- the thread, which is why the issue is recorded as a pending start exactly
+-- as a @thread\/start@ request records it — under an id nothing ever writes
+-- to the wire, because it is not a request. That record is what a connection
+-- dying before the announcement reports the review by, and what the
+-- announcement itself takes when it arrives.
+openStreamedReview :: ReviewClient -> ReviewConnection -> Int -> IO (Either Text ())
+openStreamedReview client connection issueNumber = do
+  pendingId <- nextRequestId connection
+  modifyMVar_ connection.connectionPendingRequests (pure . Map.insert pendingId (PendingThreadStart issueNumber))
+  sent <- sendValue client connection (streamUserMessage (reviewPrompt issueNumber))
+  case sent of
+    Right () -> pure (Right ())
+    Left message -> do
+      -- The caller is told, so nothing is left to report this review by.
+      modifyMVar_ connection.connectionPendingRequests (pure . Map.delete pendingId)
+      -- A per-thread connection was spawned for this review and will now
+      -- never serve a thread, so nothing else would ever stop it. A shared
+      -- one is left alone for the same reason the app-server path leaves
+      -- it: every other review is on it.
+      when (client.reviewBackend.backendProcessShape == ProcessPerThread) (stopReviewConnection connection)
+      pure (Left message)
+
 sendReviewMessage :: ReviewClient -> ReviewThreadId -> Maybe Text -> Text -> IO (Either Text ())
 sendReviewMessage client threadId activeTurnId = case activeTurnId of
-  Just turnId -> \message ->
-    withThreadConnection client threadId $ \connection ->
-      sendRequest client connection (PendingSteer threadId turnId message) "turn/steer" (steerParams turnId message)
+  -- Redirecting a turn already in flight. The app-server has an operation
+  -- for it; the CLI's channel has none at all (D-16), and what replaces it
+  -- is MODEL-16's, so until then a message typed mid-turn is refused rather
+  -- than written as a request the process on the other end cannot read.
+  Just turnId -> \message -> case client.reviewBackend.backendProtocol of
+    StreamJsonProtocol -> pure (Left (unsupportedOperation client "steer a running turn"))
+    AppServerProtocol ->
+      withThreadConnection client threadId $ \connection ->
+        sendRequest client connection (PendingSteer threadId turnId message) "turn/steer" (steerParams turnId message)
   Nothing -> sendTurnStart client threadId
   where
     steerParams turnId message =
@@ -709,15 +827,24 @@ approveReviewAction client requestIdentity accepted forSession =
       | forSession = "acceptForSession"
       | otherwise = "accept"
 
+-- | Cancel a running turn. The CLI does have an operation for this -- a
+-- @control_request@ (D-16) -- but driving it is MODEL-16's, so until then
+-- this refuses rather than writing the app-server's request into a process
+-- that would read it as ordinary input.
 interruptReview :: ReviewClient -> ReviewThreadId -> Text -> IO (Either Text ())
-interruptReview client threadId turnId =
-  withThreadConnection client threadId $ \connection ->
-    sendRequest
-      client
-      connection
-      PendingOther
-      "turn/interrupt"
-      (object ["threadId" .= threadId.reviewThreadProvider, "turnId" .= turnId])
+interruptReview client threadId turnId = case client.reviewBackend.backendProtocol of
+  StreamJsonProtocol -> pure (Left (unsupportedOperation client "interrupt a turn"))
+  AppServerProtocol ->
+    withThreadConnection client threadId $ \connection ->
+      sendRequest
+        client
+        connection
+        PendingOther
+        "turn/interrupt"
+        (object ["threadId" .= threadId.reviewThreadProvider, "turnId" .= turnId])
+
+unsupportedOperation :: ReviewClient -> Text -> Text
+unsupportedOperation client = unsupportedReviewOperationMessage client.reviewBackend.backendLabel
 
 -- | What one connection's end has to reach: the tool calls its own threads
 -- started, and its own recorded process group — using the same best-effort
@@ -782,10 +909,18 @@ sendTurnStart client threadId prompt =
 
 -- | 'sendTurnStart' for a caller that already holds the thread's connection:
 -- the response handler, which is running on it.
+--
+-- A turn is opened the way its channel opens one. The app-server takes a
+-- request carrying this turn's effort and output schema; the CLI took both
+-- as launch flags and holds them for the process's whole life (D-15), so
+-- there is nothing to send but the message itself, and the @init@ record it
+-- answers with is what announces the turn.
 sendTurnStartOn :: ReviewClient -> ReviewConnection -> ReviewThreadId -> Text -> IO (Either Text ())
-sendTurnStartOn client connection threadId prompt = case issueReviewAssignment client.reviewModelRoster of
+sendTurnStartOn client connection threadId prompt = case backendAssignment client of
   Left message -> pure (Left message)
-  Right assignment -> sendRequest client connection (PendingTurnStart threadId) "turn/start" (params assignment)
+  Right assignment -> case client.reviewBackend.backendProtocol of
+    AppServerProtocol -> sendRequest client connection (PendingTurnStart threadId) "turn/start" (params assignment)
+    StreamJsonProtocol -> sendValue client connection (streamUserMessage prompt)
   where
     params assignment =
       object
@@ -818,8 +953,14 @@ sendValue client connection value = do
     Left exception -> Left (backendSentence client <> " write failed: " <> exceptionText exception)
     Right () -> Right ()
 
-readServerOutput :: ReviewClient -> ReviewConnection -> Handle -> IO ()
-readServerOutput client connection outputHandle = do
+-- | Read one connection's output to its end, interpreting each line the way
+-- its backend's protocol says to.
+--
+-- The protocol is read once, here, rather than per line: which decoder a
+-- connection uses is fixed when it is spawned, and a dispatch inside the
+-- loop would suggest it could change mid-stream.
+readProviderOutput :: ReviewClient -> ReviewConnection -> IORef (Maybe ReviewThreadId) -> Handle -> IO ()
+readProviderOutput client connection streamThread outputHandle = do
   result <- try (forever readOne) :: IO (Either IOException ())
   case result of
     Left exception -> do
@@ -827,16 +968,20 @@ readServerOutput client connection outputHandle = do
       reportConnectionStopped client connection (backendSentence client <> " output closed: " <> exceptionText exception)
     Right () -> pure ()
   where
+    interpret = case client.reviewBackend.backendProtocol of
+      AppServerProtocol -> \line -> case decodeReviewWireMessage line of
+        Left message -> emitProtocolWarning client message
+        Right wireMessage -> handleWireMessage client connection wireMessage
+      StreamJsonProtocol -> \line -> case decodeStreamRecord line of
+        Left detail -> emitProtocolWarning client (streamDiagnostic client detail)
+        Right record -> handleStreamRecord client connection streamThread record
     readOne = do
       strictLine <- ByteString.hGetLine outputHandle
       mapM_ (\sessionLog -> logRawLine sessionLog "stdout" strictLine) client.reviewSessionLog
-      let line = LazyByteString.fromStrict strictLine
-      case decodeReviewWireMessage line of
-        Left message -> client.reviewEventSink (ReviewProtocolWarning message)
-        Right wireMessage -> handleWireMessage client connection wireMessage
+      interpret (LazyByteString.fromStrict strictLine)
 
-readServerErrors :: ReviewClient -> ReviewConnection -> Handle -> IO ()
-readServerErrors client connection errorHandle = do
+readProviderErrors :: ReviewClient -> ReviewConnection -> IORef (Maybe ReviewThreadId) -> Handle -> IO ()
+readProviderErrors client connection streamThread errorHandle = do
   result <- try (forever readOne) :: IO (Either IOException ())
   case result of
     Left _ -> pure ()
@@ -846,15 +991,65 @@ readServerErrors client connection errorHandle = do
       strictLine <- ByteString.hGetLine errorHandle
       mapM_ (\sessionLog -> logRawLine sessionLog "stderr" strictLine) client.reviewSessionLog
       let line = LazyByteString.fromStrict strictLine
-      client.reviewEventSink (ReviewOutput (diagnosticThread connection) DiagnosticOutput (decodeLine line))
+      threadId <- diagnosticThread connection streamThread
+      client.reviewEventSink (ReviewOutput threadId DiagnosticOutput (decodeLine line))
 
--- | The thread a connection's stderr is reported against: none of them. A
--- provider writes diagnostics for the whole process rather than for one of
--- its threads, and no session claims the empty provider id, so this reaches
--- the transcript of nothing — which is what it did before a connection had
--- an identity to name.
-diagnosticThread :: ReviewConnection -> ReviewThreadId
-diagnosticThread connection = ReviewThreadId connection.connectionId ""
+-- | The thread a connection's stderr is reported against.
+--
+-- A process that multiplexes every thread writes its diagnostics for the
+-- whole process rather than for one of them, so there is no thread to name:
+-- the empty provider id no session claims reaches the transcript of nothing,
+-- which is what this did before a connection had an identity at all. A
+-- process serving one review thread is the opposite case — everything it
+-- writes to stderr belongs to that thread — so once its stream has named the
+-- thread, that is where its diagnostics go.
+diagnosticThread :: ReviewConnection -> IORef (Maybe ReviewThreadId) -> IO ReviewThreadId
+diagnosticThread connection streamThread =
+  fromMaybe (ReviewThreadId connection.connectionId "") <$> readIORef streamThread
+
+-- | Turn one decoded stream-json record into what it means for this
+-- connection's review.
+--
+-- The thread, turn, transcript and completion the app-server's own
+-- notifications carry, out of a stream that has none of their names: the CLI
+-- re-emits its @init@ record at the head of every turn, so the first one is
+-- where a review's thread becomes nameable and each later one opens a turn
+-- on the thread already named. The two events a review can also end in —
+-- a start that never produced a thread, and a connection that stopped — are
+-- 'reportConnectionStopped''s, because they are things a stream stopping
+-- means rather than things it says.
+handleStreamRecord :: ReviewClient -> ReviewConnection -> IORef (Maybe ReviewThreadId) -> StreamRecord -> IO ()
+handleStreamRecord client connection streamThread record = case record of
+  StreamIgnored -> pure ()
+  StreamTurnOpened providerThreadId turnId -> do
+    let threadId = ReviewThreadId connection.connectionId providerThreadId
+    writeIORef streamThread (Just threadId)
+    -- Taken rather than read: the review has arrived, and an entry left
+    -- behind would let this connection's death report a review that is
+    -- already running as one that never started.
+    opening <- takePendingThreadStarts connection
+    mapM_ (announceThread threadId) opening
+    modifyMVar_ client.reviewActiveTurns (pure . Map.insert threadId turnId)
+    client.reviewEventSink (ReviewTurnStarted threadId turnId)
+  StreamDelta outputKind text ->
+    onNamedThread "streamed output" (\threadId -> client.reviewEventSink (ReviewOutput threadId outputKind text))
+  StreamTurnClosed outcome -> onNamedThread "a turn result" $ \threadId -> do
+    modifyMVar_ client.reviewActiveTurns (pure . Map.delete threadId)
+    client.reviewEventSink $ case outcome of
+      StreamVerdict text result -> ReviewTurnCompleted threadId TurnSucceeded Nothing (Just (text, result))
+      StreamTurnFailure detail -> ReviewTurnCompleted threadId TurnFailed (Just (streamDiagnostic client detail)) Nothing
+  where
+    announceThread threadId issueNumber = do
+      modifyMVar_ client.reviewThreadIssues (pure . Map.insert threadId issueNumber)
+      client.reviewEventSink (ReviewThreadCreated issueNumber threadId)
+    -- Everything but the opening record belongs to a thread the stream has
+    -- already named. One that arrives before it is a protocol warning rather
+    -- than an event attributed to a guess.
+    onNamedThread what action = do
+      named <- readIORef streamThread
+      case named of
+        Just threadId -> action threadId
+        Nothing -> emitProtocolWarning client (streamDiagnostic client ("sent " <> what <> " before naming its session"))
 
 -- | Report the end of one connection.
 --
@@ -875,9 +1070,28 @@ reportConnectionStopped :: ReviewClient -> ReviewConnection -> Text -> IO ()
 reportConnectionStopped client connection message = case client.reviewBackend.backendProcessShape of
   SharedProcess -> client.reviewEventSink (ReviewClientStopped message)
   ProcessPerThread -> do
-    abandoned <- takeAbandonedThreadStarts connection
+    abandoned <- takePendingThreadStarts connection
     mapM_ (\issueNumber -> client.reviewEventSink (ReviewStartFailed issueNumber message)) abandoned
+    interrupted <- takeConnectionTurns client connection
+    mapM_ (\threadId -> client.reviewEventSink (ReviewTurnCompleted threadId TurnFailed (Just message) Nothing)) interrupted
     client.reviewEventSink (ReviewConnectionStopped connection.connectionId message)
+
+-- | Take the threads on this connection that had a turn running, removing
+-- them from the active set.
+--
+-- A turn whose process died produced no verdict and never will, and a
+-- session left holding a running turn would wait for a completion that
+-- cannot arrive. Reported as that thread's own failed turn rather than as
+-- anything client-wide: a per-thread backend's other connections are
+-- untouched, and the threads on them are still running.
+--
+-- Taking, for the same reason the pending starts above are taken: a dying
+-- connection reaches two terminal paths, and only one of them may report.
+takeConnectionTurns :: ReviewClient -> ReviewConnection -> IO [ReviewThreadId]
+takeConnectionTurns client connection =
+  modifyMVar client.reviewActiveTurns $ \turns ->
+    let (mine, rest) = Map.partitionWithKey (\threadId _ -> threadId.reviewThreadConnection == connection.connectionId) turns
+     in pure (rest, Map.keys mine)
 
 watchServerProcess :: ReviewClient -> ReviewConnection -> IO ()
 watchServerProcess client connection = do
@@ -915,7 +1129,7 @@ handleWireMessage client connection wireMessage = case wireMessage of
 
 handleResponse :: ReviewClient -> ReviewConnection -> Value -> Either Value Value -> IO ()
 handleResponse client connection requestId result = case requestIdInt requestId of
-  Nothing -> client.reviewEventSink (ReviewProtocolWarning "Codex returned a non-numeric response id")
+  Nothing -> emitProtocolWarning client "Codex returned a non-numeric response id"
   Just integerId -> do
     pending <- modifyMVar connection.connectionPendingRequests $ \requests ->
       pure (Map.delete integerId requests, Map.lookup integerId requests)
@@ -955,7 +1169,7 @@ handleResponse client connection requestId result = case requestIdInt requestId 
               Right () -> pure ()
               Left _ -> client.reviewEventSink (ReviewSteerUndelivered threadId targetTurnId message)
           Just _ -> client.reviewEventSink (ReviewSteerUndelivered threadId targetTurnId message)
-      (_, Left err) -> client.reviewEventSink (ReviewProtocolWarning ("Codex request failed: " <> compactValue err))
+      (_, Left err) -> emitProtocolWarning client ("Codex request failed: " <> compactValue err)
       _ -> pure ()
 
 handleNotification :: ReviewClient -> ReviewConnection -> Text -> Value -> IO ()
@@ -964,12 +1178,12 @@ handleNotification client connection method params = case method of
     (Just threadId, Just turnId) -> do
       modifyMVar_ client.reviewActiveTurns (pure . Map.insert threadId turnId)
       client.reviewEventSink (ReviewTurnStarted threadId turnId)
-    _ -> client.reviewEventSink (ReviewProtocolWarning "turn/started omitted its thread or turn id")
+    _ -> emitProtocolWarning client "turn/started omitted its thread or turn id"
   "item/agentMessage/delta" -> emitDelta AgentOutput
   "item/commandExecution/outputDelta" -> emitDelta CommandOutput
   "item/reasoning/summaryTextDelta" -> emitDelta ReasoningOutput
   "turn/completed" -> case notifiedThread params of
-    Nothing -> client.reviewEventSink (ReviewProtocolWarning "turn/completed omitted its thread id")
+    Nothing -> emitProtocolWarning client "turn/completed omitted its thread id"
     Just threadId -> do
       modifyMVar_ client.reviewActiveTurns (pure . Map.delete threadId)
       client.reviewEventSink
@@ -991,13 +1205,13 @@ handleServerRequest client connection requestId method params = case method of
           Right question -> client.reviewEventSink (ReviewQuestionRequested threadId wrappedId question)
           Left message -> do
             void (sendDynamicToolFailure client connection wrappedId message)
-            client.reviewEventSink (ReviewProtocolWarning message)
+            emitProtocolWarning client message
         _ -> void (sendDynamicToolFailure client connection wrappedId "Question tool call omitted its thread id or arguments")
     | fieldText "tool" params == Just claudeToolName -> case (requestingThread params, objectField "arguments" params) of
         (Just threadId, Just arguments) -> case parseClaudeToolRequest arguments of
           Left message -> do
             void (sendDynamicToolFailure client connection wrappedId message)
-            client.reviewEventSink (ReviewProtocolWarning message)
+            emitProtocolWarning client message
           Right claudeRequest ->
             void
               . forkIO
@@ -1007,7 +1221,7 @@ handleServerRequest client connection requestId method params = case method of
         (Just threadId, Just arguments) -> case decodeGitHubIssueToolRequest client.reviewWorkflowConfig arguments of
           Left message -> do
             void (sendDynamicToolFailure client connection wrappedId message)
-            client.reviewEventSink (ReviewProtocolWarning message)
+            emitProtocolWarning client message
           Right githubRequest -> do
             authorized <- githubRequestMatchesThread client threadId githubRequest
             if authorized
@@ -1018,14 +1232,14 @@ handleServerRequest client connection requestId method params = case method of
               else do
                 let message = "kanban_github_issue may only access the issue owned by this review thread"
                 void (sendDynamicToolFailure client connection wrappedId message)
-                client.reviewEventSink (ReviewProtocolWarning message)
+                emitProtocolWarning client message
         _ -> void (sendDynamicToolFailure client connection wrappedId "GitHub issue tool call omitted its thread id or arguments")
     | otherwise -> void (sendDynamicToolFailure client connection wrappedId "Kanban does not implement that dynamic tool")
   "item/commandExecution/requestApproval" -> emitApproval False
   "item/fileChange/requestApproval" -> emitApproval True
   _ -> do
     void (sendErrorResponse client connection requestId (-32601) ("Unsupported app-server request: " <> method))
-    client.reviewEventSink (ReviewProtocolWarning ("Unsupported app-server request: " <> method))
+    emitProtocolWarning client ("Unsupported app-server request: " <> method)
   where
     -- The connection travels with the wire id because the user may answer
     -- minutes later, by which time another connection may have issued a
@@ -1160,11 +1374,16 @@ renderExitCode :: ReviewClient -> ExitCode -> Text
 renderExitCode client ExitSuccess = backendSentence client <> " exited"
 renderExitCode client (ExitFailure code) = backendSentence client <> " exited with status " <> Text.pack (show code)
 
--- | The backend's label at the start of a sentence. The labels name a
--- program (@codex app-server@), so they stay lowercase where a diagnostic
--- mentions one inline and are capitalized where one opens the sentence.
+-- | The backend's label at the start of a sentence.
 backendSentence :: ReviewClient -> Text
 backendSentence client = sentenceCase client.reviewBackend.backendLabel
+
+-- | A diagnostic "Kanban.Review.Stream" produced, completed by the backend
+-- that is speaking the channel it decoded. The decoder knows the protocol
+-- and this knows who is running it; neither knows both, which is what stops
+-- either from naming a provider it guessed.
+streamDiagnostic :: ReviewClient -> Text -> Text
+streamDiagnostic client = reviewSessionDiagnostic client.reviewBackend.backendLabel
 
 ignoreIOException :: IO () -> IO ()
 ignoreIOException action = do

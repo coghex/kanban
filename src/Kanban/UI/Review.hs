@@ -5,6 +5,7 @@ module Kanban.UI.Review
     applyReviewAnimationTick,
     applyReviewBackendStarted,
     applyReviewEvent,
+    reviewProtocolWarningNotice,
     applyUndeliveredSteer,
     approvalServiceRefusal,
     armReviewTick,
@@ -54,7 +55,7 @@ import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.Drainer (normalizedRepositoryIdentity)
-import Kanban.Models (ProviderName (..), RoleName (..), assignmentFor)
+import Kanban.Models (ProviderName (..), RoleName (..), assignmentFor, providerDisplayName)
 import Kanban.Preflight
   ( PreflightAction (..),
     issueOriginFromBody,
@@ -819,6 +820,21 @@ applyReviewBackendStarted result = case result of
             }
       | otherwise = session
 
+-- | How a protocol warning is announced: the provider whose backend raised
+-- it, then what it said.
+--
+-- Named by the provider the event carries rather than by a brand compiled in
+-- here. The warning is raised by client code shared by every backend --
+-- the reader loops, the response dispatch, the tool runners -- and the only
+-- thing that knows whose protocol misbehaved is the backend that raised it.
+--
+-- Pure and separate because 'applyReviewEvent' runs in brick's 'EventM',
+-- which no unit test can drive, and because the wording is a contract on
+-- both sides: Codex's has to stay exactly the sentence it always was.
+reviewProtocolWarningNotice :: ProviderName -> Text -> Text
+reviewProtocolWarningNotice provider message =
+  providerDisplayName provider <> " protocol warning: " <> message
+
 applyReviewEvent :: ReviewEvent -> EventM Name AppState ()
 applyReviewEvent reviewEvent = case reviewEvent of
   ReviewThreadCreated issueNumber threadId ->
@@ -987,7 +1003,7 @@ applyReviewEvent reviewEvent = case reviewEvent of
     modifyReviewSessionByThread threadId (applyUndeliveredSteer message)
     tailReviewThread threadId
     setNotice undeliveredNotice
-  ReviewProtocolWarning message -> setNotice ("Codex protocol warning: " <> message)
+  ReviewProtocolWarning provider message -> setNotice (reviewProtocolWarningNotice provider message)
   where
     outcomePhase IssueRevision TurnSucceeded (Just result)
       | null result.reviewResultBlockingReasons = ReviewFinished

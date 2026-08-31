@@ -25,6 +25,9 @@ module Kanban.Review.Diagnostics
     outcomeUnknownMessage,
     renderClaudeFailureDetails,
     reviewAssignmentDisplay,
+    reviewSessionDiagnostic,
+    sentenceCase,
+    unsupportedReviewOperationMessage,
   )
 where
 
@@ -48,14 +51,47 @@ import Kanban.Models
 -- Distinct from 'Kanban.Models.assignmentUnavailableMessage', which the same
 -- launch consults first, because the causes are: that one says the operator's
 -- roster cannot supply a cell, this one says Kanban itself ships no backend
--- for the provider. Only Claude answers to it, and only from MODEL-13
--- onwards -- nothing in MODEL-12 routes the embedded review anywhere but
--- Codex, so no install's behavior moves.
+-- for the provider. Both compiled providers carry one from MODEL-13 onwards,
+-- so nothing an install can route to answers to it today; it stays because
+-- 'Kanban.ProviderAdapter.adapterEmbeddedReview' is a field a provider may
+-- lack, and the launch that reads it must say so by name rather than
+-- silently doing nothing.
 missingEmbeddedReviewMessage :: ProviderName -> Text
 missingEmbeddedReviewMessage provider =
   "Kanban has no embedded issue-review backend for provider \""
     <> providerKey provider
     <> "\""
+
+-- | A diagnostic about a backend's own session: which program it is, then
+-- what that program did.
+--
+-- The backend supplies the subject and whatever read its output supplies the
+-- predicate. That split is what lets a decoder which knows a protocol and
+-- nothing about the provider speaking it produce a sentence naming the right
+-- program: a decoder that spelled the brand itself would name it in every
+-- install, including one where a different provider is running the same
+-- channel.
+reviewSessionDiagnostic :: Text -> Text -> Text
+reviewSessionDiagnostic backendLabel detail = sentenceCase backendLabel <> " " <> detail
+
+-- | A backend label at the start of a sentence. The labels name a program
+-- (@codex app-server@), so they stay lowercase where a diagnostic mentions
+-- one inline and are capitalized where one opens the sentence.
+sentenceCase :: Text -> Text
+sentenceCase value = Text.toUpper (Text.take 1 value) <> Text.drop 1 value
+
+-- | The refusal an operation gets from a backend Kanban does not drive it
+-- through.
+--
+-- Unlike every other refusal here, nothing has gone wrong: the backend is
+-- healthy and the thread is running, and the operation is one a later slice
+-- adds. Said once because two backends can reach it for different
+-- operations, and because a refusal that named the other provider's protocol
+-- -- which is what reusing that protocol's diagnostics would do -- would
+-- report a program the operator is not running.
+unsupportedReviewOperationMessage :: Text -> Text -> Text
+unsupportedReviewOperationMessage backendLabel operation =
+  "Kanban cannot " <> operation <> " on " <> backendLabel <> " yet"
 
 -- | How every review string names the agent @kanban_run_claude@ runs: the
 -- unversioned brand, then the model-and-effort of the @issue_revise.claude@
