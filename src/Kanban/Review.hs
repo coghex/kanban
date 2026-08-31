@@ -1015,16 +1015,23 @@ data StreamAttribution = StreamAttribution
 -- transcript of nothing, which is what this did before a connection had an
 -- identity at all.
 --
--- A process serving one review thread is the opposite case — everything it
--- writes to stderr belongs to that thread — but its two readers run
--- concurrently, so stderr routinely arrives before the stdout record that
--- names the thread. Reporting those early lines unattributed would show the
--- most interesting ones, the complaints a provider makes on the way up, as
--- notices belonging to no review. They wait instead.
+-- A stream that names its own session is the opposite case — the connection
+-- serves one review thread, and everything it writes to stderr belongs to
+-- that thread — but its two readers run concurrently, so stderr routinely
+-- arrives before the stdout record that names it. Reporting those early
+-- lines unattributed would show the most interesting ones, the complaints a
+-- provider makes on the way up, as notices belonging to no review. They wait
+-- instead.
+--
+-- Keyed on the protocol rather than the process shape, because the protocol
+-- is what decides whether a thread will ever be named /in the stream/. An
+-- app-server names its threads in its responses, so nothing here would ever
+-- be released by a record arriving, and holding its stderr would only delay
+-- it to the end of the connection.
 reportDiagnostic :: ReviewClient -> ReviewConnection -> MVar StreamAttribution -> Text -> IO ()
-reportDiagnostic client connection attribution line = case client.reviewBackend.backendProcessShape of
-  SharedProcess -> emitDiagnostic client (unattributedThread connection) line
-  ProcessPerThread -> do
+reportDiagnostic client connection attribution line = case client.reviewBackend.backendProtocol of
+  AppServerProtocol -> emitDiagnostic client (unattributedThread connection) line
+  StreamJsonProtocol -> do
     named <- modifyMVar attribution $ \state -> case state.attributedThread of
       Just threadId -> pure (state, Just threadId)
       Nothing -> pure (state {heldDiagnostics = state.heldDiagnostics <> [line]}, Nothing)

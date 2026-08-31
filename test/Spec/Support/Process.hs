@@ -35,6 +35,7 @@ module Spec.Support.Process
     withTwoConnectionReviewClient,
     TwoConnectionClient (..),
     withFakeReviewClient,
+    fakeProviderDiagnostic,
     ClaudeReviewFixture (..),
     withClaudeReviewClient,
     withClaudeReviewClientUsing,
@@ -55,6 +56,7 @@ module Spec.Support.Process
     nextClientLine,
     twoConnectionsOf,
     waitForConnectionStops,
+    waitForHeldConnections,
     turnCompletions,
     startFailures,
     expectNoFurtherClientRequests,
@@ -634,14 +636,19 @@ withTwoConnectionReviewClient action = do
     action
 
 -- | A backend whose provider is a fake executable on disk: it records its own
--- pid, answers the initialize handshake the client waits for, and then drains
--- its stdin until the client closes it.
+-- pid, writes one line to its stderr, answers the initialize handshake the
+-- client waits for, and then drains its stdin until the client closes it.
 --
 -- Deliberately no further protocol. What a test built on this is about is
 -- connection /shape/ — how many processes two reviews occupy, which
 -- connection a response resolves against, and whether shutdown reaps every
 -- one — and a fake that also spoke the thread and turn protocol would answer
 -- those questions no better while being able to get them wrong.
+--
+-- The stderr line is the negative control for the stream backend's held
+-- diagnostics: this backend names its threads in its responses rather than in
+-- its stream, so nothing it writes to stderr may ever be held waiting for a
+-- record that will not come.
 withFakeReviewBackend :: ReviewProcessShape -> (FilePath -> Repository -> EmbeddedReviewBackend -> IO result) -> IO result
 withFakeReviewBackend processShape action =
   withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -654,6 +661,7 @@ withFakeReviewBackend processShape action =
       ( ByteString.unlines
           [ "#!/bin/sh",
             "echo \"$$\" >> \"" <> ByteString.pack spawnLog <> "\"",
+            "printf '%s\\n' '" <> fakeProviderDiagnostic <> "' >&2",
             "printf '%s\\n' '{\"id\":1,\"result\":{}}'",
             -- Draining stdin is what keeps a client that writes a large
             -- 'thread/start' from blocking on a full pipe, and reaching EOF
@@ -680,6 +688,10 @@ withFakeReviewBackend processShape action =
                   create_group = True
                 }
           }
+
+-- | The one line the fake provider writes to its stderr.
+fakeProviderDiagnostic :: ByteString.ByteString
+fakeProviderDiagnostic = "fake app-server starting"
 
 -- | A live review client on that fake backend, plus the pid log its provider
 -- writes to and the events its sink recorded in order.
@@ -947,6 +959,27 @@ twoConnectionsOf client = do
   case connections of
     [first, second] -> pure (first, second)
     other -> fail ("expected the review client to hold two connections, it held " <> show (length other))
+
+-- | Wait until the client holds exactly @wanted@ connections, returning
+-- their ids.
+--
+-- Polled rather than read once. A dying connection is reported by whichever
+-- of its two terminal paths gets there first — its output reader hitting EOF,
+-- or its watcher reaping the process — and only the watcher also takes it out
+-- of the pool, after waiting for both readers to finish. So a stop report is
+-- not a promise that the pool has already shrunk, and an assertion that reads
+-- it straight after one passes or fails on scheduling.
+waitForHeldConnections :: ReviewClient -> Int -> IO [ConnectionId]
+waitForHeldConnections client wanted = go (400 :: Int)
+  where
+    go remaining = do
+      held <- map (.connectionId) <$> reviewConnectionsForTesting client
+      if length held == wanted
+        then pure held
+        else
+          if remaining <= 0
+            then fail ("expected the review client to hold " <> show wanted <> " connection(s), it held " <> show held)
+            else threadDelay 25000 >> go (remaining - 1)
 
 -- | Wait until at least @wanted@ connections have been reported as stopped,
 -- returning every such report so far. Bounded so a report that never arrives

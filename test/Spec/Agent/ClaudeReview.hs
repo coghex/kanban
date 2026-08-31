@@ -14,7 +14,6 @@
 -- a stand-in would say nothing about the launch an install would perform.
 module Spec.Agent.ClaudeReview (spec) where
 
-import Control.Concurrent (threadDelay)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -34,8 +33,7 @@ import Kanban.Models
   )
 import Kanban.Process (killManagedProcess)
 import Kanban.Review
-  ( ConnectionId,
-    ReviewConnection (..),
+  ( ReviewConnection (..),
     ReviewEvent (..),
     ReviewOutputKind (..),
     ReviewResult (..),
@@ -66,6 +64,7 @@ import Spec.Support.Process
     threadCreations,
     turnCompletions,
     turnStarts,
+    waitForHeldConnections,
     waitForReviewEvents,
     withClaudeReviewClient,
     withClaudeReviewClientUsing,
@@ -412,7 +411,7 @@ spec = do
         -- appear is a report naming the survivor, or naming no connection.
         map fst (connectionStopReports recorded) `shouldSatisfy` all (== stalled.reviewThreadConnection)
         [message | ReviewClientStopped message <- recorded] `shouldBe` []
-        surviving <- awaitConnections fixture 1
+        surviving <- waitForHeldConnections fixture.claudeReviewClient 1
         surviving `shouldBe` [healthy.reviewThreadConnection]
         -- The client is not the connection: a further review still starts.
         beginIssueReview fixture.claudeReviewClient 846 `shouldReturn` Right ()
@@ -593,23 +592,6 @@ stalledAndHealthy recorded =
       | first == healthy -> pure (second, first)
       | second == healthy -> pure (first, second)
     other -> fail ("expected one stalled and one completed review thread, got " <> show other)
-
--- | The connections a client still holds, once it holds exactly @wanted@.
---
--- Polled rather than read once: a dying connection is reported by whichever
--- of its two terminal paths reaches the report first, and only one of those
--- is the watcher that also takes it out of the pool.
-awaitConnections :: ClaudeReviewFixture -> Int -> IO [ConnectionId]
-awaitConnections fixture wanted = go (400 :: Int)
-  where
-    go remaining = do
-      held <- map (.connectionId) <$> reviewConnectionsForTesting fixture.claudeReviewClient
-      if length held == wanted
-        then pure held
-        else
-          if remaining <= 0
-            then fail ("expected the client to hold " <> show wanted <> " connection(s), it held " <> show held)
-            else threadDelay 25000 >> go (remaining - 1)
 
 killConnectionOf :: ClaudeReviewFixture -> ReviewThreadId -> IO ()
 killConnectionOf fixture threadId = do
