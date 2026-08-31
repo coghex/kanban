@@ -31,7 +31,7 @@ concrete precondition
 - [x] MODEL-12. Extract the provider adapter interface behind the agent flows — [#522]
 - [x] MODEL-14. Hold either embedded-review process shape in the review client — [#585]
 - [x] MODEL-13. Implement the Claude embedded-review stream-json backend — [#586]
-- [ ] MODEL-15. Serve Kanban's review tools to the Claude backend over a stdio MCP re-entry
+- [x] MODEL-15. Serve Kanban's review tools to the Claude backend over a stdio MCP re-entry — [#587]
 - [ ] MODEL-16. Reach steer and interrupt parity on the Claude backend
 - [ ] MODEL-10. Implement single-agent review routing in the Haskell flows
 - [x] MODEL-11. Make the Python gates and plugin reviews single-agent aware — [#572]
