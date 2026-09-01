@@ -3852,20 +3852,56 @@ WORKER_LAUNCH_FUNCTIONS = ("launchSolveWorker", "launchPullRequestWorker")
 # session with a refusal. Only the compatibility rules moved.
 ACTION_REGISTRY_UNROUTED_ADAPTERS = ("src/Kanban/UI/Review.hs",)
 
-# The two surfaces that start an autosolve revision round: the dashboard's
-# refresh adapter, and the plain-IO loop. Both reach the one declaration of
-# that turn (`autoSolveRevisionTurn`, beside the decision that asks for it) and
-# neither builds its own prompt, so the session they resume, the provenance
-# they resume under, and what they tell the provider cannot come to differ.
-AUTOSOLVE_REVISION_SURFACES = (
-    "src/Kanban/UI/Reconcile.hs",
-    "src/Kanban/Action/AutoSolve.hs",
-)
-AUTOSOLVE_REVISION_TURN = "autoSolveRevisionTurn"
-AUTOSOLVE_REVISION_PROMPT = "autoSolveRevisionPrompt"
-
-# Where both of them live, which is the only module that may name either.
+# Autosolve's progression, as a fact about which modules may name it.
+#
+# The loop has one owner: `decideAutoSolve` decides, `autoSolveTick` is the one
+# reading of that decision, and `autoSolveRevisionTurn` is the one construction
+# of the turn an arm of it asks for. A dashboard refresh and a headless tick
+# both take their whole move from the tick and then only render or dispatch it,
+# so neither can advance one action in a way the other would not (issue #593
+# requirement 12).
+#
+# Stated as an allowlist over the whole of src/ rather than as a per-surface
+# check: a third module that started reading the decision, or building the
+# revision turn, is exactly the second implementation this forbids, and only a
+# tree-wide scan sees one arrive.
 AUTOSOLVE_PROGRESSION_MODULE = "src/Kanban/UI/AutoSolve.hs"
+AUTOSOLVE_REGISTRY_MODULE = "src/Kanban/Action/AutoSolve.hs"
+AUTOSOLVE_DASHBOARD_SURFACE = "src/Kanban/UI/Reconcile.hs"
+
+# The registry's dispatch reads the decision for a second, narrower purpose:
+# a finished *solve* attributes the pull request it opened through the very
+# same discovery arm, so solve and autosolve cannot disagree about which pull
+# request a run produced. That reuse is the point rather than a leak, so it is
+# named here with its reason instead of being excluded by silence.
+AUTOSOLVE_ATTRIBUTION_READER = "src/Kanban/Action/Dispatch.hs"
+
+# token -> the modules allowed to name it. The engine declares each; the
+# registry's tick is the reader of the first two.
+AUTOSOLVE_SINGLE_OWNER_TOKENS = {
+    "decideAutoSolve": {
+        AUTOSOLVE_PROGRESSION_MODULE,
+        AUTOSOLVE_REGISTRY_MODULE,
+        AUTOSOLVE_ATTRIBUTION_READER,
+    },
+    "autoSolveRevisionTurn": {AUTOSOLVE_PROGRESSION_MODULE, AUTOSOLVE_REGISTRY_MODULE},
+    "autoSolveRevisionPrompt": {AUTOSOLVE_PROGRESSION_MODULE},
+}
+
+# Both surfaces reach the tick: the registry declares it, the dashboard adapter
+# takes its move from it.
+AUTOSOLVE_PROGRESSION_ENTRY = "autoSolveTick"
+AUTOSOLVE_TICK_SURFACES = (AUTOSOLVE_REGISTRY_MODULE, AUTOSOLVE_DASHBOARD_SURFACE)
+
+
+def haskell_modules_naming(token):
+    """Every module under src/ whose code (comments dropped) names `token`."""
+    named = set()
+    for path in sorted((REPO_ROOT / "src").rglob("*.hs")):
+        relative_path = path.relative_to(REPO_ROOT).as_posix()
+        if token in haskell_code_lines(relative_path):
+            named.add(relative_path)
+    return named
 
 
 def haskell_code_lines(relative_path):
@@ -4094,38 +4130,49 @@ class WorkflowActionRegistryBoundaryTests(unittest.TestCase):
                     "refusal and stop opening a session",
                 )
 
-    def test_both_autosolve_surfaces_start_one_declared_revision_turn(self):
-        # Issue #593 requirement 12. A dashboard refresh and a headless tick
-        # both start the resumed-solver turn; a second construction of it is
-        # how the two would come to resume under a different provenance or
-        # with a different prompt.
+    def test_autosolve_progression_has_one_owner(self):
+        # Issue #593 requirement 12. Each token below is named by the module
+        # that declares it and by the one module that reads it, and by nothing
+        # else: a third naming is a second implementation of the loop.
         offenders = []
-        for relative_path in AUTOSOLVE_REVISION_SURFACES:
-            code = haskell_code_lines(relative_path)
-            if AUTOSOLVE_REVISION_TURN not in code:
+        for token, allowed in sorted(AUTOSOLVE_SINGLE_OWNER_TOKENS.items()):
+            named = haskell_modules_naming(token)
+            for extra in sorted(named - allowed):
                 offenders.append(
-                    f"{relative_path} no longer reaches "
-                    f"{AUTOSOLVE_REVISION_TURN}; it is building an autosolve "
-                    "revision turn of its own"
+                    f"{extra} names {token}; only {sorted(allowed)} may, so "
+                    "that a dashboard refresh and a headless tick advance one "
+                    f"action the same way -- take the whole move from "
+                    f"{AUTOSOLVE_PROGRESSION_ENTRY} instead"
                 )
-            if AUTOSOLVE_REVISION_PROMPT in code:
+            for missing in sorted(allowed - named):
                 offenders.append(
-                    f"{relative_path} builds the revision prompt itself; "
-                    f"take the whole turn from {AUTOSOLVE_REVISION_TURN} so "
-                    "both surfaces resume the same way"
+                    f"{missing} no longer names {token}; the allowlist for it "
+                    "is asserting nothing about a module that has stopped "
+                    "owning it"
                 )
         self.assertEqual(offenders, [], "\n".join(offenders))
 
-    def test_the_revision_turn_detector_detects(self):
-        # The control, over the module that declares both names.
-        code = haskell_code_lines(AUTOSOLVE_PROGRESSION_MODULE)
-        for name in (AUTOSOLVE_REVISION_TURN, AUTOSOLVE_REVISION_PROMPT):
-            self.assertIn(
-                name,
-                code,
-                f"{AUTOSOLVE_PROGRESSION_MODULE} no longer declares {name}; "
-                "the surface gate above is asserting nothing",
-            )
+    def test_both_autosolve_surfaces_take_their_move_from_the_tick(self):
+        named = haskell_modules_naming(AUTOSOLVE_PROGRESSION_ENTRY)
+        for relative_path in AUTOSOLVE_TICK_SURFACES:
+            with self.subTest(module=relative_path):
+                self.assertIn(
+                    relative_path,
+                    named,
+                    f"{relative_path} no longer takes its move from "
+                    f"{AUTOSOLVE_PROGRESSION_ENTRY}; the dashboard adapter and "
+                    "the plain-IO loop must read one progression",
+                )
+
+    def test_the_progression_detector_detects(self):
+        # The control for both checks above. A scanner that recovered nothing
+        # would satisfy the allowlist's "extra" half by finding an empty set,
+        # and would report no drift for the same reason an empty loop does.
+        self.assertEqual(
+            haskell_modules_naming("decideAutoSolve"),
+            AUTOSOLVE_SINGLE_OWNER_TOKENS["decideAutoSolve"],
+        )
+        self.assertEqual(haskell_modules_naming("thisIdentifierExistsNowhere"), set())
 
     def test_the_worker_spawn_detector_detects(self):
         # The control: the registry is where those two functions are now

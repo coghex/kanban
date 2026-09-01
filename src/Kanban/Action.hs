@@ -28,15 +28,23 @@
 -- observation, and terminal results validated against authoritative evidence
 -- rather than taken from a worker's exit.
 --
--- Autosolve is the one action a handle cannot be concluded from. Its only
+-- Autosolve is the one action a bare handle cannot be concluded from. Its only
 -- successful terminal result is the validated approval of the pull request its
 -- loop bound, which no single provider turn establishes — a finished solver
--- has opened a pull request nothing has reviewed — so 'observeAction' reports
--- one of its turns as still running and only a provider's question or failure
--- settles it there. The loop itself is 'runAutoSolveAction', and
--- 'recoverAutoSolveState' rebuilds one already under way from the durable
--- records a dashboard-launched run left behind, so a board press and a
--- headless runner drive one action in one state model.
+-- has opened a pull request nothing has reviewed. So observing it has to
+-- /advance/ it: 'beginAutoSolveAction' opens the handle a dispatch returned
+-- into an action with a loop cursor, and each 'observeAutoSolveAction' moves
+-- it one tick until it settles on that approval. ('runAutoSolveAction' is the
+-- same loop driven to its end.) 'observeAction' on the bare handle reports the
+-- turn in flight and never a success, because a handle held on its own carries
+-- nowhere to record progress.
+--
+-- 'recoverAutoSolveState' rebuilds an action already under way from the
+-- durable records a dashboard-launched run left behind, and
+-- 'Kanban.Action.AutoSolve.autoSolveTick' is the single reading of the loop's
+-- next move that the dashboard's refresh adapter takes its move from too. A
+-- board press and a headless runner therefore drive one action, in one state
+-- model, through one progression.
 --
 -- Three things this registry never does, on any path: merge a pull request,
 -- add or remove an approval verdict label, or start or stop the approval
@@ -93,6 +101,7 @@ module Kanban.Action
     ActionObservation (..),
     ApprovalQueueObservation (..),
     approvalQueueObservationMessage,
+    approvalQueueWasReported,
 
     -- * The read a resolution is made against
     TargetCatalog (..),
@@ -143,6 +152,16 @@ module Kanban.Action
     validatedPullRequestVerdict,
 
     -- * The autosolve loop
+    AutoSolveTick (..),
+    AutoSolveMove (..),
+    AutoSolveConclusion (..),
+    autoSolveTick,
+    autoSolveConclusionOutcome,
+    AutoSolveAction,
+    beginAutoSolveAction,
+    beginAutoSolveActionWith,
+    observeAutoSolveAction,
+    autoSolveActionActivity,
     AutoSolveState (..),
     AutoSolveTurns (..),
     liveAutoSolveTurns,
@@ -150,6 +169,7 @@ module Kanban.Action
     autoSolveStateFor,
     autoSolveStateFromWorkers,
     recoverAutoSolveState,
+    reviewPhaseForRecord,
     reviewPhaseForWorker,
     settledReviewTurn,
     workerStatusIsLive,

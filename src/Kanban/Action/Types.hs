@@ -73,6 +73,7 @@ module Kanban.Action.Types
     ActionObservation (..),
     ApprovalQueueObservation (..),
     approvalQueueObservationMessage,
+    approvalQueueWasReported,
   )
 where
 
@@ -490,6 +491,14 @@ data ActionOutcome
 -- | Whether an outcome is the one its action was asked for. Deliberately
 -- narrow: a pending verdict, a missing pull request, and a needs-input halt
 -- are all honest results and none of them is success.
+--
+-- The queue observation is the one that has to be looked into rather than
+-- taken whole. Observing the queue succeeds when the controller reported a
+-- status -- whatever that status says, including a failed service, which is a
+-- successful observation of a failure. It does not succeed when the
+-- controller could not be discovered or its status could not be read: those
+-- are indeterminate, and requirement 16 forbids reporting an indeterminate
+-- result as success.
 actionOutcomeSucceeded :: ActionOutcome -> Bool
 actionOutcomeSucceeded outcome = case outcome of
   ActionPullRequestOpened _ -> True
@@ -498,7 +507,13 @@ actionOutcomeSucceeded outcome = case outcome of
   ActionNeedsInput _ -> False
   ActionStopped _ -> False
   ActionFailed _ -> False
-  ActionApprovalQueueReport _ -> True
+  ActionApprovalQueueReport observation -> approvalQueueWasReported observation
+
+-- | Whether the controller actually answered.
+approvalQueueWasReported :: ApprovalQueueObservation -> Bool
+approvalQueueWasReported (ApprovalQueueReported _ _) = True
+approvalQueueWasReported (ApprovalQueueUndiscoverable _) = False
+approvalQueueWasReported (ApprovalQueueQueryFailed _) = False
 
 actionOutcomeMessage :: ActionOutcome -> Text
 actionOutcomeMessage outcome = case outcome of

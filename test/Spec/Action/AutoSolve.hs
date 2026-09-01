@@ -15,6 +15,7 @@
 -- previous one has settled.
 module Spec.Action.AutoSolve (spec) where
 
+import Control.Monad (forM)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -29,7 +30,12 @@ import Kanban.Solve
     SolveWorkflow (..),
     SolverBrand (..),
   )
-import Kanban.UI.AutoSolve (AutoSolveRevision (..), autoSolveRevisionTurn)
+import Kanban.UI.AutoSolve
+  ( AutoSolveHalt (..),
+    AutoSolveObservation (..),
+    AutoSolveRevision (..),
+    autoSolveRevisionTurn,
+  )
 import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..), SolvePhase (..))
 import Kanban.Worker
   ( PullRequestWorkerTask (..),
@@ -331,6 +337,24 @@ outcomeOf world progress bindReviewer = fst <$> tickWith world progress bindRevi
 notSucceeding :: ActionOutcome -> Bool
 notSucceeding = not . actionOutcomeSucceeded
 
+-- | The loop's environment with one world's pull requests as its read.
+withPullRequests :: Loop -> [PullRequest] -> ActionEnvironment
+withPullRequests loop pullRequests =
+  loop.loopEnvironment
+    {actionCatalog = loop.loopEnvironment.actionCatalog {catalogPullRequests = pullRequests}}
+
+isRunningObservation :: ActionObservation -> Bool
+isRunningObservation (ActionRunning _) = True
+isRunningObservation (ActionSettled _) = False
+
+isHold :: AutoSolveMove -> Bool
+isHold (AutoSolveHold _) = True
+isHold _ = False
+
+isHoldWithActivity :: AutoSolveMove -> Bool
+isHoldWithActivity (AutoSolveHold (Just _)) = True
+isHoldWithActivity _ = False
+
 stoppedFor :: Text -> Either ActionOutcome () -> Bool
 stoppedFor fragment = either (Text.isInfixOf fragment . actionOutcomeMessage) (const False)
 
@@ -339,23 +363,8 @@ spec = do
   describe "the headless autosolve loop" $ do
     -- The whole arc, with both providers driven in sequence and nothing but
     -- durable records and refreshed snapshots to drive it.
-    it "runs solver, opposite-brand review, resumed solver, and rereview to approval" $ do
-      let mine = linkedPullRequest pullRequestUnderLoop ClaudeSolver
-          worlds =
-            [ -- The solver is still working.
-              World [] [(Solver, running)],
-              -- It finished, and the pull request it opened is on the board.
-              World [mine []] [(Solver, completed)],
-              -- The review round is under way.
-              World [mine []] [(Solver, completed), (Reviewer, running)],
-              -- The review published CHANGES_REQUESTED.
-              World [mine [label defaultWorkflowConfig.changesRequestedLabel]] [(Solver, completed), (Reviewer, completed)],
-              -- The resumed solver is revising.
-              World [mine [label defaultWorkflowConfig.changesRequestedLabel]] [(Resumed, running)],
-              -- The revision finished and its canonical rereview approved.
-              World [mine [label defaultWorkflowConfig.approvalLabel]] [(Resumed, completed)]
-            ]
-      withLoop worlds $ \loop -> do
+    it "runs solver, opposite-brand review, resumed solver, and rereview to approval" $
+      withLoop wholeArc $ \loop -> do
         outcome <- runAutoSolveActionWith loop.loopTurns loop.loopEnvironment loop.loopDriver loop.loopStart
         outcome `shouldBe` ActionPullRequestApproved pullRequestUnderLoop
         actionOutcomeSucceeded outcome `shouldBe` True
@@ -601,6 +610,106 @@ spec = do
       autoSolveRevisionTurn defaultWorkflowConfig Nothing (Repository "/tmp/kanban" "coghex" "kanban") ClaudeSolver Nothing pullRequestUnderLoop 1
         `shouldBe` Nothing
 
+  -- Requirement 12's dispatch-to-approval path. Observing the action is what
+  -- advances it, so the ordinary handle-then-observe shape reaches the
+  -- approval rather than stalling on whichever turn is in flight.
+  describe "observing a dispatched action to its approval" $ do
+    it "advances the loop a tick per observation and settles on the approval" $
+      withLoop [] $ \loop -> do
+        action <- beginAutoSolveActionWith loop.loopTurns loop.loopStart
+        observations <- forM wholeArc $ \world -> do
+          loop.loopSetWorld world
+          observeAutoSolveAction (withPullRequests loop world.worldPullRequests) action
+        last observations `shouldBe` ActionSettled (ActionPullRequestApproved pullRequestUnderLoop)
+        -- ...and nothing before it claimed a result. An action that reported
+        -- the opening solve's pull request would settle here instead.
+        all isRunningObservation (init observations) `shouldBe` True
+        map (.dispatchedKind) <$> readIORef loop.loopDispatches
+          >>= (`shouldBe` [ReviewPullRequest, AutoSolveIssue])
+
+    it "opens an action only from an autosolve handle" $
+      withLoop [] $ \loop -> do
+        opened <- beginAutoSolveAction (ApprovalQueueHandle loop.loopEnvironment.actionRepository)
+        maybe True (const False) opened `shouldBe` True
+
+  -- An unreadable review record is not "no review". Reading it as one is how
+  -- a second reviewer would be launched beside the first.
+  describe "a reviewer whose record cannot be read" $ do
+    it "waits rather than starting a second review round" $ do
+      let world = World [linkedPullRequest pullRequestUnderLoop ClaudeSolver []] [(Solver, completed)]
+      (advanced, recorded) <- tickWith world (progressAt AutoReviewing 1 (Just pullRequestUnderLoop)) True
+      advanced `shouldBe` Right ()
+      recorded `shouldBe` []
+
+    it "reports an unreadable record as a starting review, not as an absent one" $ do
+      reviewPhaseForRecord (Left "no durable record") `shouldBe` SolveStarting
+      reviewPhaseForRecord (Right running) `shouldBe` SolveRunning
+      reviewPhaseForRecord (Right completed) `shouldBe` SolveFinished
+
+  -- The one reading of a decision both surfaces take their move from.
+  describe "the shared tick" $ do
+    it "carries the activity a surface shows while the loop holds" $
+      (tickOf (observing []) (progressAt AutoDiscoveringPullRequest 0 Nothing)).tickMove
+        `shouldSatisfy` isHoldWithActivity
+
+    it "announces only the observation that bound the pull request" $ do
+      let bound = linkedPullRequest pullRequestUnderLoop ClaudeSolver []
+          discovery = tickOf (observing [bound]) (progressAt AutoDiscoveringPullRequest 0 Nothing)
+          alreadyBound = tickOf (observing [bound]) (progressAt AutoReviewing 1 (Just pullRequestUnderLoop))
+      discovery.tickMove `shouldBe` AutoSolveReviewRound pullRequestUnderLoop True
+      discovery.tickProgress.autoSolveReviewRound `shouldBe` 1
+      discovery.tickProgress.autoSolvePullRequest `shouldBe` Just pullRequestUnderLoop
+      alreadyBound.tickMove `shouldBe` AutoSolveReviewRound pullRequestUnderLoop False
+
+    it "carries the whole revision turn on the arm that asks for one" $ do
+      let observation =
+            (observing [changesRequestedPullRequest]) {autoSolveReviewPhase = Just SolveFinished}
+          tick = tickOf observation (progressAt AutoReviewing 1 (Just pullRequestUnderLoop))
+      case tick.tickMove of
+        AutoSolveRevisionRound number turn -> do
+          number `shouldBe` pullRequestUnderLoop
+          turn.autoSolveRevisionSession `shouldBe` "session-1"
+          turn.autoSolveRevisionProvenance `shouldBe` ResumeAutomatedChangesRequested
+          turn.autoSolveRevisionMessage `shouldSatisfy` Text.isInfixOf "pr-revise"
+        other -> error ("expected a revision round, saw " <> show other)
+      tick.tickProgress.autoSolveStage `shouldBe` AutoRevising
+
+    it "advances the progress each conclusion retires the loop with" $ do
+      let approvedPullRequest = linkedPullRequest pullRequestUnderLoop ClaudeSolver [label defaultWorkflowConfig.approvalLabel]
+          approved =
+            tickOf
+              ((observing [approvedPullRequest]) {autoSolveReviewPhase = Just SolveFinished})
+              (progressAt AutoReviewing 1 (Just pullRequestUnderLoop))
+          bounded =
+            tickOf
+              ((observing [changesRequestedPullRequest]) {autoSolveReviewPhase = Just SolveFinished})
+              (progressAt AutoReviewing 5 (Just pullRequestUnderLoop))
+      approved.tickMove `shouldBe` AutoSolveConcluded (AutoSolveConcludedApproved pullRequestUnderLoop)
+      approved.tickProgress.autoSolveStage `shouldBe` AutoSolveComplete
+      autoSolveConclusionOutcome (AutoSolveConcludedApproved pullRequestUnderLoop)
+        `shouldBe` ActionPullRequestApproved pullRequestUnderLoop
+      bounded.tickProgress.autoSolveStage `shouldBe` AutoSolveStopped
+      case bounded.tickMove of
+        AutoSolveConcluded (AutoSolveConcludedHalted halt reason) -> do
+          halt `shouldBe` AutoSolveHaltStopped
+          reason `shouldSatisfy` Text.isInfixOf "5 review rounds"
+        other -> error ("expected a halt, saw " <> show other)
+
+    -- The regression the exactly-one-advancer rule needs on the dashboard's
+    -- side: a refresh arriving while a turn is live starts nothing, however
+    -- many refreshes arrive.
+    it "starts nothing on a refresh that arrives while a turn is live" $ do
+      let bound = linkedPullRequest pullRequestUnderLoop ClaudeSolver []
+          reviewing = progressAt AutoReviewing 1 (Just pullRequestUnderLoop)
+          duringReview = (observing [bound]) {autoSolveReviewPhase = Just SolveRunning}
+          duringRevision =
+            (observing [changesRequestedPullRequest])
+              { autoSolveReviewPhase = Just SolveFinished,
+                autoSolveSolverRunning = True
+              }
+      map (\observation -> (tickOf observation reviewing).tickMove) [duringReview, duringRevision, duringReview]
+        `shouldSatisfy` all isHold
+
   describe "reading a worker's durable record" $ do
     it "maps every recorded status onto the phase the loop decides from" $
       map
@@ -622,6 +731,43 @@ spec = do
       workerStatusIsLive (Right (workerRecord (WorkerOrphaned SolveCompleted) Nothing)) `shouldBe` True
       workerStatusIsLive (Right running) `shouldBe` True
       workerStatusIsLive (Right completed) `shouldBe` False
+
+-- | The six observations one complete run makes, from a solver still working
+-- to the approval its canonical rereview published.
+wholeArc :: [World]
+wholeArc =
+  [ -- The solver is still working.
+    World [] [(Solver, running)],
+    -- It finished, and the pull request it opened is on the board.
+    World [mine []] [(Solver, completed)],
+    -- The review round is under way.
+    World [mine []] [(Solver, completed), (Reviewer, running)],
+    -- The review published CHANGES_REQUESTED.
+    World [mine [label defaultWorkflowConfig.changesRequestedLabel]] [(Solver, completed), (Reviewer, completed)],
+    -- The resumed solver is revising.
+    World [mine [label defaultWorkflowConfig.changesRequestedLabel]] [(Resumed, running)],
+    -- The revision finished and its canonical rereview approved.
+    World [mine [label defaultWorkflowConfig.approvalLabel]] [(Resumed, completed)]
+  ]
+  where
+    mine = linkedPullRequest pullRequestUnderLoop ClaudeSolver
+
+-- | An observation with nothing happening, refined per example.
+observing :: [PullRequest] -> AutoSolveObservation
+observing pullRequests =
+  AutoSolveObservation
+    { autoSolveIssueNumber = issueUnderLoop,
+      autoSolveWorkflowConfig = defaultWorkflowConfig,
+      autoSolveSolverBrand = ClaudeSolver,
+      autoSolveSolverSession = Just "session-1",
+      autoSolveSolverRunning = False,
+      autoSolveSnapshotPullRequests = pullRequests,
+      autoSolveReviewPhase = Nothing
+    }
+
+tickOf :: AutoSolveObservation -> AutoSolveProgress -> AutoSolveTick
+tickOf =
+  autoSolveTick defaultWorkflowConfig Nothing (Repository "/tmp/kanban" "coghex" "kanban")
 
 changesRequestedPullRequest :: PullRequest
 changesRequestedPullRequest =

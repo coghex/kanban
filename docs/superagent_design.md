@@ -505,12 +505,18 @@ already applies. Kanban's automated progressions stay on the label-derived
 route and therefore never select it: a problem status on the pull request an
 autosolve run is looping over must not silently become a repair launch.
 
-The autosolve row's `PR approved` is the whole action's result, not one turn's.
-Observing an autosolve handle after its opening solve reports the loop still
-running rather than the pull request that solve opened: promoting that would
-let a caller stop before the review, the revision, and the approval it asked
-for. Only a provider's question or failure settles the action from a single
-turn.
+The autosolve row's `PR approved` is the whole action's result, not one turn's,
+so observing an autosolve action advances it: each observation moves the loop
+one tick and reports where it now is, and only the last reports the approval.
+Reporting the pull request the opening solve opened would let a caller stop
+before the review, the revision, and the approval it asked for. A provider's
+question or failure still ends the action wherever the loop has reached.
+
+One progression owns that advance. The dashboard's refresh adapter and the
+headless loop both take their next move from the same reading of the same
+decision and then only render or dispatch it, so a refresh cannot advance an
+action in a way a runner would not, and neither can start a turn beside one the
+other started.
 
 The queue row's `idle, reviewing, barrier, failed` is this table's summary
 rather than the result type. The controller distinguishes more states than

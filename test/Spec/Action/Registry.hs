@@ -19,7 +19,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (addUTCTime)
 import Kanban.Action
-import Kanban.ApprovalService (ApprovalActivity (..), ApprovalState (..), ApprovalStatus (..))
+import Kanban.ApprovalService (ApprovalActivity (..), ApprovalState (..), ApprovalStatus (..), ApprovalUnavailable (..))
 import Kanban.Domain
 import Kanban.Models (RecordedAssignment (..), defaultRoster)
 import Kanban.Preflight
@@ -708,6 +708,23 @@ spec = do
         observed `shouldSatisfy` isUndiscoverable
         approvalQueueObservationMessage observed
           `shouldSatisfy` Text.isInfixOf "issue approval service unavailable"
+
+    -- Requirement 16: an indeterminate observation is never success. A
+    -- reported failure is a successful observation of a failure; a controller
+    -- that could not be discovered, or a status that could not be read, is
+    -- neither a success nor a report.
+    it "calls a reported status a success and an unreadable one anything but" $ do
+      let reported activity =
+            ActionApprovalQueueReport (ApprovalQueueReported (ApprovalStatus ApprovalOn "detail" activity Nothing Nothing) Nothing)
+      actionOutcomeSucceeded (reported ApprovalServiceRunning) `shouldBe` True
+      -- Including a service the controller says has failed.
+      actionOutcomeSucceeded (reported ApprovalServiceChildFailure) `shouldBe` True
+      actionOutcomeSucceeded (ActionApprovalQueueReport (ApprovalQueueQueryFailed "timed out"))
+        `shouldBe` False
+      actionOutcomeSucceeded
+        (ActionApprovalQueueReport (ApprovalQueueUndiscoverable (ApprovalHostUnsupported "no manager")))
+        `shouldBe` False
+      approvalQueueWasReported (ApprovalQueueQueryFailed "timed out") `shouldBe` False
 
     it "keeps every controller state the status record distinguishes" $ do
       let reported activity detail =

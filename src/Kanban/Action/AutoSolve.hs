@@ -28,13 +28,24 @@
 -- revision back on, so rebuilding it from a record is what keeps provider
 -- turns sequential with no dashboard present.
 module Kanban.Action.AutoSolve
-  ( AutoSolveState (..),
+  ( AutoSolveTick (..),
+    AutoSolveMove (..),
+    AutoSolveConclusion (..),
+    autoSolveTick,
+    autoSolveConclusionOutcome,
+    AutoSolveAction,
+    beginAutoSolveAction,
+    beginAutoSolveActionWith,
+    observeAutoSolveAction,
+    autoSolveActionActivity,
+    AutoSolveState (..),
     AutoSolveTurns (..),
     liveAutoSolveTurns,
     AutoSolveDriver (..),
     autoSolveStateFor,
     autoSolveStateFromWorkers,
     recoverAutoSolveState,
+    reviewPhaseForRecord,
     reviewPhaseForWorker,
     settledReviewTurn,
     workerStatusIsLive,
@@ -44,6 +55,7 @@ module Kanban.Action.AutoSolve
   )
 where
 
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (find)
 import Data.Maybe (listToMaybe)
 import Data.Set (Set)
@@ -63,7 +75,7 @@ import Kanban.Action.Target
     workflowActionKindForLabelledPullRequest,
   )
 import Kanban.Action.Types
-import Kanban.Domain (PullRequest (..), RepoSnapshot, Repository)
+import Kanban.Domain (PullRequest (..), RepoSnapshot, Repository, WorkflowConfig)
 import Kanban.Solve (SolveOutcome (..), SolveWorkflow (..), SolverBrand)
 import Kanban.UI.AutoSolve
   ( AutoSolveCompletion (..),
@@ -72,7 +84,9 @@ import Kanban.UI.AutoSolve
     AutoSolveObservation (..),
     AutoSolveRevision (..),
     autoSolveAfterCompletion,
+    autoSolveCompleted,
     autoSolveRevisionTurn,
+    autoSolveStopped,
     decideAutoSolve,
   )
 import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..), SolvePhase (..))
@@ -167,6 +181,20 @@ reviewPhaseForWorker status = case status of
   WorkerTerminal (SolveNeedsInput _) -> SolveAttention
   WorkerTerminal (SolveFailed _) -> SolveFailedPhase
 
+-- | The phase a bound reviewer's durable record reports.
+--
+-- Fails closed on the read, exactly as 'workerStatusIsLive' does, and for a
+-- sharper reason: 'Kanban.UI.AutoSolve.decideAutoSolve' reads an /absent/
+-- review phase as "no review has been started" and answers it by starting
+-- one. A record that merely could not be read -- a worker that has not
+-- written its state yet, a transient read failure -- would therefore launch a
+-- second reviewer beside the first. Reporting it as a starting review is what
+-- makes the loop wait instead; "no reviewer at all" stays the caller's own
+-- 'Nothing', which only holds when no review worker is bound.
+reviewPhaseForRecord :: Either Text WorkerState -> SolvePhase
+reviewPhaseForRecord (Left _) = SolveStarting
+reviewPhaseForRecord (Right recorded) = reviewPhaseForWorker recorded.workerStateStatus
+
 -- | Whether a recorded worker still owns live work.
 --
 -- Fails closed on both edges: a state file that could not be read is treated
@@ -191,7 +219,7 @@ advanceAutoSolveAction turns environment state = do
   let solverSession = either (const Nothing) (.workerStateSessionId) solverState
       solverLogPath = either (const Nothing) (.workerStateLogPath) solverState
       solverLive = workerStatusIsLive solverState
-      reviewPhase = reviewerState >>= either (const Nothing) (Just . reviewPhaseForWorker . (.workerStateStatus))
+      reviewPhase = reviewPhaseForRecord <$> reviewerState
       solverStatus = either (const Nothing) (Just . (.workerStateStatus)) solverState
       reviewerStatus = reviewerState >>= either (const Nothing) (Just . (.workerStateStatus))
   case settledReviewTurn reviewerStatus of
@@ -206,16 +234,19 @@ advanceAutoSolveAction turns environment state = do
     identity = catalogIdentity environment.actionCatalog
 
     decide progress solverSession solverLogPath solverLive reviewPhase =
-      case decideAutoSolve observation progress of
-        AutoSolveWait -> pure (Right state {autoSolveActionProgress = progress})
-        AutoSolveWaitingOn _ -> pure (Right state {autoSolveActionProgress = progress})
-        AutoSolveStartReview number -> startReview progress solverSession solverLogPath number
-        AutoSolveOpenReview number advanced -> startReview advanced solverSession solverLogPath number
-        AutoSolveRevise number advanced -> resumeSolver advanced solverSession solverLogPath number
-        AutoSolveApprove number -> pure (Left (ActionPullRequestApproved number))
-        AutoSolveHalted AutoSolveHaltStopped reason -> pure (Left (ActionStopped reason))
-        AutoSolveHalted AutoSolveHaltFailed reason -> pure (Left (ActionFailed reason))
+      case tick.tickMove of
+        AutoSolveHold _ -> pure (Right state {autoSolveActionProgress = tick.tickProgress})
+        AutoSolveReviewRound number _ -> startReview tick.tickProgress solverSession solverLogPath number
+        AutoSolveRevisionRound _ turn -> resumeSolver tick.tickProgress solverSession solverLogPath turn
+        AutoSolveConcluded conclusion -> pure (Left (autoSolveConclusionOutcome conclusion))
       where
+        tick =
+          autoSolveTick
+            environment.actionWorkflowConfig
+            environment.actionConfigPath
+            environment.actionRepository
+            observation
+            progress
         observation =
           AutoSolveObservation
             { autoSolveIssueNumber = issueNumber,
@@ -255,40 +286,30 @@ advanceAutoSolveAction turns environment state = do
     -- dashboard's own revision arm also starts: the session to resume, the
     -- provenance, and the prompt are one construction rather than this
     -- module's and the adapter's.
-    resumeSolver progress solverSession solverLogPath number =
-      case autoSolveRevisionTurn
-        environment.actionWorkflowConfig
-        environment.actionConfigPath
-        environment.actionRepository
-        brand
-        solverSession
-        number
-        progress.autoSolveReviewRound of
-        Nothing -> pure (Left (ActionStopped "the original solver did not return a resumable session id"))
-        Just turn -> do
-          dispatched <-
-            turns.turnDispatch
-              environment
-              (actionRequest AutoSolveIssue identity (TargetByKind ActionTargetIssue issueNumber))
-                { requestSolverBrand = Just brand,
-                  requestRecordedAssignment = state.autoSolveActionSolver.workerDescriptorSpec.workerAssignment,
-                  requestExistingSession = Just turn.autoSolveRevisionSession,
-                  requestExistingLogPath = solverLogPath,
-                  requestResumeProvenance = turn.autoSolveRevisionProvenance,
-                  requestUserMessage = turn.autoSolveRevisionMessage,
-                  requestParent = Just (parentFor progress solverSession solverLogPath)
+    resumeSolver progress solverSession solverLogPath turn = do
+      dispatched <-
+        turns.turnDispatch
+          environment
+          (actionRequest AutoSolveIssue identity (TargetByKind ActionTargetIssue issueNumber))
+            { requestSolverBrand = Just brand,
+              requestRecordedAssignment = state.autoSolveActionSolver.workerDescriptorSpec.workerAssignment,
+              requestExistingSession = Just turn.autoSolveRevisionSession,
+              requestExistingLogPath = solverLogPath,
+              requestResumeProvenance = turn.autoSolveRevisionProvenance,
+              requestUserMessage = turn.autoSolveRevisionMessage,
+              requestParent = Just (parentFor progress solverSession solverLogPath)
+            }
+      pure $ case dispatched of
+        Left refusal -> Left (ActionStopped (actionRefusalMessage refusal))
+        Right handle -> case actionHandleWorker handle of
+          Nothing -> Left (ActionStopped "the resumed solver left no durable worker")
+          Just descriptor ->
+            Right
+              state
+                { autoSolveActionProgress = progress,
+                  autoSolveActionSolver = descriptor,
+                  autoSolveActionReviewer = Nothing
                 }
-          pure $ case dispatched of
-            Left refusal -> Left (ActionStopped (actionRefusalMessage refusal))
-            Right handle -> case actionHandleWorker handle of
-              Nothing -> Left (ActionStopped "the resumed solver left no durable worker")
-              Just descriptor ->
-                Right
-                  state
-                    { autoSolveActionProgress = progress,
-                      autoSolveActionSolver = descriptor,
-                      autoSolveActionReviewer = Nothing
-                    }
 
     -- Every field describes the /solver/, which is what makes a restarted
     -- dashboard able to restore this loop: the round tells an implementation
@@ -305,6 +326,83 @@ advanceAutoSolveAction turns environment state = do
           workerParentKnownPullRequests = progress.autoSolveKnownPullRequests,
           workerParentSolverAssignment = state.autoSolveActionSolver.workerDescriptorSpec.workerAssignment
         }
+
+-- | What one observation of an autosolve session does next, for either
+-- surface.
+--
+-- This is the whole of the loop's move: the progress it advances to, the
+-- single provider turn that move starts, the activity a surface shows while
+-- it waits, and the conclusion that ends the action. The dashboard's refresh
+-- adapter and the plain-IO loop both take their move from here and then only
+-- render or dispatch it, so the progression has one owner rather than two
+-- implementations that agree today.
+--
+-- The decision inside is 'Kanban.UI.AutoSolve.decideAutoSolve''s, unchanged.
+-- What this adds is the reading of it neither surface should own: which
+-- progress each arm advances to, and the revision turn an arm asks for.
+data AutoSolveTick = AutoSolveTick
+  { tickProgress :: AutoSolveProgress,
+    tickMove :: AutoSolveMove
+  }
+  deriving stock (Eq, Show)
+
+data AutoSolveMove
+  = -- | Nothing to start. The text is the activity line, when the decision
+    -- named one.
+    AutoSolveHold (Maybe Text)
+  | -- | Start a review round for this pull request. 'True' when /this/
+    -- observation is what bound it, which is the only case a surface
+    -- announces.
+    AutoSolveReviewRound Int Bool
+  | -- | Resume the original solver against a changes-requested verdict.
+    AutoSolveRevisionRound Int AutoSolveRevision
+  | AutoSolveConcluded AutoSolveConclusion
+  deriving stock (Eq, Show)
+
+-- | How the action ended. Closed and small on purpose: these are the only
+-- three endings a decision produces, so neither surface has to be total over
+-- outcomes it can never see.
+data AutoSolveConclusion
+  = AutoSolveConcludedApproved Int
+  | AutoSolveConcludedHalted AutoSolveHalt Text
+  deriving stock (Eq, Show)
+
+autoSolveConclusionOutcome :: AutoSolveConclusion -> ActionOutcome
+autoSolveConclusionOutcome (AutoSolveConcludedApproved number) = ActionPullRequestApproved number
+autoSolveConclusionOutcome (AutoSolveConcludedHalted AutoSolveHaltStopped reason) = ActionStopped reason
+autoSolveConclusionOutcome (AutoSolveConcludedHalted AutoSolveHaltFailed reason) = ActionFailed reason
+
+-- | Read one autosolve decision as the move it is.
+autoSolveTick :: WorkflowConfig -> Maybe FilePath -> Repository -> AutoSolveObservation -> AutoSolveProgress -> AutoSolveTick
+autoSolveTick config configPath repository observation progress =
+  case decideAutoSolve observation progress of
+    AutoSolveWait -> AutoSolveTick progress (AutoSolveHold Nothing)
+    AutoSolveWaitingOn activity -> AutoSolveTick progress (AutoSolveHold (Just activity))
+    AutoSolveStartReview number -> AutoSolveTick progress (AutoSolveReviewRound number False)
+    AutoSolveOpenReview number advanced -> AutoSolveTick advanced (AutoSolveReviewRound number True)
+    AutoSolveRevise number advanced ->
+      case autoSolveRevisionTurn
+        config
+        configPath
+        repository
+        observation.autoSolveSolverBrand
+        observation.autoSolveSolverSession
+        number
+        advanced.autoSolveReviewRound of
+        -- Unreachable: 'decideRevision' halts on a missing session id before
+        -- it ever asks for a revision. Stated rather than defaulted, so a
+        -- caller that arrived without one starts nothing.
+        Nothing ->
+          AutoSolveTick
+            progress
+            ( AutoSolveConcluded
+                (AutoSolveConcludedHalted AutoSolveHaltStopped "the original solver did not return a resumable session id")
+            )
+        Just turn -> AutoSolveTick advanced (AutoSolveRevisionRound number turn)
+    AutoSolveApprove number ->
+      AutoSolveTick (autoSolveCompleted progress) (AutoSolveConcluded (AutoSolveConcludedApproved number))
+    AutoSolveHalted halt reason ->
+      AutoSolveTick (autoSolveStopped progress) (AutoSolveConcluded (AutoSolveConcludedHalted halt reason))
 
 -- | What a settled /review/ turn does to a headless action.
 --
@@ -424,14 +522,73 @@ settledSolverTurn progress status
       Just (WorkerTerminal (SolveFailed detail)) -> Just (Left (ActionFailed detail))
       _ -> Nothing
 
+-- | A dispatched autosolve action, holding the loop cursor its observations
+-- advance.
+--
+-- Autosolve is the one registered action whose result cannot be read off the
+-- turn it is currently holding, so observing it has to /progress/ it: a
+-- caller polling the bare handle would see one turn after another and never
+-- the approval that is this action's only success. This is what makes the
+-- ordinary dispatch-then-observe path reach that approval.
+--
+-- The cursor is in memory rather than durable on purpose. What the loop is
+-- doing is always recoverable from the worker records
+-- ('recoverAutoSolveState'), and requirement 18 leaves persistence to the
+-- mission store; this is the caller's place in a run, not a second record of
+-- it.
+data AutoSolveAction = AutoSolveAction
+  { autoSolveActionTurns :: AutoSolveTurns,
+    autoSolveActionCursor :: IORef AutoSolveState
+  }
+
+-- | Begin observing the action a dispatch just returned, or 'Nothing' when
+-- that handle is not an autosolve one.
+beginAutoSolveAction :: ActionHandle -> IO (Maybe AutoSolveAction)
+beginAutoSolveAction handle = traverse (beginAutoSolveActionWith liveAutoSolveTurns) (autoSolveStateFor handle)
+
+beginAutoSolveActionWith :: AutoSolveTurns -> AutoSolveState -> IO AutoSolveAction
+beginAutoSolveActionWith turns state = AutoSolveAction turns <$> newIORef state
+
+-- | Observe one autosolve action, advancing its loop by a tick.
+--
+-- 'ActionRunning' carries where the loop now is; 'ActionSettled' is the
+-- action's validated result, which for a completed run is the approval of the
+-- pull request it bound. The evidence comes from the catalog in the
+-- environment, so a caller refreshes before observing exactly as
+-- 'runAutoSolveAction' does.
+observeAutoSolveAction :: ActionEnvironment -> AutoSolveAction -> IO ActionObservation
+observeAutoSolveAction environment action = do
+  state <- readIORef action.autoSolveActionCursor
+  advanced <- advanceAutoSolveAction action.autoSolveActionTurns environment state
+  case advanced of
+    Left outcome -> pure (ActionSettled outcome)
+    Right next -> do
+      writeIORef action.autoSolveActionCursor next
+      pure (ActionRunning (autoSolveActionActivity next))
+
+-- | Where a running autosolve action currently is, in one line.
+autoSolveActionActivity :: AutoSolveState -> Text
+autoSolveActionActivity state = case state.autoSolveActionProgress.autoSolveStage of
+  AutoImplementing -> "implementing"
+  AutoDiscoveringPullRequest -> "discovering the pull request this run opened"
+  AutoReviewing -> "reviewing PR" <> boundPullRequest
+  AutoRevising -> "revising PR" <> boundPullRequest
+  AutoAwaitingRereview -> "waiting for the rereview verdict on PR" <> boundPullRequest
+  AutoSolveComplete -> "complete"
+  AutoSolveStopped -> "stopped"
+  where
+    boundPullRequest = maybe "" ((" #" <>) . showNumber) state.autoSolveActionProgress.autoSolvePullRequest
+
 -- | Drive one autosolve action to a terminal outcome.
 runAutoSolveAction :: ActionEnvironment -> AutoSolveDriver -> AutoSolveState -> IO ActionOutcome
 runAutoSolveAction = runAutoSolveActionWith liveAutoSolveTurns
 
 runAutoSolveActionWith :: AutoSolveTurns -> ActionEnvironment -> AutoSolveDriver -> AutoSolveState -> IO ActionOutcome
-runAutoSolveActionWith turns environment driver = loop driver.driverSteps
+runAutoSolveActionWith turns environment driver start = do
+  action <- beginAutoSolveActionWith turns start
+  loop driver.driverSteps action
   where
-    loop remaining state
+    loop remaining action
       | remaining <= 0 = pure (ActionStopped "the autosolve loop reached its observation budget")
       | otherwise = do
           refreshed <- driver.driverRefresh
@@ -443,10 +600,10 @@ runAutoSolveActionWith turns environment driver = loop driver.driverSteps
                       { actionCatalog =
                           catalogFromSnapshot environment.actionRepository snapshot driver.driverHistory
                       }
-              advanced <- advanceAutoSolveAction turns refreshedEnvironment state
-              case advanced of
-                Left outcome -> pure outcome
-                Right next -> driver.driverWait >> loop (remaining - 1) next
+              observed <- observeAutoSolveAction refreshedEnvironment action
+              case observed of
+                ActionSettled outcome -> pure outcome
+                ActionRunning _ -> driver.driverWait >> loop (remaining - 1) action
 
 showNumber :: Int -> Text
 showNumber = Text.pack . show

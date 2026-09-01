@@ -354,7 +354,13 @@ observeAction environment handle = case handle of
 -- Reporting the opened pull request instead would be the exact promotion
 -- requirement 7 forbids: a caller polling this handle would see success after
 -- the opening solve and never drive the review, the revision, or the approval
--- the action was asked for. Drive the loop with
+-- the action was asked for.
+--
+-- This is the view of a handle held on its own, which cannot progress because
+-- it carries nowhere to record progress. To /observe/ an autosolve action --
+-- advancing it a tick at a time until it reaches that approval -- open it
+-- with 'Kanban.Action.AutoSolve.beginAutoSolveAction' and observe that, or
+-- drive it to its end with
 -- 'Kanban.Action.AutoSolve.runAutoSolveAction'.
 observeAutoSolveTurn :: ActionEnvironment -> ResolvedTarget -> WorkerDescriptor -> IO ActionObservation
 observeAutoSolveTurn _ resolved descriptor = do
