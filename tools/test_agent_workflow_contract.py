@@ -3852,6 +3852,21 @@ WORKER_LAUNCH_FUNCTIONS = ("launchSolveWorker", "launchPullRequestWorker")
 # session with a refusal. Only the compatibility rules moved.
 ACTION_REGISTRY_UNROUTED_ADAPTERS = ("src/Kanban/UI/Review.hs",)
 
+# The two surfaces that start an autosolve revision round: the dashboard's
+# refresh adapter, and the plain-IO loop. Both reach the one declaration of
+# that turn (`autoSolveRevisionTurn`, beside the decision that asks for it) and
+# neither builds its own prompt, so the session they resume, the provenance
+# they resume under, and what they tell the provider cannot come to differ.
+AUTOSOLVE_REVISION_SURFACES = (
+    "src/Kanban/UI/Reconcile.hs",
+    "src/Kanban/Action/AutoSolve.hs",
+)
+AUTOSOLVE_REVISION_TURN = "autoSolveRevisionTurn"
+AUTOSOLVE_REVISION_PROMPT = "autoSolveRevisionPrompt"
+
+# Where both of them live, which is the only module that may name either.
+AUTOSOLVE_PROGRESSION_MODULE = "src/Kanban/UI/AutoSolve.hs"
+
 
 def haskell_code_lines(relative_path):
     """A Haskell module's source with its full-line comments dropped.
@@ -4078,6 +4093,39 @@ class WorkflowActionRegistryBoundaryTests(unittest.TestCase):
                     "issue review would reach the not-yet-runner-owned "
                     "refusal and stop opening a session",
                 )
+
+    def test_both_autosolve_surfaces_start_one_declared_revision_turn(self):
+        # Issue #593 requirement 12. A dashboard refresh and a headless tick
+        # both start the resumed-solver turn; a second construction of it is
+        # how the two would come to resume under a different provenance or
+        # with a different prompt.
+        offenders = []
+        for relative_path in AUTOSOLVE_REVISION_SURFACES:
+            code = haskell_code_lines(relative_path)
+            if AUTOSOLVE_REVISION_TURN not in code:
+                offenders.append(
+                    f"{relative_path} no longer reaches "
+                    f"{AUTOSOLVE_REVISION_TURN}; it is building an autosolve "
+                    "revision turn of its own"
+                )
+            if AUTOSOLVE_REVISION_PROMPT in code:
+                offenders.append(
+                    f"{relative_path} builds the revision prompt itself; "
+                    f"take the whole turn from {AUTOSOLVE_REVISION_TURN} so "
+                    "both surfaces resume the same way"
+                )
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_the_revision_turn_detector_detects(self):
+        # The control, over the module that declares both names.
+        code = haskell_code_lines(AUTOSOLVE_PROGRESSION_MODULE)
+        for name in (AUTOSOLVE_REVISION_TURN, AUTOSOLVE_REVISION_PROMPT):
+            self.assertIn(
+                name,
+                code,
+                f"{AUTOSOLVE_PROGRESSION_MODULE} no longer declares {name}; "
+                "the surface gate above is asserting nothing",
+            )
 
     def test_the_worker_spawn_detector_detects(self):
         # The control: the registry is where those two functions are now

@@ -22,15 +22,18 @@ import qualified Data.Text as Text
 import Kanban.Action
 import Kanban.Domain
 import Kanban.Models (defaultRoster)
+import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Solve
   ( ResumeProvenance (..),
     SolveOutcome (..),
     SolveWorkflow (..),
     SolverBrand (..),
   )
+import Kanban.UI.AutoSolve (AutoSolveRevision (..), autoSolveRevisionTurn)
 import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..), SolvePhase (..))
 import Kanban.Worker
-  ( SolveWorkerTask (..),
+  ( PullRequestWorkerTask (..),
+    SolveWorkerTask (..),
     WorkerDescriptor (..),
     WorkerId (..),
     WorkerParent (..),
@@ -41,6 +44,7 @@ import Kanban.Worker
     descriptorForSpec,
   )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
+import Data.Time (UTCTime, addUTCTime)
 import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch)
 import System.FilePath ((</>))
 import Test.Hspec (Spec, describe, it, shouldBe, shouldSatisfy)
@@ -127,22 +131,46 @@ completed = workerRecord (WorkerTerminal SolveCompleted) (Just "session-1")
 
 descriptorNamed :: Repository -> Text -> Int -> IO WorkerDescriptor
 descriptorNamed repository name issueNumber =
+  descriptorCarrying
+    repository
+    name
+    (SolveWorkerTaskKind (SolveWorkerTask issueNumber AutoSolve ClaudeSolver))
+    Nothing
+    epoch
+
+descriptorCarrying :: Repository -> Text -> WorkerTask -> Maybe WorkerParent -> UTCTime -> IO WorkerDescriptor
+descriptorCarrying repository name task parent createdAt =
   descriptorForSpec
     WorkerSpec
       { workerId = WorkerId name,
         workerRepository = repository,
-        workerTask = SolveWorkerTaskKind (SolveWorkerTask issueNumber AutoSolve ClaudeSolver),
+        workerTask = task,
         workerExistingSession = Nothing,
         workerExistingLogPath = Nothing,
         workerResumeProvenance = ResumeAnswer,
         workerUserMessage = "",
-        workerParent = Nothing,
-        workerCreatedAt = epoch,
+        workerParent = parent,
+        workerCreatedAt = createdAt,
         workerMaxRuntimeSeconds = 600,
         workerConfigPath = Nothing,
         workerWorkflowConfig = defaultWorkflowConfig,
         workerAssignment = Nothing
       }
+
+-- | The parent record a dashboard-launched autosolve writes on the review
+-- worker it starts: everything about the /solver/ that launched it.
+reviewParent :: Int -> WorkerParent
+reviewParent reviewRound =
+  WorkerParent
+    { workerParentIssueNumber = issueUnderLoop,
+      workerParentReviewRound = reviewRound,
+      workerParentSolverBrand = ClaudeSolver,
+      workerParentSolverSession = Just "session-1",
+      workerParentSolverLogPath = Nothing,
+      workerParentStartedAt = epoch,
+      workerParentKnownPullRequests = Set.fromList [7],
+      workerParentSolverAssignment = Nothing
+    }
 
 -- | A loop wired to a scripted world.
 --
@@ -300,6 +328,9 @@ tickWith world progress bindReviewer =
 outcomeOf :: World -> AutoSolveProgress -> Bool -> IO (Either ActionOutcome ())
 outcomeOf world progress bindReviewer = fst <$> tickWith world progress bindReviewer
 
+notSucceeding :: ActionOutcome -> Bool
+notSucceeding = not . actionOutcomeSucceeded
+
 stoppedFor :: Text -> Either ActionOutcome () -> Bool
 stoppedFor fragment = either (Text.isInfixOf fragment . actionOutcomeMessage) (const False)
 
@@ -432,6 +463,143 @@ spec = do
         (progressAt AutoAwaitingRereview 1 (Just pullRequestUnderLoop))
         False
         >>= (`shouldBe` Left (ActionPullRequestApproved pullRequestUnderLoop))
+
+  -- The rule that keeps one advancer per action, stated where both surfaces
+  -- read it: a dashboard refresh and a headless tick run the same decision,
+  -- and the decision itself is what refuses to start a turn beside a live
+  -- one. Repeated observations of an unchanged world therefore start nothing.
+  describe "one turn at a time, however often it is observed" $ do
+    it "starts no second review across repeated refreshes of the same world" $ do
+      let world = World [linkedPullRequest pullRequestUnderLoop ClaudeSolver []] [(Solver, completed), (Reviewer, running)]
+          reviewing = progressAt AutoReviewing 1 (Just pullRequestUnderLoop)
+      results <- mapM (const (tickWith world reviewing True)) [1 :: Int .. 3]
+      map fst results `shouldBe` replicate 3 (Right ())
+      concatMap snd results `shouldBe` []
+
+    it "starts no second solver turn across repeated refreshes of the same world" $ do
+      let world = World [changesRequestedPullRequest] [(Solver, running), (Reviewer, completed)]
+          reviewing = progressAt AutoReviewing 1 (Just pullRequestUnderLoop)
+      results <- mapM (const (tickWith world reviewing True)) [1 :: Int .. 3]
+      map fst results `shouldBe` replicate 3 (Right ())
+      concatMap snd results `shouldBe` []
+
+    -- The reviewer that stopped to ask. The dashboard reports it and waits,
+    -- because someone is there to answer; headlessly nobody is, so waiting
+    -- would spend the budget and end as a budget stop that says nothing.
+    it "ends the action with the reviewer's own question rather than a budget stop" $ do
+      let asking = workerRecord (WorkerTerminal (SolveNeedsInput "which base branch?")) Nothing
+          world = World [linkedPullRequest pullRequestUnderLoop ClaudeSolver []] [(Solver, completed), (Reviewer, asking)]
+      outcomeOf world (progressAt AutoReviewing 1 (Just pullRequestUnderLoop)) True
+        >>= (`shouldBe` Left (ActionNeedsInput "which base branch?"))
+      settledReviewTurn (Just (WorkerTerminal (SolveNeedsInput "?")))
+        `shouldBe` Just (ActionNeedsInput "?")
+      settledReviewTurn (Just (WorkerTerminal SolveCompleted)) `shouldBe` Nothing
+      settledReviewTurn (Just WorkerRunning) `shouldBe` Nothing
+      settledReviewTurn Nothing `shouldBe` Nothing
+
+    it "runs the loop to its budget only when nothing has settled" $
+      withLoop [World [] [(Solver, running)]] $ \loop -> do
+        outcome <-
+          runAutoSolveActionWith
+            loop.loopTurns
+            loop.loopEnvironment
+            loop.loopDriver {driverSteps = 3}
+            loop.loopStart
+        outcome `shouldSatisfy` notSucceeding
+        readIORef loop.loopDispatches >>= (`shouldBe` [])
+
+  -- Requirement 12's "the same action, not two": a runner takes over what a
+  -- dashboard press launched by reading the records that press left behind.
+  describe "taking over an action the dashboard launched" $ do
+    it "rebuilds the loop's state from the durable records alone" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+          solver <-
+            descriptorCarrying
+              repository
+              "solve-initial"
+              (SolveWorkerTaskKind (SolveWorkerTask issueUnderLoop AutoSolve ClaudeSolver))
+              Nothing
+              epoch
+          reviewer <-
+            descriptorCarrying
+              repository
+              "pr-review"
+              (PullRequestWorkerTaskKind (PullRequestWorkerTask pullRequestUnderLoop PullRequestClaude PullRequestReview))
+              (Just (reviewParent 1))
+              (addUTCTime 60 epoch)
+          case autoSolveStateFromWorkers targetUnderLoop (Set.fromList [9]) [solver, reviewer] of
+            Nothing -> error "expected the durable records to rebuild an action"
+            Just recovered -> do
+              -- The review worker is the round in flight, and the parent
+              -- record it carries is where the round, the run's start, and
+              -- the pull requests discovery must not bind come from.
+              recovered.autoSolveActionProgress.autoSolveStage `shouldBe` AutoReviewing
+              recovered.autoSolveActionProgress.autoSolvePullRequest `shouldBe` Just pullRequestUnderLoop
+              recovered.autoSolveActionProgress.autoSolveReviewRound `shouldBe` 1
+              recovered.autoSolveActionProgress.autoSolveKnownPullRequests `shouldBe` Set.fromList [7]
+              recovered.autoSolveActionAttribution.attributionSolverBrand `shouldBe` ClaudeSolver
+              (.workerDescriptorSpecPath) <$> recovered.autoSolveActionReviewer
+                `shouldBe` Just reviewer.workerDescriptorSpecPath
+              recovered.autoSolveActionSolver.workerDescriptorSpecPath
+                `shouldBe` solver.workerDescriptorSpecPath
+
+    it "reads a solver newer than its review as the revision the loop moved on to" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+          reviewer <-
+            descriptorCarrying
+              repository
+              "pr-review"
+              (PullRequestWorkerTaskKind (PullRequestWorkerTask pullRequestUnderLoop PullRequestClaude PullRequestReview))
+              (Just (reviewParent 1))
+              (addUTCTime 60 epoch)
+          resumed <-
+            descriptorCarrying
+              repository
+              "solve-resumed"
+              (SolveWorkerTaskKind (SolveWorkerTask issueUnderLoop AutoSolve ClaudeSolver))
+              Nothing
+              (addUTCTime 120 epoch)
+          case autoSolveStateFromWorkers targetUnderLoop Set.empty [reviewer, resumed] of
+            Nothing -> error "expected the durable records to rebuild an action"
+            Just recovered -> do
+              recovered.autoSolveActionProgress.autoSolveStage `shouldBe` AutoRevising
+              recovered.autoSolveActionReviewer `shouldBe` Nothing
+              recovered.autoSolveActionSolver.workerDescriptorSpecPath
+                `shouldBe` resumed.workerDescriptorSpecPath
+
+    it "takes over nothing when no autosolve solver worker is discoverable" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+          solveOnly <-
+            descriptorCarrying
+              repository
+              "solve-only"
+              (SolveWorkerTaskKind (SolveWorkerTask issueUnderLoop SolveOnly ClaudeSolver))
+              Nothing
+              epoch
+          maybe True (const False) (autoSolveStateFromWorkers targetUnderLoop Set.empty [solveOnly])
+            `shouldBe` True
+
+  -- The revision turn has one declaration, which both surfaces start.
+  describe "the resumed-solver turn" $ do
+    it "carries the provenance and prompt an automated revision resumes under" $ do
+      let repository = Repository "/tmp/kanban" "coghex" "kanban"
+      case autoSolveRevisionTurn defaultWorkflowConfig Nothing repository ClaudeSolver (Just "session-1") pullRequestUnderLoop 2 of
+        Nothing -> error "expected a revision turn"
+        Just turn -> do
+          turn.autoSolveRevisionSession `shouldBe` "session-1"
+          turn.autoSolveRevisionProvenance `shouldBe` ResumeAutomatedChangesRequested
+          turn.autoSolveRevisionMessage `shouldSatisfy` Text.isInfixOf "review round 2"
+          turn.autoSolveRevisionMessage `shouldSatisfy` Text.isInfixOf "pr-revise"
+
+    it "starts nothing when the solver returned no resumable session" $
+      autoSolveRevisionTurn defaultWorkflowConfig Nothing (Repository "/tmp/kanban" "coghex" "kanban") ClaudeSolver Nothing pullRequestUnderLoop 1
+        `shouldBe` Nothing
 
   describe "reading a worker's durable record" $ do
     it "maps every recorded status onto the phase the loop decides from" $

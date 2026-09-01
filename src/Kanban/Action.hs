@@ -28,6 +28,16 @@
 -- observation, and terminal results validated against authoritative evidence
 -- rather than taken from a worker's exit.
 --
+-- Autosolve is the one action a handle cannot be concluded from. Its only
+-- successful terminal result is the validated approval of the pull request its
+-- loop bound, which no single provider turn establishes — a finished solver
+-- has opened a pull request nothing has reviewed — so 'observeAction' reports
+-- one of its turns as still running and only a provider's question or failure
+-- settles it there. The loop itself is 'runAutoSolveAction', and
+-- 'recoverAutoSolveState' rebuilds one already under way from the durable
+-- records a dashboard-launched run left behind, so a board press and a
+-- headless runner drive one action in one state model.
+--
 -- Three things this registry never does, on any path: merge a pull request,
 -- add or remove an approval verdict label, or start or stop the approval
 -- service while observing it. A result it cannot establish is reported as
@@ -126,6 +136,7 @@ module Kanban.Action
     dispatchProviderTurn,
     observeAction,
     observeWorkerHandle,
+    observeAutoSolveTurn,
     approvalQueueObservation,
     validateWorkerOutcome,
     attributedSolvePullRequest,
@@ -137,7 +148,10 @@ module Kanban.Action
     liveAutoSolveTurns,
     AutoSolveDriver (..),
     autoSolveStateFor,
+    autoSolveStateFromWorkers,
+    recoverAutoSolveState,
     reviewPhaseForWorker,
+    settledReviewTurn,
     workerStatusIsLive,
     advanceAutoSolveAction,
     runAutoSolveAction,

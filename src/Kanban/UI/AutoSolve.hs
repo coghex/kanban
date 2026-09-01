@@ -17,6 +17,8 @@ module Kanban.UI.AutoSolve
     AutoSolveHalt (..),
     AutoSolveHandoff (..),
     AutoSolveObservation (..),
+    AutoSolveRevision (..),
+    autoSolveRevisionTurn,
     autoSolveAfterCompletion,
     autoSolveCompleted,
     autoSolveCompletionNotice,
@@ -47,7 +49,7 @@ import Kanban.PullRequestFlow
     originFromBody,
     pullRequestVerdictForLabels,
   )
-import Kanban.Solve (SolveWorkflow (..), SolverBrand (..))
+import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..), SolvePhase (..))
 import Kanban.UI.Util (allColumns, entriesForBoard, showText)
@@ -279,6 +281,34 @@ recoveredAutoSolveProgress AutoSolve parent boardPullRequests createdAt =
             autoSolveKnownPullRequests = maybe boardPullRequests (.workerParentKnownPullRequests) parent,
             autoSolveStartedAt = maybe createdAt (.workerParentStartedAt) parent
           }
+
+-- | Everything the resumed-solver turn of one revision round is: which
+-- provider session to resume, under what provenance, and what to tell it.
+--
+-- Declared here, beside the decision that asks for it, because two surfaces
+-- start that turn -- the dashboard's refresh adapter and the plain-IO action
+-- registry -- and a second construction of it is how the two would come to
+-- resume under a different provenance or with a different prompt.
+data AutoSolveRevision = AutoSolveRevision
+  { autoSolveRevisionSession :: Text,
+    autoSolveRevisionProvenance :: ResumeProvenance,
+    autoSolveRevisionMessage :: Text
+  }
+  deriving stock (Eq, Show)
+
+-- | The turn a revision round starts, or 'Nothing' when the original solver
+-- returned no resumable session id.
+--
+-- 'decideRevision' has already halted on that absence by the time either
+-- surface gets here, so the 'Nothing' is a totality guarantee rather than a
+-- reachable path: a caller that arrived without a session starts nothing
+-- instead of opening a fresh provider session that would not carry the
+-- solve's own context.
+autoSolveRevisionTurn :: WorkflowConfig -> Maybe FilePath -> Repository -> SolverBrand -> Maybe Text -> Int -> Int -> Maybe AutoSolveRevision
+autoSolveRevisionTurn config configPath repository brand sessionId pullRequestNumber reviewRound =
+  (\session -> AutoSolveRevision session ResumeAutomatedChangesRequested prompt) <$> sessionId
+  where
+    prompt = autoSolveRevisionPrompt config configPath repository brand pullRequestNumber reviewRound
 
 autoSolveRevisionPrompt :: WorkflowConfig -> Maybe FilePath -> Repository -> SolverBrand -> Int -> Int -> Text
 autoSolveRevisionPrompt config configPath repository brand pullRequestNumber reviewRound =

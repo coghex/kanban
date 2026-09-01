@@ -546,6 +546,36 @@ spec = do
           observeWorkerHandle environment SolveIssue target settledDescriptor (attributionOf [] ClaudeSolver)
             >>= (`shouldBe` ActionSettled (ActionNeedsInput "which base?"))
 
+    -- Autosolve's advertised handle must not report the opening solve as the
+    -- action's result. Its only success is the approval its loop reaches, and
+    -- a caller polling the handle after the solver settled would otherwise see
+    -- an opened pull request and stop -- never driving the review, the
+    -- revision, or the approval it asked for.
+    it "never concludes an autosolve action from one finished provider turn" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              opened = markedPullRequest 81 [80] ClaudeSolver []
+              catalog = (catalogOf [baseIssue 80 []] [opened] emptyHistory) {catalogRepository = repository}
+              environment = (environmentOf catalog) {actionRepository = repository}
+              target = resolveHeldItem catalog TargetPlain (IssueItem (baseIssue 80 []))
+              attribution = attributionOf [] ClaudeSolver
+          descriptor <- writeWorkerRecord repository 80 (WorkerTerminal SolveCompleted) "finished"
+          -- The same worker record, observed as a solve, does report the pull
+          -- request it opened. That is what makes this a contrast rather than
+          -- an accident of the fixture.
+          observeWorkerHandle environment SolveIssue target descriptor attribution
+            >>= (`shouldBe` ActionSettled (ActionPullRequestOpened 81))
+          observed <- observeAction environment (AutoSolveActionHandle target descriptor attribution)
+          observed `shouldSatisfy` isRunning
+          -- ...and a question or a failure still ends it, wherever the loop is.
+          asking <- writeWorkerRecord repository 80 (WorkerTerminal (SolveNeedsInput "which base?")) "waiting"
+          observeAction environment (AutoSolveActionHandle target asking attribution)
+            >>= (`shouldBe` ActionSettled (ActionNeedsInput "which base?"))
+          -- The validator agrees: no autosolve arm of it promotes a turn.
+          validateWorkerOutcome environment AutoSolveIssue target attribution SolveCompleted
+            `shouldSatisfy` notSucceeding
+
     it "treats an unreadable worker record as still running rather than as a result" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do

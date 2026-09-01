@@ -41,6 +41,7 @@ module Kanban.Action.Dispatch
     dispatchProviderTurn,
     observeAction,
     observeWorkerHandle,
+    observeAutoSolveTurn,
     approvalQueueObservation,
 
     -- * Terminal validation
@@ -327,17 +328,51 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
 
 -- | Observe one dispatched action.
 --
--- An autosolve handle reports the state of its /current provider turn/ here;
--- advancing the loop itself is "Kanban.Action.AutoSolve"'s, so that
--- progression has exactly one owner.
+-- An autosolve handle is the one that cannot be concluded from what it is
+-- holding: see 'observeAutoSolveTurn'. Advancing that loop is
+-- "Kanban.Action.AutoSolve"'s, so its progression has exactly one owner.
 observeAction :: ActionEnvironment -> ActionHandle -> IO ActionObservation
 observeAction environment handle = case handle of
   ApprovalQueueHandle repository ->
     ActionSettled . ActionApprovalQueueReport <$> approvalQueueObservation repository
   WorkerActionHandle kind resolved descriptor attribution ->
     observeWorkerHandle environment kind resolved descriptor attribution
-  AutoSolveActionHandle resolved descriptor attribution ->
-    observeWorkerHandle environment AutoSolveIssue resolved descriptor attribution
+  AutoSolveActionHandle resolved descriptor _ ->
+    observeAutoSolveTurn environment resolved descriptor
+
+-- | What one observation of an autosolve action's /current provider turn/
+-- reports.
+--
+-- Never a success. Autosolve's only successful terminal result is the
+-- validated approval of the pull request its loop bound, and no single
+-- provider turn can establish that one: a finished solver has opened a pull
+-- request nothing has reviewed, and a finished reviewer has published a
+-- verdict the loop may still have to act on. So a turn that settled leaves
+-- the action running, and only the two answers that end the loop wherever it
+-- is — a provider's question, and a provider's failure — settle it here.
+--
+-- Reporting the opened pull request instead would be the exact promotion
+-- requirement 7 forbids: a caller polling this handle would see success after
+-- the opening solve and never drive the review, the revision, or the approval
+-- the action was asked for. Drive the loop with
+-- 'Kanban.Action.AutoSolve.runAutoSolveAction'.
+observeAutoSolveTurn :: ActionEnvironment -> ResolvedTarget -> WorkerDescriptor -> IO ActionObservation
+observeAutoSolveTurn _ resolved descriptor = do
+  recorded <- readWorkerState descriptor
+  pure $ case recorded of
+    Left message -> ActionRunning ("worker state unavailable: " <> message)
+    Right state -> case state.workerStateStatus of
+      WorkerStarting -> ActionRunning state.workerStateLastActivity
+      WorkerRunning -> ActionRunning state.workerStateLastActivity
+      WorkerOrphaned _ -> ActionRunning "resolving orphaned provider processes"
+      WorkerTerminal (SolveNeedsInput detail) -> ActionSettled (ActionNeedsInput detail)
+      WorkerTerminal (SolveFailed detail) -> ActionSettled (ActionFailed detail)
+      WorkerTerminal SolveCompleted ->
+        ActionRunning
+          ( "the current provider turn for autosolve #"
+              <> showNumber resolved.resolvedTargetNumber
+              <> " finished; the loop advances on its next observation"
+          )
 
 -- | The worker half, on its own, so the autosolve loop can ask the same
 -- question of whichever provider turn it is currently waiting on.
@@ -368,7 +403,13 @@ validateWorkerOutcome environment kind resolved attribution outcome = case outco
   SolveFailed detail -> ActionFailed detail
   SolveCompleted -> case kind of
     SolveIssue -> attributedSolvePullRequest environment resolved attribution
-    AutoSolveIssue -> attributedSolvePullRequest environment resolved attribution
+    -- Deliberately not the opened pull request. An autosolve action concludes
+    -- on the approval its loop reaches, so one finished turn of it is never a
+    -- result; 'observeAutoSolveTurn' is what observes one, and
+    -- 'Kanban.Action.AutoSolve.runAutoSolveAction' is what drives the loop.
+    AutoSolveIssue ->
+      ActionStopped
+        "an autosolve action concludes on its bound pull request's approval; drive it with runAutoSolveAction"
     ReviewPullRequest -> validatedPullRequestVerdict environment resolved
     RevisePullRequest -> validatedPullRequestVerdict environment resolved
     RepairPullRequest -> validatedPullRequestVerdict environment resolved

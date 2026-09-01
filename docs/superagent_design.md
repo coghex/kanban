@@ -505,6 +505,13 @@ already applies. Kanban's automated progressions stay on the label-derived
 route and therefore never select it: a problem status on the pull request an
 autosolve run is looping over must not silently become a repair launch.
 
+The autosolve row's `PR approved` is the whole action's result, not one turn's.
+Observing an autosolve handle after its opening solve reports the loop still
+running rather than the pull request that solve opened: promoting that would
+let a caller stop before the review, the revision, and the approval it asked
+for. Only a provider's question or failure settles the action from a single
+turn.
+
 The queue row's `idle, reviewing, barrier, failed` is this table's summary
 rather than the result type. The controller distinguishes more states than
 that — a child failure is not a controller failure, an unsupported host is not

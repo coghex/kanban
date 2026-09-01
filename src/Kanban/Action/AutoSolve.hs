@@ -33,7 +33,10 @@ module Kanban.Action.AutoSolve
     liveAutoSolveTurns,
     AutoSolveDriver (..),
     autoSolveStateFor,
+    autoSolveStateFromWorkers,
+    recoverAutoSolveState,
     reviewPhaseForWorker,
+    settledReviewTurn,
     workerStatusIsLive,
     advanceAutoSolveAction,
     runAutoSolveAction,
@@ -42,6 +45,8 @@ module Kanban.Action.AutoSolve
 where
 
 import Data.List (find)
+import Data.Maybe (listToMaybe)
+import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Action.Dispatch
@@ -58,24 +63,29 @@ import Kanban.Action.Target
     workflowActionKindForLabelledPullRequest,
   )
 import Kanban.Action.Types
-import Kanban.Domain (PullRequest (..), RepoSnapshot)
-import Kanban.Solve (ResumeProvenance (..), SolveOutcome (..))
+import Kanban.Domain (PullRequest (..), RepoSnapshot, Repository)
+import Kanban.Solve (SolveOutcome (..), SolveWorkflow (..), SolverBrand)
 import Kanban.UI.AutoSolve
   ( AutoSolveCompletion (..),
     AutoSolveDecision (..),
     AutoSolveHalt (..),
     AutoSolveObservation (..),
+    AutoSolveRevision (..),
     autoSolveAfterCompletion,
-    autoSolveRevisionPrompt,
+    autoSolveRevisionTurn,
     decideAutoSolve,
   )
 import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..), SolvePhase (..))
 import Kanban.Worker
-  ( WorkerDescriptor (..),
+  ( PullRequestWorkerTask (..),
+    SolveWorkerTask (..),
+    WorkerDescriptor (..),
     WorkerParent (..),
     WorkerSpec (..),
     WorkerState (..),
     WorkerStatus (..),
+    WorkerTask (..),
+    discoverWorkers,
     readWorkerState,
   )
 
@@ -183,10 +193,13 @@ advanceAutoSolveAction turns environment state = do
       solverLive = workerStatusIsLive solverState
       reviewPhase = reviewerState >>= either (const Nothing) (Just . reviewPhaseForWorker . (.workerStateStatus))
       solverStatus = either (const Nothing) (Just . (.workerStateStatus)) solverState
-  case settledSolverTurn state.autoSolveActionProgress solverStatus of
-    Just (Left outcome) -> pure (Left outcome)
-    Just (Right advanced) -> decide advanced solverSession solverLogPath solverLive reviewPhase
-    Nothing -> decide state.autoSolveActionProgress solverSession solverLogPath solverLive reviewPhase
+      reviewerStatus = reviewerState >>= either (const Nothing) (Just . (.workerStateStatus))
+  case settledReviewTurn reviewerStatus of
+    Just outcome -> pure (Left outcome)
+    Nothing -> case settledSolverTurn state.autoSolveActionProgress solverStatus of
+      Just (Left outcome) -> pure (Left outcome)
+      Just (Right advanced) -> decide advanced solverSession solverLogPath solverLive reviewPhase
+      Nothing -> decide state.autoSolveActionProgress solverSession solverLogPath solverLive reviewPhase
   where
     issueNumber = state.autoSolveActionTarget.resolvedTargetNumber
     brand = state.autoSolveActionAttribution.attributionSolverBrand
@@ -238,38 +251,44 @@ advanceAutoSolveAction turns environment state = do
                     autoSolveActionReviewer = actionHandleWorker handle
                   }
 
-    resumeSolver progress solverSession solverLogPath number = do
-      let prompt =
-            autoSolveRevisionPrompt
-              environment.actionWorkflowConfig
-              environment.actionConfigPath
-              environment.actionRepository
-              brand
-              number
-              progress.autoSolveReviewRound
-      dispatched <-
-        turns.turnDispatch
-          environment
-          (actionRequest AutoSolveIssue identity (TargetByKind ActionTargetIssue issueNumber))
-            { requestSolverBrand = Just brand,
-              requestRecordedAssignment = state.autoSolveActionSolver.workerDescriptorSpec.workerAssignment,
-              requestExistingSession = solverSession,
-              requestExistingLogPath = solverLogPath,
-              requestResumeProvenance = ResumeAutomatedChangesRequested,
-              requestUserMessage = prompt,
-              requestParent = Just (parentFor progress solverSession solverLogPath)
-            }
-      pure $ case dispatched of
-        Left refusal -> Left (ActionStopped (actionRefusalMessage refusal))
-        Right handle -> case actionHandleWorker handle of
-          Nothing -> Left (ActionStopped "the resumed solver left no durable worker")
-          Just descriptor ->
-            Right
-              state
-                { autoSolveActionProgress = progress,
-                  autoSolveActionSolver = descriptor,
-                  autoSolveActionReviewer = Nothing
+    -- The turn is 'Kanban.UI.AutoSolve.autoSolveRevisionTurn''s, which the
+    -- dashboard's own revision arm also starts: the session to resume, the
+    -- provenance, and the prompt are one construction rather than this
+    -- module's and the adapter's.
+    resumeSolver progress solverSession solverLogPath number =
+      case autoSolveRevisionTurn
+        environment.actionWorkflowConfig
+        environment.actionConfigPath
+        environment.actionRepository
+        brand
+        solverSession
+        number
+        progress.autoSolveReviewRound of
+        Nothing -> pure (Left (ActionStopped "the original solver did not return a resumable session id"))
+        Just turn -> do
+          dispatched <-
+            turns.turnDispatch
+              environment
+              (actionRequest AutoSolveIssue identity (TargetByKind ActionTargetIssue issueNumber))
+                { requestSolverBrand = Just brand,
+                  requestRecordedAssignment = state.autoSolveActionSolver.workerDescriptorSpec.workerAssignment,
+                  requestExistingSession = Just turn.autoSolveRevisionSession,
+                  requestExistingLogPath = solverLogPath,
+                  requestResumeProvenance = turn.autoSolveRevisionProvenance,
+                  requestUserMessage = turn.autoSolveRevisionMessage,
+                  requestParent = Just (parentFor progress solverSession solverLogPath)
                 }
+          pure $ case dispatched of
+            Left refusal -> Left (ActionStopped (actionRefusalMessage refusal))
+            Right handle -> case actionHandleWorker handle of
+              Nothing -> Left (ActionStopped "the resumed solver left no durable worker")
+              Just descriptor ->
+                Right
+                  state
+                    { autoSolveActionProgress = progress,
+                      autoSolveActionSolver = descriptor,
+                      autoSolveActionReviewer = Nothing
+                    }
 
     -- Every field describes the /solver/, which is what makes a restarted
     -- dashboard able to restore this loop: the round tells an implementation
@@ -286,6 +305,109 @@ advanceAutoSolveAction turns environment state = do
           workerParentKnownPullRequests = progress.autoSolveKnownPullRequests,
           workerParentSolverAssignment = state.autoSolveActionSolver.workerDescriptorSpec.workerAssignment
         }
+
+-- | What a settled /review/ turn does to a headless action.
+--
+-- A reviewer that stopped to ask a question is where the two surfaces
+-- legitimately differ, and the difference has to be said rather than
+-- inherited. On the dashboard 'Kanban.UI.AutoSolve.decideAutoSolve' reports
+-- it as an activity and waits, because a person is sitting in front of the
+-- session and can answer. Headlessly nobody is, so waiting would spend the
+-- observation budget and end as a budget stop -- a result that says nothing
+-- about why the run halted. This ends the action with the provider's own
+-- question instead, which is a typed outcome a caller can act on.
+--
+-- Only the question. A failed or killed reviewer already reaches
+-- 'AutoSolveHalted' through the decision, and a running one is not settled.
+settledReviewTurn :: Maybe WorkerStatus -> Maybe ActionOutcome
+settledReviewTurn (Just (WorkerTerminal (SolveNeedsInput detail))) = Just (ActionNeedsInput detail)
+settledReviewTurn _ = Nothing
+
+-- | The registry state for an autosolve action already under way, rebuilt
+-- from the durable records the run left behind.
+--
+-- What a dashboard press launched and what a headless runner drives are one
+-- action in one state model rather than two implementations of one: the
+-- solver's own worker is found by the issue it names, the parent record a
+-- review worker carries supplies the round, the run's start, and the pull
+-- requests discovery must not bind, and that review worker /is/ the round
+-- already in flight. A runner taking an action over here therefore reads
+-- exactly the records the sequential-turn guards read, so it cannot start a
+-- turn the dashboard has already started.
+--
+-- 'Nothing' when no autosolve solver worker for this issue is discoverable at
+-- all, which is the only honest answer: an action with no durable solver turn
+-- is one this registry has nothing to take over.
+autoSolveStateFromWorkers :: ResolvedTarget -> Set Int -> [WorkerDescriptor] -> Maybe AutoSolveState
+autoSolveStateFromWorkers target boardPullRequests descriptors = do
+  solver <- lastOf [descriptor | descriptor <- descriptors, isAutoSolveFor issueNumber descriptor]
+  brand <- solverBrandOf solver
+  let reviewer =
+        lastOf [descriptor | descriptor <- descriptors, isReviewFor issueNumber descriptor]
+      parent = reviewer >>= (.workerDescriptorSpec.workerParent)
+      -- A solver created no earlier than the review worker is a revision the
+      -- loop has already moved on to, so that review is history rather than
+      -- the turn in flight.
+      solverIsCurrent =
+        maybe
+          True
+          (\held -> solver.workerDescriptorSpec.workerCreatedAt >= held.workerDescriptorSpec.workerCreatedAt)
+          reviewer
+      reviewRound = maybe 0 (.workerParentReviewRound) parent
+      stage
+        | solverIsCurrent && reviewRound == 0 = AutoImplementing
+        | solverIsCurrent = AutoRevising
+        | otherwise = AutoReviewing
+  pure
+    AutoSolveState
+      { autoSolveActionTarget = target,
+        autoSolveActionAttribution =
+          ActionAttribution
+            { attributionKnownPullRequests = maybe boardPullRequests (.workerParentKnownPullRequests) parent,
+              attributionStartedAt = maybe solver.workerDescriptorSpec.workerCreatedAt (.workerParentStartedAt) parent,
+              attributionSolverBrand = brand
+            },
+        autoSolveActionProgress =
+          AutoSolveProgress
+            { autoSolveStage = stage,
+              autoSolvePullRequest = if solverIsCurrent then Nothing else reviewer >>= reviewNumberOf,
+              autoSolveReviewRound = reviewRound,
+              autoSolveKnownPullRequests = maybe boardPullRequests (.workerParentKnownPullRequests) parent,
+              autoSolveStartedAt = maybe solver.workerDescriptorSpec.workerCreatedAt (.workerParentStartedAt) parent
+            },
+        autoSolveActionSolver = solver,
+        autoSolveActionReviewer = if solverIsCurrent then Nothing else reviewer
+      }
+  where
+    issueNumber = target.resolvedTargetNumber
+    lastOf values = listToMaybe (reverse values)
+
+isAutoSolveFor :: Int -> WorkerDescriptor -> Bool
+isAutoSolveFor issueNumber descriptor = case descriptor.workerDescriptorSpec.workerTask of
+  SolveWorkerTaskKind task ->
+    task.solveWorkerIssueNumber == issueNumber && task.solveWorkerWorkflow == AutoSolve
+  PullRequestWorkerTaskKind _ -> False
+
+isReviewFor :: Int -> WorkerDescriptor -> Bool
+isReviewFor issueNumber descriptor = case descriptor.workerDescriptorSpec.workerTask of
+  PullRequestWorkerTaskKind _ ->
+    ((.workerParentIssueNumber) <$> descriptor.workerDescriptorSpec.workerParent) == Just issueNumber
+  SolveWorkerTaskKind _ -> False
+
+reviewNumberOf :: WorkerDescriptor -> Maybe Int
+reviewNumberOf descriptor = case descriptor.workerDescriptorSpec.workerTask of
+  PullRequestWorkerTaskKind task -> Just task.pullRequestWorkerNumber
+  SolveWorkerTaskKind _ -> Nothing
+
+solverBrandOf :: WorkerDescriptor -> Maybe SolverBrand
+solverBrandOf descriptor = case descriptor.workerDescriptorSpec.workerTask of
+  SolveWorkerTaskKind task -> Just task.solveWorkerBrand
+  PullRequestWorkerTaskKind _ -> Nothing
+
+-- | 'autoSolveStateFromWorkers' over this repository's discoverable workers.
+recoverAutoSolveState :: Repository -> ResolvedTarget -> Set Int -> IO (Maybe AutoSolveState)
+recoverAutoSolveState repository target boardPullRequests =
+  autoSolveStateFromWorkers target boardPullRequests <$> discoverWorkers repository
 
 -- | What a settled solver turn does to the loop.
 --

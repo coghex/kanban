@@ -41,8 +41,7 @@ import Kanban.Review
   ( ReviewStage (..)
     )
 import Kanban.Solve
-  ( ResumeProvenance (..),
-    SolveWorkflow (..)
+  ( SolveWorkflow (..)
     )
 import Kanban.Text (sanitizeText)
 import Kanban.Workflow (deriveBoard )
@@ -514,12 +513,18 @@ runAutoSolveDecision snapshot issueNumber session decision = case decision of
     setNotice ("Autosolve #" <> showText issueNumber <> " discovered PR #" <> showText number <> " and started review")
   AutoSolveRevise number progress -> do
     state <- get
-    let prompt =
-          autoSolveRevisionPrompt
+    -- The turn itself is declared once, beside the decision that asks for it
+    -- ('Kanban.UI.AutoSolve.autoSolveRevisionTurn'), and the plain-IO action
+    -- registry starts the same one: the session to resume, the provenance,
+    -- and the prompt are one construction rather than this adapter's and the
+    -- registry's.
+    let revision =
+          autoSolveRevisionTurn
             state.appConfig.resolvedWorkflow
             state.appOptions.optionConfig
             state.appRepository
             session.sessionDetail.solveSessionBrand
+            session.sessionDetail.solveSessionId
             number
             progress.autoSolveReviewRound
     appendToSolveSession
@@ -535,8 +540,16 @@ runAutoSolveDecision snapshot issueNumber session decision = case decision of
             }
       )
     mapM_
-      (\sessionId -> launchSolveInvocation issueNumber AutoSolve session.sessionDetail.solveSessionBrand (Just sessionId) ResumeAutomatedChangesRequested prompt)
-      session.sessionDetail.solveSessionId
+      ( \turn ->
+          launchSolveInvocation
+            issueNumber
+            AutoSolve
+            session.sessionDetail.solveSessionBrand
+            (Just turn.autoSolveRevisionSession)
+            turn.autoSolveRevisionProvenance
+            turn.autoSolveRevisionMessage
+      )
+      revision
     setNotice ("Autosolve #" <> showText issueNumber <> " resumed its original solver for PR #" <> showText number)
   AutoSolveApprove number -> do
     appendToSolveSession
