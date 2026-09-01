@@ -2988,7 +2988,7 @@ The `coordination` documents are
 `docs/drainer-bugs.md`, `docs/gh_record_authority_design.md`,
 `docs/issue_approval_queue_design.md`, `docs/issue_search_design.md`,
 `docs/linux_portability_design.md`, `docs/managed_paths_design.md`,
-`docs/model_settings_design.md`,
+`docs/mission_runner_design.md`, `docs/model_settings_design.md`,
 `docs/multi_repo_boards_design.md`,
 `docs/overlay_focus_fullscreen_design.md`,
 `docs/pipeline-hardening.md`, `docs/product_readiness_findings.md`,
@@ -3003,6 +3003,7 @@ The `coordination` documents are
 `docs/project_review_533-517.md`,
 `docs/public_release_design.md`,
 `docs/release_maintenance_design.md`, `docs/superagent_design.md`,
+`docs/text_selection_design.md`,
 `docs/ui-bugs.md`, `docs/usage_awareness_design.md`,
 `docs/workflow_audit_findings.md`,
 `docs/workflow_command_vendoring_design.md`, and — through its directory row,
@@ -3108,6 +3109,7 @@ docs/issue_approval_queue_design.md | coordination | audit-report
 docs/issue_search_design.md | coordination | audit-report
 docs/linux_portability_design.md | coordination | audit-report
 docs/managed_paths_design.md | coordination | audit-report
+docs/mission_runner_design.md | coordination | audit-report
 docs/media/README.md | pr-atomic | test-parsed;release-document
 docs/model_settings_design.md | coordination | audit-report
 docs/multi_repo_boards_design.md | coordination | audit-report
@@ -3135,6 +3137,7 @@ docs/public_release_design.md | coordination | audit-report
 docs/release_maintenance_design.md | coordination | audit-report
 docs/releasing.md | pr-atomic | test-parsed;release-document
 docs/superagent_design.md | coordination | audit-report
+docs/text_selection_design.md | coordination | audit-report
 docs/ui-bugs.md | coordination | audit-report
 docs/usage_awareness_design.md | coordination | audit-report
 docs/user-guide.md | pr-atomic | release-document
