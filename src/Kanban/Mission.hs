@@ -15,7 +15,9 @@
 --     however far the run diverged from it.
 --   [snapshot] Replaced whole, by rename. An interrupted replacement leaves
 --     the previous snapshot readable and current rather than a half-written
---     one.
+--     one. Its session tree is checked on the way in and on the way out: the
+--     writer's guarantee only covers records this release wrote, and a
+--     restored or hand-repaired one is what a delete would decide from.
 --   [journal] Appended one whole line at a time, and read by byte offset, so a
 --     record still being written is read once — whole — on a later pass rather
 --     than truncated now and duplicated later.

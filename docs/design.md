@@ -3131,7 +3131,11 @@ Defaults:
   its own — a specification written exactly once and never rewritten, a
   snapshot replaced whole by rename, a journal appended one complete line at a
   time and read by byte offset, and sealed archive copies carrying the digest
-  and byte length that verify them after the source is collected. Every one of
+  and byte length that verify them after the source is collected. A snapshot's
+  session tree is checked when it is written and again when it is read, since
+  only the first covers records this release wrote and a delete decides from
+  the second; a snapshot whose sessions are not a tree is reported rather than
+  adopted. Every one of
   those records carries its own `schemaVersion` outside its payload, so the
   unknown-version rule below applies to each independently, a journal line
   included; and no write ever treats that silence as permission, so

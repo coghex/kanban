@@ -1136,6 +1136,23 @@ sealSpec = describe "sealing a child's log" $ do
       archived <- ByteString.readFile (missionRoot store </> "archive" </> "session-a-event_stream.log")
       archived `shouldBe` "the bytes the first attempt published"
 
+  it "reports a seal record that does not describe the entry it was read as" $
+    withStore $ \root store -> do
+      let source = root </> "child.log"
+      ByteString.writeFile source "the original"
+      void (expectRight =<< sealMissionLog store theMission (MissionSessionId "session-a") MissionEventStreamLog source)
+      let archive = missionRoot store </> "archive"
+      -- The record is handed to a collector, which acts on what it says. One
+      -- that was found under a name its own session does not produce is not
+      -- describing this entry, whichever end the disagreement is seen from.
+      renameFile (archive </> "session-a-event_stream.seal.json") (archive </> "session-b-event_stream.seal.json")
+      listed <- readMissionSealedArchives store theMission
+      case listed of
+        Left message -> do
+          Text.unpack message `shouldSatisfy` isInfixOf "does not describe the entry it was read as"
+          Text.unpack message `shouldSatisfy` isInfixOf "session-b-event_stream.seal.json"
+        Right entries -> expectationFailure ("expected a refusal, got " <> show (map missionSealedSession entries))
+
   it "refuses a seal record that belongs to another mission" $
     withStore $ \root store -> do
       let source = root </> "child.log"
@@ -1350,6 +1367,32 @@ sessionTreeSpec = describe "the session tree" $ do
   it "calls an observed exit settled" $
     missionSessionDisposition (sessionNode "session-a" Nothing settled) `shouldBe` MissionSessionSettled
 
+  it "is enforced by the reader too, and a snapshot on disk that is not a tree decides nothing" $
+    withStore $ \_ store -> do
+      -- The writer cannot produce this, which is the point: what arrives from
+      -- a restore, a hand-repair, or an edit has no such history, and
+      -- deleteMission decides from exactly this value.
+      void
+        ( expectRight
+            =<< writeMissionSnapshot
+              store
+              (snapshotWith MissionCompleted [] [sessionNode "session-a" Nothing settled, sessionNode "session-b" (Just (MissionSessionId "session-a")) settled] [])
+        )
+      collide store "\"session-b\"" "\"session-a\""
+      stored <- readMissionSnapshot store theMission
+      case stored of
+        MissionUnreadable message -> do
+          Text.unpack message `shouldSatisfy` isInfixOf "snapshot.json"
+          Text.unpack message `shouldSatisfy` isInfixOf "not a tree"
+          Text.unpack message `shouldSatisfy` isInfixOf "share the identity"
+        other -> expectationFailure ("expected a diagnostic, got " <> show other)
+      -- And neither disposition acts on it, however terminal and settled the
+      -- record looks.
+      refusalKinds <$> archiveMission store theMission >>= (`shouldBe` ["unreadable"])
+      refusalKinds <$> deleteMission store theMission >>= (`shouldBe` ["unreadable"])
+      remaining <- listMissions store
+      remaining `shouldBe` [theMission]
+
   it "is enforced by the writer: a snapshot whose sessions are not a tree is refused" $
     withStore $ \_ store -> do
       let looping =
@@ -1386,6 +1429,17 @@ sessionTreeSpec = describe "the session tree" $ do
           "session \"stranger\" records the mission \"other\" rather than the one it was read for",
           "the sessions \"a\", \"b\" form a lineage that never reaches a root"
         ]
+
+-- | Rewrites the stored snapshot, and refuses to be a fixture that changed
+-- nothing: a substitution that silently missed would leave the example
+-- asserting a refusal of a record that was still perfectly valid.
+collide :: MissionStore -> Text -> Text -> IO ()
+collide store from to = do
+  let path = missionRoot store </> "snapshot.json"
+  existing <- TextEncoding.decodeUtf8 <$> ByteString.readFile path
+  let replaced = Text.replace from to existing
+  replaced `shouldNotBe` existing
+  ByteString.writeFile path (TextEncoding.encodeUtf8 replaced)
 
 flipEither :: Either failure () -> Maybe failure
 flipEither result = case result of

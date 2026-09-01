@@ -199,16 +199,20 @@ belongsHere store mission recorded
 -- leaves "walk up to the root" a question with no answer. Refusing the write
 -- is what keeps one out of the store in the first place.
 wellFormedSessions :: MissionSnapshot -> Either Text ()
-wellFormedSessions snapshot =
-  case validateMissionSessionTree snapshot.missionSnapshotId snapshot.missionSnapshotSessions of
-    Right () -> Right ()
-    Left failure ->
-      Left
-        ( "mission "
-            <> snapshot.missionSnapshotId.unMissionId
-            <> ": "
-            <> missionSessionTreeErrorMessage failure
-        )
+wellFormedSessions snapshot = case sessionTreeFailure snapshot of
+  Nothing -> Right ()
+  Just reason -> Left ("mission " <> snapshot.missionSnapshotId.unMissionId <> ": " <> reason)
+
+-- | Why this snapshot's sessions are not a tree, if they are not.
+--
+-- The single spelling the write refusal and the read refusal both go through,
+-- so the two cannot come to disagree about what a tree is.
+sessionTreeFailure :: MissionSnapshot -> Maybe Text
+sessionTreeFailure snapshot =
+  either
+    (Just . missionSessionTreeErrorMessage)
+    (const Nothing)
+    (validateMissionSessionTree snapshot.missionSnapshotId snapshot.missionSnapshotSessions)
 
 readMissionSpecification :: MissionStore -> MissionId -> IO (MissionRead MissionSpecification)
 readMissionSpecification store mission = case missionSpecificationPath store.missionStoreDirectory mission of
@@ -240,17 +244,43 @@ writeMissionSnapshot store snapshot = do
         Left message -> pure (Left message)
         Right () -> writeMissionRecord path missionSnapshotSchemaVersion snapshot
 
+-- | Reads a mission's snapshot, and will not hand back one whose sessions are
+-- not a tree.
+--
+-- Refusing on the way in as well as on the way out is not belt and braces. The
+-- writer's guarantee only covers records this release wrote; a snapshot that
+-- was restored, edited, or truncated and repaired by hand arrives with no such
+-- history, and 'deleteMission' decides from exactly this value. An invalid
+-- lineage makes \"which sessions does this mission own?\" a question with no
+-- answer — two nodes claiming one identity, a parent that resolves to nothing,
+-- a lineage that loops — and answering it wrong is how a delete removes the
+-- only record of a session that is still running. It is reported rather than
+-- read as absent, because a file that is there and does not cohere is a
+-- repair someone has to make.
 readMissionSnapshot :: MissionStore -> MissionId -> IO (MissionRead MissionSnapshot)
 readMissionSnapshot store mission = case missionSnapshotPath store.missionStoreDirectory mission of
   Left message -> pure (MissionUnreadable message)
-  Right path ->
-    readMissionRecordFor
-      mission
-      [missionSnapshotSchemaVersion]
-      store.missionStoreRepository
-      missionSnapshotId
-      missionSnapshotRepository
-      path
+  Right path -> do
+    result <-
+      readMissionRecordFor
+        mission
+        [missionSnapshotSchemaVersion]
+        store.missionStoreRepository
+        missionSnapshotId
+        missionSnapshotRepository
+        path
+    pure $ case result of
+      MissionPresent snapshot
+        | Just reason <- sessionTreeFailure snapshot ->
+            MissionUnreadable
+              ( "mission "
+                  <> mission.unMissionId
+                  <> ": "
+                  <> Text.pack path
+                  <> " records sessions that are not a tree: "
+                  <> reason
+              )
+      other -> other
 
 -- | Appends one event to a mission's journal.
 recordMissionEvent :: MissionStore -> MissionEvent -> IO (Either Text ())
@@ -432,19 +462,55 @@ readMissionSealedArchives store mission = case missionArchiveDirectory store.mis
     pure (collect (zip sealNames results))
   where
     isSuffixOfPath suffix name = suffix `Text.isSuffixOf` Text.pack name
-    readSeal archiveDirectory name =
-      readMissionRecordFor
-        mission
-        [missionSealSchemaVersion]
-        store.missionStoreRepository
-        missionSealedMission
-        missionSealedRepository
-        (archiveDirectory </> name)
+    readSeal archiveDirectory name = do
+      result <-
+        readMissionRecordFor
+          mission
+          [missionSealSchemaVersion]
+          store.missionStoreRepository
+          missionSealedMission
+          missionSealedRepository
+          (archiveDirectory </> name)
+      pure $ case result of
+        MissionPresent sealed
+          | Just reason <- sealSubjectFailure store mission name sealed -> MissionUnreadable reason
+        other -> other
+
     collect pairs = case [message | (_, MissionUnreadable message) <- pairs] of
       message : _ -> Left message
       [] -> case [message | (_, MissionRefused message) <- pairs] of
         message : _ -> Left message
         [] -> Right [sealed | (_, MissionPresent sealed) <- pairs]
+
+-- | Why a seal record does not describe the entry it was read as, if it does
+-- not.
+--
+-- Two ways it can fail, and both are the same mistake seen from opposite ends:
+-- a record whose session and log kind do not name the file it was found under,
+-- and a record whose recorded archive name is not the one its own session and
+-- log kind produce. 'verifyMissionSealedArchive' already refuses to read a
+-- file a record merely names, but a record handed back to a collector is data
+-- that collector will act on, so an entry that does not describe itself is
+-- reported here rather than returned for something else to be misled by.
+sealSubjectFailure :: MissionStore -> MissionId -> FilePath -> MissionSealedArchive -> Maybe Text
+sealSubjectFailure store mission name sealed = case (,) <$> sealPath <*> archivePath of
+  Left message -> Just message
+  Right (canonicalSeal, canonicalArchive)
+    | takeFileName canonicalSeal /= name ->
+        Just (disagrees ("it was read from " <> Text.pack (show name)))
+    | sealed.missionSealedName /= takeFileName canonicalArchive ->
+        Just (disagrees ("it names the archived file " <> Text.pack (show sealed.missionSealedName)))
+    | otherwise -> Nothing
+  where
+    sealPath = missionSealPath store.missionStoreDirectory mission sealed.missionSealedSession sealed.missionSealedKind
+    archivePath = missionArchivePath store.missionStoreDirectory mission sealed.missionSealedSession sealed.missionSealedKind
+    disagrees detail =
+      "mission "
+        <> mission.unMissionId
+        <> ": a seal for session "
+        <> sealed.missionSealedSession.unMissionSessionId
+        <> " does not describe the entry it was read as, because "
+        <> detail
 
 -- | Re-reads an archived copy and checks it against what the seal recorded.
 --
