@@ -44,6 +44,7 @@ import Kanban.Mission
     MissionDecisionPolicy (..),
     MissionDispositionRefusal (..),
     MissionEvent (..),
+    MissionHolderPresence (..),
     MissionId (..),
     MissionJournalLine (..),
     MissionLeaseAcquisition (..),
@@ -85,6 +86,7 @@ import Kanban.Mission
     deleteMission,
     listMissions,
     missionDispositionRefusalMessage,
+    missionHolderPresence,
     missionLifecycleIsTerminal,
     missionLifecycleTag,
     missionLifecycles,
@@ -110,7 +112,7 @@ import Kanban.Mission
     sha256Hex,
     writeMissionSnapshot,
   )
-import Kanban.Process (ProcessIdentity (..))
+import Kanban.Process (ProcessIdentity (..), defaultProcessSnapshot)
 import Spec.Support.Env
   ( permissionsOf,
     withEnvironmentValue,
@@ -132,7 +134,10 @@ import Spec.Support.MissionProbes
   )
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, removeFile)
 import System.FilePath (takeDirectory, (</>))
+import System.Environment (getEnv)
 import System.Posix.Files (createSymbolicLink, setFileMode)
+import System.Posix.Process (getProcessID)
+import System.Process (createProcess, getPid, proc, waitForProcess)
 import Test.Hspec
 
 spec :: Spec
@@ -150,6 +155,7 @@ spec = describe "the durable mission store" $ do
   sessionTreeSpec
   vocabularySpec
   digestSpec
+  noProcessSpec
 
 -- * Fixtures
 
@@ -414,7 +420,7 @@ journalSpec = describe "the append-only event journal" $ do
       case diagnosticsOf records of
         [message] -> do
           Text.unpack message `shouldSatisfy` isInfixOf "mission-0001"
-          Text.unpack message `shouldSatisfy` isInfixOf "journal record"
+          Text.unpack message `shouldSatisfy` isInfixOf "events.jsonl"
         other -> expectationFailure ("expected one diagnostic, got " <> show other)
 
   it "treats a record written under an unrecognized schema version as absent without hiding the records after it" $
@@ -450,7 +456,7 @@ snapshotSpec = describe "replacing the snapshot" $ do
       void (expectRight =<< writeMissionSnapshot (MissionStore (takeDirectory elsewhere) store.missionStoreRepository) (snapshotWith MissionCompleted [] [] []))
       let snapshotFile = store.missionStoreDirectory </> "mission-0001" </> "snapshot.json"
       interrupted <- ByteString.readFile (takeDirectory elsewhere </> "mission-0001" </> "snapshot.json")
-      ByteString.writeFile (snapshotFile <> ".tmp") interrupted
+      ByteString.writeFile (snapshotFile <> ".staged-9999-interrupted") interrupted
       current <- expectPresent =<< readMissionSnapshot store theMission
       current.missionSnapshotLifecycle `shouldBe` MissionRunning
 
@@ -460,6 +466,47 @@ snapshotSpec = describe "replacing the snapshot" $ do
       void (expectRight =<< writeMissionSnapshot store (snapshotWith MissionCompleted [] [] []))
       current <- expectPresent =<< readMissionSnapshot store theMission
       current.missionSnapshotLifecycle `shouldBe` MissionCompleted
+
+  it "publishes nothing and leaves no loose file behind when a write cannot be committed" $
+    withStore $ \_ store ->
+      withFileCreationMask 0o000 $ do
+        void (expectRight =<< recordMissionEvent store (eventNamed "first"))
+        -- A target that cannot be renamed onto. The record is staged and
+        -- written in full first, so this is a commit failing rather than a
+        -- write never starting, which is what makes the staging file the
+        -- thing at risk of being left behind.
+        createDirectoryIfMissing True (missionRoot store </> "snapshot.json" </> "occupied")
+        written <- writeMissionSnapshot store runningSnapshot
+        case written of
+          Left _ -> pure ()
+          Right () -> expectationFailure "expected the snapshot write to fail"
+        entries <- sort <$> listDirectory (missionRoot store)
+        entries `shouldBe` ["events.jsonl", "snapshot.json"]
+
+  it "creates the file it stages user-only, so the record it commits was never loose for an instant" $
+    withStore $ \_ store ->
+      withFileCreationMask 0o000 $ do
+        -- Nothing tightens these files after the fact: a rename and a hard
+        -- link both carry the staged inode to the final path, so the mode
+        -- asserted here is the mode the staging file was created with.
+        void (expectRight =<< createMissionSpecification store theSpecification)
+        void (expectRight =<< writeMissionSnapshot store runningSnapshot)
+        forM_ ["specification.json", "snapshot.json"] $ \name -> do
+          mode <- permissionsOf (missionRoot store </> name)
+          (name, mode) `shouldBe` (name, 0o600)
+
+  it "is not blocked by a staged copy an interrupted creation left behind, and never adopts one" $
+    withStore $ \_ store -> do
+      void (expectRight =<< createMissionSpecification store (specificationFor (MissionRepository "coghex" "kanban") (MissionId "mission-0002") "another mission"))
+      -- What a crash between staging a specification and committing it
+      -- leaves: a complete-looking file that is not at the published path.
+      staged <- ByteString.readFile (store.missionStoreDirectory </> "mission-0002" </> "specification.json")
+      createDirectoryIfMissing True (missionRoot store)
+      ByteString.writeFile (missionRoot store </> "specification.json.staged-9999-interrupted") staged
+      created <- expectRight =<< createMissionSpecification store theSpecification
+      created `shouldBe` MissionCreated
+      stored <- expectPresent =<< readMissionSpecification store theMission
+      stored.missionSpecificationRequest `shouldBe` "solve the approved backlog"
 
   it "refuses to write a specification twice, and leaves the first exactly as it was" $
     withStore $ \_ store -> do
@@ -490,26 +537,25 @@ permissionSpec = describe "under a permissive umask" $
           case acquisition of
             MissionLeaseAcquired lease -> releaseMissionLease lease
             other -> expectationFailure ("expected to acquire the lease, got " <> show other)
-          let missionRoot = store.missionStoreDirectory </> "mission-0001"
           forM_
             [ root </> "kanban",
               root </> "kanban" </> "missions",
               store.missionStoreDirectory,
-              missionRoot,
-              missionRoot </> "archive"
+              missionRoot store,
+              missionRoot store </> "archive"
             ]
             $ \directory -> do
               present <- doesDirectoryExist directory
               present `shouldBe` True
               mode <- permissionsOf directory
               (directory, mode) `shouldBe` (directory, 0o700)
-          archived <- listDirectory (missionRoot </> "archive")
+          archived <- listDirectory (missionRoot store </> "archive")
           forM_
-            ( [ missionRoot </> "specification.json",
-                missionRoot </> "snapshot.json",
-                missionRoot </> "events.jsonl"
+            ( [ missionRoot store </> "specification.json",
+                missionRoot store </> "snapshot.json",
+                missionRoot store </> "events.jsonl"
               ]
-                <> map ((missionRoot </> "archive") </>) (sort archived)
+                <> map ((missionRoot store </> "archive") </>) (sort archived)
             )
             $ \file -> do
               present <- doesFileExist file
@@ -609,13 +655,55 @@ leaseSpec = describe "the mission lease" $ do
       afterRelease <- readMissionLeaseOwner store.missionStoreDirectory theMission
       afterRelease `shouldBe` MissionAbsent
 
-  it "stays held when the holder cannot be checked because no process snapshot can be taken" $
+  it "stays held when the liveness probe cannot answer" $
     withStore $ \_ store -> do
       void (acquireMissionLease store.missionStoreDirectory theMission)
-      second <- acquireMissionLeaseWith (pure (Left "no snapshot here")) store.missionStoreDirectory theMission
+      second <-
+        acquireMissionLeaseWith
+          (const (pure (MissionHolderUndecidable "the kernel would not say")))
+          store.missionStoreDirectory
+          theMission
       case second of
         MissionLeaseHeld reason -> Text.unpack reason `shouldSatisfy` isInfixOf "could not be checked"
         other -> expectationFailure ("expected a refusal, got " <> show other)
+
+  it "asks the kernel about a holder, and calls only a reaped process gone" $ do
+    self <- getProcessID
+    running <- missionHolderPresence (fromIntegral self)
+    running `shouldBe` MissionHolderPresent
+    -- A real process, exited and reaped, so its identifier genuinely resolves
+    -- to nothing. Reaping is what makes that an established fact rather than
+    -- something this example races.
+    (_, _, _, handle) <- createProcess (proc "/bin/sh" ["-c", "exit 0"])
+    identifier <- getPid handle
+    _ <- waitForProcess handle
+    case identifier of
+      Nothing -> expectationFailure "the child exited before it could be identified"
+      Just pid -> do
+        gone <- missionHolderPresence (fromIntegral pid)
+        gone `shouldBe` MissionHolderGone
+
+  it "refuses an identifier that would name a process group rather than a process" $
+    -- Zero and negative values are process groups to kill(2), and the largest
+    -- Int becomes -1 — every process — when it is narrowed to a pid_t. A
+    -- corrupted record must not be able to ask any of those questions.
+    forM_ [0, -1, maxBound] $ \refused -> do
+      undecidable <- missionHolderPresence refused
+      case undecidable of
+        MissionHolderUndecidable detail -> Text.unpack detail `shouldSatisfy` isInfixOf "is not a process identifier"
+        other -> expectationFailure ("expected " <> show refused <> " to be refused, got " <> show other)
+
+  it "records the holder's own process identifier, so a successor can ask about it" $
+    withStore $ \_ store -> do
+      acquisition <- acquireMissionLease store.missionStoreDirectory theMission
+      case acquisition of
+        MissionLeaseAcquired _ -> pure ()
+        other -> expectationFailure ("expected to acquire the lease, got " <> show other)
+      owner <- readMissionLeaseOwner store.missionStoreDirectory theMission
+      self <- getProcessID
+      case owner of
+        MissionPresent record -> record.missionLeaseOwnerProcessId `shouldBe` fromIntegral self
+        other -> expectationFailure ("expected an owner record, got " <> show other)
 
 leaseProbe :: MissionStore -> String -> String -> MissionProbe
 leaseProbe store gate name =
@@ -703,8 +791,11 @@ schemaSpec = describe "a record this release did not write" $ do
         Left message -> Text.unpack message `shouldSatisfy` isInfixOf "not the one this store holds"
         Right () -> expectationFailure "expected the snapshot write to be refused"
 
+missionRoot :: MissionStore -> FilePath
+missionRoot store = store.missionStoreDirectory </> "mission-0001"
+
 specificationFile :: MissionStore -> FilePath
-specificationFile store = store.missionStoreDirectory </> "mission-0001" </> "specification.json"
+specificationFile store = missionRoot store </> "specification.json"
 
 rewriteVersion :: MissionStore -> Int -> IO ()
 rewriteVersion store version = do
@@ -752,7 +843,7 @@ sealSpec = describe "sealing a child's log" $ do
       -- partial file in the archive and no record of a seal.
       let archiveDirectory = store.missionStoreDirectory </> "mission-0001" </> "archive"
       createDirectoryIfMissing True archiveDirectory
-      ByteString.writeFile (archiveDirectory </> "session-a-event_stream.log.partial") "the who"
+      ByteString.writeFile (archiveDirectory </> "session-a-event_stream.log.staged-9999-interrupted") "the who"
       beforehand <- expectRight =<< readMissionSealedArchives store theMission
       beforehand `shouldBe` []
       sealed <- expectRight =<< sealMissionLog store theMission (MissionSessionId "session-a") MissionEventStreamLog source
@@ -787,6 +878,37 @@ sealSpec = describe "sealing a child's log" $ do
       void (expectRight =<< sealMissionLog store theMission (MissionSessionId "session-a") MissionRawProviderLog raw)
       stored <- expectRight =<< readMissionSealedArchives store theMission
       sort (map missionSealedName stored) `shouldBe` ["session-a-event_stream.log", "session-a-raw_provider_log.log"]
+
+  it "verifies the archive its own session and log kind name, never the filename a record carries" $
+    withStore $ \root store -> do
+      let source = root </> "child.log"
+      ByteString.writeFile source "the original"
+      sealed <- expectRight =<< sealMissionLog store theMission (MissionSessionId "session-a") MissionEventStreamLog source
+      -- A seal record is durable data, so a forged one can name any path at
+      -- all. Reading the file it names would hash whatever was there and
+      -- report success against the digest sitting beside it.
+      let elsewhere = root </> "elsewhere.log"
+      ByteString.writeFile elsewhere "the forged content"
+      forM_
+        [ "../../../../elsewhere.log",
+          "session-b-event_stream.log",
+          "session-a-raw_provider_log.log"
+        ]
+        $ \forged -> do
+          result <-
+            verifyMissionSealedArchive
+              store
+              theMission
+              sealed
+                { missionSealedName = forged,
+                  missionSealedDigest = sha256Hex "the forged content",
+                  missionSealedByteLength = fromIntegral (ByteString.length ("the forged content" :: ByteString.ByteString))
+                }
+          case result of
+            Left message -> do
+              Text.unpack message `shouldSatisfy` isInfixOf "rather than"
+              Text.unpack message `shouldSatisfy` isInfixOf "session-a-event_stream.log"
+            Right () -> expectationFailure ("expected " <> forged <> " to be refused")
 
   it "reports a source it cannot read rather than recording an empty archive" $
     withStore $ \root store -> do
@@ -1081,6 +1203,63 @@ vocabularySpec = describe "the durable lifecycle vocabularies" $ do
   it "says why a seal was refused, naming the session and the log kind" $
     missionSealFailureMessage (MissionSealAlreadySealed (MissionSessionId "session-a") MissionRawProviderLog)
       `shouldBe` "the raw_provider_log of session session-a is already sealed"
+
+-- * Requirement 15
+
+noProcessSpec :: Spec
+noProcessSpec = describe "what the store runs" $
+  it "completes every operation without spawning a single external process" $
+    withStore $ \root store -> do
+      -- Requirement 15 of issue #592 is that this slice spawns nothing, and
+      -- the whole of it rests on that: the hand-written SHA-256 exists rather
+      -- than a call to shasum, and the lease asks the kernel about its holder
+      -- rather than reading a process snapshot, which runs `ps`. A recording
+      -- fake for each executable the surrounding code could reach turns that
+      -- claim into something a later change cannot quietly break — the log is
+      -- written by the fake itself, so any spawn at all leaves evidence.
+      let binaries = root </> "bin"
+          spawnLog = root </> "spawned.log"
+      createDirectoryIfMissing True binaries
+      forM_ ["ps", "gh", "git", "codex", "claude", "shasum", "sha256sum", "sh"] $ \name -> do
+        ByteString.writeFile
+          (binaries </> name)
+          (ByteStringChar.pack ("#!/bin/sh\nprintf '%s %s\\n' " <> name <> " \"$*\" >> " <> spawnLog <> "\n"))
+        setFileMode (binaries </> name) 0o700
+      originalPath <- getEnv "PATH"
+      withEnvironmentValue "PATH" (binaries <> ":" <> originalPath) $ do
+        void (expectRight =<< createMissionSpecification store theSpecification)
+        void (expectRight =<< writeMissionSnapshot store runningSnapshot)
+        void (expectRight =<< recordMissionEvent store (eventNamed "planned"))
+        void (expectRight =<< readMissionJournal store theMission 0)
+        void (readMissionSpecification store theMission)
+        void (readMissionSnapshot store theMission)
+        let source = root </> "child.log"
+        ByteString.writeFile source "a child's stream"
+        sealed <- expectRight =<< sealMissionLog store theMission (MissionSessionId "session-a") MissionEventStreamLog source
+        void (expectRight =<< verifyMissionSealedArchive store theMission sealed)
+        void (expectRight =<< readMissionSealedArchives store theMission)
+        void (listMissions store)
+        acquisition <- acquireMissionLease store.missionStoreDirectory theMission
+        contended <- acquireMissionLease store.missionStoreDirectory theMission
+        case contended of
+          MissionLeaseHeld _ -> pure ()
+          other -> expectationFailure ("expected the second acquisition to be refused, got " <> show other)
+        case acquisition of
+          MissionLeaseAcquired lease -> releaseMissionLease lease
+          other -> expectationFailure ("expected to acquire the lease, got " <> show other)
+        void (expectRight =<< writeMissionSnapshot store (snapshotWith MissionCompleted [] [] []))
+        void (archiveMission store theMission)
+        void (deleteMission store theMission)
+      spawned <- doesFileExist spawnLog
+      recorded <- if spawned then ByteStringChar.unpack <$> ByteString.readFile spawnLog else pure ""
+      recorded `shouldBe` ""
+      -- The control. Without it an empty log would be just as consistent with
+      -- a fixture that could never have recorded anything, and the example
+      -- above would pass while asserting nothing. This is the very call the
+      -- lease used to make, and the fixture catches it.
+      withEnvironmentValue "PATH" (binaries <> ":" <> originalPath) (void defaultProcessSnapshot)
+      controlled <- ByteStringChar.unpack <$> ByteString.readFile spawnLog
+      controlled `shouldSatisfy` isInfixOf "ps"
 
 -- * The digest
 

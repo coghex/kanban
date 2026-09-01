@@ -114,8 +114,13 @@ data MissionJournalLine
 
 -- | Decides one complete line, reading its version before its payload for the
 -- reason "Kanban.Mission.Paths" does.
-decodeMissionJournalLine :: MissionId -> ByteString.ByteString -> MissionJournalLine
-decodeMissionJournalLine mission line = case eitherDecodeStrict' line :: Either String Value of
+--
+-- Takes the journal's path so a diagnostic can name the file as well as the
+-- mission: requirement 11 of issue #592 asks for both, and a mission's records
+-- are spread over four files, so \"mission-0001 has a malformed record\" does
+-- not say which one to look at.
+decodeMissionJournalLine :: MissionId -> FilePath -> ByteString.ByteString -> MissionJournalLine
+decodeMissionJournalLine mission path line = case eitherDecodeStrict' line :: Either String Value of
   Left message -> malformed ("is not JSON (" <> Text.pack message <> ")")
   Right (Object fields) -> case KeyMap.lookup "schemaVersion" fields of
     Nothing -> malformed "carries no schemaVersion"
@@ -135,4 +140,6 @@ decodeMissionJournalLine mission line = case eitherDecodeStrict' line :: Either 
             Right envelope -> MissionJournalEvent (missionEnvelopePayload (envelope :: MissionEnvelope MissionEvent))
   Right _ -> malformed "is not a JSON object"
   where
-    malformed detail = MissionJournalMalformed ("mission " <> mission.unMissionId <> ": a journal record " <> detail)
+    malformed detail =
+      MissionJournalMalformed
+        ("mission " <> mission.unMissionId <> ": a record in " <> Text.pack path <> " " <> detail)

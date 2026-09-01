@@ -14,12 +14,23 @@
 -- @Kanban.Worker.Lease.leaseIsActive@ treats an undecodable owner record as
 -- active only for an initialization grace period, after which it may retire
 -- the lease; a mission lease has no such window. A holder that cannot be
--- /proven/ gone keeps the lease for good: an unreadable record, a record with
--- no captured identity, and a process snapshot that would not run all leave
--- the lease held. Elapsed time cannot distinguish a slow holder from a dead
--- one, and a mission advanced twice is not a second worker on one issue — it
--- is two runs spending an agent budget against one plan and writing over each
--- other's snapshot.
+-- /proven/ gone keeps the lease for good: an unreadable record, an owner
+-- record this release cannot decode, and a liveness probe that could not
+-- answer all leave the lease held. Elapsed time cannot distinguish a slow
+-- holder from a dead one, and a mission advanced twice is not a second worker
+-- on one issue — it is two runs spending an agent budget against one plan and
+-- writing over each other's snapshot.
+--
+-- Liveness is asked of the kernel with @kill(pid, 0)@ and never of a process
+-- snapshot. Reading a snapshot means running @ps@, and requirement 15 of issue
+-- #592 is that this slice spawns no process at all — the same restriction the
+-- hand-written SHA-256 in "Kanban.Mission.Digest" exists to respect. What that
+-- costs is the start time "Kanban.Process" pins an identifier with, and the
+-- loss lands entirely on the safe side: with no start time a /recycled/
+-- identifier is indistinguishable from the original, so it reads as present
+-- and the lease stays held. Only @ESRCH@ — the kernel saying no process has
+-- this identifier — is ever read as gone, and there is no way for that answer
+-- to be wrong.
 --
 -- This lease replaces nothing. The per-target worker lease and the canonical
 -- approval lock remain the lower-level authorities over what they guard; this
@@ -30,8 +41,10 @@
 module Kanban.Mission.Lease
   ( MissionLease (..),
     MissionLeaseAcquisition (..),
+    MissionHolderPresence (..),
     acquireMissionLease,
     acquireMissionLeaseWith,
+    missionHolderPresence,
     releaseMissionLease,
     readMissionLeaseOwner,
   )
@@ -56,17 +69,12 @@ import Kanban.Mission.Types
     MissionLeaseOwner (..),
     missionLeaseSchemaVersion,
   )
-import Kanban.Process
-  ( IdentityPresence (..),
-    ProcessIdentity,
-    checkIdentityPresenceWith,
-    currentProcessIdentity,
-    defaultProcessSnapshot,
-  )
 import System.Directory (createDirectory, removeDirectory, removeFile)
-import System.IO.Error (isAlreadyExistsError)
+import System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
+import System.Posix.Signals (nullSignal, signalProcess)
+import System.Posix.Types (CPid)
 
 -- | A held mission lease. Carries the token its owner record was written with,
 -- so a release can refuse to remove a lease some later acquisition now holds.
@@ -87,13 +95,52 @@ data MissionLeaseAcquisition
   | MissionLeaseUnusable Text
   deriving stock (Eq, Show)
 
-acquireMissionLease :: FilePath -> MissionId -> IO MissionLeaseAcquisition
-acquireMissionLease = acquireMissionLeaseWith defaultProcessSnapshot
+-- | What is known about the process a lease record names.
+data MissionHolderPresence
+  = MissionHolderPresent
+  | -- | The kernel says no process has this identifier. The one answer that
+    -- lets a lease be retired, and the one that cannot be wrong.
+    MissionHolderGone
+  | MissionHolderUndecidable Text
+  deriving stock (Eq, Show)
 
--- | 'acquireMissionLease' with the process snapshot injected, so a fixture can
--- stage a snapshot that will not run and prove the lease stays held.
-acquireMissionLeaseWith :: IO (Either Text [ProcessIdentity]) -> FilePath -> MissionId -> IO MissionLeaseAcquisition
-acquireMissionLeaseWith takeSnapshot store mission = case (,) <$> missionLeasePath store mission <*> missionLeaseOwnerPath store mission of
+-- | Whether a process identifier still names a running process.
+--
+-- @kill(pid, 0)@ delivers nothing; it asks the kernel whether the identifier
+-- resolves and whether this process could signal it. @ESRCH@ is the only
+-- outcome read as gone. A permission error means a process /is/ there under
+-- another user, and every other error means the question was not answered —
+-- both keep the lease.
+--
+-- The identifier is range-checked before the call rather than passed to it. To
+-- @kill@, zero and negative values name a process group or every process the
+-- caller may signal, and a value too large for a @pid_t@ /becomes/ one of
+-- those when it is narrowed — the largest 'Int' arrives as @-1@, which is
+-- every process. A record is durable data that can be corrupted or edited, so
+-- a liveness question must not be able to turn into one about an unrelated
+-- group. Anything outside the range is undecidable, which keeps the lease.
+missionHolderPresence :: Int -> IO MissionHolderPresence
+missionHolderPresence processId
+  | processId <= 0 || processId > fromIntegral (maxBound :: CPid) =
+      pure
+        ( MissionHolderUndecidable
+            ("its recorded process identifier " <> Text.pack (show processId) <> " is not a process identifier")
+        )
+  | otherwise = do
+      probed <- try @IOException (signalProcess nullSignal (fromIntegral processId))
+      pure $ case probed of
+        Right () -> MissionHolderPresent
+        Left exception
+          | isDoesNotExistError exception -> MissionHolderGone
+          | otherwise -> MissionHolderUndecidable (Text.pack (show exception))
+
+acquireMissionLease :: FilePath -> MissionId -> IO MissionLeaseAcquisition
+acquireMissionLease = acquireMissionLeaseWith missionHolderPresence
+
+-- | 'acquireMissionLease' with the liveness probe injected, so a fixture can
+-- stage a probe that cannot answer and prove the lease stays held.
+acquireMissionLeaseWith :: (Int -> IO MissionHolderPresence) -> FilePath -> MissionId -> IO MissionLeaseAcquisition
+acquireMissionLeaseWith holderPresence store mission = case (,) <$> missionLeasePath store mission <*> missionLeaseOwnerPath store mission of
   Left message -> pure (MissionLeaseUnusable message)
   Right (leaseDirectory, ownerPath) -> case missionDirectory store mission of
     Left message -> pure (MissionLeaseUnusable message)
@@ -110,7 +157,7 @@ acquireMissionLeaseWith takeSnapshot store mission = case (,) <$> missionLeasePa
           ignoreFileOperation (setFileMode leaseDirectory 0o700)
           token <- newLeaseToken
           now <- getCurrentTime
-          identity <- capturedIdentity
+          processId <- getProcessID
           written <-
             writeMissionRecord
               ownerPath
@@ -119,7 +166,7 @@ acquireMissionLeaseWith takeSnapshot store mission = case (,) <$> missionLeasePa
                 { missionLeaseOwnerMission = mission,
                   missionLeaseOwnerToken = token,
                   missionLeaseOwnerAcquiredAt = now,
-                  missionLeaseOwnerIdentity = identity
+                  missionLeaseOwnerProcessId = fromIntegral processId
                 }
           case written of
             Left message -> do
@@ -142,7 +189,7 @@ acquireMissionLeaseWith takeSnapshot store mission = case (,) <$> missionLeasePa
           | not (isAlreadyExistsError exception) ->
               pure (MissionLeaseUnusable ("could not acquire the mission lease: " <> Text.pack (show exception)))
           | otherwise -> do
-              held <- holderStillHeld takeSnapshot mission ownerPath
+              held <- holderStillHeld holderPresence mission ownerPath
               case held of
                 Just reason -> pure (MissionLeaseHeld reason)
                 Nothing
@@ -156,11 +203,11 @@ acquireMissionLeaseWith takeSnapshot store mission = case (,) <$> missionLeasePa
 -- | Whether an existing lease is still held, and why.
 --
 -- 'Nothing' — the only answer that lets a lease be retired — is returned in
--- exactly one case: the owner record decoded, it names a captured identity,
--- and a snapshot that /ran/ found nothing matching it. Every other outcome
--- keeps the lease, permanently.
-holderStillHeld :: IO (Either Text [ProcessIdentity]) -> MissionId -> FilePath -> IO (Maybe Text)
-holderStillHeld takeSnapshot mission ownerPath = do
+-- exactly one case: the owner record decoded, and the kernel says no process
+-- has the identifier it names. Every other outcome keeps the lease,
+-- permanently.
+holderStillHeld :: (Int -> IO MissionHolderPresence) -> MissionId -> FilePath -> IO (Maybe Text)
+holderStillHeld holderPresence mission ownerPath = do
   ownerResult <- readMissionRecord mission [missionLeaseSchemaVersion] ownerPath :: IO (MissionRead MissionLeaseOwner)
   case ownerResult of
     -- An owner record that is missing, unreadable, or written under a schema
@@ -170,14 +217,12 @@ holderStillHeld takeSnapshot mission ownerPath = do
     MissionAbsent -> pure (Just (blocked "its owner record is missing or was written by another release"))
     MissionUnreadable message -> pure (Just (blocked ("its owner record will not decode (" <> message <> ")")))
     MissionRefused message -> pure (Just (blocked ("its owner record was refused (" <> message <> ")")))
-    MissionPresent owner -> case owner.missionLeaseOwnerIdentity of
-      Nothing -> pure (Just (blocked "its holder's process identity was never captured, so its absence can never be proven"))
-      Just identity -> do
-        presence <- checkIdentityPresenceWith takeSnapshot [identity]
-        pure $ case presence of
-          IdentityPresent -> Just (blocked "its holder is still running")
-          IdentitySnapshotFailed detail -> Just (blocked ("its holder could not be checked (" <> detail <> ")"))
-          IdentityAbsent -> Nothing
+    MissionPresent owner -> do
+      presence <- holderPresence owner.missionLeaseOwnerProcessId
+      pure $ case presence of
+        MissionHolderPresent -> Just (blocked "its holder is still running")
+        MissionHolderUndecidable detail -> Just (blocked ("its holder could not be checked (" <> detail <> ")"))
+        MissionHolderGone -> Nothing
   where
     blocked reason = "mission " <> mission.unMissionId <> " is already being advanced: " <> reason
 
@@ -204,12 +249,6 @@ readMissionLeaseOwner :: FilePath -> MissionId -> IO (MissionRead MissionLeaseOw
 readMissionLeaseOwner store mission = case missionLeaseOwnerPath store mission of
   Left message -> pure (MissionUnreadable message)
   Right ownerPath -> readMissionRecord mission [missionLeaseSchemaVersion] ownerPath
-
--- | This acquisition's identity, or 'Nothing' when the snapshot could not be
--- taken. Best-effort by necessity, and fail-closed by consequence: a lease
--- recorded without an identity is one no successor may ever take.
-capturedIdentity :: IO (Maybe ProcessIdentity)
-capturedIdentity = currentProcessIdentity
 
 newLeaseToken :: IO Text
 newLeaseToken = do

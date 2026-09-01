@@ -49,13 +49,14 @@ module Kanban.Mission.Paths
     -- * Writing
     writeMissionRecord,
     createMissionRecord,
+    withStagedContent,
     ensureMissionDirectory,
     listMissionEntries,
     ignoreFileOperation,
   )
 where
 
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, finally, throwIO, try)
 import Control.Monad (void)
 import Data.Aeson (FromJSON, Result (Error, Success), ToJSON, Value (Object), eitherDecodeStrict', encode, fromJSON)
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -74,17 +75,19 @@ import Kanban.Mission.Types
     missionRepositoryMatches,
   )
 import Kanban.Paths (createPrivateDirectory)
+import Data.Time (getCurrentTime)
 import System.Directory
   ( XdgDirectory (XdgState),
     doesDirectoryExist,
     getXdgDirectory,
     listDirectory,
+    removeFile,
     renameFile,
   )
 import System.FilePath ((</>))
-import System.IO (hClose)
+import System.IO (Handle, hClose, hSetBinaryMode)
 import System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
-import System.Posix.Files (setFdMode, setFileMode)
+import System.Posix.Files (createLink, setFdMode)
 import System.Posix.IO
   ( OpenFileFlags (creat, exclusive),
     OpenMode (WriteOnly),
@@ -93,6 +96,7 @@ import System.Posix.IO
     fdToHandle,
     openFd,
   )
+import System.Posix.Process (getProcessID)
 
 -- | @$XDG_STATE_HOME/kanban/missions/<owner>-<repo>@.
 --
@@ -291,57 +295,99 @@ readBytes mission recognized path bytes = case eitherDecodeStrict' bytes :: Eith
     unreadable detail =
       MissionUnreadable ("mission " <> mission.unMissionId <> ": " <> Text.pack path <> " " <> detail)
 
--- | Writes one versioned record atomically, user-only: a temporary file
--- beside the target, its mode forced to @0600@ before it holds anything the
--- caller cares about, then a rename.
+-- | Stages @content@ in a private file beside @path@ and commits it with
+-- @commit@.
 --
--- An interrupted write therefore leaves whatever was at @path@ exactly as it
--- was, which is what requirement 3 asks of a snapshot replacement.
-writeMissionRecord :: ToJSON value => FilePath -> Int -> value -> IO (Either Text ())
-writeMissionRecord path version value = do
-  let temporary = path <> ".tmp"
+-- Every write in this store goes through here, and the shape is what makes two
+-- separate guarantees hold at once.
+--
+-- The staging file is opened @O_CREAT | O_EXCL@ with mode @0600@ and its mode
+-- is forced on that descriptor before a byte is written, so the file is
+-- user-only from the instant it exists rather than from whenever a later
+-- @chmod@ arrives. Nothing tightens it afterwards, deliberately: both commits
+-- below — a rename and a hard link — carry the staged /inode/ to the final
+-- path, so the committed file's mode is the staged file's mode and the
+-- permission the store promises is the one it was created with. A staging file
+-- a crash leaves behind is @0600@ for the same reason.
+--
+-- The name carries this process and a timestamp so two writers never stage
+-- into one file and interleave, and the exclusive create refuses a collision
+-- rather than truncating whatever it found.
+--
+-- The staging file is removed on the way out whether or not the commit
+-- happened. After a rename there is nothing left to remove; after a link, or
+-- after a commit that failed, the copy is this call's litter and no reader's
+-- record.
+withStagedContent :: FilePath -> LazyByteString.ByteString -> (FilePath -> IO result) -> IO (Either Text result)
+withStagedContent path content commit = do
   result <- try @IOException $ do
-    LazyByteString.writeFile temporary (encode (MissionEnvelope version value))
-    setFileMode temporary 0o600
-    renameFile temporary path
+    (staged, handle) <- openPrivateStagingFile path
+    ( do
+        LazyByteString.hPut handle content
+        hClose handle
+        commit staged
+      )
+      `finally` (ignoreFileOperation (hClose handle) >> ignoreFileOperation (removeFile staged))
   pure (either (Left . Text.pack . show) Right result)
 
--- | Writes one versioned record exactly once, refusing to replace an
--- existing one.
+openPrivateStagingFile :: FilePath -> IO (FilePath, Handle)
+openPrivateStagingFile path = do
+  processId <- getProcessID
+  now <- getCurrentTime
+  attempt (path <> ".staged-" <> show processId <> "-" <> stamp now) (0 :: Int)
+  where
+    stamp = filter (`notElem` ("-:. TZ" :: String)) . show
+    attempt base attemptsMade = do
+      let candidate = if attemptsMade == 0 then base else base <> "-" <> show attemptsMade
+      opened <- try @IOException (openFd candidate WriteOnly defaultFileFlags {creat = Just 0o600, exclusive = True})
+      case opened of
+        Left exception
+          | isAlreadyExistsError exception && attemptsMade < 32 -> attempt base (attemptsMade + 1)
+          | otherwise -> throwIO exception
+        Right descriptor -> do
+          setFdMode descriptor 0o600
+          handle <- try @IOException (fdToHandle descriptor)
+          case handle of
+            Left exception -> ignoreFileOperation (closeFd descriptor) >> throwIO exception
+            Right opening -> do
+              hSetBinaryMode opening True
+              pure (candidate, opening)
+
+-- | Replaces whatever is at @path@ with one versioned record, atomically.
 --
--- @O_CREAT | O_EXCL@ rather than a rename, because a rename would happily
--- replace the file it lands on: a specification is written once (requirement
--- 2), and a second creation for the same mission identifier must fail
--- /without changing the original/. The exclusive create is also what makes
--- the refusal atomic between two processes racing the same identifier.
+-- The record is complete before the rename that publishes it, so an
+-- interrupted write leaves whatever was at @path@ exactly as it was — which is
+-- what requirement 3 of issue #592 asks of a snapshot replacement — and a
+-- reader never observes a record half-way between two states.
+writeMissionRecord :: ToJSON value => FilePath -> Int -> value -> IO (Either Text ())
+writeMissionRecord path version value =
+  withStagedContent path (encode (MissionEnvelope version value)) (`renameFile` path)
+
+-- | Publishes one versioned record at @path@ exactly once, refusing to replace
+-- an existing one.
 --
--- The interrupted case is covered by the same call: a crash before the write
--- completes leaves a file this reader rejects as undecodable rather than a
--- half-specification it would adopt, and the file exists, so a later attempt
--- is refused rather than quietly filling it in with different content.
+-- The commit is a hard link rather than a rename, and that is the whole
+-- design: @link@ is atomic and it /fails/ when the target exists, where a
+-- rename would happily replace it. A specification is written once
+-- (requirement 2), and a second creation for the same mission identifier must
+-- fail without changing the original — including when two processes race the
+-- same identifier, which the kernel settles here rather than a check-then-act
+-- this code could be interrupted inside.
+--
+-- Interruption is covered by the same shape. The bytes are written into the
+-- staging file, so a crash before the link leaves no @path@ at all: nothing
+-- partial is ever published, and — the failure mode a check-then-act over the
+-- final path would have caused — the retry after that crash creates the
+-- specification rather than reporting one already there.
 createMissionRecord :: ToJSON value => FilePath -> Int -> value -> IO (Either Text Bool)
-createMissionRecord path version value = do
-  opened <- try @IOException (openFd path WriteOnly defaultFileFlags {creat = Just 0o600, exclusive = True})
-  case opened of
-    Left exception
-      | isAlreadyExistsError exception -> pure (Right False)
-      | otherwise -> pure (Left (Text.pack (show exception)))
-    Right descriptor -> do
-      -- The mode is forced on the descriptor just opened rather than
-      -- re-resolved by path, so it always lands on the file this call
-      -- created, and it is forced before a byte of the record is written.
-      handleResult <- try @IOException (setFdMode descriptor 0o600 >> fdToHandle descriptor)
-      case handleResult of
-        Left exception -> do
-          ignoreFileOperation (closeFd descriptor)
-          pure (Left (Text.pack (show exception)))
-        Right handle -> do
-          written <- try @IOException (LazyByteString.hPut handle (encode (MissionEnvelope version value)))
-          closed <- try @IOException (hClose handle)
-          pure $ case (written, closed) of
-            (Left exception, _) -> Left (Text.pack (show exception))
-            (_, Left exception) -> Left (Text.pack (show exception))
-            (Right (), Right ()) -> Right True
+createMissionRecord path version value =
+  withStagedContent path (encode (MissionEnvelope version value)) $ \staged -> do
+    linked <- try @IOException (createLink staged path)
+    case linked of
+      Right () -> pure True
+      Left exception
+        | isAlreadyExistsError exception -> pure False
+        | otherwise -> throwIO exception
 
 -- | Every entry of the store that is a plain name.
 --

@@ -132,8 +132,10 @@ module Kanban.Mission
     MissionLease (..),
     MissionLeaseOwner (..),
     MissionLeaseAcquisition (..),
+    MissionHolderPresence (..),
     acquireMissionLease,
     acquireMissionLeaseWith,
+    missionHolderPresence,
     releaseMissionLease,
     readMissionLeaseOwner,
   )
@@ -142,10 +144,12 @@ where
 import Kanban.Mission.Digest (sha256Hex)
 import Kanban.Mission.Journal (MissionJournalLine (..))
 import Kanban.Mission.Lease
-  ( MissionLease (..),
+  ( MissionHolderPresence (..),
+    MissionLease (..),
     MissionLeaseAcquisition (..),
     acquireMissionLease,
     acquireMissionLeaseWith,
+    missionHolderPresence,
     readMissionLeaseOwner,
     releaseMissionLease,
   )

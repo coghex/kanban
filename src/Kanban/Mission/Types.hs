@@ -703,16 +703,20 @@ data MissionEvent = MissionEvent
 
 -- | Who holds a mission's lease.
 --
--- @missionLeaseOwnerIdentity@ being 'Nothing' is not a formality: it means the
--- holder's identity was never captured, so its absence can never be proven,
--- so the lease stays held for good. See "Kanban.Mission.Lease".
+-- The holder is recorded as a bare process identifier rather than a
+-- "Kanban.Process" identity, because capturing one of those means reading a
+-- process snapshot, and reading a snapshot means running @ps@ — which
+-- requirement 15 of issue #592 forbids this slice outright. What that costs is
+-- the start time an identity pins a recycled identifier with; see
+-- "Kanban.Mission.Lease" for why losing it moves the lease's only wrong answer
+-- to the safe side.
 data MissionLeaseOwner = MissionLeaseOwner
   { missionLeaseOwnerMission :: MissionId,
     -- | Unique to one acquisition, so a release can refuse to remove a lease
     -- some later acquisition now holds.
     missionLeaseOwnerToken :: Text,
     missionLeaseOwnerAcquiredAt :: UTCTime,
-    missionLeaseOwnerIdentity :: Maybe ProcessIdentity
+    missionLeaseOwnerProcessId :: Int
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)

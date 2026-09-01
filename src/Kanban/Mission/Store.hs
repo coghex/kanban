@@ -77,6 +77,7 @@ import Kanban.Mission.Paths
     ensureMissionDirectory,
     listMissionEntries,
     missionArchiveDirectory,
+    withStagedContent,
     missionArchivePath,
     missionDirectory,
     missionJournalPath,
@@ -117,9 +118,10 @@ import Kanban.Mission.Types
     missionSpecificationSchemaVersion,
   )
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Lazy as LazyByteString
 import System.Directory (doesFileExist, removePathForcibly, renameFile)
 import System.FilePath (takeFileName, (</>))
-import System.Posix.Files (getSymbolicLinkStatus, isDirectory, setFileMode)
+import System.Posix.Files (getSymbolicLinkStatus, isDirectory)
 
 -- | One repository's mission store: where it is, and whose it is.
 --
@@ -292,7 +294,7 @@ readMissionJournal store mission consumedBytes = case missionJournalPath store.m
   Left message -> pure (Left message)
   Right path -> do
     result <- readMissionJournalSince path consumedBytes
-    pure (fmap (\(lines', offset) -> (map (decodeMissionJournalLine mission) lines', offset)) result)
+    pure (fmap (\(lines', offset) -> (map (decodeMissionJournalLine mission path) lines', offset)) result)
 
 -- | Why a seal did not happen.
 data MissionSealFailure
@@ -379,14 +381,13 @@ sealMissionLog store mission session kind source =
                         Right False -> Left (MissionSealAlreadySealed session kind)
                         Right True -> Right sealed
 
+-- | Puts the bytes in the archive under the same staging discipline every
+-- other write here uses, so a copy interrupted before it was committed leaves
+-- a user-only file that no reader adopts rather than a loose one that a seal
+-- record might later be taken to describe.
 copyIntoArchive :: FilePath -> ByteString.ByteString -> IO (Either Text ())
-copyIntoArchive archivePath bytes = do
-  let partial = archivePath <> ".partial"
-  result <- try @IOException $ do
-    ByteString.writeFile partial bytes
-    setFileMode partial 0o600
-    renameFile partial archivePath
-  pure (either (Left . Text.pack . show) Right result)
+copyIntoArchive archivePath bytes =
+  withStagedContent archivePath (LazyByteString.fromStrict bytes) (`renameFile` archivePath)
 
 -- | Every sealed archive entry a mission holds.
 --
@@ -414,42 +415,64 @@ readMissionSealedArchives store mission = case missionArchiveDirectory store.mis
 -- The archived copy is what is verified — never the source, which the whole
 -- point of a seal is to outlive.
 verifyMissionSealedArchive :: MissionStore -> MissionId -> MissionSealedArchive -> IO (Either Text ())
-verifyMissionSealedArchive store mission sealed = case missionArchiveDirectory store.missionStoreDirectory mission of
-  Left message -> pure (Left message)
-  Right archiveDirectory
-    | sealed.missionSealedDigestAlgorithm /= missionSealDigestAlgorithm ->
-        pure
-          ( Left
-              ( "the archive of session "
-                  <> sealed.missionSealedSession.unMissionSessionId
-                  <> " records the digest algorithm "
-                  <> sealed.missionSealedDigestAlgorithm
-                  <> ", which this release cannot verify"
-              )
-          )
-    | otherwise -> do
-        let path = archiveDirectory </> sealed.missionSealedName
-        bytesResult <- try @IOException (ByteString.readFile path)
-        pure $ case bytesResult of
-          Left exception -> Left ("could not read " <> Text.pack path <> " (" <> Text.pack (show exception) <> ")")
-          Right bytes
-            | fromIntegral (ByteString.length bytes) /= sealed.missionSealedByteLength ->
-                Left (mismatch path "byte length" (Text.pack (show sealed.missionSealedByteLength)) (Text.pack (show (ByteString.length bytes))))
-            | sha256Hex bytes /= sealed.missionSealedDigest ->
-                Left (mismatch path "digest" sealed.missionSealedDigest (sha256Hex bytes))
-            | otherwise -> Right ()
-  where
-    mismatch path what expected found =
-      "mission "
-        <> mission.unMissionId
-        <> ": "
-        <> Text.pack path
-        <> " has "
-        <> what
-        <> " "
-        <> found
-        <> " but its seal records "
-        <> expected
+verifyMissionSealedArchive store mission sealed =
+  case missionArchivePath store.missionStoreDirectory mission sealed.missionSealedSession sealed.missionSealedKind of
+    Left message -> pure (Left message)
+    Right path
+      -- The path is recomputed from the session and log kind this record is
+      -- *about*, never joined from the name it carries. A record is durable
+      -- data: one that has been edited could name `../../elsewhere` or some
+      -- other mission's archive, and a verification that read that file would
+      -- hash whatever was there and report success against the forged digest
+      -- beside it. The recorded name is still compared, so a record that
+      -- disagrees with its own subject is reported rather than quietly
+      -- verified against the right file.
+      | sealed.missionSealedName /= takeFileName path ->
+          pure
+            ( Left
+                ( "mission "
+                    <> mission.unMissionId
+                    <> ": the seal of session "
+                    <> sealed.missionSealedSession.unMissionSessionId
+                    <> " names the archived file "
+                    <> Text.pack (show sealed.missionSealedName)
+                    <> " rather than "
+                    <> Text.pack (show (takeFileName path))
+                    <> ", and was not verified against it"
+                )
+            )
+      | sealed.missionSealedDigestAlgorithm /= missionSealDigestAlgorithm ->
+          pure
+            ( Left
+                ( "the archive of session "
+                    <> sealed.missionSealedSession.unMissionSessionId
+                    <> " records the digest algorithm "
+                    <> sealed.missionSealedDigestAlgorithm
+                    <> ", which this release cannot verify"
+                )
+            )
+      | otherwise -> do
+          bytesResult <- try @IOException (ByteString.readFile path)
+          pure $ case bytesResult of
+            Left exception -> Left ("could not read " <> Text.pack path <> " (" <> Text.pack (show exception) <> ")")
+            Right bytes
+              | fromIntegral (ByteString.length bytes) /= sealed.missionSealedByteLength ->
+                  Left (mismatch path "byte length" (Text.pack (show sealed.missionSealedByteLength)) (Text.pack (show (ByteString.length bytes))))
+              | sha256Hex bytes /= sealed.missionSealedDigest ->
+                  Left (mismatch path "digest" sealed.missionSealedDigest (sha256Hex bytes))
+              | otherwise -> Right ()
+      where
+        mismatch path' what expected found =
+          "mission "
+            <> mission.unMissionId
+            <> ": "
+            <> Text.pack path'
+            <> " has "
+            <> what
+            <> " "
+            <> found
+            <> " but its seal records "
+            <> expected
 
 -- | Why a mission may not be archived or deleted.
 data MissionDispositionRefusal
