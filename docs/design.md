@@ -3036,7 +3036,7 @@ above are unchanged, and persistence the user switched off is not a failure.
   redraw rather than stored as fixed strings, so they stay honest without a
   timer.
 
-## 16. Cache and configuration
+## 16. Cache, configuration, and durable state
 
 Suggested paths:
 
@@ -3049,6 +3049,12 @@ Suggested paths:
 ~/.cache/kanban/logs/<owner>-<repo>/<workflow>-<number>-<timestamp>.jsonl
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.{spec,state}.json
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.events.jsonl
+~/.local/state/kanban/missions/<owner>-<repo>/<mission>/specification.json
+~/.local/state/kanban/missions/<owner>-<repo>/<mission>/snapshot.json
+~/.local/state/kanban/missions/<owner>-<repo>/<mission>/events.jsonl
+~/.local/state/kanban/missions/<owner>-<repo>/<mission>/lease/owner.json
+~/.local/state/kanban/missions/<owner>-<repo>/<mission>/archive/<session>-<kind>.log
+~/.local/state/kanban/missions/<owner>-<repo>/<mission>/archive/<session>-<kind>.seal.json
 ```
 
 Defaults:
@@ -3075,14 +3081,15 @@ Defaults:
 - Record every managed agent provider line before parsing or display filtering.
   Raw workflow logs always remain full; changing display verbosity never
   changes their contents. Directories use `0700` and files use `0600`. Every
-  directory level Kanban creates below the XDG cache and config roots carries
-  `0700`, whatever the umask and whichever writer created it first; the roots
-  themselves are shared and keep their own modes.
-- Create cache files with user-only permissions (`0600`). A file that is
-  appended to rather than rewritten — a worker's event journal — is created
-  `0600` whatever the umask, and is tightened to `0600` before each append, so
-  one an earlier release left loose self-corrects instead of waiting for a
-  rewrite that never comes.
+  directory level Kanban creates below the XDG cache, config, and state roots
+  carries `0700`, whatever the umask and whichever writer created it first; the
+  roots themselves are shared and keep their own modes.
+- Create the files here with user-only permissions (`0600`), under every one of
+  those roots. A file that is appended to rather than rewritten — a worker's
+  event journal, a mission's event journal — is created `0600` whatever the
+  umask, and is tightened to `0600` before each append, so one an earlier
+  release left loose self-corrects instead of waiting for a rewrite that never
+  comes.
 - Never cache an open issue or PR body. Startup renders no open card until the
   first live generation publishes, so nothing about a private repository's open
   work is written to disk. Completed history is the one exception, and carries
@@ -3115,6 +3122,25 @@ Defaults:
   no integer version, or fails to decode under a version Kanban does recognise
   is corruption and keeps its warning. Settings follow the same rule, falling
   back to the defaults silently for an unknown version.
+- The mission store under the state root is durable state rather than a cache,
+  and the paragraphs below about caching do not reach it. It is under
+  `$XDG_STATE_HOME` for the reason section 17 puts the PR drainer's per-repository
+  status there: a mission's history has to outlive the worker cache's fourteen-day
+  collection, and a record the cache is entitled to remove is not a record a
+  later run can be recovered from. Each of its four parts has a discipline of
+  its own — a specification written exactly once and never rewritten, a
+  snapshot replaced whole by rename, a journal appended one complete line at a
+  time and read by byte offset, and sealed archive copies carrying the digest
+  and byte length that verify them after the source is collected. Every one of
+  those records carries its own `schemaVersion` outside its payload, so the
+  unknown-version rule below applies to each independently, a journal line
+  included; and no write ever treats that silence as permission, so
+  "is one already there?" is always a question for the filesystem rather than
+  for a successful decode.
+- The mission store holds no open issue or pull request body either. What a
+  mission records of its targets is their numbers and titles alongside the
+  request the user typed, never an item's body, so the rule below is not
+  weakened by it.
 - Permit `--no-cache` and a global `cache = false` setting. Either suppresses
   both the read and the write of every cache here, the completed generation
   included: a run with caching off seeds no history and stores none, and leaves

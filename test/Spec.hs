@@ -47,6 +47,7 @@ import qualified Spec.GitHub.History as GitHubHistory
 import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.ManagedPaths as ManagedPaths
+import qualified Spec.Mission as Mission
 import qualified Spec.OperatingMode as OperatingMode
 import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
@@ -59,6 +60,7 @@ import Spec.Support.Lanes
     runSuiteInLanes,
   )
 import Spec.Support.LeaseProbes (leaseProbeVariable, runLeaseProbe)
+import Spec.Support.MissionProbes (missionProbeVariable, runMissionProbe)
 import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import Spec.Support.UsageWriters (runUsageWriter, usageWriterVariable)
 import qualified Spec.Suite.Assignment as Assignment
@@ -83,18 +85,22 @@ import qualified Spec.UI.Text as UIText
 import qualified Spec.UI.Usage as UIUsage
 import System.Environment (lookupEnv)
 
--- | Ordinarily the suite. Three markers divert it instead, and each names a
+-- | Ordinarily the suite. Four markers divert it instead, and each names a
 -- condition that cannot be established from inside an already-started test
 -- process: 'localeProbeVariable' makes this the C-locale child a single test
 -- re-ran the binary as (see "Spec.Support.Locale" for why the locale is fixed
 -- before @main@ runs), 'usageWriterVariable' makes it one of the independent
 -- processes contending over the usage cache (see "Spec.Support.UsageWriters"
--- for why a thread would not do), and 'leaseProbeVariable' makes it one of the
+-- for why a thread would not do), 'leaseProbeVariable' makes it one of the
 -- independent processes contending for a repository's lease (see
 -- "Spec.Support.LeaseProbes" for why a thread would not merely be weaker but
--- would prove the opposite).
+-- would prove the opposite), and 'missionProbeVariable' makes it one of the
+-- independent processes acting on a mission store (see
+-- "Spec.Support.MissionProbes" for the two things a thread cannot stage there:
+-- a reader sharing nothing with the writer, and a lease holder there is
+-- something to kill).
 --
--- All three are asked about before the suite and deliberately so: a lane
+-- All four are asked about before the suite and deliberately so: a lane
 -- carries its own marker in the environment its children inherit, and a child
 -- started from inside a lane must run its probe rather than that lane a second
 -- time. No marker reaches a child of a probe, so this cannot recurse.
@@ -103,11 +109,13 @@ main = do
   localeProbe <- lookupEnv localeProbeVariable
   usageWriter <- lookupEnv usageWriterVariable
   leaseProbe <- lookupEnv leaseProbeVariable
-  case (localeProbe, usageWriter, leaseProbe) of
-    (Just probeRoot, _, _) -> runLocaleProbe probeRoot
-    (Nothing, Just planPath, _) -> runUsageWriter planPath
-    (Nothing, Nothing, Just planPath) -> runLeaseProbe planPath
-    (Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
+  missionProbe <- lookupEnv missionProbeVariable
+  case (localeProbe, usageWriter, leaseProbe, missionProbe) of
+    (Just probeRoot, _, _, _) -> runLocaleProbe probeRoot
+    (Nothing, Just planPath, _, _) -> runUsageWriter planPath
+    (Nothing, Nothing, Just planPath, _) -> runLeaseProbe planPath
+    (Nothing, Nothing, Nothing, Just planPath) -> runMissionProbe planPath
+    (Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
 
 -- | Every group, its lane, and its established order.
 --
@@ -162,6 +170,13 @@ suiteGroups =
     SuiteGroup "Spec.UI.SolveChooser" PingLane SolveChooser.spec,
     SuiteGroup "Spec.Agent.Usage" UsageLane Usage.spec, -- 45.7s
     SuiteGroup "Spec.Repository.Lease" UsageLane RepositoryLease.spec, -- 1.7s
+    -- Beside the other group that starts suite processes of its own, and for
+    -- the same reason 'suiteColocations' records for the pair it names: the
+    -- assertions in @UsageLane@ about a swept process being gone are measured
+    -- against this lane's churn, and groups in one lane are serialised so
+    -- neither can overlap the other. Its own cost is small enough to ride
+    -- along anywhere.
+    SuiteGroup "Spec.Mission" UsageLane Mission.spec,
     SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
     SuiteGroup "Spec.Agent.IssueReviewer" PingLane IssueReviewer.spec,
     SuiteGroup "Spec.Drainer" PingLane Drainer.spec, -- 17.6s
