@@ -10,6 +10,7 @@ module Kanban.UI.Solve
     openSelectedSolveChooser,
     preflightBlocker,
     pullRequestFromBoard,
+    solveActionKind,
     solveChooserFooterHints,
     solveStartDecision,
     startIssueSolve,
@@ -29,7 +30,23 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Kanban.CLI (Options (..))
+import Kanban.Action
+  ( ActionEnvironment (..),
+    ActionTargetKind (..),
+    ActionTargetRef (..),
+    ActionTarget (..),
+    ActionRefusal (..),
+    TargetStructure (..),
+    WorkflowActionKind (..),
+    actionHandleWorker,
+    actionRefusalMessage,
+    actionRequest,
+    catalogIdentity,
+    dispatchProviderTurn,
+    planResolvedAction,
+    resolveHeldItem,
+    ActionRequest (..),
+  )
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
@@ -52,10 +69,9 @@ import Kanban.Solve
 import Kanban.Text (sanitizeText)
 import Kanban.Worker
   ( WorkerParent (..),
-    launchSolveWorker,
     pendingTerminationDiagnosticPrefix
     )
-import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor)
+import Kanban.UI.Filter (dashboardActionEnvironment, readOnlyHistoryRefusal, readOnlyHistoryRefusalFor)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -272,38 +288,81 @@ failSolveLaunch eventChannel issueNumber message = do
   writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
   writeBChan eventChannel (SolveProtocolEvent (SolveProcessFinished issueNumber (SolveFailed message)))
 
+-- | The spawn itself, through the workflow action registry.
+--
+-- The registry is what runs the preflight, replays this session's recorded
+-- cell, and reaches 'Kanban.Worker.launchSolveWorker'; this function's whole
+-- remaining job is to gather the session state that plan is built from and to
+-- apply the typed answer to the session -- the durable worker on success, and
+-- the diagnostic-then-terminal pair 'failSolveLaunch' raises on a refusal.
+--
+-- The plan is built against the issue the /session/ holds rather than against
+-- the number, because that record is what every entry point here already
+-- refused on; re-resolving the number would additionally refuse a session
+-- whose issue has since left the open read, which is not what pressing a
+-- chooser digit has ever done.
 launchAssignedSolveInvocation :: RecordedAssignment -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchAssignedSolveInvocation assignment issueNumber workflow brand existingSession provenance input = do
   state <- get
-  let existingLogPath = Map.lookup issueNumber state.appSolveSessions >>= (.sessionLogPath)
+  let session = Map.lookup issueNumber state.appSolveSessions
+      existingLogPath = session >>= (.sessionLogPath)
       eventChannel = state.appEventChannel
+      kind = solveActionKind workflow
       parent = do
-        session <- Map.lookup issueNumber state.appSolveSessions
-        progress <- session.sessionDetail.solveSessionAutoProgress
+        held <- session
+        progress <- held.sessionDetail.solveSessionAutoProgress
         pure
           WorkerParent
             { workerParentIssueNumber = issueNumber,
               workerParentReviewRound = progress.autoSolveReviewRound,
-              workerParentSolverBrand = session.sessionDetail.solveSessionBrand,
-              workerParentSolverSession = session.sessionDetail.solveSessionId,
-              workerParentSolverLogPath = session.sessionLogPath,
+              workerParentSolverBrand = held.sessionDetail.solveSessionBrand,
+              workerParentSolverSession = held.sessionDetail.solveSessionId,
+              workerParentSolverLogPath = held.sessionLogPath,
               workerParentStartedAt = progress.autoSolveStartedAt,
               workerParentKnownPullRequests = progress.autoSolveKnownPullRequests,
-              workerParentSolverAssignment = session.sessionDetail.solveSessionAssignment
+              workerParentSolverAssignment = held.sessionDetail.solveSessionAssignment
             }
+      environment = dashboardActionEnvironment state
+      request =
+        (actionRequest kind (catalogIdentity environment.actionCatalog) (TargetByKind ActionTargetIssue issueNumber))
+          { requestSolverBrand = Just brand,
+            requestRecordedAssignment = Just assignment,
+            requestExistingSession = existingSession,
+            requestExistingLogPath = existingLogPath,
+            requestResumeProvenance = provenance,
+            requestUserMessage = input,
+            requestParent = parent
+          }
+      planned = case session of
+        Nothing ->
+          Left
+            ( ActionDispatchFailed
+                kind
+                ("no solve session holds #" <> showText issueNumber <> " any more")
+            )
+        Just held ->
+          planResolvedAction
+            state.appConfig.resolvedWorkflow
+            kind
+            (Just brand)
+            ( ActionTargetItem
+                ( resolveHeldItem
+                    environment.actionCatalog
+                    TargetPlain
+                    (IssueItem held.sessionDetail.solveSessionIssue)
+                )
+            )
   void
     . liftIO
     . forkIO
-    $ do
-      blocked <- preflightBlocker state.appRepository (solvePreflightAction workflow brand)
-      case blocked of
-        Just message -> failSolveLaunch eventChannel issueNumber message
-        Nothing -> do
-          launched <- launchSolveWorker assignment state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
-          case launched of
-            Left message -> failSolveLaunch eventChannel issueNumber message
-            Right descriptor -> do
-              writeBChan eventChannel (WorkerRegistered descriptor)
+    $ case planned of
+      Left refusal -> failSolveLaunch eventChannel issueNumber (actionRefusalMessage refusal)
+      Right plan -> do
+        dispatched <- dispatchProviderTurn environment request plan
+        case dispatched of
+          Left refusal -> failSolveLaunch eventChannel issueNumber (actionRefusalMessage refusal)
+          Right handle ->
+            mapM_ (writeBChan eventChannel . WorkerRegistered) (actionHandleWorker handle)
   void
     . liftIO
     . forkIO
@@ -311,9 +370,10 @@ launchAssignedSolveInvocation assignment issueNumber workflow brand existingSess
       threadDelay solveInitialRefreshDelayMicros
       writeBChan eventChannel SolveBoardRefreshRequested
 
-solvePreflightAction :: SolveWorkflow -> SolverBrand -> PreflightAction
-solvePreflightAction SolveOnly = ActionSolve
-solvePreflightAction AutoSolve = ActionAutoSolve
+-- | Which registry verb a solve workflow is.
+solveActionKind :: SolveWorkflow -> WorkflowActionKind
+solveActionKind SolveOnly = SolveIssue
+solveActionKind AutoSolve = AutoSolveIssue
 
 -- | Preflight one AI action just before spawning it, so a missing
 -- Kanban-owned component is reported with the command that installs it

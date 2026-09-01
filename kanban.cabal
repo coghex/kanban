@@ -99,6 +99,7 @@ library kanban-internal
   visibility: private
   hs-source-dirs: src
   exposed-modules:
+    Kanban.Action
     Kanban.ApprovalService
     Kanban.CLI
     Kanban.Cache
@@ -167,6 +168,11 @@ library kanban-internal
     Kanban.Worker
     Kanban.Workflow
   other-modules:
+    Kanban.Action.AutoSolve
+    Kanban.Action.Capability
+    Kanban.Action.Dispatch
+    Kanban.Action.Target
+    Kanban.Action.Types
     Kanban.GitHub.Coordinator
     Kanban.GitHub.Decode
     Kanban.GitHub.Fetch
@@ -242,6 +248,8 @@ test-suite kanban-test
   hs-source-dirs: test
   main-is: Spec.hs
   other-modules:
+    Spec.Action.AutoSolve
+    Spec.Action.Registry
     Spec.ApprovalService
     Spec.Agent.Adapter
     Spec.Agent.Capture

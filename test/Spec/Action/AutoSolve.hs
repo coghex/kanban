@@ -1,0 +1,460 @@
+-- | The complete autosolve action, driven headlessly.
+--
+-- The point of these examples is that the whole loop — solver, discovery, the
+-- opposite-brand review, the resumed solver, the canonical rereview, and the
+-- approval — runs with no @AppState@, no @EventM@, and no Brick refresh. What
+-- stands in for the machine is the same seam 'Kanban.Worker.runWorkerWithTask'
+-- uses for its task: the two things the loop does to the world are injected,
+-- so a scripted world of durable worker records and refreshed snapshots drives
+-- the real progression.
+--
+-- Every stage decision below is 'Kanban.UI.AutoSolve.decideAutoSolve''s. What
+-- is under test is the adapter around it — that its observation is rebuilt
+-- from durable records rather than from dashboard state, that the turns it
+-- starts are the registry's, and that no later provider turn starts before the
+-- previous one has settled.
+module Spec.Action.AutoSolve (spec) where
+
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
+import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Kanban.Action
+import Kanban.Domain
+import Kanban.Models (defaultRoster)
+import Kanban.Solve
+  ( ResumeProvenance (..),
+    SolveOutcome (..),
+    SolveWorkflow (..),
+    SolverBrand (..),
+  )
+import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..), SolvePhase (..))
+import Kanban.Worker
+  ( SolveWorkerTask (..),
+    WorkerDescriptor (..),
+    WorkerId (..),
+    WorkerParent (..),
+    WorkerSpec (..),
+    WorkerState (..),
+    WorkerStatus (..),
+    WorkerTask (..),
+    descriptorForSpec,
+  )
+import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch)
+import System.FilePath ((</>))
+import Test.Hspec (Spec, describe, it, shouldBe, shouldSatisfy)
+
+-- ---------------------------------------------------------------------------
+-- The scripted world
+-- ---------------------------------------------------------------------------
+
+-- | Which durable worker record a scripted state belongs to.
+data Role = Solver | Reviewer | Resumed
+  deriving stock (Eq, Show)
+
+-- | One tick's evidence: what the refreshed snapshot holds, and what each
+-- worker's durable record says.
+data World = World
+  { worldPullRequests :: [PullRequest],
+    worldWorkers :: [(Role, WorkerState)]
+  }
+
+-- | One dispatch the loop made, in the shape the assertions read.
+data DispatchRecord = DispatchRecord
+  { dispatchedKind :: WorkflowActionKind,
+    dispatchedTarget :: ActionTargetRef,
+    dispatchedProvenance :: ResumeProvenance,
+    dispatchedSession :: Maybe Text,
+    dispatchedMessage :: Text,
+    dispatchedParentRound :: Maybe Int
+  }
+  deriving stock (Eq, Show)
+
+data Loop = Loop
+  { loopTurns :: AutoSolveTurns,
+    loopDriver :: AutoSolveDriver,
+    loopDispatches :: IORef [DispatchRecord],
+    loopEnvironment :: ActionEnvironment,
+    loopStart :: AutoSolveState,
+    loopReviewerDescriptor :: WorkerDescriptor,
+    -- | Install one world without going through the driver, for the
+    -- single-tick examples.
+    loopSetWorld :: World -> IO ()
+  }
+
+issueUnderLoop :: Int
+issueUnderLoop = 50
+
+pullRequestUnderLoop :: Int
+pullRequestUnderLoop = 101
+
+label :: Text -> Label
+label name = Label name ""
+
+-- | A pull request linked to the loop's issue, carrying one origin marker as
+-- its final content — the shape routing and discovery both need.
+linkedPullRequest :: Int -> SolverBrand -> [Label] -> PullRequest
+linkedPullRequest number brand labels =
+  (basePullRequest number [issueUnderLoop] False labels)
+    {pullRequestBody = "Closes #50\n\n" <> marker}
+  where
+    marker = case brand of
+      CodexSolver -> "<!-- pr-origin:codex -->"
+      ClaudeSolver -> "<!-- pr-origin:claude -->"
+
+workerRecord :: WorkerStatus -> Maybe Text -> WorkerState
+workerRecord status session =
+  WorkerState
+    { workerStateId = WorkerId "fixture",
+      workerStateStatus = status,
+      workerStateWorkerPid = 1,
+      workerStateWorkerIdentity = Nothing,
+      workerStateProviderPid = Nothing,
+      workerStateProviderIdentity = Nothing,
+      workerStateSessionId = session,
+      workerStateLogPath = Nothing,
+      workerStateHeartbeatAt = epoch,
+      workerStateLastActivity = "working",
+      workerStateKnownProcesses = []
+    }
+
+running :: WorkerState
+running = workerRecord WorkerRunning (Just "session-1")
+
+completed :: WorkerState
+completed = workerRecord (WorkerTerminal SolveCompleted) (Just "session-1")
+
+descriptorNamed :: Repository -> Text -> Int -> IO WorkerDescriptor
+descriptorNamed repository name issueNumber =
+  descriptorForSpec
+    WorkerSpec
+      { workerId = WorkerId name,
+        workerRepository = repository,
+        workerTask = SolveWorkerTaskKind (SolveWorkerTask issueNumber AutoSolve ClaudeSolver),
+        workerExistingSession = Nothing,
+        workerExistingLogPath = Nothing,
+        workerResumeProvenance = ResumeAnswer,
+        workerUserMessage = "",
+        workerParent = Nothing,
+        workerCreatedAt = epoch,
+        workerMaxRuntimeSeconds = 600,
+        workerConfigPath = Nothing,
+        workerWorkflowConfig = defaultWorkflowConfig,
+        workerAssignment = Nothing
+      }
+
+-- | A loop wired to a scripted world.
+--
+-- Worlds are consumed one per refresh and the last one repeats, so a loop that
+-- has not settled by the end of the script keeps observing the final state
+-- rather than falling off it. Every dispatch is recorded and answered with the
+-- next descriptor from a fixed pool, which is what lets the assertions say
+-- exactly which provider turns were started and in what order.
+withLoop :: [World] -> (Loop -> IO result) -> IO result
+withLoop worlds action =
+  withTemporaryCacheRoot $ \temporaryRoot ->
+    withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+      let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+      solver <- descriptorNamed repository "solve-initial" issueUnderLoop
+      reviewer <- descriptorNamed repository "pr-review" pullRequestUnderLoop
+      resumed <- descriptorNamed repository "solve-resumed" issueUnderLoop
+      remaining <- newIORef worlds
+      current <- newIORef (World [] [])
+      dispatches <- newIORef []
+      pool <- newIORef [reviewer, resumed]
+      let pathFor Solver = solver.workerDescriptorSpecPath
+          pathFor Reviewer = reviewer.workerDescriptorSpecPath
+          pathFor Resumed = resumed.workerDescriptorSpecPath
+          refresh = do
+            next <- atomicModifyIORef' remaining $ \queued -> case queued of
+              [] -> ([], Nothing)
+              [final] -> ([final], Just final)
+              first : rest -> (rest, Just first)
+            case next of
+              Nothing -> pure (Left "the scripted world ran out")
+              Just world -> do
+                writeIORef current world
+                pure (Right (RepoSnapshot [baseIssue issueUnderLoop []] world.worldPullRequests epoch))
+          lookupState descriptor = do
+            world <- readIORef current
+            pure $ case [recorded | (role, recorded) <- world.worldWorkers, pathFor role == descriptor.workerDescriptorSpecPath] of
+              [] -> Left "no durable record"
+              recorded : _ -> Right recorded
+          dispatch _ request = do
+            modifyIORef' dispatches (<> [recordOf request])
+            handed <- atomicModifyIORef' pool $ \available -> case available of
+              [] -> ([], Nothing)
+              next : rest -> (rest, Just next)
+            pure $ case handed of
+              Nothing -> Left (ActionDispatchFailed request.requestKind "the fixture ran out of workers")
+              Just descriptor
+                | request.requestKind == AutoSolveIssue ->
+                    Right (AutoSolveActionHandle targetUnderLoop descriptor attributionUnderLoop)
+                | otherwise ->
+                    Right (WorkerActionHandle request.requestKind targetUnderLoop descriptor attributionUnderLoop)
+      action
+        Loop
+          { loopTurns = AutoSolveTurns dispatch lookupState,
+            loopDriver =
+              AutoSolveDriver
+                { driverRefresh = refresh,
+                  driverHistory = CatalogHistoryLoaded (CompletedHistory [] [] epoch),
+                  driverWait = pure (),
+                  driverSteps = 12
+                },
+            loopDispatches = dispatches,
+            loopEnvironment = environmentFor repository,
+            loopStart =
+              AutoSolveState
+                { autoSolveActionTarget = targetUnderLoop,
+                  autoSolveActionAttribution = attributionUnderLoop,
+                  autoSolveActionProgress = progressAt AutoImplementing 0 Nothing,
+                  autoSolveActionSolver = solver,
+                  autoSolveActionReviewer = Nothing
+                },
+            loopReviewerDescriptor = reviewer,
+            loopSetWorld = writeIORef current
+          }
+
+recordOf :: ActionRequest -> DispatchRecord
+recordOf request =
+  DispatchRecord
+    { dispatchedKind = request.requestKind,
+      dispatchedTarget = request.requestTarget,
+      dispatchedProvenance = request.requestResumeProvenance,
+      dispatchedSession = request.requestExistingSession,
+      dispatchedMessage = request.requestUserMessage,
+      dispatchedParentRound = (.workerParentReviewRound) <$> request.requestParent
+    }
+
+environmentFor :: Repository -> ActionEnvironment
+environmentFor repository =
+  ActionEnvironment
+    { actionRepository = repository,
+      actionWorkflowConfig = defaultWorkflowConfig,
+      actionConfigPath = Nothing,
+      actionRoster = Right defaultRoster,
+      actionCatalog =
+        TargetCatalog
+          { catalogRepository = repository,
+            catalogIssues = [baseIssue issueUnderLoop []],
+            catalogPullRequests = [],
+            catalogHistory = CatalogHistoryLoaded (CompletedHistory [] [] epoch)
+          },
+      actionNow = epoch
+    }
+
+targetUnderLoop :: ResolvedTarget
+targetUnderLoop =
+  ResolvedTarget
+    { resolvedTargetRepository = "coghex/kanban",
+      resolvedTargetKind = ActionTargetIssue,
+      resolvedTargetNumber = issueUnderLoop,
+      resolvedTargetLifecycle = TargetOpen,
+      resolvedTargetHistoryReach = HistoryConfirmed,
+      resolvedTargetStructure = TargetPlain,
+      resolvedTargetItem = IssueItem (baseIssue issueUnderLoop [])
+    }
+
+attributionUnderLoop :: ActionAttribution
+attributionUnderLoop =
+  ActionAttribution
+    { attributionKnownPullRequests = Set.empty,
+      attributionStartedAt = epoch,
+      attributionSolverBrand = ClaudeSolver
+    }
+
+progressAt :: AutoSolveStage -> Int -> Maybe Int -> AutoSolveProgress
+progressAt stage reviewRound bound =
+  AutoSolveProgress
+    { autoSolveStage = stage,
+      autoSolvePullRequest = bound,
+      autoSolveReviewRound = reviewRound,
+      autoSolveKnownPullRequests = Set.empty,
+      autoSolveStartedAt = epoch
+    }
+
+-- | One tick against one hand-placed world, with the loop in a chosen state.
+--
+-- Returns the tick's answer and every dispatch it made, which together are
+-- what each single-stage example is about.
+tickWith :: World -> AutoSolveProgress -> Bool -> IO (Either ActionOutcome (), [DispatchRecord])
+tickWith world progress bindReviewer =
+  withLoop [] $ \loop -> do
+    loop.loopSetWorld world
+    let state =
+          loop.loopStart
+            { autoSolveActionProgress = progress,
+              autoSolveActionReviewer = if bindReviewer then Just loop.loopReviewerDescriptor else Nothing
+            }
+        environment =
+          loop.loopEnvironment
+            { actionCatalog = loop.loopEnvironment.actionCatalog {catalogPullRequests = world.worldPullRequests}
+            }
+    advanced <- advanceAutoSolveAction loop.loopTurns environment state
+    recorded <- readIORef loop.loopDispatches
+    pure (either Left (const (Right ())) advanced, recorded)
+
+-- | The tick's terminal answer alone.
+outcomeOf :: World -> AutoSolveProgress -> Bool -> IO (Either ActionOutcome ())
+outcomeOf world progress bindReviewer = fst <$> tickWith world progress bindReviewer
+
+stoppedFor :: Text -> Either ActionOutcome () -> Bool
+stoppedFor fragment = either (Text.isInfixOf fragment . actionOutcomeMessage) (const False)
+
+spec :: Spec
+spec = do
+  describe "the headless autosolve loop" $ do
+    -- The whole arc, with both providers driven in sequence and nothing but
+    -- durable records and refreshed snapshots to drive it.
+    it "runs solver, opposite-brand review, resumed solver, and rereview to approval" $ do
+      let mine = linkedPullRequest pullRequestUnderLoop ClaudeSolver
+          worlds =
+            [ -- The solver is still working.
+              World [] [(Solver, running)],
+              -- It finished, and the pull request it opened is on the board.
+              World [mine []] [(Solver, completed)],
+              -- The review round is under way.
+              World [mine []] [(Solver, completed), (Reviewer, running)],
+              -- The review published CHANGES_REQUESTED.
+              World [mine [label defaultWorkflowConfig.changesRequestedLabel]] [(Solver, completed), (Reviewer, completed)],
+              -- The resumed solver is revising.
+              World [mine [label defaultWorkflowConfig.changesRequestedLabel]] [(Resumed, running)],
+              -- The revision finished and its canonical rereview approved.
+              World [mine [label defaultWorkflowConfig.approvalLabel]] [(Resumed, completed)]
+            ]
+      withLoop worlds $ \loop -> do
+        outcome <- runAutoSolveActionWith loop.loopTurns loop.loopEnvironment loop.loopDriver loop.loopStart
+        outcome `shouldBe` ActionPullRequestApproved pullRequestUnderLoop
+        actionOutcomeSucceeded outcome `shouldBe` True
+        recorded <- readIORef loop.loopDispatches
+        -- Exactly two provider turns, in order and never overlapping: the
+        -- review only after the solver settled, the revision only after the
+        -- review settled.
+        map (.dispatchedKind) recorded `shouldBe` [ReviewPullRequest, AutoSolveIssue]
+        map (.dispatchedTarget) recorded
+          `shouldBe` [ TargetByKind ActionTargetPullRequest pullRequestUnderLoop,
+                       TargetByKind ActionTargetIssue issueUnderLoop
+                     ]
+        map (.dispatchedParentRound) recorded `shouldBe` [Just 1, Just 1]
+        case recorded of
+          [_, revision] -> do
+            revision.dispatchedProvenance `shouldBe` ResumeAutomatedChangesRequested
+            revision.dispatchedSession `shouldBe` Just "session-1"
+            revision.dispatchedMessage `shouldSatisfy` Text.isInfixOf "pr-revise"
+            revision.dispatchedMessage `shouldSatisfy` Text.isInfixOf "CHANGES_REQUESTED"
+          _ -> error "expected exactly two dispatches"
+
+    -- Requirement 12's sequential guarantee, from both sides.
+    it "starts no second review while the first one is still running" $ do
+      let world = World [linkedPullRequest pullRequestUnderLoop ClaudeSolver []] [(Solver, completed), (Reviewer, running)]
+      (first, firstDispatches) <- tickWith world (progressAt AutoReviewing 1 (Just pullRequestUnderLoop)) True
+      first `shouldBe` Right ()
+      firstDispatches `shouldBe` []
+
+    it "holds a revision back while the solver it would resume is still live" $ do
+      let world =
+            World
+              [linkedPullRequest pullRequestUnderLoop ClaudeSolver [label defaultWorkflowConfig.changesRequestedLabel]]
+              [(Solver, running), (Reviewer, completed)]
+      (advanced, recorded) <- tickWith world (progressAt AutoReviewing 1 (Just pullRequestUnderLoop)) True
+      advanced `shouldBe` Right ()
+      recorded `shouldBe` []
+
+    it "starts the review round the discovery bound, and only that one" $ do
+      let world = World [linkedPullRequest pullRequestUnderLoop ClaudeSolver []] [(Solver, completed)]
+      (advanced, recorded) <- tickWith world (progressAt AutoDiscoveringPullRequest 0 Nothing) False
+      advanced `shouldBe` Right ()
+      map (.dispatchedKind) recorded `shouldBe` [ReviewPullRequest]
+
+  describe "what the loop refuses to call success" $ do
+    let discovering = progressAt AutoDiscoveringPullRequest 0 Nothing
+        discoveryWorld pullRequests = World pullRequests [(Solver, completed)]
+
+    it "stops rather than binding a pull request it cannot attribute" $ do
+      let mine = linkedPullRequest pullRequestUnderLoop ClaudeSolver []
+          second = linkedPullRequest 102 ClaudeSolver []
+          theirs = linkedPullRequest 103 CodexSolver []
+      -- Two candidates, and a candidate the other brand opened: neither is an
+      -- answer, and neither becomes one by being the only thing on the board.
+      outcomeOf (discoveryWorld [mine, second]) discovering False
+        >>= (`shouldSatisfy` stoppedFor "multiple new linked PRs")
+      outcomeOf (discoveryWorld [theirs]) discovering False
+        >>= (`shouldSatisfy` stoppedFor "wrong origin marker")
+      -- None yet is not a failure; the loop waits.
+      outcomeOf (discoveryWorld []) discovering False >>= (`shouldBe` Right ())
+
+    it "stops at the five-round bound rather than revising a sixth time" $
+      outcomeOf
+        (World [changesRequestedPullRequest] [(Solver, completed), (Reviewer, completed)])
+        (progressAt AutoReviewing 5 (Just pullRequestUnderLoop))
+        True
+        >>= (`shouldSatisfy` stoppedFor "5 review rounds")
+
+    it "stops when the original solver returned no resumable session" $
+      outcomeOf
+        (World [changesRequestedPullRequest] [(Solver, workerRecord (WorkerTerminal SolveCompleted) Nothing), (Reviewer, completed)])
+        (progressAt AutoReviewing 1 (Just pullRequestUnderLoop))
+        True
+        >>= (`shouldSatisfy` stoppedFor "resumable session")
+
+    it "reports a solver that asked a question and one that failed as themselves" $ do
+      outcomeOf (World [] [(Solver, workerRecord (WorkerTerminal (SolveNeedsInput "which base?")) Nothing)]) (progressAt AutoImplementing 0 Nothing) False
+        >>= (`shouldBe` Left (ActionNeedsInput "which base?"))
+      outcomeOf (World [] [(Solver, workerRecord (WorkerTerminal (SolveFailed "boom")) Nothing)]) (progressAt AutoImplementing 0 Nothing) False
+        >>= (`shouldBe` Left (ActionFailed "boom"))
+
+    it "reports a failed review as a failure rather than as a verdict" $
+      outcomeOf
+        (World [changesRequestedPullRequest] [(Solver, completed), (Reviewer, workerRecord (WorkerTerminal (SolveFailed "review died")) Nothing)])
+        (progressAt AutoReviewing 1 (Just pullRequestUnderLoop))
+        True
+        >>= (`shouldSatisfy` stoppedFor "review failed")
+
+    it "stops when the bound pull request leaves the read" $
+      outcomeOf
+        (World [] [(Solver, completed), (Reviewer, running)])
+        (progressAt AutoReviewing 1 (Just pullRequestUnderLoop))
+        True
+        >>= (`shouldSatisfy` stoppedFor "disappeared")
+
+    it "waits, rather than concluding, while the rereview verdict is still pending" $
+      outcomeOf
+        (World [linkedPullRequest pullRequestUnderLoop ClaudeSolver []] [(Resumed, completed)])
+        (progressAt AutoAwaitingRereview 1 (Just pullRequestUnderLoop))
+        False
+        >>= (`shouldBe` Right ())
+
+    it "completes on the approval the canonical rereview published" $
+      outcomeOf
+        (World [linkedPullRequest pullRequestUnderLoop ClaudeSolver [label defaultWorkflowConfig.approvalLabel]] [(Resumed, completed)])
+        (progressAt AutoAwaitingRereview 1 (Just pullRequestUnderLoop))
+        False
+        >>= (`shouldBe` Left (ActionPullRequestApproved pullRequestUnderLoop))
+
+  describe "reading a worker's durable record" $ do
+    it "maps every recorded status onto the phase the loop decides from" $
+      map
+        reviewPhaseForWorker
+        [ WorkerStarting,
+          WorkerRunning,
+          WorkerOrphaned SolveCompleted,
+          WorkerTerminal SolveCompleted,
+          WorkerTerminal (SolveNeedsInput "?"),
+          WorkerTerminal (SolveFailed "!")
+        ]
+        `shouldBe` [SolveStarting, SolveRunning, SolveOrphanedPhase, SolveFinished, SolveAttention, SolveFailedPhase]
+
+    -- Fails closed on both edges: an unreadable record and an orphaned worker
+    -- both count as live, because launching a second provider turn beside a
+    -- running one is the mistake that matters.
+    it "counts an unreadable record and an orphaned worker as live" $ do
+      workerStatusIsLive (Left "unreadable") `shouldBe` True
+      workerStatusIsLive (Right (workerRecord (WorkerOrphaned SolveCompleted) Nothing)) `shouldBe` True
+      workerStatusIsLive (Right running) `shouldBe` True
+      workerStatusIsLive (Right completed) `shouldBe` False
+
+changesRequestedPullRequest :: PullRequest
+changesRequestedPullRequest =
+  linkedPullRequest pullRequestUnderLoop ClaudeSolver [label defaultWorkflowConfig.changesRequestedLabel]

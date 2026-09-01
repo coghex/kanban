@@ -1,6 +1,7 @@
 module Kanban.UI.Session
   ( BoardWorkLocation (..),
     EpicReviewRefusal (..),
+    dashboardItemStructure,
     IncidentActivation (..),
     ReviewTarget (..),
     agentSessionEntries,
@@ -54,6 +55,13 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, diffUTCTime )
+import Kanban.Action
+  ( StructuralRefusal (..),
+    TargetStructure (..),
+    TrackerChildren (..),
+    WorkflowActionKind (..),
+    structuralActionRefusal,
+  )
 import Kanban.Card (middleExcerpt)
 import Kanban.Domain
 import Kanban.Drainer
@@ -906,10 +914,26 @@ selectedReviewTarget state = case selectedEntry state of
 -- answers a collapsed group with a notice instead of opening one, so a
 -- tracker with visible children never reaches an overlay of its own.
 itemReviewRefusal :: AppState -> BoardItem -> Maybe EpicReviewRefusal
-itemReviewRefusal state (IssueItem issue)
-  | any headerFor (concat (Map.elems state.appVisibleBoard.boardColumns)) = Just StructuralEpicHeader
-  | otherwise = Nothing
+itemReviewRefusal state item =
+  epicRefusal <$> structuralActionRefusal ReviewIssue (dashboardItemStructure state item)
+  where
+    epicRefusal StructuralTrackerHeader = StructuralEpicHeader
+    epicRefusal StructuralCollapsedGroup = CollapsedEpicGroup
+
+-- | The structure this board is drawing an item with, in the registry's own
+-- vocabulary.
+--
+-- Taken from the visible board rather than from the tracker hierarchy because
+-- that is the fact the dashboard's refusal has always been about: an epic
+-- whose children are all filtered away is drawn as a header with nothing to
+-- redirect to, whatever its checklist says. A headless caller has no board, so
+-- it classifies from the hierarchy instead ('targetStructureForIssue') and
+-- both feed the one rule above.
+dashboardItemStructure :: AppState -> BoardItem -> TargetStructure
+dashboardItemStructure state (IssueItem issue)
+  | any headerFor (concat (Map.elems state.appVisibleBoard.boardColumns)) = TargetTracker TrackerChildless
+  | otherwise = TargetPlain
   where
     headerFor (TrackerHeader tracker) = tracker.trackerIssue.issueNumber == issue.issueNumber
     headerFor _ = False
-itemReviewRefusal _ (PullRequestItem _) = Nothing
+dashboardItemStructure _ (PullRequestItem _) = TargetPlain
