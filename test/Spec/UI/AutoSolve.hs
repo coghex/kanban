@@ -290,6 +290,21 @@ spec = describe "autosolve stage advancement" $ do
       (recoveredAutoSolveProgress AutoSolve (Just (workerParent 3)) Set.empty epoch >>= Just . (.autoSolveStage))
         `shouldBe` Just AutoRevising
 
+    -- The loop's discovery arm binds only a *new* pull request, so a run
+    -- reattached mid-revision has nowhere but the parent record to learn the
+    -- one it is revising. Without it the rereview arm halts on a pull request
+    -- that is still there and may already be approved.
+    it "restores the pull request a reattached revision is revising, through to its approval" $ do
+      let revising = (workerParent 3) {workerParentPullRequest = Just 91}
+          restored = recoveredAutoSolveProgress AutoSolve (Just revising) Set.empty epoch
+      (restored >>= (.autoSolvePullRequest)) `shouldBe` Just 91
+      -- That restored revision then finishes and hands the loop to the
+      -- canonical rereview, which completes on the verdict standing on it.
+      let awaiting = restored >>= autoSolveAfterCompletion
+      ((.autoSolveCompletionProgress.autoSolveStage) <$> awaiting) `shouldBe` Just AutoAwaitingRereview
+      ( decideAutoSolve (observing [approved]) . (.autoSolveCompletionProgress) <$> awaiting)
+        `shouldBe` Just (AutoSolveApprove 91)
+
     it "falls back to the board's pull requests when there is no parent record" $
       recoveredAutoSolveProgress AutoSolve Nothing (Set.singleton 42) epoch
         `shouldBe` Just
@@ -314,5 +329,6 @@ workerParent reviewRound =
       workerParentSolverLogPath = Nothing,
       workerParentStartedAt = addUTCTime 60 epoch,
       workerParentKnownPullRequests = Set.singleton 7,
+      workerParentPullRequest = Nothing,
       workerParentSolverAssignment = Nothing
     }

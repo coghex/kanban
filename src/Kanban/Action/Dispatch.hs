@@ -50,6 +50,7 @@ module Kanban.Action.Dispatch
 where
 
 import Data.List (find)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Action.Capability
@@ -95,6 +96,7 @@ import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..))
 import Kanban.UI.Util (launchAssignment)
 import Kanban.Worker
   ( WorkerDescriptor (..),
+    WorkerParent (..),
     WorkerState (..),
     WorkerStatus (..),
     launchPullRequestWorker,
@@ -210,9 +212,10 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
 
     launchFor resolved cell = case plan.planRoute of
       RouteProvider (ActionSolve brand) ->
-        workerHandle resolved brand <$> launchSolve resolved SolveOnly brand cell
+        workerHandle resolved brand <$> launchSolve resolved SolveOnly brand cell request.requestParent
       RouteProvider (ActionAutoSolve brand) ->
-        launchSolve resolved AutoSolve brand cell >>= autoSolveHandle resolved brand
+        launchSolve resolved AutoSolve brand cell (Just (autoSolveParent resolved brand cell))
+          >>= autoSolveHandle resolved brand
       RouteProvider (ActionPullRequestFlow origin action) ->
         workerHandle resolved (agentForAction origin action) <$> launchPullRequest resolved origin action cell
       _ -> pure (Left (ActionRoutingUnavailable plan.planKind "this action starts no provider"))
@@ -229,7 +232,31 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         (pure . Left . ActionDispatchFailed plan.planKind)
         (fmap Right . autoSolveActionHandle liveAutoSolveTurns resolved (attribution brand))
 
-    launchSolve resolved workflow brand cell =
+    -- An autosolve launch records the run's own baseline on the solver it
+    -- starts, because nothing else will. The loop's discovery arm binds only a
+    -- /new/ pull request, so a run recovered after its opening solve finished
+    -- -- and before any review worker exists to carry a parent record -- would
+    -- otherwise take the board's current pull requests as its baseline, find
+    -- the one it just opened already in it, and wait for a pull request that
+    -- has already arrived. A caller that supplied its own parent keeps it:
+    -- that is a revision round, which knows its own round and bound pull
+    -- request.
+    autoSolveParent resolved brand cell =
+      fromMaybe
+        WorkerParent
+          { workerParentIssueNumber = resolved.resolvedTargetNumber,
+            workerParentReviewRound = 0,
+            workerParentSolverBrand = brand,
+            workerParentSolverSession = request.requestExistingSession,
+            workerParentSolverLogPath = request.requestExistingLogPath,
+            workerParentStartedAt = environment.actionNow,
+            workerParentKnownPullRequests = catalogPullRequestNumbers environment.actionCatalog,
+            workerParentPullRequest = Nothing,
+            workerParentSolverAssignment = Just cell
+          }
+        request.requestParent
+
+    launchSolve resolved workflow brand cell parent =
       launchSolveWorker
         cell
         environment.actionRepository
@@ -240,7 +267,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         request.requestExistingLogPath
         request.requestResumeProvenance
         request.requestUserMessage
-        request.requestParent
+        parent
         environment.actionConfigPath
         environment.actionWorkflowConfig
 

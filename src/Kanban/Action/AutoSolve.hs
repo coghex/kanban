@@ -301,6 +301,7 @@ advanceAutoSolveAction turns environment state = do
           workerParentSolverLogPath = solverLogPath,
           workerParentStartedAt = progress.autoSolveStartedAt,
           workerParentKnownPullRequests = progress.autoSolveKnownPullRequests,
+          workerParentPullRequest = progress.autoSolvePullRequest,
           workerParentSolverAssignment = state.autoSolveActionSolver.workerDescriptorSpec.workerAssignment
         }
 
@@ -419,7 +420,8 @@ autoSolveStateFromWorkers target boardPullRequests descriptors = do
   brand <- solverBrandOf solver
   let reviewer =
         lastOf [descriptor | descriptor <- descriptors, isReviewFor issueNumber descriptor]
-      parent = reviewer >>= (.workerDescriptorSpec.workerParent)
+      solverParent = solver.workerDescriptorSpec.workerParent
+      reviewerParent = reviewer >>= (.workerDescriptorSpec.workerParent)
       -- A solver created no earlier than the review worker is a revision the
       -- loop has already moved on to, so that review round is history rather
       -- than the turn in flight. The pull request it reviewed is /not/
@@ -430,7 +432,22 @@ autoSolveStateFromWorkers target boardPullRequests descriptors = do
           True
           (\held -> solver.workerDescriptorSpec.workerCreatedAt >= held.workerDescriptorSpec.workerCreatedAt)
           reviewer
-      reviewRound = maybe 0 (.workerParentReviewRound) parent
+      -- The run's baseline is on its own solver's record. A review worker's
+      -- parent describes that same solver, so it is the fallback for a run
+      -- whose solver was launched before this release recorded one.
+      baseline = maybe reviewerParent Just solverParent
+      -- The round belongs to whichever turn is in flight, falling back to the
+      -- other record: a solver launched before this release recorded a parent
+      -- still has its round on the review worker it followed.
+      currentParent = maybe baseline Just (if solverIsCurrent then solverParent else reviewerParent)
+      reviewRound = maybe 0 (.workerParentReviewRound) currentParent
+      known = maybe boardPullRequests (.workerParentKnownPullRequests) baseline
+      startedAt = maybe solver.workerDescriptorSpec.workerCreatedAt (.workerParentStartedAt) baseline
+      -- Kept whichever turn is in flight, and read from the solver's own
+      -- record first: a revision the loop resumed records the pull request it
+      -- is revising, which is the only place a run recovered mid-revision can
+      -- learn it once its review worker is history.
+      bound = maybe (reviewer >>= reviewNumberOf) Just (solverParent >>= (.workerParentPullRequest))
       stage
         | solverIsCurrent && reviewRound == 0 = AutoImplementing
         | solverIsCurrent = AutoRevising
@@ -440,22 +457,17 @@ autoSolveStateFromWorkers target boardPullRequests descriptors = do
       { autoSolveActionTarget = target,
         autoSolveActionAttribution =
           ActionAttribution
-            { attributionKnownPullRequests = maybe boardPullRequests (.workerParentKnownPullRequests) parent,
-              attributionStartedAt = maybe solver.workerDescriptorSpec.workerCreatedAt (.workerParentStartedAt) parent,
+            { attributionKnownPullRequests = known,
+              attributionStartedAt = startedAt,
               attributionSolverBrand = brand
             },
         autoSolveActionProgress =
           AutoSolveProgress
             { autoSolveStage = stage,
-              -- Kept whichever turn is in flight. Dropping it for a
-              -- recovered revision would leave the loop with no bound pull
-              -- request when that revision finished, and the rereview arm
-              -- halts on an absent one -- so a run whose pull request exists
-              -- and is approved would stop instead of completing.
-              autoSolvePullRequest = reviewer >>= reviewNumberOf,
+              autoSolvePullRequest = bound,
               autoSolveReviewRound = reviewRound,
-              autoSolveKnownPullRequests = maybe boardPullRequests (.workerParentKnownPullRequests) parent,
-              autoSolveStartedAt = maybe solver.workerDescriptorSpec.workerCreatedAt (.workerParentStartedAt) parent
+              autoSolveKnownPullRequests = known,
+              autoSolveStartedAt = startedAt
             },
         autoSolveActionSolver = solver,
         autoSolveActionReviewer = if solverIsCurrent then Nothing else reviewer

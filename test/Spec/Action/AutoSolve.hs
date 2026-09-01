@@ -166,6 +166,12 @@ descriptorCarrying repository name task parent createdAt =
         workerAssignment = Nothing
       }
 
+-- | The baseline record an autosolve launch writes on the solver it starts:
+-- what the board held when the run began, and when that was.
+baselineParent :: Set.Set Int -> WorkerParent
+baselineParent known =
+  (reviewParent 0) {workerParentKnownPullRequests = known, workerParentPullRequest = Nothing}
+
 -- | The parent record a dashboard-launched autosolve writes on the review
 -- worker it starts: everything about the /solver/ that launched it.
 reviewParent :: Int -> WorkerParent
@@ -178,6 +184,7 @@ reviewParent reviewRound =
       workerParentSolverLogPath = Nothing,
       workerParentStartedAt = epoch,
       workerParentKnownPullRequests = Set.fromList [7],
+      workerParentPullRequest = Just pullRequestUnderLoop,
       workerParentSolverAssignment = Nothing
     }
 
@@ -611,6 +618,45 @@ spec = do
                     recovered {autoSolveActionSolver = loop.loopStart.autoSolveActionSolver}
                 either Just (const Nothing) advanced
                   `shouldBe` Just (ActionPullRequestApproved pullRequestUnderLoop)
+
+    -- The interval after the opening solve finished and before any review
+    -- worker exists: the only record of what the board held when the run
+    -- started is the solver's own, and without it the pull request the run
+    -- just opened is already in the baseline and never binds.
+    it "recovers the run's baseline from the solver's own record, before any reviewer exists" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              opened = linkedPullRequest pullRequestUnderLoop ClaudeSolver []
+          solver <-
+            descriptorCarrying
+              repository
+              "solve-initial"
+              (SolveWorkerTaskKind (SolveWorkerTask issueUnderLoop AutoSolve ClaudeSolver))
+              (Just (baselineParent Set.empty))
+              epoch
+          case autoSolveStateFromWorkers targetUnderLoop (Set.fromList [pullRequestUnderLoop]) [solver] of
+            Nothing -> error "expected the durable records to rebuild an action"
+            Just recovered -> do
+              -- The board now holds the pull request the run opened; the
+              -- baseline must not.
+              recovered.autoSolveActionProgress.autoSolveKnownPullRequests `shouldBe` Set.empty
+              recovered.autoSolveActionAttribution.attributionKnownPullRequests `shouldBe` Set.empty
+              recovered.autoSolveActionProgress.autoSolveStage `shouldBe` AutoImplementing
+              -- ...so the finished solver's pull request binds and its review
+              -- round starts, rather than the loop waiting for one that has
+              -- already arrived.
+              withLoop [] $ \loop -> do
+                loop.loopSetWorld (World [opened] [(Solver, completed)])
+                advanced <-
+                  advanceAutoSolveAction
+                    loop.loopTurns
+                    (withPullRequests loop [opened])
+                    recovered {autoSolveActionSolver = loop.loopStart.autoSolveActionSolver}
+                either (const Nothing) (Just . (.autoSolveActionProgress.autoSolvePullRequest)) advanced
+                  `shouldBe` Just (Just pullRequestUnderLoop)
+                map (.dispatchedKind) <$> readIORef loop.loopDispatches
+                  >>= (`shouldBe` [ReviewPullRequest])
 
     it "reads a solver newer than its review as the revision the loop moved on to" $
       withTemporaryCacheRoot $ \temporaryRoot ->

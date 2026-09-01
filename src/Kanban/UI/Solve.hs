@@ -320,6 +320,7 @@ launchAssignedSolveInvocation assignment issueNumber workflow brand existingSess
               workerParentSolverLogPath = held.sessionLogPath,
               workerParentStartedAt = progress.autoSolveStartedAt,
               workerParentKnownPullRequests = progress.autoSolveKnownPullRequests,
+              workerParentPullRequest = progress.autoSolvePullRequest,
               workerParentSolverAssignment = held.sessionDetail.solveSessionAssignment
             }
       environment = dashboardActionEnvironment state

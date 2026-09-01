@@ -266,9 +266,12 @@ initialAutoSolveProgress AutoSolve known startedAt =
 
 -- | The loop a reattached persistent worker resumes. The durable parent
 -- record is authoritative wherever it exists: its round is what tells an
--- implementation run apart from a revision, and its recorded start and known
--- pull requests are what keep discovery from binding a pull request this run
--- did not open.
+-- implementation run apart from a revision, its recorded start and known pull
+-- requests are what keep discovery from binding a pull request this run did
+-- not open, and its bound pull request is what a run reattached mid-revision
+-- would otherwise have no way to learn -- discovery only ever binds a /new/
+-- one, so a restored revision without it reaches its rereview with nothing
+-- bound and halts on a pull request that is still there.
 recoveredAutoSolveProgress :: SolveWorkflow -> Maybe WorkerParent -> Set Int -> UTCTime -> Maybe AutoSolveProgress
 recoveredAutoSolveProgress SolveOnly _ _ _ = Nothing
 recoveredAutoSolveProgress AutoSolve parent boardPullRequests createdAt =
@@ -276,7 +279,7 @@ recoveredAutoSolveProgress AutoSolve parent boardPullRequests createdAt =
    in Just
         AutoSolveProgress
           { autoSolveStage = if reviewRound == 0 then AutoImplementing else AutoRevising,
-            autoSolvePullRequest = Nothing,
+            autoSolvePullRequest = parent >>= (.workerParentPullRequest),
             autoSolveReviewRound = reviewRound,
             autoSolveKnownPullRequests = maybe boardPullRequests (.workerParentKnownPullRequests) parent,
             autoSolveStartedAt = maybe createdAt (.workerParentStartedAt) parent

@@ -1020,6 +1020,7 @@ autoSolveParent assignment =
       workerParentSolverLogPath = Just "/tmp/solver.jsonl",
       workerParentStartedAt = epoch,
       workerParentKnownPullRequests = mempty,
+      workerParentPullRequest = Nothing,
       workerParentSolverAssignment = assignment
     }
 
