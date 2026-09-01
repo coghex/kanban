@@ -560,8 +560,10 @@ spec = do
       assignmentFor rerosteredDefaults IssueReviewRole CodexProvider
         `shouldNotBe` assignmentFor defaultRoster IssueReviewRole CodexProvider
 
-    -- The Claude cell of issue_review stays unread until MODEL-13, so a
-    -- Claude-only roster cannot reach this backend at all.
+    -- The cell a client resolves is its own backend's, and this fixture's
+    -- backend is the app-server's, so a Claude-only roster cannot reach it
+    -- at all. The Claude backend's own refusal on a Codex-only roster is
+    -- the mirror of this, in "Spec.Agent.ClaudeReview".
     it "writes nothing to the app-server when the roster loads no codex provider" $
       withRecordingReviewClientUsing claudeOnlyRoster $ \client wire _ -> do
         started <- beginIssueReview client 844

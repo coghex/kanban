@@ -32,19 +32,24 @@ module Kanban.ProviderAdapter
   ( EmbeddedReviewBackend (..),
     ProcessRequest (..),
     ProviderAdapter (..),
+    ReviewLaunch (..),
     ReviewProcessShape (..),
+    ReviewProtocol (..),
     adapterFor,
     adapterForBrand,
     brandForProvider,
+    claudeReviewArguments,
     providerForBrand,
   )
 where
 
-import Data.Aeson (Value)
+import Data.Aeson (Value, encode)
+import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Kanban.Domain (WorkflowConfig)
-import Kanban.Models (ModelRoster, ProviderName (..))
-import Kanban.Review.Prompts (claudeTool, githubTool, questionTool)
+import Kanban.Models (Assignment (..), ModelRoster, ProviderName (..))
+import Kanban.Review.Prompts (claudeTool, finalOutputSchema, githubTool, questionTool)
 import Kanban.Solve.Event (SolverBrand (..))
 import System.Process
   ( CreateProcess (..),
@@ -84,20 +89,59 @@ data ReviewProcessShape
     ProcessPerThread
   deriving stock (Eq, Show)
 
--- | How one provider's embedded issue-review backend is started.
+-- | Which channel a backend's provider process is spoken over.
 --
--- Only Codex has one. Claude's is 'Nothing' until MODEL-13 fills it, which
--- reproduces today's Codex-only behavior exactly: nothing in this slice
--- routes the embedded review to Claude, so no install's behavior moves.
+-- Deliberately a property of the /protocol/ rather than of the provider.
+-- Two things about an embedded review differ between the two channels and
+-- nothing else does: whether starting a connection completes a handshake
+-- before anything may be sent, and how one line of the provider's output is
+-- read. The client dispatches on this rather than on 'backendProvider', so
+-- a third backend that speaks either channel needs no arm of its own.
+data ReviewProtocol
+  = -- | @codex app-server@'s JSON-RPC exchange: an @initialize@ \/
+    -- @initialized@ handshake, then @thread\/start@ and @turn\/start@
+    -- requests correlated by id, and typed notifications back.
+    AppServerProtocol
+  | -- | The @claude@ CLI's stream-json channel (D-15): no handshake, a turn
+    -- opens by writing one user message, and the provider answers with the
+    -- JSON records it streams until its result line closes the turn.
+    StreamJsonProtocol
+  deriving stock (Eq, Show)
+
+-- | What one embedded-review process is started for: the repository it runs
+-- in, and the @issue_review@ cell resolved for the provider whose backend is
+-- starting it.
+--
+-- The assignment travels here because a provider's model and effort are not
+-- always wire parameters. Codex carries its own in @thread\/start@ and
+-- @turn\/start@ and so ignores this field entirely; @claude@ takes both as
+-- launch flags (D-15), so its argv cannot be built without them. Handing
+-- the resolved cell to the backend is what keeps that difference inside the
+-- record rather than making the client ask which provider it is starting.
+data ReviewLaunch = ReviewLaunch
+  { launchRepositoryRoot :: FilePath,
+    launchAssignment :: Assignment
+  }
+  deriving stock (Eq, Show)
+
+-- | How one provider's embedded issue-review backend is started.
 --
 -- The backend names its own process rather than being handed one, because
 -- unlike the three agent-session processes it resolves no executable first:
--- @codex@ goes to 'proc' directly and 'System.Process' does the PATH lookup,
--- which is the resolution timing this extraction had to preserve.
+-- @codex@ and @claude@ go to 'proc' directly and 'System.Process' does the
+-- PATH lookup, which is the resolution timing this extraction had to
+-- preserve.
+--
+-- 'backendProvider' is the identity the event seam carries. A protocol
+-- warning is raised by generic client code that has no provider of its own,
+-- and a consumer that rendered every one of them under a compiled-in brand
+-- would tell an operator the wrong program had misbehaved.
 data EmbeddedReviewBackend = EmbeddedReviewBackend
   { backendLabel :: Text,
-    backendProcess :: FilePath -> CreateProcess,
-    backendProcessShape :: ReviewProcessShape
+    backendProvider :: ProviderName,
+    backendProcess :: ReviewLaunch -> CreateProcess,
+    backendProcessShape :: ReviewProcessShape,
+    backendProtocol :: ReviewProtocol
   }
 
 -- | Everything Kanban needs to construct one provider's agent-session
@@ -120,8 +164,10 @@ data ProviderAdapter = ProviderAdapter
     -- where Kanban ships no backend for it.
     adapterEmbeddedReview :: Maybe EmbeddedReviewBackend,
     -- | The dynamic tools this provider's embedded review registers, in the
-    -- order the backend is given them. Empty for a provider with no backend:
-    -- there is no thread to register them on.
+    -- order the backend is given them. Empty for a provider whose backend
+    -- declares none: Claude's tools are served over MCP rather than declared
+    -- inline (D-15), which is MODEL-15's, so its review thread registers
+    -- nothing here.
     adapterReviewTools :: ModelRoster -> WorkflowConfig -> [Value]
   }
 
@@ -169,7 +215,7 @@ claudeAdapter =
       adapterSolveProcess = agentSessionProcess,
       adapterPullRequestProcess = agentSessionProcess,
       adapterRevisionProcess = oneShotProcess,
-      adapterEmbeddedReview = Nothing,
+      adapterEmbeddedReview = Just claudeEmbeddedReview,
       adapterReviewTools = \_ _ -> []
     }
 
@@ -177,16 +223,86 @@ codexEmbeddedReview :: EmbeddedReviewBackend
 codexEmbeddedReview =
   EmbeddedReviewBackend
     { backendLabel = "codex app-server",
+      backendProvider = CodexProvider,
       backendProcessShape = SharedProcess,
-      backendProcess = \repositoryRoot ->
+      backendProtocol = AppServerProtocol,
+      backendProcess = \launch ->
         (proc "codex" ["app-server", "--listen", "stdio://"])
-          { cwd = Just repositoryRoot,
+          { cwd = Just launch.launchRepositoryRoot,
             std_in = CreatePipe,
             std_out = CreatePipe,
             std_err = CreatePipe,
             create_group = True
           }
     }
+
+-- | Claude's embedded review: one @claude@ CLI process per review thread,
+-- driven over the stream-json channel (D-15).
+--
+-- Shaped exactly like 'codexEmbeddedReview' where the two can be — the
+-- repository root is the working directory, all three standard streams are
+-- pipes because this channel writes to stdin as well as reading both others,
+-- and the process leads its own group so a cancellation reaches its
+-- children. What differs is what the record exists to express: the argv,
+-- which is built from the resolved assignment; the process shape, because a
+-- CLI process is one conversation; and the protocol, because the CLI streams
+-- as soon as it starts.
+claudeEmbeddedReview :: EmbeddedReviewBackend
+claudeEmbeddedReview =
+  EmbeddedReviewBackend
+    { backendLabel = "claude stream-json session",
+      backendProvider = ClaudeProvider,
+      backendProcessShape = ProcessPerThread,
+      backendProtocol = StreamJsonProtocol,
+      backendProcess = \launch ->
+        (proc "claude" (claudeReviewArguments launch.launchAssignment))
+          { cwd = Just launch.launchRepositoryRoot,
+            std_in = CreatePipe,
+            std_out = CreatePipe,
+            std_err = CreatePipe,
+            create_group = True
+          }
+    }
+
+-- | The argv one embedded review session runs under, probed against CLI
+-- 2.1.251 (D-15) and rechecked on 2.1.252.
+--
+-- Four groups, none of them optional:
+--
+-- * the channel — @-p@ with both @stream-json@ formats, and @--verbose@,
+--   without which the CLI refuses the streamed output format outright;
+-- * the transcript — @--include-partial-messages@, which is what makes the
+--   text and thinking deltas the review panel renders appear at all;
+-- * the verdict — @--json-schema@ carrying the same schema Codex passes as
+--   @turn\/start@'s @outputSchema@, so one contract produces one
+--   'Kanban.Review.Types.ReviewResult' on either backend;
+-- * the isolation — @--strict-mcp-config@ and an empty @--tools@, because a
+--   bare @claude -p@ loads the operator's own MCP servers and fires their
+--   @SessionStart@ hook. An embedded review must not inherit the machine's
+--   Claude Code configuration, and this launch is the only thing that stops
+--   it.
+--
+-- @--model@ and @--effort@ close the list because they are the only part of
+-- it the operator's roster moves.
+claudeReviewArguments :: Assignment -> [String]
+claudeReviewArguments assignment =
+  [ "-p",
+    "--verbose",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--include-partial-messages",
+    "--json-schema",
+    LazyByteString.unpack (encode finalOutputSchema),
+    "--strict-mcp-config",
+    "--tools",
+    "",
+    "--model",
+    Text.unpack assignment.assignmentModel,
+    "--effort",
+    Text.unpack assignment.assignmentEffort
+  ]
 
 -- | A long-running agent session: stdout and stderr are read as they arrive,
 -- stdin is closed so a provider that prompted would fail rather than block,

@@ -24,6 +24,7 @@ import qualified Spec.Agent.IssueReviewer as IssueReviewer
 import qualified Spec.Agent.ManagedProcess as ManagedProcess
 import qualified Spec.Agent.Ping as Ping
 import qualified Spec.Agent.Preflight as Preflight
+import qualified Spec.Agent.ClaudeReview as ClaudeReview
 import qualified Spec.Agent.Protocol as Protocol
 import qualified Spec.Agent.PullRequestFlow as PullRequestFlow
 import qualified Spec.Agent.Roster as AgentRoster
@@ -131,6 +132,13 @@ suiteGroups =
     SuiteGroup "Spec.Agent.ManagedProcess.Deadline" DeadlineLane ManagedProcess.deadlineSpec, -- 63.1s
     SuiteGroup "Spec.Agent.Supervision" SupervisionLane Supervision.spec, -- 72.6s
     SuiteGroup "Spec.Agent.Protocol" LifecycleLane Protocol.spec, -- 8.5s
+    -- Beside "Spec.Agent.Supervision" rather than spread for cost: it
+    -- spawns a fake provider per example and sleeps inside several of them,
+    -- and that lane holds the subprocess-deadline assertions its churn would
+    -- be measured against. Groups in one lane are serialised, so the two
+    -- cannot overlap at all — the same reasoning 'suiteColocations' records
+    -- for the pair it names, at a cost of about 22 of this lane's seconds.
+    SuiteGroup "Spec.Agent.ClaudeReview" SupervisionLane ClaudeReview.spec, -- 21.9s
     SuiteGroup "Spec.Agent.Solve" LifecycleLane Solve.spec, -- 2.8s
     SuiteGroup "Spec.Agent.Adapter" LifecycleLane Adapter.spec,
     SuiteGroup "Spec.Config.Settings" PingLane Settings.spec,

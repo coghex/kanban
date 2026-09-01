@@ -61,6 +61,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import GHC.Generics (Generic)
 import Kanban.Domain (WorkflowConfig (..))
+import Kanban.Models (ProviderName)
 import Kanban.Review.Connection (ConnectionId, ReviewThreadId)
 
 -- | A request the provider sent /this/ client, which the user answers later
@@ -112,7 +113,19 @@ data ReviewApproval =
     }
   deriving stock (Eq, Show)
 
-data ReviewOutputKind = AgentOutput | ReasoningOutput | CommandOutput | DiagnosticOutput
+data ReviewOutputKind
+  = AgentOutput
+  | ReasoningOutput
+  | CommandOutput
+  | -- | A line the provider wrote to its stderr, naming the provider that
+    -- wrote it.
+    --
+    -- The only output kind that identifies a program rather than a part of a
+    -- conversation, and so the only one that carries who. Its rendering is a
+    -- bracketed tag beside text the operator is meant to read as coming from
+    -- somewhere; a tag compiled in here would name the wrong somewhere as
+    -- soon as a second backend existed.
+    DiagnosticOutput ProviderName
   deriving stock (Eq, Show)
 
 data ReviewTurnOutcome = TurnSucceeded | TurnFailed | TurnInterrupted
@@ -181,7 +194,15 @@ data ReviewEvent
   -- thread: with no active turn the message is resent as a new @turn/start@
   -- instead, and nothing is reported.
   | ReviewSteerUndelivered ReviewThreadId Text Text
-  | ReviewProtocolWarning Text
+  | -- | Something the client could not make sense of, naming the provider
+    -- whose backend produced it.
+    --
+    -- The provider travels with the event because the code that raises one
+    -- has none of its own: the reader loops, the response dispatch, and the
+    -- tool runners are shared by every backend, and a consumer that rendered
+    -- them all under a compiled-in brand would name the wrong program as
+    -- soon as a second backend existed.
+    ReviewProtocolWarning ProviderName Text
   deriving stock (Eq, Show)
 
 data ReviewWireMessage

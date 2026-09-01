@@ -24,17 +24,23 @@
 -- "Spec.Agent.Roster". Nothing moved here.
 module Spec.Agent.Adapter (spec) where
 
-import Data.Aeson (Value (..))
+import Data.Aeson (Value (..), encode)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Kanban.Domain (defaultWorkflowConfig)
-import Kanban.Models (ProviderName (..), allProviders, defaultRoster)
+import Kanban.Models (Assignment (..), ProviderName (..), RoleName (..), allProviders, assignmentFor, defaultRoster)
 import Kanban.Review
   ( EmbeddedReviewBackend (..),
+    ReviewLaunch (..),
     ReviewProcessShape (..),
+    ReviewProtocol (..),
+    claudeReviewArguments,
     claudeTool,
     embeddedReviewProvider,
+    finalOutputSchema,
     missingEmbeddedReviewMessage,
   )
 import Kanban.Solve
@@ -71,6 +77,19 @@ shape spec' =
     spec'.std_err,
     spec'.create_group
   )
+
+-- | The @issue_review@ cell each backend's launch is handed. Read out of the
+-- roster rather than written here, so a default that moves moves with it.
+reviewCell :: Assignment
+reviewCell = cellFor CodexProvider
+
+claudeReviewCell :: Assignment
+claudeReviewCell = cellFor ClaudeProvider
+
+cellFor :: ProviderName -> Assignment
+cellFor provider = case assignmentFor defaultRoster IssueReviewRole provider of
+  Right assignment -> assignment
+  Left unavailable -> error ("the default roster has no issue_review cell: " <> show unavailable)
 
 toolNames :: [Value] -> [Maybe Text]
 toolNames = map name
@@ -123,13 +142,19 @@ spec = do
           )
 
   describe "the embedded issue-review backend" $ do
-    it "still runs on Codex, which is the only provider carrying one" $ do
+    -- Requirement 9: Claude now carries a backend, and yet nothing routes to
+    -- it. Both halves are asserted together, because the second is the whole
+    -- promise this slice makes about an install's behavior and the first is
+    -- what would otherwise quietly break it.
+    it "carries one for each provider while still running every install's review on Codex" $ do
       embeddedReviewProvider `shouldBe` CodexProvider
       map (fmap (.backendLabel) . adapterEmbeddedReview . adapterFor) allProviders
-        `shouldBe` [Just "codex app-server", Nothing]
+        `shouldBe` [Just "codex app-server", Just "claude stream-json session"]
+      map (fmap (.backendProvider) . adapterEmbeddedReview . adapterFor) allProviders
+        `shouldBe` [Just CodexProvider, Just ClaudeProvider]
 
     it "starts the app-server exactly as Kanban.Review used to" $
-      fmap (\backend -> shape (backend.backendProcess "/tmp/worktree")) ((adapterFor CodexProvider).adapterEmbeddedReview)
+      fmap (\backend -> shape (backend.backendProcess (ReviewLaunch "/tmp/worktree" reviewCell))) ((adapterFor CodexProvider).adapterEmbeddedReview)
         `shouldBe` Just
           ( RawCommand "codex" ["app-server", "--listen", "stdio://"],
             Just "/tmp/worktree",
@@ -139,15 +164,73 @@ spec = do
             True
           )
 
+    -- Requirement 2: the launch carries the resolved assignment, and Codex
+    -- ignores it. Its model and effort travel in `thread/start` and
+    -- `turn/start` instead, so a launch resolved from a different cell must
+    -- produce byte-identical argv.
+    it "leaves Codex's argv untouched by the assignment the launch carries" $
+      let launchedWith assignment =
+            fmap (\backend -> cmdspec (backend.backendProcess (ReviewLaunch "/tmp/worktree" assignment))) ((adapterFor CodexProvider).adapterEmbeddedReview)
+       in launchedWith (Assignment "someone-elses-model" "none" "someone else")
+            `shouldBe` launchedWith reviewCell
+
+    -- Requirement 1 and the review's launch clause: the whole argv, because
+    -- every flag in it is load-bearing and a partial assertion would let one
+    -- of them be dropped. Requirement 3's other half is the process shape it
+    -- is handed under, which is Codex's exactly.
+    it "launches Claude on the CLI's stream-json channel, hermetically, on the roster's cell" $
+      fmap (\backend -> shape (backend.backendProcess (ReviewLaunch "/tmp/worktree" claudeReviewCell))) ((adapterFor ClaudeProvider).adapterEmbeddedReview)
+        `shouldBe` Just
+          ( RawCommand
+              "claude"
+              [ "-p",
+                "--verbose",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--include-partial-messages",
+                "--json-schema",
+                LazyByteString.unpack (encode finalOutputSchema),
+                "--strict-mcp-config",
+                "--tools",
+                "",
+                "--model",
+                Text.unpack claudeReviewCell.assignmentModel,
+                "--effort",
+                Text.unpack claudeReviewCell.assignmentEffort
+              ],
+            Just "/tmp/worktree",
+            CreatePipe,
+            CreatePipe,
+            CreatePipe,
+            True
+          )
+
+    it "carries the roster's own model and effort rather than a compiled pair" $
+      dropWhile (/= "--model") (claudeReviewArguments (Assignment "rerostered-model" "rerostered-effort" "rerostered"))
+        `shouldBe` ["--model", "rerostered-model", "--effort", "rerostered-effort"]
+
     -- MODEL-14: the client reads this to decide whether starting a review
     -- reuses the connection it has or spawns another, and whether one
     -- connection ending is the whole client ending. Codex multiplexes every
-    -- review thread onto one @app-server@, which is what it declared
-    -- implicitly before the field existed.
-    it "declares that Codex's app-server serves every review thread from one process" $
-      fmap (.backendProcessShape) ((adapterFor CodexProvider).adapterEmbeddedReview)
-        `shouldBe` Just SharedProcess
+    -- review thread onto one @app-server@; a @claude@ process is a single
+    -- conversation (D-15), so its backend takes one per review thread.
+    it "declares how many processes each backend's review threads occupy" $
+      map (fmap (.backendProcessShape) . adapterEmbeddedReview . adapterFor) allProviders
+        `shouldBe` [Just SharedProcess, Just ProcessPerThread]
 
+    -- Requirement 3: the client performs a handshake for a backend that
+    -- needs one and none for a backend that does not, and it reads that off
+    -- the backend rather than off the provider.
+    it "declares which channel each backend is spoken over" $
+      map (fmap (.backendProtocol) . adapterEmbeddedReview . adapterFor) allProviders
+        `shouldBe` [Just AppServerProtocol, Just StreamJsonProtocol]
+
+    -- Both compiled providers now carry a backend, so nothing an install can
+    -- route to reaches this refusal. It stays because 'adapterEmbeddedReview'
+    -- is a field a provider may lack, and the launch that reads it must say
+    -- so by name rather than silently doing nothing.
     it "refuses by name for a provider Kanban ships no backend for" $
       missingEmbeddedReviewMessage ClaudeProvider
         `shouldBe` "Kanban has no embedded issue-review backend for provider \"claude\""
@@ -161,6 +244,9 @@ spec = do
       (adapterFor CodexProvider).adapterReviewTools defaultRoster defaultWorkflowConfig !! 1
         `shouldBe` claudeTool defaultRoster
 
-    it "registers none for a provider whose backend is absent" $
+    -- Claude's are served over MCP rather than declared inline (D-15), which
+    -- is MODEL-15's; until then its review thread registers nothing, so it
+    -- produces no tool-call event of any kind.
+    it "registers none for a provider whose backend declares none" $
       (adapterFor ClaudeProvider).adapterReviewTools defaultRoster defaultWorkflowConfig
         `shouldBe` []

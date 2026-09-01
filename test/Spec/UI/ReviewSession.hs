@@ -11,9 +11,11 @@ import qualified Data.Set as Set
 import qualified Data.Text
 import qualified Graphics.Vty as Vty
 import Kanban.Domain
+import Kanban.Models (ProviderName (..))
 import Kanban.Review
   ( ConnectionId (..),
     ReviewApproval (..),
+    ReviewOutputKind (..),
     ReviewThreadId (..),
     ReviewChoice (..),
     ReviewQuestion (..),
@@ -36,6 +38,8 @@ import Kanban.UI.Review
     epicReviewRefusalNotice,
     resolveReviewCancelAction,
     resolveReviewDigitAction,
+    reviewOutputPrefix,
+    reviewProtocolWarningNotice,
     reviewSessionsNeedingArm,
   )
 import Kanban.UI.Session
@@ -386,6 +390,39 @@ spec = do
           transcriptOf key = maybe "" (\session -> session.sessionTranscript.compactTranscript) (Map.lookup key disconnected)
       transcriptOf 2 `shouldMention` "backend gone"
       transcriptOf 1 `shouldNotMention` "backend gone"
+
+  -- The one review event whose display names a program rather than a
+  -- session. Every other diagnostic reaches the operator inside a session
+  -- that already says which backend it belongs to; a protocol warning is a
+  -- bare notice, so the brand has to be in the sentence.
+  describe "the provider a protocol warning is announced under" $ do
+    it "keeps Codex's wording exactly as it was" $
+      reviewProtocolWarningNotice CodexProvider "turn/started omitted its thread or turn id"
+        `shouldBe` "Codex protocol warning: turn/started omitted its thread or turn id"
+
+    it "names Claude for a warning Claude's backend raised" $
+      reviewProtocolWarningNotice ClaudeProvider "Claude stream-json session wrote a line that is not JSON"
+        `shouldBe` "Claude protocol warning: Claude stream-json session wrote a line that is not JSON"
+
+    -- The seam's teeth: one message, two providers, two notices. A renderer
+    -- that had kept a compiled-in brand would produce the same sentence
+    -- twice and pass every assertion above that named only one of them.
+    it "distinguishes the two for one and the same message" $
+      map (`reviewProtocolWarningNotice` "unreadable") [CodexProvider, ClaudeProvider]
+        `shouldBe` ["Codex protocol warning: unreadable", "Claude protocol warning: unreadable"]
+
+  -- The other place a review's display names a program. Diagnostic output is
+  -- the one output kind that is a line some process wrote rather than a part
+  -- of the conversation, so it is tagged with which process wrote it — and a
+  -- tag compiled in here would put the app-server's name on a CLI session's
+  -- stderr.
+  describe "the provider a diagnostic line is tagged with" $ do
+    it "keeps Codex's tag exactly as it was, and tags nothing else" $
+      map reviewOutputPrefix [AgentOutput, ReasoningOutput, CommandOutput, DiagnosticOutput CodexProvider]
+        `shouldBe` ["", "", "", "[codex] "]
+
+    it "tags a Claude session's stderr as Claude's" $
+      reviewOutputPrefix (DiagnosticOutput ClaudeProvider) `shouldBe` "[claude] "
 
   describe "review session liveness, quit protection, and the x gate" $ do
     -- issue #151: the processes overlay, the `x` gate that dispatches on

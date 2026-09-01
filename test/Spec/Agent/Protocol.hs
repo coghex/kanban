@@ -11,7 +11,9 @@ import qualified Data.ByteString.Char8 as ByteString
 import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text
+import qualified Data.Text.Encoding as TextEncoding
 import Kanban.Domain
+import Kanban.Models (ProviderName (..))
 import Kanban.Process (killManagedProcess)
 import Kanban.PullRequestFlow (flowOutcome)
 import Kanban.Review
@@ -22,6 +24,7 @@ import Kanban.Review
     ReviewChoice (..),
     ReviewConnection (..),
     ReviewEvent (..),
+    ReviewOutputKind (..),
     ReviewProcessShape (..),
     ReviewQuestion (..),
     ReviewQuestionKind (..),
@@ -78,6 +81,9 @@ import Spec.Support.Expect (isRight, shouldMention, shouldNotMention)
 import Spec.Support.Fixtures (baseIssue, fixtureReviewThread, testOptions)
 import Spec.Support.Process
   ( encodedValue,
+    fakeProviderDiagnostic,
+    reviewOutputs,
+    waitForReviewEvents,
     expectNoFurtherClientRequests,
     managedProcessFor,
     nextClientRequest,
@@ -92,6 +98,7 @@ import Spec.Support.Process
     turnCompletions,
     twoConnectionsOf,
     waitForConnectionStops,
+    waitForHeldConnections,
     withFakeReviewClient,
     withTwoConnectionReviewClient,
     TwoConnectionClient (..),
@@ -726,9 +733,37 @@ spec = do
         -- The client is not the connection: the survivor is still registered,
         -- and a further review still starts against a backend that would be
         -- reported as failed had the client-wide event been raised instead.
-        surviving <- reviewConnectionsForTesting client
-        map (.connectionId) surviving `shouldBe` [secondConnection.connectionId]
+        --
+        -- Waited for rather than read: the stop report above can come from
+        -- the reader that hits EOF, which runs before the watcher takes the
+        -- connection out of the pool.
+        surviving <- waitForHeldConnections client 1
+        surviving `shouldBe` [secondConnection.connectionId]
         beginIssueReview client 846 `shouldReturn` Right ()
+        stopReviewClient client
+
+    -- The negative control for the stream backend's held diagnostics. A
+    -- backend that names its threads in its responses rather than in its
+    -- stream has nothing for a stderr line to wait on, so holding one would
+    -- delay it until the connection ended — which for a review still running
+    -- is never. Asserted here, on a per-thread app-server backend, because
+    -- that is the shape in which the two properties could be confused with
+    -- each other.
+    it "reports an app-server's stderr as it arrives, whatever process shape it takes" $
+      withFakeReviewClient ProcessPerThread $ \_ client events -> do
+        beginIssueReview client 844 `shouldReturn` Right ()
+        connection <- soleReviewConnection client
+        diagnostics <-
+          waitForReviewEvents
+            "the provider's stderr"
+            events
+            (not . null . reviewOutputs)
+        reviewOutputs diagnostics
+          `shouldBe` [ ( threadOn connection "",
+                         DiagnosticOutput CodexProvider,
+                         TextEncoding.decodeUtf8 fakeProviderDiagnostic
+                       )
+                     ]
         stopReviewClient client
 
   describe "Kanban.StreamReader" $ do

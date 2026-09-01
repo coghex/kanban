@@ -5,6 +5,8 @@ module Kanban.UI.Review
     applyReviewAnimationTick,
     applyReviewBackendStarted,
     applyReviewEvent,
+    reviewOutputPrefix,
+    reviewProtocolWarningNotice,
     applyUndeliveredSteer,
     approvalServiceRefusal,
     armReviewTick,
@@ -54,7 +56,7 @@ import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.Drainer (normalizedRepositoryIdentity)
-import Kanban.Models (ProviderName (..), RoleName (..), assignmentFor)
+import Kanban.Models (ProviderName (..), RoleName (..), assignmentFor, providerDisplayName, providerKey)
 import Kanban.Preflight
   ( PreflightAction (..),
     issueOriginFromBody,
@@ -395,22 +397,30 @@ appendReviewOutput outputKind addition transcript =
     appendWhen True value = boundedAppend value addition
     appendWhen False value = value
 
+-- | What a line of provider output is tagged with in the transcript.
+--
+-- Only the diagnostic kind carries a tag, and it names the provider the
+-- event carries rather than a brand compiled in here: a @claude@ session's
+-- stderr shown as @[codex]@ tells the operator the wrong program is
+-- misbehaving. The key rather than the display name, because this is a
+-- machine-ish tag beside raw output rather than prose — and because it is
+-- what Codex's own lines have always read.
 reviewOutputPrefix :: ReviewOutputKind -> Text
 reviewOutputPrefix AgentOutput = ""
 reviewOutputPrefix ReasoningOutput = ""
 reviewOutputPrefix CommandOutput = ""
-reviewOutputPrefix DiagnosticOutput = "[codex] "
+reviewOutputPrefix (DiagnosticOutput provider) = "[" <> providerKey provider <> "] "
 
 reviewOutputActivity :: ReviewOutputKind -> Text
 reviewOutputActivity AgentOutput = "responding"
 reviewOutputActivity ReasoningOutput = "thinking"
 reviewOutputActivity CommandOutput = "running command"
-reviewOutputActivity DiagnosticOutput = "diagnostic output"
+reviewOutputActivity DiagnosticOutput {} = "diagnostic output"
 
 showReviewOutput :: ChatVerbosity -> ReviewOutputKind -> Bool
 showReviewOutput CompactChat AgentOutput = True
 showReviewOutput CompactChat _ = False
-showReviewOutput StandardChat DiagnosticOutput = False
+showReviewOutput StandardChat DiagnosticOutput {} = False
 showReviewOutput StandardChat _ = True
 showReviewOutput FullChat _ = True
 
@@ -820,6 +830,21 @@ applyReviewBackendStarted result = case result of
             }
       | otherwise = session
 
+-- | How a protocol warning is announced: the provider whose backend raised
+-- it, then what it said.
+--
+-- Named by the provider the event carries rather than by a brand compiled in
+-- here. The warning is raised by client code shared by every backend --
+-- the reader loops, the response dispatch, the tool runners -- and the only
+-- thing that knows whose protocol misbehaved is the backend that raised it.
+--
+-- Pure and separate because 'applyReviewEvent' runs in brick's 'EventM',
+-- which no unit test can drive, and because the wording is a contract on
+-- both sides: Codex's has to stay exactly the sentence it always was.
+reviewProtocolWarningNotice :: ProviderName -> Text -> Text
+reviewProtocolWarningNotice provider message =
+  providerDisplayName provider <> " protocol warning: " <> message
+
 applyReviewEvent :: ReviewEvent -> EventM Name AppState ()
 applyReviewEvent reviewEvent = case reviewEvent of
   ReviewThreadCreated issueNumber threadId ->
@@ -988,7 +1013,7 @@ applyReviewEvent reviewEvent = case reviewEvent of
     modifyReviewSessionByThread threadId (applyUndeliveredSteer message)
     tailReviewThread threadId
     setNotice undeliveredNotice
-  ReviewProtocolWarning message -> setNotice ("Codex protocol warning: " <> message)
+  ReviewProtocolWarning provider message -> setNotice (reviewProtocolWarningNotice provider message)
   where
     outcomePhase IssueRevision TurnSucceeded (Just result)
       | null result.reviewResultBlockingReasons = ReviewFinished

@@ -35,6 +35,19 @@ module Spec.Support.Process
     withTwoConnectionReviewClient,
     TwoConnectionClient (..),
     withFakeReviewClient,
+    fakeProviderDiagnostic,
+    ClaudeReviewFixture (..),
+    withClaudeReviewClient,
+    withClaudeReviewClientUsing,
+    claudeReviewTurn,
+    recordedClaudeLaunches,
+    recordedClaudeInput,
+    recordedClaudeDirectory,
+    threadCreations,
+    turnStarts,
+    reviewOutputs,
+    connectionStopReports,
+    waitForReviewEvents,
     soleReviewConnection,
     threadOn,
     readRecordedPids,
@@ -43,6 +56,7 @@ module Spec.Support.Process
     nextClientLine,
     twoConnectionsOf,
     waitForConnectionStops,
+    waitForHeldConnections,
     turnCompletions,
     startFailures,
     expectNoFurtherClientRequests,
@@ -89,7 +103,7 @@ import Kanban.Process
     managedProcess,
     readProcessSnapshot
   )
-import Kanban.Models (ModelRoster, RecordedAssignment, defaultRoster)
+import Kanban.Models (ModelRoster, ProviderName (..), RecordedAssignment, defaultRoster)
 import Kanban.PullRequestFlow (PullRequestFlowEvent (..))
 import Kanban.Review
   ( CommandBounds (..),
@@ -99,7 +113,10 @@ import Kanban.Review
     ReviewClient,
     ReviewConnection (..),
     ReviewEvent (..),
+    ReviewLaunch (..),
+    ReviewOutputKind (..),
     ReviewProcessShape,
+    ReviewProtocol (..),
     ReviewThreadId (..),
     ReviewWireMessage (..),
     addRecordingReviewConnectionForTesting,
@@ -117,6 +134,7 @@ import Kanban.Review
   )
 import Kanban.Solve
   ( AgentEvent (..),
+    ProviderAdapter (..),
     ResumeProvenance (..),
     SolveEvent (..),
     SolveOutcome (..),
@@ -124,6 +142,7 @@ import Kanban.Solve
     SolverBrand (..),
     StreamEvent (..),
     UnknownAggregator,
+    adapterFor,
     emitStreamEvent,
     sealUnknownAggregates,
     maxUnknownNoticeLength,
@@ -617,14 +636,19 @@ withTwoConnectionReviewClient action = do
     action
 
 -- | A backend whose provider is a fake executable on disk: it records its own
--- pid, answers the initialize handshake the client waits for, and then drains
--- its stdin until the client closes it.
+-- pid, writes one line to its stderr, answers the initialize handshake the
+-- client waits for, and then drains its stdin until the client closes it.
 --
 -- Deliberately no further protocol. What a test built on this is about is
 -- connection /shape/ — how many processes two reviews occupy, which
 -- connection a response resolves against, and whether shutdown reaps every
 -- one — and a fake that also spoke the thread and turn protocol would answer
 -- those questions no better while being able to get them wrong.
+--
+-- The stderr line is the negative control for the stream backend's held
+-- diagnostics: this backend names its threads in its responses rather than in
+-- its stream, so nothing it writes to stderr may ever be held waiting for a
+-- record that will not come.
 withFakeReviewBackend :: ReviewProcessShape -> (FilePath -> Repository -> EmbeddedReviewBackend -> IO result) -> IO result
 withFakeReviewBackend processShape action =
   withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -637,6 +661,7 @@ withFakeReviewBackend processShape action =
       ( ByteString.unlines
           [ "#!/bin/sh",
             "echo \"$$\" >> \"" <> ByteString.pack spawnLog <> "\"",
+            "printf '%s\\n' '" <> fakeProviderDiagnostic <> "' >&2",
             "printf '%s\\n' '{\"id\":1,\"result\":{}}'",
             -- Draining stdin is what keeps a client that writes a large
             -- 'thread/start' from blocking on a full pipe, and reaching EOF
@@ -651,16 +676,22 @@ withFakeReviewBackend processShape action =
         (Repository repositoryRoot "coghex" "kanban")
         EmbeddedReviewBackend
           { backendLabel = "fake app-server",
+            backendProvider = CodexProvider,
             backendProcessShape = processShape,
-            backendProcess = \root ->
+            backendProtocol = AppServerProtocol,
+            backendProcess = \launch ->
               (proc fakeProvider [])
-                { cwd = Just root,
+                { cwd = Just launch.launchRepositoryRoot,
                   std_in = CreatePipe,
                   std_out = CreatePipe,
                   std_err = CreatePipe,
                   create_group = True
                 }
           }
+
+-- | The one line the fake provider writes to its stderr.
+fakeProviderDiagnostic :: ByteString.ByteString
+fakeProviderDiagnostic = "fake app-server starting"
 
 -- | A live review client on that fake backend, plus the pid log its provider
 -- writes to and the events its sink recorded in order.
@@ -707,6 +738,185 @@ shouldHaveBeenSwept pid description = do
         Nothing -> pure ()
         Just _ -> expectationFailure ("expected " <> description <> " (pid " <> show pid <> ") to have been terminated")
 
+-- | Everything a fake-@claude@ embedded review gives a test: the live client
+-- on Kanban's real Claude backend, the events its sink recorded in order, and
+-- the directory each spawned fake wrote its argv and its stdin into.
+--
+-- The backend is the compiled one rather than a stand-in, because half of
+-- what these tests are about is the argv that backend builds. A fixture
+-- backend of its own would assert nothing about the launch an install would
+-- actually perform.
+data ClaudeReviewFixture = ClaudeReviewFixture
+  { claudeReviewClient :: ReviewClient,
+    claudeReviewEvents :: IORef [ReviewEvent],
+    claudeReviewRecordings :: FilePath,
+    claudeReviewRepositoryRoot :: FilePath
+  }
+
+-- | A fake @claude@ on a temporary PATH plus a live review client started
+-- against @(adapterFor ClaudeProvider).adapterEmbeddedReview@.
+--
+-- @turnScript@ is the shell the fake runs for each user message it reads, so
+-- one process answers as many turns as the client sends it -- which is the
+-- shape D-15 records and the only way a second turn on one process can be
+-- observed. It may use @$turn@ (this process's message counter, from 1),
+-- @$session@ (a per-process session id), and @$dir@ (the recording
+-- directory).
+withClaudeReviewClient :: [ByteString.ByteString] -> (ClaudeReviewFixture -> IO result) -> IO result
+withClaudeReviewClient = withClaudeReviewClientUsing defaultRoster
+
+-- | As 'withClaudeReviewClient', but against a chosen roster, so a test can
+-- prove a non-default @issue_review.claude@ cell reaches the launch -- or
+-- that a roster which cannot supply that cell launches nothing at all.
+withClaudeReviewClientUsing :: ModelRoster -> [ByteString.ByteString] -> (ClaudeReviewFixture -> IO result) -> IO result
+withClaudeReviewClientUsing roster turnScript action =
+  withTemporaryCacheRoot $ \temporaryRoot -> do
+    let repositoryRoot = temporaryRoot </> "repo"
+        binaryRoot = temporaryRoot </> "bin"
+        recordings = temporaryRoot </> "claude-runs"
+        fakeClaude = binaryRoot </> "claude"
+    createDirectory repositoryRoot
+    createDirectory binaryRoot
+    createDirectory recordings
+    ByteString.writeFile fakeClaude (fakeClaudeSession recordings turnScript)
+    setFileMode fakeClaude 0o700
+    originalPath <- maybe "" id <$> lookupEnv "PATH"
+    events <- newIORef []
+    backend <- case (adapterFor ClaudeProvider).adapterEmbeddedReview of
+      Just backend -> pure backend
+      Nothing -> throwIO (userError "Kanban ships no embedded review backend for Claude")
+    withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+      withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $
+        bracket
+          ( do
+              started <- startResolvedReviewClient backend roster defaultWorkflowConfig (Repository repositoryRoot "coghex" "kanban") (\event -> modifyIORef events (<> [event]))
+              case started of
+                Right client -> pure client
+                Left message -> throwIO (userError ("the Claude review backend did not start: " <> Data.Text.unpack message))
+          )
+          stopReviewClient
+          (\client -> action (ClaudeReviewFixture client events recordings repositoryRoot))
+
+-- | The fake itself: it records the argv it was launched with and every line
+-- written to its stdin, then answers each of those lines with @turnScript@.
+--
+-- Recorded per pid rather than appended to one file, because a backend that
+-- gives each review thread its own process spawns several of these and a
+-- test about two concurrent reviews has to tell one apart from the other.
+-- Argv goes one argument per line so an empty argument -- which is exactly
+-- what @--tools ""@ passes -- is recorded as the empty line it is.
+fakeClaudeSession :: FilePath -> [ByteString.ByteString] -> ByteString.ByteString
+fakeClaudeSession recordings turnScript =
+  ByteString.unlines
+    ( [ "#!/bin/sh",
+        "dir=\"" <> ByteString.pack recordings <> "\"",
+        "echo \"$$\" >> \"$dir/spawned\"",
+        "printf '%s\\n' \"$@\" > \"$dir/argv.$$\"",
+        "pwd > \"$dir/cwd.$$\"",
+        "session=\"claude-session-$$\"",
+        "turn=0",
+        "while IFS= read -r message; do",
+        "  printf '%s\\n' \"$message\" >> \"$dir/input.$$\"",
+        "  turn=$((turn + 1))"
+      ]
+        <> map ("  " <>) turnScript
+        <> ["done"]
+    )
+
+-- | One realistic review turn, as the CLI streams it (probed against 2.1.251
+-- for D-15, rechecked on 2.1.252).
+--
+-- Everything an embedded review has to survive is here, not only the three
+-- records it acts on: the hook and status notices a machine's own
+-- configuration produces, the aggregate @assistant@ message that repeats the
+-- deltas verbatim, and the rate-limit report that closes the exchange. A
+-- fake that emitted only the records the decoder understands would leave the
+-- ones it must ignore untested, and duplicated transcript text is exactly
+-- what the aggregate would cause.
+claudeReviewTurn :: ByteString.ByteString -> ByteString.ByteString -> [ByteString.ByteString]
+claudeReviewTurn thinking spoken =
+  [ "printf '{\"type\":\"system\",\"subtype\":\"hook_started\",\"hook_name\":\"SessionStart\",\"session_id\":\"%s\"}\\n' \"$session\"",
+    "printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"%s\",\"uuid\":\"turn-%s\",\"model\":\"claude-opus-5\",\"tools\":[],\"mcp_servers\":[]}\\n' \"$session\" \"$turn\"",
+    "printf '{\"type\":\"system\",\"subtype\":\"status\",\"status\":\"requesting\",\"session_id\":\"%s\"}\\n' \"$session\"",
+    "printf '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}},\"session_id\":\"%s\"}\\n' \"$session\"",
+    "printf '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"" <> thinking <> "\"}},\"session_id\":\"%s\"}\\n' \"$session\"",
+    "printf '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"AbCd\"}},\"session_id\":\"%s\"}\\n' \"$session\"",
+    "printf '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"" <> spoken <> "\"}},\"session_id\":\"%s\"}\\n' \"$session\"",
+    "printf '{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"" <> thinking <> "\"},{\"type\":\"text\",\"text\":\"" <> spoken <> "\"}]},\"session_id\":\"%s\"}\\n' \"$session\"",
+    "printf '{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\"},\"session_id\":\"%s\"}\\n' \"$session\""
+  ]
+
+-- | Every fake @claude@ launch a fixture recorded, in spawn order, as the
+-- argv each was given. An absent recording is no launch rather than an
+-- error, so a test may assert that nothing was started.
+recordedClaudeLaunches :: FilePath -> IO [[Text]]
+recordedClaudeLaunches recordings = do
+  pids <- recordedClaudePids recordings
+  mapM
+    (\index -> Data.Text.lines . TextEncoding.decodeUtf8 <$> (ByteString.readFile =<< recordedClaudeFile recordings index "argv"))
+    [0 .. length pids - 1]
+
+-- | Every line the fake at @index@ (in spawn order) read from its stdin. A
+-- fake that was launched and read nothing has written no file, which is no
+-- input rather than an error.
+recordedClaudeInput :: FilePath -> Int -> IO [Text]
+recordedClaudeInput recordings index = do
+  inputPath <- recordedClaudeFile recordings index "input"
+  written <- doesFileExist inputPath
+  if not written
+    then pure []
+    else Data.Text.lines . TextEncoding.decodeUtf8 <$> ByteString.readFile inputPath
+
+-- | The working directory the fake at @index@ (in spawn order) was launched
+-- in. The established embedded-process shape puts every one of them at the
+-- repository root, and only a live launch can show that it did.
+recordedClaudeDirectory :: FilePath -> Int -> IO FilePath
+recordedClaudeDirectory recordings index =
+  dropWhileEnd (== '\n') <$> (readFile =<< recordedClaudeFile recordings index "cwd")
+
+-- | One recording of the fake at @index@ in spawn order. Spawn order rather
+-- than pid order, because a test that started two reviews knows which it
+-- started first and nothing about which pid the kernel handed out.
+recordedClaudeFile :: FilePath -> Int -> String -> IO FilePath
+recordedClaudeFile recordings index kind = do
+  pids <- recordedClaudePids recordings
+  case drop index pids of
+    pid : _ -> pure (recordings </> (kind <> "." <> pid))
+    [] -> fail ("no fake claude was spawned at index " <> show index <> "; " <> show (length pids) <> " were")
+
+recordedClaudePids :: FilePath -> IO [String]
+recordedClaudePids recordings = do
+  let spawnLog = recordings </> "spawned"
+  exists <- doesFileExist spawnLog
+  if not exists then pure [] else lines <$> readFile spawnLog
+
+-- | Wait until the recorded events satisfy @settled@, then hand back
+-- everything recorded so far. Bounded, so a stream that never arrives fails
+-- the test instead of hanging it.
+waitForReviewEvents :: String -> IORef [ReviewEvent] -> ([ReviewEvent] -> Bool) -> IO [ReviewEvent]
+waitForReviewEvents expectation events settled = go (400 :: Int)
+  where
+    go remaining = do
+      recorded <- readIORef events
+      if settled recorded
+        then pure recorded
+        else
+          if remaining <= 0
+            then fail ("timed out waiting for " <> expectation <> "; recorded " <> show recorded)
+            else threadDelay 25000 >> go (remaining - 1)
+
+threadCreations :: [ReviewEvent] -> [(Int, ReviewThreadId)]
+threadCreations recorded = [(issueNumber, threadId) | ReviewThreadCreated issueNumber threadId <- recorded]
+
+turnStarts :: [ReviewEvent] -> [(ReviewThreadId, Text)]
+turnStarts recorded = [(threadId, turnId) | ReviewTurnStarted threadId turnId <- recorded]
+
+reviewOutputs :: [ReviewEvent] -> [(ReviewThreadId, ReviewOutputKind, Text)]
+reviewOutputs recorded = [(threadId, outputKind, text) | ReviewOutput threadId outputKind text <- recorded]
+
+connectionStopReports :: [ReviewEvent] -> [(ConnectionId, Text)]
+connectionStopReports recorded = [(connection, message) | ReviewConnectionStopped connection message <- recorded]
+
 -- | The next request the client wrote to its app-server, as method and
 -- params. Bounded so a missing write fails the test instead of hanging it.
 nextClientRequest :: Handle -> IO (Text, Value)
@@ -749,6 +959,27 @@ twoConnectionsOf client = do
   case connections of
     [first, second] -> pure (first, second)
     other -> fail ("expected the review client to hold two connections, it held " <> show (length other))
+
+-- | Wait until the client holds exactly @wanted@ connections, returning
+-- their ids.
+--
+-- Polled rather than read once. A dying connection is reported by whichever
+-- of its two terminal paths gets there first — its output reader hitting EOF,
+-- or its watcher reaping the process — and only the watcher also takes it out
+-- of the pool, after waiting for both readers to finish. So a stop report is
+-- not a promise that the pool has already shrunk, and an assertion that reads
+-- it straight after one passes or fails on scheduling.
+waitForHeldConnections :: ReviewClient -> Int -> IO [ConnectionId]
+waitForHeldConnections client wanted = go (400 :: Int)
+  where
+    go remaining = do
+      held <- map (.connectionId) <$> reviewConnectionsForTesting client
+      if length held == wanted
+        then pure held
+        else
+          if remaining <= 0
+            then fail ("expected the review client to hold " <> show wanted <> " connection(s), it held " <> show held)
+            else threadDelay 25000 >> go (remaining - 1)
 
 -- | Wait until at least @wanted@ connections have been reported as stopped,
 -- returning every such report so far. Bounded so a report that never arrives
