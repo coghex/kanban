@@ -301,13 +301,13 @@ reseatSearch anchor state = case state.appSearch of
 -- column offers.
 moveSelectionBy :: Int -> AppState -> AppState
 moveSelectionBy amount state = case safeIndex nextPosition rows of
-  Nothing -> state {appEnsureSelectionVisible = True, appNotice = Nothing}
+  Nothing -> noticeCleared state {appEnsureSelectionVisible = True}
   Just nextRow ->
-    state
-      { appSelectedRows = Map.insert column nextRow state.appSelectedRows,
-        appEnsureSelectionVisible = True,
-        appNotice = Nothing
-      }
+    noticeCleared
+      state
+        { appSelectedRows = Map.insert column nextRow state.appSelectedRows,
+          appEnsureSelectionVisible = True
+        }
   where
     column = state.appSelectedColumn
     rows = selectableRows state column
@@ -356,14 +356,14 @@ openSearch state =
   seatColumnOn
     Issues
     (selectedAnchorIn state Issues)
-    (state {appSearch = Just (ColumnSearch Issues ""), appNotice = Nothing})
+    (noticeCleared state {appSearch = Just (ColumnSearch Issues "")})
 
 -- | End a live search, restoring the target column complete and keeping
 -- @anchor@ selected by identity rather than by row number.
 closeSearchOn :: Maybe SearchAnchor -> AppState -> AppState
 closeSearchOn anchor state = case state.appSearch of
   Nothing -> state
-  Just search -> seatColumnOn search.searchColumn anchor (state {appSearch = Nothing, appNotice = Nothing})
+  Just search -> seatColumnOn search.searchColumn anchor (noticeCleared state {appSearch = Nothing})
 
 -- | Move a live search to @column@, with an empty query, selecting and
 -- revealing that column.
@@ -392,7 +392,7 @@ transferSearchTo column state = case state.appSearch of
     | otherwise ->
         seatColumnOn column (selectedAnchorIn state column)
           . seatColumnOn search.searchColumn (selectedAnchorIn state search.searchColumn)
-          $ state {appSearch = Just (ColumnSearch column ""), appNotice = Nothing}
+          $ noticeCleared state {appSearch = Just (ColumnSearch column "")}
 
 -- | Move a live search one column left (@-1@) or right (@1@).
 --

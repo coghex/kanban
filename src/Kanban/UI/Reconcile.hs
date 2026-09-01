@@ -4,6 +4,7 @@ module Kanban.UI.Reconcile
     applyBoardRefresh,
     applyClaudeRefresh,
     applyCodexRefresh,
+    boardRefreshOutcomeApplied,
     commitRefreshedUsage,
     currentCompletedGeneration,
     currentOpenGeneration,
@@ -12,6 +13,7 @@ module Kanban.UI.Reconcile
     reconcileReviewSessions,
     refreshSuccessNotice,
     unverifiedRefreshNotice,
+    usageRefreshApplied,
   )
 where
 
@@ -21,7 +23,7 @@ import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime)
@@ -91,7 +93,15 @@ applyCurrentBoardRefresh outcome = do
   -- re-run against the new board and still keep that card selected. Read
   -- here because the refresh below replaces the board it was read off.
   let searchAnchor = ((.searchColumn) <$> before.appSearch) >>= selectedAnchorIn before
-  modify $ \state -> case outcome of
+  modify (boardRefreshOutcomeApplied outcome)
+  finishCurrentBoardRefresh before searchAnchor outcome
+
+-- | What one open outcome does to the state: the board, the freshness, and
+-- the notice reporting it. Pure, and exported, so the suite can take the
+-- publication the startup carry composes over through the very transition
+-- the event runs.
+boardRefreshOutcomeApplied :: BoardRefreshOutcome -> AppState -> AppState
+boardRefreshOutcomeApplied outcome state = case outcome of
     -- Once the unconfirmed group is on disk, 'fetchGitHubSnapshot'
     -- re-verifies it before spawning anything, so a later refresh -- in this
     -- process or in one started after a restart -- cannot overlap it, and the
@@ -101,16 +111,14 @@ applyCurrentBoardRefresh outcome = do
     -- 'startBoardRefresh' keeps turning further fetches away.
     BoardRefreshUnverified failure
       | GuardRecorded <- failure.ghCleanupGuard ->
-          state
-            { appBoardFreshness = failureFreshness state.appLastSuccessfulFetch (unverifiedProviderError failure),
-              appNotice = Just (unverifiedRefreshNotice failure)
-            }
-      | otherwise -> state {appNotice = Just (unverifiedRefreshNotice failure)}
+          noticeSet
+            (unverifiedRefreshNotice failure)
+            state {appBoardFreshness = failureFreshness state.appLastSuccessfulFetch (unverifiedProviderError failure)}
+      | otherwise -> noticeSet (unverifiedRefreshNotice failure) state
     BoardRefreshCompleted (Left providerError) ->
-      state
-        { appBoardFreshness = failureFreshness state.appLastSuccessfulFetch providerError,
-          appNotice = Just (renderProviderError providerError)
-        }
+      noticeSet
+        (renderProviderError providerError)
+        state {appBoardFreshness = failureFreshness state.appLastSuccessfulFetch providerError}
     BoardRefreshCompleted (Right githubResult) ->
       let snapshot = githubResult.githubSnapshot
           -- The datasets first, then the view they admit: the completed
@@ -140,16 +148,20 @@ applyCurrentBoardRefresh outcome = do
           refreshedReviewSessions = reconcileReviewSessions state.appConfig.resolvedWorkflow snapshot.snapshotIssues state.appReviewSessions
           refreshedPullRequestSessions = reconcilePullRequestSessions snapshot.snapshotPullRequests state.appPullRequestReviewSessions
           successNotice = refreshSuccessNotice snapshot githubResult.githubWarnings
-       in refreshed
-            { appSelectedColumn = selectedColumn,
-              appSelectedRows = selectedRows,
-              appOverlay = refreshedOverlay,
-              appReviewSessions = refreshedReviewSessions,
-              appPullRequestReviewSessions = refreshedPullRequestSessions,
-              appBoardFreshness = Fresh snapshot.snapshotFetchedAt,
-              appLastSuccessfulFetch = Just snapshot.snapshotFetchedAt,
-              appNotice = Just (maybe successNotice (<> (" · " <> successNotice)) overlayNotice)
-            }
+       in noticeSet
+            (maybe successNotice (<> (" · " <> successNotice)) overlayNotice)
+            refreshed
+              { appSelectedColumn = selectedColumn,
+                appSelectedRows = selectedRows,
+                appOverlay = refreshedOverlay,
+                appReviewSessions = refreshedReviewSessions,
+                appPullRequestReviewSessions = refreshedPullRequestSessions,
+                appBoardFreshness = Fresh snapshot.snapshotFetchedAt,
+                appLastSuccessfulFetch = Just snapshot.snapshotFetchedAt
+              }
+
+finishCurrentBoardRefresh :: AppState -> Maybe SearchAnchor -> BoardRefreshOutcome -> EventM Name AppState ()
+finishCurrentBoardRefresh before searchAnchor outcome = do
   -- The query is re-run against the new board by 'entriesFor' itself; what
   -- needs deciding is where the selection lands in the result. The target
   -- column stays both the searched and the selected one whatever the refresh
@@ -161,15 +173,11 @@ applyCurrentBoardRefresh outcome = do
   -- landed is still reported once the refresh it required has published --
   -- above all a merge whose post-merge work then failed, which this is the
   -- only place the user is ever told about.
-  modify
-    ( \state ->
-        let outstanding = outstandingDirectMergeReport before.appNotice before.appDirectMergeResult
-            (composed, carried) = directMergeNoticeFor outstanding (fromMaybe "" state.appNotice)
-         in state
-              { appNotice = if isJust outstanding then Just composed else state.appNotice,
-                appDirectMergeResult = directMergeReportAfterRefresh before.appBoardRefreshQueued carried
-              }
-    )
+  modify (directMergeCarryApplied before)
+  -- And the startup diagnostics, riding the line the outcome just replaced:
+  -- the first publication composes them onto its own settled notice for the
+  -- ordinary ten seconds and retires the carry ('startupReportApplied').
+  modify (startupReportApplied before)
   startPendingWorkerMonitors
   case outcome of
     BoardRefreshCompleted (Right githubResult) -> advanceAutoSolves githubResult.githubSnapshot
@@ -248,7 +256,7 @@ publishCompletedHistory history = do
                     deriveBoard current.appConfig.resolvedWorkflow reconciled
               _ -> current.appBoard
           }
-  mapM_ (setNotice . ("Completed history cached with a warning · " <>)) cacheWarning
+  mapM_ (modify . noticeSetOverStartupReport . ("Completed history cached with a warning · " <>)) cacheWarning
 
 -- | What a published generation reports as its progress: complete, with the
 -- totals read off the history itself rather than off the pages that built it.
@@ -283,16 +291,16 @@ publishBoardData change = do
     modify $ \state ->
       let (selectedColumn, selectedRows) = preserveSelection before state.appVisibleBoard
           (reconciledOverlay, overlayNotice) = refreshOverlay state.appVisibleBoard state.appOverlay
-       in state
-            { appSelectedColumn = selectedColumn,
-              appSelectedRows = selectedRows,
-              appOverlay = reconciledOverlay,
-              -- Only when an overlay actually closed under the user. Nothing
-              -- else about a completed publication is worth the notice line:
-              -- reporting the history itself is the footer's own compact
-              -- status, which outlives every press that clears a notice.
-              appNotice = maybe state.appNotice Just overlayNotice
-            }
+       in -- The notice only when an overlay actually closed under the user.
+          -- Nothing else about a completed publication is worth the notice
+          -- line: reporting the history itself is the footer's own compact
+          -- status, which outlives every press that clears a notice.
+          maybe id noticeSet overlayNotice $
+            state
+              { appSelectedColumn = selectedColumn,
+                appSelectedRows = selectedRows,
+                appOverlay = reconciledOverlay
+              }
     modify (reseatSearch searchAnchor)
 
 -- | What the board reports when a refresh's @gh@ process group could not be
@@ -358,22 +366,28 @@ applyUsageRefresh provider displayName result = case result of
   Left providerError ->
     modify
       ( \state ->
-          state
-            { appUsageFreshness = Map.insert provider (usageFailureFreshness provider state providerError) state.appUsageFreshness,
-              appNotice = Just (displayName <> " usage refresh failed: " <> renderProviderErrorMessage providerError)
-            }
+          noticeSetOverStartupReport
+            (displayName <> " usage refresh failed: " <> renderProviderErrorMessage providerError)
+            state {appUsageFreshness = Map.insert provider (usageFailureFreshness provider state providerError) state.appUsageFreshness}
       )
   Right snapshot -> do
     state <- get
     cacheNotes <- liftIO (commitRefreshedUsage (cacheEnabled state.appOptions state.appConfig) provider snapshot)
-    modify
-      ( \current ->
-          current
-            { appUsage = Map.insert provider snapshot current.appUsage,
-              appUsageFreshness = Map.insert provider (Fresh snapshot.usageFetchedAt) current.appUsageFreshness,
-              appNotice = Just (displayName <> " usage refreshed" <> Text.concat (map (" · " <>) cacheNotes))
-            }
-      )
+    modify (usageRefreshApplied provider displayName cacheNotes snapshot)
+
+-- | What one provider's successful refresh does to the state, split from the
+-- cache commit above it so the suite can take the transition — the snapshot,
+-- the freshness, and the notice it produces, composed onto the startup line
+-- while that is still carrying its diagnostics — without touching a cache
+-- file.
+usageRefreshApplied :: UsageProvider -> Text -> [Text] -> UsageSnapshot -> AppState -> AppState
+usageRefreshApplied provider displayName cacheNotes snapshot state =
+  noticeSetOverStartupReport
+    (displayName <> " usage refreshed" <> Text.concat (map (" · " <>) cacheNotes))
+    state
+      { appUsage = Map.insert provider snapshot state.appUsage,
+        appUsageFreshness = Map.insert provider (Fresh snapshot.usageFetchedAt) state.appUsageFreshness
+      }
 
 -- | Everything a provider refresh does to the snapshot cache, outside
 -- 'EventM'.

@@ -437,13 +437,15 @@ examples = do
     -- ever readable.
     it "keeps a landed merge's result in front of the refresh it required" $ do
       let landed = "PR #42 merged, but the run did not finish cleanly (post_merge_cleanup_failed): the linked issue is still open."
-          report = DirectMergeReport landed landed
+          report = DirectMergeReport landed 7
           (shown, carried) = directMergeNoticeFor (Just report) "Refreshing GitHub…"
       shown `shouldMention` "post_merge_cleanup_failed"
       shown `shouldMention` "Refreshing GitHub"
-      -- What it carries forward is this very notice, so the next question
-      -- about whether it is still displayed has something exact to compare.
-      fmap (.directMergeReportShown) carried `shouldBe` Just shown
+      -- What it carries forward is the result itself; the instance the
+      -- composed text is displayed under is stamped by whoever shows it
+      -- ('Kanban.UI.Util.recordDirectMergeShown'), which is the next
+      -- question's exact comparison.
+      carried `shouldBe` Just report
       -- Two hops: the refresh starting, then publishing. The result stays in
       -- front of both rather than being consumed by the first.
       let (afterPublish, _) = directMergeNoticeFor carried "board updated"
@@ -458,22 +460,21 @@ examples = do
     -- question asked is "is what I wrote still on screen", which no future
     -- site has to know about either.
     it "stops carrying a result whose notice is gone, however it went" $ do
-      let landed = "PR #42 merged."
-          report = DirectMergeReport landed landed
-      -- Still displayed, so still outstanding.
-      outstandingDirectMergeReport (Just landed) (Just report) `shouldBe` Just report
+      let report = DirectMergeReport "PR #42 merged." 7
+      -- The instance it was shown under is still displayed, so still
+      -- outstanding.
+      outstandingDirectMergeReport (Just 7) (Just report) `shouldBe` Just report
       -- Dismissed with Esc, from the board or from the details overlay `m`
-      -- was pressed in, or cleared by opening an overlay or moving the card.
+      -- was pressed in, cleared by opening an overlay or moving the card, or
+      -- expired by the ten-second lifetime: no instance is displayed at all.
       outstandingDirectMergeReport Nothing (Just report) `shouldBe` Nothing
-      -- Replaced by some other action's notice.
-      outstandingDirectMergeReport (Just "Review started") (Just report) `shouldBe` Nothing
-      -- A composed notice is still this result's own, so it keeps going.
-      let (composed, carried) = directMergeNoticeFor (Just report) "Refreshing GitHub…"
-      outstandingDirectMergeReport (Just composed) carried `shouldBe` carried
-      outstandingDirectMergeReport (Just composed) (Just report) `shouldBe` Nothing
+      -- Replaced by some other action's notice instance -- including one
+      -- whose text happens to repeat the report word for word, which is a
+      -- different instance and must not adopt it.
+      outstandingDirectMergeReport (Just 8) (Just report) `shouldBe` Nothing
 
     it "drops that result only once the refresh it required has run" $ do
-      let carried = Just (DirectMergeReport "PR #42 merged." "PR #42 merged.")
+      let carried = Just (DirectMergeReport "PR #42 merged." 7)
       -- The fetch that merely happened to be in flight publishes first; the
       -- refresh the merge required has not started, so the result survives it.
       directMergeReportAfterRefresh True carried `shouldBe` carried

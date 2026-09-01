@@ -69,7 +69,7 @@ import Kanban.UI.Types
     SolvePhase (..),
     withModelRoster,
   )
-import Kanban.UI.Util (selectedRow)
+import Kanban.UI.Util (selectedRow, shownNotice)
 import Kanban.UI.Worker (recoveredPullRequestSession, recoveredSolveSession)
 import Kanban.Worker
   ( PullRequestWorkerTask (..),
@@ -226,7 +226,7 @@ dispatchSpec = describe "the four bindings it refuses" $ do
     pressed.appApprovalStatus `shouldBe` populated.appApprovalStatus
     pressed.appApprovalBusy `shouldBe` populated.appApprovalBusy
     pressed.appApprovalTransition `shouldBe` populated.appApprovalTransition
-    pressed.appNotice `shouldBe` Just noAgentModeMessage
+    shownNotice pressed `shouldBe` Just noAgentModeMessage
 
   -- Requirement 2's second half, taken against a dashboard that has one of
   -- everything the refusal must not touch.
@@ -237,7 +237,7 @@ dispatchSpec = describe "the four bindings it refuses" $ do
         | action <- agentBindings
       ]
     sequence_
-      [ (action, (refused populated action).appNotice) `shouldBe` (action, Just noAgentModeMessage)
+      [ (action, shownNotice (refused populated action)) `shouldBe` (action, Just noAgentModeMessage)
         | action <- agentBindings
       ]
 
@@ -362,7 +362,7 @@ mouseSpec = describe "the right click that is a second route" $ do
     let clicked = applyRunningProcessClick Issues 0 quiet
     runningProcessClickRefusal quiet `shouldBe` Nothing
     clicked.appOverlay `shouldBe` Just (ReviewOverlay liveIssueNumber)
-    clicked.appNotice `shouldBe` Nothing
+    shownNotice clicked `shouldBe` Nothing
     -- Still a click: it selects the card it landed on, as it always did.
     clicked.appSelectedColumn `shouldBe` Issues
     selectedRow clicked Issues `shouldBe` 0
@@ -375,7 +375,7 @@ mouseSpec = describe "the right click that is a second route" $ do
     quiet <- withModelRoster (Right noAgentRoster) <$> liveSessionState
     let clicked = applyRunningProcessClick Issues 1 quiet
     clicked.appOverlay `shouldBe` Nothing
-    clicked.appNotice `shouldBe` Nothing
+    shownNotice clicked `shouldBe` Nothing
     selectedRow clicked Issues `shouldBe` 1
 
 -- ---------------------------------------------------------------------------

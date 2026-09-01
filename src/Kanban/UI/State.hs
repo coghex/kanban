@@ -5,9 +5,10 @@ module Kanban.UI.State
     findReviewSessionByThread,
     forceTerminalRepaint,
     modifyReviewSessionByThread,
-    noticeSet,
     plainTranscript,
     setNotice,
+    setNoticeFor,
+    settleNoticeExpiry,
     settleOverlayFullscreen,
     toggleOverlayFullscreen,
     transcriptFor,
@@ -16,6 +17,9 @@ where
 
 
 import Brick
+import Brick.BChan (writeBChan)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe )
@@ -31,6 +35,7 @@ import Kanban.Settings
   ( ChatVerbosity (..)
     )
 import Kanban.Text (sanitizeText)
+import Kanban.UI.Notice
 import Kanban.UI.Types
 import Kanban.UI.SessionCore
 import Kanban.UI.Util
@@ -38,15 +43,31 @@ import Kanban.UI.Util
 setNotice :: Text -> EventM Name AppState ()
 setNotice message = modify (noticeSet message)
 
--- | The whole of what showing a notice does to the state: one field, and
--- nothing else.
+-- | 'setNotice' for a message that explicitly reports the named tracked
+-- operation as still running ('Kanban.UI.Util.noticeSetFor').
+setNoticeFor :: NoticeActivity -> Text -> EventM Name AppState ()
+setNoticeFor activity message = modify (noticeSetFor activity message)
+
+-- | Settle the notice line against what the event that just ran left behind,
+-- and arm the one-shot timer a newly settled instance needs: ten seconds
+-- after an instance's deadline is first armed, a 'NoticeExpired' tick
+-- carrying its identity arrives on the event channel, redrawing the footer
+-- even when nothing else happens in the meantime (issue #590 requirement 3).
 --
--- Split out from 'setNotice' rather than written twice, so a pure transition
--- that has to leave the same mark -- a refused board press, a refused right
--- click -- makes exactly the mark the 'EventM' arm makes, and the suite can
--- take that transition without brick.
-noticeSet :: Text -> AppState -> AppState
-noticeSet message state = state {appNotice = Just message}
+-- @before@ is the notice state the event started from. An armed pair the
+-- event left untouched keeps the timer it already has; only a pair this
+-- settle created — a new instance, or an active notice whose operation just
+-- ended — forks a thread, so an idle stream of events never stacks timers.
+settleNoticeExpiry :: NoticeState -> EventM Name AppState ()
+settleNoticeExpiry before = do
+  modify settleNoticeLifecycle
+  after <- get
+  case noticeExpiryToArm before after.appNotice of
+    Nothing -> pure ()
+    Just armedInstance ->
+      void . liftIO . forkIO $ do
+        threadDelay noticeExpiryDelayMicros
+        writeBChan after.appEventChannel (NoticeExpired armedInstance)
 
 -- | Repaint the terminal from scratch, with no network request. 'Vty.refresh'
 -- resets vty's assumed screen state and re-emits the current picture in full,
@@ -69,7 +90,7 @@ forceTerminalRepaint = do
 -- that rule untested. Nothing renders between this and the settle, which
 -- brick runs at the end of the same event.
 closeOverlay :: EventM Name AppState ()
-closeOverlay = modify (\state -> state {appOverlay = Nothing, appNotice = Nothing})
+closeOverlay = modify (\state -> noticeCleared state {appOverlay = Nothing})
 
 -- | The whole of what @f@ does: one flag, on the overlay that is open and
 -- honors the toggle.

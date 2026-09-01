@@ -58,6 +58,7 @@ import Kanban.Process (ProcessIdentity)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Usage (claudeRefreshTimeoutMicros, codexRefreshTimeoutMicros, runUsageProvider)
 import System.Timeout (timeout)
+import Kanban.UI.Notice (NoticeActivity (..), NoticeLife (..))
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.State
@@ -152,14 +153,11 @@ startQueuedBoardRefresh = do
 
 -- | Set a notice, keeping an outstanding direct-merge result in front of it
 -- and carrying that result forward only while it is still the one displayed.
+-- Both callers report the board fetch, so the composed line stays an active
+-- notice while that fetch is loading and expires ten seconds after it is not.
 announceOverDirectMergeResult :: Text -> EventM Name AppState ()
-announceOverDirectMergeResult notice =
-  modify
-    ( \state ->
-        let outstanding = outstandingDirectMergeReport state.appNotice state.appDirectMergeResult
-            (composed, carried) = directMergeNoticeFor outstanding notice
-         in state {appNotice = Just composed, appDirectMergeResult = carried}
-    )
+announceOverDirectMergeResult =
+  modify . noticeSetOverDirectMergeResult (ActiveWhile BoardRefreshRunning)
 
 -- | The board's own refresh request, which is now a request to the
 -- repository's coordinator rather than a thread of its own.
@@ -376,14 +374,14 @@ startCodexRefresh :: EventM Name AppState ()
 startCodexRefresh = do
   state <- get
   case Map.findWithDefault NotLoaded Codex state.appUsageFreshness of
-    Loading -> setNotice "Codex usage refresh is already running"
+    Loading -> setNoticeFor (UsageRefreshRunning Codex) "Codex usage refresh is already running"
     _ -> do
       modify
         ( \current ->
-            current
-              { appUsageFreshness = Map.insert Codex Loading current.appUsageFreshness,
-                appNotice = Just "Refreshing Codex usage…"
-              }
+            noticeSetFor
+              (UsageRefreshRunning Codex)
+              "Refreshing Codex usage…"
+              current {appUsageFreshness = Map.insert Codex Loading current.appUsageFreshness}
         )
       void
         . liftIO
@@ -400,14 +398,14 @@ startClaudeRefresh :: EventM Name AppState ()
 startClaudeRefresh = do
   state <- get
   case Map.findWithDefault NotLoaded Claude state.appUsageFreshness of
-    Loading -> setNotice "Claude usage refresh is already running"
+    Loading -> setNoticeFor (UsageRefreshRunning Claude) "Claude usage refresh is already running"
     _ -> do
       modify
         ( \current ->
-            current
-              { appUsageFreshness = Map.insert Claude Loading current.appUsageFreshness,
-                appNotice = Just "Refreshing Claude usage…"
-              }
+            noticeSetFor
+              (UsageRefreshRunning Claude)
+              "Refreshing Claude usage…"
+              current {appUsageFreshness = Map.insert Claude Loading current.appUsageFreshness}
         )
       void
         . liftIO

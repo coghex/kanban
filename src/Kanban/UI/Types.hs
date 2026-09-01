@@ -39,6 +39,7 @@ module Kanban.UI.Types
     SolveDetail (..),
     SolvePhase (..),
     SolveSession,
+    StartupReport (..),
     openDataView,
     withModelRoster,
     withSessionDetail,
@@ -104,6 +105,7 @@ import Kanban.Solve
     SolverBrand (..)
     )
 import Kanban.Models (ModelRoster, OperatingMode, ProviderName, RecordedAssignment, RoleName, RosterLoadError, loadedOperatingMode)
+import Kanban.UI.Notice (NoticeState)
 import Kanban.Settings
   ( Settings (..)
     )
@@ -680,6 +682,13 @@ data AppEvent
   | WorkerRegistered WorkerDescriptor
   | WorkerProtocolEvent WorkerDescriptor WorkerEvent
   | WorkerDiscoveryFinished [WorkerDescriptor]
+  | -- | A displayed notice instance's ten seconds elapsed. It carries the
+    -- instance identity the timer was armed for, on the same superseded-
+    -- generation reasoning as the animation ticks above: an expiry belonging
+    -- to a replaced or dismissed instance — even one whose text a newer
+    -- notice repeats — finds a different identity displayed and is dropped
+    -- rather than allowed to clear it (issue #590 requirement 5).
+    NoticeExpired Int
   | CanonicalIssueReviewProcessStarted Int ManagedProcess
   | CanonicalIssueReviewFinished Int ReviewStage (Either Text CanonicalIssueReviewResult)
 
@@ -773,7 +782,13 @@ data AppState = AppState
     -- 'Kanban.UI.State.settleOverlayFullscreen' enforces after every event
     -- rather than at each of the many sites that assign 'appOverlay'.
     appOverlayFullscreen :: Bool,
-    appNotice :: Maybe Text,
+    -- | The transient footer line, as the abstract lifecycle state
+    -- "Kanban.UI.Notice" alone can move: every producer shows a notice
+    -- through its transitions, every settled instance expires ten seconds
+    -- after it settles, and 'Kanban.UI.Util.settleNoticeLifecycle' — run
+    -- after every event — is what classifies the displayed instance against
+    -- the tracked operations in 'Kanban.UI.Util.noticeActivityLive'.
+    appNotice :: NoticeState,
     appBoardFreshness :: Freshness,
     -- | The newest complete open generation, kept beside the board it derived.
     -- The board alone cannot answer requirement 8: reconciling a completed
@@ -861,6 +876,13 @@ data AppState = AppState
     -- gets, and the refresh it triggers would otherwise overwrite it before
     -- it could be read.
     appDirectMergeResult :: Maybe DirectMergeReport,
+    -- | The startup line's one-time diagnostics, carried until the first
+    -- open outcome publishes. 'Nothing' from birth when startup had nothing
+    -- to report, and 'Nothing' for good once the first outcome composes the
+    -- diagnostics onto its own notice — or finds them already dismissed.
+    -- See 'DirectMergeReport' for why the carrier records the notice
+    -- instance it was last shown as.
+    appStartupReport :: Maybe StartupReport,
     -- | A board refresh that could not start because a cycle was already in
     -- flight. An in-flight fetch may have read GitHub before a change this
     -- dashboard made landed, so it does not satisfy a request that has to
@@ -905,17 +927,41 @@ data ColumnSearch = ColumnSearch
   }
   deriving stock (Eq, Show)
 
--- | A landed merge's result, together with the notice it was last shown as.
+-- | A landed merge's result, together with the identity of the notice
+-- instance it was last shown as.
 --
 -- The second field is what keeps the result from outliving its own report.
 -- Some two dozen places clear or replace 'appNotice' -- both Esc handlers,
--- every overlay that opens, every selection move -- and each of them means
--- the user has stopped looking at this result. None of them can be asked to
--- remember that a second field exists, and a list of sites that must is a
--- list that will be incomplete again the next time one is added. Comparing
--- against what was actually put on screen needs no such list.
+-- every overlay that opens, every selection move, and now the ten-second
+-- expiry -- and each of them means the user has stopped looking at this
+-- result. None of them can be asked to remember that a second field exists,
+-- and a list of sites that must is a list that will be incomplete again the
+-- next time one is added. Comparing against the instance actually put on
+-- screen needs no such list -- and unlike the text comparison it replaced,
+-- it cannot let a later notice that happens to repeat the same words adopt a
+-- retired report, because an instance identity is never reissued.
 data DirectMergeReport = DirectMergeReport
   { directMergeReportResult :: Text,
-    directMergeReportShown :: Text
+    directMergeReportShownInstance :: Int
+  }
+  deriving stock (Eq, Show)
+
+-- | The startup diagnostics — an invalid cache, a settings problem, an
+-- authority notice, a degraded roster entry — together with the identity of
+-- the notice instance they were last shown as.
+--
+-- These fragments are reported nowhere else, so they ride the startup line
+-- until the first open generation publishes: an event notice arriving during
+-- the load composes onto the line rather than replacing it
+-- ('Kanban.UI.Util.noticeSetOverStartupReport'), and the first outcome
+-- composes them onto its own settled notice for the ordinary ten seconds
+-- ('Kanban.UI.Util.startupReportApplied'), which also retires the carry for
+-- good. The instance comparison is the same rule 'DirectMergeReport' states:
+-- a carry is honoured only while what is on screen is still the instance it
+-- last wrote, so a manual dismissal or an unrelated action's replacement
+-- retires the diagnostics rather than letting a later publish resurrect them.
+data StartupReport = StartupReport
+  { startupReportDiagnostics :: Text,
+    startupReportShownInstance :: Int
   }
   deriving stock (Eq, Show)

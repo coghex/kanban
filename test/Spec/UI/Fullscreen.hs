@@ -52,6 +52,7 @@ import Kanban.UI.SessionEvents (SessionOps (..), solveSessionOps)
 import Kanban.UI.State (settleOverlayFullscreen, toggleOverlayFullscreen)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types
+import Kanban.UI.Util (noticeCleared, noticeSet)
 import Kanban.Drainer (DrainerIncident (..))
 import qualified Graphics.Vty as Vty
 import Spec.Support.App (testAppState, withPullRequestSession, withReviewSession, withSolveSession)
@@ -206,7 +207,7 @@ spec = do
     it "stops above the footer, whatever height the notice gives it" $ do
       state <- boardState
       let frames notice =
-            fullscreenFrame terminalWidth terminalHeight (opened (DetailsOverlay detailsItem) state) {appNotice = notice}
+            fullscreenFrame terminalWidth terminalHeight (maybe noticeCleared noticeSet notice (opened (DetailsOverlay detailsItem) state))
           noticeRowsIn frame = length (filter (Data.Text.isInfixOf "wrap") frame)
           bare = frames Nothing
           oneLine = frames (Just "one line")
