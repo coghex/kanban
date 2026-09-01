@@ -16,6 +16,8 @@
 module Spec.Action.AutoSolve (spec) where
 
 import Control.Monad (forM)
+import Data.Aeson (encode)
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -47,12 +49,15 @@ import Kanban.Worker
     WorkerState (..),
     WorkerStatus (..),
     WorkerTask (..),
+    acknowledgeWorker,
     descriptorForSpec,
+    discoverWorkers,
   )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Data.Time (UTCTime, addUTCTime)
 import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch)
-import System.FilePath ((</>))
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath (takeDirectory, (</>))
 import Test.Hspec (Spec, describe, it, shouldBe, shouldSatisfy)
 
 -- ---------------------------------------------------------------------------
@@ -166,6 +171,14 @@ descriptorCarrying repository name task parent createdAt =
         workerAssignment = Nothing
       }
 
+-- | Write a worker's durable specification and state, as a launch and its
+-- supervisor would.
+persistWorker :: WorkerDescriptor -> WorkerState -> IO ()
+persistWorker descriptor state = do
+  createDirectoryIfMissing True (takeDirectory descriptor.workerDescriptorSpecPath)
+  LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+  LazyByteString.writeFile descriptor.workerDescriptorStatePath (encode state)
+
 -- | The baseline record an autosolve launch writes on the solver it starts:
 -- what the board held when the run began, and when that was.
 baselineParent :: Set.Set Int -> WorkerParent
@@ -264,7 +277,7 @@ withLoop worlds action =
                 { autoSolveActionTarget = targetUnderLoop,
                   autoSolveActionAttribution = attributionUnderLoop,
                   autoSolveActionProgress = progressAt AutoImplementing 0 Nothing,
-                  autoSolveActionSolver = solver,
+                  autoSolveActionSolver = AutoSolveSolverWorker solver,
                   autoSolveActionReviewer = Nothing
                 },
             loopReviewerDescriptor = reviewer,
@@ -572,8 +585,8 @@ spec = do
               recovered.autoSolveActionAttribution.attributionSolverBrand `shouldBe` ClaudeSolver
               (.workerDescriptorSpecPath) <$> recovered.autoSolveActionReviewer
                 `shouldBe` Just reviewer.workerDescriptorSpecPath
-              recovered.autoSolveActionSolver.workerDescriptorSpecPath
-                `shouldBe` solver.workerDescriptorSpecPath
+              ((.workerDescriptorSpecPath) <$> autoSolveSolverWorker recovered.autoSolveActionSolver)
+                `shouldBe` Just solver.workerDescriptorSpecPath
 
     -- The pull request the run is looping over is not history when a revision
     -- starts: dropping it left the rereview arm with nothing bound, and it
@@ -683,8 +696,82 @@ spec = do
               recovered.autoSolveActionReviewer `shouldBe` Nothing
               recovered.autoSolveActionProgress.autoSolvePullRequest
                 `shouldBe` Just pullRequestUnderLoop
-              recovered.autoSolveActionSolver.workerDescriptorSpecPath
-                `shouldBe` resumed.workerDescriptorSpecPath
+              ((.workerDescriptorSpecPath) <$> autoSolveSolverWorker recovered.autoSolveActionSolver)
+                `shouldBe` Just resumed.workerDescriptorSpecPath
+
+    -- The ordinary shape of a dashboard-launched run once its review round
+    -- has started: starting that round acknowledges the finished solver, and
+    -- the cache collects an acknowledged worker a newer one supersedes, so
+    -- `discoverWorkers` no longer offers it at all. A recovery that needed
+    -- that descriptor could take over almost no real run.
+    it "takes over a run whose finished solver has been acknowledged and collected" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              approvedPullRequest =
+                linkedPullRequest pullRequestUnderLoop ClaudeSolver [label defaultWorkflowConfig.approvalLabel]
+          solver <-
+            descriptorCarrying
+              repository
+              "solve-initial"
+              (SolveWorkerTaskKind (SolveWorkerTask issueUnderLoop AutoSolve ClaudeSolver))
+              (Just (baselineParent Set.empty))
+              epoch
+          reviewer <-
+            descriptorCarrying
+              repository
+              "pr-review"
+              (PullRequestWorkerTaskKind (PullRequestWorkerTask pullRequestUnderLoop PullRequestClaude PullRequestReview))
+              (Just (reviewParent 1))
+              (addUTCTime 60 epoch)
+          persistWorker solver (workerRecord (WorkerTerminal SolveCompleted) (Just "session-1"))
+          acknowledgeWorker solver
+          persistWorker reviewer (workerRecord WorkerRunning Nothing)
+          -- The control: discovery really does drop the solver, so the
+          -- recovery below is answering the case this is about.
+          discovered <- discoverWorkers repository
+          map (.workerDescriptorSpecPath) discovered `shouldBe` [reviewer.workerDescriptorSpecPath]
+          recovered <- recoverAutoSolveState repository targetUnderLoop (Set.fromList [pullRequestUnderLoop])
+          case recovered of
+            Nothing -> error "expected the review worker's parent to rebuild the action"
+            Just held -> do
+              held.autoSolveActionProgress.autoSolveStage `shouldBe` AutoReviewing
+              held.autoSolveActionProgress.autoSolvePullRequest `shouldBe` Just pullRequestUnderLoop
+              held.autoSolveActionProgress.autoSolveReviewRound `shouldBe` 1
+              -- The baseline is the run's, taken from the review worker's
+              -- parent record, and not the board's: the board holds the pull
+              -- request this run opened and the baseline must not.
+              held.autoSolveActionProgress.autoSolveKnownPullRequests `shouldBe` Set.fromList [7]
+              held.autoSolveActionAttribution.attributionSolverBrand `shouldBe` ClaudeSolver
+              -- The solver is nameable and resumable from the parent alone.
+              autoSolveSolverWorker held.autoSolveActionSolver `shouldBe` Nothing
+              case held.autoSolveActionSolver of
+                AutoSolveSolverRecorded record ->
+                  record.recordedSolverSession `shouldBe` Just "session-1"
+                other -> error ("expected a recorded solver, saw " <> show other)
+              ((.workerDescriptorSpecPath) <$> held.autoSolveActionReviewer)
+                `shouldBe` Just reviewer.workerDescriptorSpecPath
+              -- ...and it runs: the review settles and the verdict standing on
+              -- the pull request completes the action, with no solver worker
+              -- anywhere.
+              let turns =
+                    AutoSolveTurns
+                      (\_ request -> pure (Left (ActionDispatchFailed request.requestKind "no turn should start")))
+                      ( \descriptor ->
+                          pure
+                            ( if descriptor.workerDescriptorSpecPath == reviewer.workerDescriptorSpecPath
+                                then Right (workerRecord (WorkerTerminal SolveCompleted) Nothing)
+                                else Left "the solver's artifacts were collected"
+                            )
+                      )
+                  environment =
+                    (environmentFor repository)
+                      { actionCatalog =
+                          (environmentFor repository).actionCatalog {catalogPullRequests = [approvedPullRequest]}
+                      }
+              advanced <- advanceAutoSolveAction turns environment held
+              either Just (const Nothing) advanced
+                `shouldBe` Just (ActionPullRequestApproved pullRequestUnderLoop)
 
     it "takes over nothing when no autosolve solver worker is discoverable" $
       withTemporaryCacheRoot $ \temporaryRoot ->

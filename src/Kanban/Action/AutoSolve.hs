@@ -37,6 +37,10 @@ module Kanban.Action.AutoSolve
     initialAutoSolveState,
     autoSolveActionActivity,
     AutoSolveState (..),
+    AutoSolveSolver (..),
+    AutoSolveSolverRecord (..),
+    autoSolveSolverWorker,
+    autoSolveSolverAssignment,
     AutoSolveTurns (..),
     AutoSolveDriver (..),
     autoSolveStateFromWorkers,
@@ -59,6 +63,7 @@ import qualified Data.Text as Text
 import Kanban.Action.Target (workflowActionKindForLabelledPullRequest)
 import Kanban.Action.Types
 import Kanban.Domain (PullRequest (..), RepoSnapshot, Repository, WorkflowConfig)
+import Kanban.Models (RecordedAssignment)
 import Kanban.Solve (SolveOutcome (..), SolveWorkflow (..), SolverBrand)
 import Kanban.UI.AutoSolve
   ( AutoSolveCompletion (..),
@@ -94,9 +99,53 @@ data AutoSolveState = AutoSolveState
   { autoSolveActionTarget :: ResolvedTarget,
     autoSolveActionAttribution :: ActionAttribution,
     autoSolveActionProgress :: AutoSolveProgress,
-    autoSolveActionSolver :: WorkerDescriptor,
+    autoSolveActionSolver :: AutoSolveSolver,
     autoSolveActionReviewer :: Maybe WorkerDescriptor
   }
+
+-- | The solver turn a loop is waiting on, or would resume.
+--
+-- Two shapes, because the first one does not survive the loop's own progress.
+-- Starting a review round acknowledges the solver that opened the pull
+-- request, and an acknowledged terminal worker superseded by a newer one is
+-- what the worker cache collects: its specification, state, and journal are
+-- removed. A loop that needed that descriptor could therefore never be taken
+-- over after its first review round began -- which is most of a run.
+--
+-- What survives is the parent record the review worker carries, and it exists
+-- for exactly this: every field of 'WorkerParent' describes the /solver/ that
+-- launched the review rather than the review itself. So a solver whose worker
+-- is gone is still nameable, resumable, and answerable for.
+data AutoSolveSolver
+  = AutoSolveSolverWorker WorkerDescriptor
+  | AutoSolveSolverRecorded AutoSolveSolverRecord
+  deriving stock (Eq, Show)
+
+-- | What a collected solver's parent record still says about it: the session a
+-- revision resumes, the log that revision appends to, and the cell it replays.
+data AutoSolveSolverRecord = AutoSolveSolverRecord
+  { recordedSolverSession :: Maybe Text,
+    recordedSolverLogPath :: Maybe FilePath,
+    recordedSolverAssignment :: Maybe RecordedAssignment
+  }
+  deriving stock (Eq, Show)
+
+autoSolveSolverWorker :: AutoSolveSolver -> Maybe WorkerDescriptor
+autoSolveSolverWorker (AutoSolveSolverWorker descriptor) = Just descriptor
+autoSolveSolverWorker (AutoSolveSolverRecorded _) = Nothing
+
+autoSolveSolverAssignment :: AutoSolveSolver -> Maybe RecordedAssignment
+autoSolveSolverAssignment (AutoSolveSolverWorker descriptor) =
+  descriptor.workerDescriptorSpec.workerAssignment
+autoSolveSolverAssignment (AutoSolveSolverRecorded record) = record.recordedSolverAssignment
+
+solverRecordFromParent :: Maybe WorkerParent -> AutoSolveSolverRecord
+solverRecordFromParent parent =
+  AutoSolveSolverRecord
+    { recordedSolverSession = parent >>= (.workerParentSolverSession),
+      recordedSolverLogPath = parent >>= (.workerParentSolverLogPath),
+      recordedSolverAssignment = parent >>= (.workerParentSolverAssignment)
+    }
 
 -- | The two things this loop does to the world, injected.
 --
@@ -138,7 +187,7 @@ initialAutoSolveState target descriptor attribution =
             autoSolveKnownPullRequests = attribution.attributionKnownPullRequests,
             autoSolveStartedAt = attribution.attributionStartedAt
           },
-      autoSolveActionSolver = descriptor,
+      autoSolveActionSolver = AutoSolveSolverWorker descriptor,
       autoSolveActionReviewer = Nothing
     }
 
@@ -191,13 +240,21 @@ workerStatusIsLive (Right state) = case state.workerStateStatus of
 -- 'Left' is terminal and ends the action; 'Right' carries the loop forward.
 advanceAutoSolveAction :: AutoSolveTurns -> ActionEnvironment -> AutoSolveState -> IO (Either ActionOutcome AutoSolveState)
 advanceAutoSolveAction turns environment state = do
-  solverState <- turns.turnWorkerState state.autoSolveActionSolver
+  solverState <- traverse turns.turnWorkerState (autoSolveSolverWorker state.autoSolveActionSolver)
   reviewerState <- traverse turns.turnWorkerState state.autoSolveActionReviewer
-  let solverSession = either (const Nothing) (.workerStateSessionId) solverState
-      solverLogPath = either (const Nothing) (.workerStateLogPath) solverState
-      solverLive = workerStatusIsLive solverState
+  let recorded = case state.autoSolveActionSolver of
+        AutoSolveSolverWorker _ -> solverRecordFromParent Nothing
+        AutoSolveSolverRecorded held -> held
+      readSolver = solverState >>= either (const Nothing) Just
+      solverSession = maybe recorded.recordedSolverSession Just (readSolver >>= (.workerStateSessionId))
+      solverLogPath = maybe recorded.recordedSolverLogPath Just (readSolver >>= (.workerStateLogPath))
+      -- A solver with no worker left is provably finished rather than
+      -- unknown: only a terminal worker is acknowledged, and only an
+      -- acknowledged one superseded by a newer worker is collected. An
+      -- unreadable /live/ descriptor still fails closed onto live.
+      solverLive = maybe False workerStatusIsLive solverState
       reviewPhase = reviewPhaseForRecord <$> reviewerState
-      solverStatus = either (const Nothing) (Just . (.workerStateStatus)) solverState
+      solverStatus = (.workerStateStatus) <$> readSolver
       reviewerStatus = reviewerState >>= either (const Nothing) (Just . (.workerStateStatus))
   case settledReviewTurn reviewerStatus of
     Just outcome -> pure (Left outcome)
@@ -269,7 +326,7 @@ advanceAutoSolveAction turns environment state = do
           environment
           (actionRequest AutoSolveIssue identity (TargetByKind ActionTargetIssue issueNumber))
             { requestSolverBrand = Just brand,
-              requestRecordedAssignment = state.autoSolveActionSolver.workerDescriptorSpec.workerAssignment,
+              requestRecordedAssignment = autoSolveSolverAssignment state.autoSolveActionSolver,
               requestExistingSession = Just turn.autoSolveRevisionSession,
               requestExistingLogPath = solverLogPath,
               requestResumeProvenance = turn.autoSolveRevisionProvenance,
@@ -284,7 +341,7 @@ advanceAutoSolveAction turns environment state = do
             Right
               state
                 { autoSolveActionProgress = progress,
-                  autoSolveActionSolver = descriptor,
+                  autoSolveActionSolver = AutoSolveSolverWorker descriptor,
                   autoSolveActionReviewer = Nothing
                 }
 
@@ -302,7 +359,7 @@ advanceAutoSolveAction turns environment state = do
           workerParentStartedAt = progress.autoSolveStartedAt,
           workerParentKnownPullRequests = progress.autoSolveKnownPullRequests,
           workerParentPullRequest = progress.autoSolvePullRequest,
-          workerParentSolverAssignment = state.autoSolveActionSolver.workerDescriptorSpec.workerAssignment
+          workerParentSolverAssignment = autoSolveSolverAssignment state.autoSolveActionSolver
         }
 
 -- | What one observation of an autosolve session does next, for either
@@ -415,66 +472,100 @@ settledReviewTurn _ = Nothing
 -- all, which is the only honest answer: an action with no durable solver turn
 -- is one this registry has nothing to take over.
 autoSolveStateFromWorkers :: ResolvedTarget -> Set Int -> [WorkerDescriptor] -> Maybe AutoSolveState
-autoSolveStateFromWorkers target boardPullRequests descriptors = do
-  solver <- lastOf [descriptor | descriptor <- descriptors, isAutoSolveFor issueNumber descriptor]
-  brand <- solverBrandOf solver
-  let reviewer =
-        lastOf [descriptor | descriptor <- descriptors, isReviewFor issueNumber descriptor]
-      solverParent = solver.workerDescriptorSpec.workerParent
-      reviewerParent = reviewer >>= (.workerDescriptorSpec.workerParent)
-      -- A solver created no earlier than the review worker is a revision the
-      -- loop has already moved on to, so that review round is history rather
-      -- than the turn in flight. The pull request it reviewed is /not/
-      -- history: it is what the whole loop is looping over, and a revision is
-      -- the loop still working on it.
-      solverIsCurrent =
-        maybe
-          True
-          (\held -> solver.workerDescriptorSpec.workerCreatedAt >= held.workerDescriptorSpec.workerCreatedAt)
-          reviewer
-      -- The run's baseline is on its own solver's record. A review worker's
-      -- parent describes that same solver, so it is the fallback for a run
-      -- whose solver was launched before this release recorded one.
-      baseline = maybe reviewerParent Just solverParent
-      -- The round belongs to whichever turn is in flight, falling back to the
-      -- other record: a solver launched before this release recorded a parent
-      -- still has its round on the review worker it followed.
-      currentParent = maybe baseline Just (if solverIsCurrent then solverParent else reviewerParent)
-      reviewRound = maybe 0 (.workerParentReviewRound) currentParent
-      known = maybe boardPullRequests (.workerParentKnownPullRequests) baseline
-      startedAt = maybe solver.workerDescriptorSpec.workerCreatedAt (.workerParentStartedAt) baseline
-      -- Kept whichever turn is in flight, and read from the solver's own
-      -- record first: a revision the loop resumed records the pull request it
-      -- is revising, which is the only place a run recovered mid-revision can
-      -- learn it once its review worker is history.
-      bound = maybe (reviewer >>= reviewNumberOf) Just (solverParent >>= (.workerParentPullRequest))
-      stage
-        | solverIsCurrent && reviewRound == 0 = AutoImplementing
-        | solverIsCurrent = AutoRevising
-        | otherwise = AutoReviewing
-  pure
-    AutoSolveState
-      { autoSolveActionTarget = target,
-        autoSolveActionAttribution =
-          ActionAttribution
-            { attributionKnownPullRequests = known,
-              attributionStartedAt = startedAt,
-              attributionSolverBrand = brand
-            },
-        autoSolveActionProgress =
-          AutoSolveProgress
-            { autoSolveStage = stage,
-              autoSolvePullRequest = bound,
-              autoSolveReviewRound = reviewRound,
-              autoSolveKnownPullRequests = known,
-              autoSolveStartedAt = startedAt
-            },
-        autoSolveActionSolver = solver,
-        autoSolveActionReviewer = if solverIsCurrent then Nothing else reviewer
-      }
+autoSolveStateFromWorkers target boardPullRequests descriptors =
+  case (solver, reviewer) of
+    (Just held, _) -> fromSolver held
+    -- No solver worker left, but a review round in flight. This is the
+    -- ordinary shape of a dashboard-launched run, not an edge: starting the
+    -- review acknowledges the finished solver, and the cache collects an
+    -- acknowledged worker a newer one supersedes. Everything the loop needs
+    -- about that solver is on the review worker's parent record, which is
+    -- what that record is for.
+    (Nothing, Just held) -> fromReviewer held
+    (Nothing, Nothing) -> Nothing
   where
     issueNumber = target.resolvedTargetNumber
     lastOf values = listToMaybe (reverse values)
+    solver = lastOf [descriptor | descriptor <- descriptors, isAutoSolveFor issueNumber descriptor]
+    reviewer = lastOf [descriptor | descriptor <- descriptors, isReviewFor issueNumber descriptor]
+
+    fromReviewer held = do
+      let parent = held.workerDescriptorSpec.workerParent
+      brand <- (.workerParentSolverBrand) <$> parent
+      pure
+        (assemble
+           brand
+           (AutoSolveSolverRecorded (solverRecordFromParent parent))
+           (Just held)
+           AutoReviewing
+           (maybe 0 (.workerParentReviewRound) parent)
+           (maybe boardPullRequests (.workerParentKnownPullRequests) parent)
+           (maybe held.workerDescriptorSpec.workerCreatedAt (.workerParentStartedAt) parent)
+           (maybe (reviewNumberOf held) Just (parent >>= (.workerParentPullRequest))))
+
+    fromSolver held = do
+      brand <- solverBrandOf held
+      let solverParent = held.workerDescriptorSpec.workerParent
+          reviewerParent = reviewer >>= (.workerDescriptorSpec.workerParent)
+          -- A solver created no earlier than the review worker is a revision
+          -- the loop has already moved on to, so that review round is history
+          -- rather than the turn in flight. The pull request it reviewed is
+          -- /not/ history: it is what the whole loop is looping over, and a
+          -- revision is the loop still working on it.
+          solverIsCurrent =
+            maybe
+              True
+              (\other -> held.workerDescriptorSpec.workerCreatedAt >= other.workerDescriptorSpec.workerCreatedAt)
+              reviewer
+          -- The run's baseline is on its own solver's record. A review
+          -- worker's parent describes that same solver, so it is the fallback
+          -- for a run whose solver was launched before this release recorded
+          -- one.
+          baseline = maybe reviewerParent Just solverParent
+          -- The round belongs to whichever turn is in flight, falling back to
+          -- the other record.
+          currentParent = maybe baseline Just (if solverIsCurrent then solverParent else reviewerParent)
+          -- Read from the solver's own record first: a revision the loop
+          -- resumed records the pull request it is revising, which is the only
+          -- place a run recovered mid-revision can learn it once its review
+          -- worker is history.
+          bound = maybe (reviewer >>= reviewNumberOf) Just (solverParent >>= (.workerParentPullRequest))
+          reviewRound = maybe 0 (.workerParentReviewRound) currentParent
+          stage
+            | solverIsCurrent && reviewRound == 0 = AutoImplementing
+            | solverIsCurrent = AutoRevising
+            | otherwise = AutoReviewing
+      pure
+        (assemble
+           brand
+           (AutoSolveSolverWorker held)
+           (if solverIsCurrent then Nothing else reviewer)
+           stage
+           reviewRound
+           (maybe boardPullRequests (.workerParentKnownPullRequests) baseline)
+           (maybe held.workerDescriptorSpec.workerCreatedAt (.workerParentStartedAt) baseline)
+           bound)
+
+    assemble brand solverIdentity reviewerDescriptor stage reviewRound known startedAt bound =
+      AutoSolveState
+        { autoSolveActionTarget = target,
+          autoSolveActionAttribution =
+            ActionAttribution
+              { attributionKnownPullRequests = known,
+                attributionStartedAt = startedAt,
+                attributionSolverBrand = brand
+              },
+          autoSolveActionProgress =
+            AutoSolveProgress
+              { autoSolveStage = stage,
+                autoSolvePullRequest = bound,
+                autoSolveReviewRound = reviewRound,
+                autoSolveKnownPullRequests = known,
+                autoSolveStartedAt = startedAt
+              },
+          autoSolveActionSolver = solverIdentity,
+          autoSolveActionReviewer = reviewerDescriptor
+        }
 
 isAutoSolveFor :: Int -> WorkerDescriptor -> Bool
 isAutoSolveFor issueNumber descriptor = case descriptor.workerDescriptorSpec.workerTask of
