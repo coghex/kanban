@@ -1,6 +1,9 @@
 -- | The embedded issue-review client: connection startup and shutdown, the
 -- reader threads, and the dispatch of everything a provider sends back —
--- including routing a tool call to "Kanban.Review.Tools" and answering it.
+-- including routing a tool call to "Kanban.Review.Tools" and answering it,
+-- whether it arrived as an app-server request on the provider's own wire or
+-- as a frame forwarded by the stdio MCP re-entry a stream-json backend's
+-- tools go over ('serveConnectionToolCalls', D-15).
 --
 -- A client holds a /pool/ of connections rather than one process
 -- ("Kanban.Review.Connection"). Codex's backend shares one connection across
@@ -46,6 +49,7 @@ module Kanban.Review
     ReviewResult (..),
     ReviewStage (..),
     ReviewThreadId (..),
+    ReviewToolServerLaunch (..),
     ReviewTurnOutcome (..),
     ReviewWireMessage (..),
     StreamRecord (..),
@@ -119,7 +123,7 @@ module Kanban.Review
   )
 where
 
-import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newMVar, putMVar, takeMVar, withMVar)
+import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newMVar, putMVar, takeMVar, threadDelay, withMVar)
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception (IOException, try)
 import Control.Monad (forever, void, when)
@@ -158,6 +162,7 @@ import Kanban.ProviderAdapter
     ReviewLaunch (..),
     ReviewProcessShape (..),
     ReviewProtocol (..),
+    ReviewToolServerLaunch (..),
     adapterFor,
     claudeReviewArguments,
   )
@@ -180,8 +185,11 @@ import Kanban.Review.Canonical
   )
 import Kanban.Review.Client
   ( ReviewClient (..),
+    ReviewToolProxy (..),
     ToolRegistry,
     attachToolProcess,
+    destroyReviewToolProxy,
+    drainReviewToolProxies,
     drainToolRegistry,
     emitProtocolWarning,
     killConnectionToolProcesses,
@@ -189,8 +197,10 @@ import Kanban.Review.Client
     killReviewTools,
     killThreadToolProcesses,
     newToolRegistry,
+    registerReviewToolProxy,
     releaseToolSlot,
     reserveToolSlot,
+    takeReviewToolProxy,
     withReservedToolSlot,
   )
 import Kanban.Review.Connection
@@ -228,6 +238,18 @@ import Kanban.Review.Prompts
     questionToolName,
     reviewDeveloperInstructions,
     reviewPrompt,
+  )
+import Kanban.ReviewToolServer
+  ( ReviewToolEndpoint (..),
+    createReviewToolEndpoint,
+    decodeEndpointCall,
+    mcpToolDescriptor,
+    mcpToolResult,
+    proxyError,
+    proxyResult,
+    readEndpointCall,
+    teardownReviewToolEndpoint,
+    writeEndpointReply,
   )
 import Kanban.Review.Stream
   ( StreamRecord (..),
@@ -278,6 +300,7 @@ import Kanban.Review.Types
     reviewStageForLabels,
   )
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
+import System.Environment (getExecutablePath)
 import System.Exit (ExitCode (..))
 import System.IO (BufferMode (..), Handle, hClose, hFlush, hIsEOF, hSetBuffering)
 import System.Process
@@ -368,6 +391,7 @@ startResolvedReviewClient backend roster workflowConfig repository eventSink = d
   activeTurns <- newMVar Map.empty
   threadIssues <- newMVar Map.empty
   toolRegistry <- newToolRegistry
+  toolProxies <- newMVar Map.empty
   let client =
         ReviewClient
           { reviewBackend = backend,
@@ -375,6 +399,7 @@ startResolvedReviewClient backend roster workflowConfig repository eventSink = d
             reviewActiveTurns = activeTurns,
             reviewThreadIssues = threadIssues,
             reviewToolRegistry = toolRegistry,
+            reviewToolProxies = toolProxies,
             reviewEventSink = eventSink,
             reviewRepositoryRoot = repository.repositoryRoot,
             reviewRepositorySlug = repository.repositoryOwner <> "/" <> repository.repositoryName,
@@ -392,7 +417,7 @@ startResolvedReviewClient backend roster workflowConfig repository eventSink = d
   case backend.backendProcessShape of
     ProcessPerThread -> pure (Right client)
     SharedProcess -> do
-      started <- startReviewConnection client
+      started <- startReviewConnection client Nothing
       case started of
         Left message -> closeReviewLog sessionLog >> pure (Left message)
         Right _ -> pure (Right client)
@@ -400,8 +425,12 @@ startResolvedReviewClient backend roster workflowConfig repository eventSink = d
 -- | The connection that serves a new review thread: the one this client
 -- already holds when its backend shares a process across every thread, or a
 -- freshly spawned one when the backend gives each thread its own.
-acquireReviewConnection :: ReviewClient -> IO (Either Text ReviewConnection)
-acquireReviewConnection client = case client.reviewBackend.backendProcessShape of
+--
+-- The issue travels into a per-thread spawn because that spawn may create
+-- this thread's tool endpoint, and the endpoint is bound to the one issue
+-- its review owns rather than to anything a caller could later claim.
+acquireReviewConnection :: ReviewClient -> Int -> IO (Either Text ReviewConnection)
+acquireReviewConnection client issueNumber = case client.reviewBackend.backendProcessShape of
   -- A shared-process backend's one connection is created when the client
   -- starts and is never replaced. Spawning a replacement here would be a
   -- second app-server for a client the UI has already been told is finished,
@@ -412,15 +441,18 @@ acquireReviewConnection client = case client.reviewBackend.backendProcessShape o
     case held of
       connection : _ -> pure (Right connection)
       [] -> pure (Left (connectionGoneMessage client))
-  ProcessPerThread -> startReviewConnection client
+  ProcessPerThread -> startReviewConnection client (Just issueNumber)
 
--- | Reserve a slot and spawn a connection into it.
-startReviewConnection :: ReviewClient -> IO (Either Text ReviewConnection)
-startReviewConnection client = do
+-- | Reserve a slot and spawn a connection into it. @reviewIssue@ is the one
+-- issue the connection will serve where the backend gives each review its
+-- own process, and 'Nothing' for a shared-process backend's startup spawn,
+-- which serves no review yet.
+startReviewConnection :: ReviewClient -> Maybe Int -> IO (Either Text ReviewConnection)
+startReviewConnection client reviewIssue = do
   reserved <- reserveConnectionSlot client.reviewConnections
   case reserved of
     ConnectionPoolClosed -> pure (Left (clientShuttingDownMessage client))
-    ReservedConnection identifier -> spawnReviewConnection client identifier
+    ReservedConnection identifier -> spawnReviewConnection client identifier reviewIssue
 
 -- | Start one provider process, complete its handshake, and register it.
 --
@@ -428,50 +460,65 @@ startReviewConnection client = do
 -- later finds it in the pool — shutdown above all — may wait on its
 -- completion signal unconditionally. A failure before that point is cleaned
 -- up here and releases the reservation, because nothing else has ever seen
--- it.
-spawnReviewConnection :: ReviewClient -> ConnectionId -> IO (Either Text ReviewConnection)
-spawnReviewConnection client identifier = case backendAssignment client of
+-- it — including the tool endpoint a stream-json spawn creates ahead of its
+-- process, which every failure path below unlinks before reporting.
+spawnReviewConnection :: ReviewClient -> ConnectionId -> Maybe Int -> IO (Either Text ReviewConnection)
+spawnReviewConnection client identifier reviewIssue = case backendAssignment client of
   -- Resolved before the process, not after: a backend whose argv carries the
   -- roster's model and effort cannot be launched without them, and one that
   -- carries them on the wire would only reach the same refusal a moment
   -- later with a provider process already running.
   Left message -> abandonSlot message
   Right assignment -> do
-    let processSpec = client.reviewBackend.backendProcess (ReviewLaunch client.reviewRepositoryRoot assignment)
-    started <- try (createProcess processSpec) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
-    case started of
-      Left exception -> abandonSlot ("Could not start " <> label <> ": " <> exceptionText exception)
-      Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
-        hSetBuffering inputHandle LineBuffering
-        hSetBuffering outputHandle LineBuffering
-        (processManaged, groupLeaderProblem) <- managedProcess processHandle
-        mapM_ (\value -> mapM_ (logMessage value "group-leadership-unverified") groupLeaderProblem) client.reviewSessionLog
-        connection <- newReviewConnection identifier inputHandle processHandle processManaged
-        -- What this connection's two readers share. Held beside the
-        -- connection rather than on it because it is the reader loops' own
-        -- state, and in one place because they use it together: see
-        -- 'StreamAttribution'.
-        attribution <- newMVar (StreamAttribution Nothing [])
-        initialized <- completeHandshake client connection outputHandle
-        case initialized of
-          Nothing -> abandonConnection connection (sentenceLabel <> " initialization timed out")
-          Just (Left message) -> abandonConnection connection message
-          Just (Right ()) -> do
-            markConnectionReadersStarted connection
-            void (forkIO (readProviderOutput client connection attribution outputHandle >> putMVar connection.connectionOutputDone ()))
-            void (forkIO (readProviderErrors client connection attribution errorHandle >> putMVar connection.connectionErrorDone ()))
-            void (forkIO (watchServerProcess client connection))
-            attached <- attachConnection client.reviewConnections connection
-            if attached
-              then pure (Right connection)
-              else do
-                -- Shutdown drained the pool while this was starting, so no
-                -- drain will ever see this connection: it is stopped here, by
-                -- the only code that still holds it.
-                stopReviewConnection connection
-                awaitConnectionReaders connection
-                pure (Left (clientShuttingDownMessage client))
-      Right _ -> abandonSlot (sentenceLabel <> " did not provide all three standard streams")
+    prepared <- prepareToolServer client
+    case prepared of
+      Left message -> abandonSlot message
+      Right toolServer -> do
+        let processSpec = client.reviewBackend.backendProcess (ReviewLaunch client.reviewRepositoryRoot assignment (snd <$> toolServer))
+        started <- try (createProcess processSpec) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
+        case started of
+          Left exception -> abandonEndpoint toolServer >> abandonSlot ("Could not start " <> label <> ": " <> exceptionText exception)
+          Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
+            hSetBuffering inputHandle LineBuffering
+            hSetBuffering outputHandle LineBuffering
+            (processManaged, groupLeaderProblem) <- managedProcess processHandle
+            mapM_ (\value -> mapM_ (logMessage value "group-leadership-unverified") groupLeaderProblem) client.reviewSessionLog
+            connection <- newReviewConnection identifier inputHandle processHandle processManaged
+            -- What this connection's two readers share. Held beside the
+            -- connection rather than on it because it is the reader loops' own
+            -- state, and in one place because they use it together: see
+            -- 'StreamAttribution'.
+            attribution <- newMVar (StreamAttribution Nothing [])
+            initialized <- completeHandshake client connection outputHandle
+            case initialized of
+              Nothing -> abandonEndpoint toolServer >> abandonConnection connection (sentenceLabel <> " initialization timed out")
+              Just (Left message) -> abandonEndpoint toolServer >> abandonConnection connection message
+              Just (Right ()) -> do
+                -- Registered before the watcher is forked, so from here on
+                -- the connection's own terminal cleanup owns the proxy —
+                -- including the refused-attachment path below, whose
+                -- 'stopReviewConnection' the watcher answers.
+                mapM_
+                  ( \(endpoint, _) -> do
+                      server <- forkIO (serveConnectionToolCalls client connection attribution reviewIssue endpoint)
+                      registerReviewToolProxy client identifier (ReviewToolProxy endpoint server)
+                  )
+                  toolServer
+                markConnectionReadersStarted connection
+                void (forkIO (readProviderOutput client connection attribution outputHandle >> putMVar connection.connectionOutputDone ()))
+                void (forkIO (readProviderErrors client connection attribution errorHandle >> putMVar connection.connectionErrorDone ()))
+                void (forkIO (watchServerProcess client connection))
+                attached <- attachConnection client.reviewConnections connection
+                if attached
+                  then pure (Right connection)
+                  else do
+                    -- Shutdown drained the pool while this was starting, so no
+                    -- drain will ever see this connection: it is stopped here, by
+                    -- the only code that still holds it.
+                    stopReviewConnection connection
+                    awaitConnectionReaders connection
+                    pure (Left (clientShuttingDownMessage client))
+          Right _ -> abandonEndpoint toolServer >> abandonSlot (sentenceLabel <> " did not provide all three standard streams")
   where
     label = client.reviewBackend.backendLabel
     sentenceLabel = sentenceCase label
@@ -481,6 +528,26 @@ spawnReviewConnection client identifier = case backendAssignment client of
     abandonConnection connection message = do
       stopReviewConnection connection
       abandonSlot message
+    abandonEndpoint = mapM_ (teardownReviewToolEndpoint . fst)
+
+-- | What a spawn needs when its backend's tools go over the MCP re-entry
+-- rather than inline: a fresh endpoint, and the launch record naming the
+-- exact currently running executable against it.
+--
+-- Keyed on the protocol because the protocol is what decides the question:
+-- the app-server takes its tools in @thread\/start@, and the stream-json
+-- channel has no tool declaration at all, so a backend speaking it can only
+-- be served this way (D-15).
+prepareToolServer :: ReviewClient -> IO (Either Text (Maybe (ReviewToolEndpoint, ReviewToolServerLaunch)))
+prepareToolServer client = case client.reviewBackend.backendProtocol of
+  AppServerProtocol -> pure (Right Nothing)
+  StreamJsonProtocol -> do
+    created <- createReviewToolEndpoint
+    case created of
+      Left message -> pure (Left ("Could not create the review tool endpoint: " <> message))
+      Right endpoint -> do
+        executable <- getExecutablePath
+        pure (Right (Just (endpoint, ReviewToolServerLaunch executable endpoint.endpointDirectory)))
 
 -- | Complete whatever a backend requires before anything may be sent, which
 -- for one of the two protocols is nothing at all.
@@ -529,6 +596,7 @@ newReviewClientForTesting roster bounds repositoryRoot repositorySlug eventSink 
   activeTurns <- newMVar Map.empty
   threadIssues <- newMVar Map.empty
   toolRegistry <- newToolRegistry
+  toolProxies <- newMVar Map.empty
   let client =
         ReviewClient
           { reviewBackend = placeholderReviewBackend,
@@ -536,6 +604,7 @@ newReviewClientForTesting roster bounds repositoryRoot repositorySlug eventSink 
             reviewActiveTurns = activeTurns,
             reviewThreadIssues = threadIssues,
             reviewToolRegistry = toolRegistry,
+            reviewToolProxies = toolProxies,
             reviewEventSink = eventSink,
             reviewRepositoryRoot = repositoryRoot,
             reviewRepositorySlug = repositorySlug,
@@ -593,7 +662,7 @@ addTestingReviewConnection client recording = do
     ReservedConnection value -> pure value
     _ -> fail "the testing review client's connection pool refused a reservation"
   (Just processInput, Just _outputHandle, Just _errorHandle, processHandle) <-
-    createProcess (client.reviewBackend.backendProcess (ReviewLaunch client.reviewRepositoryRoot placeholderAssignment))
+    createProcess (client.reviewBackend.backendProcess (ReviewLaunch client.reviewRepositoryRoot placeholderAssignment Nothing))
   (processManaged, _) <- managedProcess processHandle
   (inputHandle, readEnd) <-
     if not recording
@@ -639,6 +708,7 @@ newRecordingReviewClientForTesting roster eventSink = do
   activeTurns <- newMVar Map.empty
   threadIssues <- newMVar Map.empty
   toolRegistry <- newToolRegistry
+  toolProxies <- newMVar Map.empty
   let client =
         ReviewClient
           { reviewBackend = placeholderReviewBackend,
@@ -646,6 +716,7 @@ newRecordingReviewClientForTesting roster eventSink = do
             reviewActiveTurns = activeTurns,
             reviewThreadIssues = threadIssues,
             reviewToolRegistry = toolRegistry,
+            reviewToolProxies = toolProxies,
             reviewEventSink = eventSink,
             reviewRepositoryRoot = ".",
             reviewRepositorySlug = "coghex/kanban",
@@ -709,7 +780,7 @@ beginIssueReview client issueNumber = case backendAssignment client of
     -- backend hands back the connection it already holds, so every thread
     -- lands on one process; a per-thread backend spawns here, so this
     -- review's thread is the only one its process will ever serve.
-    acquired <- acquireReviewConnection client
+    acquired <- acquireReviewConnection client issueNumber
     case acquired of
       Left message -> pure (Left message)
       Right connection -> case client.reviewBackend.backendProtocol of
@@ -787,38 +858,64 @@ withConnection client identifier action = do
     Nothing -> pure (Left (connectionGoneMessage client))
     Just connection -> action connection
 
+-- | Deliver the user's answer to the request that asked for it, the way
+-- that request arrived. An app-server question is a server request on the
+-- connection's own wire and is answered there; a stream-json backend's
+-- question came through the MCP re-entry, whose caller is still blocked on
+-- the forwarded call, so the answer is the reply frame that resolves it —
+-- written to that connection's endpoint and never to the provider's stdin,
+-- which on this channel reads only user messages. Both carry the same
+-- encoded answer document, so the model reads one shape on either backend.
 answerReviewQuestion :: ReviewClient -> ReviewRequestId -> ReviewAnswer -> IO (Either Text ())
 answerReviewQuestion client requestIdentity answer =
   withConnection client requestIdentity.reviewRequestConnection $ \connection ->
-    sendValue client connection
-      . object
-      $ [ "id" .= requestIdentity.reviewRequestWireId,
-        "result"
-          .= object
-            [ "success" .= True,
-              "contentItems"
-                .= [ object
-                       [ "type" .= ("inputText" :: Text),
-                         "text" .= TextEncoding.decodeUtf8 (LazyByteString.toStrict (encode answerValue))
+    case client.reviewBackend.backendProtocol of
+      AppServerProtocol ->
+        sendValue client connection
+          . object
+          $ [ "id" .= requestIdentity.reviewRequestWireId,
+            "result"
+              .= object
+                [ "success" .= True,
+                  "contentItems"
+                    .= [ object
+                           [ "type" .= ("inputText" :: Text),
+                             "text" .= renderedAnswer
+                           ]
                        ]
-                   ]
-              ]
-        ]
+                  ]
+            ]
+      StreamJsonProtocol -> do
+        proxies <- readMVar client.reviewToolProxies
+        case Map.lookup connection.connectionId proxies of
+          Nothing -> pure (Left (connectionGoneMessage client))
+          Just proxy ->
+            writeEndpointReply
+              proxy.proxyEndpoint
+              (proxyResult requestIdentity.reviewRequestWireId (mcpToolResult False renderedAnswer))
   where
+    renderedAnswer = TextEncoding.decodeUtf8 (LazyByteString.toStrict (encode answerValue))
     answerValue =
       object
         [ "selected" .= answer.reviewAnswerSelections,
           "other" .= answer.reviewAnswerOther
         ]
 
+-- | Answer a command or file-change approval request, which only the
+-- app-server ever raises. Refused rather than written on the CLI's channel:
+-- no approval request can arrive there, so an identity that reaches this
+-- arm is stale, and the app-server response it would produce is a line the
+-- CLI process on the other end would read as ordinary input.
 approveReviewAction :: ReviewClient -> ReviewRequestId -> Bool -> Bool -> IO (Either Text ())
-approveReviewAction client requestIdentity accepted forSession =
-  withConnection client requestIdentity.reviewRequestConnection $ \connection ->
-    sendValue client connection
-      . object
-      $ [ "id" .= requestIdentity.reviewRequestWireId,
-          "result" .= object ["decision" .= decision]
-        ]
+approveReviewAction client requestIdentity accepted forSession = case client.reviewBackend.backendProtocol of
+  StreamJsonProtocol -> pure (Left (unsupportedOperation client "answer an approval request"))
+  AppServerProtocol ->
+    withConnection client requestIdentity.reviewRequestConnection $ \connection ->
+      sendValue client connection
+        . object
+        $ [ "id" .= requestIdentity.reviewRequestWireId,
+            "result" .= object ["decision" .= decision]
+          ]
   where
     decision :: Text
     decision
@@ -860,6 +957,12 @@ unsupportedOperation client = unsupportedReviewOperationMessage client.reviewBac
 -- this connection's entries are killed.
 terminalConnectionCleanup :: ReviewClient -> ReviewConnection -> IO ()
 terminalConnectionCleanup client connection = do
+  -- The tool re-entry first, so nothing goes on answering the endpoint of a
+  -- connection that is over: unlinking it is also what makes a still-running
+  -- re-entered server fail its pending calls and exit. Taken, so the two
+  -- terminal paths that both reach here cannot tear one proxy down twice.
+  taken <- takeReviewToolProxy client connection.connectionId
+  mapM_ destroyReviewToolProxy taken
   case client.reviewBackend.backendProcessShape of
     SharedProcess -> do
       toolProcesses <- drainToolRegistry client.reviewToolRegistry
@@ -883,6 +986,14 @@ stopReviewClient client = do
   connections <- drainConnectionPool client.reviewConnections
   mapM_ stopReviewConnection connections
   mapM_ awaitConnectionReaders connections
+  -- Every attached connection's proxy was destroyed by its own watcher
+  -- inside the waits above; what this drain reaps is a spawn that
+  -- registered its proxy and was then refused attachment in the shutdown
+  -- race, whose own cleanup may still be running. Take-semantics make the
+  -- overlap harmless, and after this no endpoint of this client's remains
+  -- on disk.
+  leftover <- drainReviewToolProxies client
+  mapM_ destroyReviewToolProxy leftover
   -- A shared-process client's transcript was closed by the watcher above,
   -- which is the only path a crashed client ever reaches; a per-thread
   -- client's is still open, and this is where that client ends.
@@ -1305,9 +1416,8 @@ handleServerRequest client connection requestId method params = case method of
                   . forkIO
                   $ runGitHubToolCall client connection threadId wrappedId githubRequest
               else do
-                let message = "kanban_github_issue may only access the issue owned by this review thread"
-                void (sendDynamicToolFailure client connection wrappedId message)
-                emitProtocolWarning client message
+                void (sendDynamicToolFailure client connection wrappedId crossIssueRefusal)
+                emitProtocolWarning client crossIssueRefusal
         _ -> void (sendDynamicToolFailure client connection wrappedId "GitHub issue tool call omitted its thread id or arguments")
     | otherwise -> void (sendDynamicToolFailure client connection wrappedId "Kanban does not implement that dynamic tool")
   "item/commandExecution/requestApproval" -> emitApproval False
@@ -1386,6 +1496,119 @@ runGitHubToolCall client connection threadId requestId request = do
         (_, Left message) -> Left message
         (Right output, Right ()) -> Right output
   client.reviewEventSink (ReviewGitHubFinished threadId completion)
+
+crossIssueRefusal :: Text
+crossIssueRefusal = "kanban_github_issue may only access the issue owned by this review thread"
+
+-- | Answer one connection's tool re-entry: the parent's half of the MCP
+-- proxy a stream-json backend's tools go over (D-15).
+--
+-- The dispatch mirrors 'handleServerRequest''s @item\/tool\/call@ arms by
+-- outcome: a valid question emits 'ReviewQuestionRequested' and leaves the
+-- forwarded call blocked until the user's answer resolves it; an authorized
+-- GitHub call emits 'ReviewGitHubStarted' and 'ReviewGitHubFinished' around
+-- the same runner the Codex path forks; and an invalid or cross-issue call
+-- is answered as a tool-level failure beside the same protocol warning,
+-- with no start or finish event, exactly as the app-server path refuses it.
+--
+-- Authorization is the endpoint's: this connection was spawned for exactly
+-- one review, the endpoint was bound to that review's issue before the
+-- provider existed, and no field of the call can name another thread. That
+-- is the same one-issue boundary 'githubRequestMatchesThread' holds on the
+-- multiplexed backend, held by construction instead of by lookup — and a
+-- connection spawned for no review at all ('Nothing') authorizes nothing.
+--
+-- The loop ends when the endpoint's read fails, which teardown causes by
+-- closing it; 'destroyReviewToolProxy' also kills the loop directly, so a
+-- teardown cannot wait on a read that never returns.
+serveConnectionToolCalls :: ReviewClient -> ReviewConnection -> MVar StreamAttribution -> Maybe Int -> ReviewToolEndpoint -> IO ()
+serveConnectionToolCalls client connection attribution reviewIssue endpoint = do
+  _ <- try (forever serveOne) :: IO (Either IOException ())
+  pure ()
+  where
+    serveOne = do
+      line <- readEndpointCall endpoint
+      case decodeEndpointCall line of
+        Left message -> emitProtocolWarning client (streamDiagnostic client ("tool endpoint " <> message))
+        Right (wireId, method, params) -> case method of
+          "tools/list" ->
+            void (writeEndpointReply endpoint (proxyResult wireId (object ["tools" .= servedToolDescriptors])))
+          "tools/call" -> serveToolCall wireId params
+          _ -> do
+            void (writeEndpointReply endpoint (proxyError wireId (-32601) ("Kanban's review tool server does not serve " <> method)))
+            emitProtocolWarning client (streamDiagnostic client ("tool endpoint forwarded an unservable method: " <> method))
+    -- The same declarations the Codex thread registers inline, translated —
+    -- never restated — so the served schemas carry whatever the adapter's
+    -- declarations carry, the workflow label vocabulary included.
+    servedToolDescriptors =
+      map
+        mcpToolDescriptor
+        ((adapterFor client.reviewBackend.backendProvider).adapterReviewTools client.reviewModelRoster client.reviewWorkflowConfig)
+    serveToolCall wireId params = do
+      let wrappedId = ReviewRequestId connection.connectionId wireId
+          arguments = maybe (Object mempty) id (objectField "arguments" params)
+          refuse message = do
+            void (writeEndpointReply endpoint (proxyResult wireId (mcpToolResult True message)))
+            emitProtocolWarning client message
+      named <- awaitAttributedThread attribution
+      case named of
+        -- The CLI names its session at the head of the very first turn,
+        -- before the model can call anything, so a call with no session
+        -- after the wait is a protocol violation rather than a race.
+        Nothing -> refuse (streamDiagnostic client "called a Kanban tool before naming its session")
+        Just threadId -> case objectField "name" params >>= textValue of
+          Just name
+            | name == questionToolName -> case parseQuestionValue arguments of
+                Left message -> refuse message
+                Right question -> client.reviewEventSink (ReviewQuestionRequested threadId wrappedId question)
+            | name == githubToolName -> case decodeGitHubIssueToolRequest client.reviewWorkflowConfig arguments of
+                Left message -> refuse message
+                Right githubRequest
+                  | Just githubRequest.githubToolIssue == reviewIssue ->
+                      void (forkIO (runProxiedGitHubCall client endpoint threadId wireId githubRequest))
+                  | otherwise -> refuse crossIssueRefusal
+          _ ->
+            -- The Codex arm answers an unregistered tool without a warning,
+            -- and so does this one.
+            void (writeEndpointReply endpoint (proxyResult wireId (mcpToolResult True "Kanban does not implement that dynamic tool")))
+
+-- | 'runGitHubToolCall' for a call that arrived over the re-entry: the same
+-- events around the same runner, with the answer written as the reply frame
+-- resolving the forwarded call.
+runProxiedGitHubCall :: ReviewClient -> ReviewToolEndpoint -> ReviewThreadId -> Value -> GitHubIssueToolRequest -> IO ()
+runProxiedGitHubCall client endpoint threadId wireId request = do
+  client.reviewEventSink (ReviewGitHubStarted threadId (githubActionSummary request))
+  result <- withReservedToolSlot client threadId (\key -> runGitHubIssueTool client key request)
+  sent <- writeEndpointReply endpoint . proxyResult wireId $ case result of
+    Left message -> mcpToolResult True message
+    Right output -> mcpToolResult False output
+  let completion = case (result, sent) of
+        (Left message, _) -> Left message
+        (_, Left message) -> Left message
+        (Right output, Right ()) -> Right output
+  client.reviewEventSink (ReviewGitHubFinished threadId completion)
+
+-- | The thread this connection's stream has named, waiting briefly for the
+-- readers to have processed the record that names it: the endpoint and the
+-- stdout stream are separate channels, so a call the provider makes right
+-- after announcing itself can reach the parent first. Bounded, so a
+-- provider that truly never names a session cannot park a call forever.
+awaitAttributedThread :: MVar StreamAttribution -> IO (Maybe ReviewThreadId)
+awaitAttributedThread attribution = go attributionAttempts
+  where
+    go :: Int -> IO (Maybe ReviewThreadId)
+    go remaining = do
+      named <- attributedThread <$> readMVar attribution
+      case named of
+        Just threadId -> pure (Just threadId)
+        Nothing
+          | remaining <= 0 -> pure Nothing
+          | otherwise -> threadDelay 25000 >> go (remaining - 1)
+    attributionAttempts = 200 :: Int
+
+textValue :: Value -> Maybe Text
+textValue (String value) = Just value
+textValue _ = Nothing
 
 sendErrorResponse :: ReviewClient -> ReviewConnection -> Value -> Int -> Text -> IO (Either Text ())
 sendErrorResponse client connection requestId code message =

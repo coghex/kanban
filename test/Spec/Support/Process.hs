@@ -39,8 +39,13 @@ module Spec.Support.Process
     ClaudeReviewFixture (..),
     withClaudeReviewClient,
     withClaudeReviewClientUsing,
+    withClaudeMcpReviewClient,
     claudeReviewTurn,
+    claudeMcpToolCall,
     recordedClaudeLaunches,
+    recordedGitHubInvocations,
+    recordedMcpServerPid,
+    recordedMcpTraffic,
     recordedClaudeInput,
     recordedClaudeDirectory,
     threadCreations,
@@ -87,7 +92,7 @@ import Data.Aeson (Value (..), eitherDecode, encode)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
-import Data.List (dropWhileEnd, find, findIndex, findIndices)
+import Data.List (dropWhileEnd, find, findIndex, findIndices, isPrefixOf, sort)
 import Data.Text (Text)
 import qualified Data.Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -769,7 +774,33 @@ withClaudeReviewClient = withClaudeReviewClientUsing defaultRoster
 -- prove a non-default @issue_review.claude@ cell reaches the launch -- or
 -- that a roster which cannot supply that cell launches nothing at all.
 withClaudeReviewClientUsing :: ModelRoster -> [ByteString.ByteString] -> (ClaudeReviewFixture -> IO result) -> IO result
-withClaudeReviewClientUsing roster turnScript action =
+withClaudeReviewClientUsing roster = withClaudeReviewSession roster defaultWorkflowConfig Nothing []
+
+-- | A fake @claude@ that spawns and drives the MCP server its launch names
+-- — exactly as the real CLI does — plus a fake @gh@ on the same PATH for
+-- the calls the parent answers by running one.
+--
+-- The fake extracts the server command and endpoint from its own recorded
+-- @--mcp-config@ argument rather than being told them, because that argv is
+-- the one channel the real CLI has; a fixture handed the endpoint some
+-- other way would keep working after the launch stopped carrying it. Its
+-- turn script may call 'claudeMcpToolCall', which blocks on the reply the
+-- way a real tool-using turn does; every reply the fake reads lands in the
+-- @mcp.\<pid\>@ recording 'recordedMcpTraffic' reads back, after the
+-- @initialize@ and @tools\/list@ replies its bootstrap already performed.
+--
+-- The workflow configuration is a parameter so a test can prove a
+-- non-default label vocabulary reaches the served schemas.
+withClaudeMcpReviewClient :: WorkflowConfig -> [ByteString.ByteString] -> [ByteString.ByteString] -> (ClaudeReviewFixture -> IO result) -> IO result
+withClaudeMcpReviewClient workflowConfig ghScript =
+  withClaudeReviewSession defaultRoster workflowConfig (Just ghScript) claudeMcpBootstrap
+
+-- | The one fixture behind every fake-@claude@ review client: a fake
+-- @claude@ built from @prelude@ (run once, before the message loop) and
+-- @turnScript@ (run per user message), optionally a fake @gh@ beside it,
+-- and a live client on Kanban's real Claude backend.
+withClaudeReviewSession :: ModelRoster -> WorkflowConfig -> Maybe [ByteString.ByteString] -> [ByteString.ByteString] -> [ByteString.ByteString] -> (ClaudeReviewFixture -> IO result) -> IO result
+withClaudeReviewSession roster workflowConfig ghScript prelude turnScript action =
   withTemporaryCacheRoot $ \temporaryRoot -> do
     let repositoryRoot = temporaryRoot </> "repo"
         binaryRoot = temporaryRoot </> "bin"
@@ -778,8 +809,15 @@ withClaudeReviewClientUsing roster turnScript action =
     createDirectory repositoryRoot
     createDirectory binaryRoot
     createDirectory recordings
-    ByteString.writeFile fakeClaude (fakeClaudeSession recordings turnScript)
+    ByteString.writeFile fakeClaude (fakeClaudeSession recordings prelude turnScript)
     setFileMode fakeClaude 0o700
+    mapM_
+      ( \scriptLines -> do
+          let fakeGh = binaryRoot </> "gh"
+          ByteString.writeFile fakeGh (fakeGitHubRecorder recordings scriptLines)
+          setFileMode fakeGh 0o700
+      )
+      ghScript
     originalPath <- maybe "" id <$> lookupEnv "PATH"
     events <- newIORef []
     backend <- case (adapterFor ClaudeProvider).adapterEmbeddedReview of
@@ -789,7 +827,7 @@ withClaudeReviewClientUsing roster turnScript action =
       withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $
         bracket
           ( do
-              started <- startResolvedReviewClient backend roster defaultWorkflowConfig (Repository repositoryRoot "coghex" "kanban") (\event -> modifyIORef events (<> [event]))
+              started <- startResolvedReviewClient backend roster workflowConfig (Repository repositoryRoot "coghex" "kanban") (\event -> modifyIORef events (<> [event]))
               case started of
                 Right client -> pure client
                 Left message -> throwIO (userError ("the Claude review backend did not start: " <> Data.Text.unpack message))
@@ -797,30 +835,86 @@ withClaudeReviewClientUsing roster turnScript action =
           stopReviewClient
           (\client -> action (ClaudeReviewFixture client events recordings repositoryRoot))
 
--- | The fake itself: it records the argv it was launched with and every line
--- written to its stdin, then answers each of those lines with @turnScript@.
+-- | The fake itself: it records the argv it was launched with, runs
+-- @prelude@ once, then answers each line written to its stdin with
+-- @turnScript@.
 --
 -- Recorded per pid rather than appended to one file, because a backend that
 -- gives each review thread its own process spawns several of these and a
 -- test about two concurrent reviews has to tell one apart from the other.
 -- Argv goes one argument per line so an empty argument -- which is exactly
 -- what @--tools ""@ passes -- is recorded as the empty line it is.
-fakeClaudeSession :: FilePath -> [ByteString.ByteString] -> ByteString.ByteString
-fakeClaudeSession recordings turnScript =
+fakeClaudeSession :: FilePath -> [ByteString.ByteString] -> [ByteString.ByteString] -> ByteString.ByteString
+fakeClaudeSession recordings prelude turnScript =
   ByteString.unlines
     ( [ "#!/bin/sh",
         "dir=\"" <> ByteString.pack recordings <> "\"",
         "echo \"$$\" >> \"$dir/spawned\"",
         "printf '%s\\n' \"$@\" > \"$dir/argv.$$\"",
         "pwd > \"$dir/cwd.$$\"",
-        "session=\"claude-session-$$\"",
-        "turn=0",
-        "while IFS= read -r message; do",
-        "  printf '%s\\n' \"$message\" >> \"$dir/input.$$\"",
-        "  turn=$((turn + 1))"
+        "session=\"claude-session-$$\""
       ]
+        <> prelude
+        <> [ "turn=0",
+             "while IFS= read -r message; do",
+             "  printf '%s\\n' \"$message\" >> \"$dir/input.$$\"",
+             "  turn=$((turn + 1))"
+           ]
         <> map ("  " <>) turnScript
         <> ["done"]
+    )
+
+-- | The fake's MCP session against the server its own launch names, spawned
+-- and spoken to the way the real CLI does it: the command and endpoint come
+-- out of the recorded @--mcp-config@ argument and nowhere else, the server
+-- runs with its stdio on two of the fake's own pipes, and the exchange
+-- opens with @initialize@ and @tools\/list@ before any turn runs. The
+-- @mcp_ask@ helper the tool-call lines use writes one request and blocks on
+-- one reply, recording it — which is exactly the shape of a real tool call,
+-- a blocked @kanban_prompt_user@ included.
+claudeMcpBootstrap :: [ByteString.ByteString]
+claudeMcpBootstrap =
+  [ "config=$(awk 'previous==\"--mcp-config\" {print; exit} {previous=$0}' \"$dir/argv.$$\")",
+    "server=$(printf '%s' \"$config\" | sed 's/.*\"command\":\"\\([^\"]*\\)\".*/\\1/')",
+    "endpoint=$(printf '%s' \"$config\" | sed 's/.*\"--review-tools\",\"\\([^\"]*\\)\".*/\\1/')",
+    "mcp_in=\"$dir/mcp-in.$$\"",
+    "mcp_out=\"$dir/mcp-out.$$\"",
+    "mkfifo \"$mcp_in\" \"$mcp_out\"",
+    "\"$server\" --review-tools \"$endpoint\" < \"$mcp_in\" > \"$mcp_out\" &",
+    "printf '%s\\n' \"$!\" > \"$dir/mcp-server-pid.$$\"",
+    "exec 8> \"$mcp_in\"",
+    "exec 9< \"$mcp_out\"",
+    "mcp_send() { printf '%s\\n' \"$1\" >&8; }",
+    "mcp_ask() { mcp_send \"$1\"; IFS= read -r mcp_reply <&9; printf '%s\\n' \"$mcp_reply\" >> \"$dir/mcp.$$\"; }",
+    "mcp_ask '{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"claude-code\",\"version\":\"2.1.252\"}}}'",
+    "mcp_send '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}'",
+    "mcp_ask '{\"jsonrpc\":\"2.0\",\"id\":91,\"method\":\"tools/list\",\"params\":{}}'"
+  ]
+
+-- | One blocking @tools\/call@ for a turn script: request id, tool name,
+-- and the arguments object, written as the JSON the MCP channel carries.
+claudeMcpToolCall :: Int -> ByteString.ByteString -> ByteString.ByteString -> ByteString.ByteString
+claudeMcpToolCall requestId toolName arguments =
+  "mcp_ask '{\"jsonrpc\":\"2.0\",\"id\":"
+    <> ByteString.pack (show requestId)
+    <> ",\"method\":\"tools/call\",\"params\":{\"name\":\""
+    <> toolName
+    <> "\",\"arguments\":"
+    <> arguments
+    <> "}}'"
+
+-- | A fake @gh@ that records each invocation's argv before running
+-- @scriptLines@, so a test can hold the re-entered call to the same @gh@
+-- vocabulary the Codex path's tool runner builds.
+fakeGitHubRecorder :: FilePath -> [ByteString.ByteString] -> ByteString.ByteString
+fakeGitHubRecorder recordings scriptLines =
+  ByteString.unlines
+    ( [ "#!/bin/sh",
+        "dir=\"" <> ByteString.pack recordings <> "\"",
+        "printf '%s\\n' \"$@\" > \"$dir/gh-argv.$$\"",
+        "cat >/dev/null"
+      ]
+        <> scriptLines
     )
 
 -- | One realistic review turn, as the CLI streams it (probed against 2.1.251
@@ -889,6 +983,34 @@ recordedClaudePids recordings = do
   let spawnLog = recordings </> "spawned"
   exists <- doesFileExist spawnLog
   if not exists then pure [] else lines <$> readFile spawnLog
+
+-- | Every MCP reply the fake at @index@ (in spawn order) read back, in the
+-- order it read them: the @initialize@ and @tools\/list@ replies its
+-- bootstrap performed, then one line per 'claudeMcpToolCall'. An absent
+-- recording is no traffic rather than an error, so a test may assert that a
+-- refused call produced none.
+recordedMcpTraffic :: FilePath -> Int -> IO [Text]
+recordedMcpTraffic recordings index = do
+  trafficPath <- recordedClaudeFile recordings index "mcp"
+  written <- doesFileExist trafficPath
+  if not written
+    then pure []
+    else Data.Text.lines . TextEncoding.decodeUtf8 <$> ByteString.readFile trafficPath
+
+-- | The pid of the MCP server the fake at @index@ (in spawn order) spawned
+-- off its own launch configuration.
+recordedMcpServerPid :: FilePath -> Int -> IO Int
+recordedMcpServerPid recordings index = readRecordedPid =<< recordedClaudeFile recordings index "mcp-server-pid"
+
+-- | Every argv the fake @gh@ recorded, one list per invocation. Ordered by
+-- pid rather than by time — the recorder has nothing better — so a test
+-- matches invocations by content, not position.
+recordedGitHubInvocations :: FilePath -> IO [[Text]]
+recordedGitHubInvocations recordings = do
+  entries <- listDirectory recordings
+  mapM
+    (\entry -> Data.Text.lines . TextEncoding.decodeUtf8 <$> ByteString.readFile (recordings </> entry))
+    (sort [entry | entry <- entries, "gh-argv." `isPrefixOf` entry])
 
 -- | Wait until the recorded events satisfy @settled@, then hand back
 -- everything recorded so far. Bounded, so a stream that never arrives fails

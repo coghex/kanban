@@ -126,6 +126,7 @@ library kanban-internal
     Kanban.Repository.Authority
     Kanban.Repository.Lease
     Kanban.Review
+    Kanban.ReviewToolServer
     Kanban.Settings
     Kanban.Solve
     Kanban.StreamReader
@@ -249,6 +250,7 @@ test-suite kanban-test
     Spec.Agent.Roster
     Spec.Agent.Solve
     Spec.Agent.Supervision
+    Spec.Agent.ToolReentry
     Spec.Agent.Transcript
     Spec.Agent.Usage
     Spec.Agent.UsageMode

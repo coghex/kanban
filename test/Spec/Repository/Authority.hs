@@ -289,13 +289,14 @@ spec = do
     it "is the dashboard, and only the dashboard" $ do
       map launchMode everyMode
         `shouldBe` [ WorkerMode "/tmp/spec.json",
+                     ReviewToolServerMode "/tmp/endpoint",
                      GlyphTestMode,
                      DoctorMode,
                      UsageQueryMode,
                      PingQueryMode,
                      DashboardMode
                    ]
-      map acquiresRepositoryLease everyMode `shouldBe` [False, False, False, False, False, True]
+      map acquiresRepositoryLease everyMode `shouldBe` [False, False, False, False, False, False, True]
 
     -- The order is §5's, and the reason it is asserted is that an invocation
     -- naming two modes must resolve to the one that does not take the lease.
@@ -387,6 +388,7 @@ unownedGroup groupPid = OwnedProcessGroup groupPid [] False Nothing
 everyMode :: [Options]
 everyMode =
   [ testOptions {optionWorkerSpec = Just "/tmp/spec.json"},
+    testOptions {optionReviewTools = Just "/tmp/endpoint"},
     testOptions {optionGlyphTest = True},
     testOptions {optionDoctor = True},
     testOptions {optionUsage = True},
