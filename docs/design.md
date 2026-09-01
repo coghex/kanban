@@ -3129,8 +3129,8 @@ Defaults:
   collection, and a record the cache is entitled to remove is not a record a
   later run can be recovered from. Each of its four parts has a discipline of
   its own — a specification written exactly once and never rewritten, a
-  snapshot replaced whole by rename, a journal appended one complete line at a
-  time and read by byte offset, and sealed archive copies carrying the digest
+  snapshot replaced whole by rename, a journal whose every record is one
+  append-mode write of the whole line and which is read by byte offset, and sealed archive copies carrying the digest
   and byte length that verify them after the source is collected. A snapshot's
   session tree is checked when it is written and again when it is read, since
   only the first covers records this release wrote and a delete decides from

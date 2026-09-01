@@ -15,10 +15,11 @@
 -- @schemaVersion@, so a line another release wrote reads as absent instead of
 -- stopping the read, while a genuinely malformed line is reported.
 --
--- The append handle's @0600@ discipline is applied here rather than shared,
--- because the worker journal's opener is internal to that seam. It is the same
--- policy — @docs\/design.md@ §16's, established by issue #19 — and the comment
--- on 'openPrivateAppendHandle' below states it once for this store.
+-- The append descriptor's @0600@ discipline is applied here rather than
+-- shared, because the worker journal's opener is internal to that seam. It is
+-- the same policy — @docs\/design.md@ §16's, established by issue #19 — and the
+-- comment on 'openPrivateAppendDescriptor' below states it once for this
+-- store.
 --
 -- This module is internal — "Kanban.Mission" re-exports the parts of it that
 -- module's public contract promises.
@@ -30,7 +31,7 @@ module Kanban.Mission.Journal
   )
 where
 
-import Control.Exception (IOException, onException, try)
+import Control.Exception (IOException, bracket, onException, try)
 import Data.Aeson (Result (Error, Success), Value (Object), eitherDecodeStrict', encode, fromJSON)
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
@@ -46,26 +47,51 @@ import Kanban.Mission.Types
     missionRepositoryMatches,
   )
 import Kanban.Worker (consumeJournalLines)
-import System.IO (BufferMode (LineBuffering), Handle, hClose, hSetBinaryMode, hSetBuffering)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (setFdMode)
-import System.Posix.IO (OpenFileFlags (append, creat), OpenMode (WriteOnly), closeFd, defaultFileFlags, fdToHandle, openFd)
+import System.Posix.IO (OpenFileFlags (append, creat), OpenMode (WriteOnly), closeFd, defaultFileFlags, openFd)
+import System.Posix.IO.ByteString (fdWrite)
+import System.Posix.Types (Fd)
 
 -- | Appends one event as a single complete line.
 --
--- One write of envelope-plus-newline, so a concurrent reader observes a whole
--- record or nothing of it rather than a record split across two writes. The
--- handle is opened and closed around the append so a reader always sees a
--- flushed record and a long-lived mission never retains a deleted journal's
--- inode.
+-- One @write(2)@ of the whole line, newline included, onto a descriptor opened
+-- @O_APPEND@ — which is what makes the append atomic against every other
+-- writer, so a concurrent reader observes a whole record or nothing of it.
+--
+-- The single call is the point, and it is why this does not go through a
+-- 'Handle'. @hPut@ writes a lazy ByteString one chunk at a time, and an
+-- encoded event is several chunks as soon as it outgrows the encoder's buffer,
+-- with the newline always a chunk of its own. Each chunk is then its own
+-- @write@, and @O_APPEND@ makes each of /those/ atomic rather than the
+-- sequence: a second process appending between two of them merges the two
+-- records into one malformed line, and both are lost once a reader has
+-- advanced past it. Building the line strictly first and writing it once
+-- closes that, whatever an event's size.
+--
+-- A short write is reported rather than resumed. Continuing would append the
+-- remainder after whatever another writer had appended in the meantime, which
+-- is the very splice this avoids; leaving it as an unterminated fragment is
+-- what the reader already knows how to ignore.
 appendMissionEvent :: FilePath -> MissionEvent -> IO (Either Text ())
 appendMissionEvent path event = do
-  result <- try @IOException $ do
-    handle <- openPrivateAppendHandle path
-    hSetBuffering handle LineBuffering
-    LazyByteString.hPut handle (encode (MissionEnvelope missionEventSchemaVersion event) <> "\n")
-    hClose handle
-  pure (either (Left . Text.pack . show) Right result)
+  let line = LazyByteString.toStrict (encode (MissionEnvelope missionEventSchemaVersion event) <> "\n")
+  result <-
+    try @IOException
+      (bracket (openPrivateAppendDescriptor path) closeFd (`fdWrite` line))
+  pure $ case result of
+    Left exception -> Left (Text.pack (show exception))
+    Right written
+      | fromIntegral written == ByteString.length line -> Right ()
+      | otherwise ->
+          Left
+            ( "only "
+                <> Text.pack (show (toInteger written))
+                <> " of "
+                <> Text.pack (show (ByteString.length line))
+                <> " bytes of a record reached "
+                <> Text.pack path
+            )
 
 -- | Opens a mission journal for appending under §16's user-only file mode,
 -- whatever the ambient umask and whichever release created the file.
@@ -75,12 +101,11 @@ appendMissionEvent path event = do
 -- release left loose is tightened /before/ this call appends more private
 -- bytes to it, rather than whenever some future rewrite that never comes
 -- happens along.
-openPrivateAppendHandle :: FilePath -> IO Handle
-openPrivateAppendHandle path = do
-  journalFd <- openFd path WriteOnly defaultFileFlags {append = True, creat = Just 0o600}
-  handle <- onException (setFdMode journalFd 0o600 >> fdToHandle journalFd) (closeFd journalFd)
-  hSetBinaryMode handle True
-  pure handle
+openPrivateAppendDescriptor :: FilePath -> IO Fd
+openPrivateAppendDescriptor path = do
+  descriptor <- openFd path WriteOnly defaultFileFlags {append = True, creat = Just 0o600}
+  onException (setFdMode descriptor 0o600) (closeFd descriptor)
+  pure descriptor
 
 -- | Reads the journal's full current contents and consumes the complete lines
 -- appended since @consumedBytes@, returning the new offset.

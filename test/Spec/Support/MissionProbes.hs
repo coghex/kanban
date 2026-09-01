@@ -63,6 +63,7 @@ where
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket_)
 import Control.Monad (forM, forM_, unless, when)
+import Data.Time (getCurrentTime)
 import Data.Aeson (FromJSON, ToJSON, eitherDecodeFileStrict', encode)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
@@ -92,6 +93,7 @@ import Kanban.Mission
     readMissionJournal,
     readMissionSnapshot,
     readMissionSpecification,
+    recordMissionEvent,
     releaseMissionLease,
     sealMissionLog,
   )
@@ -125,6 +127,9 @@ data MissionProbeAction
     MissionProbeReadBack
   | -- | Seal one source file as the named session's log of the given kind.
     MissionProbeSealLog FilePath MissionSessionId MissionLogKind
+  | -- | Append @count@ events whose kinds are the given prefix numbered from
+    -- zero, each carrying a detail of @payload@ characters.
+    MissionProbeAppendEvents Text Int Int
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -181,6 +186,8 @@ data MissionProbeReport
   = MissionProbeLeaseReport MissionProbeOutcome
   | MissionProbeReadbackReport MissionProbeReadback
   | MissionProbeSealReport MissionProbeSealOutcome
+  | -- | Every append that was refused. Empty is the whole assertion.
+    MissionProbeAppendReport [Text]
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -330,6 +337,22 @@ runMissionProbe planPath = do
         MissionProbeReadBack -> do
           readback <- readMissionBack plan
           report plan (MissionProbeReadbackReport readback)
+        MissionProbeAppendEvents prefix count payload -> do
+          let store = MissionStore plan.probePlanStore plan.probePlanRepository
+          now <- getCurrentTime
+          refused <- forM [0 .. count - 1] $ \index ->
+            recordMissionEvent
+              store
+              MissionEvent
+                { missionEventAt = now,
+                  missionEventMission = plan.probePlanMission,
+                  missionEventRepository = plan.probePlanRepository,
+                  missionEventStep = Nothing,
+                  missionEventSession = Nothing,
+                  missionEventKind = prefix <> "-" <> Text.pack (show index),
+                  missionEventDetail = Just (Text.replicate payload "x")
+                }
+          report plan (MissionProbeAppendReport [message | Left message <- refused])
         MissionProbeSealLog source session kind -> do
           let store = MissionStore plan.probePlanStore plan.probePlanRepository
           sealed <- sealMissionLog store plan.probePlanMission session kind source

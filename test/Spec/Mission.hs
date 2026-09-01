@@ -513,6 +513,47 @@ journalSpec = describe "the append-only event journal" $ do
       kindsOf secondPass `shouldBe` ["third"]
       diagnosticsOf secondPass `shouldBe` []
 
+  it "keeps every record whole when two processes append large events at once" $
+    withStore $ \root store -> do
+      -- Each event is far larger than the encoder's own buffer, so its
+      -- encoding is several chunks and its newline is a chunk of its own.
+      -- Written a chunk at a time, the other process's appends land between
+      -- them and merge two records into one malformed line — which loses both
+      -- once a reader has advanced past it. Whether that interleaving happens
+      -- on any given run is a race; that none of it can happen is what a
+      -- single write per record buys, and what this asserts.
+      let writers = ["first", "second"]
+          perWriter = 10
+          payload = 64 * 1024
+      withMissionProbes
+        (root </> "probes")
+        [ MissionProbe
+            { missionProbeName = name,
+              missionProbeStore = store.missionStoreDirectory,
+              missionProbeRepository = store.missionStoreRepository,
+              missionProbeMission = theMission,
+              missionProbeAction = MissionProbeAppendEvents (Text.pack name) perWriter payload,
+              missionProbeGate = "both"
+            }
+        | name <- writers
+        ]
+        $ \probes -> do
+          openMissionGate probes "both"
+          forM_ writers $ \name -> do
+            reported <- awaitMissionReport probes name
+            case reported of
+              MissionProbeAppendReport [] -> pure ()
+              other -> expectationFailure ("expected " <> name <> " to append every event, got " <> show other)
+      (records, offset) <- expectRight =<< readMissionJournal store theMission 0
+      diagnosticsOf records `shouldBe` []
+      refusalsOf records `shouldBe` []
+      sort (map Text.unpack (kindsOf records))
+        `shouldBe` sort [name <> "-" <> show index | name <- writers, index <- [0 .. perWriter - 1]]
+      -- Every byte of the journal was a complete record, so nothing was left
+      -- as an unterminated fragment either.
+      consumed <- ByteString.length <$> ByteString.readFile (journalPath store)
+      offset `shouldBe` consumed
+
   it "reports the one malformed line an unrelated append after a permanently truncated fragment makes" $
     withStore $ \_ store -> do
       void (expectRight =<< recordMissionEvent store (eventNamed "first"))
