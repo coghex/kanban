@@ -75,6 +75,7 @@ import Kanban.Mission.Paths
     createMissionRecord,
     ensureMissionDirectory,
     MissionStore (..),
+    ignoreFileOperation,
     listMissionEntries,
     missionArchiveDirectory,
     openMissionStore,
@@ -118,9 +119,10 @@ import Kanban.Mission.Types
   )
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
-import System.Directory (doesFileExist, removePathForcibly)
-import System.FilePath (takeFileName, (</>))
+import System.Directory (doesFileExist, removePathForcibly, renameDirectory)
+import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.Posix.Files (getSymbolicLinkStatus, isDirectory)
+import System.Posix.Process (getProcessID)
 
 -- | Every mission of this repository, sorted.
 --
@@ -661,10 +663,44 @@ deleteMission store mission = do
       refusal : rest -> pure (Left (refusal : rest))
       [] -> case missionDirectory store.missionStoreDirectory mission of
         Left message -> pure (Left [MissionDispositionUnreadable message])
-        Right directory -> do
-          removed <- try @IOException (removePathForcibly directory)
-          pure (either (Left . pure . MissionDispositionUnreadable . Text.pack . show) Right removed)
+        Right directory -> removeMissionDirectory store directory
     other -> pure (Left [unreadableRefusal mission other])
+
+-- | Takes a mission out of the store in one move, and then clears up.
+--
+-- The rename is what the delete /is/: after it the mission is gone from
+-- everything that reads this store, and the recursive removal that follows is
+-- housekeeping. Removing in place instead would make a delete that was
+-- interrupted — or that could not remove some one file — leave a mission
+-- behind with only part of itself, and such a mission is stranded rather than
+-- half-deleted: it still enumerates, its snapshot no longer reads, and every
+-- gate that would let it be deleted again decides from that snapshot.
+--
+-- The holding area is a sibling of the repository's store rather than a name
+-- inside it, so a mission on its way out is never enumerated as one that is
+-- still there. Nothing reads it, and a removal that fails leaves it as inert
+-- litter rather than as a mission.
+removeMissionDirectory :: MissionStore -> FilePath -> IO (Either [MissionDispositionRefusal] ())
+removeMissionDirectory store directory = do
+  token <- deletionToken
+  let holding = takeDirectory store.missionStoreDirectory </> ".deleted"
+      aside = holding </> token
+  prepared <- ensureMissionDirectory holding
+  case prepared of
+    Left message -> pure (Left [MissionDispositionUnreadable message])
+    Right () -> do
+      moved <- try @IOException (renameDirectory directory aside)
+      case moved of
+        Left exception -> pure (Left [MissionDispositionUnreadable (Text.pack (show exception))])
+        Right () -> do
+          ignoreFileOperation (removePathForcibly aside)
+          pure (Right ())
+
+deletionToken :: IO FilePath
+deletionToken = do
+  now <- getCurrentTime
+  processId <- getProcessID
+  pure (filter (`notElem` ("-:. TZ" :: String)) (show now) <> "-" <> show processId)
 
 unreadableRefusal :: MissionId -> MissionRead value -> MissionDispositionRefusal
 unreadableRefusal mission result = MissionDispositionUnreadable $ case result of

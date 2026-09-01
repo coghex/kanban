@@ -3135,7 +3135,11 @@ Defaults:
   session tree is checked when it is written and again when it is read, since
   only the first covers records this release wrote and a delete decides from
   the second; a snapshot whose sessions are not a tree is reported rather than
-  adopted. Every one of
+  adopted. Anything that removes durable state does so by moving it aside in
+  one step and clearing up afterwards — a released or retired lease, a deleted
+  mission — so an interruption leaves either the whole record or none of it,
+  never a lease standing without its owner record or a mission with only part
+  of itself. Every one of
   those records carries its own `schemaVersion` outside its payload, so the
   unknown-version rule below applies to each independently, a journal line
   included; and no write ever treats that silence as permission, so

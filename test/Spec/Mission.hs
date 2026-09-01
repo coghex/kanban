@@ -27,6 +27,8 @@
 -- out by hand earns being checked against it rather than against itself.
 module Spec.Mission (spec) where
 
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (forM_, void)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteStringChar
@@ -775,6 +777,65 @@ leaseSpec = describe "the mission lease" $ do
       afterRelease <- readMissionLeaseOwner store theMission
       afterRelease `shouldBe` MissionAbsent
 
+  it "is not given up by a stale release of an acquisition that has already ended" $
+    withStore $ \_ store -> do
+      first <- acquiredLease store
+      releaseMissionLease first
+      successor <- acquiredLease store
+      -- The stale handle names an acquisition that is over. Releasing it must
+      -- leave the successor holding the lease, however matching the handle
+      -- looked when its own release began.
+      releaseMissionLease first
+      owner <- readMissionLeaseOwner store theMission
+      case owner of
+        MissionPresent record -> record.missionLeaseOwnerToken `shouldBe` successor.missionLeaseToken
+        other -> expectationFailure ("expected the successor's owner record, got " <> show other)
+      intruder <- acquireMissionLease store theMission
+      case intruder of
+        MissionLeaseHeld reason -> Text.unpack reason `shouldSatisfy` isInfixOf "still running"
+        other -> expectationFailure ("expected the successor to still hold the lease, got " <> show other)
+
+  it "releases one acquisition once, however many times its handle is released" $
+    withStore $ \_ store -> do
+      held <- acquiredLease store
+      -- Two threads racing the same handle is the shape the hazard takes, and
+      -- neither ordering may end with more than one release having run.
+      done <- newEmptyMVar
+      forM_ [1 :: Int, 2] $ \_ -> void (forkIO (releaseMissionLease held >> putMVar done ()))
+      forM_ [1 :: Int, 2] $ \_ -> takeMVar done
+      successor <- acquireMissionLease store theMission
+      case successor of
+        MissionLeaseAcquired lease -> releaseMissionLease lease
+        other -> expectationFailure ("expected the lease to be free, got " <> show other)
+
+  it "gives the whole lease up in one move, so an unexpected file inside it cannot strand the mission" $
+    withStore $ \_ store -> do
+      held <- acquiredLease store
+      -- Anything at all beside the owner record: a later release's leftover, a
+      -- stray from an editor. An unlink followed by an rmdir would fail here
+      -- and leave a lease directory with no owner record — which reads as a
+      -- holder that cannot be proven gone, and so a mission nothing could
+      -- ever acquire again.
+      ByteString.writeFile (missionRoot store </> "lease" </> "unexpected") "not the owner record"
+      releaseMissionLease held
+      present <- doesDirectoryExist (missionRoot store </> "lease")
+      present `shouldBe` False
+      successor <- acquireMissionLease store theMission
+      case successor of
+        MissionLeaseAcquired lease -> releaseMissionLease lease
+        other -> expectationFailure ("expected the lease to be free, got " <> show other)
+
+  it "retires a lease whose holder is proven gone in one move, whatever is inside it" $
+    withStore $ \_ store -> do
+      void (acquiredLease store)
+      ByteString.writeFile (missionRoot store </> "lease" </> "unexpected") "not the owner record"
+      -- The holder is proven gone, so the retirement runs; it must free the
+      -- name rather than fail half way and leave the mission unacquirable.
+      taken <- acquireMissionLeaseWith (const (pure MissionHolderGone)) store theMission
+      case taken of
+        MissionLeaseAcquired lease -> releaseMissionLease lease
+        other -> expectationFailure ("expected the stale lease to be retired, got " <> show other)
+
   it "stays held when its owner record belongs to another mission, however gone that holder is" $
     withStore $ \_ store -> do
       void (acquireMissionLease store theMission)
@@ -846,6 +907,15 @@ leaseSpec = describe "the mission lease" $ do
       case owner of
         MissionPresent record -> record.missionLeaseOwnerProcessId `shouldBe` fromIntegral self
         other -> expectationFailure ("expected an owner record, got " <> show other)
+
+-- | Acquires the mission's lease, failing the example rather than returning
+-- something that is not one.
+acquiredLease :: MissionStore -> IO MissionLease
+acquiredLease store = do
+  acquisition <- acquireMissionLease store theMission
+  case acquisition of
+    MissionLeaseAcquired lease -> pure lease
+    other -> fail ("expected to acquire the lease, got " <> show other)
 
 leaseProbe :: MissionStore -> String -> String -> MissionProbe
 leaseProbe store gate name =
@@ -1270,6 +1340,29 @@ dispositionSpec = describe "archiving and deleting a mission" $ do
       void (expectRight =<< writeMissionSnapshot store (snapshotWith MissionRunning [stepRecord MissionStepOutcomeUnknown] [sessionNode "session-a" Nothing unresolved] [worktree]))
       result <- deleteMission store theMission
       sort (refusalKinds result) `shouldBe` sort ["not-terminal", "unverifiable-session", "outcome-unknown-step", "sole-recovery-record"]
+
+  it "moves the mission out of the store before clearing it up, to a holding area no repository enumerates" $
+    withStore $ \_ store -> do
+      void (expectRight =<< createMissionSpecification store theSpecification)
+      void (expectRight =<< writeMissionSnapshot store (snapshotWith MissionCompleted [] [] []))
+      void (expectRight =<< recordMissionEvent store (eventNamed "finished"))
+      void (expectRight =<< deleteMission store theMission)
+      -- The move is what the delete is; removing in place would make an
+      -- interrupted one leave a mission behind with only part of itself,
+      -- which is stranded rather than half-deleted — it still enumerates, its
+      -- snapshot no longer reads, and every gate that would let it be deleted
+      -- again decides from that snapshot.
+      let holding = takeDirectory store.missionStoreDirectory </> ".deleted"
+      staged <- doesDirectoryExist holding
+      staged `shouldBe` True
+      -- And the holding area is a sibling of this repository's store rather
+      -- than a name inside it, so nothing on its way out can be reported as a
+      -- mission that is still there.
+      createDirectoryIfMissing True (holding </> "an-interrupted-clearing-up" </> "archive")
+      missions <- listMissions store
+      missions `shouldBe` []
+      gone <- doesDirectoryExist (missionRoot store)
+      gone `shouldBe` False
 
   it "leaves the mission on disk whenever it refuses" $
     withStore $ \_ store -> do

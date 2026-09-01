@@ -50,6 +50,7 @@ module Kanban.Mission.Lease
   )
 where
 
+import Control.Concurrent.MVar (MVar, newMVar, tryTakeMVar)
 import Control.Exception (IOException, try)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -71,7 +72,8 @@ import Kanban.Mission.Types
     MissionRepository,
     missionLeaseSchemaVersion,
   )
-import System.Directory (createDirectory, removeDirectory, removeFile)
+import System.Directory (createDirectory, removeDirectoryRecursive, renameDirectory)
+import System.FilePath ((</>))
 import System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
@@ -85,9 +87,39 @@ data MissionLease = MissionLease
     missionLeaseRepository :: MissionRepository,
     missionLeaseDirectory :: FilePath,
     missionLeaseOwnerFile :: FilePath,
-    missionLeaseToken :: Text
+    missionLeaseToken :: Text,
+    -- | Full until this acquisition has been released, and taken by the
+    -- release that runs. One acquisition is released once however many times
+    -- 'releaseMissionLease' is called on it and from however many threads,
+    -- which is what stops two releases of one value from racing each other
+    -- across the gap between checking the owner and removing it.
+    --
+    -- In-process is the whole of what is needed: this value is a handle
+    -- rather than a record, it never crosses a process boundary, and two
+    -- processes therefore cannot hold the same acquisition to release twice.
+    missionLeaseRelease :: MVar ()
   }
-  deriving stock (Eq, Show)
+
+-- | Compared and shown by what identifies the acquisition. The release claim
+-- is this value's own state rather than part of which lease it is, and an
+-- 'MVar' has no useful comparison or rendering.
+instance Eq MissionLease where
+  left == right =
+    left.missionLeaseMission == right.missionLeaseMission
+      && left.missionLeaseRepository == right.missionLeaseRepository
+      && left.missionLeaseDirectory == right.missionLeaseDirectory
+      && left.missionLeaseOwnerFile == right.missionLeaseOwnerFile
+      && left.missionLeaseToken == right.missionLeaseToken
+
+instance Show MissionLease where
+  show lease =
+    "MissionLease {missionLeaseMission = "
+      <> show lease.missionLeaseMission
+      <> ", missionLeaseDirectory = "
+      <> show lease.missionLeaseDirectory
+      <> ", missionLeaseToken = "
+      <> show lease.missionLeaseToken
+      <> "}"
 
 -- | What one attempt was told. Three answers rather than two, because \"someone
 -- else has it\" and \"this store will not hold a lease at all\" call for
@@ -172,12 +204,16 @@ acquireMissionLeaseWith holderPresence store mission = case (,) <$> missionLease
                   missionLeaseOwnerAcquiredAt = now,
                   missionLeaseOwnerProcessId = fromIntegral processId
                 }
+          releaseClaim <- newMVar ()
           case written of
             Left message -> do
               -- The lease was won but never recorded, so nothing could ever
               -- prove its holder gone. Giving the directory back is the only
-              -- move that does not strand the mission for good.
-              ignoreFileOperation (removeDirectory leaseDirectory)
+              -- move that does not strand the mission for good, and it is
+              -- given back whatever a failed write left inside it: an rmdir
+              -- that refused because the directory was not empty would leave
+              -- exactly the ownerless lease this is undoing.
+              ignoreFileOperation (removeDirectoryRecursive leaseDirectory)
               pure (MissionLeaseUnusable ("could not record the mission lease owner: " <> message))
             Right () ->
               pure
@@ -187,7 +223,8 @@ acquireMissionLeaseWith holderPresence store mission = case (,) <$> missionLease
                         missionLeaseRepository = store.missionStoreRepository,
                         missionLeaseDirectory = leaseDirectory,
                         missionLeaseOwnerFile = ownerPath,
-                        missionLeaseToken = token
+                        missionLeaseToken = token,
+                        missionLeaseRelease = releaseClaim
                       }
                 )
         Left exception
@@ -201,8 +238,21 @@ acquireMissionLeaseWith holderPresence store mission = case (,) <$> missionLease
                   | not mayRetire ->
                       pure (MissionLeaseHeld ("mission " <> mission.unMissionId <> " lease was reacquired while it was being retired"))
                   | otherwise -> do
-                      ignoreFileOperation (removeFile ownerPath)
-                      ignoreFileOperation (removeDirectory leaseDirectory)
+                      -- One atomic move rather than an unlink and an rmdir,
+                      -- for the reason 'releaseMissionLease' takes the whole
+                      -- directory: between the two steps the lease stands
+                      -- with no owner record, which reads as a holder that
+                      -- cannot be proven gone — a mission nothing could
+                      -- acquire again — and a directory holding anything
+                      -- unexpected would leave it in that state for good. A
+                      -- move that loses to another retirer is not an error;
+                      -- the retry below settles which of them acquires.
+                      retiring <- newLeaseToken
+                      let retiredPath = leaseDirectory <> ".retired-" <> Text.unpack retiring
+                      moved <- try @IOException (renameDirectory leaseDirectory retiredPath)
+                      case moved of
+                        Left _ -> pure ()
+                        Right () -> ignoreFileOperation (removeDirectoryRecursive retiredPath)
                       attempt leaseDirectory ownerPath False
 
 -- | Whether an existing lease is still held, and why.
@@ -247,26 +297,71 @@ holderStillHeld holderPresence store mission ownerPath = do
 
 -- | Gives a lease up, and only this lease.
 --
--- The owner record is re-read and its token compared first, so a release that
--- arrives after this lease was retired and reacquired removes the successor's
--- lease rather than its own.
+-- Three things together, because the obvious two are not enough.
+--
+-- The release of one acquisition happens once. 'missionLeaseRelease' is taken
+-- by whichever call gets there, and every other call on that value returns
+-- having done nothing. Without it, two releases of one handle can both read a
+-- matching owner record, and the second can resume long enough after the first
+-- for a successor to have acquired — at which point it would delete the
+-- successor's lease while the successor still believed it held one.
+--
+-- The lease then goes away in a single atomic step. A rename takes the whole
+-- directory, owner record and all, so no observer sees a lease directory
+-- standing with its owner record already gone — a state that reads as a holder
+-- who cannot be proven gone, which is to say a mission nothing can ever
+-- acquire again. It is also why an unexpected extra file inside the lease
+-- directory cannot strand the mission: the move does not care what is in
+-- there, where an unlink-then-rmdir would fail and leave the ruin behind.
+--
+-- And what was taken is checked again before it is destroyed. The token is
+-- compared before the rename, so in the ordinary case this only confirms what
+-- is already known; if it ever does disagree, the directory belonged to a
+-- successor and is put straight back rather than removed.
 releaseMissionLease :: MissionLease -> IO ()
 releaseMissionLease lease = do
-  ownerResult <-
-    readMissionRecordFor
-      lease.missionLeaseMission
-      [missionLeaseSchemaVersion]
-      lease.missionLeaseRepository
-      missionLeaseOwnerMission
-      missionLeaseOwnerRepository
-      lease.missionLeaseOwnerFile ::
-      IO (MissionRead MissionLeaseOwner)
-  case ownerResult of
-    MissionPresent owner
-      | owner.missionLeaseOwnerToken == lease.missionLeaseToken -> do
-          ignoreFileOperation (removeFile lease.missionLeaseOwnerFile)
-          ignoreFileOperation (removeDirectory lease.missionLeaseDirectory)
-    _ -> pure ()
+  claimed <- tryTakeMVar lease.missionLeaseRelease
+  case claimed of
+    Nothing -> pure ()
+    Just () -> do
+      ownerResult <- readOwner lease.missionLeaseOwnerFile
+      case ownerResult of
+        MissionPresent owner
+          | owner.missionLeaseOwnerToken == lease.missionLeaseToken -> takeAside
+        _ -> pure ()
+  where
+    -- Named for the acquisition rather than the mission, so two acquisitions
+    -- can never contend for one aside directory and a leftover from a release
+    -- that was interrupted cannot block a later one.
+    asidePath = lease.missionLeaseDirectory <> ".released-" <> Text.unpack lease.missionLeaseToken
+
+    readOwner path =
+      readMissionRecordFor
+        lease.missionLeaseMission
+        [missionLeaseSchemaVersion]
+        lease.missionLeaseRepository
+        missionLeaseOwnerMission
+        missionLeaseOwnerRepository
+        path ::
+        IO (MissionRead MissionLeaseOwner)
+
+    takeAside = do
+      moved <- try @IOException (renameDirectory lease.missionLeaseDirectory asidePath)
+      case moved of
+        -- Nothing of this acquisition's is there to remove.
+        Left _ -> pure ()
+        Right () -> do
+          confirmed <- readOwner (asidePath </> "owner.json")
+          case confirmed of
+            MissionPresent owner
+              | owner.missionLeaseOwnerToken == lease.missionLeaseToken ->
+                  ignoreFileOperation (removeDirectoryRecursive asidePath)
+            -- Unreachable while the claim above holds, and a restore rather
+            -- than a removal if it ever is reached. A restore that cannot
+            -- land — because something has already taken the freed name —
+            -- leaves an inert directory behind rather than destroying a lease
+            -- that is now somebody else's.
+            _ -> ignoreFileOperation (renameDirectory asidePath lease.missionLeaseDirectory)
 
 -- | The owner record of whatever holds a mission's lease, for a caller that
 -- wants to say who rather than to take it.
