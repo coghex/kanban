@@ -47,6 +47,7 @@ module Spec.Support.MissionProbes
     MissionProbeOutcome (..),
     MissionProbeReadback (..),
     MissionProbeReport (..),
+    MissionProbeSealOutcome (..),
     MissionProbes,
     awaitMissionReport,
     killMissionHolder,
@@ -75,19 +76,24 @@ import GHC.Generics (Generic)
 import Kanban.Mission
   ( MissionEvent (..),
     MissionId (..),
-    MissionJournalLine (..),
+    MissionJournalLine (MissionJournalEvent, MissionJournalMalformed),
     MissionLeaseAcquisition (..),
+    MissionLogKind,
     MissionRead (..),
     MissionRepository (..),
+    MissionSealedArchive (..),
+    MissionSessionId,
     MissionSnapshot (..),
     MissionSpecification (..),
     MissionStore (..),
     acquireMissionLease,
     missionLifecycleTag,
+    missionSealFailureMessage,
     readMissionJournal,
     readMissionSnapshot,
     readMissionSpecification,
     releaseMissionLease,
+    sealMissionLog,
   )
 import Spec.Support.Env (ignoringIOException)
 import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
@@ -117,6 +123,8 @@ data MissionProbeAction
   | -- | Read the mission's specification, snapshot and whole journal, and
     -- report what came back.
     MissionProbeReadBack
+  | -- | Seal one source file as the named session's log of the given kind.
+    MissionProbeSealLog FilePath MissionSessionId MissionLogKind
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -161,9 +169,18 @@ data MissionProbeReadback = MissionProbeReadback
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | What one seal attempt was told: the digest it committed, or why it was
+-- refused.
+data MissionProbeSealOutcome
+  = MissionProbeSealed Text
+  | MissionProbeSealRefused Text
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
 data MissionProbeReport
   = MissionProbeLeaseReport MissionProbeOutcome
   | MissionProbeReadbackReport MissionProbeReadback
+  | MissionProbeSealReport MissionProbeSealOutcome
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -313,6 +330,12 @@ runMissionProbe planPath = do
         MissionProbeReadBack -> do
           readback <- readMissionBack plan
           report plan (MissionProbeReadbackReport readback)
+        MissionProbeSealLog source session kind -> do
+          let store = MissionStore plan.probePlanStore plan.probePlanRepository
+          sealed <- sealMissionLog store plan.probePlanMission session kind source
+          report plan . MissionProbeSealReport $ case sealed of
+            Right entry -> MissionProbeSealed entry.missionSealedDigest
+            Left failure -> MissionProbeSealRefused (missionSealFailureMessage failure)
         MissionProbeLease -> do
           acquisition <- acquireMissionLease plan.probePlanStore plan.probePlanMission
           case acquisition of

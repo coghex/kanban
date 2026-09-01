@@ -125,6 +125,7 @@ import Spec.Support.MissionProbes
     MissionProbeOutcome (..),
     MissionProbeReadback (..),
     MissionProbeReport (..),
+    MissionProbeSealOutcome (..),
     MissionProbes,
     awaitMissionReport,
     killMissionHolder,
@@ -132,7 +133,7 @@ import Spec.Support.MissionProbes
     releaseMissionHolder,
     withMissionProbes,
   )
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, removeFile)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, removeFile, renameFile)
 import System.FilePath (takeDirectory, (</>))
 import System.Environment (getEnv)
 import System.Posix.Files (createSymbolicLink, setFileMode)
@@ -423,16 +424,23 @@ journalSpec = describe "the append-only event journal" $ do
           Text.unpack message `shouldSatisfy` isInfixOf "events.jsonl"
         other -> expectationFailure ("expected one diagnostic, got " <> show other)
 
-  it "treats a record written under an unrecognized schema version as absent without hiding the records after it" $
+  it "says nothing at all about a record written under an unrecognized schema version, and reads the ones after it" $
     withStore $ \_ store -> do
       void (expectRight =<< recordMissionEvent store (eventNamed "before"))
       let journal = journalPath store
       ByteString.appendFile journal "{\"schemaVersion\":9999,\"payload\":{}}\n"
       void (expectRight =<< recordMissionEvent store (eventNamed "after"))
-      (records, _) <- expectRight =<< readMissionJournal store theMission 0
+      (records, offset) <- expectRight =<< readMissionJournal store theMission 0
+      -- Absent means absent: three lines were consumed and two are reported,
+      -- with nothing said about the third and no diagnostic standing in for
+      -- it.
+      length records `shouldBe` 2
       kindsOf records `shouldBe` ["before", "after"]
       diagnosticsOf records `shouldBe` []
-      [version | MissionJournalUnknownVersion version <- records] `shouldBe` [9999]
+      -- The offset still passed over it, so a reader threading the offset
+      -- neither replays it nor stalls on it.
+      consumed <- ByteString.length <$> ByteString.readFile journal
+      offset `shouldBe` consumed
 
 kindsOf :: [MissionJournalLine] -> [Text]
 kindsOf records = [event.missionEventKind | MissionJournalEvent event <- records]
@@ -655,6 +663,28 @@ leaseSpec = describe "the mission lease" $ do
       afterRelease <- readMissionLeaseOwner store.missionStoreDirectory theMission
       afterRelease `shouldBe` MissionAbsent
 
+  it "stays held when its owner record belongs to another mission, however gone that holder is" $
+    withStore $ \_ store -> do
+      void (acquireMissionLease store.missionStoreDirectory theMission)
+      -- An owner record written for another mission, moved here. Its process
+      -- says nothing about who is advancing this mission, so even a probe
+      -- that reports every holder gone must not retire the lease.
+      let other = MissionId "mission-0002"
+      void (acquireMissionLease store.missionStoreDirectory other)
+      renameFile
+        (store.missionStoreDirectory </> "mission-0002" </> "lease" </> "owner.json")
+        (missionRoot store </> "lease" </> "owner.json")
+      second <-
+        acquireMissionLeaseWith
+          (const (pure MissionHolderGone))
+          store.missionStoreDirectory
+          theMission
+      case second of
+        MissionLeaseHeld reason -> do
+          Text.unpack reason `shouldSatisfy` isInfixOf "belongs to mission mission-0002"
+          Text.unpack reason `shouldSatisfy` isInfixOf "cannot be identified"
+        other' -> expectationFailure ("expected a refusal, got " <> show other')
+
   it "stays held when the liveness probe cannot answer" $
     withStore $ \_ store -> do
       void (acquireMissionLease store.missionStoreDirectory theMission)
@@ -715,6 +745,13 @@ leaseProbe store gate name =
       missionProbeAction = MissionProbeLease,
       missionProbeGate = gate
     }
+
+sealOutcome :: MissionProbes -> String -> IO MissionProbeSealOutcome
+sealOutcome probes name = do
+  reported <- awaitMissionReport probes name
+  case reported of
+    MissionProbeSealReport outcome -> pure outcome
+    other -> fail ("expected a seal report from " <> name <> ", got " <> show other)
 
 leaseOutcome :: MissionProbes -> String -> IO MissionProbeOutcome
 leaseOutcome probes name = do
@@ -779,6 +816,31 @@ schemaSpec = describe "a record this release did not write" $ do
       case snapshot of
         MissionRefused message -> Text.unpack message `shouldSatisfy` isInfixOf "another repository"
         other -> expectationFailure ("expected a refusal, got " <> show other)
+
+  it "is refused, not adopted, when it is another mission's record sitting in this mission's directory" $
+    withStore $ \_ store -> do
+      -- Both records are written correctly, for the mission they name, and
+      -- then moved: a store restored from a backup or a directory copied by
+      -- hand is enough to do this, and adopting one would let mission-0002's
+      -- terminal snapshot authorise archiving or deleting mission-0001.
+      let other = MissionId "mission-0002"
+      void (expectRight =<< createMissionSpecification store (specificationFor (MissionRepository "coghex" "kanban") other "another mission"))
+      void (expectRight =<< writeMissionSnapshot store (runningSnapshot {missionSnapshotId = other, missionSnapshotLifecycle = MissionCompleted}))
+      createDirectoryIfMissing True (missionRoot store)
+      forM_ ["specification.json", "snapshot.json"] $ \name ->
+        renameFile (store.missionStoreDirectory </> "mission-0002" </> name) (missionRoot store </> name)
+      specification <- readMissionSpecification store theMission
+      case specification of
+        MissionRefused message -> Text.unpack message `shouldSatisfy` isInfixOf "mission-0002"
+        other' -> expectationFailure ("expected a refusal, got " <> show other')
+      snapshot <- readMissionSnapshot store theMission
+      case snapshot of
+        MissionRefused message -> Text.unpack message `shouldSatisfy` isInfixOf "mission-0002"
+        other' -> expectationFailure ("expected a refusal, got " <> show other')
+      -- And the two operations that decide from a snapshot refuse rather than
+      -- act on the foreign one, however terminal it looks.
+      refusalKinds <$> archiveMission store theMission >>= (`shouldBe` ["unreadable"])
+      refusalKinds <$> deleteMission store theMission >>= (`shouldBe` ["unreadable"])
 
   it "is never written in the first place: a record naming another repository is refused by the writer" $
     withStore $ \_ store -> do
@@ -889,6 +951,7 @@ sealSpec = describe "sealing a child's log" $ do
       -- report success against the digest sitting beside it.
       let elsewhere = root </> "elsewhere.log"
       ByteString.writeFile elsewhere "the forged content"
+      sealed.missionSealedMission `shouldBe` theMission
       forM_
         [ "../../../../elsewhere.log",
           "session-b-event_stream.log",
@@ -909,6 +972,79 @@ sealSpec = describe "sealing a child's log" $ do
               Text.unpack message `shouldSatisfy` isInfixOf "rather than"
               Text.unpack message `shouldSatisfy` isInfixOf "session-a-event_stream.log"
             Right () -> expectationFailure ("expected " <> forged <> " to be refused")
+
+  it "cannot have its committed archive altered by a losing concurrent reseal" $
+    withStore $ \root store -> do
+      -- Two processes sealing the same session's log at once. Both can see no
+      -- seal record; the one that loses the seal must not have replaced the
+      -- winner's archive on its way there, or the winner's digest stops
+      -- verifying the file it names.
+      let contents = [("first", "the first process's bytes"), ("second", "the second process's bytes")]
+      forM_ contents $ \(name, body) -> ByteString.writeFile (root </> name <> ".log") body
+      outcomes <- withMissionProbes (root </> "probes")
+        [ MissionProbe
+            { missionProbeName = name,
+              missionProbeStore = store.missionStoreDirectory,
+              missionProbeRepository = store.missionStoreRepository,
+              missionProbeMission = theMission,
+              missionProbeAction = MissionProbeSealLog (root </> name <> ".log") (MissionSessionId "session-a") MissionEventStreamLog,
+              missionProbeGate = "both"
+            }
+        | (name, _) <- contents
+        ]
+        $ \probes -> do
+          openMissionGate probes "both"
+          mapM (sealOutcome probes . fst) contents
+      let sealedDigests = [digest | MissionProbeSealed digest <- outcomes]
+      length sealedDigests `shouldBe` 1
+      length [() | MissionProbeSealRefused _ <- outcomes] `shouldBe` 1
+      -- The archive holds exactly one of the two bodies, and it is the one
+      -- the winning seal records.
+      archived <- ByteString.readFile (missionRoot store </> "archive" </> "session-a-event_stream.log")
+      map snd contents `shouldSatisfy` elem archived
+      sealedDigests `shouldBe` [sha256Hex archived]
+      stored <- expectRight =<< readMissionSealedArchives store theMission
+      forM_ stored (\entry -> void (expectRight =<< verifyMissionSealedArchive store theMission entry))
+      map missionSealedDigest stored `shouldBe` sealedDigests
+
+  it "completes an archive an interrupted attempt published without a seal, and seals what is actually there" $
+    withStore $ \root store -> do
+      let source = root </> "child.log"
+      ByteString.writeFile source "the bytes the first attempt published"
+      sealed <- expectRight =<< sealMissionLog store theMission (MissionSessionId "session-a") MissionEventStreamLog source
+      -- What a crash between publishing the archive and recording the seal
+      -- leaves: an archive with nothing describing it.
+      removeFile (missionRoot store </> "archive" </> "session-a-event_stream.seal.json")
+      ByteString.writeFile source "different bytes entirely"
+      again <- expectRight =<< sealMissionLog store theMission (MissionSessionId "session-a") MissionEventStreamLog source
+      -- The archive is immutable, so the completing seal describes what is
+      -- there rather than what this attempt was handed.
+      again.missionSealedDigest `shouldBe` sealed.missionSealedDigest
+      void (expectRight =<< verifyMissionSealedArchive store theMission again)
+      archived <- ByteString.readFile (missionRoot store </> "archive" </> "session-a-event_stream.log")
+      archived `shouldBe` "the bytes the first attempt published"
+
+  it "refuses a seal record that belongs to another mission" $
+    withStore $ \root store -> do
+      let source = root </> "child.log"
+      ByteString.writeFile source "the original"
+      sealed <- expectRight =<< sealMissionLog store theMission (MissionSessionId "session-a") MissionEventStreamLog source
+      result <- verifyMissionSealedArchive store theMission sealed {missionSealedMission = MissionId "mission-0002"}
+      case result of
+        Left message -> Text.unpack message `shouldSatisfy` isInfixOf "belongs to mission mission-0002"
+        Right () -> expectationFailure "expected the verification to be refused"
+      -- And one sitting in this mission's archive directory is refused on the
+      -- way in rather than returned.
+      void (expectRight =<< createMissionSpecification store (specificationFor (MissionRepository "coghex" "kanban") (MissionId "mission-0002") "another mission"))
+      other <- expectRight =<< sealMissionLog (MissionStore store.missionStoreDirectory store.missionStoreRepository) (MissionId "mission-0002") (MissionSessionId "session-b") MissionEventStreamLog source
+      renameFile
+        (store.missionStoreDirectory </> "mission-0002" </> "archive" </> "session-b-event_stream.seal.json")
+        (missionRoot store </> "archive" </> "session-b-event_stream.seal.json")
+      other.missionSealedMission `shouldBe` MissionId "mission-0002"
+      listed <- readMissionSealedArchives store theMission
+      case listed of
+        Left message -> Text.unpack message `shouldSatisfy` isInfixOf "mission-0002"
+        Right entries -> expectationFailure ("expected a refusal, got " <> show (map missionSealedSession entries))
 
   it "reports a source it cannot read rather than recording an empty archive" $
     withStore $ \root store -> do

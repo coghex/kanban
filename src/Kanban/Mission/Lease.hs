@@ -217,12 +217,29 @@ holderStillHeld holderPresence mission ownerPath = do
     MissionAbsent -> pure (Just (blocked "its owner record is missing or was written by another release"))
     MissionUnreadable message -> pure (Just (blocked ("its owner record will not decode (" <> message <> ")")))
     MissionRefused message -> pure (Just (blocked ("its owner record was refused (" <> message <> ")")))
-    MissionPresent owner -> do
-      presence <- holderPresence owner.missionLeaseOwnerProcessId
-      pure $ case presence of
-        MissionHolderPresent -> Just (blocked "its holder is still running")
-        MissionHolderUndecidable detail -> Just (blocked ("its holder could not be checked (" <> detail <> ")"))
-        MissionHolderGone -> Nothing
+    -- An owner record naming another mission is not this lease's holder, so
+    -- the process it names says nothing about whether this mission is being
+    -- advanced. A store restored from a backup or a directory copied by hand
+    -- is enough to put one here, and retiring on its evidence would hand the
+    -- lease out while the real holder — about whom nothing is recorded — is
+    -- still running.
+    MissionPresent owner
+      | owner.missionLeaseOwnerMission /= mission ->
+          pure
+            ( Just
+                ( blocked
+                    ( "its owner record belongs to mission "
+                        <> owner.missionLeaseOwnerMission.unMissionId
+                        <> ", so this mission's holder cannot be identified"
+                    )
+                )
+            )
+      | otherwise -> do
+          presence <- holderPresence owner.missionLeaseOwnerProcessId
+          pure $ case presence of
+            MissionHolderPresent -> Just (blocked "its holder is still running")
+            MissionHolderUndecidable detail -> Just (blocked ("its holder could not be checked (" <> detail <> ")"))
+            MissionHolderGone -> Nothing
   where
     blocked reason = "mission " <> mission.unMissionId <> " is already being advanced: " <> reason
 
@@ -238,7 +255,8 @@ releaseMissionLease lease = do
       :: IO (MissionRead MissionLeaseOwner)
   case ownerResult of
     MissionPresent owner
-      | owner.missionLeaseOwnerToken == lease.missionLeaseToken -> do
+      | owner.missionLeaseOwnerMission == lease.missionLeaseMission,
+        owner.missionLeaseOwnerToken == lease.missionLeaseToken -> do
           ignoreFileOperation (removeFile lease.missionLeaseOwnerFile)
           ignoreFileOperation (removeDirectory lease.missionLeaseDirectory)
     _ -> pure ()

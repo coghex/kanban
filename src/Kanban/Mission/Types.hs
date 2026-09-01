@@ -662,7 +662,13 @@ missionWorktreeStateTag state = case state of
 -- The digest algorithm is recorded rather than implied, so a record written
 -- under one algorithm is still checkable after a later release adds another.
 data MissionSealedArchive = MissionSealedArchive
-  { missionSealedSession :: MissionSessionId,
+  { -- | The mission this entry belongs to. Checked against the mission whose
+    -- archive it was read from, for the reason every other record's identity
+    -- is checked: where a record sits and what it says about itself can be
+    -- made to disagree, and a seal is what a collector trusts before removing
+    -- a source.
+    missionSealedMission :: MissionId,
+    missionSealedSession :: MissionSessionId,
     missionSealedKind :: MissionLogKind,
     -- | The archived copy's name inside the mission's @archive@ directory.
     -- A name rather than a path, so a store that moved still resolves.

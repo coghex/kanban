@@ -50,6 +50,7 @@ module Kanban.Mission.Paths
     writeMissionRecord,
     createMissionRecord,
     withStagedContent,
+    commitNoReplace,
     ensureMissionDirectory,
     listMissionEntries,
     ignoreFileOperation,
@@ -245,29 +246,45 @@ readMissionRecord mission recognized path = do
     Right bytes -> readBytes mission recognized path bytes
 
 -- | 'readMissionRecord' with requirement 11's identity refusal applied: a
--- record that decodes but names another repository is refused rather than
--- adopted.
+-- record that decodes but is not this mission's, in this repository, is
+-- refused rather than adopted.
+--
+-- Both halves of the identity are checked, and the mission half is not a
+-- formality. A record carries the mission it describes, and where it /sits/ is
+-- the mission it will be read as; a store restored from a backup, a directory
+-- copied to try something out, or a file moved by hand can make those two
+-- disagree. Adopting such a record would let one mission's terminal snapshot
+-- authorise archiving or deleting another, which is the one place a read is
+-- allowed to destroy something.
 readMissionRecordFor ::
   FromJSON value =>
   MissionId ->
   [Int] ->
   MissionRepository ->
+  (value -> MissionId) ->
   (value -> MissionRepository) ->
   FilePath ->
   IO (MissionRead value)
-readMissionRecordFor mission recognized expected recordedRepository path = do
+readMissionRecordFor mission recognized expected recordedMission recordedRepository path = do
   result <- readMissionRecord mission recognized path
   pure $ case result of
     MissionPresent value
       | not (missionRepositoryMatches (recordedRepository value) expected) ->
-          MissionRefused
-            ( "mission "
-                <> mission.unMissionId
-                <> " at "
-                <> Text.pack path
-                <> " is recorded against another repository and was not adopted"
-            )
+          refused "another repository"
+      | recordedMission value /= mission ->
+          refused ("the mission " <> (recordedMission value).unMissionId)
     other -> other
+  where
+    refused subject =
+      MissionRefused
+        ( "mission "
+            <> mission.unMissionId
+            <> " at "
+            <> Text.pack path
+            <> " is recorded against "
+            <> subject
+            <> " and was not adopted"
+        )
 
 -- | The pure half of 'readMissionRecord', separated so the decision order is
 -- readable without the IO around it.
@@ -381,13 +398,25 @@ writeMissionRecord path version value =
 -- specification rather than reporting one already there.
 createMissionRecord :: ToJSON value => FilePath -> Int -> value -> IO (Either Text Bool)
 createMissionRecord path version value =
-  withStagedContent path (encode (MissionEnvelope version value)) $ \staged -> do
-    linked <- try @IOException (createLink staged path)
-    case linked of
-      Right () -> pure True
-      Left exception
-        | isAlreadyExistsError exception -> pure False
-        | otherwise -> throwIO exception
+  withStagedContent path (encode (MissionEnvelope version value)) (`commitNoReplace` path)
+
+-- | Publishes @staged@ at @path@ if nothing is there, reporting whether it
+-- did.
+--
+-- A hard link rather than a rename, and that is the whole point: @link@ is
+-- atomic and it /fails/ when the target exists, where a rename would replace
+-- it. Two processes racing one path are settled by the kernel here, not by a
+-- check-then-act this code could be interrupted inside, and a file this store
+-- promises never to replace is a file nothing published through here can
+-- replace.
+commitNoReplace :: FilePath -> FilePath -> IO Bool
+commitNoReplace staged path = do
+  linked <- try @IOException (createLink staged path)
+  case linked of
+    Right () -> pure True
+    Left exception
+      | isAlreadyExistsError exception -> pure False
+      | otherwise -> throwIO exception
 
 -- | Every entry of the store that is a plain name.
 --

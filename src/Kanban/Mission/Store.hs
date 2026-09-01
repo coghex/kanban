@@ -69,7 +69,7 @@ import qualified Data.Text as Text
 import Data.Time (UTCTime, getCurrentTime)
 import Kanban.Domain (Repository)
 import Kanban.Mission.Digest (sha256Hex)
-import Kanban.Mission.Journal (MissionJournalLine, appendMissionEvent, decodeMissionJournalLine, readMissionJournalSince)
+import Kanban.Mission.Journal (MissionJournalLine (MissionJournalUnknownVersion), appendMissionEvent, decodeMissionJournalLine, readMissionJournalSince)
 import Kanban.Mission.Session (missionSessionTreeErrorMessage, validateMissionSessionTree)
 import Kanban.Mission.Paths
   ( MissionRead (..),
@@ -78,6 +78,7 @@ import Kanban.Mission.Paths
     listMissionEntries,
     missionArchiveDirectory,
     withStagedContent,
+    commitNoReplace,
     missionArchivePath,
     missionDirectory,
     missionJournalPath,
@@ -85,7 +86,6 @@ import Kanban.Mission.Paths
     missionSnapshotPath,
     missionSpecificationPath,
     missionStoreRoot,
-    readMissionRecord,
     readMissionRecordFor,
     writeMissionRecord,
   )
@@ -119,7 +119,7 @@ import Kanban.Mission.Types
   )
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
-import System.Directory (doesFileExist, removePathForcibly, renameFile)
+import System.Directory (doesFileExist, removePathForcibly)
 import System.FilePath (takeFileName, (</>))
 import System.Posix.Files (getSymbolicLinkStatus, isDirectory)
 
@@ -238,6 +238,7 @@ readMissionSpecification store mission = case missionSpecificationPath store.mis
       mission
       [missionSpecificationSchemaVersion]
       store.missionStoreRepository
+      missionSpecificationId
       missionSpecificationRepository
       path
 
@@ -267,6 +268,7 @@ readMissionSnapshot store mission = case missionSnapshotPath store.missionStoreD
       mission
       [missionSnapshotSchemaVersion]
       store.missionStoreRepository
+      missionSnapshotId
       missionSnapshotRepository
       path
 
@@ -294,7 +296,17 @@ readMissionJournal store mission consumedBytes = case missionJournalPath store.m
   Left message -> pure (Left message)
   Right path -> do
     result <- readMissionJournalSince path consumedBytes
-    pure (fmap (\(lines', offset) -> (map (decodeMissionJournalLine mission path) lines', offset)) result)
+    pure (fmap (\(lines', offset) -> (readable (map (decodeMissionJournalLine mission path) lines'), offset)) result)
+  where
+    -- A record written under a schema version this release does not
+    -- recognize is absent (§16), and absent means the caller is not told
+    -- about it. The offset is unaffected: the line was consumed, so the read
+    -- after this one starts past it and the records around it are examined
+    -- exactly as they would have been.
+    readable = filter notUnknownVersion
+    notUnknownVersion line = case line of
+      MissionJournalUnknownVersion _ -> False
+      _ -> True
 
 -- | Why a seal did not happen.
 data MissionSealFailure
@@ -346,7 +358,9 @@ sealMissionLog store mission session kind source =
       -- Existence, not a successful decode: a seal record written under a
       -- schema version this release does not recognize reads as absent, and
       -- resealing over it would destroy an archive entry a later release
-      -- still owns.
+      -- still owns. This is a fast refusal rather than the guarantee — the
+      -- guarantee is the no-replace commit below, which is what settles a
+      -- race this check cannot see.
       alreadySealed <- doesFileExist sealPath
       if alreadySealed
         then pure (Left (MissionSealAlreadySealed session kind))
@@ -359,35 +373,66 @@ sealMissionLog store mission session kind source =
               case bytesResult of
                 Left exception -> pure (Left (MissionSealSourceUnreadable source (Text.pack (show exception))))
                 Right bytes -> do
-                  now <- getCurrentTime
-                  copied <- copyIntoArchive archivePath bytes
-                  case copied of
+                  published <- publishArchive archivePath bytes
+                  case published of
                     Left message -> pure (Left (MissionSealNotWritten message))
-                    Right () -> do
-                      let sealed =
-                            MissionSealedArchive
-                              { missionSealedSession = session,
-                                missionSealedKind = kind,
-                                missionSealedName = takeFileName archivePath,
-                                missionSealedDigestAlgorithm = missionSealDigestAlgorithm,
-                                missionSealedDigest = sha256Hex bytes,
-                                missionSealedByteLength = fromIntegral (ByteString.length bytes),
-                                missionSealedAt = now,
-                                missionSealedSource = source
-                              }
-                      recorded <- createMissionRecord sealPath missionSealSchemaVersion sealed
-                      pure $ case recorded of
-                        Left message -> Left (MissionSealNotWritten message)
-                        Right False -> Left (MissionSealAlreadySealed session kind)
-                        Right True -> Right sealed
+                    Right _ -> commitSeal mission session kind source archivePath sealPath
 
--- | Puts the bytes in the archive under the same staging discipline every
--- other write here uses, so a copy interrupted before it was committed leaves
--- a user-only file that no reader adopts rather than a loose one that a seal
--- record might later be taken to describe.
-copyIntoArchive :: FilePath -> ByteString.ByteString -> IO (Either Text ())
-copyIntoArchive archivePath bytes =
-  withStagedContent archivePath (LazyByteString.fromStrict bytes) (`renameFile` archivePath)
+-- | Puts the bytes in the archive under a commit that cannot replace what is
+-- already there.
+--
+-- A rename here would be the whole race: two callers can both find no seal
+-- record, and the one that loses the seal creation would still have renamed
+-- /its/ bytes over the archive the winner sealed, leaving a seal that no
+-- longer verifies the file it names. A link fails instead, so a committed
+-- archive is immutable from the moment it exists and the loser touches
+-- nothing. Reporting whether this call published is deliberately not what the
+-- caller decides on: what matters is that an archive is now there, and the
+-- seal is written from that file rather than from the bytes this call happens
+-- to be holding.
+publishArchive :: FilePath -> ByteString.ByteString -> IO (Either Text Bool)
+publishArchive archivePath bytes =
+  withStagedContent archivePath (LazyByteString.fromStrict bytes) (`commitNoReplace` archivePath)
+
+-- | Records the seal for an archive that is already committed.
+--
+-- The digest and length are taken by reading the archive back, never from the
+-- bytes the caller supplied, so the record describes the file it names even
+-- when this call found an archive an interrupted earlier attempt had already
+-- published. That is also what makes the interrupted case recoverable: an
+-- archive with no seal beside it is completed by the next attempt rather than
+-- left permanently unverifiable.
+commitSeal ::
+  MissionId ->
+  MissionSessionId ->
+  MissionLogKind ->
+  FilePath ->
+  FilePath ->
+  FilePath ->
+  IO (Either MissionSealFailure MissionSealedArchive)
+commitSeal mission session kind source archivePath sealPath = do
+  archivedResult <- try @IOException (ByteString.readFile archivePath)
+  case archivedResult of
+    Left exception -> pure (Left (MissionSealNotWritten (Text.pack (show exception))))
+    Right archivedBytes -> do
+      now <- getCurrentTime
+      let sealed =
+            MissionSealedArchive
+              { missionSealedMission = mission,
+                missionSealedSession = session,
+                missionSealedKind = kind,
+                missionSealedName = takeFileName archivePath,
+                missionSealedDigestAlgorithm = missionSealDigestAlgorithm,
+                missionSealedDigest = sha256Hex archivedBytes,
+                missionSealedByteLength = fromIntegral (ByteString.length archivedBytes),
+                missionSealedAt = now,
+                missionSealedSource = source
+              }
+      recorded <- createMissionRecord sealPath missionSealSchemaVersion sealed
+      pure $ case recorded of
+        Left message -> Left (MissionSealNotWritten message)
+        Right False -> Left (MissionSealAlreadySealed session kind)
+        Right True -> Right sealed
 
 -- | Every sealed archive entry a mission holds.
 --
@@ -400,10 +445,18 @@ readMissionSealedArchives store mission = case missionArchiveDirectory store.mis
   Right archiveDirectory -> do
     entries <- listMissionEntries archiveDirectory
     let sealNames = sort (filter (".seal.json" `isSuffixOfPath`) entries)
-    results <- mapM (readMissionRecord mission [missionSealSchemaVersion] . (archiveDirectory </>)) sealNames
+    results <- mapM (readSeal archiveDirectory) sealNames
     pure (collect (zip sealNames results))
   where
     isSuffixOfPath suffix name = suffix `Text.isSuffixOf` Text.pack name
+    readSeal archiveDirectory name =
+      readMissionRecordFor
+        mission
+        [missionSealSchemaVersion]
+        store.missionStoreRepository
+        missionSealedMission
+        (const store.missionStoreRepository)
+        (archiveDirectory </> name)
     collect pairs = case [message | (_, MissionUnreadable message) <- pairs] of
       message : _ -> Left message
       [] -> case [message | (_, MissionRefused message) <- pairs] of
@@ -419,6 +472,18 @@ verifyMissionSealedArchive store mission sealed =
   case missionArchivePath store.missionStoreDirectory mission sealed.missionSealedSession sealed.missionSealedKind of
     Left message -> pure (Left message)
     Right path
+      | sealed.missionSealedMission /= mission ->
+          pure
+            ( Left
+                ( "the seal of session "
+                    <> sealed.missionSealedSession.unMissionSessionId
+                    <> " belongs to mission "
+                    <> sealed.missionSealedMission.unMissionId
+                    <> " rather than "
+                    <> mission.unMissionId
+                    <> ", and was not verified"
+                )
+            )
       -- The path is recomputed from the session and log kind this record is
       -- *about*, never joined from the name it carries. A record is durable
       -- data: one that has been edited could name `../../elsewhere` or some

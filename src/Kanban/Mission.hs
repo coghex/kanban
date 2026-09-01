@@ -104,7 +104,9 @@ module Kanban.Mission
 
     -- * The journal
     MissionEvent (..),
-    MissionJournalLine (..),
+    -- | Only the two a caller can receive: a record read under an
+    -- unrecognized schema version is absent, and never surfaces.
+    MissionJournalLine (MissionJournalEvent, MissionJournalMalformed),
     recordMissionEvent,
     readMissionJournal,
 
