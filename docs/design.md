@@ -3137,6 +3137,17 @@ Defaults:
   included; and no write ever treats that silence as permission, so
   "is one already there?" is always a question for the filesystem rather than
   for a successful decode.
+- Every mission record also carries the repository and the mission it belongs
+  to, and a record whose identity disagrees with the directory it sits in is
+  refused rather than adopted — the specification, the snapshot, each journal
+  line, each sealed-archive record, and the lease owner alike. Each is decoded
+  on its own, so for each of them a store restored from a backup, a directory
+  copied, or a repository renamed can put the two out of step; adopting one
+  would let a foreign record authorise deleting a mission, report another
+  mission's history as this one's, or hand out a lease whose real holder is
+  still running. Nothing this release writes can produce such a record either:
+  a write naming another repository or mission is refused before it is
+  staged.
 - The mission store holds no open issue or pull request body either. What a
   mission records of its targets is their numbers and titles alongside the
   request the user typed, never an item's body, so the rule below is not

@@ -144,6 +144,7 @@ import Test.Hspec
 spec :: Spec
 spec = describe "the durable mission store" $ do
   storeLocationSpec
+  identitySpec
   roundTripSpec
   journalSpec
   snapshotSpec
@@ -304,6 +305,7 @@ eventNamed kind =
   MissionEvent
     { missionEventAt = fixedTime,
       missionEventMission = theMission,
+      missionEventRepository = MissionRepository "coghex" "kanban",
       missionEventStep = Just (MissionStepId "solve-592"),
       missionEventSession = Nothing,
       missionEventKind = kind,
@@ -349,6 +351,109 @@ storeLocationSpec = describe "where a repository's missions live" $ do
       entries `shouldBe` []
       above <- listDirectory (takeDirectory (takeDirectory store.missionStoreDirectory))
       sort above `shouldBe` ["missions"]
+
+-- * Identity
+
+-- | The whole identity lattice, enumerated: five kinds of durable record, two
+-- ways each can fail to be this store's.
+--
+-- Enumerated in one place on purpose. Each record is decoded on its own, so
+-- for each of them where it sits and what it says about itself can be made to
+-- disagree — a store restored from a backup, a directory copied to try
+-- something out, a repository renamed. Checking four of the five, or one of
+-- the two identities, leaves a hole that looks exactly like the ones that are
+-- covered.
+identitySpec :: Spec
+identitySpec = describe "every durable record's own identity" $ do
+  it "is refused when the record belongs to another repository, however right its mission looks" $
+    withStore $ \root store -> do
+      foreignRecords root store (MissionRepository "coghex" "elsewhere") theMission
+      specification <- readMissionSpecification store theMission
+      refusalOf specification `shouldSatisfy` mentions "another repository"
+      snapshot <- readMissionSnapshot store theMission
+      refusalOf snapshot `shouldSatisfy` mentions "another repository"
+      (records, _) <- expectRight =<< readMissionJournal store theMission 0
+      kindsOf records `shouldBe` []
+      unwords (map Text.unpack (refusalsOf records)) `shouldSatisfy` isInfixOf "another repository"
+      seals <- readMissionSealedArchives store theMission
+      case seals of
+        Left message -> Text.unpack message `shouldSatisfy` isInfixOf "another repository"
+        Right entries -> expectationFailure ("expected a refusal, got " <> show (map missionSealedSession entries))
+      lease <- acquireMissionLeaseWith (const (pure MissionHolderGone)) store theMission
+      case lease of
+        MissionLeaseHeld reason -> Text.unpack reason `shouldSatisfy` isInfixOf "another repository"
+        other -> expectationFailure ("expected a refusal, got " <> show other)
+
+  it "is refused when the record belongs to another mission" $
+    withStore $ \root store -> do
+      foreignRecords root store (MissionRepository "coghex" "kanban") (MissionId "mission-0002")
+      specification <- readMissionSpecification store theMission
+      refusalOf specification `shouldSatisfy` mentions "the mission mission-0002"
+      snapshot <- readMissionSnapshot store theMission
+      refusalOf snapshot `shouldSatisfy` mentions "the mission mission-0002"
+      (records, _) <- expectRight =<< readMissionJournal store theMission 0
+      kindsOf records `shouldBe` []
+      unwords (map Text.unpack (refusalsOf records)) `shouldSatisfy` isInfixOf "the mission mission-0002"
+      seals <- readMissionSealedArchives store theMission
+      case seals of
+        Left message -> Text.unpack message `shouldSatisfy` isInfixOf "mission-0002"
+        Right entries -> expectationFailure ("expected a refusal, got " <> show (map missionSealedSession entries))
+      lease <- acquireMissionLeaseWith (const (pure MissionHolderGone)) store theMission
+      case lease of
+        MissionLeaseHeld reason -> Text.unpack reason `shouldSatisfy` isInfixOf "mission-0002"
+        other -> expectationFailure ("expected a refusal, got " <> show other)
+
+-- | Writes one of every durable record correctly, for @owner@ and @named@, and
+-- then moves each into this store's @mission-0001@ directory.
+--
+-- Every record is produced by the writer that owns it rather than assembled
+-- here: what is being tested is a reader's refusal, and a hand-built record
+-- would be testing this module's idea of the format instead.
+foreignRecords :: FilePath -> MissionStore -> MissionRepository -> MissionId -> IO ()
+foreignRecords root store owner named = do
+  elsewhere <-
+    if owner == store.missionStoreRepository
+      then pure store
+      else expectRight =<< openMissionStore otherRepository
+  void (expectRight =<< createMissionSpecification elsewhere (specificationFor owner named "somewhere else"))
+  void
+    ( expectRight
+        =<< writeMissionSnapshot
+          elsewhere
+          runningSnapshot {missionSnapshotId = named, missionSnapshotRepository = owner}
+    )
+  void
+    ( expectRight
+        =<< recordMissionEvent
+          elsewhere
+          (eventNamed "planned") {missionEventMission = named, missionEventRepository = owner}
+    )
+  let source = root </> "child.log"
+  ByteString.writeFile source "a child's stream"
+  void (expectRight =<< sealMissionLog elsewhere named (MissionSessionId "session-a") MissionEventStreamLog source)
+  acquisition <- acquireMissionLease elsewhere named
+  case acquisition of
+    MissionLeaseAcquired _ -> pure ()
+    other -> expectationFailure ("expected to acquire the foreign lease, got " <> show other)
+  let from = elsewhere.missionStoreDirectory </> Text.unpack named.unMissionId
+  createDirectoryIfMissing True (missionRoot store </> "lease")
+  createDirectoryIfMissing True (missionRoot store </> "archive")
+  forM_
+    [ "specification.json",
+      "snapshot.json",
+      "events.jsonl",
+      "lease" </> "owner.json",
+      "archive" </> "session-a-event_stream.seal.json"
+    ]
+    $ \name -> renameFile (from </> name) (missionRoot store </> name)
+
+refusalOf :: Show value => MissionRead value -> String
+refusalOf result = case result of
+  MissionRefused message -> Text.unpack message
+  other -> "not a refusal: " <> show other
+
+mentions :: String -> String -> Bool
+mentions = isInfixOf
 
 -- * Round-trip
 
@@ -445,8 +550,15 @@ journalSpec = describe "the append-only event journal" $ do
 kindsOf :: [MissionJournalLine] -> [Text]
 kindsOf records = [event.missionEventKind | MissionJournalEvent event <- records]
 
+-- | Records this release could not read. Kept apart from 'refusalsOf' because
+-- broken and not-ours are different answers with different repairs, and a
+-- helper that merged them would let either assertion pass on the other.
 diagnosticsOf :: [MissionJournalLine] -> [Text]
 diagnosticsOf records = [message | MissionJournalMalformed message <- records]
+
+-- | Records that decoded and belong to another mission or repository.
+refusalsOf :: [MissionJournalLine] -> [Text]
+refusalsOf records = [message | MissionJournalRefused message <- records]
 
 journalPath :: MissionStore -> FilePath
 journalPath store = store.missionStoreDirectory </> "mission-0001" </> "events.jsonl"
@@ -541,7 +653,7 @@ permissionSpec = describe "under a permissive umask" $
           let source = root </> "child.log"
           ByteString.writeFile source "a child's stream"
           void (expectRight =<< sealMissionLog store theMission (MissionSessionId "session-a") MissionEventStreamLog source)
-          acquisition <- acquireMissionLease store.missionStoreDirectory theMission
+          acquisition <- acquireMissionLease store theMission
           case acquisition of
             MissionLeaseAcquired lease -> releaseMissionLease lease
             other -> expectationFailure ("expected to acquire the lease, got " <> show other)
@@ -628,70 +740,70 @@ leaseSpec = describe "the mission lease" $ do
 
   it "stays held for good when its owner record will not decode" $
     withStore $ \_ store -> do
-      acquisition <- acquireMissionLease store.missionStoreDirectory theMission
+      acquisition <- acquireMissionLease store theMission
       case acquisition of
         MissionLeaseAcquired _ -> pure ()
         other -> expectationFailure ("expected to acquire the lease, got " <> show other)
       ByteString.writeFile (store.missionStoreDirectory </> "mission-0001" </> "lease" </> "owner.json") "not json at all"
-      second <- acquireMissionLease store.missionStoreDirectory theMission
+      second <- acquireMissionLease store theMission
       case second of
         MissionLeaseHeld reason -> Text.unpack reason `shouldSatisfy` isInfixOf "will not decode"
         other -> expectationFailure ("expected a refusal, got " <> show other)
 
   it "stays held for good when its owner record is gone entirely" $
     withStore $ \_ store -> do
-      void (acquireMissionLease store.missionStoreDirectory theMission)
+      void (acquireMissionLease store theMission)
       removeFile (store.missionStoreDirectory </> "mission-0001" </> "lease" </> "owner.json")
-      second <- acquireMissionLease store.missionStoreDirectory theMission
+      second <- acquireMissionLease store theMission
       case second of
         MissionLeaseHeld reason -> Text.unpack reason `shouldSatisfy` isInfixOf "missing"
         other -> expectationFailure ("expected a refusal, got " <> show other)
 
   it "names its holder to a caller that only wants to say who has it" $
     withStore $ \_ store -> do
-      acquisition <- acquireMissionLease store.missionStoreDirectory theMission
+      acquisition <- acquireMissionLease store theMission
       lease <- case acquisition of
         MissionLeaseAcquired lease -> pure lease
         other -> fail ("expected to acquire the lease, got " <> show other)
-      owner <- readMissionLeaseOwner store.missionStoreDirectory theMission
+      owner <- readMissionLeaseOwner store theMission
       case owner of
         MissionPresent record -> do
           record.missionLeaseOwnerMission `shouldBe` theMission
           record.missionLeaseOwnerToken `shouldBe` lease.missionLeaseToken
         other -> expectationFailure ("expected an owner record, got " <> show other)
       releaseMissionLease lease
-      afterRelease <- readMissionLeaseOwner store.missionStoreDirectory theMission
+      afterRelease <- readMissionLeaseOwner store theMission
       afterRelease `shouldBe` MissionAbsent
 
   it "stays held when its owner record belongs to another mission, however gone that holder is" $
     withStore $ \_ store -> do
-      void (acquireMissionLease store.missionStoreDirectory theMission)
+      void (acquireMissionLease store theMission)
       -- An owner record written for another mission, moved here. Its process
       -- says nothing about who is advancing this mission, so even a probe
       -- that reports every holder gone must not retire the lease.
       let other = MissionId "mission-0002"
-      void (acquireMissionLease store.missionStoreDirectory other)
+      void (acquireMissionLease store other)
       renameFile
         (store.missionStoreDirectory </> "mission-0002" </> "lease" </> "owner.json")
         (missionRoot store </> "lease" </> "owner.json")
       second <-
         acquireMissionLeaseWith
           (const (pure MissionHolderGone))
-          store.missionStoreDirectory
+          store
           theMission
       case second of
         MissionLeaseHeld reason -> do
-          Text.unpack reason `shouldSatisfy` isInfixOf "belongs to mission mission-0002"
-          Text.unpack reason `shouldSatisfy` isInfixOf "cannot be identified"
+          Text.unpack reason `shouldSatisfy` isInfixOf "owner record was refused"
+          Text.unpack reason `shouldSatisfy` isInfixOf "the mission mission-0002"
         other' -> expectationFailure ("expected a refusal, got " <> show other')
 
   it "stays held when the liveness probe cannot answer" $
     withStore $ \_ store -> do
-      void (acquireMissionLease store.missionStoreDirectory theMission)
+      void (acquireMissionLease store theMission)
       second <-
         acquireMissionLeaseWith
           (const (pure (MissionHolderUndecidable "the kernel would not say")))
-          store.missionStoreDirectory
+          store
           theMission
       case second of
         MissionLeaseHeld reason -> Text.unpack reason `shouldSatisfy` isInfixOf "could not be checked"
@@ -725,11 +837,11 @@ leaseSpec = describe "the mission lease" $ do
 
   it "records the holder's own process identifier, so a successor can ask about it" $
     withStore $ \_ store -> do
-      acquisition <- acquireMissionLease store.missionStoreDirectory theMission
+      acquisition <- acquireMissionLease store theMission
       case acquisition of
         MissionLeaseAcquired _ -> pure ()
         other -> expectationFailure ("expected to acquire the lease, got " <> show other)
-      owner <- readMissionLeaseOwner store.missionStoreDirectory theMission
+      owner <- readMissionLeaseOwner store theMission
       self <- getProcessID
       case owner of
         MissionPresent record -> record.missionLeaseOwnerProcessId `shouldBe` fromIntegral self
@@ -1375,8 +1487,8 @@ noProcessSpec = describe "what the store runs" $
         void (expectRight =<< verifyMissionSealedArchive store theMission sealed)
         void (expectRight =<< readMissionSealedArchives store theMission)
         void (listMissions store)
-        acquisition <- acquireMissionLease store.missionStoreDirectory theMission
-        contended <- acquireMissionLease store.missionStoreDirectory theMission
+        acquisition <- acquireMissionLease store theMission
+        contended <- acquireMissionLease store theMission
         case contended of
           MissionLeaseHeld _ -> pure ()
           other -> expectationFailure ("expected the second acquisition to be refused, got " <> show other)

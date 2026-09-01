@@ -56,17 +56,19 @@ import qualified Data.Text as Text
 import Data.Time (getCurrentTime)
 import Kanban.Mission.Paths
   ( MissionRead (..),
+    MissionStore (..),
     ensureMissionDirectory,
     ignoreFileOperation,
     missionDirectory,
     missionLeaseOwnerPath,
     missionLeasePath,
-    readMissionRecord,
+    readMissionRecordFor,
     writeMissionRecord,
   )
 import Kanban.Mission.Types
   ( MissionId (..),
     MissionLeaseOwner (..),
+    MissionRepository,
     missionLeaseSchemaVersion,
   )
 import System.Directory (createDirectory, removeDirectory, removeFile)
@@ -80,6 +82,7 @@ import System.Posix.Types (CPid)
 -- so a release can refuse to remove a lease some later acquisition now holds.
 data MissionLease = MissionLease
   { missionLeaseMission :: MissionId,
+    missionLeaseRepository :: MissionRepository,
     missionLeaseDirectory :: FilePath,
     missionLeaseOwnerFile :: FilePath,
     missionLeaseToken :: Text
@@ -134,15 +137,15 @@ missionHolderPresence processId
           | isDoesNotExistError exception -> MissionHolderGone
           | otherwise -> MissionHolderUndecidable (Text.pack (show exception))
 
-acquireMissionLease :: FilePath -> MissionId -> IO MissionLeaseAcquisition
+acquireMissionLease :: MissionStore -> MissionId -> IO MissionLeaseAcquisition
 acquireMissionLease = acquireMissionLeaseWith missionHolderPresence
 
 -- | 'acquireMissionLease' with the liveness probe injected, so a fixture can
 -- stage a probe that cannot answer and prove the lease stays held.
-acquireMissionLeaseWith :: (Int -> IO MissionHolderPresence) -> FilePath -> MissionId -> IO MissionLeaseAcquisition
-acquireMissionLeaseWith holderPresence store mission = case (,) <$> missionLeasePath store mission <*> missionLeaseOwnerPath store mission of
+acquireMissionLeaseWith :: (Int -> IO MissionHolderPresence) -> MissionStore -> MissionId -> IO MissionLeaseAcquisition
+acquireMissionLeaseWith holderPresence store mission = case (,) <$> missionLeasePath store.missionStoreDirectory mission <*> missionLeaseOwnerPath store.missionStoreDirectory mission of
   Left message -> pure (MissionLeaseUnusable message)
-  Right (leaseDirectory, ownerPath) -> case missionDirectory store mission of
+  Right (leaseDirectory, ownerPath) -> case missionDirectory store.missionStoreDirectory mission of
     Left message -> pure (MissionLeaseUnusable message)
     Right directory -> do
       prepared <- ensureMissionDirectory directory
@@ -164,6 +167,7 @@ acquireMissionLeaseWith holderPresence store mission = case (,) <$> missionLease
               missionLeaseSchemaVersion
               MissionLeaseOwner
                 { missionLeaseOwnerMission = mission,
+                  missionLeaseOwnerRepository = store.missionStoreRepository,
                   missionLeaseOwnerToken = token,
                   missionLeaseOwnerAcquiredAt = now,
                   missionLeaseOwnerProcessId = fromIntegral processId
@@ -180,6 +184,7 @@ acquireMissionLeaseWith holderPresence store mission = case (,) <$> missionLease
                 ( MissionLeaseAcquired
                     MissionLease
                       { missionLeaseMission = mission,
+                        missionLeaseRepository = store.missionStoreRepository,
                         missionLeaseDirectory = leaseDirectory,
                         missionLeaseOwnerFile = ownerPath,
                         missionLeaseToken = token
@@ -189,7 +194,7 @@ acquireMissionLeaseWith holderPresence store mission = case (,) <$> missionLease
           | not (isAlreadyExistsError exception) ->
               pure (MissionLeaseUnusable ("could not acquire the mission lease: " <> Text.pack (show exception)))
           | otherwise -> do
-              held <- holderStillHeld holderPresence mission ownerPath
+              held <- holderStillHeld holderPresence store mission ownerPath
               case held of
                 Just reason -> pure (MissionLeaseHeld reason)
                 Nothing
@@ -206,9 +211,17 @@ acquireMissionLeaseWith holderPresence store mission = case (,) <$> missionLease
 -- exactly one case: the owner record decoded, and the kernel says no process
 -- has the identifier it names. Every other outcome keeps the lease,
 -- permanently.
-holderStillHeld :: (Int -> IO MissionHolderPresence) -> MissionId -> FilePath -> IO (Maybe Text)
-holderStillHeld holderPresence mission ownerPath = do
-  ownerResult <- readMissionRecord mission [missionLeaseSchemaVersion] ownerPath :: IO (MissionRead MissionLeaseOwner)
+holderStillHeld :: (Int -> IO MissionHolderPresence) -> MissionStore -> MissionId -> FilePath -> IO (Maybe Text)
+holderStillHeld holderPresence store mission ownerPath = do
+  ownerResult <-
+    readMissionRecordFor
+      mission
+      [missionLeaseSchemaVersion]
+      store.missionStoreRepository
+      missionLeaseOwnerMission
+      missionLeaseOwnerRepository
+      ownerPath ::
+      IO (MissionRead MissionLeaseOwner)
   case ownerResult of
     -- An owner record that is missing, unreadable, or written under a schema
     -- version this release does not know is a holder whose absence cannot be
@@ -216,30 +229,19 @@ holderStillHeld holderPresence mission ownerPath = do
     -- authorises taking a lock away from a holder that may still be running.
     MissionAbsent -> pure (Just (blocked "its owner record is missing or was written by another release"))
     MissionUnreadable message -> pure (Just (blocked ("its owner record will not decode (" <> message <> ")")))
+    -- An owner record that belongs to another mission or another repository
+    -- is not this lease's holder, so the process it names says nothing about
+    -- whether this mission is being advanced. A store restored from a backup
+    -- or a directory copied by hand is enough to put one here, and retiring on
+    -- its evidence would hand the lease out while the real holder — about whom
+    -- nothing is recorded — is still running.
     MissionRefused message -> pure (Just (blocked ("its owner record was refused (" <> message <> ")")))
-    -- An owner record naming another mission is not this lease's holder, so
-    -- the process it names says nothing about whether this mission is being
-    -- advanced. A store restored from a backup or a directory copied by hand
-    -- is enough to put one here, and retiring on its evidence would hand the
-    -- lease out while the real holder — about whom nothing is recorded — is
-    -- still running.
-    MissionPresent owner
-      | owner.missionLeaseOwnerMission /= mission ->
-          pure
-            ( Just
-                ( blocked
-                    ( "its owner record belongs to mission "
-                        <> owner.missionLeaseOwnerMission.unMissionId
-                        <> ", so this mission's holder cannot be identified"
-                    )
-                )
-            )
-      | otherwise -> do
-          presence <- holderPresence owner.missionLeaseOwnerProcessId
-          pure $ case presence of
-            MissionHolderPresent -> Just (blocked "its holder is still running")
-            MissionHolderUndecidable detail -> Just (blocked ("its holder could not be checked (" <> detail <> ")"))
-            MissionHolderGone -> Nothing
+    MissionPresent owner -> do
+      presence <- holderPresence owner.missionLeaseOwnerProcessId
+      pure $ case presence of
+        MissionHolderPresent -> Just (blocked "its holder is still running")
+        MissionHolderUndecidable detail -> Just (blocked ("its holder could not be checked (" <> detail <> ")"))
+        MissionHolderGone -> Nothing
   where
     blocked reason = "mission " <> mission.unMissionId <> " is already being advanced: " <> reason
 
@@ -251,22 +253,34 @@ holderStillHeld holderPresence mission ownerPath = do
 releaseMissionLease :: MissionLease -> IO ()
 releaseMissionLease lease = do
   ownerResult <-
-    readMissionRecord lease.missionLeaseMission [missionLeaseSchemaVersion] lease.missionLeaseOwnerFile
-      :: IO (MissionRead MissionLeaseOwner)
+    readMissionRecordFor
+      lease.missionLeaseMission
+      [missionLeaseSchemaVersion]
+      lease.missionLeaseRepository
+      missionLeaseOwnerMission
+      missionLeaseOwnerRepository
+      lease.missionLeaseOwnerFile ::
+      IO (MissionRead MissionLeaseOwner)
   case ownerResult of
     MissionPresent owner
-      | owner.missionLeaseOwnerMission == lease.missionLeaseMission,
-        owner.missionLeaseOwnerToken == lease.missionLeaseToken -> do
+      | owner.missionLeaseOwnerToken == lease.missionLeaseToken -> do
           ignoreFileOperation (removeFile lease.missionLeaseOwnerFile)
           ignoreFileOperation (removeDirectory lease.missionLeaseDirectory)
     _ -> pure ()
 
 -- | The owner record of whatever holds a mission's lease, for a caller that
 -- wants to say who rather than to take it.
-readMissionLeaseOwner :: FilePath -> MissionId -> IO (MissionRead MissionLeaseOwner)
-readMissionLeaseOwner store mission = case missionLeaseOwnerPath store mission of
+readMissionLeaseOwner :: MissionStore -> MissionId -> IO (MissionRead MissionLeaseOwner)
+readMissionLeaseOwner store mission = case missionLeaseOwnerPath store.missionStoreDirectory mission of
   Left message -> pure (MissionUnreadable message)
-  Right ownerPath -> readMissionRecord mission [missionLeaseSchemaVersion] ownerPath
+  Right ownerPath ->
+    readMissionRecordFor
+      mission
+      [missionLeaseSchemaVersion]
+      store.missionStoreRepository
+      missionLeaseOwnerMission
+      missionLeaseOwnerRepository
+      ownerPath
 
 newLeaseToken :: IO Text
 newLeaseToken = do

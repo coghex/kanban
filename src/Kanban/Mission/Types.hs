@@ -668,6 +668,7 @@ data MissionSealedArchive = MissionSealedArchive
     -- made to disagree, and a seal is what a collector trusts before removing
     -- a source.
     missionSealedMission :: MissionId,
+    missionSealedRepository :: MissionRepository,
     missionSealedSession :: MissionSessionId,
     missionSealedKind :: MissionLogKind,
     -- | The archived copy's name inside the mission's @archive@ directory.
@@ -691,6 +692,11 @@ missionSealDigestAlgorithm = "sha256"
 
 -- | One journal record.
 --
+-- Carries both identities, like every other independently decoded record here:
+-- a line is decoded on its own, so where it sits and what it says about itself
+-- can be made to disagree, and a reader that took the location as the answer
+-- would emit another mission's event as this one's.
+--
 -- The payload is deliberately a name and a free-text detail rather than a sum
 -- over the runner's vocabulary: the runner is SAG-3's and its action registry
 -- is SAG-2's, and a journal written today must still be readable when both
@@ -699,6 +705,7 @@ missionSealDigestAlgorithm = "sha256"
 data MissionEvent = MissionEvent
   { missionEventAt :: UTCTime,
     missionEventMission :: MissionId,
+    missionEventRepository :: MissionRepository,
     missionEventStep :: Maybe MissionStepId,
     missionEventSession :: Maybe MissionSessionId,
     missionEventKind :: Text,
@@ -709,6 +716,12 @@ data MissionEvent = MissionEvent
 
 -- | Who holds a mission's lease.
 --
+-- Carries both identities for the reason every record here does, and the
+-- consequence is sharper than elsewhere: an owner record from somewhere else
+-- naming a process that has exited would otherwise read as proof that /this/
+-- mission's holder is gone, and hand the lease out from under a holder about
+-- whom nothing was recorded.
+--
 -- The holder is recorded as a bare process identifier rather than a
 -- "Kanban.Process" identity, because capturing one of those means reading a
 -- process snapshot, and reading a snapshot means running @ps@ — which
@@ -718,6 +731,7 @@ data MissionEvent = MissionEvent
 -- to the safe side.
 data MissionLeaseOwner = MissionLeaseOwner
   { missionLeaseOwnerMission :: MissionId,
+    missionLeaseOwnerRepository :: MissionRepository,
     -- | Unique to one acquisition, so a release can refuse to remove a lease
     -- some later acquisition now holds.
     missionLeaseOwnerToken :: Text,

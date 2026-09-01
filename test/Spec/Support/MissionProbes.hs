@@ -76,7 +76,7 @@ import GHC.Generics (Generic)
 import Kanban.Mission
   ( MissionEvent (..),
     MissionId (..),
-    MissionJournalLine (MissionJournalEvent, MissionJournalMalformed),
+    MissionJournalLine (MissionJournalEvent, MissionJournalMalformed, MissionJournalRefused),
     MissionLeaseAcquisition (..),
     MissionLogKind,
     MissionRead (..),
@@ -337,7 +337,8 @@ runMissionProbe planPath = do
             Right entry -> MissionProbeSealed entry.missionSealedDigest
             Left failure -> MissionProbeSealRefused (missionSealFailureMessage failure)
         MissionProbeLease -> do
-          acquisition <- acquireMissionLease plan.probePlanStore plan.probePlanMission
+          let store = MissionStore plan.probePlanStore plan.probePlanRepository
+          acquisition <- acquireMissionLease store plan.probePlanMission
           case acquisition of
             MissionLeaseAcquired lease -> do
               report plan (MissionProbeLeaseReport MissionProbeAcquired)
@@ -361,6 +362,7 @@ readMissionBack plan = do
         Right (records, _) ->
           ( [event.missionEventKind | MissionJournalEvent event <- records],
             [message | MissionJournalMalformed message <- records]
+              <> [message | MissionJournalRefused message <- records]
           )
   pure
     MissionProbeReadback

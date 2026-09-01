@@ -39,9 +39,11 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Mission.Types
   ( MissionEnvelope (..),
-    MissionEvent,
+    MissionEvent (..),
     MissionId (..),
+    MissionRepository,
     missionEventSchemaVersion,
+    missionRepositoryMatches,
   )
 import Kanban.Worker (consumeJournalLines)
 import System.IO (BufferMode (LineBuffering), Handle, hClose, hSetBinaryMode, hSetBuffering)
@@ -116,8 +118,13 @@ data MissionJournalLine
     MissionJournalUnknownVersion Int
   | -- | Malformed JSON, no integer @schemaVersion@, or a payload that will
     -- not decode under a version this release does recognize. Names the
-    -- mission.
+    -- mission and the file.
     MissionJournalMalformed Text
+  | -- | A record that decodes perfectly well and belongs to another mission
+    -- or another repository. Reported rather than emitted, and kept apart
+    -- from 'MissionJournalMalformed' because it is not broken: the repair is
+    -- to find out how it got here, not to fix its contents.
+    MissionJournalRefused Text
   deriving stock (Eq, Show)
 
 -- | Decides one complete line, reading its version before its payload for the
@@ -127,8 +134,8 @@ data MissionJournalLine
 -- mission: requirement 11 of issue #592 asks for both, and a mission's records
 -- are spread over four files, so \"mission-0001 has a malformed record\" does
 -- not say which one to look at.
-decodeMissionJournalLine :: MissionId -> FilePath -> ByteString.ByteString -> MissionJournalLine
-decodeMissionJournalLine mission path line = case eitherDecodeStrict' line :: Either String Value of
+decodeMissionJournalLine :: MissionId -> MissionRepository -> FilePath -> ByteString.ByteString -> MissionJournalLine
+decodeMissionJournalLine mission repository path line = case eitherDecodeStrict' line :: Either String Value of
   Left message -> malformed ("is not JSON (" <> Text.pack message <> ")")
   Right (Object fields) -> case KeyMap.lookup "schemaVersion" fields of
     Nothing -> malformed "carries no schemaVersion"
@@ -145,9 +152,22 @@ decodeMissionJournalLine mission path line = case eitherDecodeStrict' line :: Ei
                     <> Text.pack message
                     <> ")"
                 )
-            Right envelope -> MissionJournalEvent (missionEnvelopePayload (envelope :: MissionEnvelope MissionEvent))
+            Right envelope -> identified (missionEnvelopePayload (envelope :: MissionEnvelope MissionEvent))
   Right _ -> malformed "is not a JSON object"
   where
     malformed detail =
       MissionJournalMalformed
         ("mission " <> mission.unMissionId <> ": a record in " <> Text.pack path <> " " <> detail)
+    -- Where the line sits and what it says about itself can be made to
+    -- disagree: a journal restored from a backup, a directory copied by hand.
+    -- Emitting such an event would attribute one mission's history to
+    -- another, so it is reported and not delivered.
+    identified event
+      | event.missionEventMission /= mission =
+          refused ("the mission " <> event.missionEventMission.unMissionId)
+      | not (missionRepositoryMatches event.missionEventRepository repository) =
+          refused "another repository"
+      | otherwise = MissionJournalEvent event
+    refused subject =
+      MissionJournalRefused
+        ("mission " <> mission.unMissionId <> ": a record in " <> Text.pack path <> " is recorded against " <> subject)

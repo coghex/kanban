@@ -29,8 +29,17 @@
 -- the payload, and a version this release does not recognize reads as absent,
 -- silently, exactly as a missing file does (@docs\/design.md@ §16, issue #45).
 -- A genuine decode failure keeps its diagnostic and names the mission and the
--- file. A record whose recorded repository identity is not the repository it
--- is read for is refused rather than adopted.
+-- file.
+--
+-- Every one of those records also carries the repository and the mission it
+-- belongs to, and is refused rather than adopted when either disagrees with
+-- where it sits — the specification, the snapshot, each journal line, each
+-- seal, and the lease owner alike. Each is decoded on its own, so for each of
+-- them the location and the contents can be made to disagree by a store
+-- restored from a backup, a directory copied to try something out, or a
+-- repository renamed; and adopting one would let a foreign record authorise
+-- deleting a mission, emit another mission's history as this one's, or hand
+-- out a lease a live holder still has.
 --
 -- No write ever takes that silence for permission. \"Is there already one of
 -- these?\" is always an existence check on the filesystem, never a successful
@@ -104,9 +113,9 @@ module Kanban.Mission
 
     -- * The journal
     MissionEvent (..),
-    -- | Only the two a caller can receive: a record read under an
+    -- | Only the three a caller can receive: a record read under an
     -- unrecognized schema version is absent, and never surfaces.
-    MissionJournalLine (MissionJournalEvent, MissionJournalMalformed),
+    MissionJournalLine (MissionJournalEvent, MissionJournalMalformed, MissionJournalRefused),
     recordMissionEvent,
     readMissionJournal,
 

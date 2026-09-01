@@ -28,6 +28,8 @@
 -- module's public contract promises.
 module Kanban.Mission.Paths
   ( -- * The store
+    MissionStore (..),
+    openMissionStore,
     missionStoreRoot,
     missionStoreKey,
     missionDirectory,
@@ -73,6 +75,7 @@ import Kanban.Mission.Types
     MissionRepository,
     MissionSessionId (..),
     missionLogKindTag,
+    missionRepository,
     missionRepositoryMatches,
   )
 import Kanban.Paths (createPrivateDirectory)
@@ -98,6 +101,28 @@ import System.Posix.IO
     openFd,
   )
 import System.Posix.Process (getProcessID)
+
+-- | One repository's mission store: where it is, and whose it is.
+--
+-- The repository identity is carried rather than re-derived at each read,
+-- because it is what requirement 11's refusal compares against and a second
+-- derivation is a second chance to disagree. It lives here rather than beside
+-- the operations because the lease is bound to it too, and a lease that could
+-- not name the repository it belongs to could be retired on another
+-- repository's evidence.
+data MissionStore = MissionStore
+  { missionStoreDirectory :: FilePath,
+    missionStoreRepository :: MissionRepository
+  }
+  deriving stock (Eq, Show)
+
+-- | Resolves and creates a repository's store, @0700@ on every level below the
+-- XDG state root.
+openMissionStore :: Repository -> IO (Either Text MissionStore)
+openMissionStore repository = do
+  root <- missionStoreRoot repository
+  prepared <- ensureMissionDirectory root
+  pure (MissionStore root (missionRepository repository) <$ prepared)
 
 -- | @$XDG_STATE_HOME/kanban/missions/<owner>-<repo>@.
 --
