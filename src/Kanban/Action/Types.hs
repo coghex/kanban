@@ -62,9 +62,24 @@ module Kanban.Action.Types
 
     -- * Handles
     ActionAttribution (..),
+    AutoSolveCursor (..),
     ActionHandle (..),
     actionHandleKind,
     actionHandleWorker,
+    actionHandleRepository,
+
+    -- * The read a resolution is made against
+    TargetCatalog (..),
+    CatalogHistory (..),
+    catalogIdentity,
+    catalogHistoryReach,
+    catalogFromSnapshot,
+    catalogPullRequestNumbers,
+
+    -- * The environment a request is answered against
+    ActionEnvironment (..),
+    ActionRequest (..),
+    actionRequest,
 
     -- * Observations
     ActionOutcome (..),
@@ -79,6 +94,7 @@ where
 
 import Data.Char (isDigit)
 import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime)
@@ -88,10 +104,20 @@ import Kanban.ApprovalService
     ApprovalUnavailable,
     approvalUnavailableMessage,
   )
-import Kanban.Domain (BoardItem (..), Issue (..), PullRequest (..), Repository)
+import Kanban.Cache (normalizedRepositoryIdentity)
+import Kanban.Domain
+  ( BoardItem (..),
+    CompletedHistory (..),
+    Issue (..),
+    PullRequest (..),
+    RepoSnapshot (..),
+    Repository,
+    WorkflowConfig,
+  )
+import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
 import Kanban.PullRequestFlow (PullRequestVerdict (..))
-import Kanban.Solve (SolverBrand)
-import Kanban.Worker (WorkerDescriptor)
+import Kanban.Solve (ResumeProvenance (..), SolverBrand)
+import Kanban.Worker (WorkerDescriptor, WorkerParent)
 import Kanban.Workflow (readOnlyHistoryNotice)
 
 -- ---------------------------------------------------------------------------
@@ -444,25 +470,50 @@ data ActionAttribution = ActionAttribution
 -- Every constructor names durable state owned by the action's own authority —
 -- a persistent worker's specification, or a repository's approval controller —
 -- and never rendered dashboard text.
+-- | A dispatched autosolve action's place in its loop, and the one step that
+-- advances it.
+--
+-- Opaque, and carried on the handle rather than named here, because advancing
+-- an autosolve action starts provider turns through the very dispatch that
+-- returned the handle: the loop is built on top of the dispatch layer, so the
+-- step is closed over when the handle is made rather than reached for when it
+-- is observed. That is what lets observing an autosolve action /progress/ it
+-- to the approval that is its only success, instead of reporting whichever
+-- provider turn it happens to be holding.
+--
+-- The place itself is in memory. What the loop is doing is always recoverable
+-- from the worker records, and requirement 18 leaves persistence to the
+-- mission store; this is a caller's cursor into a run, not a second record of
+-- one.
+newtype AutoSolveCursor = AutoSolveCursor
+  { advanceAutoSolveCursor :: ActionEnvironment -> IO ActionObservation
+  }
+
 data ActionHandle
   = -- | One provider turn owned by a persistent worker.
     WorkerActionHandle WorkflowActionKind ResolvedTarget WorkerDescriptor ActionAttribution
-  | -- | The complete autosolve loop over one issue. The worker is its current
-    -- provider turn; the loop's own progression is advanced by observing it.
-    AutoSolveActionHandle ResolvedTarget WorkerDescriptor ActionAttribution
+  | -- | The complete autosolve loop over one issue. The worker is the provider
+    -- turn it started with; observing the handle advances the loop past it.
+    AutoSolveActionHandle ResolvedTarget WorkerDescriptor ActionAttribution AutoSolveCursor
   | -- | The approval queue, which this action only ever reads.
     ApprovalQueueHandle Repository
-  deriving stock (Eq, Show)
 
 actionHandleKind :: ActionHandle -> WorkflowActionKind
 actionHandleKind (WorkerActionHandle kind _ _ _) = kind
-actionHandleKind (AutoSolveActionHandle _ _ _) = AutoSolveIssue
+actionHandleKind (AutoSolveActionHandle _ _ _ _) = AutoSolveIssue
 actionHandleKind (ApprovalQueueHandle _) = ObserveApprovalQueue
 
 actionHandleWorker :: ActionHandle -> Maybe WorkerDescriptor
 actionHandleWorker (WorkerActionHandle _ _ descriptor _) = Just descriptor
-actionHandleWorker (AutoSolveActionHandle _ descriptor _) = Just descriptor
+actionHandleWorker (AutoSolveActionHandle _ descriptor _ _) = Just descriptor
 actionHandleWorker (ApprovalQueueHandle _) = Nothing
+
+-- | The repository an approval-queue handle observes, and nothing for the two
+-- that own a worker. Exists so a caller can recognise the handle it holds
+-- without matching a type that carries a closure.
+actionHandleRepository :: ActionHandle -> Maybe Repository
+actionHandleRepository (ApprovalQueueHandle repository) = Just repository
+actionHandleRepository _ = Nothing
 
 -- ---------------------------------------------------------------------------
 -- Observations
@@ -554,6 +605,115 @@ approvalQueueObservationMessage (ApprovalQueueUndiscoverable unavailable) =
   "issue approval service unavailable: " <> approvalUnavailableMessage unavailable
 approvalQueueObservationMessage (ApprovalQueueQueryFailed detail) =
   "issue approval status unavailable: " <> detail
+
+-- ---------------------------------------------------------------------------
+-- The catalog
+-- ---------------------------------------------------------------------------
+
+-- | Whether the read behind a catalog covered completed work.
+--
+-- 'CatalogHistoryAbsent' is not an empty history. It is the statement that the
+-- completed generation was never read, which is exactly the case a settled
+-- target hides in: @Kanban.UI.Filter.settledItem@ answers @Nothing@ both when
+-- the target is genuinely live and when nothing was ever loaded to ask.
+data CatalogHistory
+  = CatalogHistoryLoaded CompletedHistory
+  | CatalogHistoryAbsent
+  deriving stock (Eq, Show)
+
+-- | One read of a repository, and the reach a resolution against it inherits.
+data TargetCatalog = TargetCatalog
+  { catalogRepository :: Repository,
+    catalogIssues :: [Issue],
+    catalogPullRequests :: [PullRequest],
+    catalogHistory :: CatalogHistory
+  }
+  deriving stock (Eq, Show)
+
+-- | The canonical identity every resolved record carries, taken from the one
+-- existing definition rather than spelled a second time here: neither 'Issue'
+-- nor 'PullRequest' holds a repository, so this is where a resolved target
+-- gets one.
+catalogIdentity :: TargetCatalog -> Text
+catalogIdentity = normalizedRepositoryIdentity . (.catalogRepository)
+
+catalogHistoryReach :: TargetCatalog -> HistoryReach
+catalogHistoryReach catalog = case catalog.catalogHistory of
+  CatalogHistoryLoaded _ -> HistoryConfirmed
+  CatalogHistoryAbsent -> HistoryAbsent
+
+catalogFromSnapshot :: Repository -> RepoSnapshot -> CatalogHistory -> TargetCatalog
+catalogFromSnapshot repository snapshot history =
+  TargetCatalog
+    { catalogRepository = repository,
+      catalogIssues = snapshot.snapshotIssues,
+      catalogPullRequests = snapshot.snapshotPullRequests,
+      catalogHistory = history
+    }
+
+-- | Every pull-request number this read covered, which is the baseline a
+-- solve's later "exactly one new pull request" attribution is measured
+-- against.
+catalogPullRequestNumbers :: TargetCatalog -> Set Int
+catalogPullRequestNumbers catalog =
+  Set.fromList (map (.pullRequestNumber) catalog.catalogPullRequests)
+
+-- ---------------------------------------------------------------------------
+-- Requests
+-- ---------------------------------------------------------------------------
+
+-- | Everything a request is answered against that is not the request itself.
+--
+-- The catalog is an input rather than something fetched here, so one read
+-- answers a whole plan's worth of questions and a caller can say exactly how
+-- fresh the evidence a terminal result is validated against is. A verdict
+-- validated against a stale catalog is a stale verdict, which is why the
+-- headless loop refreshes before every observation.
+data ActionEnvironment = ActionEnvironment
+  { actionRepository :: Repository,
+    actionWorkflowConfig :: WorkflowConfig,
+    actionConfigPath :: Maybe FilePath,
+    actionRoster :: Either RosterLoadError ModelRoster,
+    actionCatalog :: TargetCatalog,
+    actionNow :: UTCTime
+  }
+
+-- | One request. 'actionRequest' builds the ordinary shape; the resume fields
+-- are for a caller continuing a provider session it already owns.
+data ActionRequest = ActionRequest
+  { requestKind :: WorkflowActionKind,
+    -- | The repository identity the caller means, checked against the one the
+    -- catalog was read from.
+    requestRepository :: Text,
+    requestTarget :: ActionTargetRef,
+    -- | The operator's solver choice, for the two issue-side verbs that have
+    -- one. Every other brand on this path is derived by existing routing.
+    requestSolverBrand :: Maybe SolverBrand,
+    -- | A cell a previous worker recorded, replayed unchanged so a roster
+    -- edited between two turns of one provider session cannot change what it
+    -- runs on (D-7).
+    requestRecordedAssignment :: Maybe RecordedAssignment,
+    requestExistingSession :: Maybe Text,
+    requestExistingLogPath :: Maybe FilePath,
+    requestResumeProvenance :: ResumeProvenance,
+    requestUserMessage :: Text,
+    requestParent :: Maybe WorkerParent
+  }
+
+actionRequest :: WorkflowActionKind -> Text -> ActionTargetRef -> ActionRequest
+actionRequest kind repository target =
+  ActionRequest
+    { requestKind = kind,
+      requestRepository = repository,
+      requestTarget = target,
+      requestSolverBrand = Nothing,
+      requestRecordedAssignment = Nothing,
+      requestExistingSession = Nothing,
+      requestExistingLogPath = Nothing,
+      requestResumeProvenance = ResumeAnswer,
+      requestUserMessage = "",
+      requestParent = Nothing
+    }
 
 showNumber :: Int -> Text
 showNumber = Text.pack . show

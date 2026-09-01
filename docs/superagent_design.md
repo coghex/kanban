@@ -506,8 +506,9 @@ route and therefore never select it: a problem status on the pull request an
 autosolve run is looping over must not silently become a repair launch.
 
 The autosolve row's `PR approved` is the whole action's result, not one turn's,
-so observing an autosolve action advances it: each observation moves the loop
-one tick and reports where it now is, and only the last reports the approval.
+so observing an autosolve action advances it: the handle its dispatch returns
+carries the loop's cursor, each observation moves that loop one tick and
+reports where it now is, and only the last reports the approval.
 Reporting the pull request the opening solve opened would let a caller stop
 before the review, the revision, and the approval it asked for. A provider's
 question or failure still ends the action wherever the loop has reached.

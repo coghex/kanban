@@ -28,16 +28,15 @@
 -- observation, and terminal results validated against authoritative evidence
 -- rather than taken from a worker's exit.
 --
--- Autosolve is the one action a bare handle cannot be concluded from. Its only
--- successful terminal result is the validated approval of the pull request its
--- loop bound, which no single provider turn establishes — a finished solver
--- has opened a pull request nothing has reviewed. So observing it has to
--- /advance/ it: 'beginAutoSolveAction' opens the handle a dispatch returned
--- into an action with a loop cursor, and each 'observeAutoSolveAction' moves
--- it one tick until it settles on that approval. ('runAutoSolveAction' is the
--- same loop driven to its end.) 'observeAction' on the bare handle reports the
--- turn in flight and never a success, because a handle held on its own carries
--- nowhere to record progress.
+-- Autosolve is the one action whose result cannot be read off the turn it is
+-- holding. Its only successful terminal result is the validated approval of
+-- the pull request its loop bound, which no single provider turn establishes —
+-- a finished solver has opened a pull request nothing has reviewed. So
+-- observing it /advances/ it: the handle a dispatch returns carries a cursor,
+-- and each 'observeAction' on it moves the loop one tick until it settles on
+-- that approval. ('runAutoSolveAction' is the same loop driven to its end.)
+-- 'observeAutoSolveTurn' is the narrower view of one turn, which never reports
+-- a success.
 --
 -- 'recoverAutoSolveState' rebuilds an action already under way from the
 -- durable records a dashboard-launched run left behind, and
@@ -92,9 +91,11 @@ module Kanban.Action
 
     -- * Handles and observations
     ActionAttribution (..),
+    AutoSolveCursor (..),
     ActionHandle (..),
     actionHandleKind,
     actionHandleWorker,
+    actionHandleRepository,
     ActionOutcome (..),
     actionOutcomeSucceeded,
     actionOutcomeMessage,
@@ -157,16 +158,14 @@ module Kanban.Action
     AutoSolveConclusion (..),
     autoSolveTick,
     autoSolveConclusionOutcome,
-    AutoSolveAction,
-    beginAutoSolveAction,
-    beginAutoSolveActionWith,
-    observeAutoSolveAction,
+    autoSolveCursorFor,
+    autoSolveActionHandle,
+    initialAutoSolveState,
     autoSolveActionActivity,
     AutoSolveState (..),
     AutoSolveTurns (..),
     liveAutoSolveTurns,
     AutoSolveDriver (..),
-    autoSolveStateFor,
     autoSolveStateFromWorkers,
     recoverAutoSolveState,
     reviewPhaseForRecord,

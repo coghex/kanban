@@ -88,6 +88,9 @@ data Loop = Loop
     loopEnvironment :: ActionEnvironment,
     loopStart :: AutoSolveState,
     loopReviewerDescriptor :: WorkerDescriptor,
+    -- | An autosolve handle for the initial solver, carrying a cursor wired
+    -- to this fixture's turns -- the shape a real dispatch returns.
+    loopAutoSolveHandle :: IO ActionHandle,
     -- | Install one world without going through the driver, for the
     -- single-tick examples.
     loopSetWorld :: World -> IO ()
@@ -197,7 +200,15 @@ withLoop worlds action =
       current <- newIORef (World [] [])
       dispatches <- newIORef []
       pool <- newIORef [reviewer, resumed]
-      let pathFor Solver = solver.workerDescriptorSpecPath
+      turnsBox <- newIORef Nothing
+      let autoSolveHandleWith descriptor = do
+            held <- readIORef turnsBox
+            case held of
+              Nothing -> error "the fixture's turns were not installed"
+              Just installed ->
+                AutoSolveActionHandle targetUnderLoop descriptor attributionUnderLoop
+                  <$> autoSolveCursorFor installed (initialAutoSolveState targetUnderLoop descriptor attributionUnderLoop)
+          pathFor Solver = solver.workerDescriptorSpecPath
           pathFor Reviewer = reviewer.workerDescriptorSpecPath
           pathFor Resumed = resumed.workerDescriptorSpecPath
           refresh = do
@@ -220,16 +231,18 @@ withLoop worlds action =
             handed <- atomicModifyIORef' pool $ \available -> case available of
               [] -> ([], Nothing)
               next : rest -> (rest, Just next)
-            pure $ case handed of
-              Nothing -> Left (ActionDispatchFailed request.requestKind "the fixture ran out of workers")
+            case handed of
+              Nothing -> pure (Left (ActionDispatchFailed request.requestKind "the fixture ran out of workers"))
               Just descriptor
                 | request.requestKind == AutoSolveIssue ->
-                    Right (AutoSolveActionHandle targetUnderLoop descriptor attributionUnderLoop)
+                    Right <$> autoSolveHandleWith descriptor
                 | otherwise ->
-                    Right (WorkerActionHandle request.requestKind targetUnderLoop descriptor attributionUnderLoop)
+                    pure (Right (WorkerActionHandle request.requestKind targetUnderLoop descriptor attributionUnderLoop))
+      let installedTurns = AutoSolveTurns dispatch lookupState
+      writeIORef turnsBox (Just installedTurns)
       action
         Loop
-          { loopTurns = AutoSolveTurns dispatch lookupState,
+          { loopTurns = installedTurns,
             loopDriver =
               AutoSolveDriver
                 { driverRefresh = refresh,
@@ -248,6 +261,7 @@ withLoop worlds action =
                   autoSolveActionReviewer = Nothing
                 },
             loopReviewerDescriptor = reviewer,
+            loopAutoSolveHandle = autoSolveHandleWith solver,
             loopSetWorld = writeIORef current
           }
 
@@ -554,6 +568,50 @@ spec = do
               recovered.autoSolveActionSolver.workerDescriptorSpecPath
                 `shouldBe` solver.workerDescriptorSpecPath
 
+    -- The pull request the run is looping over is not history when a revision
+    -- starts: dropping it left the rereview arm with nothing bound, and it
+    -- halts on that, so a run whose pull request was approved would stop.
+    it "keeps the bound pull request through a recovered revision, to its approval" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+          reviewer <-
+            descriptorCarrying
+              repository
+              "pr-review"
+              (PullRequestWorkerTaskKind (PullRequestWorkerTask pullRequestUnderLoop PullRequestClaude PullRequestReview))
+              (Just (reviewParent 1))
+              (addUTCTime 60 epoch)
+          resumed <-
+            descriptorCarrying
+              repository
+              "solve-resumed"
+              (SolveWorkerTaskKind (SolveWorkerTask issueUnderLoop AutoSolve ClaudeSolver))
+              Nothing
+              (addUTCTime 120 epoch)
+          case autoSolveStateFromWorkers targetUnderLoop Set.empty [reviewer, resumed] of
+            Nothing -> error "expected the durable records to rebuild an action"
+            Just recovered -> do
+              recovered.autoSolveActionProgress.autoSolvePullRequest
+                `shouldBe` Just pullRequestUnderLoop
+              -- ...and that recovered action reaches its approval: the
+              -- revision settles, the loop moves to the rereview, and the
+              -- verdict standing on the pull request completes it.
+              let approvedPullRequest =
+                    linkedPullRequest pullRequestUnderLoop ClaudeSolver [label defaultWorkflowConfig.approvalLabel]
+              withLoop [] $ \loop -> do
+                -- The recovered action's solver, standing in as this
+                -- fixture's, has settled: the revision is done and the
+                -- canonical rereview it invoked has published its verdict.
+                loop.loopSetWorld (World [approvedPullRequest] [(Solver, completed)])
+                advanced <-
+                  advanceAutoSolveAction
+                    loop.loopTurns
+                    (withPullRequests loop [approvedPullRequest])
+                    recovered {autoSolveActionSolver = loop.loopStart.autoSolveActionSolver}
+                either Just (const Nothing) advanced
+                  `shouldBe` Just (ActionPullRequestApproved pullRequestUnderLoop)
+
     it "reads a solver newer than its review as the revision the loop moved on to" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
@@ -577,6 +635,8 @@ spec = do
             Just recovered -> do
               recovered.autoSolveActionProgress.autoSolveStage `shouldBe` AutoRevising
               recovered.autoSolveActionReviewer `shouldBe` Nothing
+              recovered.autoSolveActionProgress.autoSolvePullRequest
+                `shouldBe` Just pullRequestUnderLoop
               recovered.autoSolveActionSolver.workerDescriptorSpecPath
                 `shouldBe` resumed.workerDescriptorSpecPath
 
@@ -614,23 +674,29 @@ spec = do
   -- advances it, so the ordinary handle-then-observe shape reaches the
   -- approval rather than stalling on whichever turn is in flight.
   describe "observing a dispatched action to its approval" $ do
-    it "advances the loop a tick per observation and settles on the approval" $
+    -- The handle a dispatch returns is the progressing thing: observing it is
+    -- what advances the loop, so the ordinary dispatch-then-observe path
+    -- reaches the approval rather than reporting the turn in flight forever.
+    it "advances the loop a tick per observation of the handle, settling on the approval" $
       withLoop [] $ \loop -> do
-        action <- beginAutoSolveActionWith loop.loopTurns loop.loopStart
+        handle <- loop.loopAutoSolveHandle
         observations <- forM wholeArc $ \world -> do
           loop.loopSetWorld world
-          observeAutoSolveAction (withPullRequests loop world.worldPullRequests) action
+          observeAction (withPullRequests loop world.worldPullRequests) handle
         last observations `shouldBe` ActionSettled (ActionPullRequestApproved pullRequestUnderLoop)
-        -- ...and nothing before it claimed a result. An action that reported
+        -- ...and nothing before it claimed a result. A handle that reported
         -- the opening solve's pull request would settle here instead.
         all isRunningObservation (init observations) `shouldBe` True
         map (.dispatchedKind) <$> readIORef loop.loopDispatches
           >>= (`shouldBe` [ReviewPullRequest, AutoSolveIssue])
 
-    it "opens an action only from an autosolve handle" $
+    it "names the loop's own place while it runs" $
       withLoop [] $ \loop -> do
-        opened <- beginAutoSolveAction (ApprovalQueueHandle loop.loopEnvironment.actionRepository)
-        maybe True (const False) opened `shouldBe` True
+        handle <- loop.loopAutoSolveHandle
+        loop.loopSetWorld (World [] [(Solver, running)])
+        observed <- observeAction (withPullRequests loop []) handle
+        observed `shouldBe` ActionRunning "implementing"
+        actionHandleKind handle `shouldBe` AutoSolveIssue
 
   -- An unreadable review record is not "no review". Reading it as one is how
   -- a second reviewer would be launched beside the first.

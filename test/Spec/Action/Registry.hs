@@ -566,11 +566,12 @@ spec = do
           -- an accident of the fixture.
           observeWorkerHandle environment SolveIssue target descriptor attribution
             >>= (`shouldBe` ActionSettled (ActionPullRequestOpened 81))
-          observed <- observeAction environment (AutoSolveActionHandle target descriptor attribution)
-          observed `shouldSatisfy` isRunning
+          -- Observed as an autosolve turn, the same record is not a result:
+          -- the loop has a review, a revision, and an approval still to run.
+          observeAutoSolveTurn environment target descriptor >>= (`shouldSatisfy` isRunning)
           -- ...and a question or a failure still ends it, wherever the loop is.
           asking <- writeWorkerRecord repository 80 (WorkerTerminal (SolveNeedsInput "which base?")) "waiting"
-          observeAction environment (AutoSolveActionHandle target asking attribution)
+          observeAutoSolveTurn environment target asking
             >>= (`shouldBe` ActionSettled (ActionNeedsInput "which base?"))
           -- The validator agrees: no autosolve arm of it promotes a turn.
           validateWorkerOutcome environment AutoSolveIssue target attribution SolveCompleted
@@ -657,7 +658,7 @@ spec = do
                     (Just CodexSolver)
                     (ActionTargetItem (resolveHeldItem catalog TargetPlain (IssueItem (baseIssue 844 []))))
           dispatched <- dispatchProviderTurn environment request plan
-          dispatched `shouldSatisfy` either isCapabilityBlocked (const False)
+          either isCapabilityBlocked (const False) dispatched `shouldBe` True
           specifications repository >>= (`shouldBe` [])
 
     -- Declared, and refused at the door. Nothing is spawned and nothing is
@@ -673,7 +674,7 @@ spec = do
             ( \kind -> do
                 dispatched <-
                   dispatchAction environment (actionRequest kind identityUnderTest (TargetByNumber 844))
-                dispatched `shouldBe` Left (ActionNotRunnerOwned kind)
+                either Just (const Nothing) dispatched `shouldBe` Just (ActionNotRunnerOwned kind)
             )
             [ReviewIssue, ReviseIssue]
           specifications repository >>= (`shouldBe` [])
@@ -686,7 +687,8 @@ spec = do
               catalog = (catalogOf [epicIssue 844 []] [] emptyHistory) {catalogRepository = repository}
               environment = (environmentOf catalog) {actionRepository = repository}
           dispatched <- dispatchAction environment (actionRequest ReviewIssue identityUnderTest (TargetByNumber 844))
-          dispatched `shouldBe` Left (ActionTargetStructural StructuralTrackerHeader 844)
+          either Just (const Nothing) dispatched
+            `shouldBe` Just (ActionTargetStructural StructuralTrackerHeader 844)
 
     it "hands back a queue handle without touching the service" $
       withPreflightMachine fullyProvisionedFakes BackendInstalled $ \workingDirectory probeLog ->
@@ -695,7 +697,7 @@ spec = do
               catalog = (catalogOf [] [] emptyHistory) {catalogRepository = repository}
               environment = (environmentOf catalog) {actionRepository = repository}
           dispatched <- dispatchAction environment (actionRequest ObserveApprovalQueue identityUnderTest TargetRepositoryWide)
-          dispatched `shouldBe` Right (ApprovalQueueHandle repository)
+          either (const Nothing) actionHandleRepository dispatched `shouldBe` Just repository
           probeInvocations probeLog >>= (`shouldBe` [])
 
   describe "the approval queue observation" $ do

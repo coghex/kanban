@@ -21,15 +21,7 @@
 -- it could not tell a closed or merged target apart from a nonexistent one —
 -- which is 'ActionTargetUnresolved', a refusal, never a dispatch.
 module Kanban.Action.Target
-  ( -- * The read a resolution is made against
-    TargetCatalog (..),
-    CatalogHistory (..),
-    catalogIdentity,
-    catalogHistoryReach,
-    catalogFromSnapshot,
-    catalogPullRequestNumbers,
-
-    -- * Resolution
+  ( -- * Resolution
     resolveActionTarget,
     resolveHeldItem,
     targetStructureForIssue,
@@ -51,20 +43,15 @@ where
 
 import Data.List (find)
 import qualified Data.Map.Strict as Map
-import Data.Set (Set)
-import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Action.Types
-import Kanban.Cache (normalizedRepositoryIdentity)
 import Kanban.Domain
   ( BoardItem (..),
     CompletedHistory (..),
     Issue (..),
     ItemId (..),
     PullRequest (..),
-    RepoSnapshot (..),
-    Repository,
     Tracker (..),
     WorkflowConfig,
   )
@@ -75,58 +62,6 @@ import Kanban.PullRequestFlow
   )
 import Kanban.Tracker (trackerFromIssue)
 import Kanban.Workflow (itemCompleted)
-
--- ---------------------------------------------------------------------------
--- The catalog
--- ---------------------------------------------------------------------------
-
--- | Whether the read behind a catalog covered completed work.
---
--- 'CatalogHistoryAbsent' is not an empty history. It is the statement that the
--- completed generation was never read, which is exactly the case a settled
--- target hides in: @Kanban.UI.Filter.settledItem@ answers @Nothing@ both when
--- the target is genuinely live and when nothing was ever loaded to ask.
-data CatalogHistory
-  = CatalogHistoryLoaded CompletedHistory
-  | CatalogHistoryAbsent
-  deriving stock (Eq, Show)
-
--- | One read of a repository, and the reach a resolution against it inherits.
-data TargetCatalog = TargetCatalog
-  { catalogRepository :: Repository,
-    catalogIssues :: [Issue],
-    catalogPullRequests :: [PullRequest],
-    catalogHistory :: CatalogHistory
-  }
-  deriving stock (Eq, Show)
-
--- | The canonical identity every resolved record carries, taken from the one
--- existing definition rather than spelled a second time here: neither 'Issue'
--- nor 'PullRequest' holds a repository, so this is where a resolved target
--- gets one.
-catalogIdentity :: TargetCatalog -> Text
-catalogIdentity = normalizedRepositoryIdentity . (.catalogRepository)
-
-catalogHistoryReach :: TargetCatalog -> HistoryReach
-catalogHistoryReach catalog = case catalog.catalogHistory of
-  CatalogHistoryLoaded _ -> HistoryConfirmed
-  CatalogHistoryAbsent -> HistoryAbsent
-
-catalogFromSnapshot :: Repository -> RepoSnapshot -> CatalogHistory -> TargetCatalog
-catalogFromSnapshot repository snapshot history =
-  TargetCatalog
-    { catalogRepository = repository,
-      catalogIssues = snapshot.snapshotIssues,
-      catalogPullRequests = snapshot.snapshotPullRequests,
-      catalogHistory = history
-    }
-
--- | Every pull-request number this read covered, which is the baseline a
--- solve's later "exactly one new pull request" attribution is measured
--- against.
-catalogPullRequestNumbers :: TargetCatalog -> Set Int
-catalogPullRequestNumbers catalog =
-  Set.fromList (map (.pullRequestNumber) catalog.catalogPullRequests)
 
 -- ---------------------------------------------------------------------------
 -- Resolution

@@ -26,12 +26,7 @@
 -- second site for "what does this launch run on" and "what does the loop do
 -- next". Neither imports this module, so nothing here is circular.
 module Kanban.Action.Dispatch
-  ( -- * The environment a request is answered against
-    ActionEnvironment (..),
-    ActionRequest (..),
-    actionRequest,
-
-    -- * Planning
+  ( -- * Planning
     ActionPlan (..),
     planAction,
     planResolvedAction,
@@ -39,6 +34,9 @@ module Kanban.Action.Dispatch
     -- * Dispatch and observation
     dispatchAction,
     dispatchProviderTurn,
+    liveAutoSolveTurns,
+    autoSolveActionHandle,
+    runAutoSolveAction,
     observeAction,
     observeWorkerHandle,
     observeAutoSolveTurn,
@@ -54,19 +52,21 @@ where
 import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (UTCTime)
 import Kanban.Action.Capability
   ( ActionCapability (..),
     ActionRoute (..),
     actionCapabilityIO,
     actionRoute,
   )
-import Kanban.Action.Target
-  ( TargetCatalog (..),
-    actionCompatibility,
-    catalogPullRequestNumbers,
-    resolveActionTarget,
+import Kanban.Action.AutoSolve
+  ( AutoSolveDriver,
+    AutoSolveState,
+    AutoSolveTurns (..),
+    autoSolveCursorFor,
+    initialAutoSolveState,
+    runAutoSolveActionWith,
   )
+import Kanban.Action.Target (actionCompatibility, resolveActionTarget)
 import Kanban.Action.Types
 import Kanban.ApprovalService
   ( ApprovalObservation (..),
@@ -75,7 +75,7 @@ import Kanban.ApprovalService
   )
 import Kanban.Cache (normalizedRepositoryIdentity)
 import Kanban.Domain (Label (..), PullRequest (..), Repository, WorkflowConfig)
-import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
+import Kanban.Models (RecordedAssignment)
 import Kanban.Preflight (PreflightAction (..))
 import Kanban.PullRequestFlow
   ( PullRequestAction,
@@ -85,13 +85,7 @@ import Kanban.PullRequestFlow
     pullRequestAssignment,
     pullRequestVerdictForLabels,
   )
-import Kanban.Solve
-  ( ResumeProvenance (..),
-    SolveOutcome (..),
-    SolveWorkflow (..),
-    SolverBrand,
-    solveAssignment,
-  )
+import Kanban.Solve (SolveOutcome (..), SolveWorkflow (..), SolverBrand, solveAssignment)
 import Kanban.UI.AutoSolve
   ( AutoSolveDecision (..),
     AutoSolveObservation (..),
@@ -101,70 +95,12 @@ import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..))
 import Kanban.UI.Util (launchAssignment)
 import Kanban.Worker
   ( WorkerDescriptor (..),
-    WorkerParent,
     WorkerState (..),
     WorkerStatus (..),
     launchPullRequestWorker,
     launchSolveWorker,
     readWorkerState,
   )
-
--- ---------------------------------------------------------------------------
--- Requests
--- ---------------------------------------------------------------------------
-
--- | Everything a request is answered against that is not the request itself.
---
--- The catalog is an input rather than something fetched here, so one read
--- answers a whole plan's worth of questions and a caller can say exactly how
--- fresh the evidence a terminal result is validated against is. A verdict
--- validated against a stale catalog is a stale verdict, which is why the
--- headless loop refreshes before every observation.
-data ActionEnvironment = ActionEnvironment
-  { actionRepository :: Repository,
-    actionWorkflowConfig :: WorkflowConfig,
-    actionConfigPath :: Maybe FilePath,
-    actionRoster :: Either RosterLoadError ModelRoster,
-    actionCatalog :: TargetCatalog,
-    actionNow :: UTCTime
-  }
-
--- | One request. 'actionRequest' builds the ordinary shape; the resume fields
--- are for a caller continuing a provider session it already owns.
-data ActionRequest = ActionRequest
-  { requestKind :: WorkflowActionKind,
-    -- | The repository identity the caller means, checked against the one the
-    -- catalog was read from.
-    requestRepository :: Text,
-    requestTarget :: ActionTargetRef,
-    -- | The operator's solver choice, for the two issue-side verbs that have
-    -- one. Every other brand on this path is derived by existing routing.
-    requestSolverBrand :: Maybe SolverBrand,
-    -- | A cell a previous worker recorded, replayed unchanged so a roster
-    -- edited between two turns of one provider session cannot change what it
-    -- runs on (D-7).
-    requestRecordedAssignment :: Maybe RecordedAssignment,
-    requestExistingSession :: Maybe Text,
-    requestExistingLogPath :: Maybe FilePath,
-    requestResumeProvenance :: ResumeProvenance,
-    requestUserMessage :: Text,
-    requestParent :: Maybe WorkerParent
-  }
-
-actionRequest :: WorkflowActionKind -> Text -> ActionTargetRef -> ActionRequest
-actionRequest kind repository target =
-  ActionRequest
-    { requestKind = kind,
-      requestRepository = repository,
-      requestTarget = target,
-      requestSolverBrand = Nothing,
-      requestRecordedAssignment = Nothing,
-      requestExistingSession = Nothing,
-      requestExistingLogPath = Nothing,
-      requestResumeProvenance = ResumeAnswer,
-      requestUserMessage = "",
-      requestParent = Nothing
-    }
 
 -- ---------------------------------------------------------------------------
 -- Planning
@@ -276,7 +212,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
       RouteProvider (ActionSolve brand) ->
         workerHandle resolved brand <$> launchSolve resolved SolveOnly brand cell
       RouteProvider (ActionAutoSolve brand) ->
-        autoSolveHandle resolved brand <$> launchSolve resolved AutoSolve brand cell
+        launchSolve resolved AutoSolve brand cell >>= autoSolveHandle resolved brand
       RouteProvider (ActionPullRequestFlow origin action) ->
         workerHandle resolved (agentForAction origin action) <$> launchPullRequest resolved origin action cell
       _ -> pure (Left (ActionRoutingUnavailable plan.planKind "this action starts no provider"))
@@ -286,10 +222,12 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         (Left . ActionDispatchFailed plan.planKind)
         (Right . (\descriptor -> WorkerActionHandle plan.planKind resolved descriptor (attribution brand)))
 
+    -- The one place an autosolve handle is made, so every one of them carries
+    -- a cursor observing it can advance.
     autoSolveHandle resolved brand =
       either
-        (Left . ActionDispatchFailed plan.planKind)
-        (Right . (\descriptor -> AutoSolveActionHandle resolved descriptor (attribution brand)))
+        (pure . Left . ActionDispatchFailed plan.planKind)
+        (fmap Right . autoSolveActionHandle liveAutoSolveTurns resolved (attribution brand))
 
     launchSolve resolved workflow brand cell =
       launchSolveWorker
@@ -323,6 +261,25 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         environment.actionWorkflowConfig
 
 -- ---------------------------------------------------------------------------
+-- The autosolve loop's live wiring
+-- ---------------------------------------------------------------------------
+
+-- | The two things the autosolve loop does to the world, in production: this
+-- registry's own dispatch, and the real durable-state read.
+liveAutoSolveTurns :: AutoSolveTurns
+liveAutoSolveTurns = AutoSolveTurns dispatchAction readWorkerState
+
+-- | An autosolve handle carrying a cursor its observations advance.
+autoSolveActionHandle :: AutoSolveTurns -> ResolvedTarget -> ActionAttribution -> WorkerDescriptor -> IO ActionHandle
+autoSolveActionHandle turns resolved attribution descriptor = do
+  cursor <- autoSolveCursorFor turns (initialAutoSolveState resolved descriptor attribution)
+  pure (AutoSolveActionHandle resolved descriptor attribution cursor)
+
+-- | Drive one autosolve action to a terminal outcome.
+runAutoSolveAction :: ActionEnvironment -> AutoSolveDriver -> AutoSolveState -> IO ActionOutcome
+runAutoSolveAction = runAutoSolveActionWith liveAutoSolveTurns
+
+-- ---------------------------------------------------------------------------
 -- Observation
 -- ---------------------------------------------------------------------------
 
@@ -337,8 +294,9 @@ observeAction environment handle = case handle of
     ActionSettled . ActionApprovalQueueReport <$> approvalQueueObservation repository
   WorkerActionHandle kind resolved descriptor attribution ->
     observeWorkerHandle environment kind resolved descriptor attribution
-  AutoSolveActionHandle resolved descriptor _ ->
-    observeAutoSolveTurn environment resolved descriptor
+  -- Advancing rather than merely reading: an autosolve action's result is the
+  -- approval its loop reaches, so observing it moves the loop on a tick.
+  AutoSolveActionHandle _ _ _ cursor -> advanceAutoSolveCursor cursor environment
 
 -- | What one observation of an autosolve action's /current provider turn/
 -- reports.

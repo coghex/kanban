@@ -33,16 +33,12 @@ module Kanban.Action.AutoSolve
     AutoSolveConclusion (..),
     autoSolveTick,
     autoSolveConclusionOutcome,
-    AutoSolveAction,
-    beginAutoSolveAction,
-    beginAutoSolveActionWith,
-    observeAutoSolveAction,
+    autoSolveCursorFor,
+    initialAutoSolveState,
     autoSolveActionActivity,
     AutoSolveState (..),
     AutoSolveTurns (..),
-    liveAutoSolveTurns,
     AutoSolveDriver (..),
-    autoSolveStateFor,
     autoSolveStateFromWorkers,
     recoverAutoSolveState,
     reviewPhaseForRecord,
@@ -50,7 +46,6 @@ module Kanban.Action.AutoSolve
     settledReviewTurn,
     workerStatusIsLive,
     advanceAutoSolveAction,
-    runAutoSolveAction,
     runAutoSolveActionWith,
   )
 where
@@ -61,19 +56,7 @@ import Data.Maybe (listToMaybe)
 import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Kanban.Action.Dispatch
-  ( ActionEnvironment (..),
-    ActionRequest (..),
-    actionRequest,
-    dispatchAction,
-  )
-import Kanban.Action.Target
-  ( CatalogHistory,
-    TargetCatalog (..),
-    catalogFromSnapshot,
-    catalogIdentity,
-    workflowActionKindForLabelledPullRequest,
-  )
+import Kanban.Action.Target (workflowActionKindForLabelledPullRequest)
 import Kanban.Action.Types
 import Kanban.Domain (PullRequest (..), RepoSnapshot, Repository, WorkflowConfig)
 import Kanban.Solve (SolveOutcome (..), SolveWorkflow (..), SolverBrand)
@@ -100,7 +83,6 @@ import Kanban.Worker
     WorkerStatus (..),
     WorkerTask (..),
     discoverWorkers,
-    readWorkerState,
   )
 
 -- | One autosolve action in flight.
@@ -128,9 +110,6 @@ data AutoSolveTurns = AutoSolveTurns
     turnWorkerState :: WorkerDescriptor -> IO (Either Text WorkerState)
   }
 
-liveAutoSolveTurns :: AutoSolveTurns
-liveAutoSolveTurns = AutoSolveTurns dispatchAction readWorkerState
-
 -- | How a headless caller supplies fresh evidence and paces the loop.
 --
 -- The refresh is the caller's because the registry adds no read authority of
@@ -145,25 +124,23 @@ data AutoSolveDriver = AutoSolveDriver
     driverSteps :: Int
   }
 
--- | The state a freshly dispatched autosolve handle starts in.
-autoSolveStateFor :: ActionHandle -> Maybe AutoSolveState
-autoSolveStateFor (AutoSolveActionHandle target descriptor attribution) =
-  Just
-    AutoSolveState
-      { autoSolveActionTarget = target,
-        autoSolveActionAttribution = attribution,
-        autoSolveActionProgress =
-          AutoSolveProgress
-            { autoSolveStage = AutoImplementing,
-              autoSolvePullRequest = Nothing,
-              autoSolveReviewRound = 0,
-              autoSolveKnownPullRequests = attribution.attributionKnownPullRequests,
-              autoSolveStartedAt = attribution.attributionStartedAt
-            },
-        autoSolveActionSolver = descriptor,
-        autoSolveActionReviewer = Nothing
-      }
-autoSolveStateFor _ = Nothing
+-- | The state a freshly dispatched autosolve action starts in.
+initialAutoSolveState :: ResolvedTarget -> WorkerDescriptor -> ActionAttribution -> AutoSolveState
+initialAutoSolveState target descriptor attribution =
+  AutoSolveState
+    { autoSolveActionTarget = target,
+      autoSolveActionAttribution = attribution,
+      autoSolveActionProgress =
+        AutoSolveProgress
+          { autoSolveStage = AutoImplementing,
+            autoSolvePullRequest = Nothing,
+            autoSolveReviewRound = 0,
+            autoSolveKnownPullRequests = attribution.attributionKnownPullRequests,
+            autoSolveStartedAt = attribution.attributionStartedAt
+          },
+      autoSolveActionSolver = descriptor,
+      autoSolveActionReviewer = Nothing
+    }
 
 -- | The dashboard's session phase, as a worker's durable status reports it.
 --
@@ -444,8 +421,10 @@ autoSolveStateFromWorkers target boardPullRequests descriptors = do
         lastOf [descriptor | descriptor <- descriptors, isReviewFor issueNumber descriptor]
       parent = reviewer >>= (.workerDescriptorSpec.workerParent)
       -- A solver created no earlier than the review worker is a revision the
-      -- loop has already moved on to, so that review is history rather than
-      -- the turn in flight.
+      -- loop has already moved on to, so that review round is history rather
+      -- than the turn in flight. The pull request it reviewed is /not/
+      -- history: it is what the whole loop is looping over, and a revision is
+      -- the loop still working on it.
       solverIsCurrent =
         maybe
           True
@@ -468,7 +447,12 @@ autoSolveStateFromWorkers target boardPullRequests descriptors = do
         autoSolveActionProgress =
           AutoSolveProgress
             { autoSolveStage = stage,
-              autoSolvePullRequest = if solverIsCurrent then Nothing else reviewer >>= reviewNumberOf,
+              -- Kept whichever turn is in flight. Dropping it for a
+              -- recovered revision would leave the loop with no bound pull
+              -- request when that revision finished, and the rereview arm
+              -- halts on an absent one -- so a run whose pull request exists
+              -- and is approved would stop instead of completing.
+              autoSolvePullRequest = reviewer >>= reviewNumberOf,
               autoSolveReviewRound = reviewRound,
               autoSolveKnownPullRequests = maybe boardPullRequests (.workerParentKnownPullRequests) parent,
               autoSolveStartedAt = maybe solver.workerDescriptorSpec.workerCreatedAt (.workerParentStartedAt) parent
@@ -522,48 +506,32 @@ settledSolverTurn progress status
       Just (WorkerTerminal (SolveFailed detail)) -> Just (Left (ActionFailed detail))
       _ -> Nothing
 
--- | A dispatched autosolve action, holding the loop cursor its observations
--- advance.
+-- | The cursor a dispatched autosolve action's handle carries.
 --
--- Autosolve is the one registered action whose result cannot be read off the
--- turn it is currently holding, so observing it has to /progress/ it: a
--- caller polling the bare handle would see one turn after another and never
--- the approval that is this action's only success. This is what makes the
--- ordinary dispatch-then-observe path reach that approval.
+-- Each advance is one tick of the loop: it reads where the action is, moves it
+-- on, and reports 'ActionRunning' with where it now is or 'ActionSettled' with
+-- the action's validated result -- for a completed run, the approval of the
+-- pull request it bound. That is what makes the ordinary
+-- dispatch-then-observe path reach that approval rather than stalling on the
+-- provider turn in flight.
 --
--- The cursor is in memory rather than durable on purpose. What the loop is
--- doing is always recoverable from the worker records
--- ('recoverAutoSolveState'), and requirement 18 leaves persistence to the
--- mission store; this is the caller's place in a run, not a second record of
--- it.
-data AutoSolveAction = AutoSolveAction
-  { autoSolveActionTurns :: AutoSolveTurns,
-    autoSolveActionCursor :: IORef AutoSolveState
-  }
+-- The turns are injected for the same reason
+-- 'Kanban.Worker.runWorkerWithTask' takes its task: a suite process cannot
+-- spawn a real detached supervisor, and the progression is what has to be
+-- exercised. Production passes the registry's own dispatch.
+autoSolveCursorFor :: AutoSolveTurns -> AutoSolveState -> IO AutoSolveCursor
+autoSolveCursorFor turns start = do
+  cursor <- newIORef start
+  pure (AutoSolveCursor (advanceOnce turns cursor))
 
--- | Begin observing the action a dispatch just returned, or 'Nothing' when
--- that handle is not an autosolve one.
-beginAutoSolveAction :: ActionHandle -> IO (Maybe AutoSolveAction)
-beginAutoSolveAction handle = traverse (beginAutoSolveActionWith liveAutoSolveTurns) (autoSolveStateFor handle)
-
-beginAutoSolveActionWith :: AutoSolveTurns -> AutoSolveState -> IO AutoSolveAction
-beginAutoSolveActionWith turns state = AutoSolveAction turns <$> newIORef state
-
--- | Observe one autosolve action, advancing its loop by a tick.
---
--- 'ActionRunning' carries where the loop now is; 'ActionSettled' is the
--- action's validated result, which for a completed run is the approval of the
--- pull request it bound. The evidence comes from the catalog in the
--- environment, so a caller refreshes before observing exactly as
--- 'runAutoSolveAction' does.
-observeAutoSolveAction :: ActionEnvironment -> AutoSolveAction -> IO ActionObservation
-observeAutoSolveAction environment action = do
-  state <- readIORef action.autoSolveActionCursor
-  advanced <- advanceAutoSolveAction action.autoSolveActionTurns environment state
+advanceOnce :: AutoSolveTurns -> IORef AutoSolveState -> ActionEnvironment -> IO ActionObservation
+advanceOnce turns cursor environment = do
+  state <- readIORef cursor
+  advanced <- advanceAutoSolveAction turns environment state
   case advanced of
     Left outcome -> pure (ActionSettled outcome)
     Right next -> do
-      writeIORef action.autoSolveActionCursor next
+      writeIORef cursor next
       pure (ActionRunning (autoSolveActionActivity next))
 
 -- | Where a running autosolve action currently is, in one line.
@@ -579,16 +547,12 @@ autoSolveActionActivity state = case state.autoSolveActionProgress.autoSolveStag
   where
     boundPullRequest = maybe "" ((" #" <>) . showNumber) state.autoSolveActionProgress.autoSolvePullRequest
 
--- | Drive one autosolve action to a terminal outcome.
-runAutoSolveAction :: ActionEnvironment -> AutoSolveDriver -> AutoSolveState -> IO ActionOutcome
-runAutoSolveAction = runAutoSolveActionWith liveAutoSolveTurns
-
 runAutoSolveActionWith :: AutoSolveTurns -> ActionEnvironment -> AutoSolveDriver -> AutoSolveState -> IO ActionOutcome
 runAutoSolveActionWith turns environment driver start = do
-  action <- beginAutoSolveActionWith turns start
-  loop driver.driverSteps action
+  cursor <- autoSolveCursorFor turns start
+  loop driver.driverSteps cursor
   where
-    loop remaining action
+    loop remaining cursor
       | remaining <= 0 = pure (ActionStopped "the autosolve loop reached its observation budget")
       | otherwise = do
           refreshed <- driver.driverRefresh
@@ -600,10 +564,10 @@ runAutoSolveActionWith turns environment driver start = do
                       { actionCatalog =
                           catalogFromSnapshot environment.actionRepository snapshot driver.driverHistory
                       }
-              observed <- observeAutoSolveAction refreshedEnvironment action
+              observed <- advanceAutoSolveCursor cursor refreshedEnvironment
               case observed of
                 ActionSettled outcome -> pure outcome
-                ActionRunning _ -> driver.driverWait >> loop (remaining - 1) action
+                ActionRunning _ -> driver.driverWait >> loop (remaining - 1) cursor
 
 showNumber :: Int -> Text
 showNumber = Text.pack . show
