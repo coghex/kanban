@@ -11,12 +11,13 @@ import Kanban.Models (loadModelRoster)
 import Kanban.Ping (PingMode (..), pingRepositoryIdentity, pingResolvedConfig, resolvePingBrand, runPingMode)
 import Kanban.Preflight (doctorLines, doctorReady, gatherPreflightEnvironment)
 import Kanban.Repository (resolveRepository, resolveRepositoryRoster)
+import Kanban.ReviewToolServer (serveReviewTools)
 import Kanban.UI (runDashboard)
 import Kanban.Usage (UsageAcquisition (..), UsageMode (..), runUsageMode)
 import Kanban.Worker (runWorker)
 import Options.Applicative (execParser)
-import System.Exit (exitFailure)
-import System.IO (hPutStrLn, stderr)
+import System.Exit (exitFailure, exitWith)
+import System.IO (hPutStrLn, stderr, stdin, stdout)
 
 main :: IO ()
 main = do
@@ -58,6 +59,12 @@ main = do
       case result of
         Left message -> hPutStrLn stderr ("kanban worker: " <> Text.unpack message) >> exitFailure
         Right () -> pure ()
+    -- The re-entered review tool server (D-15): speaks MCP on this
+    -- process's own stdio to the provider that spawned it and proxies over
+    -- the endpoint it was handed. Everything else — configuration, roster,
+    -- repository — belongs to the Kanban on the other end.
+    ReviewToolServerMode endpointDirectory ->
+      exitWith =<< serveReviewTools stdin stdout endpointDirectory
     GlyphTestMode -> runGlyphTest
     -- Read-only, and deliberately ahead of configuration and repository
     -- resolution: a fresh clone with no configured remote still needs to be

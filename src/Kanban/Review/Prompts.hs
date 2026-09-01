@@ -1,6 +1,10 @@
 -- | Everything the embedded review session hands to the Codex app-server:
 -- the developer instructions, the opening prompt, the three dynamic tools'
--- names and JSON schemas, and the final output schema.
+-- names and JSON schemas, and the final output schema. Two of those tool
+-- declarations — the question tool and the GitHub tool — are also what a
+-- Claude review thread's MCP re-entry serves, translated rather than
+-- restated ('Kanban.ReviewToolServer.mcpToolDescriptor'), so this module
+-- remains their one declaration site on either channel.
 --
 -- Literal but for the two model names it states. Those are read out of the
 -- roster it is given — the coordinator's own @issue_review.codex@ and the

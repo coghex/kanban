@@ -326,7 +326,8 @@ testOptions =
       optionAscii = False,
       optionNoCache = False,
       optionConfig = Nothing,
-      optionWorkerSpec = Nothing
+      optionWorkerSpec = Nothing,
+      optionReviewTools = Nothing
     }
 
 testResolvedConfig :: ResolvedConfig

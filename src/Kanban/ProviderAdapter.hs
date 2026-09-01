@@ -35,6 +35,7 @@ module Kanban.ProviderAdapter
     ReviewLaunch (..),
     ReviewProcessShape (..),
     ReviewProtocol (..),
+    ReviewToolServerLaunch (..),
     adapterFor,
     adapterForBrand,
     brandForProvider,
@@ -49,7 +50,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain (WorkflowConfig)
 import Kanban.Models (Assignment (..), ModelRoster, ProviderName (..))
-import Kanban.Review.Prompts (claudeTool, finalOutputSchema, githubTool, questionTool)
+import Kanban.Review.Prompts (claudeTool, finalOutputSchema, githubTool, githubToolName, questionTool, questionToolName)
+import Kanban.ReviewToolServer (mcpToolAllowance, reviewToolServerConfig)
 import Kanban.Solve.Event (SolverBrand (..))
 import System.Process
   ( CreateProcess (..),
@@ -108,9 +110,21 @@ data ReviewProtocol
     StreamJsonProtocol
   deriving stock (Eq, Show)
 
+-- | How a launch names the re-entered MCP server that will serve this
+-- session's Kanban tools (D-15): the exact executable to re-enter — the
+-- currently running one, resolved by the client through
+-- 'System.Environment.getExecutablePath' exactly as "Kanban.Worker" resolves
+-- its supervisor, never a @kanban@ found on PATH — and the directory of the
+-- FIFO endpoint the client created for this one review thread.
+data ReviewToolServerLaunch = ReviewToolServerLaunch
+  { toolServerExecutable :: FilePath,
+    toolServerEndpoint :: FilePath
+  }
+  deriving stock (Eq, Show)
+
 -- | What one embedded-review process is started for: the repository it runs
--- in, and the @issue_review@ cell resolved for the provider whose backend is
--- starting it.
+-- in, the @issue_review@ cell resolved for the provider whose backend is
+-- starting it, and the tool re-entry the client prepared for it.
 --
 -- The assignment travels here because a provider's model and effort are not
 -- always wire parameters. Codex carries its own in @thread\/start@ and
@@ -118,9 +132,18 @@ data ReviewProtocol
 -- launch flags (D-15), so its argv cannot be built without them. Handing
 -- the resolved cell to the backend is what keeps that difference inside the
 -- record rather than making the client ask which provider it is starting.
+--
+-- The tool server travels here for the same reason. Codex's tools are
+-- @thread\/start@ parameters and it ignores this field; @claude@'s are
+-- served over a stdio MCP re-entry whose configuration is argv, so its
+-- launch cannot be built without one. The client supplies it for every
+-- backend whose channel declares no inline tools — 'StreamJsonProtocol' —
+-- and 'Nothing' is only what the backends that never read the field are
+-- handed.
 data ReviewLaunch = ReviewLaunch
   { launchRepositoryRoot :: FilePath,
-    launchAssignment :: Assignment
+    launchAssignment :: Assignment,
+    launchToolServer :: Maybe ReviewToolServerLaunch
   }
   deriving stock (Eq, Show)
 
@@ -164,10 +187,11 @@ data ProviderAdapter = ProviderAdapter
     -- where Kanban ships no backend for it.
     adapterEmbeddedReview :: Maybe EmbeddedReviewBackend,
     -- | The dynamic tools this provider's embedded review registers, in the
-    -- order the backend is given them. Empty for a provider whose backend
-    -- declares none: Claude's tools are served over MCP rather than declared
-    -- inline (D-15), which is MODEL-15's, so its review thread registers
-    -- nothing here.
+    -- order the backend is given them. One declaration site whatever the
+    -- channel: Codex's travel inline as @thread\/start@'s @dynamicTools@,
+    -- and Claude's are the same declarations translated onto the MCP
+    -- re-entry's @tools\/list@ (D-15), so the served schemas — the label
+    -- vocabulary above all — cannot drift from what is declared here.
     adapterReviewTools :: ModelRoster -> WorkflowConfig -> [Value]
   }
 
@@ -216,7 +240,11 @@ claudeAdapter =
       adapterPullRequestProcess = agentSessionProcess,
       adapterRevisionProcess = oneShotProcess,
       adapterEmbeddedReview = Just claudeEmbeddedReview,
-      adapterReviewTools = \_ _ -> []
+      -- The question tool and the GitHub tool, in the Codex thread's own
+      -- order, and deliberately not the nested revision tool: a Claude
+      -- review thread is already Claude and revises inline, exactly as a
+      -- Codex-only install's thread does (D-14 as amended).
+      adapterReviewTools = \_ config -> [questionTool, githubTool config]
     }
 
 codexEmbeddedReview :: EmbeddedReviewBackend
@@ -255,7 +283,7 @@ claudeEmbeddedReview =
       backendProcessShape = ProcessPerThread,
       backendProtocol = StreamJsonProtocol,
       backendProcess = \launch ->
-        (proc "claude" (claudeReviewArguments launch.launchAssignment))
+        (proc "claude" (claudeReviewArguments launch.launchAssignment launch.launchToolServer))
           { cwd = Just launch.launchRepositoryRoot,
             std_in = CreatePipe,
             std_out = CreatePipe,
@@ -267,7 +295,7 @@ claudeEmbeddedReview =
 -- | The argv one embedded review session runs under, probed against CLI
 -- 2.1.251 (D-15) and rechecked on 2.1.252.
 --
--- Four groups, none of them optional:
+-- Five groups, none of them optional:
 --
 -- * the channel — @-p@ with both @stream-json@ formats, and @--verbose@,
 --   without which the CLI refuses the streamed output format outright;
@@ -280,12 +308,18 @@ claudeEmbeddedReview =
 --   bare @claude -p@ loads the operator's own MCP servers and fires their
 --   @SessionStart@ hook. An embedded review must not inherit the machine's
 --   Claude Code configuration, and this launch is the only thing that stops
---   it.
+--   it;
+-- * the tools — @--mcp-config@ naming Kanban's own re-entry as the one
+--   server @--strict-mcp-config@ then holds the session to, and
+--   @--allowedTools@ naming that server's two tools so the noninteractive
+--   session may call them without a permission prompt nothing can answer
+--   (D-15). The allowance is spelled from the same tool-name constants the
+--   declarations are built from, and a test holds the two lists together.
 --
 -- @--model@ and @--effort@ close the list because they are the only part of
 -- it the operator's roster moves.
-claudeReviewArguments :: Assignment -> [String]
-claudeReviewArguments assignment =
+claudeReviewArguments :: Assignment -> Maybe ReviewToolServerLaunch -> [String]
+claudeReviewArguments assignment toolServer =
   [ "-p",
     "--verbose",
     "--input-format",
@@ -297,11 +331,23 @@ claudeReviewArguments assignment =
     LazyByteString.unpack (encode finalOutputSchema),
     "--strict-mcp-config",
     "--tools",
-    "",
-    "--model",
-    Text.unpack assignment.assignmentModel,
-    "--effort",
-    Text.unpack assignment.assignmentEffort
+    ""
+  ]
+    <> foldMap reviewToolServerArguments toolServer
+    <> [ "--model",
+         Text.unpack assignment.assignmentModel,
+         "--effort",
+         Text.unpack assignment.assignmentEffort
+       ]
+
+-- | The launch's tool group: the MCP configuration for Kanban's re-entered
+-- server, and the permission allowance for exactly the two tools it serves.
+reviewToolServerArguments :: ReviewToolServerLaunch -> [String]
+reviewToolServerArguments toolServer =
+  [ "--mcp-config",
+    LazyByteString.unpack (encode (reviewToolServerConfig toolServer.toolServerExecutable toolServer.toolServerEndpoint)),
+    "--allowedTools",
+    Text.unpack (Text.intercalate "," (map mcpToolAllowance [questionToolName, githubToolName]))
   ]
 
 -- | A long-running agent session: stdout and stderr are read as they arrive,

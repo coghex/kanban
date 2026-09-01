@@ -24,7 +24,7 @@
 -- "Spec.Agent.Roster". Nothing moved here.
 module Spec.Agent.Adapter (spec) where
 
-import Data.Aeson (Value (..), encode)
+import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
@@ -37,12 +37,14 @@ import Kanban.Review
     ReviewLaunch (..),
     ReviewProcessShape (..),
     ReviewProtocol (..),
+    ReviewToolServerLaunch (..),
     claudeReviewArguments,
     claudeTool,
     embeddedReviewProvider,
     finalOutputSchema,
     missingEmbeddedReviewMessage,
   )
+import Kanban.ReviewToolServer (reviewToolServerConfig)
 import Kanban.Solve
   ( ProcessRequest (..),
     ProviderAdapter (..),
@@ -90,6 +92,13 @@ cellFor :: ProviderName -> Assignment
 cellFor provider = case assignmentFor defaultRoster IssueReviewRole provider of
   Right assignment -> assignment
   Left unavailable -> error ("the default roster has no issue_review cell: " <> show unavailable)
+
+-- | The tool re-entry a Claude launch is handed. A fixture pair, exactly as
+-- 'request' is: what the adapter owns is where these two values land in the
+-- argv, and the client's own resolution of them is covered where it runs,
+-- in "Spec.Agent.ToolReentry".
+claudeToolServer :: ReviewToolServerLaunch
+claudeToolServer = ReviewToolServerLaunch "/opt/bin/kanban" "/tmp/endpoint"
 
 toolNames :: [Value] -> [Maybe Text]
 toolNames = map name
@@ -154,7 +163,7 @@ spec = do
         `shouldBe` [Just CodexProvider, Just ClaudeProvider]
 
     it "starts the app-server exactly as Kanban.Review used to" $
-      fmap (\backend -> shape (backend.backendProcess (ReviewLaunch "/tmp/worktree" reviewCell))) ((adapterFor CodexProvider).adapterEmbeddedReview)
+      fmap (\backend -> shape (backend.backendProcess (ReviewLaunch "/tmp/worktree" reviewCell Nothing))) ((adapterFor CodexProvider).adapterEmbeddedReview)
         `shouldBe` Just
           ( RawCommand "codex" ["app-server", "--listen", "stdio://"],
             Just "/tmp/worktree",
@@ -164,22 +173,25 @@ spec = do
             True
           )
 
-    -- Requirement 2: the launch carries the resolved assignment, and Codex
-    -- ignores it. Its model and effort travel in `thread/start` and
-    -- `turn/start` instead, so a launch resolved from a different cell must
-    -- produce byte-identical argv.
-    it "leaves Codex's argv untouched by the assignment the launch carries" $
-      let launchedWith assignment =
-            fmap (\backend -> cmdspec (backend.backendProcess (ReviewLaunch "/tmp/worktree" assignment))) ((adapterFor CodexProvider).adapterEmbeddedReview)
-       in launchedWith (Assignment "someone-elses-model" "none" "someone else")
-            `shouldBe` launchedWith reviewCell
+    -- Requirement 2: the launch carries the resolved assignment and the
+    -- tool re-entry, and Codex ignores both. Its model and effort travel in
+    -- `thread/start` and `turn/start`, and its tools in `thread/start`'s
+    -- dynamicTools, so a launch resolved from a different cell — or one
+    -- carrying a tool server — must produce byte-identical argv.
+    it "leaves Codex's argv untouched by the assignment and tool server the launch carries" $
+      let launchedWith assignment toolServer =
+            fmap (\backend -> cmdspec (backend.backendProcess (ReviewLaunch "/tmp/worktree" assignment toolServer))) ((adapterFor CodexProvider).adapterEmbeddedReview)
+       in launchedWith (Assignment "someone-elses-model" "none" "someone else") (Just claudeToolServer)
+            `shouldBe` launchedWith reviewCell Nothing
 
     -- Requirement 1 and the review's launch clause: the whole argv, because
     -- every flag in it is load-bearing and a partial assertion would let one
     -- of them be dropped. Requirement 3's other half is the process shape it
-    -- is handed under, which is Codex's exactly.
+    -- is handed under, which is Codex's exactly. The tool group sits inside
+    -- the isolation the earlier flags establish: `--strict-mcp-config` is
+    -- what holds the session to exactly the one server `--mcp-config` names.
     it "launches Claude on the CLI's stream-json channel, hermetically, on the roster's cell" $
-      fmap (\backend -> shape (backend.backendProcess (ReviewLaunch "/tmp/worktree" claudeReviewCell))) ((adapterFor ClaudeProvider).adapterEmbeddedReview)
+      fmap (\backend -> shape (backend.backendProcess (ReviewLaunch "/tmp/worktree" claudeReviewCell (Just claudeToolServer)))) ((adapterFor ClaudeProvider).adapterEmbeddedReview)
         `shouldBe` Just
           ( RawCommand
               "claude"
@@ -195,6 +207,10 @@ spec = do
                 "--strict-mcp-config",
                 "--tools",
                 "",
+                "--mcp-config",
+                LazyByteString.unpack (encode (reviewToolServerConfig "/opt/bin/kanban" "/tmp/endpoint")),
+                "--allowedTools",
+                "mcp__kanban__kanban_prompt_user,mcp__kanban__kanban_github_issue",
                 "--model",
                 Text.unpack claudeReviewCell.assignmentModel,
                 "--effort",
@@ -207,8 +223,27 @@ spec = do
             True
           )
 
+    -- The configuration behind that `--mcp-config` element, decoded and
+    -- pinned by value: one server, named kanban, re-entering the exact
+    -- executable the launch names — never a PATH lookup — against this
+    -- thread's endpoint, over stdio. Asserted against literals rather than
+    -- the builder, so the builder cannot vouch for itself.
+    it "re-enters the launch's own executable as the one MCP server the session loads" $
+      reviewToolServerConfig "/opt/bin/kanban" "/tmp/endpoint"
+        `shouldBe` object
+          [ "mcpServers"
+              .= object
+                [ "kanban"
+                    .= object
+                      [ "type" .= ("stdio" :: Text),
+                        "command" .= ("/opt/bin/kanban" :: Text),
+                        "args" .= (["--review-tools", "/tmp/endpoint"] :: [Text])
+                      ]
+                ]
+          ]
+
     it "carries the roster's own model and effort rather than a compiled pair" $
-      dropWhile (/= "--model") (claudeReviewArguments (Assignment "rerostered-model" "rerostered-effort" "rerostered"))
+      dropWhile (/= "--model") (claudeReviewArguments (Assignment "rerostered-model" "rerostered-effort" "rerostered") (Just claudeToolServer))
         `shouldBe` ["--model", "rerostered-model", "--effort", "rerostered-effort"]
 
     -- MODEL-14: the client reads this to decide whether starting a review
@@ -244,9 +279,17 @@ spec = do
       (adapterFor CodexProvider).adapterReviewTools defaultRoster defaultWorkflowConfig !! 1
         `shouldBe` claudeTool defaultRoster
 
-    -- Claude's are served over MCP rather than declared inline (D-15), which
-    -- is MODEL-15's; until then its review thread registers nothing, so it
-    -- produces no tool-call event of any kind.
-    it "registers none for a provider whose backend declares none" $
+    -- Claude's are served over MCP rather than declared inline (D-15), from
+    -- these same declarations, and deliberately without the nested revision
+    -- tool: a Claude review thread is already Claude and revises inline
+    -- (D-14 as amended), so requirement 8 is exactly this list holding two
+    -- names and never a third.
+    it "registers Claude's two, in the Codex thread's own order, with no revision tool" $ do
+      toolNames ((adapterFor ClaudeProvider).adapterReviewTools defaultRoster defaultWorkflowConfig)
+        `shouldBe` [Just "kanban_prompt_user", Just "kanban_github_issue"]
+      -- The same declarations, not merely the same names: whatever schema
+      -- the Codex thread registers for a tool is what the re-entry serves.
       (adapterFor ClaudeProvider).adapterReviewTools defaultRoster defaultWorkflowConfig
-        `shouldBe` []
+        `shouldBe` [ (adapterFor CodexProvider).adapterReviewTools defaultRoster defaultWorkflowConfig !! 0,
+                     (adapterFor CodexProvider).adapterReviewTools defaultRoster defaultWorkflowConfig !! 2
+                   ]

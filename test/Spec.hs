@@ -30,6 +30,7 @@ import qualified Spec.Agent.PullRequestFlow as PullRequestFlow
 import qualified Spec.Agent.Roster as AgentRoster
 import qualified Spec.Agent.Solve as Solve
 import qualified Spec.Agent.Supervision as Supervision
+import qualified Spec.Agent.ToolReentry as ToolReentry
 import qualified Spec.Agent.Transcript as Transcript
 import qualified Spec.Agent.Usage as Usage
 import qualified Spec.Agent.UsageMode as UsageMode
@@ -83,7 +84,10 @@ import qualified Spec.UI.Settings as UISettings
 import qualified Spec.UI.SolveChooser as SolveChooser
 import qualified Spec.UI.Text as UIText
 import qualified Spec.UI.Usage as UIUsage
-import System.Environment (lookupEnv)
+import Kanban.ReviewToolServer (serveReviewTools)
+import System.Environment (getArgs, lookupEnv)
+import System.Exit (exitWith)
+import System.IO (stdin, stdout)
 
 -- | Ordinarily the suite. Four markers divert it instead, and each names a
 -- condition that cannot be established from inside an already-started test
@@ -106,16 +110,30 @@ import System.Environment (lookupEnv)
 -- time. No marker reaches a child of a probe, so this cannot recurse.
 main :: IO ()
 main = do
-  localeProbe <- lookupEnv localeProbeVariable
-  usageWriter <- lookupEnv usageWriterVariable
-  leaseProbe <- lookupEnv leaseProbeVariable
-  missionProbe <- lookupEnv missionProbeVariable
-  case (localeProbe, usageWriter, leaseProbe, missionProbe) of
-    (Just probeRoot, _, _, _) -> runLocaleProbe probeRoot
-    (Nothing, Just planPath, _, _) -> runUsageWriter planPath
-    (Nothing, Nothing, Just planPath, _) -> runLeaseProbe planPath
-    (Nothing, Nothing, Nothing, Just planPath) -> runMissionProbe planPath
-    (Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
+  arguments <- getArgs
+  case arguments of
+    -- The re-entered review tool server, exactly as @kanban --review-tools@
+    -- serves it. A fifth diversion, and the one that is argv rather than
+    -- environment because that is how the mechanism under test hands it
+    -- over: "Spec.Agent.ToolReentry"'s fake @claude@ spawns whatever
+    -- executable its recorded @--mcp-config@ names, that executable is this
+    -- suite's own binary ('System.Environment.getExecutablePath', the same
+    -- re-entry a real install performs), and so the served process runs the
+    -- real 'serveReviewTools' rather than a fixture restating it. Checked
+    -- ahead of the probe markers: the spawned server inherits whatever
+    -- environment the suite's own machinery is carrying.
+    ["--review-tools", endpointDirectory] -> exitWith =<< serveReviewTools stdin stdout endpointDirectory
+    _ -> do
+      localeProbe <- lookupEnv localeProbeVariable
+      usageWriter <- lookupEnv usageWriterVariable
+      leaseProbe <- lookupEnv leaseProbeVariable
+      missionProbe <- lookupEnv missionProbeVariable
+      case (localeProbe, usageWriter, leaseProbe, missionProbe) of
+        (Just probeRoot, _, _, _) -> runLocaleProbe probeRoot
+        (Nothing, Just planPath, _, _) -> runUsageWriter planPath
+        (Nothing, Nothing, Just planPath, _) -> runLeaseProbe planPath
+        (Nothing, Nothing, Nothing, Just planPath) -> runMissionProbe planPath
+        (Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
 
 -- | Every group, its lane, and its established order.
 --
@@ -147,6 +165,7 @@ suiteGroups =
     -- cannot overlap at all — the same reasoning 'suiteColocations' records
     -- for the pair it names, at a cost of about 22 of this lane's seconds.
     SuiteGroup "Spec.Agent.ClaudeReview" SupervisionLane ClaudeReview.spec, -- 21.9s
+    SuiteGroup "Spec.Agent.ToolReentry" LifecycleLane ToolReentry.spec,
     SuiteGroup "Spec.Agent.Solve" LifecycleLane Solve.spec, -- 2.8s
     SuiteGroup "Spec.Agent.Adapter" LifecycleLane Adapter.spec,
     SuiteGroup "Spec.Config.Settings" PingLane Settings.spec,

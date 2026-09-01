@@ -8,21 +8,26 @@
 -- off the client or changing any runner's signature.
 module Kanban.Review.Client
   ( ReviewClient (..),
+    ReviewToolProxy (..),
     ToolRegistry,
     attachToolProcess,
+    destroyReviewToolProxy,
+    drainReviewToolProxies,
     drainToolRegistry,
     emitProtocolWarning,
     killConnectionToolProcesses,
     killReviewTools,
     killThreadToolProcesses,
     newToolRegistry,
+    registerReviewToolProxy,
     releaseToolSlot,
     reserveToolSlot,
+    takeReviewToolProxy,
     withReservedToolSlot,
   )
 where
 
-import Control.Concurrent (MVar, modifyMVar, modifyMVar_, newMVar)
+import Control.Concurrent (MVar, ThreadId, killThread, modifyMVar, modifyMVar_, newMVar)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -34,6 +39,7 @@ import Kanban.Process (ManagedProcess, killManagedProcess)
 import Kanban.ProviderAdapter (EmbeddedReviewBackend (..))
 import Kanban.Review.Connection (ConnectionId, ConnectionPool, ReviewThreadId (..))
 import Kanban.Review.Types (ReviewEvent (..))
+import Kanban.ReviewToolServer (ReviewToolEndpoint, teardownReviewToolEndpoint)
 import Kanban.Transcript (SessionLog)
 
 data ReviewClient = ReviewClient
@@ -62,6 +68,14 @@ data ReviewClient = ReviewClient
     reviewActiveTurns :: MVar (Map ReviewThreadId Text),
     reviewThreadIssues :: MVar (Map ReviewThreadId Int),
     reviewToolRegistry :: ToolRegistry,
+    -- | The tool re-entry serving each connection whose provider's tools go
+    -- over MCP rather than inline (D-15): the FIFO endpoint the connection's
+    -- launch named and the parent loop answering it. Keyed by connection
+    -- because that is what the endpoint is bound to — a caller cannot select
+    -- another thread's proxy any more than another thread's issue — and
+    -- taken (never merely read) by teardown, so a connection's terminal
+    -- cleanup and full client shutdown cannot both destroy one.
+    reviewToolProxies :: MVar (Map ConnectionId ReviewToolProxy),
     reviewEventSink :: ReviewEvent -> IO (),
     reviewRepositoryRoot :: FilePath,
     -- | The dashboard's resolved OWNER/NAME (which may come from an
@@ -216,6 +230,41 @@ killToolEntry entry = mapM_ killManagedProcess entry.toolEntryProcess
 
 killReviewTools :: ReviewClient -> ReviewThreadId -> IO ()
 killReviewTools client threadId = killThreadToolProcesses client.reviewToolRegistry threadId
+
+-- | One connection's tool re-entry, as the parent holds it: the endpoint
+-- the spawned server proxies over, and the serving loop answering it.
+data ReviewToolProxy = ReviewToolProxy
+  { proxyEndpoint :: ReviewToolEndpoint,
+    proxyServer :: ThreadId
+  }
+
+registerReviewToolProxy :: ReviewClient -> ConnectionId -> ReviewToolProxy -> IO ()
+registerReviewToolProxy client connectionId proxy =
+  modifyMVar_ client.reviewToolProxies (pure . Map.insert connectionId proxy)
+
+-- | Take one connection's proxy, if it still holds one. Taking rather than
+-- reading is what makes destruction single-owner: whichever terminal path
+-- gets here first is the one that tears it down.
+takeReviewToolProxy :: ReviewClient -> ConnectionId -> IO (Maybe ReviewToolProxy)
+takeReviewToolProxy client connectionId =
+  modifyMVar client.reviewToolProxies $ \proxies ->
+    pure (Map.delete connectionId proxies, Map.lookup connectionId proxies)
+
+-- | Take every proxy still registered, for full shutdown to destroy. The
+-- connections' own watchers have normally emptied this already; what is
+-- left is a spawn that registered and was then refused attachment in the
+-- shutdown race, and nothing else will ever look for it.
+drainReviewToolProxies :: ReviewClient -> IO [ReviewToolProxy]
+drainReviewToolProxies client =
+  modifyMVar client.reviewToolProxies (\proxies -> pure (Map.empty, Map.elems proxies))
+
+-- | Stop one proxy completely: the serving loop first, so nothing answers a
+-- frame mid-teardown, then the endpoint — whose unlinking is what tells the
+-- re-entered server to fail its pending calls and exit.
+destroyReviewToolProxy :: ReviewToolProxy -> IO ()
+destroyReviewToolProxy proxy = do
+  killThread proxy.proxyServer
+  teardownReviewToolEndpoint proxy.proxyEndpoint
 
 -- | Reserves a registry slot for the *whole* dispatched tool call before
 -- doing any work (including the @findExecutable@ lookup and any

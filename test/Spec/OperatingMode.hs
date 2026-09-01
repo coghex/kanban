@@ -408,7 +408,7 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
   -- Requirement 6. @app/Main.hs@ is not built by this suite, so the decision
   -- is here and that module only reports what it answered.
   it "names exactly the two modes that reach a provider" $
-    map launchModeNeedsProvider everyMode `shouldBe` [False, False, False, True, True, False]
+    map launchModeNeedsProvider everyMode `shouldBe` [False, False, False, False, True, True, False]
 
   it "refuses --usage and --ping with the roster's own words" $
     sequence_
@@ -451,6 +451,7 @@ everyMode =
   map
     launchMode
     [ testOptions {optionWorkerSpec = Just "/tmp/spec.json"},
+      testOptions {optionReviewTools = Just "/tmp/endpoint"},
       testOptions {optionGlyphTest = True},
       testOptions {optionDoctor = True},
       testOptions {optionUsage = True},

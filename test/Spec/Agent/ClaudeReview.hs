@@ -19,7 +19,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
-import Data.List (nub)
+import Data.List (isPrefixOf, nub)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text
@@ -50,8 +50,11 @@ import Kanban.Review
     stopReviewClient,
     streamUserMessage,
   )
+import Kanban.ReviewToolServer (reviewToolServerConfig)
 import Spec.Support.Env (withEnvironmentValue)
 import Spec.Support.Expect (shouldMention, shouldNotMention)
+import System.Environment (getExecutablePath, lookupEnv)
+import System.FilePath ((</>))
 import Spec.Support.Process
   ( ClaudeReviewFixture (..),
     claudeReviewTurn,
@@ -78,30 +81,47 @@ spec = do
     -- The launch in full: every flag in it is load-bearing, so a partial
     -- assertion would let any one of them be dropped. Read off the process
     -- that actually ran rather than off the backend record, which is what
-    -- shows the compiled backend is the thing being spawned off PATH.
+    -- shows the compiled backend is the thing being spawned off PATH. The
+    -- two values only a live launch decides — the executable the MCP
+    -- configuration re-enters and the endpoint it proxies over — are held
+    -- separately: the executable must be exactly the one this process is
+    -- running (never a PATH lookup), and the endpoint must be a fresh
+    -- directory under this run's own private review-tools root.
     it "runs the CLI's stream-json channel hermetically, on the roster's issue_review.claude cell" $
       withClaudeReviewClient (reviewTurn <> [approvedResult 844]) $ \fixture -> do
         beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
         _ <- awaitOneCompletedTurn fixture
         launches <- recordedClaudeLaunches fixture.claudeReviewRecordings
-        launches
-          `shouldBe` [ [ "-p",
-                         "--verbose",
-                         "--input-format",
-                         "stream-json",
-                         "--output-format",
-                         "stream-json",
-                         "--include-partial-messages",
-                         "--json-schema",
-                         encodedText finalOutputSchema,
-                         "--strict-mcp-config",
-                         "--tools",
-                         "",
-                         "--model",
-                         "claude-opus-5",
-                         "--effort",
-                         "xhigh"
-                       ]
+        launch <- case launches of
+          [one] -> pure one
+          other -> fail ("expected exactly one launch, got " <> show other)
+        endpoint <- case argumentAfter "--mcp-config" launch >>= mcpEndpointOf of
+          Just value -> pure (Data.Text.unpack value)
+          Nothing -> fail ("the launch carries no decodable --mcp-config: " <> show launch)
+        cacheRoot <- maybe (fail "the fixture set no XDG_CACHE_HOME") pure =<< lookupEnv "XDG_CACHE_HOME"
+        (cacheRoot </> "kanban" </> "review-tools") `shouldSatisfy` (`isPrefixOf` endpoint)
+        executable <- getExecutablePath
+        launch
+          `shouldBe` [ "-p",
+                       "--verbose",
+                       "--input-format",
+                       "stream-json",
+                       "--output-format",
+                       "stream-json",
+                       "--include-partial-messages",
+                       "--json-schema",
+                       encodedText finalOutputSchema,
+                       "--strict-mcp-config",
+                       "--tools",
+                       "",
+                       "--mcp-config",
+                       encodedText (reviewToolServerConfig executable endpoint),
+                       "--allowedTools",
+                       "mcp__kanban__kanban_prompt_user,mcp__kanban__kanban_github_issue",
+                       "--model",
+                       "claude-opus-5",
+                       "--effort",
+                       "xhigh"
                      ]
 
     -- The rest of the established embedded-process shape. Its streams and
@@ -654,6 +674,23 @@ userMessageShape written = case decodeObject written of
         item : _ -> stringAt ["type"] item
         [] -> Nothing
       _ -> Nothing
+
+-- | The value following @flag@ in a recorded argv.
+argumentAfter :: Text -> [Text] -> Maybe Text
+argumentAfter flag arguments = case dropWhile (/= flag) arguments of
+  _ : value : _ -> Just value
+  _ -> Nothing
+
+-- | The endpoint directory a recorded @--mcp-config@ value proxies over.
+mcpEndpointOf :: Text -> Maybe Text
+mcpEndpointOf configText = do
+  value <- decodeObject configText
+  arguments <- objectField "mcpServers" value >>= objectField "kanban" >>= objectField "args"
+  case arguments of
+    Array items -> case foldMap pure items of
+      [_, String endpoint] -> Just endpoint
+      _ -> Nothing
+    _ -> Nothing
 
 decodeObject :: Text -> Maybe Value
 decodeObject written = case eitherDecode (LazyByteString.fromStrict (TextEncoding.encodeUtf8 written)) of
