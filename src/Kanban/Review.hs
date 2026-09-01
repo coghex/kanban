@@ -1359,15 +1359,10 @@ handleStreamRecord client connection attribution record = case record of
     onNamedThread "an answer to a control request" $ \threadId ->
       advanceInterrupt client connection threadId (acknowledge requestId answer)
   -- Warned about like any line this backend could not read, and then acted
-  -- on, because an operation is waiting on it. The answer named no request,
-  -- so it is taken as the answer to the one interrupt this thread can have
-  -- pending -- which is fail-closed twice: nothing else on this channel
-  -- writes a control request, and settling an interrupt that was somehow not
-  -- this answer's costs a resend, while leaving it to wait costs a message
-  -- and every send after it.
+  -- on, because an operation is waiting on it.
   StreamControlUnreadable detail -> onNamedThread "an answer to a control request" $ \threadId -> do
     emitProtocolWarning client (streamDiagnostic client detail)
-    advanceInterrupt client connection threadId (unreadableAnswer detail)
+    advanceInterrupt client connection threadId (refusedBy detail)
   StreamTurnClosed outcome -> onNamedThread "a turn result" $ \threadId -> do
     ended <- modifyMVar client.reviewActiveTurns (\turns -> pure (Map.delete threadId turns, Map.lookup threadId turns))
     client.reviewEventSink $ case outcome of
@@ -1392,21 +1387,36 @@ handleStreamRecord client connection attribution record = case record of
     announceThread threadId issueNumber = do
       modifyMVar_ client.reviewThreadIssues (pure . Map.insert threadId issueNumber)
       client.reviewEventSink (ReviewThreadCreated issueNumber threadId)
-    -- One acknowledgement belongs to one pending interrupt, matched by the
-    -- id the request carried. An answer naming anything else settles nothing:
-    -- it belongs to an operation this thread has already finished with, or to
-    -- one this client never sent.
+    -- Every answer to a control request settles the one interrupt a thread
+    -- can have pending, and only an answer that both names it and agrees
+    -- settles it as performed.
+    --
+    -- One rule for all of them, because on this channel there is nothing for
+    -- a second reading to be about: a thread has at most one interrupt in
+    -- flight, this backend writes no other kind of control request, and the
+    -- CLI answers each one once. So an answer naming a different request, or
+    -- naming none at all, is not somebody else's -- it is this exchange
+    -- turning out not to be what this client thinks it is, and it is the
+    -- last thing that will be said about the request. Left to wait, it
+    -- costs the user's message and every send after it; taken as a refusal,
+    -- it costs a deliberate resend. The bound is what matters, so it fails
+    -- closed.
     acknowledge requestId answer pending
-      | pending.interruptRequest /= requestId = pending
-      | otherwise = pending {interruptAcknowledgement = either InterruptRefused (const InterruptAccepted) answer}
-    -- An answer that arrived and could not be read is not agreement, and is
-    -- the last thing that will be said about the request: the same refusal
-    -- an explicit @error@ produces, quoting what could not be read.
-    unreadableAnswer detail pending = pending {interruptAcknowledgement = InterruptRefused detail}
-    -- Only the turn the interrupt named settles it, and only its own account
-    -- of how it ended says whether the interrupt is what ended it.
+      | pending.interruptRequest /= requestId =
+          refusedBy ("answered " <> requestId <> ", which is not the interrupt this review is waiting on") pending
+      | otherwise = either refusedBy (const accepted) answer pending
+    accepted pending = pending {interruptAcknowledgement = InterruptAccepted}
+    refusedBy detail pending = pending {interruptAcknowledgement = InterruptRefused detail}
+    -- What the turn's own ending makes of the interrupt aimed at it, and the
+    -- same bound from the other side.
+    --
+    -- Its own account of how it ended is what says whether the interrupt is
+    -- what ended it. A /different/ turn ending settles it too, and as
+    -- unconfirmed: a thread runs one turn at a time, so a turn ending that
+    -- is not the target's is proof the target is no longer running, and
+    -- nothing about it says an interrupt is what stopped it.
     targetEnded turnId outcome pending
-      | pending.interruptTurn /= turnId = pending
+      | pending.interruptTurn /= turnId = pending {interruptTarget = TargetSettled}
       | otherwise = pending {interruptTarget = endedAs outcome}
     endedAs StreamTurnAborted = TargetAborted
     endedAs _ = TargetSettled

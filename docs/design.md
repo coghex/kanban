@@ -946,20 +946,29 @@ interrupt is confirmed before anything is sent: the message is written only
 once the backend has acknowledged the request *and* the turn it named has
 stopped, in whichever order those two arrive, so it is never written into a
 turn that is still running and never silently dropped because the interrupt did
-not land. Every way it can fail to land is reported as that failure rather than
-as an undelivered steer, which has no counterpart here — an interrupt the
-backend refuses, one whose answer cannot be read, one whose turn reached its
-verdict first, and one whose process died before answering — and the turn stays
-whatever it was. The message it was carrying comes back the way a rejected
-steer does when the session can still send it, and waits in that session's
-queue when it cannot, which is where a session whose backend has gone keeps it:
-visible in the overlay, and back on the input line the next time one can be
-sent — including into the fresh revision `r` starts once the failed one can no
-longer take it. A turn ended this way is reported as interrupted, so a session
-can tell it from one that finished on its own, and an explicit cancellation is
-the same exchange with no message riding on it. One interrupt runs on a thread at a
-time: a second is refused while the first is unresolved, which leaves the draft
-where the user typed it.
+not land.
+
+Anything short of an answer that both names the interrupt and agrees with it
+counts as failing to land, and every one of those is reported as this failure
+rather than as an undelivered steer, which has no counterpart here. A refusal,
+an answer that cannot be read, and an answer naming a request this client never
+sent are treated alike: the channel carries one interrupt at a time and no
+other control operation, so none of them is somebody else's answer to keep
+waiting for. So are a turn that reached its verdict first, a turn ending that
+is not the one the interrupt named, and a process that died before answering.
+Each is bounded — the message comes back rather than waiting on something that
+has already been and gone — and the turn stays whatever it was.
+
+The message comes back the way a rejected steer does when the session can still
+send it, and waits in that session's queue when it cannot, which is where a
+session whose backend has gone keeps it: visible in the overlay, and back on
+the input line the next time one can be sent — including into the fresh
+revision `r` starts once the failed one can no longer take it. A turn ended
+this way is reported as interrupted, so a session can tell it from one that
+finished on its own, and an explicit cancellation is the same exchange with no
+message riding on it. One interrupt runs on a thread at a time: a second is
+refused while the first is unresolved, which leaves the draft where the user
+typed it.
 
 Review, solve, and PR transcripts follow the live tail only while they are
 already at the bottom. Scrolling up during a turn holds the view where it is,

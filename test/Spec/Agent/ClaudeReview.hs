@@ -572,6 +572,51 @@ spec = do
         retried <- sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
         retried `shouldBe` Right ()
 
+    -- The answer that names a request this client never sent. There is only
+    -- ever one interrupt in flight on a thread and this backend writes no
+    -- other kind of control request, so such an answer is not somebody
+    -- else's to wait for -- it is the exchange turning out not to be what
+    -- this client thinks it is, and ignoring it strands the message exactly
+    -- as an unreadable one would.
+    it "hands the message back when the answer names a request it never sent" $
+      withClaudeReviewClient (interruptibleSession [mismatchedAnswer]) $ \fixture -> do
+        threadId <- awaitRunningTurn fixture
+        sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
+          `shouldReturn` Right ()
+        recorded <- waitForReviewEvents "the interrupt failure" fixture.claudeReviewEvents (not . null . interruptFailures)
+        case interruptFailures recorded of
+          [(failed, cause, held)] -> do
+            failed `shouldBe` threadId
+            cause `shouldMention` "not the interrupt this review is waiting on"
+            held `shouldBe` Just "focus on the parser"
+          other -> expectationFailure ("expected one interrupt failure, got " <> show other)
+        -- The turn it failed to end is still running, and nothing was
+        -- written into it.
+        turnCompletions recorded `shouldBe` []
+        written <- awaitRecordedWrites fixture 2
+        map classifyWrite written `shouldBe` ["prompt", "interrupt"]
+        -- And the thread can try again rather than reporting an interrupt
+        -- that will never settle.
+        sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
+          `shouldReturn` Right ()
+
+    -- The same bound from the turn's side. A thread runs one turn at a time,
+    -- so a turn ending that is not the one the interrupt named is proof the
+    -- target is no longer running -- and nothing about it says an interrupt
+    -- is what stopped it, so the message comes back rather than being
+    -- released into whatever the provider is doing now.
+    it "hands the message back when a turn other than the target ends" $
+      withClaudeReviewClient (interruptibleSession (reviewTurn <> [abortedResult])) $ \fixture -> do
+        threadId <- awaitRunningTurn fixture
+        sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
+          `shouldReturn` Right ()
+        recorded <- waitForReviewEvents "the interrupt failure" fixture.claudeReviewEvents (not . null . interruptFailures)
+        case interruptFailures recorded of
+          [(_, _, held)] -> held `shouldBe` Just "focus on the parser"
+          other -> expectationFailure ("expected one interrupt failure, got " <> show other)
+        written <- awaitRecordedWrites fixture 2
+        map classifyWrite written `shouldBe` ["prompt", "interrupt"]
+
     -- The race the acknowledgement cannot settle on its own: an interrupt
     -- written a moment after the turn reached its verdict is still
     -- acknowledged as a success. Releasing the message on that would open a
@@ -966,6 +1011,13 @@ refuseInterrupt detail =
 -- of one this backend cannot attach to the operation waiting on it.
 unreadableAnswer :: ByteString.ByteString
 unreadableAnswer = rawResult "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\"}}"
+
+-- | An answer naming a request this client never sent, which on a channel
+-- carrying one interrupt and no other control operation confirms nothing.
+mismatchedAnswer :: ByteString.ByteString
+mismatchedAnswer =
+  rawResult
+    "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"kanban-interrupt-9999\",\"response\":{\"still_queued\":[]}}}"
 
 -- | The result line closing a turn that was cut short rather than ending on
 -- its own: an error subtype and @is_error@ like any broken turn, told apart
