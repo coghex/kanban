@@ -344,6 +344,7 @@ launchAssignedSolveInvocation assignment issueNumber workflow brand existingSess
         Just held ->
           planResolvedAction
             state.appConfig.resolvedWorkflow
+            (catalogIdentity environment.actionCatalog)
             kind
             (Just brand)
             ( ActionTargetItem

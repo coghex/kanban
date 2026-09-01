@@ -30,6 +30,7 @@ module Kanban.Action.Dispatch
     ActionPlan (..),
     planAction,
     planResolvedAction,
+    checkTargetRepository,
 
     -- * Dispatch and observation
     dispatchAction,
@@ -130,6 +131,7 @@ planAction environment request = do
       request.requestTarget
   planResolvedAction
     environment.actionWorkflowConfig
+    request.requestRepository
     request.requestKind
     request.requestSolverBrand
     target
@@ -141,11 +143,31 @@ planAction environment request = do
 -- answer to a question it has already answered -- and a stricter one, since a
 -- number that has left the open read is unresolvable while the session holding
 -- its record is not.
-planResolvedAction :: WorkflowConfig -> WorkflowActionKind -> Maybe SolverBrand -> ActionTarget -> Either ActionRefusal ActionPlan
-planResolvedAction config kind solverBrand target =
+planResolvedAction :: WorkflowConfig -> Text -> WorkflowActionKind -> Maybe SolverBrand -> ActionTarget -> Either ActionRefusal ActionPlan
+planResolvedAction config requested kind solverBrand target = do
+  checkTargetRepository requested target
   case actionCompatibility config kind target of
     Just refusal -> Left refusal
     Nothing -> ActionPlan kind target <$> actionRoute config kind solverBrand target
+
+-- | Refuse a target that belongs to a repository other than the one the
+-- caller means.
+--
+-- 'resolveActionTarget' asks this before it looks a number up, and this asks
+-- it again of a record the caller resolved itself -- which is the whole reason
+-- the identity is carried on the record. Every repository has a #123, so a
+-- target resolved against one repository and dispatched with another's
+-- environment would spawn a worker on the wrong repository entirely while the
+-- record it came from still named the right one.
+checkTargetRepository :: Text -> ActionTarget -> Either ActionRefusal ()
+checkTargetRepository requested target = case target of
+  ActionTargetRepositoryWide repository -> compareWith (normalizedRepositoryIdentity repository)
+  ActionTargetItem resolved -> compareWith resolved.resolvedTargetRepository
+  where
+    normalized = Text.toLower (Text.strip requested)
+    compareWith held
+      | normalized == held = Right ()
+      | otherwise = Left (ActionRepositoryMismatch normalized held)
 
 -- ---------------------------------------------------------------------------
 -- Dispatch
@@ -177,13 +199,20 @@ dispatchAction environment request = case planAction environment request of
 dispatchProviderTurn :: ActionEnvironment -> ActionRequest -> ActionPlan -> IO (Either ActionRefusal ActionHandle)
 dispatchProviderTurn environment request plan = case plan.planTarget of
   ActionTargetRepositoryWide _ -> pure (Left (ActionTargetMismatchedArity plan.planKind))
-  ActionTargetItem resolved -> do
-    capability <- actionCapabilityIO environment.actionRepository plan.planRoute
-    case capability of
-      ActionIncapable detail -> pure (Left (ActionCapabilityBlocked plan.planKind detail))
-      ActionCapable -> case assignmentFor plan of
-        Left message -> pure (Left (ActionRoutingUnavailable plan.planKind message))
-        Right cell -> launchFor resolved cell
+  -- Asked again here, of the environment this launch will actually be made
+  -- against, and before anything is probed or spawned. A plan is checked
+  -- against the identity its request named; this is the boundary a worker
+  -- crosses, and the repository it crosses into is this environment's.
+  ActionTargetItem resolved
+    | Left refusal <- checkTargetRepository (normalizedRepositoryIdentity environment.actionRepository) plan.planTarget ->
+        pure (Left refusal)
+    | otherwise -> do
+        capability <- actionCapabilityIO environment.actionRepository plan.planRoute
+        case capability of
+          ActionIncapable detail -> pure (Left (ActionCapabilityBlocked plan.planKind detail))
+          ActionCapable -> case assignmentFor plan of
+            Left message -> pure (Left (ActionRoutingUnavailable plan.planKind message))
+            Right cell -> launchFor resolved cell
   where
     -- The baseline is taken here, at dispatch, and carried on the handle:
     -- "exactly one /new/ pull request" is only answerable against what already

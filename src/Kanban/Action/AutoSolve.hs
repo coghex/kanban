@@ -54,7 +54,7 @@ module Kanban.Action.AutoSolve
   )
 where
 
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Data.List (find)
 import Data.Maybe (listToMaybe)
 import Data.Set (Set)
@@ -624,18 +624,29 @@ settledSolverTurn progress status
 -- exercised. Production passes the registry's own dispatch.
 autoSolveCursorFor :: AutoSolveTurns -> AutoSolveState -> IO AutoSolveCursor
 autoSolveCursorFor turns start = do
-  cursor <- newIORef start
+  cursor <- newMVar start
   pure (AutoSolveCursor (advanceOnce turns cursor))
 
-advanceOnce :: AutoSolveTurns -> IORef AutoSolveState -> ActionEnvironment -> IO ActionObservation
-advanceOnce turns cursor environment = do
-  state <- readIORef cursor
-  advanced <- advanceAutoSolveAction turns environment state
-  case advanced of
-    Left outcome -> pure (ActionSettled outcome)
-    Right next -> do
-      writeIORef cursor next
-      pure (ActionRunning (autoSolveActionActivity next))
+-- | One tick, under the lock the cursor is.
+--
+-- The whole read-decide-start-write sequence is held, not just the write. Two
+-- observations of one action that each read the same state would each see a
+-- solve that had just finished, each bind the pull request it opened, and each
+-- start a review round for it -- two provider turns for one action, which is
+-- exactly what requirement 12's sequential guarantee forbids. Holding the
+-- cursor across the dispatch is what makes the second observation decide from
+-- the first one's result instead.
+--
+-- A settled action leaves the cursor where it was: the outcome was derived
+-- from evidence rather than from the cursor, so observing it again re-derives
+-- the same answer rather than advancing past it.
+advanceOnce :: AutoSolveTurns -> MVar AutoSolveState -> ActionEnvironment -> IO ActionObservation
+advanceOnce turns cursor environment =
+  modifyMVar cursor $ \state -> do
+    advanced <- advanceAutoSolveAction turns environment state
+    pure $ case advanced of
+      Left outcome -> (state, ActionSettled outcome)
+      Right next -> (next, ActionRunning (autoSolveActionActivity next))
 
 -- | Where a running autosolve action currently is, in one line.
 autoSolveActionActivity :: AutoSolveState -> Text

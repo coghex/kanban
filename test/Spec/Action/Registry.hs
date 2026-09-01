@@ -604,6 +604,7 @@ spec = do
               either (error . show) id $
                 planResolvedAction
                   defaultWorkflowConfig
+                  identityUnderTest
                   SolveIssue
                   (Just CodexSolver)
                   (ActionTargetItem (resolveHeldItem environment.actionCatalog TargetPlain (IssueItem (baseIssue 844 []))))
@@ -631,6 +632,7 @@ spec = do
               either (error . show) id $
                 planResolvedAction
                   defaultWorkflowConfig
+                  identityUnderTest
                   RepairPullRequest
                   Nothing
                   (ActionTargetItem (resolveHeldItem environment.actionCatalog TargetPlain (PullRequestItem repairable)))
@@ -638,6 +640,33 @@ spec = do
         specifications environment.actionRepository >>= \written -> case written of
           [spec'] -> pullRequestTaskOf spec' `shouldBe` Just (42, PullRequestCodex, PullRequestRepair)
           other -> error ("expected exactly one worker specification, saw " <> show (length other))
+
+    -- Every repository has a #123. A target resolved against one and
+    -- dispatched with another's environment would spawn a worker on the wrong
+    -- repository entirely, while the record it came from still named the
+    -- right one -- so the identity the record carries is checked again here,
+    -- before anything is probed or spawned.
+    it "refuses a resolved target that belongs to another repository, spawning nothing" $
+      withDispatchMachine $ \environment -> do
+        let elsewhere = (catalogOf [baseIssue 844 []] [] emptyHistory) {catalogRepository = Repository "/tmp/other" "coghex" "other"}
+            foreign' = resolveHeldItem elsewhere TargetPlain (IssueItem (baseIssue 844 []))
+            request =
+              (actionRequest SolveIssue identityUnderTest (TargetByKind ActionTargetIssue 844))
+                { requestSolverBrand = Just CodexSolver,
+                  requestRecordedAssignment = Just (solveCell CodexSolver)
+                }
+        -- The plan is refused against the identity the request names...
+        planResolvedAction defaultWorkflowConfig identityUnderTest SolveIssue (Just CodexSolver) (ActionTargetItem foreign')
+          `shouldBe` Left (ActionRepositoryMismatch identityUnderTest "coghex/other")
+        -- ...and again at the boundary a worker crosses, against the
+        -- environment it would cross into, for a plan that was built
+        -- elsewhere.
+        let planned =
+              either (error . show) id $
+                planResolvedAction defaultWorkflowConfig "coghex/other" SolveIssue (Just CodexSolver) (ActionTargetItem foreign')
+        dispatched <- dispatchProviderTurn environment request planned
+        either isRepositoryMismatch (const False) dispatched `shouldBe` True
+        specifications environment.actionRepository >>= (`shouldBe` [])
 
     it "refuses before any launch when a definite local observation blocks the action" $
       withPreflightMachine [] BackendMissing $ \workingDirectory _ ->
@@ -654,6 +683,7 @@ spec = do
                 either (error . show) id $
                   planResolvedAction
                     defaultWorkflowConfig
+                    identityUnderTest
                     SolveIssue
                     (Just CodexSolver)
                     (ActionTargetItem (resolveHeldItem catalog TargetPlain (IssueItem (baseIssue 844 []))))
@@ -766,6 +796,10 @@ isRunning _ = False
 isCapabilityBlocked :: ActionRefusal -> Bool
 isCapabilityBlocked (ActionCapabilityBlocked _ _) = True
 isCapabilityBlocked _ = False
+
+isRepositoryMismatch :: ActionRefusal -> Bool
+isRepositoryMismatch (ActionRepositoryMismatch _ _) = True
+isRepositoryMismatch _ = False
 
 isUndiscoverable :: ApprovalQueueObservation -> Bool
 isUndiscoverable (ApprovalQueueUndiscoverable _) = True

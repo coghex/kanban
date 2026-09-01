@@ -15,6 +15,8 @@
 -- previous one has settled.
 module Spec.Action.AutoSolve (spec) where
 
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (forM)
 import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy as LazyByteString
@@ -96,6 +98,8 @@ data Loop = Loop
     -- | An autosolve handle for the initial solver, carrying a cursor wired
     -- to this fixture's turns -- the shape a real dispatch returns.
     loopAutoSolveHandle :: IO ActionHandle,
+    -- | Hold every dispatch open for this many microseconds.
+    loopSlowDispatch :: Int -> IO (),
     -- | Install one world without going through the driver, for the
     -- single-tick examples.
     loopSetWorld :: World -> IO ()
@@ -219,6 +223,7 @@ withLoop worlds action =
       remaining <- newIORef worlds
       current <- newIORef (World [] [])
       dispatches <- newIORef []
+      dispatchDelay <- newIORef 0
       pool <- newIORef [reviewer, resumed]
       turnsBox <- newIORef Nothing
       let autoSolveHandleWith descriptor = do
@@ -247,6 +252,11 @@ withLoop worlds action =
               [] -> Left "no durable record"
               recorded : _ -> Right recorded
           dispatch _ request = do
+            -- Slow on purpose. Two observations that each decided from the
+            -- same state would both be inside here at once, which is the race
+            -- the cursor's lock exists to close; without it this window is
+            -- what makes the duplicate turn reliable rather than lucky.
+            readIORef dispatchDelay >>= threadDelay
             modifyIORef' dispatches (<> [recordOf request])
             handed <- atomicModifyIORef' pool $ \available -> case available of
               [] -> ([], Nothing)
@@ -282,6 +292,7 @@ withLoop worlds action =
                 },
             loopReviewerDescriptor = reviewer,
             loopAutoSolveHandle = autoSolveHandleWith solver,
+            loopSlowDispatch = writeIORef dispatchDelay,
             loopSetWorld = writeIORef current
           }
 
@@ -822,6 +833,28 @@ spec = do
         all isRunningObservation (init observations) `shouldBe` True
         map (.dispatchedKind) <$> readIORef loop.loopDispatches
           >>= (`shouldBe` [ReviewPullRequest, AutoSolveIssue])
+
+    -- Requirement 12's sequential guarantee, against the one thing that can
+    -- break it now that observing advances the loop: two observations of the
+    -- same handle at once. Each would decide from the same freshly finished
+    -- solve, bind the pull request it opened, and start a review for it.
+    it "starts one review round when two observations of one handle race" $
+      withLoop [] $ \loop -> do
+        handle <- loop.loopAutoSolveHandle
+        let opened = linkedPullRequest pullRequestUnderLoop ClaudeSolver []
+        loop.loopSetWorld (World [opened] [(Solver, completed)])
+        loop.loopSlowDispatch 100000
+        first <- newEmptyMVar
+        second <- newEmptyMVar
+        mapM_
+          (\done -> forkIO (observeAction (withPullRequests loop [opened]) handle >>= putMVar done))
+          [first, second]
+        observations <- mapM takeMVar [first, second]
+        all isRunningObservation observations `shouldBe` True
+        -- One review round, not two. The second observation decided from the
+        -- first one's result rather than from the state it started with.
+        map (.dispatchedKind) <$> readIORef loop.loopDispatches
+          >>= (`shouldBe` [ReviewPullRequest])
 
     it "names the loop's own place while it runs" $
       withLoop [] $ \loop -> do

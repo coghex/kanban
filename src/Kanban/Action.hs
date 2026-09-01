@@ -142,6 +142,7 @@ module Kanban.Action
     ActionPlan (..),
     planAction,
     planResolvedAction,
+    checkTargetRepository,
     dispatchAction,
     dispatchProviderTurn,
     observeAction,

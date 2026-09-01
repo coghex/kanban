@@ -257,6 +257,7 @@ launchAssignedPullRequestFlow assignment number _origin action _brand existingSe
         Just held ->
           planResolvedAction
             state.appConfig.resolvedWorkflow
+            (catalogIdentity environment.actionCatalog)
             kind
             Nothing
             ( ActionTargetItem
