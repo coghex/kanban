@@ -492,8 +492,11 @@ handleClientLine pending writeClient forwardCall failEndpoint line =
 
 -- | Resolve one parent reply against the call it answers, forwarding the
 -- parent's result or error verbatim under the CLI's own id. 'False' is a
--- frame this server cannot read at all, which the caller treats as the
--- endpoint failing.
+-- frame this server cannot use — not JSON, no id, or anything but exactly
+-- one of @result@ and @error@ — which the caller treats as the endpoint
+-- failing. Judged /before/ the pending map is touched: a malformed frame
+-- must fail the call it raced as a tool failure, not consume it and hand
+-- the CLI a response that resolves nothing.
 handleEndpointReply ::
   MVar (Map LazyByteString.ByteString PendingCall) ->
   (Value -> IO ()) ->
@@ -502,22 +505,28 @@ handleEndpointReply ::
 handleEndpointReply pending writeClient line =
   case eitherDecode (LazyByteString.fromStrict line) of
     Left _ -> pure False
-    Right value -> case lookupField "id" value of
-      Nothing -> pure False
-      Just requestId -> do
+    Right value -> case (lookupField "id" value, replyPayload value) of
+      (Just requestId, Just (field, payload)) -> do
         resolved <- modifyMVar pending $ \held ->
           let key = encode requestId
            in pure (Map.delete key held, Map.member key held)
         -- A reply nothing waits for is dropped: the call it answered was
         -- already failed by a teardown this reply raced.
         when resolved . writeClient . Object . KeyMap.fromList $
-          ("jsonrpc", String jsonRpcVersion)
-            : ("id", requestId)
-            : [ (Key.fromText field, payload)
-                | field <- ["result", "error"],
-                  Just payload <- [lookupField field value]
-              ]
+          [ ("jsonrpc", String jsonRpcVersion),
+            ("id", requestId),
+            (Key.fromText field, payload)
+          ]
         pure True
+      _ -> pure False
+
+-- | The one payload a well-formed reply carries. A frame with neither, or
+-- with both, is nothing this server can forward as a JSON-RPC response.
+replyPayload :: Value -> Maybe (Text, Value)
+replyPayload value = case (lookupField "result" value, lookupField "error" value) of
+  (Just result, Nothing) -> Just ("result", result)
+  (Nothing, Just failure) -> Just ("error", failure)
+  _ -> Nothing
 
 -- | The answer @initialize@ deserves: this server's identity, a tools
 -- capability, and the client's own protocol version echoed back where it

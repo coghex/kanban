@@ -206,6 +206,33 @@ spec = do
         fieldAt ["result", "isError"] failed `shouldBe` Just (Bool True)
         awaitServerExit server `shouldReturn` ExitFailure 1
 
+    -- A frame that parses but resolves nothing is malformed all the same: an
+    -- id with no payload must not consume the call it names and hand the CLI
+    -- a response carrying no result — the call fails and the server exits,
+    -- exactly as it does for a frame that is not JSON.
+    it "fails a pending call and exits on a reply carrying an id but no payload" $
+      withReentryServer $ \server -> do
+        sendToServer server (request 8 "tools/call" (object ["name" .= ("kanban_prompt_user" :: Text), "arguments" .= object []]))
+        _ <- nextForwarded server
+        writeEndpointReply server.serverEndpoint (object ["id" .= (8 :: Int)]) `shouldReturn` Right ()
+        failed <- nextServed server
+        fieldAt ["id"] failed `shouldBe` Just (Number 8)
+        fieldAt ["result", "isError"] failed `shouldBe` Just (Bool True)
+        awaitServerExit server `shouldReturn` ExitFailure 1
+
+    it "fails a pending call and exits on a reply carrying both a result and an error" $
+      withReentryServer $ \server -> do
+        sendToServer server (request 9 "tools/call" (object ["name" .= ("kanban_prompt_user" :: Text), "arguments" .= object []]))
+        _ <- nextForwarded server
+        writeEndpointReply
+          server.serverEndpoint
+          (object ["id" .= (9 :: Int), "result" .= object [], "error" .= object ["code" .= (-32603 :: Int)]])
+          `shouldReturn` Right ()
+        failed <- nextServed server
+        fieldAt ["id"] failed `shouldBe` Just (Number 9)
+        fieldAt ["result", "isError"] failed `shouldBe` Just (Bool True)
+        awaitServerExit server `shouldReturn` ExitFailure 1
+
   describe "the served tool list" $ do
     -- The translation itself, held to the adapter's declarations by
     -- construction and to the contract by value: the two tools, no
