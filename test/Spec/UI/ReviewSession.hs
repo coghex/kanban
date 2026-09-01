@@ -577,24 +577,24 @@ spec = do
     -- completion event.
     it "reuses a live session regardless of stage" $ do
       mapM_
-        (\phase -> reviewSessionReusable phase InitialReview InitialReview False `shouldBe` True)
+        (\phase -> reviewSessionReusable phase InitialReview InitialReview False False `shouldBe` True)
         [ReviewStarting, ReviewRunning, ReviewWaiting]
-      reviewSessionReusable ReviewRunning InitialReview IssueRereview False `shouldBe` True
+      reviewSessionReusable ReviewRunning InitialReview IssueRereview False False `shouldBe` True
 
     it "reuses a finished session whose recorded stage still matches what labels request" $
-      reviewSessionReusable ReviewFinished InitialReview InitialReview False `shouldBe` True
+      reviewSessionReusable ReviewFinished InitialReview InitialReview False False `shouldBe` True
 
     it "does not reuse a finished session once labels request a different stage" $
-      reviewSessionReusable ReviewNeedsChanges InitialReview IssueRereview False `shouldBe` False
+      reviewSessionReusable ReviewNeedsChanges InitialReview IssueRereview False False `shouldBe` False
 
     it "forces a fresh launch for an interrupted canonical stage once its process is gone" $
-      reviewSessionReusable ReviewInterrupted InitialReview InitialReview False `shouldBe` False
+      reviewSessionReusable ReviewInterrupted InitialReview InitialReview False False `shouldBe` False
 
     it "keeps reusing an interrupted session while its kill is still in flight" $
-      reviewSessionReusable ReviewInterrupted InitialReview InitialReview True `shouldBe` True
+      reviewSessionReusable ReviewInterrupted InitialReview InitialReview True False `shouldBe` True
 
     it "reuses an interrupted app-server revision when its stage is unchanged" $
-      reviewSessionReusable ReviewInterrupted IssueRevision IssueRevision False `shouldBe` True
+      reviewSessionReusable ReviewInterrupted IssueRevision IssueRevision False False `shouldBe` True
 
     -- The opposite of the interrupted revision above. An interrupted one is
     -- paused and keeps its input line; a failed one has lost the thread it
@@ -603,13 +603,34 @@ spec = do
     -- able to start another, which is also what gives a message the backend
     -- never read somewhere to go.
     it "forces a fresh launch for a failed revision, which cannot be resumed" $
-      reviewSessionReusable ReviewFailed IssueRevision IssueRevision False `shouldBe` False
+      reviewSessionReusable ReviewFailed IssueRevision IssueRevision False False `shouldBe` False
 
     -- Scoped to the revision, because a settled canonical stage is not a
     -- dead end in the same way: it holds a verdict worth reopening to read,
     -- and its retry is the label change that moves the stage.
     it "still reopens a failed canonical stage whose stage labels still request it" $
-      reviewSessionReusable ReviewFailed InitialReview InitialReview False `shouldBe` True
+      reviewSessionReusable ReviewFailed InitialReview InitialReview False False `shouldBe` True
+
+    -- A turn that reached its verdict while an interrupt was still
+    -- unconfirmed hands the message back into a session that has by then
+    -- stopped accepting one (D-16). Those phases are otherwise the most
+    -- reusable there are -- they hold the verdict -- so the held message is
+    -- what decides: reopening such a session is the one press that would
+    -- strand it for good.
+    it "forces a fresh launch for a settled revision still holding a message it cannot send" $
+      mapM_
+        (\phase -> reviewSessionReusable phase IssueRevision IssueRevision False True `shouldBe` False)
+        [ReviewFinished, ReviewNeedsChanges, ReviewRevised, ReviewFailed]
+
+    it "reopens those same settled revisions when they hold nothing undelivered" $
+      mapM_
+        (\phase -> reviewSessionReusable phase IssueRevision IssueRevision False False `shouldBe` True)
+        [ReviewFinished, ReviewNeedsChanges, ReviewRevised]
+
+    -- An interrupted revision is resumable and its line still takes text, so
+    -- a message waiting on it is not stranded and the session is kept.
+    it "keeps an interrupted revision even while it holds an undelivered message" $
+      reviewSessionReusable ReviewInterrupted IssueRevision IssueRevision False True `shouldBe` True
 
   describe "review animation tick decisions" $ do
     -- issue #30: answering a question/approval and the backend's matching

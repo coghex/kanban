@@ -820,14 +820,25 @@ reviewSessionActive session = reviewPhaseActive session.sessionPhase
 -- nothing to send it on, so reopening one is a dead end no further press can
 -- leave. 'r' starts a fresh revision instead, and
 -- 'Kanban.UI.Review.carryUndelivered' brings across whatever the failed one
--- never managed to send. A settled canonical stage keeps the ordinary rule:
--- it holds a verdict worth reopening to read, and its retry is the label
--- change that moves the stage.
-reviewSessionReusable :: ReviewPhase -> ReviewStage -> ReviewStage -> Bool -> Bool
-reviewSessionReusable phase sessionStage requestedStage hasLiveCanonicalProcess
+-- never managed to send.
+--
+-- @holdsUndelivered@ generalises that second exception to the settled phases
+-- a /successful/ turn leaves behind. A verdict reached while an interrupt
+-- was still unconfirmed hands the message back into a session that has since
+-- stopped accepting one (D-16), and 'ReviewFinished' and 'ReviewNeedsChanges'
+-- are otherwise perfectly reusable -- they hold a verdict worth reopening to
+-- read. So the message itself decides: a session still holding text it can no
+-- longer send is replaced rather than reopened, because reopening it is the
+-- one press that would strand the text for good, and every session holding
+-- nothing keeps the ordinary rule. A settled canonical stage is unaffected
+-- either way: it has no thread, so it never holds an undelivered message, and
+-- its retry remains the label change that moves the stage.
+reviewSessionReusable :: ReviewPhase -> ReviewStage -> ReviewStage -> Bool -> Bool -> Bool
+reviewSessionReusable phase sessionStage requestedStage hasLiveCanonicalProcess holdsUndelivered
   | phase == ReviewInterrupted, sessionStage /= IssueRevision = hasLiveCanonicalProcess
   | reviewPhaseActive phase = True
   | phase == ReviewFailed, sessionStage == IssueRevision = False
+  | holdsUndelivered, not (reviewSessionInputLive sessionStage phase) = False
   | sessionStage == requestedStage = True
   | otherwise = False
 

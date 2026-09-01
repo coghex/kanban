@@ -65,6 +65,7 @@ import Kanban.UI.Review
     carryUndelivered,
     markReviewSessionsDisconnected,
     newReviewSession,
+    reviewOutcomePhase,
   )
 import Kanban.UI.Session (reviewSessionInputLive, reviewSessionReusable)
 import Kanban.UI.SessionCore (newAgentSession)
@@ -617,6 +618,31 @@ spec = do
         written <- awaitRecordedWrites fixture 2
         map classifyWrite written `shouldBe` ["prompt", "interrupt"]
 
+    -- A line that does not parse at all carries no record type, so nothing
+    -- says whether it was the acknowledgement. Warned about like any
+    -- unreadable line, and then treated as the answer that may have been
+    -- lost inside it -- otherwise a truncated control reply strands the
+    -- message exactly as a well-formed unusable one would.
+    it "hands the message back when the answer arrives as a line it cannot parse" $
+      withClaudeReviewClient (interruptibleSession [truncatedAnswer]) $ \fixture -> do
+        threadId <- awaitRunningTurn fixture
+        sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
+          `shouldReturn` Right ()
+        recorded <- waitForReviewEvents "the interrupt failure" fixture.claudeReviewEvents (not . null . interruptFailures)
+        case interruptFailures recorded of
+          [(failed, _, held)] -> do
+            failed `shouldBe` threadId
+            held `shouldBe` Just "focus on the parser"
+          other -> expectationFailure ("expected one interrupt failure, got " <> show other)
+        -- The turn it failed to end is still running, nothing was written
+        -- into it, and the unreadable line was still reported.
+        turnCompletions recorded `shouldBe` []
+        diagnostics recorded `shouldSatisfy` any (Data.Text.isInfixOf "not JSON")
+        written <- awaitRecordedWrites fixture 2
+        map classifyWrite written `shouldBe` ["prompt", "interrupt"]
+        sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
+          `shouldReturn` Right ()
+
     -- The race the acknowledgement cannot settle on its own: an interrupt
     -- written a moment after the turn reached its verdict is still
     -- acknowledged as a success. Releasing the message on that would open a
@@ -803,12 +829,40 @@ spec = do
         stranded.sessionDetail.reviewSessionStage
         IssueRevision
         False
+        (not (null stranded.sessionDetail.reviewSessionUndelivered))
         `shouldBe` False
       -- Built by the constructor the press itself uses, so the last link is
       -- the session `r` really creates rather than one shaped like it.
       let restarted = carryUndelivered (Just stranded) (newReviewSession (baseIssue 588 []) IssueRevision 0)
       restarted.sessionInput `shouldBe` guidance
       restarted.sessionDetail.reviewSessionUndelivered `shouldBe` []
+      reviewSessionInputLive restarted.sessionDetail.reviewSessionStage restarted.sessionPhase
+        `shouldBe` True
+
+    -- The other sequence that hands a message back, and the one whose
+    -- terminal phase is not a failure at all: the turn reached its verdict
+    -- while the interrupt was still unconfirmed. The phase is taken from the
+    -- rule the event handler itself uses rather than named here, so a change
+    -- to what a completed revision settles into cannot leave this asserting
+    -- the wrong thing.
+    it "carries the message on from a turn that reached its verdict first" $ do
+      let settledPhase = reviewOutcomePhase IssueRevision TurnSucceeded (Just (verdictResult 588))
+          finished = (interruptedSession "") {sessionPhase = settledPhase}
+          stranded = applyFailedInterrupt cause (Just guidance) finished
+      -- A verdict, not a failure -- and still a session that can no longer
+      -- be sent to.
+      settledPhase `shouldNotBe` ReviewFailed
+      reviewSessionInputLive IssueRevision settledPhase `shouldBe` False
+      stranded.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
+      reviewSessionReusable
+        settledPhase
+        IssueRevision
+        IssueRevision
+        False
+        (not (null stranded.sessionDetail.reviewSessionUndelivered))
+        `shouldBe` False
+      let restarted = carryUndelivered (Just stranded) (newReviewSession (baseIssue 588 []) IssueRevision 0)
+      restarted.sessionInput `shouldBe` guidance
       reviewSessionInputLive restarted.sessionDetail.reviewSessionStage restarted.sessionPhase
         `shouldBe` True
 
@@ -1011,6 +1065,12 @@ refuseInterrupt detail =
 -- of one this backend cannot attach to the operation waiting on it.
 unreadableAnswer :: ByteString.ByteString
 unreadableAnswer = rawResult "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\"}}"
+
+-- | A control answer cut off mid-line, which is what a reply lost to a
+-- broken write looks like: it parses as nothing at all, so not even its
+-- record type survives to say what it was.
+truncatedAnswer :: ByteString.ByteString
+truncatedAnswer = rawResult "{\"type\":\"control_response\",\"response\":{\"subtype\":\"suc"
 
 -- | An answer naming a request this client never sent, which on a channel
 -- carrying one interrupt and no other control operation confirms nothing.

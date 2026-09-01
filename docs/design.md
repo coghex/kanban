@@ -694,11 +694,13 @@ its column's first selectable entry instead, exactly as a closed search does.
 ### Embedded issue reviews
 
 Pressing `r` on an issue or from its open details starts its label-selected
-review stage, or reopens the issue's existing session. A revision session that
-has *failed* is the exception: it has lost the thread it would send on, so it
-takes no further input and reopening it leads nowhere — `r` starts a fresh
-revision instead, carrying across the draft on its input line and anything
-still waiting behind it. Canonical review and
+review stage, or reopens the issue's existing session. Two kinds of revision
+session are replaced rather than reopened: one that has *failed*, since it has
+lost the thread it would send on and so takes no further input, and any settled
+one still holding a message it never delivered, since reopening it is the one
+press that would strand that message for good. Both start a fresh revision
+carrying across the draft on the old input line and anything still waiting
+behind it. Canonical review and
 rereview use the synchronous v2 reviewer; interactive revision uses one
 persistent Codex app-server. Pressing `r` on an epic header is a no-op that
 sets a notice instead: an epic is structure rather than reviewable work, so
@@ -951,11 +953,13 @@ not land.
 Anything short of an answer that both names the interrupt and agrees with it
 counts as failing to land, and every one of those is reported as this failure
 rather than as an undelivered steer, which has no counterpart here. A refusal,
-an answer that cannot be read, and an answer naming a request this client never
-sent are treated alike: the channel carries one interrupt at a time and no
-other control operation, so none of them is somebody else's answer to keep
-waiting for. So are a turn that reached its verdict first, a turn ending that
-is not the one the interrupt named, and a process that died before answering.
+an answer that cannot be read, an answer naming a request this client never
+sent, and a line that does not parse at all — which carries no record type, so
+nothing says it was not the answer — are treated alike: the channel carries one
+interrupt at a time and no other control operation, so none of them is somebody
+else's answer to keep waiting for. So are a turn that reached its verdict
+first, a turn ending that is not the one the interrupt named, and a process
+that died before answering.
 Each is bounded — the message comes back rather than waiting on something that
 has already been and gone — and the turn stays whatever it was.
 
@@ -963,7 +967,8 @@ The message comes back the way a rejected steer does when the session can still
 send it, and waits in that session's queue when it cannot, which is where a
 session whose backend has gone keeps it: visible in the overlay, and back on
 the input line the next time one can be sent — including into the fresh
-revision `r` starts once the failed one can no longer take it. A turn ended
+revision `r` starts once the session holding it can no longer take it, whether
+it failed or reached a verdict. A turn ended
 this way is reported as interrupted, so a session can tell it from one that
 finished on its own, and an explicit cancellation is the same exchange with no
 message riding on it. One interrupt runs on a thread at a time: a second is

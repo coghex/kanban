@@ -25,6 +25,7 @@ module Kanban.UI.Review
     forcedToNormalBy,
     markReviewSessionsDisconnected,
     newReviewSession,
+    reviewOutcomePhase,
     numberedChoicePrompt,
     resolveReviewCancelAction,
     reviewDigitActionFor,
@@ -354,6 +355,24 @@ withPendingInteraction pending = withSessionDetail (\detail -> detail {reviewSes
 withUndelivered :: [Text] -> ReviewSession -> ReviewSession
 withUndelivered undelivered = withSessionDetail (\detail -> detail {reviewSessionUndelivered = undelivered})
 
+-- | The phase a completed turn leaves its session in.
+--
+-- Lifted out of 'applyReviewEvent' rather than left inline because it is the
+-- rule that decides whether a session can still be sent to, and anything
+-- reasoning about what a turn's end leaves behind — a test covering the
+-- sequence a failed interrupt arrives in, above all — has to reach the same
+-- answer the event handler does rather than name a phase and hope.
+reviewOutcomePhase :: ReviewStage -> ReviewTurnOutcome -> Maybe ReviewResult -> ReviewPhase
+reviewOutcomePhase IssueRevision TurnSucceeded (Just result)
+  | null result.reviewResultBlockingReasons = ReviewFinished
+  | otherwise = ReviewNeedsChanges
+reviewOutcomePhase _ TurnSucceeded (Just result)
+  | result.reviewResultApproved = ReviewFinished
+  | otherwise = ReviewNeedsChanges
+reviewOutcomePhase _ TurnSucceeded Nothing = ReviewFailed
+reviewOutcomePhase _ TurnFailed _ = ReviewFailed
+reviewOutcomePhase _ TurnInterrupted _ = ReviewInterrupted
+
 undeliveredTranscriptNote :: Text -> Text
 undeliveredTranscriptNote message = "[not delivered] " <> message
 
@@ -576,7 +595,12 @@ startIssueReview issue = do
   let requestedStage = issueReviewStage state.appConfig.resolvedWorkflow issue
   case Map.lookup issue.issueNumber state.appReviewSessions of
     Just session
-      | reviewSessionReusable session.sessionPhase session.sessionDetail.reviewSessionStage requestedStage (Map.member issue.issueNumber state.appCanonicalReviewProcesses) -> do
+      | reviewSessionReusable
+          session.sessionPhase
+          session.sessionDetail.reviewSessionStage
+          requestedStage
+          (Map.member issue.issueNumber state.appCanonicalReviewProcesses)
+          (not (null session.sessionDetail.reviewSessionUndelivered)) -> do
           modify (\current -> noticeCleared current {appOverlay = Just (ReviewOverlay issue.issueNumber)})
           presentTranscriptTail
           armVisibleReviewTicks
@@ -1110,15 +1134,7 @@ applyReviewEvent reviewEvent = case reviewEvent of
     setNotice (interruptFailureNotice cause message)
   ReviewProtocolWarning provider message -> setNotice (reviewProtocolWarningNotice provider message)
   where
-    outcomePhase IssueRevision TurnSucceeded (Just result)
-      | null result.reviewResultBlockingReasons = ReviewFinished
-      | otherwise = ReviewNeedsChanges
-    outcomePhase _ TurnSucceeded (Just result)
-      | result.reviewResultApproved = ReviewFinished
-      | otherwise = ReviewNeedsChanges
-    outcomePhase _ TurnSucceeded Nothing = ReviewFailed
-    outcomePhase _ TurnFailed _ = ReviewFailed
-    outcomePhase _ TurnInterrupted _ = ReviewInterrupted
+    outcomePhase = reviewOutcomePhase
     reviewOutcomeActivity completedStage TurnSucceeded (Just result)
       | completedStage == IssueRevision && null result.reviewResultBlockingReasons = "revision published"
       | result.reviewResultApproved = "approved"

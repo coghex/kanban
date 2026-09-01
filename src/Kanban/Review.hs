@@ -1228,12 +1228,43 @@ readProviderOutput client connection attribution outputHandle = do
         Left message -> emitProtocolWarning client message
         Right wireMessage -> handleWireMessage client connection wireMessage
       StreamJsonProtocol -> \line -> case decodeStreamRecord line of
-        Left detail -> emitProtocolWarning client (streamDiagnostic client detail)
+        Left detail -> reportUnreadableLine client connection attribution detail
         Right record -> handleStreamRecord client connection attribution record
     readOne = do
       strictLine <- ByteString.hGetLine outputHandle
       mapM_ (\sessionLog -> logRawLine sessionLog "stdout" strictLine) client.reviewSessionLog
       interpret (LazyByteString.fromStrict strictLine)
+
+-- | A line on a stream-json connection this backend could not read at all.
+--
+-- Warned about, as any unreadable line is, and then treated as the answer
+-- that may have been lost inside it. A line that does not parse carries no
+-- record type, so there is no telling whether it was the acknowledgement an
+-- interrupt is waiting on — and waiting on an answer that has already gone
+-- past unreadably is exactly the hang this backend must not have. So it
+-- settles the one interrupt the thread can have pending, and the user's
+-- message comes back.
+--
+-- The trade is the one every other unconfirming answer makes: a garbled line
+-- that was /not/ the acknowledgement costs a deliberate resend, while
+-- leaving the interrupt to wait costs the message and every send after it.
+-- A thread with nothing pending is unaffected, which is every thread in a
+-- session that is merely reading a stream it does not fully understand.
+reportUnreadableLine :: ReviewClient -> ReviewConnection -> MVar StreamAttribution -> Text -> IO ()
+reportUnreadableLine client connection attribution detail = do
+  emitProtocolWarning client (streamDiagnostic client detail)
+  named <- attributedThread <$> readMVar attribution
+  mapM_ (\threadId -> advanceInterrupt client connection threadId (interruptUnconfirmed detail)) named
+
+-- | Mark a pending interrupt as answered by something that did not confirm
+-- it, quoting what was said or what could not be read.
+--
+-- One spelling for every such answer -- an explicit refusal, an answer that
+-- named no request, one that named a different request, and a line that
+-- could not be read at all -- because they differ only in what they say, and
+-- what they mean for the message riding on the interrupt is identical.
+interruptUnconfirmed :: Text -> PendingInterrupt -> PendingInterrupt
+interruptUnconfirmed detail pending = pending {interruptAcknowledgement = InterruptRefused detail}
 
 -- | Read one connection's stderr to its end, reporting each line against
 -- the thread it belongs to and releasing whatever is still waiting for a
@@ -1362,7 +1393,7 @@ handleStreamRecord client connection attribution record = case record of
   -- on, because an operation is waiting on it.
   StreamControlUnreadable detail -> onNamedThread "an answer to a control request" $ \threadId -> do
     emitProtocolWarning client (streamDiagnostic client detail)
-    advanceInterrupt client connection threadId (refusedBy detail)
+    advanceInterrupt client connection threadId (interruptUnconfirmed detail)
   StreamTurnClosed outcome -> onNamedThread "a turn result" $ \threadId -> do
     ended <- modifyMVar client.reviewActiveTurns (\turns -> pure (Map.delete threadId turns, Map.lookup threadId turns))
     client.reviewEventSink $ case outcome of
@@ -1403,10 +1434,9 @@ handleStreamRecord client connection attribution record = case record of
     -- closed.
     acknowledge requestId answer pending
       | pending.interruptRequest /= requestId =
-          refusedBy ("answered " <> requestId <> ", which is not the interrupt this review is waiting on") pending
-      | otherwise = either refusedBy (const accepted) answer pending
+          interruptUnconfirmed ("answered " <> requestId <> ", which is not the interrupt this review is waiting on") pending
+      | otherwise = either interruptUnconfirmed (const accepted) answer pending
     accepted pending = pending {interruptAcknowledgement = InterruptAccepted}
-    refusedBy detail pending = pending {interruptAcknowledgement = InterruptRefused detail}
     -- What the turn's own ending makes of the interrupt aimed at it, and the
     -- same bound from the other side.
     --
