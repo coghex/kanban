@@ -152,6 +152,7 @@ library kanban-internal
     Kanban.UI.SessionEvents
     Kanban.UI.Settings
     Kanban.UI.Solve
+    Kanban.UI.Notice
     Kanban.UI.State
     Kanban.UI.Theme
     Kanban.UI.Transcript
@@ -299,6 +300,7 @@ test-suite kanban-test
     Spec.UI.Incidents
     Spec.UI.Keys
     Spec.UI.Layout
+    Spec.UI.Notice
     Spec.UI.OpenData
     Spec.UI.ReviewSession
     Spec.UI.Search

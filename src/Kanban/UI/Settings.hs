@@ -73,6 +73,7 @@ import Kanban.Models
 import Kanban.Settings (ChatVerbosity (..))
 import Kanban.UI.Keys (BoardAction (..), binding, footerHint)
 import Kanban.UI.Types
+import Kanban.UI.Util (noticeCleared, noticeSet)
 
 -- | One @(role, provider)@ assignment as the screen shows it.
 --
@@ -399,21 +400,19 @@ undeclaredDefaultMessage role provider compiled catalog =
 -- it earned one, and otherwise clears the notice — including a caution left
 -- over from an earlier edit, which the newer edit does not stand behind.
 applyRosterWrite :: Either Text () -> RosterWrite -> AppState -> AppState
-applyRosterWrite (Left message) _ state = state {appNotice = Just message}
+applyRosterWrite (Left message) _ state = noticeSet message state
 applyRosterWrite (Right ()) write state =
-  (withModelRoster (Right write.rosterWriteRoster) state)
-    { appSettingsFocus = write.rosterWriteFocus,
-      appNotice = if write.rosterWriteCaution then Just issueGateCaution else Nothing
-    }
+  (if write.rosterWriteCaution then noticeSet issueGateCaution else noticeCleared)
+    (withModelRoster (Right write.rosterWriteRoster) state) {appSettingsFocus = write.rosterWriteFocus}
 
 -- | Show the settings overlay, focused on its first roster row.
 openSettings :: AppState -> AppState
 openSettings state =
-  state
-    { appOverlay = Just SettingsOverlay,
-      appSettingsFocus = listToMaybe (map rosterRowCell (settingsRosterRows state.appModelRoster)),
-      appNotice = Nothing
-    }
+  noticeCleared
+    state
+      { appOverlay = Just SettingsOverlay,
+        appSettingsFocus = listToMaybe (map rosterRowCell (settingsRosterRows state.appModelRoster))
+      }
 
 -- ---------------------------------------------------------------------------
 -- Wording

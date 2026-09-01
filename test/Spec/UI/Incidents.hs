@@ -29,6 +29,7 @@ import Kanban.UI.Session
     solveIncidentPhase,
   )
 import Kanban.UI.Theme (themeFor)
+import Kanban.UI.Util (shownNotice)
 import Kanban.UI.Types
   ( AgentSessionRef (..),
     AppState (..),
@@ -312,7 +313,7 @@ spec = do
       Map.lookup Issues activated.appSelectedRows `shouldBe` Just 1
       -- Nothing is expanded: a group header is drawn open or closed.
       activated.appExpandedTrackers `shouldBe` Set.empty
-      activated.appNotice `shouldBe` Nothing
+      shownNotice activated `shouldBe` Nothing
 
   describe "incident panel activation" $ do
     it "selects the card a drainer incident names, opening no session Kanban does not hold" $ do
@@ -321,7 +322,7 @@ spec = do
       activated.appSelectedColumn `shouldBe` Reviewing
       Map.lookup Reviewing activated.appSelectedRows `shouldBe` Just 0
       activated.appOverlay `shouldBe` Nothing
-      activated.appNotice `shouldBe` Nothing
+      shownNotice activated `shouldBe` Nothing
 
     it "selects the card and opens the session for a qualifying session row" $ do
       solve <- withSolveSession (baseIssue 10 []) SolveAttention <$> navigationState
@@ -344,7 +345,7 @@ spec = do
       activated.appSelectedColumn `shouldBe` Done
       activated.appSelectedRows `shouldBe` moved.appSelectedRows
       activated.appExpandedTrackers `shouldBe` Set.empty
-      activated.appNotice `shouldBe` Just "Issue #77 is not on the current board"
+      shownNotice activated `shouldBe` Just "Issue #77 is not on the current board"
       -- The session is still worth opening.
       activated.appOverlay `shouldBe` Just (SolveOverlay 77)
 
@@ -354,7 +355,7 @@ spec = do
       activated.appSelectedColumn `shouldBe` Issues
       activated.appSelectedRows `shouldBe` state.appSelectedRows
       activated.appExpandedTrackers `shouldBe` Set.empty
-      activated.appNotice `shouldBe` Just "PR #903 is not on the current board"
+      shownNotice activated `shouldBe` Just "PR #903 is not on the current board"
       activated.appOverlay `shouldBe` Nothing
 
     it "reports a supervisor crash and navigates nowhere" $ do
@@ -364,7 +365,7 @@ spec = do
       activated.appSelectedRows `shouldBe` state.appSelectedRows
       activated.appExpandedTrackers `shouldBe` Set.empty
       activated.appOverlay `shouldBe` Nothing
-      activated.appNotice `shouldBe` Just ("drainer supervisor · " <> crashDetail)
+      shownNotice activated `shouldBe` Just ("drainer supervisor · " <> crashDetail)
 
     it "changes no incident, session, or GitHub state when opened or activated" $ do
       base <-
@@ -411,7 +412,7 @@ spec = do
       state <- reportingState [conflictIncident 42]
       let stale = state {appIncidentSelection = IncidentSelection (Just (namedRef "gone")) 0}
           activated = applyIncidentsAction ActivateSelectedIncident stale
-      activated.appNotice `shouldBe` Just "That incident is no longer listed"
+      shownNotice activated `shouldBe` Just "That incident is no longer listed"
       activated.appSelectedRows `shouldBe` stale.appSelectedRows
       activated.appSelectedColumn `shouldBe` stale.appSelectedColumn
       activated.appOverlay `shouldBe` stale.appOverlay
@@ -431,12 +432,12 @@ spec = do
       resolveIncidentSelection (incidentEntries refreshed) refreshed.appIncidentSelection
         `shouldBe` IncidentSelection (Just (DrainerIncidentRef "incident-conflict-42")) 0
       let activated = applyIncidentsAction ActivateSelectedIncident refreshed
-      activated.appNotice `shouldBe` Nothing
+      shownNotice activated `shouldBe` Nothing
       activated.appSelectedColumn `shouldBe` Reviewing
       Map.lookup Reviewing activated.appSelectedRows `shouldBe` Just 0
 
       -- Still nothing to act on when the refresh brought nothing.
-      (applyIncidentsAction ActivateSelectedIncident opened).appNotice
+      shownNotice (applyIncidentsAction ActivateSelectedIncident opened)
         `shouldBe` Just "No incident is selected"
 
     it "resolves a click by the identity rendered into the row" $ do

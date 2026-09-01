@@ -7,6 +7,7 @@ module Kanban.UI.Worker
     recoveredSolveSession,
     registerWorker,
     startPendingWorkerMonitors,
+    workerSessionEnsured,
   )
 where
 
@@ -203,39 +204,43 @@ startPendingWorkerMonitors = do
   mapM_ tryStartWorkerMonitor descriptors
 
 ensureWorkerSession :: WorkerDescriptor -> EventM Name AppState ()
-ensureWorkerSession descriptor = do
-  state <- get
-  case descriptor.workerDescriptorSpec.workerTask of
-    SolveWorkerTaskKind task
-      | Map.member task.solveWorkerIssueNumber state.appSolveSessions -> pure ()
-      | Just issue <- issueFromBoard state.appBoard task.solveWorkerIssueNumber ->
-          modify
-            ( \current ->
-                current
-                  { appSolveSessions =
-                      Map.insert
-                        task.solveWorkerIssueNumber
-                        (recoveredSolveSession current descriptor.workerDescriptorSpec.workerAssignment descriptor issue task)
-                        current.appSolveSessions
-                  }
-            )
-      | otherwise -> setNotice ("Persistent worker for issue #" <> showText task.solveWorkerIssueNumber <> " is running, but the issue is absent from the cached board; press " <> actionKeyText RefreshAll <> " to refresh")
-    PullRequestWorkerTaskKind task -> do
-      when (Map.notMember task.pullRequestWorkerNumber state.appPullRequestReviewSessions) $
-        case pullRequestFromBoard state.appBoard task.pullRequestWorkerNumber of
-          Nothing -> setNotice ("Persistent worker for PR #" <> showText task.pullRequestWorkerNumber <> " is running, but the PR is absent from the cached board; press " <> actionKeyText RefreshAll <> " to refresh")
-          Just pullRequest ->
-            modify
-              ( \current ->
-                  current
-                    { appPullRequestReviewSessions =
-                        Map.insert
-                          task.pullRequestWorkerNumber
-                          (recoveredPullRequestSession state.appModelRoster (priorTickGeneration task.pullRequestWorkerNumber state.appPullRequestReviewSessions) descriptor pullRequest task)
-                          current.appPullRequestReviewSessions
-                    }
-              )
-      ensureRecoveredAutoSolve descriptor task
+ensureWorkerSession = modify . workerSessionEnsured
+
+-- | What attaching one discovered worker does to the state: the recovered
+-- session its item supports, or the absent-item refusal. Pure, and exported,
+-- so the suite can take a discovery arriving before the first board
+-- publication through the very transition the event runs — the refusal is
+-- composed over an outstanding startup line rather than allowed to replace
+-- it, because worker discovery is forked at startup and its answer routinely
+-- lands while the startup fetch is still running.
+workerSessionEnsured :: WorkerDescriptor -> AppState -> AppState
+workerSessionEnsured descriptor state = case descriptor.workerDescriptorSpec.workerTask of
+  SolveWorkerTaskKind task
+    | Map.member task.solveWorkerIssueNumber state.appSolveSessions -> state
+    | Just issue <- issueFromBoard state.appBoard task.solveWorkerIssueNumber ->
+        state
+          { appSolveSessions =
+              Map.insert
+                task.solveWorkerIssueNumber
+                (recoveredSolveSession state descriptor.workerDescriptorSpec.workerAssignment descriptor issue task)
+                state.appSolveSessions
+          }
+    | otherwise -> noticeSetOverStartupReport ("Persistent worker for issue #" <> showText task.solveWorkerIssueNumber <> " is running, but the issue is absent from the cached board; press " <> actionKeyText RefreshAll <> " to refresh") state
+  PullRequestWorkerTaskKind task ->
+    recoveredAutoSolveEnsured descriptor task (sessionEnsured state)
+    where
+      sessionEnsured current
+        | Map.member task.pullRequestWorkerNumber current.appPullRequestReviewSessions = current
+        | otherwise = case pullRequestFromBoard current.appBoard task.pullRequestWorkerNumber of
+            Nothing -> noticeSetOverStartupReport ("Persistent worker for PR #" <> showText task.pullRequestWorkerNumber <> " is running, but the PR is absent from the cached board; press " <> actionKeyText RefreshAll <> " to refresh") current
+            Just pullRequest ->
+              current
+                { appPullRequestReviewSessions =
+                    Map.insert
+                      task.pullRequestWorkerNumber
+                      (recoveredPullRequestSession current.appModelRoster (priorTickGeneration task.pullRequestWorkerNumber current.appPullRequestReviewSessions) descriptor pullRequest task)
+                      current.appPullRequestReviewSessions
+                }
 
 -- | A solve session restored from a running worker.
 --
@@ -324,25 +329,21 @@ recoveredPullRequestSession rosterResult priorGeneration descriptor pullRequest 
       )
         {sessionLogPath = descriptor.workerDescriptorSpec.workerExistingLogPath}
 
-ensureRecoveredAutoSolve :: WorkerDescriptor -> PullRequestWorkerTask -> EventM Name AppState ()
-ensureRecoveredAutoSolve descriptor task = case descriptor.workerDescriptorSpec.workerParent of
-  Nothing -> pure ()
-  Just parent -> do
-    state <- get
-    when (Map.notMember parent.workerParentIssueNumber state.appSolveSessions) $
-      case issueFromBoard state.appBoard parent.workerParentIssueNumber of
-        Nothing -> pure ()
+recoveredAutoSolveEnsured :: WorkerDescriptor -> PullRequestWorkerTask -> AppState -> AppState
+recoveredAutoSolveEnsured descriptor task state = case descriptor.workerDescriptorSpec.workerParent of
+  Nothing -> state
+  Just parent
+    | Map.member parent.workerParentIssueNumber state.appSolveSessions -> state
+    | otherwise -> case issueFromBoard state.appBoard parent.workerParentIssueNumber of
+        Nothing -> state
         Just issue ->
-          modify
-            ( \current ->
-                current
-                  { appSolveSessions =
-                      Map.insert
-                        parent.workerParentIssueNumber
-                        (recoveredAutoSolveParentSession state descriptor issue parent task)
-                        current.appSolveSessions
-                  }
-            )
+          state
+            { appSolveSessions =
+                Map.insert
+                  parent.workerParentIssueNumber
+                  (recoveredAutoSolveParentSession state descriptor issue parent task)
+                  state.appSolveSessions
+            }
 
 -- | The /solver's/ session an autosolve pull-request worker's reattach
 -- restores beside the pull-request one.

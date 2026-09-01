@@ -62,7 +62,7 @@ import Kanban.Domain
 import Kanban.Filter
 import Kanban.UI.Search (SearchAnchor, openSearch, seatColumnOn, selectedAnchorIn)
 import Kanban.UI.Types
-import Kanban.UI.Util (allColumns, showText)
+import Kanban.UI.Util (allColumns, noticeCleared, showText)
 import Kanban.Workflow (itemCompleted, readOnlyHistoryNotice)
 
 -- | Recompute what the criteria admit from the datasets currently held.
@@ -94,7 +94,7 @@ refreshVisibleBoard state =
 applyCriteriaChange :: (FilterCriteria -> FilterCriteria) -> AppState -> AppState
 applyCriteriaChange change state = reseat (refreshVisibleBoard edited)
   where
-    edited = state {appFilterCriteria = change state.appFilterCriteria, appNotice = Nothing}
+    edited = noticeCleared state {appFilterCriteria = change state.appFilterCriteria}
     anchors :: [(BoardColumn, Maybe SearchAnchor)]
     anchors = [(column, selectedAnchorIn state column) | column <- allColumns]
     -- Each seating selects the column it seats, so the column the user was in
@@ -259,15 +259,15 @@ toggleFilterPanel state
 -- at the first box, because hiding it is what puts the panel away.
 focusFilterPanel :: AppState -> AppState
 focusFilterPanel state =
-  state
-    { appFilterPanel = Just (FilterPanel focusedBox False),
-      appNotice = Nothing
-    }
+  noticeCleared
+    state
+      { appFilterPanel = Just (FilterPanel focusedBox False)
+      }
   where
     focusedBox = maybe firstFilterBox (.filterPanelBox) state.appFilterPanel
 
 closeFilterPanel :: AppState -> AppState
-closeFilterPanel state = state {appFilterPanel = Nothing, appNotice = Nothing}
+closeFilterPanel state = noticeCleared state {appFilterPanel = Nothing}
 
 -- | Hand the keyboard to the column search. With none live, one is opened on
 -- the Issues column exactly as the board's own @s@ opens it, so the key means

@@ -3,7 +3,9 @@ module Kanban.UI.PullRequest
     applyDrainerStatus,
     applyDrainerToggle,
     applyPullRequestFlowEvent,
+    directMergeResultApplied,
     drainerErrorStatus,
+    drainerToggleApplied,
     drainerTogglePress,
     failPullRequestLaunch,
     freshPullRequestTranscript,
@@ -78,6 +80,7 @@ import Kanban.Worker
     )
 import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
+import Kanban.UI.Notice (NoticeActivity (..))
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.SessionCore
@@ -133,7 +136,7 @@ startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullReques
       Just session
         | pullRequestSessionReusable forceFresh (solvePhaseActive session.sessionPhase) session.sessionDetail.pullRequestSessionAction action session.sessionDetail.pullRequestSessionLaunchedForUpdatedAt pullRequest.pullRequestUpdatedAt ->
             when showOverlay $ do
-              modify (\current -> current {appOverlay = Just (PullRequestReviewOverlay pullRequest.pullRequestNumber), appNotice = Nothing})
+              modify (\current -> noticeCleared current {appOverlay = Just (PullRequestReviewOverlay pullRequest.pullRequestNumber)})
               presentTranscriptTail
       _ | Just notice <- pullRequestStartRefusal state origin action -> setNotice notice
       _ -> do
@@ -159,11 +162,11 @@ startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullReques
                   }
         modify
           ( \current ->
-              current
-                { appPullRequestReviewSessions = Map.insert pullRequest.pullRequestNumber session current.appPullRequestReviewSessions,
-                  appOverlay = if showOverlay then Just (PullRequestReviewOverlay pullRequest.pullRequestNumber) else current.appOverlay,
-                  appNotice = if showOverlay then Nothing else current.appNotice
-                }
+              (if showOverlay then noticeCleared else id)
+                current
+                  { appPullRequestReviewSessions = Map.insert pullRequest.pullRequestNumber session current.appPullRequestReviewSessions,
+                    appOverlay = if showOverlay then Just (PullRequestReviewOverlay pullRequest.pullRequestNumber) else current.appOverlay
+                  }
           )
         when showOverlay presentTranscriptTail
         launchPullRequestFlow pullRequest.pullRequestNumber origin action brand Nothing ResumeAnswer ""
@@ -383,18 +386,20 @@ drainerTogglePress state = case drainerToggle state.appDrainerBusy state.appDrai
             if shouldRun
               then DrainerStatus DrainerStarting "starting…" DrainerServiceStarting Nothing
               else DrainerStatus DrainerStopping "stopping…" DrainerServiceStopping Nothing
-       in ( state
-              { appDrainerStatus = transition,
-                -- Mid-transition, the last poll's set describes a drainer
-                -- that is being started or stopped underneath it.
-                appDrainerIncidents = Nothing,
-                appDrainerBusy = True,
-                appNotice = Just (if shouldRun then "Starting PR drainer…" else "Stopping PR drainer…")
-              },
+       in ( noticeSetFor
+              DrainerToggleRunning
+              (if shouldRun then "Starting PR drainer…" else "Stopping PR drainer…")
+              state
+                { appDrainerStatus = transition,
+                  -- Mid-transition, the last poll's set describes a drainer
+                  -- that is being started or stopped underneath it.
+                  appDrainerIncidents = Nothing,
+                  appDrainerBusy = True
+                },
             Just (controller, shouldRun)
           )
   where
-    noticed notice = state {appNotice = Just notice}
+    noticed notice = noticeSet notice state
 
 toggleDrainer :: EventM Name AppState ()
 toggleDrainer = do
@@ -424,17 +429,24 @@ applyDrainerStatus result = modify $ \state ->
         }
 
 applyDrainerToggle :: Either Text DrainerObservation -> EventM Name AppState ()
-applyDrainerToggle result = modify $ \state ->
+applyDrainerToggle = modify . drainerToggleApplied
+
+-- | What one toggle's observation does to the state: the settled status, and
+-- the settled notice reporting it. Pure so the suite can take the
+-- active-to-settled transition the drainer notice makes without brick.
+drainerToggleApplied :: Either Text DrainerObservation -> AppState -> AppState
+drainerToggleApplied result state =
   let status = observedStatusOr result
       notice = case result of
         Left message -> "PR drainer control failed: " <> sanitizeText message
         Right _ -> "PR drainer is " <> status.drainerDetail
-   in state
-        { appDrainerStatus = status,
-          appDrainerIncidents = observedIncidentsOr result,
-          appDrainerBusy = False,
-          appNotice = Just notice
-        }
+   in noticeSet
+        notice
+        state
+          { appDrainerStatus = status,
+            appDrainerIncidents = observedIncidentsOr result,
+            appDrainerBusy = False
+          }
 
 observedStatusOr :: Either Text DrainerObservation -> DrainerStatus
 observedStatusOr = either drainerErrorStatus (.observedStatus)
@@ -493,10 +505,10 @@ runMergeDecision selection = do
         Right scriptPath -> do
           modify
             ( \current ->
-                current
-                  { appDirectMergePending = Just number,
-                    appNotice = Just ("Merging PR #" <> showText number <> " through the PR drainer…")
-                  }
+                noticeSetFor
+                  (DirectMergeRunning number)
+                  ("Merging PR #" <> showText number <> " through the PR drainer…")
+                  current {appDirectMergePending = Just number}
             )
           void
             . liftIO
@@ -512,20 +524,30 @@ runMergeDecision selection = do
 applyDirectMerge :: Int -> Either Text DirectMergeOutcome -> EventM Name AppState ()
 applyDirectMerge number result = do
   let effect = directMergeEffect number result
-  modify
-    ( \state ->
-        state
-          { appDirectMergePending =
-              if state.appDirectMergePending == Just number then Nothing else state.appDirectMergePending,
-            appNotice = Just effect.directMergeNotice,
-            -- Outstanding only when a refresh follows. A declined run reports
-            -- itself and nothing overwrites it, and clearing here is also what
-            -- retires the previous merge's result.
-            appDirectMergeResult =
-              if effect.directMergeRefreshesBoard
-                then Just (DirectMergeReport effect.directMergeNotice effect.directMergeNotice)
-                else Nothing
-          }
-    )
+  modify (directMergeResultApplied number effect)
   when effect.directMergeRefreshesBoard requireBoardRefresh
+
+-- | What one merge's result does to the state, split from the refresh it
+-- then requires so the suite can take the transition without brick. The
+-- result notice itself is settled — the merge has landed or declined either
+-- way — and the report behind it records the instance it was shown as, which
+-- is what keeps the carry to that very report.
+directMergeResultApplied :: Int -> DirectMergeEffect -> AppState -> AppState
+directMergeResultApplied number effect state =
+  let noticed =
+        noticeSet
+          effect.directMergeNotice
+          state
+            { appDirectMergePending =
+                if state.appDirectMergePending == Just number then Nothing else state.appDirectMergePending
+            }
+   in noticed
+        { -- Outstanding only when a refresh follows. A declined run reports
+          -- itself and nothing overwrites it, and clearing here is also what
+          -- retires the previous merge's result.
+          appDirectMergeResult =
+            if effect.directMergeRefreshesBoard
+              then Just (recordDirectMergeShown noticed (DirectMergeReport effect.directMergeNotice 0))
+              else Nothing
+        }
 

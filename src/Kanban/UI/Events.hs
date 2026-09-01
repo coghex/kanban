@@ -67,6 +67,7 @@ import Kanban.Workflow (entryItem )
 import Kanban.Worker
   ( terminateWorker
     )
+import Kanban.UI.Notice (NoticeActivity (..))
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.Filter (FilterBox)
@@ -120,9 +121,14 @@ handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = do
   now <- liftIO getCurrentTime
   modify (\state -> state {appNow = now})
-  before <- (.appOverlay) <$> get
+  before <- get
   dispatchEvent event
-  modify (settleOverlayFullscreen before)
+  modify (settleOverlayFullscreen before.appOverlay)
+  -- The notice line's settle is the same shape for the same reason: whatever
+  -- the dispatch above showed, replaced, or left alone is classified and
+  -- armed here, once, rather than beside every one of the many sites that
+  -- produce a notice ('Kanban.UI.State.settleNoticeExpiry').
+  settleNoticeExpiry before.appNotice
 
 dispatchEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 dispatchEvent event = do
@@ -135,7 +141,7 @@ dispatchEvent event = do
     -- clears the line.
     (_, AppEvent (BoardHistoryPaused resetAt)) -> do
       modify (\current -> current {appCompletedStatus = CompletedHistoryPaused resetAt})
-      setNotice (historyPausedNotice state.appTimeZone resetAt)
+      modify (noticeSetOverStartupReport (historyPausedNotice state.appTimeZone resetAt))
     (_, AppEvent (BoardHistoryUpdated generation historyOutcome)) -> applyBoardHistory generation historyOutcome
     (_, AppEvent (BoardRefreshShutdownFinished verdict)) -> completeDashboardQuit verdict
     (_, AppEvent (CodexRefreshFinished result)) -> applyCodexRefresh result
@@ -161,6 +167,10 @@ dispatchEvent event = do
       modifyReviewSession issueNumber (\session -> session {sessionActivity = "reviewing issue"})
       armReviewTick issueNumber
     (_, AppEvent (CanonicalIssueReviewFinished issueNumber stage result)) -> applyCanonicalIssueReview issueNumber stage result
+    -- The tick clears only the instance it was armed for, and only once that
+    -- instance's deadline has actually passed; everything else about the
+    -- decision is 'Kanban.UI.Util.noticeExpiryApplied''s.
+    (_, AppEvent (NoticeExpired instanceId)) -> modify (noticeExpiryApplied instanceId)
     -- @f@ is the one binding live in every overlay that honors it, so it is
     -- resolved once here rather than in each overlay's own arms below. It has
     -- to come first: settings, the process inspector, and the incidents panel
@@ -227,7 +237,7 @@ dispatchEvent event = do
     -- fallback for one that neither handles it itself nor appears as a
     -- 'BindingScope'; the scrolling keys are live for the help and details
     -- overlays, which the table deliberately does not claim @j@ and @k@ in.
-    (Just _, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appOverlay = Nothing, appNotice = Nothing})
+    (Just _, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> noticeCleared current {appOverlay = Nothing})
     (Just _, VtyEvent (Vty.EvKey Vty.KDown [])) -> vScrollBy (viewportScroll DetailsViewport) 1
     (Just _, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> vScrollBy (viewportScroll DetailsViewport) 1
     (Just _, VtyEvent (Vty.EvKey Vty.KUp [])) -> vScrollBy (viewportScroll DetailsViewport) (-1)
@@ -598,26 +608,23 @@ requestDashboardQuit = do
     then
       modify
         ( \current ->
-            current
-              { appOverlay = Nothing,
-                appNotice =
-                  Just
-                    ( "Finish or kill the non-persistent issue review"
-                        <> (if length liveInteractiveReviews == 1 then " " else "s ")
-                        <> Text.intercalate ", " (map (("#" <>) . showText) liveInteractiveReviews)
-                        <> " before quitting; solve and PR workers may be safely left running"
-                    )
-              }
+            noticeSet
+              ( "Finish or kill the non-persistent issue review"
+                  <> (if length liveInteractiveReviews == 1 then " " else "s ")
+                  <> Text.intercalate ", " (map (("#" <>) . showText) liveInteractiveReviews)
+                  <> " before quitting; solve and PR workers may be safely left running"
+              )
+              current {appOverlay = Nothing}
         )
     else
       if state.appQuitPending
-        then setNotice stoppingGitHubWorkNotice
+        then setNoticeFor QuitSettling stoppingGitHubWorkNotice
         else do
           mustSettle <- liftIO (coordinatorMustSettle state.appRefreshCoordinator)
           if not mustSettle
             then halt
             else do
-              modify (\current -> current {appOverlay = Nothing, appQuitPending = True, appNotice = Just stoppingGitHubWorkNotice})
+              modify (\current -> noticeSetFor QuitSettling stoppingGitHubWorkNotice current {appOverlay = Nothing, appQuitPending = True})
               void . liftIO . forkIO $
                 shutdownRefreshCoordinator state.appRefreshCoordinator
                   >>= writeBChan state.appEventChannel . BoardRefreshShutdownFinished
@@ -657,7 +664,7 @@ quitDecision (Just failure) = case failure.ghCleanupGuard of
 completeDashboardQuit :: Maybe GhCleanupFailure -> EventM Name AppState ()
 completeDashboardQuit verdict = case quitDecision verdict of
   QuitHalts -> halt
-  QuitHeldBack notice -> modify (\current -> current {appQuitPending = False, appNotice = Just notice})
+  QuitHeldBack notice -> modify (\current -> noticeSet notice current {appQuitPending = False})
 
 -- | Which overlays answer @f@ through the shared arm in 'dispatchEvent'
 -- rather than through a decoder of their own.
@@ -778,10 +785,9 @@ chooseChatVerbosity verbosity = do
     Right () ->
       modify
         ( \current ->
-            current
-              { appSettings = settings,
-                appNotice = Just ("Chat output set to " <> Text.toLower (verbosityLabel verbosity) <> " · full logs remain unchanged")
-              }
+            noticeSet
+              ("Chat output set to " <> Text.toLower (verbosityLabel verbosity) <> " · full logs remain unchanged")
+              current {appSettings = settings}
         )
 
 -- | What one event does to the incidents panel. Separated from the dispatch
@@ -830,12 +836,12 @@ incidentsAction _ _ = Nothing
 applyIncidentsAction :: IncidentsAction -> AppState -> AppState
 applyIncidentsAction action state = case action of
   OpenIncidentsPanel ->
-    state
-      { appOverlay = Just IncidentsOverlay,
-        appIncidentSelection = resolveIncidentSelection entries state.appIncidentSelection,
-        appNotice = Nothing
-      }
-  CloseIncidentsPanel -> state {appOverlay = Nothing, appNotice = Nothing}
+    noticeCleared
+      state
+        { appOverlay = Just IncidentsOverlay,
+          appIncidentSelection = resolveIncidentSelection entries state.appIncidentSelection
+        }
+  CloseIncidentsPanel -> noticeCleared state {appOverlay = Nothing}
   MoveIncidentSelection amount -> state {appIncidentSelection = movedSelection amount}
   ScrollIncidentsPanel amount -> state {appIncidentSelection = movedSelection amount}
   ActivateSelectedIncident -> activate (activationTarget state.appIncidentSelection)
@@ -866,23 +872,21 @@ applyIncidentsAction action state = case action of
           nextIndex = max 0 (min maximumIndex (resolved.incidentSelectionRow + amount))
        in IncidentSelection (incidentEntryRef <$> safeIndex nextIndex entries) nextIndex
 
-    activate Nothing = state {appNotice = Just "No incident is selected"}
+    activate Nothing = noticeSet "No incident is selected" state
     -- Resolved against the visible view: activation moves the selection to a
     -- row, and a row is an index into what the criteria are showing.
     activate (Just reference) = case resolveIncidentActivation state.appVisibleBoard entries reference of
       -- The row went away between the last render and this key press. The
       -- panel stays open with nothing acted on, rather than sending the user
       -- to whichever incident took its place.
-      Nothing -> state {appNotice = Just "That incident is no longer listed"}
+      Nothing -> noticeSet "That incident is no longer listed" state
       Just activation -> applyIncidentActivation activation state
 
 applyIncidentActivation :: IncidentActivation -> AppState -> AppState
 applyIncidentActivation activation state =
-  selectWork
-    state
-      { appOverlay = activation.incidentActivationSession >>= sessionOverlayFor,
-        appNotice = activation.incidentActivationNotice
-      }
+  maybe noticeCleared noticeSet activation.incidentActivationNotice
+    . selectWork
+    $ state {appOverlay = activation.incidentActivationSession >>= sessionOverlayFor}
   where
     selectWork current = case activation.incidentActivationWork of
       -- No row to go to: column, row, and tracker expansion are all left
@@ -925,11 +929,11 @@ openProcesses = do
   let resolved = resolveProcessSelection (agentSessionEntries state) state.appProcessSelection
   modify
     ( \current ->
-        current
-          { appOverlay = Just ProcessesOverlay,
-            appProcessSelection = resolved,
-            appNotice = Nothing
-          }
+        noticeCleared
+          current
+            { appOverlay = Just ProcessesOverlay,
+              appProcessSelection = resolved
+            }
     )
 
 moveProcessSelection :: Int -> EventM Name AppState ()
@@ -965,13 +969,13 @@ openSelectedAgentSession = do
     Nothing -> setNotice "No agent session is selected"
     Just entry -> case entry.agentSessionRef of
       SolveAgent issueNumber -> do
-        modify (\current -> current {appOverlay = Just (SolveOverlay issueNumber), appNotice = Nothing})
+        modify (\current -> noticeCleared current {appOverlay = Just (SolveOverlay issueNumber)})
         presentTranscriptTail
       PullRequestAgent number -> do
-        modify (\current -> current {appOverlay = Just (PullRequestReviewOverlay number), appNotice = Nothing})
+        modify (\current -> noticeCleared current {appOverlay = Just (PullRequestReviewOverlay number)})
         presentTranscriptTail
       ReviewAgent issueNumber -> do
-        modify (\current -> current {appOverlay = Just (ReviewOverlay issueNumber), appNotice = Nothing})
+        modify (\current -> noticeCleared current {appOverlay = Just (ReviewOverlay issueNumber)})
         presentTranscriptTail
         armVisibleReviewTicks
       WorkerAgent _ -> setNotice ("This persistent worker is waiting for its issue or PR metadata; press " <> actionKeyText RefreshAll <> " to refresh the board")
@@ -1214,7 +1218,7 @@ applyCardClick column row state
         Just entry ->
           closeSearchOn
             (anchorAt state column row)
-            (state {appOverlay = Just (DetailsOverlay (entryItem entry)), appNotice = Nothing})
+            (noticeCleared state {appOverlay = Just (DetailsOverlay (entryItem entry))})
         Nothing -> state
   | otherwise = selectCardOnly column row state
 
@@ -1253,12 +1257,12 @@ runningProcessClickRefusal state = agentSurfaceRefusal state.appOperatingMode Sh
 
 selectCardOnly :: BoardColumn -> Int -> AppState -> AppState
 selectCardOnly column row state =
-  state
-    { appSelectedColumn = column,
-      appSelectedRows = Map.insert column row state.appSelectedRows,
-      appEnsureSelectionVisible = True,
-      appNotice = Nothing
-    }
+  noticeCleared
+    state
+      { appSelectedColumn = column,
+        appSelectedRows = Map.insert column row state.appSelectedRows,
+        appEnsureSelectionVisible = True
+      }
 
 runningProcessOverlay :: AppState -> BoardItem -> Maybe Overlay
 runningProcessOverlay state (PullRequestItem pullRequest)

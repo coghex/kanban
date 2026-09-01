@@ -489,7 +489,7 @@ startIssueReview issue = do
   case Map.lookup issue.issueNumber state.appReviewSessions of
     Just session
       | reviewSessionReusable session.sessionPhase session.sessionDetail.reviewSessionStage requestedStage (Map.member issue.issueNumber state.appCanonicalReviewProcesses) -> do
-          modify (\current -> current {appOverlay = Just (ReviewOverlay issue.issueNumber), appNotice = Nothing})
+          modify (\current -> noticeCleared current {appOverlay = Just (ReviewOverlay issue.issueNumber)})
           presentTranscriptTail
           armVisibleReviewTicks
     -- The service interlock is asked before a session is created, so a press
@@ -503,11 +503,11 @@ startIssueReview issue = do
           session = newReviewSession issue requestedStage priorGeneration
       modify
         ( \current ->
-            current
-              { appReviewSessions = Map.insert issue.issueNumber session current.appReviewSessions,
-                appOverlay = Just (ReviewOverlay issue.issueNumber),
-                appNotice = Nothing
-              }
+            noticeCleared
+              current
+                { appReviewSessions = Map.insert issue.issueNumber session current.appReviewSessions,
+                  appOverlay = Just (ReviewOverlay issue.issueNumber)
+                }
         )
       presentTranscriptTail
       if requestedStage == IssueRevision
@@ -806,11 +806,12 @@ applyReviewBackendStarted result = case result of
   Left message -> do
     modify
       ( \state ->
-          state
-            { appReviewBackend = ReviewBackendFailed message,
-              appReviewSessions = Map.map (failStartingSession message) state.appReviewSessions,
-              appNotice = Just (agentFailureNotice "Issue revision" message)
-            }
+          noticeSet
+            (agentFailureNotice "Issue revision" message)
+            state
+              { appReviewBackend = ReviewBackendFailed message,
+                appReviewSessions = Map.map (failStartingSession message) state.appReviewSessions
+              }
       )
     tailDisplayedTranscript
   Right client -> do
@@ -989,11 +990,12 @@ applyReviewEvent reviewEvent = case reviewEvent of
   ReviewClientStopped message -> do
     modify
       ( \state ->
-          state
-            { appReviewBackend = ReviewBackendFailed message,
-              appReviewSessions = markReviewSessionsDisconnected Nothing message state.appReviewSessions,
-              appNotice = Just message
-            }
+          noticeSet
+            message
+            state
+              { appReviewBackend = ReviewBackendFailed message,
+                appReviewSessions = markReviewSessionsDisconnected Nothing message state.appReviewSessions
+              }
       )
     tailDisplayedTranscript
   -- One connection of several ended. Only the sessions it was serving are
@@ -1002,10 +1004,9 @@ applyReviewEvent reviewEvent = case reviewEvent of
   ReviewConnectionStopped endedConnection message -> do
     modify
       ( \state ->
-          state
-            { appReviewSessions = markReviewSessionsDisconnected (Just endedConnection) message state.appReviewSessions,
-              appNotice = Just message
-            }
+          noticeSet
+            message
+            state {appReviewSessions = markReviewSessionsDisconnected (Just endedConnection) message state.appReviewSessions}
       )
     tailDisplayedTranscript
   ReviewSteerUndelivered threadId _targetTurnId message -> do

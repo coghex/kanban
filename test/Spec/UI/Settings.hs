@@ -36,6 +36,7 @@ import Kanban.UI.Overlay (drawOverlay)
 import Kanban.UI.Settings
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types (AppEvent, AppState (..), Name (..), Overlay (..), withModelRoster)
+import Kanban.UI.Util (shownNotice)
 import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures (fixtureBoard, testOptions)
 import Spec.Support.Render (renderWidgetLines)
@@ -296,7 +297,7 @@ spec = describe "the settings overlay's model roster" $ do
           saved = applyRosterWrite (Right ()) write state
       saved.appModelRoster `shouldBe` Right editedRoster
       saved.appSettingsFocus `shouldBe` Just (SolveRole, ClaudeProvider)
-      saved.appNotice `shouldBe` Nothing
+      shownNotice saved `shouldBe` Nothing
 
     it "leaves the roster, the focus and every displayed assignment untouched on a failed save" $ do
       state <- openSettings <$> testAppState (fixtureBoard [])
@@ -307,7 +308,7 @@ spec = describe "the settings overlay's model roster" $ do
       settingsRosterRows failed.appModelRoster `shouldBe` settingsRosterRows state.appModelRoster
       -- The diagnostic, and only the diagnostic: nothing was changed, so
       -- there is nothing to caution about.
-      failed.appNotice `shouldBe` Just "model roster write failed: disk full"
+      shownNotice failed `shouldBe` Just "model roster write failed: disk full"
 
   describe "the issue_gate caution" $ do
     it "fires for an issue_gate edit and for the whole-roster recovery" $ do
@@ -325,7 +326,7 @@ spec = describe "the settings overlay's model roster" $ do
     it "says only that approvals may go stale, and names both exceptions" $ do
       state <- openSettings <$> testAppState (fixtureBoard [])
       let cautioned = applyRosterWrite (Right ()) (RosterWrite editedGateRoster (Just (IssueGateRole, CodexProvider)) True) state
-      cautioned.appNotice `shouldBe` Just issueGateCaution
+      shownNotice cautioned `shouldBe` Just issueGateCaution
       issueGateCaution
         `shouldBe` "Changing `issue_gate` may make existing issue approvals stale; reconciliation can request rereview. \
                    \Environment overrides or accepted historical reviewer routes may keep some approvals current."

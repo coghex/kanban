@@ -60,7 +60,9 @@ import Kanban.Domain (Repository)
 import Kanban.Drainer (normalizedRepositoryIdentity)
 import Kanban.Text (sanitizeText)
 import Kanban.UI.Refresh (requireBoardRefresh)
+import Kanban.UI.Notice (NoticeActivity (..))
 import Kanban.UI.Types
+import Kanban.UI.Util (noticeSet, noticeSetFor)
 
 -- | The controller work one toggle press hands off, and which transition it
 -- belongs to.
@@ -130,22 +132,22 @@ approvalTogglePress state = case approvalToggle state.appApprovalBusy state.appA
                   ApprovalServiceStopping
                   state.appApprovalStatus.approvalBarrierIssue
                   Nothing
-       in ( state
-              { appApprovalStatus = optimistic,
-                appApprovalIncidents = Nothing,
-                appApprovalBusy = True,
-                appApprovalTransition = transition,
-                appNotice =
-                  Just
-                    ( if shouldRun
-                        then "Starting issue approval service…"
-                        else "Stopping issue approval service…"
-                    )
-              },
+       in ( noticeSetFor
+              ApprovalToggleRunning
+              ( if shouldRun
+                  then "Starting issue approval service…"
+                  else "Stopping issue approval service…"
+              )
+              state
+                { appApprovalStatus = optimistic,
+                  appApprovalIncidents = Nothing,
+                  appApprovalBusy = True,
+                  appApprovalTransition = transition
+                },
             Just (ApprovalHandoff controller shouldRun transition)
           )
   where
-    noticed notice = state {appNotice = Just notice}
+    noticed notice = noticeSet notice state
 
 toggleApprovalService :: EventM Name AppState ()
 toggleApprovalService = do
@@ -275,20 +277,17 @@ approvalToggleApplied transition result state
   | otherwise = case result of
       Right observation ->
         let (applied, refresh) = approvalObservationApplied observation state
-         in ( applied
-                { appNotice =
-                    Just
-                      ( "Issue approval service is "
-                          <> observation.observedApprovalStatus.approvalDetail
-                      )
-                },
+         in ( noticeSet
+                ( "Issue approval service is "
+                    <> observation.observedApprovalStatus.approvalDetail
+                )
+                applied,
               refresh
             )
       Left message ->
-        ( (forgetObservation (approvalErrorStatus message) state)
-            { appApprovalBusy = False,
-              appNotice = Just ("Issue approval service control failed: " <> sanitizeText message)
-            },
+        ( noticeSet
+            ("Issue approval service control failed: " <> sanitizeText message)
+            (forgetObservation (approvalErrorStatus message) state) {appApprovalBusy = False},
           False
         )
 

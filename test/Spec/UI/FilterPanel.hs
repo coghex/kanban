@@ -36,7 +36,7 @@ import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Search (SearchInput (..), applySearchInput, entriesFor, openSearch, searchInput)
 import Kanban.UI.Selection (selectedItem)
 import Kanban.UI.Types
-import Kanban.UI.Util (allColumns, entriesForBoard, selectedRow)
+import Kanban.UI.Util (allColumns, entriesForBoard, noticeCleared, selectedRow)
 import Kanban.Workflow (deriveBoard)
 import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch)
@@ -838,7 +838,7 @@ presentationSpec = describe "what the board says about the criteria" $ do
   -- Requirement 8: the five words, off a state rather than off a notice.
   it "states where the completed generation stands, whatever cleared the notice" $ do
     state <- panelState
-    let saying status = completedHistoryStatusText state {appCompletedStatus = status, appNotice = Nothing}
+    let saying status = completedHistoryStatusText (noticeCleared state {appCompletedStatus = status})
     map
       saying
       [ CompletedHistoryLoading,

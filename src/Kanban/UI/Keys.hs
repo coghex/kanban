@@ -223,7 +223,7 @@ binding action = case action of
       "Toggle the open overlay between its windowed box and fullscreen, in every overlay except the Codex/Claude solve chooser; a live-agent overlay answers it in normal mode, where insert mode types the letter into the draft instead, and with no overlay open the key does nothing"
   DismissOrClose ->
     KeyBinding action [plain Vty.KEsc] [BoardScope, DetailsScope, HelpScope] Nothing "close" "close overlay or dismiss a notice"
-      "Close an overlay or dismiss a transient error; in a live-agent overlay it is modal, returning an insert-mode session to normal and only then hiding the overlay, and it never reaches the dashboard's own quit"
+      "Close an overlay or dismiss any notice early, ahead of its ten-second lifetime; in a live-agent overlay it is modal, returning an insert-mode session to normal and only then hiding the overlay, and it never reaches the dashboard's own quit"
   ReviewSelection ->
     KeyBinding action [key 'r'] [BoardScope, DetailsScope] Nothing "review/revise" "review/revise/repair selected issue or PR"
       "Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session; a no-op on a collapsed or childless epic header"

@@ -37,6 +37,7 @@ import Kanban.UI.Approval
 import Kanban.UI.PullRequest (drainerTogglePress)
 import Kanban.UI.Review (approvalServiceRefusal, canonicalLaunchOutcome)
 import Kanban.UI.Types (AppState (..))
+import Kanban.UI.Util (shownNotice)
 import Spec.Support.App (testAppState)
 import Spec.Support.Env (withTemporaryCacheRoot)
 import Spec.Support.Expect (requireLeft, requireRight, shouldMention, shouldNotMention)
@@ -317,7 +318,7 @@ spec = do
       state.appApprovalStatus.approvalActivity `shouldBe` ApprovalServiceUnsupported
       let (pressed, handoff) = approvalTogglePress state
       handoffStart handoff `shouldBe` Nothing
-      pressed.appNotice `shouldMentionJust` "not supported on this host"
+      shownNotice pressed `shouldMentionJust` "not supported on this host"
 
     it "names the remediation for every way an installed lookup can fail" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -681,14 +682,14 @@ spec = do
       let (pressed, handoff) = approvalTogglePress unsupported
       handoffStart handoff `shouldBe` Nothing
       pressed.appApprovalBusy `shouldBe` False
-      pressed.appNotice `shouldBe` Just "Issue approval service is not supported on this host"
+      shownNotice pressed `shouldBe` Just "Issue approval service is not supported on this host"
 
       uninstalled <-
         (\state -> state {appApprovalController = Left (ApprovalUndiscoverable "not installed for example/project")})
           <$> dashboardShowing stoppedStatus
       let (refused, noHandoff) = approvalTogglePress uninstalled
       handoffStart noHandoff `shouldBe` Nothing
-      refused.appNotice `shouldMentionJust` "control unavailable"
+      shownNotice refused `shouldMentionJust` "control unavailable"
       refused.appApprovalBusy `shouldBe` False
 
     it "holds an optimistic transition and refuses a second press behind it" $ do
@@ -703,7 +704,7 @@ spec = do
       let (again, secondHandoff) = approvalTogglePress pressed
       handoffStart secondHandoff `shouldBe` Nothing
       again.appApprovalStatus `shouldBe` pressed.appApprovalStatus
-      again.appNotice `shouldBe` Just "Issue approval service is already starting or stopping"
+      shownNotice again `shouldBe` Just "Issue approval service is already starting or stopping"
 
     it "carries the durable barrier through an optimistic stop" $ do
       state <- dashboardShowing barrierStatus
@@ -720,7 +721,7 @@ spec = do
           (settled, _) = approvalToggleApplied transition (Right authoritative) pressed
       settled.appApprovalStatus `shouldBe` runningStatus
       settled.appApprovalBusy `shouldBe` False
-      settled.appNotice `shouldBe` Just "Issue approval service is on"
+      shownNotice settled `shouldBe` Just "Issue approval service is on"
 
     it "lets an authoritative poll supersede the optimistic transition and free the control" $ do
       state <- dashboardShowing stoppedStatus
@@ -764,7 +765,7 @@ spec = do
           (failed, _) = approvalToggleApplied transition (Left "the job is not loaded") pressed
       failed.appApprovalBusy `shouldBe` False
       failed.appApprovalStatus.approvalActivity `shouldBe` ApprovalServiceUnknown
-      failed.appNotice `shouldMentionJust` "control failed"
+      shownNotice failed `shouldMentionJust` "control failed"
       -- And the toggle is usable again, rather than answering "already
       -- starting" forever.
       approvalToggle failed.appApprovalBusy failed.appApprovalStatus `shouldBe` StartApprovalService
