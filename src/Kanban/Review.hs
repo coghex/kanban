@@ -1358,6 +1358,16 @@ handleStreamRecord client connection attribution record = case record of
   StreamControlAnswered requestId answer ->
     onNamedThread "an answer to a control request" $ \threadId ->
       advanceInterrupt client connection threadId (acknowledge requestId answer)
+  -- Warned about like any line this backend could not read, and then acted
+  -- on, because an operation is waiting on it. The answer named no request,
+  -- so it is taken as the answer to the one interrupt this thread can have
+  -- pending -- which is fail-closed twice: nothing else on this channel
+  -- writes a control request, and settling an interrupt that was somehow not
+  -- this answer's costs a resend, while leaving it to wait costs a message
+  -- and every send after it.
+  StreamControlUnreadable detail -> onNamedThread "an answer to a control request" $ \threadId -> do
+    emitProtocolWarning client (streamDiagnostic client detail)
+    advanceInterrupt client connection threadId (unreadableAnswer detail)
   StreamTurnClosed outcome -> onNamedThread "a turn result" $ \threadId -> do
     ended <- modifyMVar client.reviewActiveTurns (\turns -> pure (Map.delete threadId turns, Map.lookup threadId turns))
     client.reviewEventSink $ case outcome of
@@ -1389,6 +1399,10 @@ handleStreamRecord client connection attribution record = case record of
     acknowledge requestId answer pending
       | pending.interruptRequest /= requestId = pending
       | otherwise = pending {interruptAcknowledgement = either InterruptRefused (const InterruptAccepted) answer}
+    -- An answer that arrived and could not be read is not agreement, and is
+    -- the last thing that will be said about the request: the same refusal
+    -- an explicit @error@ produces, quoting what could not be read.
+    unreadableAnswer detail pending = pending {interruptAcknowledgement = InterruptRefused detail}
     -- Only the turn the interrupt named settles it, and only its own account
     -- of how it ended says whether the interrupt is what ended it.
     targetEnded turnId outcome pending
@@ -1422,10 +1436,6 @@ handleStreamRecord client connection attribution record = case record of
 -- never-started review is.
 reportConnectionStopped :: ReviewClient -> ReviewConnection -> Text -> IO ()
 reportConnectionStopped client connection message = do
-  -- Ahead of the events that end this connection's sessions, so a session
-  -- takes back the message it was shown as having sent before it is told the
-  -- process behind it is gone.
-  reportAbandonedInterrupts client connection message
   case client.reviewBackend.backendProcessShape of
     SharedProcess -> client.reviewEventSink (ReviewClientStopped message)
     ProcessPerThread -> do
@@ -1434,6 +1444,12 @@ reportConnectionStopped client connection message = do
       interrupted <- takeConnectionTurns client connection
       mapM_ (\threadId -> client.reviewEventSink (ReviewTurnCompleted threadId TurnFailed (Just message) Nothing)) interrupted
       client.reviewEventSink (ReviewConnectionStopped connection.connectionId message)
+  -- Last, and deliberately after the events that end this connection's
+  -- sessions. A message handed back is put where the session it belongs to
+  -- can still act on it, and which places those are depends on the phase
+  -- those events leave it in -- so reporting this first would offer a
+  -- resend from a session that is about to stop accepting one.
+  reportAbandonedInterrupts client connection message
 
 -- | Take the threads on this connection that had a turn running, removing
 -- them from the active set.

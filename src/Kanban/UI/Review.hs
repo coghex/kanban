@@ -285,14 +285,29 @@ takeNextUndelivered :: [Text] -> (Text, [Text])
 takeNextUndelivered [] = ("", [])
 takeNextUndelivered (next : remaining) = (next, remaining)
 
--- | Folds a rejected steer back into its session. The message goes onto the
--- input line only when the line is free — otherwise it queues behind whatever
--- is already waiting, so neither a draft typed after the original send nor an
--- earlier rejection is overwritten or truncated. The transcript is annotated
--- either way, since 'sendReviewFeedback' already wrote an optimistic @You:@
--- entry that would otherwise claim the message was delivered (issue #17).
+-- | Folds a rejected steer back into its session. A steer is only ever
+-- rejected by a thread that is still running, so its session can always take
+-- the message back onto its input line (issue #17).
 applyUndeliveredSteer :: Text -> ReviewSession -> ReviewSession
-applyUndeliveredSteer message session =
+applyUndeliveredSteer = holdUndelivered True
+
+-- | Folds a message the provider never read back into its session.
+--
+-- It goes onto the input line only when the line is free /and/ the session
+-- can still send from it — otherwise it queues behind whatever is already
+-- waiting, so neither a draft typed after the original send nor an earlier
+-- undelivered message is overwritten or truncated. The queue is drawn in the
+-- overlay and drains oldest-first the next time a send succeeds, which is why
+-- it is where a message goes when the input line is not an offer the session
+-- can honour: a settled session's line takes no keystrokes and submits
+-- nothing, so text parked there would look like a draft and behave like a
+-- decoration.
+--
+-- The transcript is annotated in every case, since 'sendReviewFeedback'
+-- already wrote an optimistic @You:@ entry that would otherwise claim the
+-- message was delivered.
+holdUndelivered :: Bool -> Text -> ReviewSession -> ReviewSession
+holdUndelivered inputLive message session =
   (withUndelivered stillUndelivered session)
     { sessionInput = nextInput,
       sessionTranscript =
@@ -301,7 +316,7 @@ applyUndeliveredSteer message session =
   where
     queued = session.sessionDetail.reviewSessionUndelivered <> [message]
     (nextInput, stillUndelivered)
-      | Text.null (Text.strip session.sessionInput) = takeNextUndelivered queued
+      | inputLive, Text.null (Text.strip session.sessionInput) = takeNextUndelivered queued
       | otherwise = (session.sessionInput, queued)
 
 clearPendingInteraction :: ReviewSession -> ReviewSession
@@ -330,9 +345,20 @@ undeliveredNotice = "Your message was not delivered — it is waiting in the rev
 -- entry for text the provider never read. And a cancellation carries no
 -- message at all, yet a cancellation that did not happen is exactly what a
 -- user watching a turn keep running needs told.
+--
+-- Where the message lands is decided from the session this leaves behind,
+-- not from the one that sent it. A refused interrupt leaves a thread still
+-- running and an input line that can resend; a connection that died leaves a
+-- settled session whose line takes nothing, and this event arrives after the
+-- events that settle it precisely so that difference is visible here.
 applyFailedInterrupt :: Text -> Maybe Text -> ReviewSession -> ReviewSession
-applyFailedInterrupt cause message session = maybe noted (`applyUndeliveredSteer` noted) message
+applyFailedInterrupt cause message session = maybe noted hold message
   where
+    hold text =
+      holdUndelivered
+        (reviewSessionInputLive noted.sessionDetail.reviewSessionStage noted.sessionPhase)
+        text
+        noted
     noted =
       session
         { sessionTranscript =
@@ -349,7 +375,10 @@ interruptFailureNotice cause message = "Interrupt failed: " <> sanitizeText caus
   where
     whereItWent = case message of
       Nothing -> ""
-      Just _ -> " — your message is waiting in the review session to resend"
+      -- Kept, not "waiting to resend": where it is waiting depends on whether
+      -- the session survived, and a notice promising a resend from one that
+      -- did not would be the same false claim the optimistic entry made.
+      Just _ -> " — your message was not delivered and is kept in the review session"
 
 -- | What Ctrl-C/Ctrl-X in a review overlay should do, decided from the
 -- session's connection/process state rather than inline in

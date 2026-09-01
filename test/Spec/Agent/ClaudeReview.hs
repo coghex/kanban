@@ -60,7 +60,7 @@ import Kanban.Review
     streamUserMessage,
   )
 import Kanban.ReviewToolServer (reviewToolServerConfig)
-import Kanban.UI.Review (applyFailedInterrupt)
+import Kanban.UI.Review (applyFailedInterrupt, applyUndeliveredSteer)
 import Kanban.UI.SessionCore (newAgentSession)
 import Kanban.UI.Types (AgentSession (..), ChatTranscript (..), ReviewDetail (..), ReviewPhase (..), ReviewSession)
 import Spec.Support.Env (withEnvironmentValue)
@@ -537,6 +537,35 @@ spec = do
         -- The turn the cancellation did not end is still running.
         turnCompletions recorded `shouldBe` []
 
+    -- The answer that arrives and cannot be read. Nothing else will be said
+    -- about the request, and the turn goes on running, so an implementation
+    -- that only warned about the line would strand the message: shown as
+    -- sent, never delivered, and every later send refused because an
+    -- interrupt is still recorded as in flight.
+    it "hands the message back when the answer to the interrupt cannot be read" $
+      withClaudeReviewClient (interruptibleSession [unreadableAnswer]) $ \fixture -> do
+        threadId <- awaitRunningTurn fixture
+        sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
+          `shouldReturn` Right ()
+        recorded <- waitForReviewEvents "the interrupt failure" fixture.claudeReviewEvents (not . null . interruptFailures)
+        case interruptFailures recorded of
+          [(failed, cause, held)] -> do
+            failed `shouldBe` threadId
+            cause `shouldMention` "without naming which one"
+            held `shouldBe` Just "focus on the parser"
+          other -> expectationFailure ("expected one interrupt failure, got " <> show other)
+        -- Still warned about, like any line this backend could not read.
+        diagnostics recorded `shouldSatisfy` any (Data.Text.isInfixOf "without naming which one")
+        -- The turn it failed to end is still running, and nothing was written
+        -- into it.
+        turnCompletions recorded `shouldBe` []
+        written <- awaitRecordedWrites fixture 2
+        map classifyWrite written `shouldBe` ["prompt", "interrupt"]
+        -- And the thread is free to try again rather than stuck reporting an
+        -- interrupt that will never settle.
+        retried <- sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
+        retried `shouldBe` Right ()
+
     -- The race the acknowledgement cannot settle on its own: an interrupt
     -- written a moment after the turn reached its verdict is still
     -- acknowledged as a success. Releasing the message on that would open a
@@ -604,6 +633,19 @@ spec = do
             held `shouldBe` Just "focus on the parser"
           other -> expectationFailure ("expected one interrupt failure, got " <> show other)
         [event | event@ReviewSteerUndelivered {} <- recorded] `shouldBe` []
+        -- The order is load-bearing rather than incidental. A session decides
+        -- where a handed-back message can go from the phase it is in, and
+        -- 'ReviewConnectionStopped' is what settles it, so that event has to
+        -- have arrived first; reported before it, this would offer a resend
+        -- from a session about to stop accepting one.
+        --
+        -- Anchored on that event rather than on the whole terminal sequence
+        -- because a dying connection reaches two terminal paths and which of
+        -- them reports each taken thing is a race. What is not a race is
+        -- that whichever path hands the message back emitted its own
+        -- connection report first.
+        takeWhile (/= "ReviewInterruptFailed") (lifecycle recorded)
+          `shouldSatisfy` elem "ReviewConnectionStopped"
 
   -- The session half of a failed interrupt. 'applyReviewEvent' runs in
   -- brick's 'EventM', which no unit test here can drive, so the transition a
@@ -623,7 +665,11 @@ spec = do
               (plainChatTranscript ("\nYou: " <> guidance <> "\n"))
               ReviewDetail
                 { reviewSessionIssue = baseIssue 588 [],
-                  reviewSessionStage = InitialReview,
+                  -- The stage an embedded review runs at, and the only one
+                  -- that ever reads typed text: the others run the canonical
+                  -- gate as a subprocess and hold no thread for an interrupt
+                  -- to fail on.
+                  reviewSessionStage = IssueRevision,
                   reviewSessionThreadId = Just (fixtureReviewThread "claude-session-1"),
                   reviewSessionTurnId = Just "turn-1",
                   reviewSessionPending = Nothing,
@@ -631,6 +677,10 @@ spec = do
                 }
           )
             {sessionInput = input}
+        -- The same session as the connection's end leaves it: settled, and
+        -- past the point where its input line takes anything.
+        settledSession :: Text -> ReviewSession
+        settledSession input = (interruptedSession input) {sessionPhase = ReviewFailed}
 
     it "restores the message to an input line the user left alone, and says what failed" $ do
       let recovered = applyFailedInterrupt cause (Just guidance) (interruptedSession "")
@@ -658,6 +708,28 @@ spec = do
       recovered.sessionDetail.reviewSessionUndelivered `shouldBe` []
       recovered.sessionTranscript.standardTranscript `shouldMention` ("[interrupt failed] " <> cause)
       recovered.sessionTranscript.standardTranscript `shouldNotMention` "[not delivered]"
+
+    -- The connection died, so the session this arrives at is already settled
+    -- and its input line takes no keystrokes and submits nothing
+    -- ('reviewSessionInputLive'). Text parked there would look like a draft
+    -- and behave like a decoration; the session's own queue is drawn in the
+    -- overlay and drains back onto the line the next time one can be sent,
+    -- so that is where a message goes when the line cannot honour it.
+    it "queues the message rather than parking it on a settled session's dead input line" $ do
+      let recovered = applyFailedInterrupt cause (Just guidance) (settledSession "")
+      recovered.sessionInput `shouldBe` ""
+      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
+      recovered.sessionTranscript.standardTranscript `shouldMention` ("[not delivered] " <> guidance)
+      recovered.sessionTranscript.standardTranscript `shouldMention` ("[interrupt failed] " <> cause)
+
+    -- And the queue it lands in is the one whose drain is already the
+    -- recovery: a message waiting there comes back to the input line
+    -- oldest-first the next time one can be sent, so a settled session that
+    -- is later running again offers it without a second mechanism.
+    it "leaves it in the queue the session drains back onto a usable line" $ do
+      let stranded = applyFailedInterrupt cause (Just guidance) (settledSession "")
+          running = stranded {sessionPhase = ReviewRunning}
+      (applyUndeliveredSteer "a later rejection" running).sessionInput `shouldBe` guidance
 
   -- The handshake's rule on its own, away from any process. Both halves have
   -- to be in and agree before a user's message may be written, and every way
@@ -764,13 +836,20 @@ spec = do
         ]
         `shouldSatisfy` all refusalNamingItsRequest
 
-    it "refuses an answer it cannot attach to a request" $
+    -- Reported rather than refused, unlike every other line this decoder
+    -- cannot read. An operation is waiting on an answer to a control
+    -- request, and a line saying only that one arrived and could not be read
+    -- is the last thing that will be said about it -- so a warning alone
+    -- would leave the operation waiting for something that has already been
+    -- and gone. The detail still names no provider, because this decoder
+    -- knows the channel and not who is speaking it.
+    it "reports an answer it cannot attach to a request, rather than only refusing it" $
       map
         decodeStreamRecord
         [ "{\"type\":\"control_response\"}",
           "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\"}}"
         ]
-        `shouldSatisfy` all (either (not . mentionsAProvider) (const False))
+        `shouldSatisfy` all unreadableNamingNoProvider
 
     -- A cut-short turn reports an error subtype and @is_error@ exactly as a
     -- broken one does; only @terminal_reason@ separates them, so a decoder
@@ -837,6 +916,11 @@ refuseInterrupt detail =
     [ readRequestId,
       "printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"%s\",\"error\":\"" <> detail <> "\"}}\\n' \"$request\""
     ]
+
+-- | An answer to a control request that names no request, which is the shape
+-- of one this backend cannot attach to the operation waiting on it.
+unreadableAnswer :: ByteString.ByteString
+unreadableAnswer = rawResult "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\"}}"
 
 -- | The result line closing a turn that was cut short rather than ending on
 -- its own: an error subtype and @is_error@ like any broken turn, told apart
@@ -997,6 +1081,13 @@ waitingOn acknowledgement target =
       interruptTarget = target
     }
 
+-- | Whether one decoded line is an answer that could not be attached to a
+-- request, saying why without naming a provider.
+unreadableNamingNoProvider :: Either Text StreamRecord -> Bool
+unreadableNamingNoProvider (Right (StreamControlUnreadable detail)) =
+  not (Data.Text.null detail) && not (mentionsAProvider detail)
+unreadableNamingNoProvider _ = False
+
 -- | Whether one decoded line is an answer that named its request and refused
 -- it, saying something about why.
 refusalNamingItsRequest :: Either Text StreamRecord -> Bool
@@ -1036,7 +1127,10 @@ lifecycle = map name
     name ReviewTurnStarted {} = "ReviewTurnStarted"
     name ReviewOutput {} = "ReviewOutput"
     name ReviewTurnCompleted {} = "ReviewTurnCompleted"
+    name ReviewConnectionStopped {} = "ReviewConnectionStopped"
+    name ReviewInterruptFailed {} = "ReviewInterruptFailed"
     name other = show other
+
 
 -- | Every line a provider wrote to its stderr, as the thread it was reported
 -- against, the kind that names who wrote it, and the text.

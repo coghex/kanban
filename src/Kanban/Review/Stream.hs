@@ -13,10 +13,12 @@
 -- Alongside it runs one narrow exchange that /is/ correlated — a
 -- @control_request@ and the @control_response@ answering it by request id —
 -- and interrupting a turn is the only thing this backend uses it for (D-16).
--- The four records that carry meaning for a review are the ones this module
--- names; everything else the CLI emits (its hook and status notices, its
--- rate-limit reports, the aggregate @assistant@ message that repeats what the
--- deltas already carried, and the control requests it sends /this/ client) is
+-- The five records that carry meaning for a review are the ones this module
+-- names, two of them that exchange's — an answer that cannot be read still
+-- settles what was waiting on it, so it is reported rather than refused.
+-- Everything else the CLI emits (its hook and status notices, its rate-limit
+-- reports, the aggregate @assistant@ message that repeats what the deltas
+-- already carried, and the control requests it sends /this/ client) is
 -- recognised and ignored rather than warned about, so a CLI release that adds
 -- a record type does not fill the review panel with warnings.
 --
@@ -79,6 +81,16 @@ data StreamRecord
     -- that settlement releases, is the client's — this module has no memory
     -- of what was asked.
     StreamControlAnswered Text (Either Text ())
+  | -- | An answer to a control request that named no request, or carried
+    -- nothing to read an outcome from.
+    --
+    -- A record rather than the 'Left' every other unreadable line is,
+    -- because this one has a consequence beyond the warning it deserves: an
+    -- operation is waiting on an answer, and a line that says only that one
+    -- arrived and could not be read is the CLI's last word on it. Reported
+    -- as its own thing so the client can settle what was waiting instead of
+    -- leaving it to wait for an answer that has already been and gone.
+    StreamControlUnreadable Text
   | -- | A record this backend has no use for.
     StreamIgnored
   deriving stock (Eq, Show)
@@ -147,23 +159,25 @@ decodeStreamRecord line = case eitherDecode line of
     Just "system" -> systemRecord value
     Just "stream_event" -> streamEventRecord value
     Just "result" -> Right (StreamTurnClosed (resultOutcome value))
-    Just "control_response" -> controlResponse value
+    Just "control_response" -> Right (controlResponse value)
     Just _ -> Right StreamIgnored
 
 -- | The CLI's answer to a control request, which nests its own subtype,
 -- the @request_id@ it is answering, and — on the failing branch — what went
 -- wrong, under a @response@ object.
 --
--- Fails closed on a subtype this decoder does not know: an operation is only
--- performed when the CLI says @success@, and reading anything else as
--- agreement is how a message would be released into a turn that is still
--- running.
-controlResponse :: Value -> Either Text StreamRecord
+-- Fails closed twice over. A subtype this decoder does not know is not
+-- agreement: an operation is only performed when the CLI says @success@, and
+-- reading anything else as agreement is how a message would be released into
+-- a turn that is still running. And an answer it cannot read at all is
+-- 'StreamControlUnreadable' rather than a bare refusal to decode, because
+-- the operation waiting on that answer has to hear about it.
+controlResponse :: Value -> StreamRecord
 controlResponse value = case objectField "response" value of
-  Nothing -> Left "answered a control request with no response"
+  Nothing -> StreamControlUnreadable "answered a control request with no response"
   Just response -> case fieldText "request_id" response of
-    Nothing -> Left "answered a control request without naming which one"
-    Just requestId -> Right (StreamControlAnswered requestId (outcome response))
+    Nothing -> StreamControlUnreadable "answered a control request without naming which one"
+    Just requestId -> StreamControlAnswered requestId (outcome response)
   where
     outcome response = case fieldText "subtype" response of
       Just "success" -> Right ()

@@ -942,15 +942,19 @@ interrupt is confirmed before anything is sent: the message is written only
 once the backend has acknowledged the request *and* the turn it named has
 stopped, in whichever order those two arrive, so it is never written into a
 turn that is still running and never silently dropped because the interrupt did
-not land. An interrupt the backend refuses, and one whose turn reached its
-verdict first, are both reported as that failure rather than as an undelivered
-steer, which has no counterpart here; the turn stays whatever it was, and the
-message returns to the input line the way a rejected steer does. A turn ended
-this way is reported as interrupted, so a session can tell it from one that
-finished on its own, and an explicit cancellation is the same exchange with no
-message riding on it. One interrupt runs on a thread at a time: a second is
-refused while the first is unresolved, which leaves the draft where the user
-typed it.
+not land. Every way it can fail to land is reported as that failure rather than
+as an undelivered steer, which has no counterpart here — an interrupt the
+backend refuses, one whose answer cannot be read, one whose turn reached its
+verdict first, and one whose process died before answering — and the turn stays
+whatever it was. The message it was carrying comes back the way a rejected
+steer does when the session can still send it, and waits in that session's
+queue when it cannot, which is where a session whose backend has gone keeps it:
+visible in the overlay, and back on the input line the next time one can be
+sent. A turn ended this way is reported as interrupted, so a session can tell
+it from one that finished on its own, and an explicit cancellation is the same
+exchange with no message riding on it. One interrupt runs on a thread at a
+time: a second is refused while the first is unresolved, which leaves the draft
+where the user typed it.
 
 Review, solve, and PR transcripts follow the live tail only while they are
 already at the bottom. Scrolling up during a turn holds the view where it is,
