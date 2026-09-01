@@ -333,7 +333,7 @@ readyClaudeFake :: (String, [ByteString.ByteString])
 readyClaudeFake =
   ( "claude",
     [ "case \"$*\" in",
-      "  '--version') printf '2.1.220 (Claude Code)\\n' ;;",
+      "  '--version') printf '2.1.251 (Claude Code)\\n' ;;",
       "  'auth status') printf '%s\\n' '{\"loggedIn\": true}' ;;",
       "  'plugin list --json') printf '%s\\n' '[{\"id\":\"kanban@kanban\",\"enabled\":true}]' ;;",
       "  *) exit 1 ;;",

@@ -14,6 +14,7 @@
 -- a stand-in would say nothing about the launch an install would perform.
 module Spec.Agent.ClaudeReview (spec) where
 
+import Control.Concurrent (threadDelay)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -33,7 +34,11 @@ import Kanban.Models
   )
 import Kanban.Process (killManagedProcess)
 import Kanban.Review
-  ( ReviewConnection (..),
+  ( InterruptAcknowledgement (..),
+    InterruptSettlement (..),
+    InterruptTarget (..),
+    PendingInterrupt (..),
+    ReviewConnection (..),
     ReviewEvent (..),
     ReviewOutputKind (..),
     ReviewResult (..),
@@ -41,18 +46,26 @@ import Kanban.Review
     ReviewThreadId (..),
     ReviewTurnOutcome (..),
     StreamRecord (..),
+    StreamTurnResult (..),
     beginIssueReview,
     decodeStreamRecord,
     finalOutputSchema,
     interruptReview,
+    pendingInterrupt,
     reviewConnectionsForTesting,
     sendReviewMessage,
+    settleInterrupt,
     stopReviewClient,
+    streamInterruptRequest,
     streamUserMessage,
   )
 import Kanban.ReviewToolServer (reviewToolServerConfig)
+import Kanban.UI.Review (applyFailedInterrupt)
+import Kanban.UI.SessionCore (newAgentSession)
+import Kanban.UI.Types (AgentSession (..), ChatTranscript (..), ReviewDetail (..), ReviewPhase (..), ReviewSession)
 import Spec.Support.Env (withEnvironmentValue)
 import Spec.Support.Expect (shouldMention, shouldNotMention)
+import Spec.Support.Fixtures (baseIssue, fixtureReviewThread)
 import System.Environment (getExecutablePath, lookupEnv)
 import System.FilePath ((</>))
 import Spec.Support.Process
@@ -65,6 +78,7 @@ import Spec.Support.Process
     reviewOutputs,
     startFailures,
     threadCreations,
+    plainChatTranscript,
     turnCompletions,
     turnStarts,
     waitForHeldConnections,
@@ -436,22 +450,245 @@ spec = do
         -- The client is not the connection: a further review still starts.
         beginIssueReview fixture.claudeReviewClient 846 `shouldReturn` Right ()
 
-    -- MODEL-16's boundary, held closed. The app-server's control requests
-    -- are meaningless to a CLI process, which would read one as ordinary
-    -- input and answer it as a review instruction.
-    it "refuses a mid-turn steer and an interrupt rather than writing app-server requests" $
+  -- MODEL-16. The channel has no operation that redirects a turn in flight
+  -- (D-16), so a message typed into one ends that turn and becomes the next.
+  -- Both halves of that handshake are asserted through a real fake CLI,
+  -- because what has to hold is an ordering between two processes: the
+  -- guidance must reach the provider's stdin after the interrupt and after
+  -- the turn it targeted has stopped, and nothing readable off one side alone
+  -- shows that.
+  describe "the Claude embedded review's mid-turn guidance" $ do
+    -- The acknowledgement first, then the turn's own end -- the order the
+    -- live CLI produced when D-16 was probed.
+    it "interrupts the running turn and sends the typed message as the next one" $
+      withClaudeReviewClient (interruptibleSession [acknowledgeInterrupt, abortedResult]) $ \fixture -> do
+        recorded <- guidanceRoundTrip fixture "focus on the parser"
+        map turnOutcomeOf (filter isTurnCompletion recorded)
+          `shouldBe` [Just TurnInterrupted, Just TurnSucceeded]
+        written <- awaitRecordedWrites fixture 3
+        map classifyWrite written `shouldBe` ["prompt", "interrupt", "guidance: focus on the parser"]
+        [event | event@ReviewSteerUndelivered {} <- recorded] `shouldBe` []
+        interruptFailures recorded `shouldBe` []
+
+    -- The same handshake with its two answers swapped. Neither the channel
+    -- nor the CLI orders the acknowledgement against the result of the turn
+    -- it ended, so an implementation that reads either as the trigger works
+    -- exactly half the time.
+    it "sends it in the other arrival order too, and writes it exactly once" $
+      withClaudeReviewClient (interruptibleSession [abortedResult, acknowledgeInterrupt]) $ \fixture -> do
+        recorded <- guidanceRoundTrip fixture "focus on the parser"
+        map turnOutcomeOf (filter isTurnCompletion recorded)
+          `shouldBe` [Just TurnInterrupted, Just TurnSucceeded]
+        written <- awaitRecordedWrites fixture 3
+        map classifyWrite written `shouldBe` ["prompt", "interrupt", "guidance: focus on the parser"]
+        interruptFailures recorded `shouldBe` []
+
+    -- A cancellation asks for the turn to end and nothing more. Its report is
+    -- the turn's own completion, so there must be no follow-up turn behind
+    -- it -- and the turn must be distinguishable from one that ran out.
+    it "ends a running turn on an explicit cancellation, with nothing sent after it" $
+      withClaudeReviewClient (interruptibleSession [acknowledgeInterrupt, abortedResult]) $ \fixture -> do
+        threadId <- awaitRunningTurn fixture
+        interruptReview fixture.claudeReviewClient threadId "turn-1" `shouldReturn` Right ()
+        recorded <- awaitOneCompletedTurn fixture
+        map turnOutcomeOf (filter isTurnCompletion recorded) `shouldBe` [Just TurnInterrupted]
+        written <- awaitRecordedWrites fixture 2
+        map classifyWrite written `shouldBe` ["prompt", "interrupt"]
+        interruptFailures recorded `shouldBe` []
+
+    -- The failure this path owns. A refused interrupt is not a rejected
+    -- steer: there is no steer to reject on this channel, so it is reported
+    -- as its own event carrying the message back (D-16). What must not happen
+    -- is the message going into the turn that is still running.
+    it "reports a refused interrupt as its own failure, keeping the message" $
+      withClaudeReviewClient (interruptibleSession [refuseInterrupt "cannot interrupt right now"]) $ \fixture -> do
+        threadId <- awaitRunningTurn fixture
+        sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
+          `shouldReturn` Right ()
+        recorded <- waitForReviewEvents "the interrupt failure" fixture.claudeReviewEvents (not . null . interruptFailures)
+        case interruptFailures recorded of
+          [(failed, cause, held)] -> do
+            failed `shouldBe` threadId
+            cause `shouldMention` "cannot interrupt right now"
+            held `shouldBe` Just "focus on the parser"
+          other -> expectationFailure ("expected one interrupt failure, got " <> show other)
+        [event | event@ReviewSteerUndelivered {} <- recorded] `shouldBe` []
+        -- The turn is still the one that was running, and nothing was written
+        -- into it.
+        turnCompletions recorded `shouldBe` []
+        written <- awaitRecordedWrites fixture 2
+        map classifyWrite written `shouldBe` ["prompt", "interrupt"]
+
+    -- The cancellation half of the same failure. Writing the control request
+    -- is not cancelling: the turn goes on running, and a session told only
+    -- that the write succeeded would show it as stopping and never hear
+    -- otherwise.
+    it "reports a refused cancellation too, with no message to hand back" $
+      withClaudeReviewClient (interruptibleSession [refuseInterrupt "cannot interrupt right now"]) $ \fixture -> do
+        threadId <- awaitRunningTurn fixture
+        interruptReview fixture.claudeReviewClient threadId "turn-1" `shouldReturn` Right ()
+        recorded <- waitForReviewEvents "the interrupt failure" fixture.claudeReviewEvents (not . null . interruptFailures)
+        case interruptFailures recorded of
+          [(failed, cause, held)] -> do
+            failed `shouldBe` threadId
+            cause `shouldMention` "cannot interrupt right now"
+            held `shouldBe` Nothing
+          other -> expectationFailure ("expected one interrupt failure, got " <> show other)
+        -- The turn the cancellation did not end is still running.
+        turnCompletions recorded `shouldBe` []
+
+    -- The race the acknowledgement cannot settle on its own: an interrupt
+    -- written a moment after the turn reached its verdict is still
+    -- acknowledged as a success. Releasing the message on that would open a
+    -- turn on a review that has already finished, so it is handed back
+    -- instead -- and the turn stays the successful one it was.
+    it "hands the message back when the turn reached its verdict first" $
+      withClaudeReviewClient (interruptibleSession [acknowledgeInterrupt, approvedResult 844]) $ \fixture -> do
+        threadId <- awaitRunningTurn fixture
+        sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
+          `shouldReturn` Right ()
+        recorded <- waitForReviewEvents "the interrupt failure" fixture.claudeReviewEvents (not . null . interruptFailures)
+        map turnOutcomeOf (filter isTurnCompletion recorded) `shouldBe` [Just TurnSucceeded]
+        case interruptFailures recorded of
+          [(_, _, held)] -> held `shouldBe` Just "focus on the parser"
+          other -> expectationFailure ("expected one interrupt failure, got " <> show other)
+        written <- awaitRecordedWrites fixture 2
+        map classifyWrite written `shouldBe` ["prompt", "interrupt"]
+
+    -- One acknowledgement can only settle one operation, so a second one may
+    -- not be started while the first is unresolved. Refused synchronously,
+    -- which is what lets the session keep the draft the user is still
+    -- looking at rather than restore it from an event later.
+    it "refuses a second guidance or cancellation while one interrupt is unresolved" $
+      withClaudeReviewClient (interruptibleSession ["true"]) $ \fixture -> do
+        threadId <- awaitRunningTurn fixture
+        sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "first"
+          `shouldReturn` Right ()
+        second <- sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "second"
+        refusalText second `shouldMention` "already interrupting this turn"
+        cancellation <- interruptReview fixture.claudeReviewClient threadId "turn-1"
+        refusalText cancellation `shouldMention` "already interrupting this turn"
+        -- Only the first one was ever written, and neither refused message
+        -- reached the provider.
+        written <- awaitRecordedWrites fixture 2
+        map classifyWrite written `shouldBe` ["prompt", "interrupt"]
+
+    -- A turn that has already ended cannot be interrupted, and no ending will
+    -- ever settle a request aimed at one. Refused before anything is written,
+    -- so the caller keeps its message instead of being told later that it was
+    -- lost.
+    it "refuses to interrupt a turn the thread has already finished" $
       withClaudeReviewClient (reviewTurn <> [approvedResult 844]) $ \fixture -> do
         beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
         recorded <- awaitOneCompletedTurn fixture
         threadId <- soleThread recorded
-        sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "redirect"
-          `shouldReturn` Left "Kanban cannot steer a running turn on claude stream-json session yet"
-        interruptReview fixture.claudeReviewClient threadId "turn-1"
-          `shouldReturn` Left "Kanban cannot interrupt a turn on claude stream-json session yet"
-        -- Nothing reached the process: it read the opening message and
-        -- nothing else.
+        stale <- sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
+        refusalText stale `shouldMention` "already finished that turn"
         length <$> recordedClaudeInput fixture.claudeReviewRecordings 0 `shouldReturn` 1
+
+    -- The acknowledgement that never comes. Nothing else would settle the
+    -- handshake, and the message riding on it has already been shown to the
+    -- user as sent, so the connection's end is where it has to be handed
+    -- back.
+    it "hands the message back when the process dies with the interrupt unanswered" $
+      withClaudeReviewClient (interruptibleSession ["true"]) $ \fixture -> do
+        threadId <- awaitRunningTurn fixture
+        sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
+          `shouldReturn` Right ()
+        killConnectionOf fixture threadId
+        recorded <- waitForReviewEvents "the interrupt failure" fixture.claudeReviewEvents (not . null . interruptFailures)
+        case interruptFailures recorded of
+          [(failed, cause, held)] -> do
+            failed `shouldBe` threadId
+            cause `shouldMention` "Claude stream-json session"
+            held `shouldBe` Just "focus on the parser"
+          other -> expectationFailure ("expected one interrupt failure, got " <> show other)
         [event | event@ReviewSteerUndelivered {} <- recorded] `shouldBe` []
+
+  -- The session half of a failed interrupt. 'applyReviewEvent' runs in
+  -- brick's 'EventM', which no unit test here can drive, so the transition a
+  -- 'ReviewInterruptFailed' causes lives in 'applyFailedInterrupt' and is
+  -- covered directly -- the way issue #17's rejected steer is in
+  -- "Spec.Agent.Protocol", and reusing that recovery rather than a second one.
+  describe "recovering a message a failed interrupt was carrying" $ do
+    let guidance = "focus on the parser" :: Text
+        cause = "the interrupt was not performed" :: Text
+        interruptedSession :: Text -> ReviewSession
+        interruptedSession input =
+          ( newAgentSession
+              0
+              ReviewRunning
+              "thinking"
+              Nothing
+              (plainChatTranscript ("\nYou: " <> guidance <> "\n"))
+              ReviewDetail
+                { reviewSessionIssue = baseIssue 588 [],
+                  reviewSessionStage = InitialReview,
+                  reviewSessionThreadId = Just (fixtureReviewThread "claude-session-1"),
+                  reviewSessionTurnId = Just "turn-1",
+                  reviewSessionPending = Nothing,
+                  reviewSessionUndelivered = []
+                }
+          )
+            {sessionInput = input}
+
+    it "restores the message to an input line the user left alone, and says what failed" $ do
+      let recovered = applyFailedInterrupt cause (Just guidance) (interruptedSession "")
+      recovered.sessionInput `shouldBe` guidance
+      recovered.sessionTranscript.standardTranscript `shouldMention` ("[interrupt failed] " <> cause)
+
+    -- The optimistic entry is written the moment the control request goes
+    -- out, so a session shown only the failure would go on claiming the
+    -- provider read text it never saw.
+    it "qualifies the optimistic transcript entry rather than leaving it claiming delivery" $ do
+      let recovered = applyFailedInterrupt cause (Just guidance) (interruptedSession "")
+      recovered.sessionTranscript.standardTranscript `shouldMention` ("[not delivered] " <> guidance)
+
+    it "queues it behind a draft typed after the send rather than overwriting it" $ do
+      let recovered = applyFailedInterrupt cause (Just guidance) (interruptedSession "wait, ignore that")
+      recovered.sessionInput `shouldBe` "wait, ignore that"
+      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
+
+    -- A cancellation carried nothing, so there is nothing to restore -- but
+    -- one that did not happen is exactly what a user watching the turn keep
+    -- running needs told.
+    it "reports a failed cancellation without inventing a message to put back" $ do
+      let recovered = applyFailedInterrupt cause Nothing (interruptedSession "")
+      recovered.sessionInput `shouldBe` ""
+      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` []
+      recovered.sessionTranscript.standardTranscript `shouldMention` ("[interrupt failed] " <> cause)
+      recovered.sessionTranscript.standardTranscript `shouldNotMention` "[not delivered]"
+
+  -- The handshake's rule on its own, away from any process. Both halves have
+  -- to be in and agree before a user's message may be written, and every way
+  -- they can fail to agree has to abandon it rather than leave it pending.
+  describe "settling one interrupt" $ do
+    it "releases the guidance only once the request was accepted and its turn was cut short" $
+      map settleInterrupt [waitingOn InterruptAccepted TargetAborted]
+        `shouldBe` [Just InterruptDelivered]
+
+    it "keeps waiting while either half is still outstanding" $
+      map
+        settleInterrupt
+        [ waitingOn AcknowledgementPending TargetRunning,
+          waitingOn AcknowledgementPending TargetAborted,
+          waitingOn InterruptAccepted TargetRunning
+        ]
+        `shouldBe` [Nothing, Nothing, Nothing]
+
+    -- A refusal performed nothing whatever the turn went on to do, and a turn
+    -- that ended on its own was not interrupted however the request was
+    -- answered. Both abandon, and each says which it was.
+    it "abandons it, saying why, on every disagreement between the two halves" $
+      map
+        settleInterrupt
+        [ waitingOn (InterruptRefused "refused it") TargetRunning,
+          waitingOn (InterruptRefused "refused it") TargetAborted,
+          waitingOn (InterruptRefused "refused it") TargetSettled,
+          waitingOn AcknowledgementPending TargetSettled,
+          waitingOn InterruptAccepted TargetSettled
+        ]
+        `shouldSatisfy` all abandonedWithReason
 
   describe "the CLI stream-json decoder" $ do
     it "opens a turn on the session and turn a system init record names" $
@@ -505,10 +742,109 @@ spec = do
       encodedText (streamUserMessage "review #844")
         `shouldBe` "{\"message\":{\"content\":[{\"text\":\"review #844\",\"type\":\"text\"}],\"role\":\"user\"},\"type\":\"user\"}"
 
+    it "writes one control request, in the shape the CLI answers" $
+      encodedText (streamInterruptRequest "kanban-interrupt-2")
+        `shouldBe` "{\"request\":{\"subtype\":\"interrupt\"},\"request_id\":\"kanban-interrupt-2\",\"type\":\"control_request\"}"
+
+    it "reads the acknowledgement of a control request it performed" $
+      decodeStreamRecord
+        "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"kanban-interrupt-2\",\"response\":{\"still_queued\":[]}}}"
+        `shouldBe` Right (StreamControlAnswered "kanban-interrupt-2" (Right ()))
+
+    -- Fails closed on everything that is not agreement, quoting what the CLI
+    -- said where it said anything. An answer read as agreement is what would
+    -- release a user's message into a turn that is still running.
+    it "reads every other answer to a control request as a refusal that says why" $
+      map
+        decodeStreamRecord
+        [ "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"r-1\",\"error\":\"Unsupported control request subtype: interrupt\"}}",
+          "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"r-1\"}}",
+          "{\"type\":\"control_response\",\"response\":{\"subtype\":\"a_later_cli_adds_one\",\"request_id\":\"r-1\"}}",
+          "{\"type\":\"control_response\",\"response\":{\"request_id\":\"r-1\"}}"
+        ]
+        `shouldSatisfy` all refusalNamingItsRequest
+
+    it "refuses an answer it cannot attach to a request" $
+      map
+        decodeStreamRecord
+        [ "{\"type\":\"control_response\"}",
+          "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\"}}"
+        ]
+        `shouldSatisfy` all (either (not . mentionsAProvider) (const False))
+
+    -- A cut-short turn reports an error subtype and @is_error@ exactly as a
+    -- broken one does; only @terminal_reason@ separates them, so a decoder
+    -- reading the subtype first would call every interrupted turn a failure.
+    it "tells a turn that was cut short from one that broke" $
+      map
+        decodeStreamRecord
+        [ "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"stop_reason\":null,\"terminal_reason\":\"aborted_streaming\"}",
+          "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"terminal_reason\":\"completed\",\"result\":\"it broke\"}"
+        ]
+        `shouldBe` [ Right (StreamTurnClosed StreamTurnAborted),
+                     Right (StreamTurnClosed (StreamTurnFailure "ended its turn with an error: it broke"))
+                   ]
+
 -- | One realistic turn's worth of stream, minus the result line each test
 -- supplies for itself.
 reviewTurn :: [ByteString.ByteString]
 reviewTurn = claudeReviewTurn "weighing it" "reviewing it"
+
+-- | A session whose first turn opens and then stays open, so a test can type
+-- into a turn that is genuinely still running.
+--
+-- Three branches, told apart by the line the fake was handed rather than by
+-- how many it has read, because the whole point is that they do not arrive in
+-- a fixed order. A control request is answered with @answer@ -- which is
+-- where each test puts the acknowledgement, the result of the turn it ends,
+-- or neither, in whichever order it is about. The opening review prompt opens
+-- a turn and writes no result, leaving it running. Anything else is the
+-- follow-up turn, and completes with a verdict.
+interruptibleSession :: [ByteString.ByteString] -> [ByteString.ByteString]
+interruptibleSession answer =
+  ["case \"$message\" in", "  *control_request*)"]
+    <> answer
+    <> ["    ;;", "  *'#844'*)"]
+    <> reviewTurn
+    <> ["    ;;", "  *)"]
+    <> reviewTurn
+    <> [approvedResult 844, "    ;;", "esac"]
+
+-- | The @request_id@ the control request named, read back out of the line the
+-- fake was handed.
+--
+-- Echoed rather than invented, so a client that answered an acknowledgement
+-- naming somebody else's request would be caught: the id travels from
+-- Kanban's own counter, through the provider, and back.
+readRequestId :: ByteString.ByteString
+readRequestId = "request=$(printf '%s' \"$message\" | sed 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/')"
+
+-- | The CLI's acknowledgement of an interrupt it performed, in the shape a
+-- live 2.1.257 wrote it.
+acknowledgeInterrupt :: ByteString.ByteString
+acknowledgeInterrupt =
+  ByteString.intercalate
+    "\n"
+    [ readRequestId,
+      "printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{\"still_queued\":[]}}}\\n' \"$request\""
+    ]
+
+-- | The CLI's answer to a control request it would not perform.
+refuseInterrupt :: ByteString.ByteString -> ByteString.ByteString
+refuseInterrupt detail =
+  ByteString.intercalate
+    "\n"
+    [ readRequestId,
+      "printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"%s\",\"error\":\"" <> detail <> "\"}}\\n' \"$request\""
+    ]
+
+-- | The result line closing a turn that was cut short rather than ending on
+-- its own: an error subtype and @is_error@ like any broken turn, told apart
+-- from one only by @terminal_reason@.
+abortedResult :: ByteString.ByteString
+abortedResult =
+  rawResult
+    "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"stop_reason\":null,\"terminal_reason\":\"aborted_streaming\"}"
 
 -- | A second turn announcing a session this connection has never used, then
 -- completing normally. Only reachable by a provider that has already opened
@@ -597,6 +933,79 @@ encodedText = TextEncoding.decodeUtf8 . LazyByteString.toStrict . encode
 awaitOneCompletedTurn :: ClaudeReviewFixture -> IO [ReviewEvent]
 awaitOneCompletedTurn fixture =
   waitForReviewEvents "one completed turn" fixture.claudeReviewEvents (not . null . turnCompletions)
+
+-- | Start review 844 and wait until its first turn is running, which is the
+-- state every mid-turn test begins from.
+awaitRunningTurn :: ClaudeReviewFixture -> IO ReviewThreadId
+awaitRunningTurn fixture = do
+  beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+  recorded <- waitForReviewEvents "a running turn" fixture.claudeReviewEvents (not . null . turnStarts)
+  soleThread recorded
+
+-- | Type @message@ into a running turn and wait for the turn it becomes to
+-- reach its verdict.
+guidanceRoundTrip :: ClaudeReviewFixture -> Text -> IO [ReviewEvent]
+guidanceRoundTrip fixture message = do
+  threadId <- awaitRunningTurn fixture
+  sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") message `shouldReturn` Right ()
+  waitForReviewEvents
+    "the turn the guidance opened"
+    fixture.claudeReviewEvents
+    (any ((== Just TurnSucceeded) . turnOutcomeOf))
+
+-- | The lines the fake read from its stdin, once there are at least @wanted@
+-- of them. A write is made by one process and recorded by another, so a
+-- count read too early says nothing.
+awaitRecordedWrites :: ClaudeReviewFixture -> Int -> IO [Text]
+awaitRecordedWrites fixture wanted = go (400 :: Int)
+  where
+    go remaining = do
+      written <- recordedClaudeInput fixture.claudeReviewRecordings 0
+      if length written >= wanted
+        then pure written
+        else
+          if remaining <= 0
+            then fail ("timed out waiting for " <> show wanted <> " writes; recorded " <> show written)
+            else threadDelay 25000 >> go (remaining - 1)
+
+-- | What one line Kanban wrote to the provider is, named rather than
+-- compared: an interrupt, the review prompt that opens a session, or a
+-- message the user typed, quoted so the assertion says which one.
+classifyWrite :: Text -> String
+classifyWrite written
+  | "\"control_request\"" `Data.Text.isInfixOf` written = "interrupt"
+  | "#844" `Data.Text.isInfixOf` spoken = "prompt"
+  | otherwise = "guidance: " <> Data.Text.unpack spoken
+  where
+    spoken = userMessageText written
+
+isTurnCompletion :: ReviewEvent -> Bool
+isTurnCompletion ReviewTurnCompleted {} = True
+isTurnCompletion _ = False
+
+-- | Every interrupt this backend could not complete, as the thread it was on,
+-- what went wrong, and the guidance it handed back.
+interruptFailures :: [ReviewEvent] -> [(ReviewThreadId, Text, Maybe Text)]
+interruptFailures recorded =
+  [(threadId, cause, message) | ReviewInterruptFailed threadId cause message <- recorded]
+
+-- | One interrupt carrying a message, with its two halves in a stated state.
+waitingOn :: InterruptAcknowledgement -> InterruptTarget -> PendingInterrupt
+waitingOn acknowledgement target =
+  (pendingInterrupt "kanban-interrupt-2" "turn-1" (Just "focus on the parser"))
+    { interruptAcknowledgement = acknowledgement,
+      interruptTarget = target
+    }
+
+-- | Whether one decoded line is an answer that named its request and refused
+-- it, saying something about why.
+refusalNamingItsRequest :: Either Text StreamRecord -> Bool
+refusalNamingItsRequest (Right (StreamControlAnswered "r-1" (Left detail))) = not (Data.Text.null detail)
+refusalNamingItsRequest _ = False
+
+abandonedWithReason :: Maybe InterruptSettlement -> Bool
+abandonedWithReason (Just (InterruptAbandoned cause)) = not (Data.Text.null cause)
+abandonedWithReason _ = False
 
 soleThread :: [ReviewEvent] -> IO ReviewThreadId
 soleThread recorded = case threadCreations recorded of

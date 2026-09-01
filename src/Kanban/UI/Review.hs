@@ -7,6 +7,7 @@ module Kanban.UI.Review
     applyReviewEvent,
     reviewOutputPrefix,
     reviewProtocolWarningNotice,
+    applyFailedInterrupt,
     applyUndeliveredSteer,
     approvalServiceRefusal,
     armReviewTick,
@@ -317,6 +318,38 @@ undeliveredTranscriptNote message = "[not delivered] " <> message
 
 undeliveredNotice :: Text
 undeliveredNotice = "Your message was not delivered — it is waiting in the review session to resend"
+
+-- | Folds a failed interrupt back into its session: what went wrong, and —
+-- when a message was riding on it — the same restoration a rejected steer
+-- gets (issue #17).
+--
+-- Both halves are needed and neither substitutes for the other. A message
+-- sent on the Claude path is shown as sent the moment the control request is
+-- written, because that is the last synchronous moment there is (D-16), so a
+-- session told only that something failed would go on displaying a @You:@
+-- entry for text the provider never read. And a cancellation carries no
+-- message at all, yet a cancellation that did not happen is exactly what a
+-- user watching a turn keep running needs told.
+applyFailedInterrupt :: Text -> Maybe Text -> ReviewSession -> ReviewSession
+applyFailedInterrupt cause message session = maybe noted (`applyUndeliveredSteer` noted) message
+  where
+    noted =
+      session
+        { sessionTranscript =
+            appendTranscript session.sessionTranscript ("\n" <> interruptFailureTranscriptNote cause <> "\n")
+        }
+
+interruptFailureTranscriptNote :: Text -> Text
+interruptFailureTranscriptNote cause = "[interrupt failed] " <> sanitizeText cause
+
+-- | The notice a failed interrupt raises. It says what went wrong either way,
+-- and adds where the message went only when there was one to put back.
+interruptFailureNotice :: Text -> Maybe Text -> Text
+interruptFailureNotice cause message = "Interrupt failed: " <> sanitizeText cause <> whereItWent
+  where
+    whereItWent = case message of
+      Nothing -> ""
+      Just _ -> " — your message is waiting in the review session to resend"
 
 -- | What Ctrl-C/Ctrl-X in a review overlay should do, decided from the
 -- session's connection/process state rather than inline in
@@ -1013,6 +1046,10 @@ applyReviewEvent reviewEvent = case reviewEvent of
     modifyReviewSessionByThread threadId (applyUndeliveredSteer message)
     tailReviewThread threadId
     setNotice undeliveredNotice
+  ReviewInterruptFailed threadId cause message -> do
+    modifyReviewSessionByThread threadId (applyFailedInterrupt cause message)
+    tailReviewThread threadId
+    setNotice (interruptFailureNotice cause message)
   ReviewProtocolWarning provider message -> setNotice (reviewProtocolWarningNotice provider message)
   where
     outcomePhase IssueRevision TurnSucceeded (Just result)

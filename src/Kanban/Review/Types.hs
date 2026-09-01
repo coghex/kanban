@@ -194,6 +194,23 @@ data ReviewEvent
   -- thread: with no active turn the message is resent as a new @turn/start@
   -- instead, and nothing is reported.
   | ReviewSteerUndelivered ReviewThreadId Text Text
+  | -- | An interrupt-and-send that could not be completed, carrying the
+    -- thread, what went wrong, and the guidance that was waiting on it — so a
+    -- session can put a message it has already shown as sent back where the
+    -- user can resend it deliberately.
+    --
+    -- The Claude path's counterpart to 'ReviewSteerUndelivered' and
+    -- deliberately not that event (D-16). There is no steer to reject on this
+    -- channel; what can fail instead is the interrupt a typed message has to
+    -- land before it may be sent, and the two are different enough that one
+    -- event describing both would have to lie about one of them. It carries
+    -- no turn id for the same reason: the turn this names is the one the
+    -- interrupt failed to end, which the session has already been told about.
+    --
+    -- 'Nothing' is an explicit cancellation, which had no message riding on
+    -- it — the failure is still reported, because a cancellation that only
+    -- reached the provider's stdin has cancelled nothing.
+    ReviewInterruptFailed ReviewThreadId Text (Maybe Text)
   | -- | Something the client could not make sense of, naming the provider
     -- whose backend produced it.
     --

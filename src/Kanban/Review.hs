@@ -31,8 +31,12 @@ module Kanban.Review
     EmbeddedReviewBackend (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
+    InterruptAcknowledgement (..),
+    InterruptSettlement (..),
+    InterruptTarget (..),
     IssueReviewerRecord (..),
     IssueReviewerSource (..),
+    PendingInterrupt (..),
     ReviewAnswer (..),
     ReviewApproval (..),
     ReviewChoice (..),
@@ -99,12 +103,15 @@ module Kanban.Review
     reviewDeveloperInstructions,
     newToolRegistry,
     outcomeUnknownDiagnostic,
+    pendingInterrupt,
     releaseToolSlot,
     renderCanonicalIssueReviewResult,
     reserveToolSlot,
     resolveCanonicalIssueReviewer,
     resolveCanonicalIssueReviewerAt,
     reviewStageForLabels,
+    settleInterrupt,
+    streamInterruptRequest,
     streamUserMessage,
     unsupportedReviewOperationMessage,
     issueReviseAssignment,
@@ -184,7 +191,11 @@ import Kanban.Review.Canonical
     selectCanonicalIssueReviewerAt,
   )
 import Kanban.Review.Client
-  ( ReviewClient (..),
+  ( InterruptAcknowledgement (..),
+    InterruptSettlement (..),
+    InterruptTarget (..),
+    PendingInterrupt (..),
+    ReviewClient (..),
     ReviewToolProxy (..),
     ToolRegistry,
     attachToolProcess,
@@ -197,9 +208,11 @@ import Kanban.Review.Client
     killReviewTools,
     killThreadToolProcesses,
     newToolRegistry,
+    pendingInterrupt,
     registerReviewToolProxy,
     releaseToolSlot,
     reserveToolSlot,
+    settleInterrupt,
     takeReviewToolProxy,
     withReservedToolSlot,
   )
@@ -255,6 +268,7 @@ import Kanban.Review.Stream
   ( StreamRecord (..),
     StreamTurnResult (..),
     decodeStreamRecord,
+    streamInterruptRequest,
     streamUserMessage,
   )
 import Kanban.Review.Tools
@@ -389,6 +403,7 @@ startResolvedReviewClient backend roster workflowConfig repository eventSink = d
     Right value -> logMessage value "backend-started" backend.backendLabel >> pure (Just value)
   connections <- newConnectionPool
   activeTurns <- newMVar Map.empty
+  interrupts <- newMVar Map.empty
   threadIssues <- newMVar Map.empty
   toolRegistry <- newToolRegistry
   toolProxies <- newMVar Map.empty
@@ -397,6 +412,7 @@ startResolvedReviewClient backend roster workflowConfig repository eventSink = d
           { reviewBackend = backend,
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
+            reviewInterrupts = interrupts,
             reviewThreadIssues = threadIssues,
             reviewToolRegistry = toolRegistry,
             reviewToolProxies = toolProxies,
@@ -594,6 +610,7 @@ newReviewClientForTesting :: ModelRoster -> CommandBounds -> FilePath -> Text ->
 newReviewClientForTesting roster bounds repositoryRoot repositorySlug eventSink = do
   connections <- newConnectionPool
   activeTurns <- newMVar Map.empty
+  interrupts <- newMVar Map.empty
   threadIssues <- newMVar Map.empty
   toolRegistry <- newToolRegistry
   toolProxies <- newMVar Map.empty
@@ -602,6 +619,7 @@ newReviewClientForTesting roster bounds repositoryRoot repositorySlug eventSink 
           { reviewBackend = placeholderReviewBackend,
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
+            reviewInterrupts = interrupts,
             reviewThreadIssues = threadIssues,
             reviewToolRegistry = toolRegistry,
             reviewToolProxies = toolProxies,
@@ -706,6 +724,7 @@ newRecordingReviewClientForTesting :: ModelRoster -> (ReviewEvent -> IO ()) -> I
 newRecordingReviewClientForTesting roster eventSink = do
   connections <- newConnectionPool
   activeTurns <- newMVar Map.empty
+  interrupts <- newMVar Map.empty
   threadIssues <- newMVar Map.empty
   toolRegistry <- newToolRegistry
   toolProxies <- newMVar Map.empty
@@ -714,6 +733,7 @@ newRecordingReviewClientForTesting roster eventSink = do
           { reviewBackend = placeholderReviewBackend,
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
+            reviewInterrupts = interrupts,
             reviewThreadIssues = threadIssues,
             reviewToolRegistry = toolRegistry,
             reviewToolProxies = toolProxies,
@@ -825,14 +845,23 @@ openStreamedReview client connection issueNumber = do
       when (client.reviewBackend.backendProcessShape == ProcessPerThread) (stopReviewConnection connection)
       pure (Left message)
 
+-- | Send the user's typed message to a review thread, whether or not a turn
+-- is already running on it.
+--
+-- One entry point, two mechanisms, because the two channels differ in what
+-- they can do to a turn in flight. The app-server redirects it: @turn\/steer@
+-- carries the @expectedTurnId@ the message was aimed at, and a rejection is
+-- recovered rather than dropped (issue #17). The CLI's channel has no
+-- operation that redirects one at all (D-16), so the message ends the turn
+-- and becomes the next one — which the probe behind that decision found to
+-- be a near-equivalent, because an interrupted turn's partial output stays in
+-- the conversation the follow-up reads.
+--
+-- With no turn running both are the same thing: the message opens a turn.
 sendReviewMessage :: ReviewClient -> ReviewThreadId -> Maybe Text -> Text -> IO (Either Text ())
 sendReviewMessage client threadId activeTurnId = case activeTurnId of
-  -- Redirecting a turn already in flight. The app-server has an operation
-  -- for it; the CLI's channel has none at all (D-16), and what replaces it
-  -- is MODEL-16's, so until then a message typed mid-turn is refused rather
-  -- than written as a request the process on the other end cannot read.
   Just turnId -> \message -> case client.reviewBackend.backendProtocol of
-    StreamJsonProtocol -> pure (Left (unsupportedOperation client "steer a running turn"))
+    StreamJsonProtocol -> requestInterrupt client threadId turnId (Just message)
     AppServerProtocol ->
       withThreadConnection client threadId $ \connection ->
         sendRequest client connection (PendingSteer threadId turnId message) "turn/steer" (steerParams turnId message)
@@ -844,6 +873,117 @@ sendReviewMessage client threadId activeTurnId = case activeTurnId of
           "expectedTurnId" .= turnId,
           "input" .= [textInput message]
         ]
+
+-- | Write one @control_request@ ending the turn running on a thread, and
+-- record what is waiting on it.
+--
+-- 'Right' means the request was written, and nothing more. What the CLI does
+-- with it arrives later on that connection's reader, so this is where an
+-- interrupt-and-send stops being synchronous: a caller that took 'Right' has
+-- not yet had its message delivered, and learns it never will through
+-- 'ReviewInterruptFailed'.
+--
+-- Refused outright, before anything is written, in the two cases a caller can
+-- still do something about. A thread already interrupting must not start a
+-- second handshake: the acknowledgement coming back names one request, and
+-- two pending operations would race for it while one of the two messages went
+-- nowhere. And a turn that is no longer the thread's own is a turn nothing
+-- can end — the terminal record for it is already past, so no ending would
+-- ever settle this. Both leave the caller holding its message, which is what
+-- lets a session keep the user's draft rather than restore it later.
+--
+-- The two maps are taken in this order here and everywhere else that holds
+-- both, so the reader thread settling a turn cannot deadlock against a
+-- message being typed on it.
+requestInterrupt :: ReviewClient -> ReviewThreadId -> Text -> Maybe Text -> IO (Either Text ())
+requestInterrupt client threadId turnId guidance =
+  withThreadConnection client threadId $ \connection -> do
+    requestId <- interruptRequestId <$> nextRequestId connection
+    claimed <- modifyMVar client.reviewActiveTurns $ \turns ->
+      if Map.lookup threadId turns /= Just turnId
+        then pure (turns, Left (staleTurnMessage client))
+        else do
+          taken <- modifyMVar client.reviewInterrupts $ \pending -> case Map.lookup threadId pending of
+            Just _ -> pure (pending, Left (interruptInFlightMessage client))
+            Nothing -> pure (Map.insert threadId (pendingInterrupt requestId turnId guidance) pending, Right ())
+          pure (turns, taken)
+    case claimed of
+      Left message -> pure (Left message)
+      Right () -> do
+        sent <- sendValue client connection (streamInterruptRequest requestId)
+        case sent of
+          Right () -> pure (Right ())
+          Left message -> do
+            -- The caller is told and keeps its message, so nothing is left
+            -- waiting on an acknowledgement that cannot arrive.
+            modifyMVar_ client.reviewInterrupts (pure . Map.delete threadId)
+            pure (Left message)
+
+-- | The @request_id@ one interrupt is written under. Prefixed so a reader of
+-- a session transcript can tell Kanban's own control traffic from the CLI's,
+-- and drawn from the connection's request counter so no two of this
+-- connection's requests share an id.
+interruptRequestId :: Int -> Text
+interruptRequestId = ("kanban-interrupt-" <>) . Text.pack . show
+
+interruptInFlightMessage :: ReviewClient -> Text
+interruptInFlightMessage client =
+  backendSentence client <> " is already interrupting this turn; wait for it to stop before sending again"
+
+staleTurnMessage :: ReviewClient -> Text
+staleTurnMessage client =
+  backendSentence client <> " has already finished that turn; send again to start a new one"
+
+-- | Fold one new fact into the interrupt pending on a thread, and act on
+-- whatever that makes of it.
+--
+-- The single place a pending interrupt is settled, so the guidance riding on
+-- one is written on exactly one path and abandoned on exactly one other. Both
+-- of the facts it folds in — the acknowledgement and the end of the targeted
+-- turn — reach it from the same connection reader, so the entry is taken
+-- under the lock that read it and a settlement cannot happen twice.
+--
+-- The write itself is deliberately outside that lock. Sending is what opens
+-- the next turn, and holding the interrupt map across it would make a message
+-- typed on another thread wait on this thread's provider accepting a line.
+advanceInterrupt :: ReviewClient -> ReviewConnection -> ReviewThreadId -> (PendingInterrupt -> PendingInterrupt) -> IO ()
+advanceInterrupt client connection threadId step = do
+  settled <- modifyMVar client.reviewInterrupts $ \pending -> case Map.lookup threadId pending of
+    Nothing -> pure (pending, Nothing)
+    Just current ->
+      let stepped = step current
+       in case settleInterrupt stepped of
+            Nothing -> pure (Map.insert threadId stepped pending, Nothing)
+            Just settlement -> pure (Map.delete threadId pending, Just (stepped.interruptGuidance, settlement))
+  case settled of
+    Nothing -> pure ()
+    -- An explicit cancellation asked for the turn to end and nothing more, so
+    -- its delivery is the turn's own completion event and there is nothing
+    -- left to write.
+    Just (Nothing, InterruptDelivered) -> pure ()
+    Just (Just message, InterruptDelivered) -> do
+      sent <- sendTurnStartOn client connection threadId message
+      case sent of
+        Right () -> pure ()
+        Left detail -> client.reviewEventSink (ReviewInterruptFailed threadId detail (Just message))
+    Just (guidance, InterruptAbandoned cause) ->
+      client.reviewEventSink (ReviewInterruptFailed threadId cause guidance)
+
+-- | Report every interrupt pending on a connection that has ended, taking
+-- them so only one of a dying connection's terminal paths can.
+--
+-- An acknowledgement that never arrived before the process died is the
+-- failure this covers: nothing else would ever settle these, and the guidance
+-- waiting on one would be lost silently — having already been shown to the
+-- user as sent.
+reportAbandonedInterrupts :: ReviewClient -> ReviewConnection -> Text -> IO ()
+reportAbandonedInterrupts client connection message = do
+  abandoned <- modifyMVar client.reviewInterrupts $ \pending ->
+    let (mine, rest) = Map.partitionWithKey (\threadId _ -> threadId.reviewThreadConnection == connection.connectionId) pending
+     in pure (rest, Map.toList mine)
+  mapM_
+    (\(threadId, interrupt) -> client.reviewEventSink (ReviewInterruptFailed threadId message interrupt.interruptGuidance))
+    abandoned
 
 -- | Run an action against the connection a thread lives on. A thread that
 -- names a connection this client no longer holds is a connection that has
@@ -923,13 +1063,18 @@ approveReviewAction client requestIdentity accepted forSession = case client.rev
       | forSession = "acceptForSession"
       | otherwise = "accept"
 
--- | Cancel a running turn. The CLI does have an operation for this -- a
--- @control_request@ (D-16) -- but driving it is MODEL-16's, so until then
--- this refuses rather than writing the app-server's request into a process
--- that would read it as ordinary input.
+-- | Cancel a running turn.
+--
+-- Both channels have an operation for it, and neither answers synchronously:
+-- 'Right' says the request reached the provider, not that the turn stopped.
+-- The app-server reports the stop as that turn's own completion, and so does
+-- the CLI's channel -- but the CLI also answers the control request itself
+-- (D-16), so a cancellation it refuses is reported as
+-- 'ReviewInterruptFailed' rather than leaving a session waiting on a turn
+-- that is still running.
 interruptReview :: ReviewClient -> ReviewThreadId -> Text -> IO (Either Text ())
 interruptReview client threadId turnId = case client.reviewBackend.backendProtocol of
-  StreamJsonProtocol -> pure (Left (unsupportedOperation client "interrupt a turn"))
+  StreamJsonProtocol -> requestInterrupt client threadId turnId Nothing
   AppServerProtocol ->
     withThreadConnection client threadId $ \connection ->
       sendRequest
@@ -1210,11 +1355,20 @@ handleStreamRecord client connection attribution record = case record of
     client.reviewEventSink (ReviewTurnStarted threadId turnId)
   StreamDelta outputKind text ->
     onNamedThread "streamed output" (\threadId -> client.reviewEventSink (ReviewOutput threadId outputKind text))
+  StreamControlAnswered requestId answer ->
+    onNamedThread "an answer to a control request" $ \threadId ->
+      advanceInterrupt client connection threadId (acknowledge requestId answer)
   StreamTurnClosed outcome -> onNamedThread "a turn result" $ \threadId -> do
-    modifyMVar_ client.reviewActiveTurns (pure . Map.delete threadId)
+    ended <- modifyMVar client.reviewActiveTurns (\turns -> pure (Map.delete threadId turns, Map.lookup threadId turns))
     client.reviewEventSink $ case outcome of
       StreamVerdict text result -> ReviewTurnCompleted threadId TurnSucceeded Nothing (Just (text, result))
+      StreamTurnAborted -> ReviewTurnCompleted threadId TurnInterrupted Nothing Nothing
       StreamTurnFailure detail -> ReviewTurnCompleted threadId TurnFailed (Just (streamDiagnostic client detail)) Nothing
+    -- Reported before the interrupt is settled, so a session is told its turn
+    -- has stopped before the guidance that ended it opens the next one. The
+    -- two are written by this one reader in that order, and the next turn's
+    -- own opening record is behind both.
+    mapM_ (\turnId -> advanceInterrupt client connection threadId (targetEnded turnId outcome)) ended
   where
     -- The thread this turn runs on, whether the session drifted, and the
     -- diagnostics that were waiting for a thread to belong to. Decided in one
@@ -1228,6 +1382,20 @@ handleStreamRecord client connection attribution record = case record of
     announceThread threadId issueNumber = do
       modifyMVar_ client.reviewThreadIssues (pure . Map.insert threadId issueNumber)
       client.reviewEventSink (ReviewThreadCreated issueNumber threadId)
+    -- One acknowledgement belongs to one pending interrupt, matched by the
+    -- id the request carried. An answer naming anything else settles nothing:
+    -- it belongs to an operation this thread has already finished with, or to
+    -- one this client never sent.
+    acknowledge requestId answer pending
+      | pending.interruptRequest /= requestId = pending
+      | otherwise = pending {interruptAcknowledgement = either InterruptRefused (const InterruptAccepted) answer}
+    -- Only the turn the interrupt named settles it, and only its own account
+    -- of how it ended says whether the interrupt is what ended it.
+    targetEnded turnId outcome pending
+      | pending.interruptTurn /= turnId = pending
+      | otherwise = pending {interruptTarget = endedAs outcome}
+    endedAs StreamTurnAborted = TargetAborted
+    endedAs _ = TargetSettled
     -- Everything but the opening record belongs to a thread the stream has
     -- already named. One that arrives before it is a protocol warning rather
     -- than an event attributed to a guess.
@@ -1253,14 +1421,19 @@ handleStreamRecord client connection attribution record = case record of
 -- so it is reported first and by issue number, the same way every other
 -- never-started review is.
 reportConnectionStopped :: ReviewClient -> ReviewConnection -> Text -> IO ()
-reportConnectionStopped client connection message = case client.reviewBackend.backendProcessShape of
-  SharedProcess -> client.reviewEventSink (ReviewClientStopped message)
-  ProcessPerThread -> do
-    abandoned <- takePendingThreadStarts connection
-    mapM_ (\issueNumber -> client.reviewEventSink (ReviewStartFailed issueNumber message)) abandoned
-    interrupted <- takeConnectionTurns client connection
-    mapM_ (\threadId -> client.reviewEventSink (ReviewTurnCompleted threadId TurnFailed (Just message) Nothing)) interrupted
-    client.reviewEventSink (ReviewConnectionStopped connection.connectionId message)
+reportConnectionStopped client connection message = do
+  -- Ahead of the events that end this connection's sessions, so a session
+  -- takes back the message it was shown as having sent before it is told the
+  -- process behind it is gone.
+  reportAbandonedInterrupts client connection message
+  case client.reviewBackend.backendProcessShape of
+    SharedProcess -> client.reviewEventSink (ReviewClientStopped message)
+    ProcessPerThread -> do
+      abandoned <- takePendingThreadStarts connection
+      mapM_ (\issueNumber -> client.reviewEventSink (ReviewStartFailed issueNumber message)) abandoned
+      interrupted <- takeConnectionTurns client connection
+      mapM_ (\threadId -> client.reviewEventSink (ReviewTurnCompleted threadId TurnFailed (Just message) Nothing)) interrupted
+      client.reviewEventSink (ReviewConnectionStopped connection.connectionId message)
 
 -- | Take the threads on this connection that had a turn running, removing
 -- them from the active set.

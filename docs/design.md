@@ -922,16 +922,35 @@ since its ticks are the only thing driving review redraws, while solve and PR
 spinners also drive the board's own card badges and activity timers and so keep
 running with no overlay open.
 
-Feedback sent into a running turn is steered into it against the turn it was
-aimed at, so the app-server rejects it when that turn has moved on. A rejection
-never discards the message. With the thread now idle it becomes the follow-up
-turn the same keypress would have started a moment later — one request, and no
-second transcript entry. While any turn is running it is reported undelivered
+What feedback does to a running turn depends on the channel the review runs
+on, because only one of the two can redirect one.
+
+On the app-server, feedback sent into a running turn is steered into it against
+the turn it was aimed at, so the app-server rejects it when that turn has moved
+on. A rejection never discards the message. With the thread now idle it becomes
+the follow-up turn the same keypress would have started a moment later — one
+request, and no second transcript entry. While any turn is running it is reported undelivered
 rather than redirected into a turn the user never addressed: the transcript
 entry is marked as not delivered, and the text returns to the input line, or
 waits in the session behind whatever is already there. A draft typed after the
 send and a second rejected message are both preserved; sending frees the line
 and brings the oldest waiting message back.
+
+On the CLI's stream-json channel there is no operation that redirects a turn in
+flight at all, so feedback ends that turn and becomes the next one. The
+interrupt is confirmed before anything is sent: the message is written only
+once the backend has acknowledged the request *and* the turn it named has
+stopped, in whichever order those two arrive, so it is never written into a
+turn that is still running and never silently dropped because the interrupt did
+not land. An interrupt the backend refuses, and one whose turn reached its
+verdict first, are both reported as that failure rather than as an undelivered
+steer, which has no counterpart here; the turn stays whatever it was, and the
+message returns to the input line the way a rejected steer does. A turn ended
+this way is reported as interrupted, so a session can tell it from one that
+finished on its own, and an explicit cancellation is the same exchange with no
+message riding on it. One interrupt runs on a thread at a time: a second is
+refused while the first is unresolved, which leaves the draft where the user
+typed it.
 
 Review, solve, and PR transcripts follow the live tail only while they are
 already at the bottom. Scrolling up during a turn holds the view where it is,

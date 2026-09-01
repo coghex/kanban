@@ -156,6 +156,19 @@ brandComponent :: SolverBrand -> Text
 brandComponent CodexSolver = "codex-plugin"
 brandComponent ClaudeSolver = "claude-plugin"
 
+-- | Why each brand's floor is where it is, so the remediation an operator
+-- reads names the capability they are actually below.
+--
+-- The two are no longer the same sentence. Both floors start at the plugin
+-- subcommand family the tracked bundles install through, but Claude's has
+-- been raised past it by the embedded review's interrupt exchange (D-16),
+-- and telling an operator on such a release only that they cannot install the
+-- bundle would send them looking for a failure they will not find.
+versionFloorReason :: SolverBrand -> Text
+versionFloorReason CodexSolver = "older releases cannot install the Kanban workflow bundle."
+versionFloorReason ClaudeSolver =
+  "older releases cannot install the Kanban workflow bundle, and the embedded issue review's turn interruption is unverified below it."
+
 oppositeBrand :: SolverBrand -> SolverBrand
 oppositeBrand CodexSolver = ClaudeSolver
 oppositeBrand ClaudeSolver = CodexSolver
@@ -225,7 +238,7 @@ executableCheck probe = PreflightCheck (name <> " executable") status
           PreflightBlocked
             ExecutableUnavailable
             (name <> " " <> found <> " is older than the supported " <> required)
-            ("Update " <> product_ <> " to " <> required <> " or newer; older releases cannot install the Kanban workflow bundle.")
+            ("Update " <> product_ <> " to " <> required <> " or newer; " <> versionFloorReason probe.probeBrand)
         VersionUnknown detail -> PreflightUnknown (Text.pack path <> " (" <> detail <> ")")
         VersionSupported found -> PreflightReady (Text.pack path <> " (" <> found <> ")")
 
