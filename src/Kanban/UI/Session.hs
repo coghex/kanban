@@ -780,6 +780,11 @@ reviewSessionMode session =
 -- resumable, and §7 promises guidance after an interrupt, so
 -- 'ReviewInterrupted' is terminal for a canonical stage and merely paused for
 -- a revision.
+--
+-- 'ReviewFailed' is the opposite case, and is why 'reviewSessionReusable'
+-- refuses to reopen one: a failed revision has lost whatever it was running
+-- on, so a line that took text here could only offer a send with nothing to
+-- send it on.
 reviewSessionInputLive :: ReviewStage -> ReviewPhase -> Bool
 reviewSessionInputLive stage phase
   | stage /= IssueRevision = False
@@ -794,9 +799,12 @@ reviewSessionActive session = reviewPhaseActive session.sessionPhase
 
 -- | Whether pressing 'r' should just reopen an existing review session
 -- rather than launch a fresh label-derived stage. A live turn is always
--- reused, as is a finished/failed session whose recorded stage still
--- matches what the labels currently request. A cancelled canonical stage
--- ('ReviewInterrupted') is the exception: once its process has actually
+-- reused, as is a settled session whose recorded stage still
+-- matches what the labels currently request. Two phases are exceptions, one
+-- at each end of that rule.
+--
+-- A cancelled canonical stage
+-- ('ReviewInterrupted') is the first: once its process has actually
 -- finished (no live entry in 'appCanonicalReviewProcesses' remains), 'r'
 -- must launch a genuinely fresh stage even though the stage is unchanged,
 -- rather than reopen the stale interrupted overlay -- but while that kill
@@ -804,10 +812,22 @@ reviewSessionActive session = reviewPhaseActive session.sessionPhase
 -- process launch against the first invocation's still-pending completion.
 -- An interrupted app-server revision remains resumable, so it follows the
 -- ordinary same-stage reuse rule instead.
+--
+-- A /failed/ revision is the second, for the opposite reason to the
+-- interrupted one: nothing about it is resumable. Its thread is gone --
+-- because the turn failed, or because the connection carrying it did -- and
+-- 'reviewSessionInputLive' correctly refuses to take text for a session with
+-- nothing to send it on, so reopening one is a dead end no further press can
+-- leave. 'r' starts a fresh revision instead, and
+-- 'Kanban.UI.Review.carryUndelivered' brings across whatever the failed one
+-- never managed to send. A settled canonical stage keeps the ordinary rule:
+-- it holds a verdict worth reopening to read, and its retry is the label
+-- change that moves the stage.
 reviewSessionReusable :: ReviewPhase -> ReviewStage -> ReviewStage -> Bool -> Bool
 reviewSessionReusable phase sessionStage requestedStage hasLiveCanonicalProcess
   | phase == ReviewInterrupted, sessionStage /= IssueRevision = hasLiveCanonicalProcess
   | reviewPhaseActive phase = True
+  | phase == ReviewFailed, sessionStage == IssueRevision = False
   | sessionStage == requestedStage = True
   | otherwise = False
 

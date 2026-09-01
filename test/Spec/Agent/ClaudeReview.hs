@@ -60,7 +60,13 @@ import Kanban.Review
     streamUserMessage,
   )
 import Kanban.ReviewToolServer (reviewToolServerConfig)
-import Kanban.UI.Review (applyFailedInterrupt, applyUndeliveredSteer)
+import Kanban.UI.Review
+  ( applyFailedInterrupt,
+    carryUndelivered,
+    markReviewSessionsDisconnected,
+    newReviewSession,
+  )
+import Kanban.UI.Session (reviewSessionInputLive, reviewSessionReusable)
 import Kanban.UI.SessionCore (newAgentSession)
 import Kanban.UI.Types (AgentSession (..), ChatTranscript (..), ReviewDetail (..), ReviewPhase (..), ReviewSession)
 import Spec.Support.Env (withEnvironmentValue)
@@ -722,14 +728,53 @@ spec = do
       recovered.sessionTranscript.standardTranscript `shouldMention` ("[not delivered] " <> guidance)
       recovered.sessionTranscript.standardTranscript `shouldMention` ("[interrupt failed] " <> cause)
 
-    -- And the queue it lands in is the one whose drain is already the
-    -- recovery: a message waiting there comes back to the input line
-    -- oldest-first the next time one can be sent, so a settled session that
-    -- is later running again offers it without a second mechanism.
-    it "leaves it in the queue the session drains back onto a usable line" $ do
-      let stranded = applyFailedInterrupt cause (Just guidance) (settledSession "")
-          running = stranded {sessionPhase = ReviewRunning}
-      (applyUndeliveredSteer "a later rejection" running).sessionInput `shouldBe` guidance
+    -- The whole sequence a dying connection actually produces, in order and
+    -- through the functions that handle it, rather than a session poked into
+    -- a phase by hand. The connection report settles the session, the
+    -- failure hands the message to the only place a settled session can
+    -- keep it, the settled session is then refused as reusable so the next
+    -- press starts a review rather than reopening a dead end, and the
+    -- session that press creates has the message back on a line it can send
+    -- from. Any one of those four links missing loses the message.
+    it "carries the message through the connection's end to a fresh review that can send it" $ do
+      let opened = interruptedSession ""
+          -- The connection the session is actually running on, read off the
+          -- session rather than restated, so this cannot drift into
+          -- disconnecting a connection it was never served by and passing
+          -- because nothing happened.
+          serving = fmap (.reviewThreadConnection) opened.sessionDetail.reviewSessionThreadId
+          settled =
+            markReviewSessionsDisconnected
+              serving
+              "Claude stream-json session exited"
+              (Map.singleton 588 opened)
+      stranded <- case Map.lookup 588 settled of
+        Just session -> pure (applyFailedInterrupt cause (Just guidance) session)
+        Nothing -> fail "the connection's end dropped the session it served"
+      stranded.sessionPhase `shouldBe` ReviewFailed
+      stranded.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
+      reviewSessionReusable
+        stranded.sessionPhase
+        stranded.sessionDetail.reviewSessionStage
+        IssueRevision
+        False
+        `shouldBe` False
+      -- Built by the constructor the press itself uses, so the last link is
+      -- the session `r` really creates rather than one shaped like it.
+      let restarted = carryUndelivered (Just stranded) (newReviewSession (baseIssue 588 []) IssueRevision 0)
+      restarted.sessionInput `shouldBe` guidance
+      restarted.sessionDetail.reviewSessionUndelivered `shouldBe` []
+      reviewSessionInputLive restarted.sessionDetail.reviewSessionStage restarted.sessionPhase
+        `shouldBe` True
+
+    -- A draft the user typed after the send is not overwritten by the
+    -- message coming across: the line the fresh session opens with is the
+    -- one they were last looking at, and the message waits behind it.
+    it "keeps the replaced session's own draft ahead of what it never sent" $ do
+      let stranded = applyFailedInterrupt cause (Just guidance) (settledSession "wait, ignore that")
+          restarted = carryUndelivered (Just stranded) (newReviewSession (baseIssue 588 []) IssueRevision 0)
+      restarted.sessionInput `shouldBe` "wait, ignore that"
+      restarted.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
 
   -- The handshake's rule on its own, away from any process. Both halves have
   -- to be in and agree before a user's message may be written, and every way

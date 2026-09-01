@@ -694,7 +694,11 @@ its column's first selectable entry instead, exactly as a closed search does.
 ### Embedded issue reviews
 
 Pressing `r` on an issue or from its open details starts its label-selected
-review stage, or reopens the issue's existing session. Canonical review and
+review stage, or reopens the issue's existing session. A revision session that
+has *failed* is the exception: it has lost the thread it would send on, so it
+takes no further input and reopening it leads nowhere — `r` starts a fresh
+revision instead, carrying across the draft on its input line and anything
+still waiting behind it. Canonical review and
 rereview use the synchronous v2 reviewer; interactive revision uses one
 persistent Codex app-server. Pressing `r` on an epic header is a no-op that
 sets a notice instead: an epic is structure rather than reviewable work, so
@@ -950,9 +954,10 @@ whatever it was. The message it was carrying comes back the way a rejected
 steer does when the session can still send it, and waits in that session's
 queue when it cannot, which is where a session whose backend has gone keeps it:
 visible in the overlay, and back on the input line the next time one can be
-sent. A turn ended this way is reported as interrupted, so a session can tell
-it from one that finished on its own, and an explicit cancellation is the same
-exchange with no message riding on it. One interrupt runs on a thread at a
+sent — including into the fresh revision `r` starts once the failed one can no
+longer take it. A turn ended this way is reported as interrupted, so a session
+can tell it from one that finished on its own, and an explicit cancellation is
+the same exchange with no message riding on it. One interrupt runs on a thread at a
 time: a second is refused while the first is unresolved, which leaves the draft
 where the user typed it.
 

@@ -596,6 +596,21 @@ spec = do
     it "reuses an interrupted app-server revision when its stage is unchanged" $
       reviewSessionReusable ReviewInterrupted IssueRevision IssueRevision False `shouldBe` True
 
+    -- The opposite of the interrupted revision above. An interrupted one is
+    -- paused and keeps its input line; a failed one has lost the thread it
+    -- would send on, so 'reviewSessionInputLive' takes no text for it and
+    -- reopening it is a dead end no further press can leave. 'r' has to be
+    -- able to start another, which is also what gives a message the backend
+    -- never read somewhere to go.
+    it "forces a fresh launch for a failed revision, which cannot be resumed" $
+      reviewSessionReusable ReviewFailed IssueRevision IssueRevision False `shouldBe` False
+
+    -- Scoped to the revision, because a settled canonical stage is not a
+    -- dead end in the same way: it holds a verdict worth reopening to read,
+    -- and its retry is the label change that moves the stage.
+    it "still reopens a failed canonical stage whose stage labels still request it" $
+      reviewSessionReusable ReviewFailed InitialReview InitialReview False `shouldBe` True
+
   describe "review animation tick decisions" $ do
     -- issue #30: answering a question/approval and the backend's matching
     -- 'ReviewTurnStarted' notification each used to call the tick

@@ -9,6 +9,7 @@ module Kanban.UI.Review
     reviewProtocolWarningNotice,
     applyFailedInterrupt,
     applyUndeliveredSteer,
+    carryUndelivered,
     approvalServiceRefusal,
     armReviewTick,
     armVisibleReviewTicks,
@@ -23,6 +24,7 @@ module Kanban.UI.Review
     epicReviewRefusalNotice,
     forcedToNormalBy,
     markReviewSessionsDisconnected,
+    newReviewSession,
     numberedChoicePrompt,
     resolveReviewCancelAction,
     reviewDigitActionFor,
@@ -319,6 +321,30 @@ holdUndelivered inputLive message session =
       | inputLive, Text.null (Text.strip session.sessionInput) = takeNextUndelivered queued
       | otherwise = (session.sessionInput, queued)
 
+-- | Carries what a session being replaced never managed to send into the
+-- session replacing it: the draft on its input line, and everything still
+-- waiting behind it, oldest first.
+--
+-- The other half of handing a message back. A message that failed to reach
+-- the provider is put where the session can still act on it, but a session
+-- whose backend has gone cannot act on anything — so it holds the message in
+-- its queue, and the press that starts the review it needs is the one press
+-- that would otherwise throw it away with the session it was parked in. This
+-- is what makes "kept in the review session" true across that press rather
+-- than only until it.
+--
+-- The old line goes first because it is what the user was last looking at,
+-- and the queue follows in the order it accumulated; empty text is dropped
+-- rather than carried as a blank entry. The fresh session's line is live, so
+-- what lands there is immediately sendable again.
+carryUndelivered :: Maybe ReviewSession -> ReviewSession -> ReviewSession
+carryUndelivered Nothing session = session
+carryUndelivered (Just previous) session =
+  (withUndelivered stillUndelivered session) {sessionInput = nextInput}
+  where
+    (nextInput, stillUndelivered) = takeNextUndelivered (filter (not . Text.null . Text.strip) carried)
+    carried = previous.sessionInput : previous.sessionDetail.reviewSessionUndelivered
+
 clearPendingInteraction :: ReviewSession -> ReviewSession
 clearPendingInteraction = withPendingInteraction Nothing
 
@@ -562,7 +588,10 @@ startIssueReview issue = do
     _ | Just notice <- approvalServiceRefusal state requestedStage -> setNotice notice
     _ -> do
       let priorGeneration = priorTickGeneration issue.issueNumber state.appReviewSessions
-          session = newReviewSession issue requestedStage priorGeneration
+          session =
+            carryUndelivered
+              (Map.lookup issue.issueNumber state.appReviewSessions)
+              (newReviewSession issue requestedStage priorGeneration)
       modify
         ( \current ->
             noticeCleared
