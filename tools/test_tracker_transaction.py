@@ -2110,6 +2110,67 @@ class TrackerTransactionTests(TrackerFixture):
             self.fx.check(document=classified)["status"], "outstanding"
         )
 
+    def test_a_novel_document_with_a_lane_is_written_locally_but_resolves_on_the_branch_only(self):
+        # Requirement 3's lane precedence once the applied record exists
+        # (#605). Classified for the direct lane but never on the branch, the
+        # document IS written and recorded locally: the helper declines to
+        # publish a novel document (#237) and applies the approved mutation
+        # over the copy the preflight observed like any other. That record
+        # still does not license a local resolution, because the lane says
+        # the disposition is verified on the branch, so the transaction stays
+        # outstanding until the document is enrolled and published there.
+        classified = "docs/drainer-bugs.md"
+        run(["git", "checkout", "-q", "master"], self.fx.primary)
+        (self.fx.primary / "docs" / "agent-workflow-contract.md").write_text(
+            CLASSIFICATION.replace(
+                "docs/design.md | pr-atomic | test-parsed",
+                "docs/design.md | pr-atomic | test-parsed\n"
+                "docs/drainer-bugs.md | coordination | audit-report",
+            ),
+            encoding="utf-8",
+        )
+        run(["git", "commit", "-qam", "classify"], self.fx.primary)
+        run(["git", "push", "-q", "origin", "master:master"], self.fx.primary)
+        (self.fx.docs / classified).write_text(DOCUMENT, encoding="utf-8")
+        self.assertIsNone(publisher.blob_at(self.fx.docs, "origin/master", classified))
+        preflight = publisher.check_pending(
+            self.fx.docs, "coghex/kanban", "master", classified
+        )
+        self.assertEqual(preflight["status"], "clear")
+        self.confirmed_pr_atomic_transaction(document=classified)
+
+        applied = self.fx.publish_document(
+            self.APPLIED, path=classified,
+            expected_working_copy=preflight["working_copy_blob"],
+        )
+        self.assertEqual(applied["status"], "not-published")
+        self.assertIn("novel document", applied["reason"])
+        self.assertTrue(applied["document_written"])
+        self.assertEqual(applied["write_outcome"], "applied-over-preflight-copy")
+        self.assertEqual(applied["applied_record"], "recorded")
+        self.assertEqual(
+            applied["applied_ref"], publisher.applied_ref("coghex/kanban", classified)
+        )
+        self.assertIn(
+            "- [x] DW-3. Checkpoint tracker mutations — [#311]",
+            (self.fx.docs / classified).read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            publisher.read_applied(self.fx.docs, "coghex/kanban", classified),
+            publisher.working_blob(self.fx.docs, classified),
+        )
+
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.resolve(source="local", document=classified)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("publishes directly to master", caught.exception.message)
+        self.assertEqual(
+            self.fx.check(document=classified)["status"], "outstanding"
+        )
+        self.assertIsNotNone(self.fx.read(document=classified)[0])
+        # Still novel: nothing here published it, and nothing may (#237).
+        self.assertIsNone(publisher.blob_at(self.fx.docs, "origin/master", classified))
+
     # -- abandonment ---------------------------------------------------------
 
     def test_abandonment_clears_an_unfinished_transaction_and_reports_what_landed(self):
