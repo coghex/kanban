@@ -34,6 +34,7 @@ module Kanban.Action.AutoSolve
     autoSolveTick,
     autoSolveConclusionOutcome,
     autoSolveCursorFor,
+    autoSolveStateForWorker,
     initialAutoSolveState,
     autoSolveActionActivity,
     AutoSolveState (..),
@@ -56,7 +57,7 @@ where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Data.List (find)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -77,6 +78,7 @@ import Kanban.UI.AutoSolve
     autoSolveRevisionTurn,
     autoSolveStopped,
     decideAutoSolve,
+    recoveredAutoSolveProgress,
   )
 import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..), SolvePhase (..))
 import Kanban.Worker
@@ -174,7 +176,35 @@ data AutoSolveDriver = AutoSolveDriver
     driverSteps :: Int
   }
 
--- | The state a freshly dispatched autosolve action starts in.
+-- | The loop state an autosolve worker is in, from its own durable record.
+--
+-- Used for every autosolve handle, launched or joined, because the two are
+-- the same question asked of the same record. A worker this dispatch started
+-- carries a parent recording round zero and no bound pull request, which is
+-- the opening state; a worker it /joined/ may be a revision three rounds in,
+-- and its parent says so.
+--
+-- Building the opening state unconditionally is what would break the second
+-- case: a handle joined to a running revision would be reset to
+-- \'AutoImplementing\' with nothing bound, and once that revision finished it
+-- would go back to discovering a pull request instead of waiting for the
+-- canonical rereview verdict on the one the run already has.
+autoSolveStateForWorker :: ResolvedTarget -> WorkerDescriptor -> ActionAttribution -> AutoSolveState
+autoSolveStateForWorker target descriptor attribution =
+  (initialAutoSolveState target descriptor attribution)
+    { autoSolveActionProgress =
+        fromMaybe
+          (initialAutoSolveState target descriptor attribution).autoSolveActionProgress
+          ( recoveredAutoSolveProgress
+              AutoSolve
+              descriptor.workerDescriptorSpec.workerParent
+              attribution.attributionKnownPullRequests
+              descriptor.workerDescriptorSpec.workerCreatedAt
+          )
+    }
+
+-- | The state a worker with no durable parent record starts in: the opening
+-- turn of a fresh run.
 initialAutoSolveState :: ResolvedTarget -> WorkerDescriptor -> ActionAttribution -> AutoSolveState
 initialAutoSolveState target descriptor attribution =
   AutoSolveState

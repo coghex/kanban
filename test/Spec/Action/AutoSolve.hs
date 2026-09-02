@@ -811,6 +811,61 @@ spec = do
               either Just (const Nothing) advanced
                 `shouldBe` Just (ActionPullRequestApproved pullRequestUnderLoop)
 
+    -- A handle joined to a running revision must start where that revision
+    -- is. Reset to the opening turn, it would go back to discovering a pull
+    -- request once the revision finished, instead of waiting for the
+    -- canonical rereview verdict on the one the run already has.
+    it "starts a joined worker's handle where its own record says the run is" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              revising =
+                (reviewParent 2) {workerParentPullRequest = Just pullRequestUnderLoop}
+          resumed <-
+            descriptorCarrying
+              repository
+              "solve-resumed"
+              (SolveWorkerTaskKind (SolveWorkerTask issueUnderLoop AutoSolve ClaudeSolver))
+              (Just revising)
+              (addUTCTime 120 epoch)
+          let joined = autoSolveStateForWorker targetUnderLoop resumed attributionUnderLoop
+          joined.autoSolveActionProgress.autoSolveStage `shouldBe` AutoRevising
+          joined.autoSolveActionProgress.autoSolvePullRequest `shouldBe` Just pullRequestUnderLoop
+          joined.autoSolveActionProgress.autoSolveReviewRound `shouldBe` 2
+          joined.autoSolveActionProgress.autoSolveKnownPullRequests `shouldBe` Set.fromList [7]
+          -- ...and driven on, it awaits that pull request's rereview verdict
+          -- and completes on it, rather than rediscovering anything.
+          let approvedPullRequest =
+                linkedPullRequest pullRequestUnderLoop ClaudeSolver [label defaultWorkflowConfig.approvalLabel]
+          withLoop [] $ \loop -> do
+            loop.loopSetWorld (World [approvedPullRequest] [(Solver, completed)])
+            advanced <-
+              advanceAutoSolveAction
+                loop.loopTurns
+                (withPullRequests loop [approvedPullRequest])
+                joined {autoSolveActionSolver = loop.loopStart.autoSolveActionSolver}
+            either Just (const Nothing) advanced
+              `shouldBe` Just (ActionPullRequestApproved pullRequestUnderLoop)
+            readIORef loop.loopDispatches >>= (`shouldBe` [])
+
+    -- A worker with no parent record is the opening turn of a fresh run,
+    -- which is what a launch this dispatch made looks like.
+    it "starts a worker with no record at the opening turn" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+          fresh <-
+            descriptorCarrying
+              repository
+              "solve-initial"
+              (SolveWorkerTaskKind (SolveWorkerTask issueUnderLoop AutoSolve ClaudeSolver))
+              Nothing
+              epoch
+          let opening = autoSolveStateForWorker targetUnderLoop fresh attributionUnderLoop
+          opening.autoSolveActionProgress.autoSolveStage `shouldBe` AutoImplementing
+          opening.autoSolveActionProgress.autoSolvePullRequest `shouldBe` Nothing
+          opening.autoSolveActionProgress.autoSolveReviewRound `shouldBe` 0
+
     it "takes over nothing when no autosolve solver worker is discoverable" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do

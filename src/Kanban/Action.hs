@@ -171,6 +171,7 @@ module Kanban.Action
     autoSolveConclusionOutcome,
     autoSolveCursorFor,
     autoSolveActionHandle,
+    autoSolveStateForWorker,
     initialAutoSolveState,
     autoSolveActionActivity,
     AutoSolveState (..),

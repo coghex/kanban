@@ -66,7 +66,7 @@ import Kanban.Action.AutoSolve
     AutoSolveState,
     AutoSolveTurns (..),
     autoSolveCursorFor,
-    initialAutoSolveState,
+    autoSolveStateForWorker,
     runAutoSolveActionWith,
   )
 import Kanban.Action.Target (actionCompatibility, resolveActionTarget)
@@ -379,7 +379,7 @@ liveAutoSolveTurns = AutoSolveTurns dispatchAction readWorkerState
 -- | An autosolve handle carrying a cursor its observations advance.
 autoSolveActionHandle :: AutoSolveTurns -> ResolvedTarget -> ActionAttribution -> WorkerDescriptor -> IO ActionHandle
 autoSolveActionHandle turns resolved attribution descriptor = do
-  cursor <- autoSolveCursorFor turns (initialAutoSolveState resolved descriptor attribution)
+  cursor <- autoSolveCursorFor turns (autoSolveStateForWorker resolved descriptor attribution)
   pure (AutoSolveActionHandle resolved descriptor attribution cursor)
 
 -- | Drive one autosolve action to a terminal outcome.

@@ -855,6 +855,58 @@ spec = do
         dispatched <- dispatchProviderTurn environment request plan
         either isTurnAlreadyRunning (const False) dispatched `shouldBe` True
 
+    -- The handle a joined dispatch returns must drive the run it joined, not
+    -- a fresh one: observing it reports where that run actually is.
+    it "returns a handle placed where the joined autosolve run already is" $
+      withDispatchMachine $ \environment -> do
+        holder <- solveWorkerDescriptor environment.actionRepository 844 AutoSolve
+        let revising =
+              holder
+                { workerDescriptorSpec =
+                    holder.workerDescriptorSpec
+                      { workerParent =
+                          Just
+                            WorkerParent
+                              { workerParentIssueNumber = 844,
+                                workerParentReviewRound = 2,
+                                workerParentSolverBrand = ClaudeSolver,
+                                workerParentSolverSession = Just "session-1",
+                                workerParentSolverLogPath = Nothing,
+                                workerParentStartedAt = epoch,
+                                workerParentKnownPullRequests = Set.fromList [11],
+                                workerParentPullRequest = Just 900,
+                                workerParentSolverAssignment = Nothing
+                              }
+                      }
+                }
+        publishWorkerSpec revising
+        publishWorkerState revising WorkerRunning
+        acquireWorkerLease revising `shouldReturn` Right ()
+        let request =
+              (actionRequest AutoSolveIssue identityUnderTest (TargetByKind ActionTargetIssue 844))
+                { requestSolverBrand = Just ClaudeSolver,
+                  requestRecordedAssignment = Just (solveCell ClaudeSolver)
+                }
+            plan =
+              either (error . show) id $
+                planResolvedAction
+                  defaultWorkflowConfig
+                  identityUnderTest
+                  AutoSolveIssue
+                  (Just ClaudeSolver)
+                  (ActionTargetItem (resolveHeldItem environment.actionCatalog TargetPlain (IssueItem (baseIssue 844 []))))
+        dispatched <- dispatchProviderTurn environment request plan
+        case dispatched of
+          Left refusal -> error ("expected the running revision to be joined, saw " <> show refusal)
+          Right handle -> do
+            actionHandleWorker handle
+              `shouldSatisfy` maybe False ((== revising.workerDescriptorSpecPath) . (.workerDescriptorSpecPath))
+            -- The revision is still running, so the loop holds — and says
+            -- where it is. A handle reset to the opening turn would say
+            -- "implementing" and, once that turn settled, rediscover.
+            observed <- observeAction environment handle
+            observed `shouldBe` Right (ActionRunning "revising PR #900")
+
     -- A discoverable worker matching the requested task is not evidence that
     -- it holds the lease. A terminal worker stays discoverable until it is
     -- acknowledged, so this issue has a finished solve sitting in the cache
