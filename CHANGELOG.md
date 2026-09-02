@@ -15,6 +15,23 @@ created above it.
 
 ### Unreleased
 
+- A report or design document processed before it has ever been on the
+  publication branch now takes its first disposition instead of stranding the
+  run. `publish_coordination_doc.py --check-pending` reports the document's
+  `working_copy_blob` beside `publication_tip`, publication accepts it back as
+  `--expected-working-copy`, and a document absent from the tip is applied over
+  the working copy the preflight observed — a fifth named write outcome,
+  `applied-over-preflight-copy`, recorded exactly like the two existing applied
+  ones — while a copy that moved since, a binding that was not passed, or a
+  file that does not exist still writes nothing. `tracker_transaction.py
+  --resolve --source local` no longer refuses a document merely for being
+  absent from the tip; the lane check and the applied record decide, so a
+  novel document the module never wrote is still refused and one with a lane
+  still resolves on the branch only. `process-report`, `process-design-doc`,
+  and `note-problem` in both bundles extract and pass the binding and name the
+  five cases. Observed on a consuming repository whose documents accumulate in
+  the docs worktree until a batch landing, where every first disposition hit
+  it (#605).
 - Every settled footer notice now disappears on its own ten seconds after it
   settles, instead of sitting in the yellow line until an unrelated press
   cleared it. The rule covers every producer and severity alike — startup

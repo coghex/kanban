@@ -219,9 +219,11 @@ Then this workflow can capture observations into it.
 
 That boundary follows from the publication contract below rather than from
 preference. `tools/publish_coordination_doc.py` is this workflow's only writer,
-and a document absent from the publication tip is one it declines to *write* as
-well as to publish: it preserves the approved content in the object database and
-reports that the document was not written. An invocation that promised to create
+and a document absent from the working copy is one it declines to *create* as
+well as to publish: a document that has never been on the branch is written
+only over the working copy the preflight observed, and where there is no file
+at all it preserves the approved content in the object database and reports
+that the document was not written. An invocation that promised to create
 the report would therefore leave the user with no report at all and the
 observation reachable only as a preserved blob. Writing the file directly
 instead would contradict the only-writer rule, and the document it left behind
@@ -267,7 +269,19 @@ PREFLIGHT="$(python3 "$PUBLISH_DOC" \
 PREFLIGHT_TIP="$(PREFLIGHT="$PREFLIGHT" python3 -c \
   'import json, os; print(json.loads(os.environ["PREFLIGHT"])["publication_tip"])')"
 [ -n "$PREFLIGHT_TIP" ]
+PREFLIGHT_COPY="$(PREFLIGHT="$PREFLIGHT" python3 -c \
+  'import json, os; print(json.loads(os.environ["PREFLIGHT"])["working_copy_blob"] or "")')"
+[ -n "$PREFLIGHT_COPY" ]
 ```
+
+`$PREFLIGHT_COPY` is the `working_copy_blob` the same preflight reported: the
+exact bytes the document holds in the working copy at this moment. It is what
+lets a document that has never been on the branch take its disposition — the
+ordinary case for an owner whose documents accumulate in the docs worktree
+until a batch landing — because for such a document there is no publication
+tip blob to guard the write with, and the helper applies the mutation over the
+working copy only while it still holds exactly those bytes. Extract it beside
+the tip, and pass it back unchanged.
 
 `$PREFLIGHT_TIP` must be extracted, not assumed: publication refuses to run
 without it, and an empty one is a failure rather than a publication with the
@@ -297,7 +311,7 @@ APPROVED="$(python3 "$PUBLISH_DOC" \
 python3 "$PUBLISH_DOC" \
   --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
   --path "$DOC_RELATIVE_PATH" --content "$APPROVED" \
-  --expected-tip "$PREFLIGHT_TIP"
+  --expected-tip "$PREFLIGHT_TIP" --expected-working-copy "$PREFLIGHT_COPY"
 ```
 
 `$PREFLIGHT_TIP` is the `publication_tip` the preflight reported. Always pass
@@ -348,18 +362,22 @@ of it. Act on the one structured result it returns:
   eligible — it is `pr-atomic`, matched no §7 row, is not yet tracked, or
   belongs to a repository whose `workflow.direct_publication_paths` does not
   cover it. The approved mutation is not lost: the helper reports
-  `approved_blob`,
-  recoverable with `git cat-file -p`, and `document_written` says whether it
-  also applied it to the document. `write_outcome` names which of the four
-  cases the write was, rather than leaving `document_written` to stand for all
-  of them: `applied-over-baseline`, `applied-over-local-predecessor`,
-  `no-baseline`, and
-  `unrecognized-working-copy`. A working copy byte-identical to what the helper
-  last applied locally is its own unlanded write, and the approved mutation is
-  applied on top of it — so successive approved mutations to a document its
-  owner lands out of band accumulate rather than wedging on the first one. A
-  working copy the helper did not write is never overwritten, and nothing is
-  applied over it.
+  `approved_blob`, recoverable with `git cat-file -p`, and `document_written`
+  says whether it also applied it to the document. `write_outcome` names which
+  of the five cases the write was, rather than leaving `document_written` to
+  stand for all of them: `applied-over-baseline`,
+  `applied-over-local-predecessor`, `applied-over-preflight-copy`,
+  `no-baseline`, and `unrecognized-working-copy`. A working copy byte-identical
+  to what the helper last applied locally is its own unlanded write, and the
+  approved mutation is applied on top of it — so successive approved mutations
+  to a document its owner lands out of band accumulate rather than wedging on
+  the first one. A document absent from the publication tip is applied over the
+  working copy the preflight observed, provided it is still byte-identical to it
+  — that is what `$PREFLIGHT_COPY` binds, and it is how a report processed
+  before its owner's first batch landing takes its disposition like any other. A
+  working copy that is none of those — neither the publication tip's content,
+  the helper's own last write, nor, for a document absent from the tip, the copy
+  the preflight observed — is never overwritten, and nothing is applied over it.
 
   `applied_record` is the other half of that. The helper records what it wrote
   in its own reference, and only `"recorded"` — with `applied_ref` naming that
@@ -369,14 +387,15 @@ of it. Act on the one structured result it returns:
   resolve from it.
 
   **The ordinary outcome is reported by saying nothing about it.**
-  `not-published`, with a `write_outcome` of `applied-over-baseline` or
-  `applied-over-local-predecessor` and an `applied_record` of `"recorded"`, is
-  the expected and healthy result: the approved mutation is in the working copy,
-  recorded, and waiting for its owner to batch it, which is exactly where that
-  owner wants it. So say nothing about publication, eligibility, lanes,
-  worktrees, write roots, blobs, or what still has to happen for the edit to
-  land — none of it is a decision the user has to make, and narrating a settled
-  mechanism on every run makes a working workflow read like a recurring problem.
+  `not-published`, with a `write_outcome` of `applied-over-baseline`,
+  `applied-over-local-predecessor` or `applied-over-preflight-copy` and an
+  `applied_record` of `"recorded"`, is the expected and healthy result: the
+  approved mutation is in the working copy, recorded, and waiting for its owner
+  to batch it, which is exactly where that owner wants it. So say nothing about
+  publication, eligibility, lanes, worktrees, write roots, blobs, or what still
+  has to happen for the edit to land — none of it is a decision the user has to
+  make, and narrating a settled mechanism on every run makes a working workflow
+  read like a recurring problem.
 
   **That silence is a rule about the report, not about the work.** Every step of
   this section still runs on that outcome — the helper is still invoked and its
@@ -393,13 +412,16 @@ of it. Act on the one structured result it returns:
   `no-baseline` or `unrecognized-working-copy` means nothing was applied and the
   approved mutation survives only as `approved_blob`; an `applied_record` of
   `"unrecorded"` means the write cannot be proven and no later run may build on
-  it. Each of those needs the write root, the document path, and the preserved
-  `approved_blob` named plainly, because the mutation is not where the next run
-  will look for it. A `"published"` status and any other status keep the reports
-  described beside them for their own reasons — a publication is verified
-  success with a changed-line summary the run has to check, and an unmodelled
-  status is a failure whose three states are the only account of where the
-  document went.
+  it. `no-baseline` on a document that exists means the working copy moved after
+  the preflight observed it, or the binding was not passed: re-read the
+  document, render the disposition again, and hand it over with a fresh
+  preflight's binding. Each of those needs the write root, the document path,
+  and the preserved `approved_blob` named plainly, because the mutation is not
+  where the next run will look for it. A `"published"` status and any other
+  status keep the reports described beside them for their own reasons — a
+  publication is verified success with a changed-line summary the run has to
+  check, and an unmodelled status is a failure whose three states are the only
+  account of where the document went.
 - **Any other status.** The document was not published. Report the three states
   the helper returns — whether the edit exists locally and in which worktree and
   path, whether a local publication commit exists and its ID, and whether the

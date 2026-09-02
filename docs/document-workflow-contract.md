@@ -197,7 +197,7 @@ follow from their subject being a document that already exists:
 - **They create no report.** A path holding no report is `draft-report`'s to
   draft and create; `note-problem` stops and says so. That boundary is forced by
   §9.4's only-writer rule rather than chosen: a document absent from the
-  publication tip is one the module declines to *write* as well as to publish,
+  working copy is one the module declines to *create* as well as to publish,
   so an asset that promised to create the report would leave the user with none
   and the approved observation reachable only as a preserved blob. Writing it
   directly instead would contradict the only-writer rule and leave a document
@@ -540,9 +540,11 @@ case: a report that already exists and may already be classified
 `coordination`. Classifying it as a drafting asset would leave an appended
 observation on such a report permanently unpublished, which is the exact
 one-checkout-cursor failure this section exists to prevent. The same split is
-why it creates nothing: the module declines to write an absent document as well
-as to publish it, so the novel-document case stays entirely with the drafting
-assets, which write their own file precisely because they publish nothing.
+why it creates nothing: the module never creates an absent document — it
+writes a document that is not on the tip only over the working copy the run's
+own preflight observed (§9.4) — so creating one stays entirely with the
+drafting assets, which write their own file precisely because they publish
+nothing.
 
 ### 9.2 Eligibility, and the fail-closed default
 
@@ -736,13 +738,27 @@ The second approved mutation to a document whose owner lands it out of band
 arrives to find the first one unlanded in the working copy, and a decline there
 strands the run's tracker transaction where no later run can get past it — the
 defect issue #385 was filed for, observed end to end. So the module says which
-of four things a write outcome was rather than leaving one boolean to stand for
+of five things a write outcome was rather than leaving one boolean to stand for
 all of them: the working copy still carried the publication tip's content and
 the mutation was applied to it; the working copy was byte-identical to what this
 module last applied locally, making it this module's own unlanded write, and the
 mutation was applied on top of it; the document is absent from the publication
-tip, so there was no baseline and nothing was written; or the working copy is
-none of those, in which case it is somebody else's and is never overwritten.
+tip but the working copy still held exactly the bytes the run's own preflight
+observed, and the mutation was applied over them; the document is absent from
+the tip and the working copy is not that — it moved since the preflight, no
+binding was passed, or there is no file at all, which the module never creates —
+so nothing was written; or the working copy is none of those, in which case it
+is somebody else's and is never overwritten.
+
+The third is issue #605, and for an owner that lands out of band it is the
+ordinary case rather than the exotic one: every report is processed before its
+first batch landing, so the first disposition of every report arrives at a
+document that has never been on the branch. There is no tip blob to guard that
+write with, so the guard is the run's own preflight — `--check-pending` reports
+the working copy's blob as `working_copy_blob`, the asset passes it back as
+`--expected-working-copy`, and the write goes over exactly those bytes or not at
+all. A novel document is still never published from here (#237's
+enrollment-by-pull-request rule stands); only its local write is licensed.
 Which predecessor it is changes nothing else: the replacement is guarded against
 the exact bytes the decision was made from, a staged document is still refused,
 and a write that lands in between still wins.
@@ -843,7 +859,7 @@ publication branch. A push that appeared to succeed is not that verification.
 **Every** other outcome is an unpublished failure, reported with all three
 states rather than collapsed into one — including the ones the module never
 modelled. One result is not among them: a `not-published` whose `write_outcome`
-is one of the two applied ones and whose `applied_record` reads `"recorded"` is
+is one of the three applied ones and whose `applied_record` reads `"recorded"` is
 §9.2's empty lane working exactly as designed, so it is neither a failure nor
 owed the three-state report. A caller branches on the result, so a traceback
 where a result belongs leaves it with nothing to report and no way to learn
