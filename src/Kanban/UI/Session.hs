@@ -788,6 +788,11 @@ reviewSessionMode session =
 -- resumable, and §7 promises guidance after an interrupt, so
 -- 'ReviewInterrupted' is terminal for a canonical stage and merely paused for
 -- a revision.
+--
+-- 'ReviewFailed' is the opposite case, and is why 'reviewSessionReusable'
+-- refuses to reopen one: a failed revision has lost whatever it was running
+-- on, so a line that took text here could only offer a send with nothing to
+-- send it on.
 reviewSessionInputLive :: ReviewStage -> ReviewPhase -> Bool
 reviewSessionInputLive stage phase
   | stage /= IssueRevision = False
@@ -802,9 +807,12 @@ reviewSessionActive session = reviewPhaseActive session.sessionPhase
 
 -- | Whether pressing 'r' should just reopen an existing review session
 -- rather than launch a fresh label-derived stage. A live turn is always
--- reused, as is a finished/failed session whose recorded stage still
--- matches what the labels currently request. A cancelled canonical stage
--- ('ReviewInterrupted') is the exception: once its process has actually
+-- reused, as is a settled session whose recorded stage still
+-- matches what the labels currently request. Two phases are exceptions, one
+-- at each end of that rule.
+--
+-- A cancelled canonical stage
+-- ('ReviewInterrupted') is the first: once its process has actually
 -- finished (no live entry in 'appCanonicalReviewProcesses' remains), 'r'
 -- must launch a genuinely fresh stage even though the stage is unchanged,
 -- rather than reopen the stale interrupted overlay -- but while that kill
@@ -812,10 +820,39 @@ reviewSessionActive session = reviewPhaseActive session.sessionPhase
 -- process launch against the first invocation's still-pending completion.
 -- An interrupted app-server revision remains resumable, so it follows the
 -- ordinary same-stage reuse rule instead.
-reviewSessionReusable :: ReviewPhase -> ReviewStage -> ReviewStage -> Bool -> Bool
-reviewSessionReusable phase sessionStage requestedStage hasLiveCanonicalProcess
+--
+-- A /failed/ revision is the second, for the opposite reason to the
+-- interrupted one: nothing about it is resumable. Its thread is gone --
+-- because the turn failed, or because the connection carrying it did -- and
+-- 'reviewSessionInputLive' correctly refuses to take text for a session with
+-- nothing to send it on, so reopening one is a dead end no further press can
+-- leave. 'r' starts a fresh revision instead, and
+-- 'Kanban.UI.Review.carryUndelivered' brings across whatever the failed one
+-- never managed to send.
+--
+-- @holdsUnsentText@ generalises that second exception to every settled phase,
+-- including the ones a /successful/ turn leaves behind. A verdict reached
+-- while an interrupt was still unconfirmed hands the message back into a
+-- session that has since stopped accepting one (D-16), and 'ReviewFinished'
+-- and 'ReviewNeedsChanges' are otherwise the most reusable phases there are
+-- -- they hold the verdict worth reopening to read. So the text itself
+-- decides: a session still holding text it can no longer send is replaced
+-- rather than reopened, because reopening it is the one press that would
+-- strand that text for good, and every session holding none keeps the
+-- ordinary rule.
+--
+-- The text counts wherever it sits, and whoever put it there. A message
+-- handed back onto a live input line, one queued behind it, and a draft its
+-- user typed mid-turn are indistinguishable to the person looking at them,
+-- and all three are equally lost once the session cannot send — so telling
+-- them apart would only decide which of them to lose. A settled canonical
+-- stage is unaffected either way: it never had a line to type on.
+reviewSessionReusable :: ReviewPhase -> ReviewStage -> ReviewStage -> Bool -> Bool -> Bool
+reviewSessionReusable phase sessionStage requestedStage hasLiveCanonicalProcess holdsUnsentText
   | phase == ReviewInterrupted, sessionStage /= IssueRevision = hasLiveCanonicalProcess
   | reviewPhaseActive phase = True
+  | phase == ReviewFailed, sessionStage == IssueRevision = False
+  | holdsUnsentText, not (reviewSessionInputLive sessionStage phase) = False
   | sessionStage == requestedStage = True
   | otherwise = False
 

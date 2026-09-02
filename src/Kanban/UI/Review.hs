@@ -7,7 +7,10 @@ module Kanban.UI.Review
     applyReviewEvent,
     reviewOutputPrefix,
     reviewProtocolWarningNotice,
+    applyFailedInterrupt,
     applyUndeliveredSteer,
+    carryUndelivered,
+    undeliveredForIssue,
     approvalServiceRefusal,
     armReviewTick,
     armVisibleReviewTicks,
@@ -22,6 +25,9 @@ module Kanban.UI.Review
     epicReviewRefusalNotice,
     forcedToNormalBy,
     markReviewSessionsDisconnected,
+    newReviewSession,
+    reviewOutcomePhase,
+    reviewSessionHoldsUnsentText,
     numberedChoicePrompt,
     resolveReviewCancelAction,
     reviewDigitActionFor,
@@ -284,14 +290,29 @@ takeNextUndelivered :: [Text] -> (Text, [Text])
 takeNextUndelivered [] = ("", [])
 takeNextUndelivered (next : remaining) = (next, remaining)
 
--- | Folds a rejected steer back into its session. The message goes onto the
--- input line only when the line is free — otherwise it queues behind whatever
--- is already waiting, so neither a draft typed after the original send nor an
--- earlier rejection is overwritten or truncated. The transcript is annotated
--- either way, since 'sendReviewFeedback' already wrote an optimistic @You:@
--- entry that would otherwise claim the message was delivered (issue #17).
+-- | Folds a rejected steer back into its session. A steer is only ever
+-- rejected by a thread that is still running, so its session can always take
+-- the message back onto its input line (issue #17).
 applyUndeliveredSteer :: Text -> ReviewSession -> ReviewSession
-applyUndeliveredSteer message session =
+applyUndeliveredSteer = holdUndelivered True
+
+-- | Folds a message the provider never read back into its session.
+--
+-- It goes onto the input line only when the line is free /and/ the session
+-- can still send from it — otherwise it queues behind whatever is already
+-- waiting, so neither a draft typed after the original send nor an earlier
+-- undelivered message is overwritten or truncated. The queue is drawn in the
+-- overlay and drains oldest-first the next time a send succeeds, which is why
+-- it is where a message goes when the input line is not an offer the session
+-- can honour: a settled session's line takes no keystrokes and submits
+-- nothing, so text parked there would look like a draft and behave like a
+-- decoration.
+--
+-- The transcript is annotated in every case, since 'sendReviewFeedback'
+-- already wrote an optimistic @You:@ entry that would otherwise claim the
+-- message was delivered.
+holdUndelivered :: Bool -> Text -> ReviewSession -> ReviewSession
+holdUndelivered inputLive message session =
   (withUndelivered stillUndelivered session)
     { sessionInput = nextInput,
       sessionTranscript =
@@ -300,8 +321,74 @@ applyUndeliveredSteer message session =
   where
     queued = session.sessionDetail.reviewSessionUndelivered <> [message]
     (nextInput, stillUndelivered)
-      | Text.null (Text.strip session.sessionInput) = takeNextUndelivered queued
+      | inputLive, Text.null (Text.strip session.sessionInput) = takeNextUndelivered queued
       | otherwise = (session.sessionInput, queued)
+
+-- | Record what an issue's review still owes a send, dropping the entry
+-- entirely once nothing is owed so the map holds only live obligations.
+holdUndeliveredForIssue :: Int -> [Text] -> Map Int [Text] -> Map Int [Text]
+holdUndeliveredForIssue issueNumber owed held
+  | null owed = Map.delete issueNumber held
+  | otherwise = Map.insert issueNumber owed held
+
+-- | Whether a session is still holding text nobody has managed to send.
+--
+-- The input line as well as the queue, because that is where a message
+-- handed back lands while the session is still live — and a turn reaching
+-- its verdict a moment later is exactly what turns that offer into a dead
+-- one. A draft typed mid-turn counts for the same reason: once the session
+-- cannot send, it is as stranded as anything the backend refused, and
+-- telling the two apart would only decide which of them to lose.
+reviewSessionHoldsUnsentText :: ReviewSession -> Bool
+reviewSessionHoldsUnsentText session =
+  any
+    (not . Text.null . Text.strip)
+    (session.sessionInput : session.sessionDetail.reviewSessionUndelivered)
+
+-- | Carries what a session being replaced never managed to send into the
+-- session replacing it: the draft on its input line, and everything still
+-- waiting behind it, oldest first.
+--
+-- The other half of handing a message back. A message that failed to reach
+-- the provider is put where the session can still act on it, but a session
+-- whose backend has gone cannot act on anything — so it holds the message in
+-- its queue, and the press that starts the review it needs is the one press
+-- that would otherwise throw it away with the session it was parked in. This
+-- is what makes "kept in the review session" true across that press rather
+-- than only until it.
+--
+-- The old line goes first because it is what the user was last looking at,
+-- and the queue follows in the order it accumulated; empty text is dropped
+-- rather than carried as a blank entry.
+--
+-- Only into a session that can send it, and what it cannot take is held for
+-- the issue instead rather than either forced on it or thrown away. @r@
+-- starts whatever stage the labels ask for, and a revision that published
+-- its verdict moves them on — so the session replacing it is often a
+-- canonical stage, which runs the gate as a subprocess and holds no thread
+-- to send anything on. Text put there would look kept while being
+-- unreachable, and text dropped there would be lost to the single keystroke
+-- the user made to carry on; 'appReviewUndelivered' is neither.
+carryUndelivered :: [Text] -> ReviewSession -> (ReviewSession, [Text])
+carryUndelivered carried session
+  | not (reviewSessionInputLive session.sessionDetail.reviewSessionStage session.sessionPhase) = (session, offered)
+  | otherwise = ((withUndelivered stillUndelivered session) {sessionInput = nextInput}, [])
+  where
+    (nextInput, stillUndelivered) = takeNextUndelivered offered
+    offered = filter (not . Text.null . Text.strip) carried
+
+-- | Everything an issue's review still owes a send, oldest first: what the
+-- session being replaced was holding, and whatever earlier stages could not
+-- take.
+--
+-- The replaced session's own line goes first because it is what the user was
+-- last looking at, then its queue, then what was already being held for the
+-- issue — so the most recent thing they saw is the one that comes back to
+-- the line.
+undeliveredForIssue :: Maybe ReviewSession -> [Text] -> [Text]
+undeliveredForIssue previous held = maybe [] fromSession previous <> held
+  where
+    fromSession session = session.sessionInput : session.sessionDetail.reviewSessionUndelivered
 
 clearPendingInteraction :: ReviewSession -> ReviewSession
 clearPendingInteraction = withPendingInteraction Nothing
@@ -312,11 +399,75 @@ withPendingInteraction pending = withSessionDetail (\detail -> detail {reviewSes
 withUndelivered :: [Text] -> ReviewSession -> ReviewSession
 withUndelivered undelivered = withSessionDetail (\detail -> detail {reviewSessionUndelivered = undelivered})
 
+-- | The phase a completed turn leaves its session in.
+--
+-- Lifted out of 'applyReviewEvent' rather than left inline because it is the
+-- rule that decides whether a session can still be sent to, and anything
+-- reasoning about what a turn's end leaves behind — a test covering the
+-- sequence a failed interrupt arrives in, above all — has to reach the same
+-- answer the event handler does rather than name a phase and hope.
+reviewOutcomePhase :: ReviewStage -> ReviewTurnOutcome -> Maybe ReviewResult -> ReviewPhase
+reviewOutcomePhase IssueRevision TurnSucceeded (Just result)
+  | null result.reviewResultBlockingReasons = ReviewFinished
+  | otherwise = ReviewNeedsChanges
+reviewOutcomePhase _ TurnSucceeded (Just result)
+  | result.reviewResultApproved = ReviewFinished
+  | otherwise = ReviewNeedsChanges
+reviewOutcomePhase _ TurnSucceeded Nothing = ReviewFailed
+reviewOutcomePhase _ TurnFailed _ = ReviewFailed
+reviewOutcomePhase _ TurnInterrupted _ = ReviewInterrupted
+
 undeliveredTranscriptNote :: Text -> Text
 undeliveredTranscriptNote message = "[not delivered] " <> message
 
 undeliveredNotice :: Text
 undeliveredNotice = "Your message was not delivered — it is waiting in the review session to resend"
+
+-- | Folds a failed interrupt back into its session: what went wrong, and —
+-- when a message was riding on it — the same restoration a rejected steer
+-- gets (issue #17).
+--
+-- Both halves are needed and neither substitutes for the other. A message
+-- sent on the Claude path is shown as sent the moment the control request is
+-- written, because that is the last synchronous moment there is (D-16), so a
+-- session told only that something failed would go on displaying a @You:@
+-- entry for text the provider never read. And a cancellation carries no
+-- message at all, yet a cancellation that did not happen is exactly what a
+-- user watching a turn keep running needs told.
+--
+-- Where the message lands is decided from the session this leaves behind,
+-- not from the one that sent it. A refused interrupt leaves a thread still
+-- running and an input line that can resend; a connection that died leaves a
+-- settled session whose line takes nothing, and this event arrives after the
+-- events that settle it precisely so that difference is visible here.
+applyFailedInterrupt :: Text -> Maybe Text -> ReviewSession -> ReviewSession
+applyFailedInterrupt cause message session = maybe noted hold message
+  where
+    hold text =
+      holdUndelivered
+        (reviewSessionInputLive noted.sessionDetail.reviewSessionStage noted.sessionPhase)
+        text
+        noted
+    noted =
+      session
+        { sessionTranscript =
+            appendTranscript session.sessionTranscript ("\n" <> interruptFailureTranscriptNote cause <> "\n")
+        }
+
+interruptFailureTranscriptNote :: Text -> Text
+interruptFailureTranscriptNote cause = "[interrupt failed] " <> sanitizeText cause
+
+-- | The notice a failed interrupt raises. It says what went wrong either way,
+-- and adds where the message went only when there was one to put back.
+interruptFailureNotice :: Text -> Maybe Text -> Text
+interruptFailureNotice cause message = "Interrupt failed: " <> sanitizeText cause <> whereItWent
+  where
+    whereItWent = case message of
+      Nothing -> ""
+      -- Kept, not "waiting to resend": where it is waiting depends on whether
+      -- the session survived, and a notice promising a resend from one that
+      -- did not would be the same false claim the optimistic entry made.
+      Just _ -> " — your message was not delivered and is kept in the review session"
 
 -- | What Ctrl-C/Ctrl-X in a review overlay should do, decided from the
 -- session's connection/process state rather than inline in
@@ -488,7 +639,12 @@ startIssueReview issue = do
   let requestedStage = issueReviewStage state.appConfig.resolvedWorkflow issue
   case Map.lookup issue.issueNumber state.appReviewSessions of
     Just session
-      | reviewSessionReusable session.sessionPhase session.sessionDetail.reviewSessionStage requestedStage (Map.member issue.issueNumber state.appCanonicalReviewProcesses) -> do
+      | reviewSessionReusable
+          session.sessionPhase
+          session.sessionDetail.reviewSessionStage
+          requestedStage
+          (Map.member issue.issueNumber state.appCanonicalReviewProcesses)
+          (reviewSessionHoldsUnsentText session) -> do
           modify (\current -> noticeCleared current {appOverlay = Just (ReviewOverlay issue.issueNumber)})
           presentTranscriptTail
           armVisibleReviewTicks
@@ -500,12 +656,19 @@ startIssueReview issue = do
     _ | Just notice <- approvalServiceRefusal state requestedStage -> setNotice notice
     _ -> do
       let priorGeneration = priorTickGeneration issue.issueNumber state.appReviewSessions
-          session = newReviewSession issue requestedStage priorGeneration
+          owed =
+            undeliveredForIssue
+              (Map.lookup issue.issueNumber state.appReviewSessions)
+              (Map.findWithDefault [] issue.issueNumber state.appReviewUndelivered)
+          (session, stillOwed) = carryUndelivered owed (newReviewSession issue requestedStage priorGeneration)
       modify
         ( \current ->
             noticeCleared
               current
                 { appReviewSessions = Map.insert issue.issueNumber session current.appReviewSessions,
+                  -- Kept for the issue rather than for the session that could
+                  -- not take it, so the next one that can send is handed it.
+                  appReviewUndelivered = holdUndeliveredForIssue issue.issueNumber stillOwed current.appReviewUndelivered,
                   appOverlay = Just (ReviewOverlay issue.issueNumber)
                 }
         )
@@ -1013,17 +1176,13 @@ applyReviewEvent reviewEvent = case reviewEvent of
     modifyReviewSessionByThread threadId (applyUndeliveredSteer message)
     tailReviewThread threadId
     setNotice undeliveredNotice
+  ReviewInterruptFailed threadId cause message -> do
+    modifyReviewSessionByThread threadId (applyFailedInterrupt cause message)
+    tailReviewThread threadId
+    setNotice (interruptFailureNotice cause message)
   ReviewProtocolWarning provider message -> setNotice (reviewProtocolWarningNotice provider message)
   where
-    outcomePhase IssueRevision TurnSucceeded (Just result)
-      | null result.reviewResultBlockingReasons = ReviewFinished
-      | otherwise = ReviewNeedsChanges
-    outcomePhase _ TurnSucceeded (Just result)
-      | result.reviewResultApproved = ReviewFinished
-      | otherwise = ReviewNeedsChanges
-    outcomePhase _ TurnSucceeded Nothing = ReviewFailed
-    outcomePhase _ TurnFailed _ = ReviewFailed
-    outcomePhase _ TurnInterrupted _ = ReviewInterrupted
+    outcomePhase = reviewOutcomePhase
     reviewOutcomeActivity completedStage TurnSucceeded (Just result)
       | completedStage == IssueRevision && null result.reviewResultBlockingReasons = "revision published"
       | result.reviewResultApproved = "approved"
@@ -1105,8 +1264,15 @@ markReviewSessionsDisconnected endedConnection message = Map.map disconnect
   where
     disconnect session
       | not (servedByEndedConnection session) = session
+      -- 'ReviewInterrupted' among them, unlike every other settled phase.
+      -- An interrupted revision is resumable only while there is something
+      -- to resume it on: its thread outlives the interrupt but not the
+      -- connection carrying it, so once that connection is gone it is
+      -- exactly as finished as a failed one -- and leaving it resumable
+      -- leaves its input line offering a send that can only reach a dead
+      -- process, and 'reviewSessionReusable' reopening it forever.
       | session.sessionDetail.reviewSessionStage == IssueRevision,
-        session.sessionPhase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting] =
+        session.sessionPhase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting, ReviewInterrupted] =
           session
             { sessionPhase = ReviewFailed,
               sessionActivity = "disconnected",

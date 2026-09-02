@@ -127,6 +127,7 @@ testAppState board = do
         appQuitPending = False,
         appReviewBackend = ReviewBackendStopped,
         appReviewSessions = Map.empty,
+        appReviewUndelivered = Map.empty,
         appSolveSessions = Map.empty,
         appSolveProcesses = Map.empty,
         appCanonicalReviewProcesses = Map.empty,

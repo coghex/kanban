@@ -105,14 +105,23 @@ brandExecutable :: SolverBrand -> Text
 brandExecutable CodexSolver = "codex"
 brandExecutable ClaudeSolver = "claude"
 
--- | The versions the tracked plugin bundles were verified against
--- (@codex-plugin\/README.md@, @claude-plugin\/README.md@); older releases
--- do not provide the plugin subcommand family the bundles install through.
+-- | The oldest release of each CLI everything Kanban asks of it has been
+-- verified against.
+--
+-- The plugin subcommand family the tracked bundles install through is the
+-- floor both of these started at (@codex-plugin\/README.md@,
+-- @claude-plugin\/README.md@): an older release cannot install the bundle at
+-- all. Claude's has since moved past it. Its embedded issue review ends a
+-- running turn with a @control_request@ whose acknowledgement the client
+-- waits on before writing anything further (D-16), and that exchange is
+-- verified no earlier than 2.1.251 — so a release below it may install the
+-- bundle and still leave typed guidance riding on an interrupt this backend
+-- cannot confirm.
 minimumCodexVersion :: [Int]
 minimumCodexVersion = [0, 144, 6]
 
 minimumClaudeVersion :: [Int]
-minimumClaudeVersion = [2, 1, 216]
+minimumClaudeVersion = [2, 1, 251]
 
 -- Pure classification -------------------------------------------------------
 

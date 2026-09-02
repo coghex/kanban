@@ -7,15 +7,20 @@
 -- decided by the client that holds the connection it arrived on. A decoder
 -- that also emitted events could not be exercised without a process.
 --
--- The channel is not a request-response protocol. There is no handshake, no
--- request id, and no reply: the client writes user messages, and the CLI
--- streams typed JSON records until a @result@ record closes the turn. The
--- three that carry meaning for a review are the ones this module names —
--- everything else the CLI emits (its hook and status notices, its rate-limit
+-- The conversation itself is not a request-response protocol. There is no
+-- handshake and no reply: the client writes user messages, and the CLI
+-- streams typed JSON records until a @result@ record closes the turn.
+-- Alongside it runs one narrow exchange that /is/ correlated — a
+-- @control_request@ and the @control_response@ answering it by request id —
+-- and interrupting a turn is the only thing this backend uses it for (D-16).
+-- The five records that carry meaning for a review are the ones this module
+-- names, two of them that exchange's — an answer that cannot be read still
+-- settles what was waiting on it, so it is reported rather than refused.
+-- Everything else the CLI emits (its hook and status notices, its rate-limit
 -- reports, the aggregate @assistant@ message that repeats what the deltas
--- already carried) is recognised and ignored rather than warned about, so a
--- CLI release that adds a record type does not fill the review panel with
--- warnings.
+-- already carried, and the control requests it sends /this/ client) is
+-- recognised and ignored rather than warned about, so a CLI release that adds
+-- a record type does not fill the review panel with warnings.
 --
 -- Ignoring the aggregate @assistant@ record is the one that has to be said
 -- out loud: it repeats the whole of the text and thinking the deltas
@@ -32,6 +37,7 @@ module Kanban.Review.Stream
   ( StreamRecord (..),
     StreamTurnResult (..),
     decodeStreamRecord,
+    streamInterruptRequest,
     streamUserMessage,
   )
 where
@@ -67,6 +73,24 @@ data StreamRecord
   | -- | The turn is over, and either produced its structured verdict or did
     -- not.
     StreamTurnClosed StreamTurnResult
+  | -- | The CLI's answer to one @control_request@ this client wrote, named by
+    -- the @request_id@ that request carried and saying whether the operation
+    -- was performed.
+    --
+    -- Only the answer is decoded here. Which operation it settles, and what
+    -- that settlement releases, is the client's — this module has no memory
+    -- of what was asked.
+    StreamControlAnswered Text (Either Text ())
+  | -- | An answer to a control request that named no request, or carried
+    -- nothing to read an outcome from.
+    --
+    -- A record rather than the 'Left' every other unreadable line is,
+    -- because this one has a consequence beyond the warning it deserves: an
+    -- operation is waiting on an answer, and a line that says only that one
+    -- arrived and could not be read is the CLI's last word on it. Reported
+    -- as its own thing so the client can settle what was waiting instead of
+    -- leaving it to wait for an answer that has already been and gone.
+    StreamControlUnreadable Text
   | -- | A record this backend has no use for.
     StreamIgnored
   deriving stock (Eq, Show)
@@ -82,11 +106,36 @@ data StreamRecord
 data StreamTurnResult
   = -- | The structured verdict, and the JSON it was decoded from.
     StreamVerdict Text ReviewResult
+  | -- | The turn was cut short rather than ending on its own, which on this
+    -- channel is what an accepted interrupt does to it.
+    --
+    -- Read off the CLI's own account of the turn rather than off the
+    -- client's memory of having asked for one, because the two are not the
+    -- same claim: an interrupt written a moment after a turn finished is
+    -- still acknowledged as a success, and a turn nothing here interrupted
+    -- can still be aborted from outside. What ended the turn is the result
+    -- record's to say.
+    StreamTurnAborted
   | StreamTurnFailure Text
   deriving stock (Eq, Show)
 
+-- | The one control request this backend sends: cancel whatever turn is
+-- running, named by an id its answer comes back under.
+--
+-- The id is the caller's to choose and the caller's to match, because the
+-- channel guarantees nothing about ordering between this exchange and the
+-- turn it targets — the answer may arrive before or after the result record
+-- of the turn it ended.
+streamInterruptRequest :: Text -> Value
+streamInterruptRequest requestId =
+  object
+    [ "type" .= ("control_request" :: Text),
+      "request_id" .= requestId,
+      "request" .= object ["subtype" .= ("interrupt" :: Text)]
+    ]
+
 -- | One user message, in the shape the CLI's @stream-json@ input format
--- reads. The only thing this client ever writes.
+-- reads. The turns this client opens are written as these and nothing else.
 streamUserMessage :: Text -> Value
 streamUserMessage message =
   object
@@ -110,7 +159,35 @@ decodeStreamRecord line = case eitherDecode line of
     Just "system" -> systemRecord value
     Just "stream_event" -> streamEventRecord value
     Just "result" -> Right (StreamTurnClosed (resultOutcome value))
+    Just "control_response" -> Right (controlResponse value)
     Just _ -> Right StreamIgnored
+
+-- | The CLI's answer to a control request, which nests its own subtype,
+-- the @request_id@ it is answering, and — on the failing branch — what went
+-- wrong, under a @response@ object.
+--
+-- Fails closed twice over. A subtype this decoder does not know is not
+-- agreement: an operation is only performed when the CLI says @success@, and
+-- reading anything else as agreement is how a message would be released into
+-- a turn that is still running. And an answer it cannot read at all is
+-- 'StreamControlUnreadable' rather than a bare refusal to decode, because
+-- the operation waiting on that answer has to hear about it.
+controlResponse :: Value -> StreamRecord
+controlResponse value = case objectField "response" value of
+  Nothing -> StreamControlUnreadable "answered a control request with no response"
+  Just response -> case fieldText "request_id" response of
+    Nothing -> StreamControlUnreadable "answered a control request without naming which one"
+    Just requestId -> StreamControlAnswered requestId (outcome response)
+  where
+    outcome response = case fieldText "subtype" response of
+      Just "success" -> Right ()
+      subtype -> Left (classify subtype <> reported response)
+    classify (Just "error") = "refused it"
+    classify (Just subtype) = "answered it with status " <> subtype
+    classify Nothing = "answered it without saying whether it was performed"
+    reported response = case fieldText "error" response of
+      Just detail | not (Text.null detail) -> ": " <> detail
+      _ -> ""
 
 -- | @system@ records announce the turn's start and then narrate it. Only the
 -- @init@ subtype opens a turn; the rest — the hook notices a machine's own
@@ -151,8 +228,16 @@ streamEventRecord value = case objectField "event" value of
 -- is what the @--json-schema@ launch flag asks for, and a turn that ended
 -- without it — because the model never called the synthetic tool, or the CLI
 -- stopped it first — completed without reviewing anything.
+--
+-- A turn the CLI cut short is told apart from one that failed on its own by
+-- @terminal_reason@, which every result line carries: @completed@ closes a
+-- turn that ran to its end, and @aborted_streaming@ one that was stopped
+-- mid-stream. Checked ahead of everything else, because such a turn also
+-- reports @is_error@ and an error subtype and would otherwise be
+-- indistinguishable from a turn that broke.
 resultOutcome :: Value -> StreamTurnResult
 resultOutcome value
+  | fieldText "terminal_reason" value == Just "aborted_streaming" = StreamTurnAborted
   | fieldText "subtype" value /= Just "success" = StreamTurnFailure failureMessage
   | fieldBool "is_error" value == Just True = StreamTurnFailure failureMessage
   | otherwise = case objectField "structured_output" value of
