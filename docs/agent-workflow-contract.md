@@ -3002,6 +3002,7 @@ The `coordination` documents are
 `docs/project_review_466-399.md`, `docs/project_review_516-498.md`,
 `docs/project_review_533-517.md`,
 `docs/project_review_600-573.md`,
+`docs/project_review_602-562.md`,
 `docs/public_release_design.md`,
 `docs/release_maintenance_design.md`, `docs/superagent_design.md`,
 `docs/text_selection_design.md`,
@@ -3135,6 +3136,7 @@ docs/project_review_466-399.md | coordination | audit-report
 docs/project_review_516-498.md | coordination | audit-report
 docs/project_review_533-517.md | coordination | audit-report
 docs/project_review_600-573.md | coordination | audit-report
+docs/project_review_602-562.md | coordination | audit-report
 docs/public_release_design.md | coordination | audit-report
 docs/release_maintenance_design.md | coordination | audit-report
 docs/releasing.md | pr-atomic | test-parsed;release-document
