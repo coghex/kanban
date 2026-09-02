@@ -71,8 +71,9 @@ The whole userinfo goes, not merely the part after a `:` — a bare
 `https://<token>@host/owner/name.git` puts the secret in the username position,
 and nothing can tell a secret username from an ordinary one — and so does
 everything from the first `?` or `#`. **Every endpoint identity this run
-shows** — that one, and any push destination named in a refusal below — is
-shown through that same redaction. Redaction is for display only: the
+shows** — that one, and every push destination §2 reads into the report or a
+refusal below names — is shown through that same redaction. A push URL carries
+a credential exactly as a fetch URL does. Redaction is for display only: the
 destination proof in §5 compares the URLs Git itself reports, because two
 endpoints differing only in their credentials are two endpoints.
 
@@ -170,7 +171,10 @@ item being confirmed, and run one per candidate rather than one per category.
 
   ```bash
   git -C "$ROOT" ls-remote --heads origin
-  git -C "$ROOT" remote get-url --push --all origin
+  git -C "$ROOT" remote get-url --push --all origin \
+    | sed -E -e 's%^([A-Za-z0-9+.-]+://)[^@/]*@%\1<redacted>@%' \
+             -e 's%^[^/@:]*(:[^/@]*)?@%<redacted>@%' \
+             -e 's%[?#].*%%'
   ```
 
   Those two reads answer different questions, and a remote branch needs both
@@ -179,9 +183,18 @@ item being confirmed, and run one per candidate rather than one per category.
   goes to `origin`'s **push** destinations, which are a separate, multi-valued
   setting. `git remote get-url --push --all origin` reports those destinations
   after Git's own rewriting, so it is the read that says where a deletion would
-  actually land. A branch whose deletion would reach any destination other than
-  `$ENDPOINT` is reported as visible cleanup debt — named, with the reason —
-  and no remote deletion is proposed for it.
+  actually land. It goes through §0's redaction, character for character,
+  because this read is what puts a destination into the report and a push URL
+  can carry a token as readily as a fetch URL can. A branch whose deletion
+  would reach any destination other than `$ENDPOINT` is reported as visible
+  cleanup debt — named, with the reason — and no remote deletion is proposed
+  for it.
+
+  Nothing here is the proof. Redaction is a function, so two destinations that
+  were equal stay equal and this comparison never refuses a branch it should
+  have kept; two that differ only in their credentials read as one here, and
+  §5's own read — of what Git reports, unredacted, immediately before the push
+  — is what refuses them. This one only decides what to report.
 - **PR and drainer state:** the controller status the census carries is
   authoritative for service health and cleanup debt; do not recreate its
   eligibility algorithm. Route an incident or a stopped service to

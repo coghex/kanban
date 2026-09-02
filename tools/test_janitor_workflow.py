@@ -56,11 +56,14 @@ fall into six kinds.
   else entirely -- and the `owner/name` the report names has already discarded
   the host that would have shown it. `RemoteDeletionEndpointTests` splits the
   two apart against real Git and asserts on the bare repositories themselves
-  that neither the audited endpoint nor the unreported one loses a ref, and
-  `EndpointRedactionTests` drives the announcement the proof is reported
-  against a `remote.origin.url` carrying a credential. Both run the asset's
-  complete check-and-delete statement rather than its `push` line, since an
-  extractor that starts at the push is exactly what would step over the guard.
+  that neither the audited endpoint nor the unreported one loses a ref. It runs
+  the asset's complete check-and-delete statement rather than its `push` line,
+  since an extractor that starts at the push is exactly what would step over
+  the guard. `EndpointRedactionTests` covers the other half: the two reads that
+  put an endpoint into the report -- the announcement and the census read --
+  driven against a real `remote.origin.url` and a real `remote.origin.pushurl`
+  carrying credentials, and held to one filter, because the weaker of two
+  spellings is what would decide what a report discloses.
 
 Every rule is measured over BOTH rendered assets, and each class carries a
 control that plants the failure it is meant to catch: a rule matching
@@ -330,6 +333,23 @@ def named_fences(text: str) -> dict[str, str]:
         assert marker in fence, f"fence for {name!r} does not contain {marker!r}"
         named[name] = fence
     return named
+
+
+def redactions(text: str) -> list[tuple[str, ...]]:
+    """Every endpoint redaction in `text`, as its tuple of `sed` expressions.
+
+    Line continuations are joined first, so a filter wrapped across four lines
+    in one place and three in another is compared as the substitutions it
+    performs rather than as the bytes it was typed as. The `owner/name`
+    reduction in the same fence is a single-argument `sed` and is deliberately
+    not matched: it is a different filter with a different job.
+    """
+    joined = re.sub(r"\\\n\s*", " ", text)
+    joined = re.sub(r"[ \t]+", " ", joined)
+    return [
+        tuple(re.findall(r"-e ('[^']*')", match.group(1)))
+        for match in re.finditer(r"\| sed -E((?: -e '[^']*')+)", joined)
+    ]
 
 
 def gh_invocations(text: str) -> list[str]:
@@ -1179,8 +1199,26 @@ REDACTION_CASES = (
 )
 
 
+# The push destinations §2 reads into the report, and what redaction leaves of
+# each. `remote.origin.pushurl` is configured by hand as often as a fetch URL
+# is, and carries a credential the same way; the census read is what would put
+# one into the report.
+PUSH_REDACTION_CASE = (
+    (
+        "https://x-access-token:ghp_pushs3cret@github.com/coghex/kanban.git",
+        "https://<redacted>@github.com/coghex/kanban.git",
+        "ghp_pushs3cret",
+    ),
+    (
+        "https://github.com/coghex/mirror.git?token=pushquerys3cret",
+        "https://github.com/coghex/mirror.git",
+        "pushquerys3cret",
+    ),
+)
+
+
 class EndpointRedactionTests(HarnessCase):
-    """The announced endpoint names the repository and no credential.
+    """Every endpoint this run shows names its repository and no credential.
 
     §0 keeps the fetch URL whole because the `owner/name` it also derives has
     thrown the host away, and a remote deletion has to be bound to a host. The
@@ -1253,6 +1291,111 @@ class EndpointRedactionTests(HarnessCase):
                     result = self.announce(relative_path, url)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertNotIn(secret, result.stdout)
+
+    def destination_lines(self, relative_path: str) -> str:
+        """§2's push-destination read, continuations included."""
+        lines = self.fences(relative_path)["branches"].splitlines()
+        start = [
+            position
+            for position, line in enumerate(lines)
+            if "remote get-url --push --all" in line
+        ]
+        self.assertEqual(len(start), 1, "expected one push-destination read")
+        end = start[0]
+        while lines[end].rstrip().endswith("\\"):
+            end += 1
+        return "\n".join(lines[start[0] : end + 1])
+
+    def census(self, relative_path: str, push_urls) -> subprocess.CompletedProcess:
+        """§2's read, run against a remote configured with `push_urls`."""
+        root = self.temporary_directory()
+        env = isolated_git_env(root)
+        work = root / "work"
+        commands = [
+            (["init", "-q", "-b", DEFAULT_BRANCH, str(work)], None),
+            (["remote", "add", "origin",
+              f"https://github.com/{REPO_SLUG}.git"], work),
+        ]
+        commands += [
+            (["config", "--add", "remote.origin.pushurl", url], work)
+            for url in push_urls
+        ]
+        for arguments, cwd in commands:
+            created = subprocess.run(
+                ["git", *arguments],
+                cwd=str(cwd) if cwd else None,
+                env=env,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+        env["ROOT"] = str(work)
+        return subprocess.run(
+            ["sh", "-c", "set -e\n" + self.destination_lines(relative_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def test_the_census_read_shows_redacted_destinations(self):
+        # The read that puts a destination into the report, driven against a
+        # real `remote.origin.pushurl` pair rather than a string: it is `git`
+        # that decides what the workflow is redacting.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                result = self.census(
+                    relative_path, [url for url, _, _ in PUSH_REDACTION_CASE]
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout.split(),
+                    [shown for _, shown, _ in PUSH_REDACTION_CASE],
+                )
+
+    def test_no_push_credential_survives_the_census_read(self):
+        for relative_path in RENDERED_ASSETS:
+            for url, _, secret in PUSH_REDACTION_CASE:
+                with self.subTest(asset=relative_path, url=url):
+                    self.assertIn(secret, url)
+                    result = self.census(relative_path, [url])
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotIn(secret, result.stdout)
+
+    def test_the_control_shows_an_uncredentialed_destination_whole(self):
+        # Without it every assertion above would pass over a read that printed
+        # nothing, or that swallowed the host and path along with the secret.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                plain = f"https://github.com/{REPO_SLUG}.git"
+                result = self.census(relative_path, [plain])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.split(), [plain])
+
+    def test_both_endpoint_readers_redact_identically(self):
+        # The announcement and the census read are two spellings of one
+        # filter. A rule that only checked each one's own behavior would let
+        # them drift into two different redactions, and the weaker one is what
+        # would then decide what a report discloses.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                found = redactions(read(relative_path))
+                self.assertEqual(len(found), 2, "expected two endpoint redactions")
+                self.assertEqual(found[0], found[1])
+                self.assertEqual(len(found[0]), 3)
+
+    def test_a_planted_divergence_is_caught(self):
+        # The control for the rule above, and for the extractor: the
+        # `owner/name` reduction in the same fence is a `sed` too, and must
+        # not be counted as a redaction.
+        text = read(CLAUDE_ASSET)
+        self.assertEqual(len(redactions(text)), 2)
+        planted = text.replace("'s%[?#].*%%'", "'s%[?].*%%'", 1)
+        self.assertNotEqual(planted, text)
+        found = redactions(planted)
+        self.assertEqual(len(found), 2)
+        self.assertNotEqual(found[0], found[1])
 
 
 class RemoteDeletionEndpointTests(HarnessCase):
@@ -1956,6 +2099,14 @@ ENDPOINT_PROOF_CONTRACT = (
     "the redacted `$ENDPOINT` or the reduced `$REPO`",
     "A branch whose deletion would reach any destination other than "
     "`$ENDPOINT` is reported as visible cleanup debt",
+    "It goes through §0's redaction, character for character, because this "
+    "read is what puts a destination into the report and a push URL can carry "
+    "a token as readily as a fetch URL can",
+    "Nothing here is the proof.",
+    "two that differ only in their credentials read as one here, and §5's own "
+    "read — of what Git reports, unredacted, immediately before the push — is "
+    "what refuses them",
+    "every push destination §2 reads into the report or a refusal below names",
     "`$ENDPOINT` is announced redacted, because a fetch URL may carry a "
     "credential.",
     "The whole userinfo goes, not merely the part after a `:`",
