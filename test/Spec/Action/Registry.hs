@@ -907,6 +907,64 @@ spec = do
             observed <- observeAction environment handle
             observed `shouldBe` Right (ActionRunning "revising PR #900")
 
+    -- A join speaks for the run it joined, so it must be the same run: the
+    -- same brand, and one that recorded what it started from. Joining a
+    -- Claude solve from a Codex request would check that run's pull request
+    -- against the wrong origin, and joining a run with no recorded baseline
+    -- would check it against this request's.
+    it "refuses to join a solve run on another brand" $
+      withDispatchMachine $ \environment -> do
+        holder <- solveWorkerDescriptor environment.actionRepository 844 SolveOnly
+        publishWorkerSpec holder
+        publishWorkerState holder WorkerRunning
+        acquireWorkerLease holder `shouldReturn` Right ()
+        -- The fixture's worker runs Claude; this request is Codex.
+        solveTaskBrandOf holder `shouldBe` Just ClaudeSolver
+        dispatched <- dispatchSolve environment CodexSolver
+        either isTurnAlreadyRunning (const False) dispatched `shouldBe` True
+
+    it "refuses to join a run that recorded nothing to continue it from" $
+      withDispatchMachine $ \environment -> do
+        holder <- solveWorkerDescriptor environment.actionRepository 844 SolveOnly
+        publishWorkerSpec holder
+        publishWorkerState holder WorkerRunning
+        acquireWorkerLease holder `shouldReturn` Right ()
+        dispatched <- dispatchSolve environment ClaudeSolver
+        either isTurnAlreadyRunning (const False) dispatched `shouldBe` True
+        either actionRefusalMessage (const "") dispatched
+          `shouldSatisfy` Text.isInfixOf "recorded no attribution"
+
+    -- ...and one that did record it is joined, with that run's own baseline
+    -- rather than this request's: the pull request it has already opened is
+    -- attributable to it, which it would not be if the baseline were taken
+    -- from the board as it stands now.
+    it "joins a solve run that recorded its baseline, and reports its pull request" $
+      withDispatchMachine $ \environment -> do
+        holder <- solveWorkerDescriptor environment.actionRepository 844 SolveOnly
+        let recorded =
+              holder
+                { workerDescriptorSpec =
+                    holder.workerDescriptorSpec {workerParent = Just (solveBaseline ClaudeSolver)}
+                }
+        publishWorkerSpec recorded
+        publishWorkerState recorded (WorkerTerminal SolveCompleted)
+        -- A terminal worker's lease is retired rather than held, so the join
+        -- is exercised through the state builder the dispatch would use.
+        let opened = markedPullRequest 901 [844] ClaudeSolver []
+            environment' =
+              environment
+                { actionCatalog = environment.actionCatalog {catalogPullRequests = [opened]}
+                }
+            joinedAttribution =
+              ActionAttribution
+                { attributionKnownPullRequests = Set.empty,
+                  attributionStartedAt = epoch,
+                  attributionSolverBrand = ClaudeSolver
+                }
+            target = resolveHeldItem environment.actionCatalog TargetPlain (IssueItem (baseIssue 844 []))
+        observed <- observeWorkerHandle environment' SolveIssue target recorded joinedAttribution
+        observed `shouldBe` ActionSettled (ActionPullRequestOpened 901)
+
     -- A discoverable worker matching the requested task is not evidence that
     -- it holds the lease. A terminal worker stays discoverable until it is
     -- acknowledged, so this issue has a finished solve sitting in the cache
@@ -1142,6 +1200,45 @@ isCapabilityBlocked _ = False
 isRepositoryMismatch :: ActionRefusal -> Bool
 isRepositoryMismatch (ActionRepositoryMismatch _ _) = True
 isRepositoryMismatch _ = False
+
+-- | A solve dispatch for the machine's issue, on a named brand.
+dispatchSolve :: ActionEnvironment -> SolverBrand -> IO (Either ActionRefusal ActionHandle)
+dispatchSolve environment brand =
+  dispatchProviderTurn environment request plan
+  where
+    request =
+      (actionRequest SolveIssue identityUnderTest (TargetByKind ActionTargetIssue 844))
+        { requestSolverBrand = Just brand,
+          requestRecordedAssignment = Just (solveCell brand)
+        }
+    plan =
+      either (error . show) id $
+        planResolvedAction
+          defaultWorkflowConfig
+          identityUnderTest
+          SolveIssue
+          (Just brand)
+          (ActionTargetItem (resolveHeldItem environment.actionCatalog TargetPlain (IssueItem (baseIssue 844 []))))
+
+solveTaskBrandOf :: WorkerDescriptor -> Maybe SolverBrand
+solveTaskBrandOf descriptor = case descriptor.workerDescriptorSpec.workerTask of
+  SolveWorkerTaskKind task -> Just task.solveWorkerBrand
+  PullRequestWorkerTaskKind _ -> Nothing
+
+-- | The baseline record a solve launch writes on the worker it starts.
+solveBaseline :: SolverBrand -> WorkerParent
+solveBaseline brand =
+  WorkerParent
+    { workerParentIssueNumber = 844,
+      workerParentReviewRound = 0,
+      workerParentSolverBrand = brand,
+      workerParentSolverSession = Nothing,
+      workerParentSolverLogPath = Nothing,
+      workerParentStartedAt = epoch,
+      workerParentKnownPullRequests = Set.empty,
+      workerParentPullRequest = Nothing,
+      workerParentSolverAssignment = Nothing
+    }
 
 isTurnAlreadyRunning :: ActionRefusal -> Bool
 isTurnAlreadyRunning (ActionTurnAlreadyRunning _ _) = True

@@ -242,29 +242,34 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
 
     launchFor resolved cell = case plan.planRoute of
       RouteProvider (ActionSolve brand) ->
-        launchSolve resolved SolveOnly brand cell request.requestParent
-          >>= settled brand (solveTurn resolved SolveOnly) (workerHandle resolved)
+        launchSolve resolved SolveOnly brand cell (Just (baselineParent resolved brand cell))
+          >>= settled brand (solveTurn resolved SolveOnly brand) recordedAttribution (workerHandle resolved)
       RouteProvider (ActionAutoSolve brand) ->
-        launchSolve resolved AutoSolve brand cell (Just (autoSolveParent resolved brand cell))
-          >>= settled brand (solveTurn resolved AutoSolve) (autoSolveHandle resolved)
+        launchSolve resolved AutoSolve brand cell (Just (baselineParent resolved brand cell))
+          >>= settled brand (solveTurn resolved AutoSolve brand) recordedAttribution (autoSolveHandle resolved)
       RouteProvider (ActionPullRequestFlow origin action) ->
         launchPullRequest resolved origin action cell
-          >>= settled (agentForAction origin action) (pullRequestTurn resolved action) (workerHandle resolved)
+          >>= settled (agentForAction origin action) (pullRequestTurn resolved origin action) (const . Just) (workerHandle resolved)
       _ -> pure (Left (ActionRoutingUnavailable plan.planKind "this action starts no provider"))
 
     -- The turn this request wanted, as a fact about a worker's task. A lease
     -- is keyed by number alone, so this is what stops an autosolve request
-    -- adopting a plain solve, or a repair adopting a running review.
-    solveTurn resolved workflow task = case task of
+    -- adopting a plain solve, a repair adopting a running review, or either
+    -- adopting a run on the other brand -- which is a different run, on a
+    -- different provider, whose pull request will carry the other origin
+    -- marker.
+    solveTurn resolved workflow brand task = case task of
       SolveWorkerTaskKind held ->
         held.solveWorkerIssueNumber == resolved.resolvedTargetNumber
           && held.solveWorkerWorkflow == workflow
+          && held.solveWorkerBrand == brand
       PullRequestWorkerTaskKind _ -> False
 
-    pullRequestTurn resolved action task = case task of
+    pullRequestTurn resolved origin action task = case task of
       PullRequestWorkerTaskKind held ->
         held.pullRequestWorkerNumber == resolved.resolvedTargetNumber
           && held.pullRequestWorkerAction == action
+          && held.pullRequestWorkerOrigin == origin
       SolveWorkerTaskKind _ -> False
 
     -- What a launch's answer means, with the one refusal a caller can act on
@@ -281,23 +286,35 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
     -- Fails closed when the holder cannot be found: a turn is running and
     -- this dispatch does not know which, so it refuses rather than starting
     -- another.
-    settled brand wanted build outcome = case outcome of
+    settled brand wanted attribute build outcome = case outcome of
       Right descriptor -> build (attribution brand) descriptor
       Left (WorkerLaunchFailed detail) -> pure (Left (ActionDispatchFailed plan.planKind detail))
       Left (WorkerTurnAlreadyRunning owner detail) -> do
         held <- workerHoldingTurn environment.actionRepository owner wanted
         case held of
-          -- The adopted worker's own record is what its run started from, so
+          Nothing -> pure (Left (ActionTurnAlreadyRunning plan.planKind detail))
+          -- The joined worker's own record is what its run started from, so
           -- the baseline comes from it rather than from this catalog: a run
           -- begun earlier must not have the pull requests it has since opened
-          -- counted as pre-existing.
-          Just descriptor -> build (adoptedAttribution brand descriptor) descriptor
-          Nothing -> pure (Left (ActionTurnAlreadyRunning plan.planKind detail))
+          -- counted as pre-existing. A run that recorded none cannot be
+          -- joined at all -- inventing one from this request would check the
+          -- other run's result against this caller's baseline and brand.
+          Just descriptor -> case attribute (attribution brand) descriptor of
+            Nothing ->
+              pure
+                ( Left
+                    ( ActionTurnAlreadyRunning
+                        plan.planKind
+                        (detail <> ", and that run recorded no attribution to continue it from")
+                    )
+                )
+            Just held' -> build held' descriptor
 
-    adoptedAttribution brand descriptor =
-      case descriptor.workerDescriptorSpec.workerParent of
-        Nothing -> attribution brand
-        Just parent ->
+    -- The attribution a joined run started with. 'Nothing' when its worker
+    -- recorded none, which is a run this caller must not speak for.
+    recordedAttribution _ descriptor = fromParent <$> descriptor.workerDescriptorSpec.workerParent
+      where
+        fromParent parent =
           ActionAttribution
             { attributionKnownPullRequests = parent.workerParentKnownPullRequests,
               attributionStartedAt = parent.workerParentStartedAt,
@@ -312,16 +329,21 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
     autoSolveHandle resolved held descriptor =
       Right <$> autoSolveActionHandle liveAutoSolveTurns resolved held descriptor
 
-    -- An autosolve launch records the run's own baseline on the solver it
-    -- starts, because nothing else will. The loop's discovery arm binds only a
-    -- /new/ pull request, so a run recovered after its opening solve finished
-    -- -- and before any review worker exists to carry a parent record -- would
+    -- Every solve launch records the run's own baseline on the worker it
+    -- starts, because nothing else will, and two different readers need it.
+    --
+    -- An autosolve run recovered after its opening solve finished -- and
+    -- before any review worker exists to carry a parent record -- would
     -- otherwise take the board's current pull requests as its baseline, find
     -- the one it just opened already in it, and wait for a pull request that
-    -- has already arrived. A caller that supplied its own parent keeps it:
-    -- that is a revision round, which knows its own round and bound pull
-    -- request.
-    autoSolveParent resolved brand cell =
+    -- had already arrived. And any solve run that another caller /joins/ is
+    -- one whose result that caller then reports: without the run's own
+    -- baseline and brand it would attribute against its own, excluding the
+    -- pull request the run opened or calling its origin wrong.
+    --
+    -- A caller that supplied its own parent keeps it: that is a revision
+    -- round, which knows its own round and bound pull request.
+    baselineParent resolved brand cell =
       fromMaybe
         WorkerParent
           { workerParentIssueNumber = resolved.resolvedTargetNumber,
