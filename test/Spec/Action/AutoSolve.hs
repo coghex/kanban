@@ -388,6 +388,10 @@ withPullRequests loop pullRequests =
   loop.loopEnvironment
     {actionCatalog = loop.loopEnvironment.actionCatalog {catalogPullRequests = pullRequests}}
 
+isRepositoryMismatchRefusal :: ActionRefusal -> Bool
+isRepositoryMismatchRefusal (ActionRepositoryMismatch _ _) = True
+isRepositoryMismatchRefusal _ = False
+
 isRunningObservation :: ActionObservation -> Bool
 isRunningObservation (ActionRunning _) = True
 isRunningObservation (ActionSettled _) = False
@@ -850,10 +854,10 @@ spec = do
         observations <- forM wholeArc $ \world -> do
           loop.loopSetWorld world
           observeAction (withPullRequests loop world.worldPullRequests) handle
-        last observations `shouldBe` ActionSettled (ActionPullRequestApproved pullRequestUnderLoop)
+        last observations `shouldBe` Right (ActionSettled (ActionPullRequestApproved pullRequestUnderLoop))
         -- ...and nothing before it claimed a result. A handle that reported
         -- the opening solve's pull request would settle here instead.
-        all isRunningObservation (init observations) `shouldBe` True
+        all (either (const False) isRunningObservation) (init observations) `shouldBe` True
         map (.dispatchedKind) <$> readIORef loop.loopDispatches
           >>= (`shouldBe` [ReviewPullRequest, AutoSolveIssue])
 
@@ -873,18 +877,39 @@ spec = do
           (\done -> forkIO (observeAction (withPullRequests loop [opened]) handle >>= putMVar done))
           [first, second]
         observations <- mapM takeMVar [first, second]
-        all isRunningObservation observations `shouldBe` True
+        all (either (const False) isRunningObservation) observations `shouldBe` True
         -- One review round, not two. The second observation decided from the
         -- first one's result rather than from the state it started with.
         map (.dispatchedKind) <$> readIORef loop.loopDispatches
           >>= (`shouldBe` [ReviewPullRequest])
+
+    -- An observation reads evidence and, for an autosolve handle, acts on it.
+    -- Made against another repository's environment it would validate the
+    -- wrong labels and dispatch this run's later turns against whatever
+    -- shares those numbers over there.
+    it "refuses an observation made against another repository" $
+      withLoop [] $ \loop -> do
+        handle <- loop.loopAutoSolveHandle
+        loop.loopSetWorld (World [linkedPullRequest pullRequestUnderLoop ClaudeSolver []] [(Solver, completed)])
+        let elsewhere =
+              (withPullRequests loop [])
+                {actionRepository = Repository "/tmp/other" "coghex" "other"}
+        observed <- observeAction elsewhere handle
+        either isRepositoryMismatchRefusal (const False) observed `shouldBe` True
+        -- Nothing was advanced and no turn was started.
+        readIORef loop.loopDispatches >>= (`shouldBe` [])
+        -- The loop's own tick refuses it too, since a driver advances the
+        -- cursor directly.
+        advanced <- advanceAutoSolveAction loop.loopTurns elsewhere loop.loopStart
+        either (const True) (const False) advanced `shouldBe` True
+        readIORef loop.loopDispatches >>= (`shouldBe` [])
 
     it "names the loop's own place while it runs" $
       withLoop [] $ \loop -> do
         handle <- loop.loopAutoSolveHandle
         loop.loopSetWorld (World [] [(Solver, running)])
         observed <- observeAction (withPullRequests loop []) handle
-        observed `shouldBe` ActionRunning "implementing"
+        observed `shouldBe` Right (ActionRunning "implementing")
         actionHandleKind handle `shouldBe` AutoSolveIssue
 
   -- An unreadable review record is not "no review". Reading it as one is how

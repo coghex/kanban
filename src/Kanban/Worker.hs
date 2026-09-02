@@ -35,7 +35,7 @@ module Kanban.Worker
     WorkerLeaseRefusal (..),
     WorkerLaunchRefusal (..),
     workerLaunchRefusalMessage,
-    workerHoldingItem,
+    workerHoldingTurn,
     acknowledgeWorker,
     acknowledgeSupersededWorkers,
     collectWorkerCache,
@@ -106,7 +106,7 @@ import Kanban.Worker.Discovery
     collectWorkerCacheWith,
     discoverWorkerHistory,
     discoverWorkers,
-    workerHoldingItem,
+    workerHoldingTurn,
   )
 import Kanban.Worker.Journal (EventJournalLock, appendWorkerEvent, consumeJournalLines, newEventJournalLock)
 import Kanban.Worker.Lease

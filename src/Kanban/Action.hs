@@ -96,6 +96,7 @@ module Kanban.Action
     structuralRefusalMessage,
     ActionRefusal (..),
     actionRefusalMessage,
+    checkTargetRepository,
 
     -- * Handles and observations
     ActionAttribution (..),
@@ -150,11 +151,11 @@ module Kanban.Action
     ActionPlan (..),
     planAction,
     planResolvedAction,
-    checkTargetRepository,
     checkedAgainst,
     dispatchAction,
     dispatchProviderTurn,
     observeAction,
+    observationRefusal,
     observeWorkerHandle,
     observeAutoSolveTurn,
     approvalQueueObservation,

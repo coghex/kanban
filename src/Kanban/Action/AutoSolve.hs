@@ -61,6 +61,7 @@ import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Action.Target (workflowActionKindForLabelledPullRequest)
+import Kanban.Cache (normalizedRepositoryIdentity)
 import Kanban.Action.Types
 import Kanban.Domain (PullRequest (..), RepoSnapshot, Repository, WorkflowConfig)
 import Kanban.Models (RecordedAssignment)
@@ -239,7 +240,20 @@ workerStatusIsLive (Right state) = case state.workerStateStatus of
 --
 -- 'Left' is terminal and ends the action; 'Right' carries the loop forward.
 advanceAutoSolveAction :: AutoSolveTurns -> ActionEnvironment -> AutoSolveState -> IO (Either ActionOutcome AutoSolveState)
-advanceAutoSolveAction turns environment state = do
+advanceAutoSolveAction turns environment state
+  -- The evidence this tick decides from, and the repository its next turn
+  -- would be started in, are both this environment's. Advancing a run against
+  -- another repository's would bind whatever happens to share its numbers
+  -- over there, so a mismatched environment ends the action rather than
+  -- acting on it.
+  | Left refusal <- checkTargetRepository identity (ActionTargetItem state.autoSolveActionTarget) =
+      pure (Left (ActionFailed (actionRefusalMessage refusal)))
+  | otherwise = advanceCheckedAutoSolveAction turns environment state
+  where
+    identity = normalizedRepositoryIdentity environment.actionRepository
+
+advanceCheckedAutoSolveAction :: AutoSolveTurns -> ActionEnvironment -> AutoSolveState -> IO (Either ActionOutcome AutoSolveState)
+advanceCheckedAutoSolveAction turns environment state = do
   solverState <- traverse turns.turnWorkerState (autoSolveSolverWorker state.autoSolveActionSolver)
   reviewerState <- traverse turns.turnWorkerState state.autoSolveActionReviewer
   let recorded = case state.autoSolveActionSolver of

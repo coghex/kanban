@@ -55,6 +55,7 @@ module Kanban.Action.Types
     ActionTarget (..),
 
     -- * Refusals
+    checkTargetRepository,
     StructuralRefusal (..),
     structuralRefusalMessage,
     ActionRefusal (..),
@@ -728,6 +729,25 @@ actionRequest kind repository target =
       requestUserMessage = "",
       requestParent = Nothing
     }
+
+-- | Refuse a target that belongs to a repository other than the one the
+-- caller means.
+--
+-- 'resolveActionTarget' asks this before it looks a number up, and this asks
+-- it again of a record the caller resolved itself -- which is the whole reason
+-- the identity is carried on the record. Every repository has a #123, so a
+-- target resolved against one repository and dispatched with another's
+-- environment would spawn a worker on the wrong repository entirely while the
+-- record it came from still named the right one.
+checkTargetRepository :: Text -> ActionTarget -> Either ActionRefusal ()
+checkTargetRepository requested target = case target of
+  ActionTargetRepositoryWide repository -> compareWith (normalizedRepositoryIdentity repository)
+  ActionTargetItem resolved -> compareWith resolved.resolvedTargetRepository
+  where
+    normalized = Text.toLower (Text.strip requested)
+    compareWith held
+      | normalized == held = Right ()
+      | otherwise = Left (ActionRepositoryMismatch normalized held)
 
 showNumber :: Int -> Text
 showNumber = Text.pack . show

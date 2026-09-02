@@ -817,6 +817,43 @@ spec = do
         written <- specifications environment.actionRepository
         map (.workerId) written `shouldBe` [running.workerDescriptorSpec.workerId]
 
+    -- Leases are keyed by number alone, so one pull request's is held equally
+    -- by a review and a repair, and one issue's by a solve and an autosolve.
+    -- Joining blind would report a running review's result as a repair, or
+    -- wrap a plain solve in an autosolve handle and then start review rounds
+    -- for work nobody asked to review.
+    it "refuses to join a turn running under a different action than the one asked for" $
+      withDispatchMachine $ \environment -> do
+        let repairable =
+              (markedPullRequest 42 [844] CodexSolver [label defaultWorkflowConfig.approvalLabel])
+                { pullRequestMergeState = MergeConflicting,
+                  pullRequestReviewDecision = ReviewApproved
+                }
+        -- A live worker on the same pull request, but reviewing it.
+        reviewing <- pullRequestWorkerDescriptor environment.actionRepository 42
+        let asReview =
+              reviewing
+                { workerDescriptorSpec =
+                    reviewing.workerDescriptorSpec
+                      { workerTask =
+                          PullRequestWorkerTaskKind (PullRequestWorkerTask 42 PullRequestCodex PullRequestReview)
+                      }
+                }
+        publishWorkerSpec asReview
+        publishWorkerState asReview WorkerRunning
+        acquireWorkerLease asReview `shouldReturn` Right ()
+        let request = actionRequest RepairPullRequest identityUnderTest (TargetByKind ActionTargetPullRequest 42)
+            plan =
+              either (error . show) id $
+                planResolvedAction
+                  defaultWorkflowConfig
+                  identityUnderTest
+                  RepairPullRequest
+                  Nothing
+                  (ActionTargetItem (resolveHeldItem environment.actionCatalog TargetPlain (PullRequestItem repairable)))
+        dispatched <- dispatchProviderTurn environment request plan
+        either isTurnAlreadyRunning (const False) dispatched `shouldBe` True
+
     -- Fails closed the moment the holder cannot be identified: a turn is
     -- running and this dispatch does not know which worker owns it, so it
     -- refuses rather than starting another.

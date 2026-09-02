@@ -14,7 +14,7 @@
 module Kanban.Worker.Discovery
   ( discoverWorkers,
     discoverWorkerHistory,
-    workerHoldingItem,
+    workerHoldingTurn,
     acknowledgeWorker,
     acknowledgeSupersededWorkers,
     collectWorkerCache,
@@ -31,7 +31,7 @@ import Data.Maybe (catMaybes, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
-import Kanban.Domain (ItemId (..), Repository (..))
+import Kanban.Domain (Repository (..))
 import Kanban.Process (IdentityPresence (..), ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot)
 import Kanban.Worker.Paths
   ( decodeFile,
@@ -77,29 +77,30 @@ discoverWorkers repository = do
           WorkerTerminal _ -> not acknowledged
         Left _ -> not acknowledged && diffUTCTime now descriptor.workerDescriptorSpec.workerCreatedAt < workerDiscoveryStartupGraceSeconds
 
--- | The live worker that currently owns one item's turn.
+-- | The live worker that currently owns the turn a caller wanted to start.
 --
 -- The lease is keyed by item, so a launch that lost it lost to exactly one
 -- worker, and this is how a caller finds the one it lost to: by the owner id
--- the lease record names when that record could be read, and by the item
+-- the lease record names when that record could be read, and by the task
 -- otherwise. Joining that worker is what makes two advancers of one action
 -- observe one turn instead of racing to start a second.
 --
+-- The predicate is the caller's requested turn, and it is what keeps the
+-- lease's coarseness from becoming a mix-up. Leases are keyed by /number/
+-- alone, so one issue's lease is held equally by a solve and an autosolve,
+-- and one pull request's by a review and a repair. Joining blind would let an
+-- autosolve request adopt a plain solve and then start review rounds for work
+-- nobody asked to review, or report a running review's result as a repair.
+-- A holder whose task is not the requested turn is no holder to this caller.
+--
 -- Discovery-filtered, so a worker that has already settled and been
 -- acknowledged is never offered as the holder of a live turn.
-workerHoldingItem :: Repository -> Maybe WorkerId -> ItemId -> IO (Maybe WorkerDescriptor)
-workerHoldingItem repository owner item = do
+workerHoldingTurn :: Repository -> Maybe WorkerId -> (WorkerTask -> Bool) -> IO (Maybe WorkerDescriptor)
+workerHoldingTurn repository owner wanted = do
   descriptors <- discoverWorkers repository
-  let forItem = filter (acts item) descriptors
-      named = filter ((== owner) . Just . (.workerId) . (.workerDescriptorSpec)) forItem
-  pure (listToMaybe (named <> forItem))
-  where
-    acts (IssueId number) descriptor = case descriptor.workerDescriptorSpec.workerTask of
-      SolveWorkerTaskKind task -> task.solveWorkerIssueNumber == number
-      PullRequestWorkerTaskKind _ -> False
-    acts (PullRequestId number) descriptor = case descriptor.workerDescriptorSpec.workerTask of
-      PullRequestWorkerTaskKind task -> task.pullRequestWorkerNumber == number
-      SolveWorkerTaskKind _ -> False
+  let matching = filter (wanted . (.workerTask) . (.workerDescriptorSpec)) descriptors
+      named = filter ((== owner) . Just . (.workerId) . (.workerDescriptorSpec)) matching
+  pure (listToMaybe (named <> matching))
 
 discoverWorkerHistory :: Repository -> IO [WorkerDescriptor]
 discoverWorkerHistory repository = do

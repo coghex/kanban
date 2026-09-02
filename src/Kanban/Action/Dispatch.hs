@@ -30,7 +30,6 @@ module Kanban.Action.Dispatch
     ActionPlan (..),
     planAction,
     planResolvedAction,
-    checkTargetRepository,
     checkedAgainst,
 
     -- * Dispatch and observation
@@ -40,6 +39,7 @@ module Kanban.Action.Dispatch
     autoSolveActionHandle,
     runAutoSolveAction,
     observeAction,
+    observationRefusal,
     observeWorkerHandle,
     observeAutoSolveTurn,
     approvalQueueObservation,
@@ -77,7 +77,7 @@ import Kanban.ApprovalService
     queryApprovalStatus,
   )
 import Kanban.Cache (normalizedRepositoryIdentity)
-import Kanban.Domain (ItemId (..), Label (..), PullRequest (..), Repository, WorkflowConfig)
+import Kanban.Domain (Label (..), PullRequest (..), Repository, WorkflowConfig)
 import Kanban.Models (RecordedAssignment)
 import Kanban.Preflight (PreflightAction (..))
 import Kanban.PullRequestFlow
@@ -100,12 +100,16 @@ import Kanban.Worker
   ( WorkerDescriptor (..),
     WorkerLaunchRefusal (..),
     WorkerParent (..),
+    WorkerSpec (..),
     WorkerState (..),
     WorkerStatus (..),
+    WorkerTask (..),
+    SolveWorkerTask (..),
+    PullRequestWorkerTask (..),
     launchPullRequestWorker,
     launchSolveWorker,
     readWorkerState,
-    workerHoldingItem,
+    workerHoldingTurn,
   )
 
 -- ---------------------------------------------------------------------------
@@ -166,25 +170,6 @@ checkedAgainst :: ActionEnvironment -> ActionPlan -> Either ActionRefusal Action
 checkedAgainst environment plan =
   plan
     <$ checkTargetRepository (normalizedRepositoryIdentity environment.actionRepository) plan.planTarget
-
--- | Refuse a target that belongs to a repository other than the one the
--- caller means.
---
--- 'resolveActionTarget' asks this before it looks a number up, and this asks
--- it again of a record the caller resolved itself -- which is the whole reason
--- the identity is carried on the record. Every repository has a #123, so a
--- target resolved against one repository and dispatched with another's
--- environment would spawn a worker on the wrong repository entirely while the
--- record it came from still named the right one.
-checkTargetRepository :: Text -> ActionTarget -> Either ActionRefusal ()
-checkTargetRepository requested target = case target of
-  ActionTargetRepositoryWide repository -> compareWith (normalizedRepositoryIdentity repository)
-  ActionTargetItem resolved -> compareWith resolved.resolvedTargetRepository
-  where
-    normalized = Text.toLower (Text.strip requested)
-    compareWith held
-      | normalized == held = Right ()
-      | otherwise = Left (ActionRepositoryMismatch normalized held)
 
 -- ---------------------------------------------------------------------------
 -- Dispatch
@@ -258,14 +243,29 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
     launchFor resolved cell = case plan.planRoute of
       RouteProvider (ActionSolve brand) ->
         launchSolve resolved SolveOnly brand cell request.requestParent
-          >>= settled resolved (workerHandle resolved brand)
+          >>= settled brand (solveTurn resolved SolveOnly) (workerHandle resolved)
       RouteProvider (ActionAutoSolve brand) ->
         launchSolve resolved AutoSolve brand cell (Just (autoSolveParent resolved brand cell))
-          >>= settled resolved (autoSolveHandle resolved brand)
+          >>= settled brand (solveTurn resolved AutoSolve) (autoSolveHandle resolved)
       RouteProvider (ActionPullRequestFlow origin action) ->
         launchPullRequest resolved origin action cell
-          >>= settled resolved (workerHandle resolved (agentForAction origin action))
+          >>= settled (agentForAction origin action) (pullRequestTurn resolved action) (workerHandle resolved)
       _ -> pure (Left (ActionRoutingUnavailable plan.planKind "this action starts no provider"))
+
+    -- The turn this request wanted, as a fact about a worker's task. A lease
+    -- is keyed by number alone, so this is what stops an autosolve request
+    -- adopting a plain solve, or a repair adopting a running review.
+    solveTurn resolved workflow task = case task of
+      SolveWorkerTaskKind held ->
+        held.solveWorkerIssueNumber == resolved.resolvedTargetNumber
+          && held.solveWorkerWorkflow == workflow
+      PullRequestWorkerTaskKind _ -> False
+
+    pullRequestTurn resolved action task = case task of
+      PullRequestWorkerTaskKind held ->
+        held.pullRequestWorkerNumber == resolved.resolvedTargetNumber
+          && held.pullRequestWorkerAction == action
+      SolveWorkerTaskKind _ -> False
 
     -- What a launch's answer means, with the one refusal a caller can act on
     -- treated as such.
@@ -281,26 +281,36 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
     -- Fails closed when the holder cannot be found: a turn is running and
     -- this dispatch does not know which, so it refuses rather than starting
     -- another.
-    settled resolved build outcome = case outcome of
-      Right descriptor -> build descriptor
+    settled brand wanted build outcome = case outcome of
+      Right descriptor -> build (attribution brand) descriptor
       Left (WorkerLaunchFailed detail) -> pure (Left (ActionDispatchFailed plan.planKind detail))
       Left (WorkerTurnAlreadyRunning owner detail) -> do
-        held <- workerHoldingItem environment.actionRepository owner (itemFor resolved)
+        held <- workerHoldingTurn environment.actionRepository owner wanted
         case held of
-          Just descriptor -> build descriptor
+          -- The adopted worker's own record is what its run started from, so
+          -- the baseline comes from it rather than from this catalog: a run
+          -- begun earlier must not have the pull requests it has since opened
+          -- counted as pre-existing.
+          Just descriptor -> build (adoptedAttribution brand descriptor) descriptor
           Nothing -> pure (Left (ActionTurnAlreadyRunning plan.planKind detail))
 
-    itemFor resolved = case resolved.resolvedTargetKind of
-      ActionTargetIssue -> IssueId resolved.resolvedTargetNumber
-      ActionTargetPullRequest -> PullRequestId resolved.resolvedTargetNumber
+    adoptedAttribution brand descriptor =
+      case descriptor.workerDescriptorSpec.workerParent of
+        Nothing -> attribution brand
+        Just parent ->
+          ActionAttribution
+            { attributionKnownPullRequests = parent.workerParentKnownPullRequests,
+              attributionStartedAt = parent.workerParentStartedAt,
+              attributionSolverBrand = parent.workerParentSolverBrand
+            }
 
-    workerHandle resolved brand descriptor =
-      pure (Right (WorkerActionHandle plan.planKind resolved descriptor (attribution brand)))
+    workerHandle resolved held descriptor =
+      pure (Right (WorkerActionHandle plan.planKind resolved descriptor held))
 
     -- The one place an autosolve handle is made, so every one of them carries
     -- a cursor observing it can advance.
-    autoSolveHandle resolved brand descriptor =
-      Right <$> autoSolveActionHandle liveAutoSolveTurns resolved (attribution brand) descriptor
+    autoSolveHandle resolved held descriptor =
+      Right <$> autoSolveActionHandle liveAutoSolveTurns resolved held descriptor
 
     -- An autosolve launch records the run's own baseline on the solver it
     -- starts, because nothing else will. The loop's discovery arm binds only a
@@ -385,15 +395,36 @@ runAutoSolveAction = runAutoSolveActionWith liveAutoSolveTurns
 -- An autosolve handle is the one that cannot be concluded from what it is
 -- holding: see 'observeAutoSolveTurn'. Advancing that loop is
 -- "Kanban.Action.AutoSolve"'s, so its progression has exactly one owner.
-observeAction :: ActionEnvironment -> ActionHandle -> IO ActionObservation
-observeAction environment handle = case handle of
-  ApprovalQueueHandle repository ->
-    ActionSettled . ActionApprovalQueueReport <$> approvalQueueObservation repository
-  WorkerActionHandle kind resolved descriptor attribution ->
-    observeWorkerHandle environment kind resolved descriptor attribution
-  -- Advancing rather than merely reading: an autosolve action's result is the
-  -- approval its loop reaches, so observing it moves the loop on a tick.
-  AutoSolveActionHandle _ _ _ cursor -> advanceAutoSolveCursor cursor environment
+observeAction :: ActionEnvironment -> ActionHandle -> IO (Either ActionRefusal ActionObservation)
+observeAction environment handle = case observationRefusal environment handle of
+  Just refusal -> pure (Left refusal)
+  Nothing -> Right <$> case handle of
+    ApprovalQueueHandle repository ->
+      ActionSettled . ActionApprovalQueueReport <$> approvalQueueObservation repository
+    WorkerActionHandle kind resolved descriptor attribution ->
+      observeWorkerHandle environment kind resolved descriptor attribution
+    -- Advancing rather than merely reading: an autosolve action's result is
+    -- the approval its loop reaches, so observing it moves the loop on a tick.
+    AutoSolveActionHandle _ _ _ cursor -> advanceAutoSolveCursor cursor environment
+
+-- | Why this environment may not observe this handle.
+--
+-- An observation reads evidence — the catalog's pull requests, the approval
+-- controller — and for an autosolve handle it also /acts/ on that evidence by
+-- starting the next turn. So the environment it is made against has to be the
+-- repository the handle names: observing a handle for one repository with
+-- another's environment would validate the wrong labels for a finished turn,
+-- and would dispatch an autosolve run's later turns against whatever happens
+-- to share those numbers over there.
+observationRefusal :: ActionEnvironment -> ActionHandle -> Maybe ActionRefusal
+observationRefusal environment handle =
+  either Just (const Nothing) (checkTargetRepository identity target)
+  where
+    identity = normalizedRepositoryIdentity environment.actionRepository
+    target = case handle of
+      ApprovalQueueHandle repository -> ActionTargetRepositoryWide repository
+      WorkerActionHandle _ resolved _ _ -> ActionTargetItem resolved
+      AutoSolveActionHandle resolved _ _ _ -> ActionTargetItem resolved
 
 -- | What one observation of an autosolve action's /current provider turn/
 -- reports.
