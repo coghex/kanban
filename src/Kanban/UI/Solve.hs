@@ -12,6 +12,7 @@ module Kanban.UI.Solve
     pullRequestFromBoard,
     solveActionKind,
     solveChooserFooterHints,
+    solveLaunchPlan,
     solveStartDecision,
     startIssueSolve,
     submitSolveInput,
@@ -35,6 +36,7 @@ import Kanban.Action
     ActionTargetKind (..),
     ActionTargetRef (..),
     ActionTarget (..),
+    ActionPlan (..),
     ActionRefusal (..),
     TargetStructure (..),
     WorkflowActionKind (..),
@@ -304,63 +306,14 @@ failSolveLaunch eventChannel issueNumber message = do
 launchAssignedSolveInvocation :: RecordedAssignment -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchAssignedSolveInvocation assignment issueNumber workflow brand existingSession provenance input = do
   state <- get
-  let session = Map.lookup issueNumber state.appSolveSessions
-      existingLogPath = session >>= (.sessionLogPath)
-      eventChannel = state.appEventChannel
-      kind = solveActionKind workflow
-      parent = do
-        held <- session
-        progress <- held.sessionDetail.solveSessionAutoProgress
-        pure
-          WorkerParent
-            { workerParentIssueNumber = issueNumber,
-              workerParentReviewRound = progress.autoSolveReviewRound,
-              workerParentSolverBrand = held.sessionDetail.solveSessionBrand,
-              workerParentSolverSession = held.sessionDetail.solveSessionId,
-              workerParentSolverLogPath = held.sessionLogPath,
-              workerParentStartedAt = progress.autoSolveStartedAt,
-              workerParentKnownPullRequests = progress.autoSolveKnownPullRequests,
-              workerParentPullRequest = progress.autoSolvePullRequest,
-              workerParentSolverAssignment = held.sessionDetail.solveSessionAssignment
-            }
-      environment = dashboardActionEnvironment state
-      request =
-        (actionRequest kind (catalogIdentity environment.actionCatalog) (TargetByKind ActionTargetIssue issueNumber))
-          { requestSolverBrand = Just brand,
-            requestRecordedAssignment = Just assignment,
-            requestExistingSession = existingSession,
-            requestExistingLogPath = existingLogPath,
-            requestResumeProvenance = provenance,
-            requestUserMessage = input,
-            requestParent = parent
-          }
-      planned = case session of
-        Nothing ->
-          Left
-            ( ActionDispatchFailed
-                kind
-                ("no solve session holds #" <> showText issueNumber <> " any more")
-            )
-        Just held ->
-          planResolvedAction
-            state.appConfig.resolvedWorkflow
-            (catalogIdentity environment.actionCatalog)
-            kind
-            (Just brand)
-            ( ActionTargetItem
-                ( resolveHeldItem
-                    environment.actionCatalog
-                    TargetPlain
-                    (IssueItem held.sessionDetail.solveSessionIssue)
-                )
-            )
+  let eventChannel = state.appEventChannel
   void
     . liftIO
     . forkIO
-    $ case planned of
+    $ case solveLaunchPlan state assignment issueNumber workflow brand existingSession provenance input of
       Left refusal -> failSolveLaunch eventChannel issueNumber (actionRefusalMessage refusal)
-      Right plan -> do
-        dispatched <- dispatchProviderTurn environment request plan
+      Right (request, plan) -> do
+        dispatched <- dispatchProviderTurn (dashboardActionEnvironment state) request plan
         case dispatched of
           Left refusal -> failSolveLaunch eventChannel issueNumber (actionRefusalMessage refusal)
           Right handle ->
@@ -371,6 +324,90 @@ launchAssignedSolveInvocation assignment issueNumber workflow brand existingSess
     $ do
       threadDelay solveInitialRefreshDelayMicros
       writeBChan eventChannel SolveBoardRefreshRequested
+
+-- | What a solve launch asks the registry for, from the session state this
+-- dashboard holds.
+--
+-- Extracted from the launch above so the whole of what this adapter /decides/
+-- is a value: the verb the key selects, the target, the cell to replay, the
+-- session to resume, and the parent record an autosolve run's worker carries.
+-- Everything after it is the registry's and everything before it is the
+-- press, which leaves the launch a fork, a dispatch, and the two ways of
+-- applying the answer -- and leaves this assertable without an @EventM@.
+--
+-- The plan is built against the issue the /session/ holds rather than against
+-- the number, because that record is what every entry point here already
+-- refused on; re-resolving the number would additionally refuse a session
+-- whose issue has since left the open read, which is not what pressing a
+-- chooser digit has ever done.
+solveLaunchPlan ::
+  AppState ->
+  RecordedAssignment ->
+  Int ->
+  SolveWorkflow ->
+  SolverBrand ->
+  Maybe Text ->
+  ResumeProvenance ->
+  Text ->
+  Either ActionRefusal (ActionRequest, ActionPlan)
+solveLaunchPlan state assignment issueNumber workflow brand existingSession provenance input =
+  case session of
+    Nothing ->
+      Left
+        ( ActionDispatchFailed
+            kind
+            ("no solve session holds #" <> showText issueNumber <> " any more")
+        )
+    Just held -> do
+      plan <-
+        planResolvedAction
+          state.appConfig.resolvedWorkflow
+          (catalogIdentity environment.actionCatalog)
+          kind
+          (Just brand)
+          ( ActionTargetItem
+              ( resolveHeldItem
+                  environment.actionCatalog
+                  TargetPlain
+                  (IssueItem held.sessionDetail.solveSessionIssue)
+              )
+          )
+      pure (request, plan)
+  where
+    session = Map.lookup issueNumber state.appSolveSessions
+    environment = dashboardActionEnvironment state
+    kind = solveActionKind workflow
+    -- Every field describes the /solver/, which is what makes a restarted
+    -- dashboard able to restore this loop: the round tells an implementation
+    -- run from a revision, the recorded start and known pull requests keep
+    -- discovery from binding a pull request this run did not open, and the
+    -- bound pull request is what a revision reattached after a restart would
+    -- otherwise have no way to learn.
+    parent = do
+      held <- session
+      progress <- held.sessionDetail.solveSessionAutoProgress
+      pure
+        WorkerParent
+          { workerParentIssueNumber = issueNumber,
+            workerParentReviewRound = progress.autoSolveReviewRound,
+            workerParentSolverBrand = held.sessionDetail.solveSessionBrand,
+            workerParentSolverSession = held.sessionDetail.solveSessionId,
+            workerParentSolverLogPath = held.sessionLogPath,
+            workerParentStartedAt = progress.autoSolveStartedAt,
+            workerParentKnownPullRequests = progress.autoSolveKnownPullRequests,
+            workerParentPullRequest = progress.autoSolvePullRequest,
+            workerParentSolverAssignment = held.sessionDetail.solveSessionAssignment
+          }
+    request =
+      (actionRequest kind (catalogIdentity environment.actionCatalog) (TargetByKind ActionTargetIssue issueNumber))
+        { requestSolverBrand = Just brand,
+          requestRecordedAssignment = Just assignment,
+          requestExistingSession = existingSession,
+          requestExistingLogPath = session >>= (.sessionLogPath),
+          requestResumeProvenance = provenance,
+          requestUserMessage = input,
+          requestParent = parent
+        }
 
 -- | Which registry verb a solve workflow is.
 solveActionKind :: SolveWorkflow -> WorkflowActionKind

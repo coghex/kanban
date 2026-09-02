@@ -13,6 +13,7 @@ module Kanban.UI.PullRequest
     mergeItemDoneCard,
     mergeSelectedDoneCard,
     modifyAutoSolveForPullRequest,
+    pullRequestLaunchPlan,
     pullRequestStartRefusal,
     runDrainerToggleHandoff,
     startPullRequestReview,
@@ -33,6 +34,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Action
   ( ActionEnvironment (..),
+    ActionPlan (..),
     ActionRefusal (..),
     ActionRequest (..),
     ActionTarget (..),
@@ -232,48 +234,72 @@ failPullRequestLaunch eventChannel number message = do
 launchAssignedPullRequestFlow :: RecordedAssignment -> Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchAssignedPullRequestFlow assignment number _origin action _brand existingSession provenance input = do
   state <- get
-  let session = Map.lookup number state.appPullRequestReviewSessions
-      existingLogPath = session >>= (.sessionLogPath)
-      parent = autoSolveWorkerParent state number
-      eventChannel = state.appEventChannel
-      kind = workflowActionKindForAction action
-      environment = dashboardActionEnvironment state
-      request =
-        (actionRequest kind (catalogIdentity environment.actionCatalog) (TargetByKind ActionTargetPullRequest number))
-          { requestRecordedAssignment = Just assignment,
-            requestExistingSession = existingSession,
-            requestExistingLogPath = existingLogPath,
-            requestResumeProvenance = provenance,
-            requestUserMessage = input,
-            requestParent = parent
-          }
-      planned = case session of
-        Nothing ->
-          Left
-            ( ActionDispatchFailed
-                kind
-                ("no pull-request session holds #" <> showText number <> " any more")
-            )
-        Just held ->
-          planResolvedAction
-            state.appConfig.resolvedWorkflow
-            (catalogIdentity environment.actionCatalog)
+  let eventChannel = state.appEventChannel
+  void . liftIO . forkIO $
+    case pullRequestLaunchPlan state assignment number action existingSession provenance input of
+      Left refusal -> failPullRequestLaunch eventChannel number (actionRefusalMessage refusal)
+      Right (request, plan) -> do
+        dispatched <- dispatchProviderTurn (dashboardActionEnvironment state) request plan
+        case dispatched of
+          Left refusal -> failPullRequestLaunch eventChannel number (actionRefusalMessage refusal)
+          Right handle -> mapM_ (writeBChan eventChannel . WorkerRegistered) (actionHandleWorker handle)
+
+-- | What a pull-request launch asks the registry for, from the session state
+-- this dashboard holds. The pull-request twin of
+-- \'Kanban.UI.Solve.solveLaunchPlan\', and extracted for the same reason.
+--
+-- The action this session recorded selects the registry verb, and the
+-- registry derives the action back from the /same/ pull-request record
+-- through \'Kanban.PullRequestFlow.labelPullRequestAction\' and
+-- \'Kanban.PullRequestFlow.directPullRequestAction\'. That round trip is the
+-- point: repair stays the verb only \'directPullRequestAction\' selects, and
+-- nothing here restates which brand or which cell any of the four actions
+-- runs on.
+pullRequestLaunchPlan ::
+  AppState ->
+  RecordedAssignment ->
+  Int ->
+  PullRequestAction ->
+  Maybe Text ->
+  ResumeProvenance ->
+  Text ->
+  Either ActionRefusal (ActionRequest, ActionPlan)
+pullRequestLaunchPlan state assignment number action existingSession provenance input =
+  case session of
+    Nothing ->
+      Left
+        ( ActionDispatchFailed
             kind
-            Nothing
-            ( ActionTargetItem
-                ( resolveHeldItem
-                    environment.actionCatalog
-                    TargetPlain
-                    (PullRequestItem held.sessionDetail.pullRequestSessionPullRequest)
-                )
-            )
-  void . liftIO . forkIO $ case planned of
-    Left refusal -> failPullRequestLaunch eventChannel number (actionRefusalMessage refusal)
-    Right plan -> do
-      dispatched <- dispatchProviderTurn environment request plan
-      case dispatched of
-        Left refusal -> failPullRequestLaunch eventChannel number (actionRefusalMessage refusal)
-        Right handle -> mapM_ (writeBChan eventChannel . WorkerRegistered) (actionHandleWorker handle)
+            ("no pull-request session holds #" <> showText number <> " any more")
+        )
+    Just held -> do
+      plan <-
+        planResolvedAction
+          state.appConfig.resolvedWorkflow
+          (catalogIdentity environment.actionCatalog)
+          kind
+          Nothing
+          ( ActionTargetItem
+              ( resolveHeldItem
+                  environment.actionCatalog
+                  TargetPlain
+                  (PullRequestItem held.sessionDetail.pullRequestSessionPullRequest)
+              )
+          )
+      pure (request, plan)
+  where
+    session = Map.lookup number state.appPullRequestReviewSessions
+    environment = dashboardActionEnvironment state
+    kind = workflowActionKindForAction action
+    request =
+      (actionRequest kind (catalogIdentity environment.actionCatalog) (TargetByKind ActionTargetPullRequest number))
+        { requestRecordedAssignment = Just assignment,
+          requestExistingSession = existingSession,
+          requestExistingLogPath = session >>= (.sessionLogPath),
+          requestResumeProvenance = provenance,
+          requestUserMessage = input,
+          requestParent = autoSolveWorkerParent state number
+        }
 
 autoSolveWorkerParent :: AppState -> Int -> Maybe WorkerParent
 autoSolveWorkerParent state pullRequestNumber =

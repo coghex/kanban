@@ -53,6 +53,7 @@ import Kanban.Worker
     SolveWorkerTask (..),
     WorkerDescriptor (..),
     WorkerId (..),
+    WorkerParent (..),
     WorkerSpec (..),
     WorkerState (..),
     WorkerStatus (..),
@@ -61,7 +62,9 @@ import Kanban.Worker
     workerDirectory,
   )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch)
+import qualified Data.Map.Strict as Map
+import Spec.Support.App (testAppState, testPullRequestSession, testSolveSession, withSolveSession)
+import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, fixtureBoard)
 import Spec.Support.Preflight
   ( BackendFixture (..),
     fullyProvisionedFakes,
@@ -71,7 +74,17 @@ import Spec.Support.Preflight
     withCodexProbe,
     withPreflightMachine,
   )
-import Kanban.UI.Solve (solveActionKind)
+import Kanban.UI.PullRequest (pullRequestLaunchPlan)
+import Kanban.UI.Solve (solveActionKind, solveLaunchPlan)
+import Kanban.UI.Types
+  ( AgentSession (..),
+    AppState (..),
+    AutoSolveProgress (..),
+    AutoSolveStage (..),
+    PullRequestDetail (..),
+    SolveDetail (..),
+    SolvePhase (..),
+  )
 import Spec.Support.Roster (cellOf)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, listDirectory)
 import System.FilePath (takeDirectory, (</>))
@@ -405,6 +418,104 @@ spec = do
               `shouldBe` workflowActionKindForAction action
         )
         [PullRequestReview, PullRequestRereview, PullRequestRevision, PullRequestRepair]
+
+    -- What the S key hands the registry, from a real dashboard state: the
+    -- verb, the target, the operator's brand, the cell to replay, and the
+    -- session to resume. Everything after this is the registry's, so this is
+    -- where the adapter's own decision is pinned.
+    it "hands the registry a solve turn for the session S pressed on" $ do
+      state <- withSolveSession (baseIssue 844 []) SolveRunning <$> testAppState (fixtureBoard [])
+      case solveLaunchPlan state (solveCell CodexSolver) 844 SolveOnly CodexSolver (Just "session-7") ResumeAnswer "go" of
+        Left refusal -> error ("expected a plan, saw " <> show refusal)
+        Right (request, plan) -> do
+          request.requestKind `shouldBe` SolveIssue
+          plan.planKind `shouldBe` SolveIssue
+          plan.planRoute `shouldBe` RouteProvider (ActionSolve CodexSolver)
+          request.requestTarget `shouldBe` TargetByKind ActionTargetIssue 844
+          request.requestSolverBrand `shouldBe` Just CodexSolver
+          request.requestRecordedAssignment `shouldBe` Just (solveCell CodexSolver)
+          request.requestExistingSession `shouldBe` Just "session-7"
+          request.requestUserMessage `shouldBe` "go"
+          -- A plain solve carries no loop, so it records no parent.
+          request.requestParent `shouldBe` Nothing
+
+    -- The A key differs in exactly two ways, and both are what an autosolve
+    -- run needs to survive a restart: the verb, and the parent record its
+    -- worker carries.
+    it "hands the registry an autosolve turn carrying the run's own record" $ do
+      let progress =
+            AutoSolveProgress
+              { autoSolveStage = AutoReviewing,
+                autoSolvePullRequest = Just 900,
+                autoSolveReviewRound = 2,
+                autoSolveKnownPullRequests = Set.fromList [11],
+                autoSolveStartedAt = epoch
+              }
+          looping session =
+            session {sessionDetail = session.sessionDetail {solveSessionAutoProgress = Just progress}}
+      base <- testAppState (fixtureBoard [])
+      let state =
+            base
+              { appSolveSessions =
+                  Map.singleton 844 (looping (testSolveSession (baseIssue 844 []) SolveRunning))
+              }
+      case solveLaunchPlan state (solveCell ClaudeSolver) 844 AutoSolve ClaudeSolver Nothing ResumeAutomatedChangesRequested "revise" of
+        Left refusal -> error ("expected a plan, saw " <> show refusal)
+        Right (request, plan) -> do
+          request.requestKind `shouldBe` AutoSolveIssue
+          plan.planRoute `shouldBe` RouteProvider (ActionAutoSolve ClaudeSolver)
+          request.requestResumeProvenance `shouldBe` ResumeAutomatedChangesRequested
+          case request.requestParent of
+            Nothing -> error "expected an autosolve run to record its parent"
+            Just parent -> do
+              parent.workerParentIssueNumber `shouldBe` 844
+              parent.workerParentReviewRound `shouldBe` 2
+              parent.workerParentKnownPullRequests `shouldBe` Set.fromList [11]
+              parent.workerParentPullRequest `shouldBe` Just 900
+              parent.workerParentStartedAt `shouldBe` epoch
+
+    -- Every mode r selects, repair included. The registry derives the action
+    -- back from the same record the press decided from, so each verb must
+    -- round-trip to the action its session recorded.
+    it "hands the registry each pull-request mode r selects" $
+      mapM_
+        ( \action -> do
+            let pullRequest = pullRequestFor action
+                recorded session =
+                  session {sessionDetail = session.sessionDetail {pullRequestSessionAction = action}}
+            base <- testAppState (fixtureBoard [])
+            let state =
+                  base
+                    { appPullRequestReviewSessions =
+                        Map.singleton 60 (recorded (testPullRequestSession pullRequest SolveRunning))
+                    }
+            case pullRequestLaunchPlan state (solveCell CodexSolver) 60 action Nothing ResumeAnswer "" of
+              Left refusal -> error ("expected a plan for " <> show action <> ", saw " <> show refusal)
+              Right (request, plan) -> do
+                request.requestKind `shouldBe` workflowActionKindForAction action
+                request.requestTarget `shouldBe` TargetByKind ActionTargetPullRequest 60
+                -- The route names the action the registry derived back, and
+                -- the brand routing that action takes.
+                plan.planRoute
+                  `shouldBe` RouteProvider (ActionPullRequestFlow PullRequestClaude action)
+        )
+        [PullRequestReview, PullRequestRereview, PullRequestRevision, PullRequestRepair]
+
+    -- The refusals reach the adapter too: a launch for a session that has
+    -- gone, and one whose issue the completed generation has since settled,
+    -- both come back as refusals rather than plans.
+    it "refuses a launch the session or the completed generation has settled" $ do
+      base <- testAppState (fixtureBoard [])
+      either (Text.isInfixOf "no solve session" . actionRefusalMessage) (const False)
+        (solveLaunchPlan base (solveCell CodexSolver) 844 SolveOnly CodexSolver Nothing ResumeAnswer "")
+        `shouldBe` True
+      let closed = (baseIssue 844 []) {issueState = IssueClosed}
+          settled =
+            (withSolveSession (baseIssue 844 []) SolveRunning base)
+              {appCompletedHistory = Just (CompletedHistory [closed] [] epoch)}
+      either (Text.isInfixOf "completed history is read-only" . actionRefusalMessage) (const False)
+        (solveLaunchPlan settled (solveCell CodexSolver) 844 SolveOnly CodexSolver Nothing ResumeAnswer "")
+        `shouldBe` True
 
     -- The dashboard classifies structure from what it is drawing; a headless
     -- caller from the hierarchy. Both feed the one rule, and only the first
