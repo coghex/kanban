@@ -10,6 +10,7 @@ module Kanban.UI.Review
     applyFailedInterrupt,
     applyUndeliveredSteer,
     carryUndelivered,
+    undeliveredForIssue,
     approvalServiceRefusal,
     armReviewTick,
     armVisibleReviewTicks,
@@ -323,6 +324,13 @@ holdUndelivered inputLive message session =
       | inputLive, Text.null (Text.strip session.sessionInput) = takeNextUndelivered queued
       | otherwise = (session.sessionInput, queued)
 
+-- | Record what an issue's review still owes a send, dropping the entry
+-- entirely once nothing is owed so the map holds only live obligations.
+holdUndeliveredForIssue :: Int -> [Text] -> Map Int [Text] -> Map Int [Text]
+holdUndeliveredForIssue issueNumber owed held
+  | null owed = Map.delete issueNumber held
+  | otherwise = Map.insert issueNumber owed held
+
 -- | Whether a session is still holding text nobody has managed to send.
 --
 -- The input line as well as the queue, because that is where a message
@@ -353,24 +361,34 @@ reviewSessionHoldsUnsentText session =
 -- and the queue follows in the order it accumulated; empty text is dropped
 -- rather than carried as a blank entry.
 --
--- Only into a session that can send it. @r@ starts whatever stage the labels
--- ask for, and a revision that published its verdict moves them on — so the
--- session replacing it is often a canonical stage, which runs the gate as a
--- subprocess and holds no thread to send anything on. Carrying the message
--- there would preserve it in the one place it can never leave, and then into
--- every canonical stage after that: a message that looks kept and is not.
--- The user has already been told it was not delivered, by the notice at the
--- time and the transcript entry beside it, so it is better let go of at the
--- moment they ask for something that cannot carry it than shown waiting in a
--- session that will never send it.
-carryUndelivered :: Maybe ReviewSession -> ReviewSession -> ReviewSession
-carryUndelivered Nothing session = session
-carryUndelivered (Just previous) session
-  | not (reviewSessionInputLive session.sessionDetail.reviewSessionStage session.sessionPhase) = session
-  | otherwise = (withUndelivered stillUndelivered session) {sessionInput = nextInput}
+-- Only into a session that can send it, and what it cannot take is held for
+-- the issue instead rather than either forced on it or thrown away. @r@
+-- starts whatever stage the labels ask for, and a revision that published
+-- its verdict moves them on — so the session replacing it is often a
+-- canonical stage, which runs the gate as a subprocess and holds no thread
+-- to send anything on. Text put there would look kept while being
+-- unreachable, and text dropped there would be lost to the single keystroke
+-- the user made to carry on; 'appReviewUndelivered' is neither.
+carryUndelivered :: [Text] -> ReviewSession -> (ReviewSession, [Text])
+carryUndelivered carried session
+  | not (reviewSessionInputLive session.sessionDetail.reviewSessionStage session.sessionPhase) = (session, offered)
+  | otherwise = ((withUndelivered stillUndelivered session) {sessionInput = nextInput}, [])
   where
-    (nextInput, stillUndelivered) = takeNextUndelivered (filter (not . Text.null . Text.strip) carried)
-    carried = previous.sessionInput : previous.sessionDetail.reviewSessionUndelivered
+    (nextInput, stillUndelivered) = takeNextUndelivered offered
+    offered = filter (not . Text.null . Text.strip) carried
+
+-- | Everything an issue's review still owes a send, oldest first: what the
+-- session being replaced was holding, and whatever earlier stages could not
+-- take.
+--
+-- The replaced session's own line goes first because it is what the user was
+-- last looking at, then its queue, then what was already being held for the
+-- issue — so the most recent thing they saw is the one that comes back to
+-- the line.
+undeliveredForIssue :: Maybe ReviewSession -> [Text] -> [Text]
+undeliveredForIssue previous held = maybe [] fromSession previous <> held
+  where
+    fromSession session = session.sessionInput : session.sessionDetail.reviewSessionUndelivered
 
 clearPendingInteraction :: ReviewSession -> ReviewSession
 clearPendingInteraction = withPendingInteraction Nothing
@@ -638,15 +656,19 @@ startIssueReview issue = do
     _ | Just notice <- approvalServiceRefusal state requestedStage -> setNotice notice
     _ -> do
       let priorGeneration = priorTickGeneration issue.issueNumber state.appReviewSessions
-          session =
-            carryUndelivered
+          owed =
+            undeliveredForIssue
               (Map.lookup issue.issueNumber state.appReviewSessions)
-              (newReviewSession issue requestedStage priorGeneration)
+              (Map.findWithDefault [] issue.issueNumber state.appReviewUndelivered)
+          (session, stillOwed) = carryUndelivered owed (newReviewSession issue requestedStage priorGeneration)
       modify
         ( \current ->
             noticeCleared
               current
                 { appReviewSessions = Map.insert issue.issueNumber session current.appReviewSessions,
+                  -- Kept for the issue rather than for the session that could
+                  -- not take it, so the next one that can send is handed it.
+                  appReviewUndelivered = holdUndeliveredForIssue issue.issueNumber stillOwed current.appReviewUndelivered,
                   appOverlay = Just (ReviewOverlay issue.issueNumber)
                 }
         )

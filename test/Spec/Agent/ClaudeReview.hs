@@ -69,6 +69,7 @@ import Kanban.UI.Review
     newReviewSession,
     reviewOutcomePhase,
     reviewSessionHoldsUnsentText,
+    undeliveredForIssue,
   )
 import Kanban.UI.Session (reviewSessionInputLive, reviewSessionReusable)
 import Kanban.UI.SessionCore (newAgentSession)
@@ -836,7 +837,8 @@ spec = do
         `shouldBe` False
       -- Built by the constructor the press itself uses, so the last link is
       -- the session `r` really creates rather than one shaped like it.
-      let restarted = carryUndelivered (Just stranded) (newReviewSession (baseIssue 588 []) IssueRevision 0)
+      let (restarted, _) =
+            carryUndelivered (undeliveredForIssue (Just stranded) []) (newReviewSession (baseIssue 588 []) IssueRevision 0)
       restarted.sessionInput `shouldBe` guidance
       restarted.sessionDetail.reviewSessionUndelivered `shouldBe` []
       reviewSessionInputLive restarted.sessionDetail.reviewSessionStage restarted.sessionPhase
@@ -864,7 +866,8 @@ spec = do
         False
         (not (null stranded.sessionDetail.reviewSessionUndelivered))
         `shouldBe` False
-      let restarted = carryUndelivered (Just stranded) (newReviewSession (baseIssue 588 []) IssueRevision 0)
+      let (restarted, _) =
+            carryUndelivered (undeliveredForIssue (Just stranded) []) (newReviewSession (baseIssue 588 []) IssueRevision 0)
       restarted.sessionInput `shouldBe` guidance
       reviewSessionInputLive restarted.sessionDetail.reviewSessionStage restarted.sessionPhase
         `shouldBe` True
@@ -888,7 +891,8 @@ spec = do
       reviewSessionHoldsUnsentText completed `shouldBe` True
       reviewSessionReusable settledPhase IssueRevision IssueRevision False (reviewSessionHoldsUnsentText completed)
         `shouldBe` False
-      let restarted = carryUndelivered (Just completed) (newReviewSession (baseIssue 588 []) IssueRevision 0)
+      let (restarted, _) =
+            carryUndelivered (undeliveredForIssue (Just completed) []) (newReviewSession (baseIssue 588 []) IssueRevision 0)
       restarted.sessionInput `shouldBe` guidance
       reviewSessionInputLive restarted.sessionDetail.reviewSessionStage restarted.sessionPhase
         `shouldBe` True
@@ -917,7 +921,8 @@ spec = do
         False
         (reviewSessionHoldsUnsentText stopped)
         `shouldBe` False
-      let restarted = carryUndelivered (Just stopped) (newReviewSession (baseIssue 588 []) IssueRevision 0)
+      let (restarted, _) =
+            carryUndelivered (undeliveredForIssue (Just stopped) []) (newReviewSession (baseIssue 588 []) IssueRevision 0)
       restarted.sessionInput `shouldBe` guidance
 
     -- Where carrying it forward stops. A revision that published its verdict
@@ -925,29 +930,36 @@ spec = do
     -- a stage that runs the gate as a subprocess and holds no thread. The
     -- stage is derived from the labels that revision publishes rather than
     -- named, so this is the sequence the board actually produces.
-    it "does not carry the message into a stage that could never send it" $ do
+    it "holds the message for the issue when the next stage could never send it" $ do
       let stranded = applyFailedInterrupt cause (Just guidance) (settledSession "")
           -- What a published revision leaves on the issue, and what `r` then
           -- asks for.
           nextStage = reviewStageForLabels defaultWorkflowConfig ["reviewed:revised"]
           canonical = newReviewSession (baseIssue 588 []) nextStage 0
-          replacement = carryUndelivered (Just stranded) canonical
+          (replacement, owed) = carryUndelivered (undeliveredForIssue (Just stranded) []) canonical
       nextStage `shouldNotBe` IssueRevision
       reviewSessionInputLive nextStage canonical.sessionPhase `shouldBe` False
-      -- Not carried, and so not shown waiting in a session that will never
-      -- send it -- nor dragged into every canonical stage after this one.
+      -- Not put into a session that could never send it, and not thrown away
+      -- with the session it was parked in either.
       replacement.sessionInput `shouldBe` ""
       replacement.sessionDetail.reviewSessionUndelivered `shouldBe` []
-      -- A revision asked for instead does take it.
-      (carryUndelivered (Just stranded) (newReviewSession (baseIssue 588 []) IssueRevision 0)).sessionInput
-        `shouldBe` guidance
+      owed `shouldBe` [guidance]
+      -- It survives however many canonical stages come and go...
+      let (_, stillOwed) = carryUndelivered (undeliveredForIssue (Just replacement) owed) canonical
+      stillOwed `shouldBe` [guidance]
+      -- ...and the next session that can send is handed it.
+      let (revision, nothingLeft) =
+            carryUndelivered (undeliveredForIssue Nothing stillOwed) (newReviewSession (baseIssue 588 []) IssueRevision 0)
+      revision.sessionInput `shouldBe` guidance
+      nothingLeft `shouldBe` []
 
     -- A draft the user typed after the send is not overwritten by the
     -- message coming across: the line the fresh session opens with is the
     -- one they were last looking at, and the message waits behind it.
     it "keeps the replaced session's own draft ahead of what it never sent" $ do
       let stranded = applyFailedInterrupt cause (Just guidance) (settledSession "wait, ignore that")
-          restarted = carryUndelivered (Just stranded) (newReviewSession (baseIssue 588 []) IssueRevision 0)
+          (restarted, _) =
+            carryUndelivered (undeliveredForIssue (Just stranded) []) (newReviewSession (baseIssue 588 []) IssueRevision 0)
       restarted.sessionInput `shouldBe` "wait, ignore that"
       restarted.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
 

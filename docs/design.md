@@ -702,9 +702,15 @@ press that would strand that text for good. It counts wherever it sits — a
 message handed back onto the input line, one queued behind it, or a draft typed
 while the turn was still running — because once the session cannot send, all
 three are equally lost. Both start a fresh revision carrying that text across,
-the old input line first — and only into a revision, since a canonical stage
-runs the gate as a subprocess and has nothing to send on, so text carried there
-would look kept while being unreachable. An interrupted revision is the one settled phase that
+the old input line first.
+
+Text a replacement cannot take is held for the issue rather than for any one
+session. `r` starts whatever stage the labels ask for, and a revision that
+publishes its verdict moves them to a canonical stage, which runs the gate as a
+subprocess and has nothing to send on: put there the text would look kept while
+being unreachable, and dropped there it would be lost to the single keystroke
+the user made to carry on. Held for the issue it survives however many stages
+come and go, and the next session that can send is handed it. An interrupted revision is the one settled phase that
 stays resumable and keeps its input, but only while its connection lives:
 once that ends it is as finished as a failed one and is replaced the same way.
 Canonical review and
