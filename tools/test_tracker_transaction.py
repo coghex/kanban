@@ -2018,8 +2018,8 @@ class TrackerTransactionTests(TrackerFixture):
         # the branch, processed before its owner's first batch landing. The
         # first disposition is applied over the copy the preflight observed and
         # recorded; the record is what lets the transaction resolve; and the
-        # second disposition then continues over the module's own predecessor
-        # exactly as #385 made it for a tracked document.
+        # second disposition, bound to its own preflight's copy, continues over
+        # the module's own predecessor as #385 made it for a tracked document.
         novel = "docs/new_design.md"
         (self.fx.docs / novel).write_text(DOCUMENT, encoding="utf-8")
         self.assertIsNone(publisher.blob_at(self.fx.docs, "origin/master", novel))
@@ -2038,7 +2038,12 @@ class TrackerTransactionTests(TrackerFixture):
         self.assertEqual(outcome["source"], "local")
         self.assertIsNone(self.fx.read(document=novel)[0])
 
-        second = self.fx.publish_document(self.SECOND_APPLIED, path=novel)
+        again = publisher.check_pending(self.fx.docs, "coghex/kanban", "master", novel)
+        self.assertEqual(again["status"], "clear")
+        second = self.fx.publish_document(
+            self.SECOND_APPLIED, path=novel,
+            expected_working_copy=again["working_copy_blob"],
+        )
         self.assertEqual(second["status"], "not-published")
         self.assertEqual(second["write_outcome"], "applied-over-local-predecessor")
         self.fx.acquire(plan(entry_key="DW-4"), document=novel)

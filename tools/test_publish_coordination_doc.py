@@ -1858,8 +1858,9 @@ class PublishTests(PublishFixture):
         # the docs worktree and processed before its owner's first batch
         # landing. Bound to the preflight's blob, the first disposition is
         # applied and recorded exactly like a write over a tracked baseline —
-        # and the second continues over the module's own predecessor with no
-        # binding at all, since the record now speaks for the working copy.
+        # and the second, bound to ITS preflight's blob, continues over the
+        # module's own predecessor: the record names which continuation it
+        # was, while the binding is still what licenses the write.
         (self.fx.docs / "docs" / "novel.md").write_text("# Novel\n")
         observed = self.novel_preflight_blob()
         first = self.fx.publish(
@@ -1880,11 +1881,18 @@ class PublishTests(PublishFixture):
         )
         self.assertIsNone(publisher.blob_at(self.fx.docs, "origin/master", "docs/novel.md"))
 
-        second = self.fx.publish("# Novel\n\nmore\n\neven more\n", path="docs/novel.md")
+        again = self.novel_preflight_blob()
+        self.assertEqual(again, first["approved_blob"])
+        second = self.fx.publish(
+            "# Novel\n\nmore\n\neven more\n", path="docs/novel.md",
+            expected_working_copy=again,
+        )
         self.assertEqual(second["status"], "not-published")
         self.assertTrue(second["document_written"])
         self.assertEqual(second["write_outcome"], "applied-over-local-predecessor")
         self.assertEqual(second["applied_record"], "recorded")
+        self.assertEqual(second["local_predecessor"], again)
+        self.assertIn("last applied locally", second["write_reason"])
         self.assertIn(
             "even more", (self.fx.docs / "docs" / "novel.md").read_text()
         )
@@ -1911,6 +1919,86 @@ class PublishTests(PublishFixture):
         self.assertIn(
             "more", run(["git", "cat-file", "-p", result["approved_blob"]], self.fx.docs)
         )
+
+    def test_a_novel_predecessor_is_not_continued_without_the_binding(self):
+        # The record says what the module last wrote; for a document absent
+        # from the tip it does not stand in for the run's own preflight. A
+        # continuation that binds nothing is refused exactly as a first
+        # disposition that binds nothing is, and the reason says both why the
+        # record did not carry it and what would have.
+        (self.fx.docs / "docs" / "novel.md").write_text("# Novel\n")
+        first = self.fx.publish(
+            "# Novel\n\nmore\n", path="docs/novel.md",
+            expected_working_copy=self.novel_preflight_blob(),
+        )
+        self.assertEqual(first["write_outcome"], "applied-over-preflight-copy")
+        unbound = self.fx.publish("# Novel\n\nmore\n\neven more\n", path="docs/novel.md")
+        self.assertEqual(unbound["status"], "not-published")
+        self.assertFalse(unbound["document_written"])
+        self.assertEqual(unbound["write_outcome"], "no-baseline")
+        self.assertIsNone(unbound["applied_record"])
+        self.assertEqual(unbound["local_predecessor"], first["approved_blob"])
+        self.assertEqual(unbound["found_blob"], first["approved_blob"])
+        self.assertIn("--expected-working-copy", unbound["write_reason"])
+        self.assertIn("last applied locally", unbound["write_reason"])
+        self.assertEqual(
+            (self.fx.docs / "docs" / "novel.md").read_text(), "# Novel\n\nmore\n"
+        )
+
+    def test_a_stale_binding_cannot_overwrite_a_newer_recorded_predecessor(self):
+        # The regression the issue review asked for. A run preflights and sees
+        # blob A; before it publishes, another run's write lands and records
+        # blob B. The stale run's binding is A and the working copy is B, and
+        # B being the module's own record must not let A's run through — that
+        # is exactly the overwrite the binding exists to refuse. A run whose
+        # own preflight saw B then continues over it as the predecessor.
+        (self.fx.docs / "docs" / "novel.md").write_text("# Novel\n")
+        stale = self.novel_preflight_blob()
+        intervening = self.fx.publish(
+            "# Novel\n\n- first\n", path="docs/novel.md", expected_working_copy=stale
+        )
+        self.assertEqual(intervening["write_outcome"], "applied-over-preflight-copy")
+        self.assertEqual(intervening["applied_record"], "recorded")
+        recorded = intervening["approved_blob"]
+        self.assertNotEqual(recorded, stale)
+        self.assertEqual(
+            publisher.read_applied(self.fx.docs, "coghex/kanban", "docs/novel.md"),
+            recorded,
+        )
+
+        refused = self.fx.publish(
+            "# Novel\n\n- second\n", path="docs/novel.md", expected_working_copy=stale
+        )
+        self.assertEqual(refused["status"], "not-published")
+        self.assertFalse(refused["document_written"])
+        self.assertEqual(refused["write_outcome"], "no-baseline")
+        self.assertIsNone(refused["applied_record"])
+        self.assertIsNone(refused["applied_ref"])
+        self.assertEqual(refused["found_blob"], recorded)
+        self.assertEqual(refused["local_predecessor"], recorded)
+        self.assertIn("no longer the content the preflight observed", refused["write_reason"])
+        self.assertIn("does not license", refused["write_reason"])
+        self.assertEqual(
+            (self.fx.docs / "docs" / "novel.md").read_text(), "# Novel\n\n- first\n"
+        )
+        self.assertEqual(
+            publisher.read_applied(self.fx.docs, "coghex/kanban", "docs/novel.md"),
+            recorded,
+        )
+        self.assertIn(
+            "- second", run(["git", "cat-file", "-p", refused["approved_blob"]], self.fx.docs)
+        )
+
+        fresh = self.novel_preflight_blob()
+        self.assertEqual(fresh, recorded)
+        continued = self.fx.publish(
+            "# Novel\n\n- first\n\n- second\n", path="docs/novel.md",
+            expected_working_copy=fresh,
+        )
+        self.assertEqual(continued["write_outcome"], "applied-over-local-predecessor")
+        self.assertEqual(continued["applied_record"], "recorded")
+        self.assertEqual(continued["local_predecessor"], recorded)
+        self.assertIn("- second", (self.fx.docs / "docs" / "novel.md").read_text())
 
     def test_the_binding_never_creates_an_absent_document(self):
         # Creating a document stays the drafting assets' job (§9.1): whatever

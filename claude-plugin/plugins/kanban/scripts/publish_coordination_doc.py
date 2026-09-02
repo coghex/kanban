@@ -1583,7 +1583,16 @@ def _apply_locally(
     `check_pending` reports the working copy's blob, the caller passes it back
     as `expected_working_copy`, and the mutation is applied over the working
     copy only while it still holds exactly those bytes. Without that binding,
-    or once the copy has moved, nothing is written. A document that does not
+    or once the copy has moved, nothing is written. That binding guards EVERY
+    write to a document absent from the tip, the continuation over this
+    module's own recorded predecessor included: a copy that is both the
+    preflight's blob and the recorded predecessor continues as
+    `applied-over-local-predecessor`, one that is the preflight's blob alone
+    is `applied-over-preflight-copy`, and one this run's preflight did not
+    observe is refused even when the record names it. The record says what
+    the module last wrote, not what this run decided over; consulted first,
+    it would let a run prepared over an older copy overwrite a newer
+    disposition another run recorded in between. A document that does not
     exist at all is never created here, whatever binding is passed; creating
     one stays the drafting assets' job. Anything else — a tracked document
     whose working copy is neither the tip's content nor this module's own last
@@ -1596,6 +1605,7 @@ def _apply_locally(
     """
     recorded = read_applied(root, owner, document)
     current = working_blob(root, document)
+    predecessor = recorded is not None and current == recorded
     outcome, why, over = "unrecognized-working-copy", None, None
     if baseline is not None and current == baseline:
         outcome, over = "applied-over-baseline", baseline
@@ -1603,7 +1613,7 @@ def _apply_locally(
             f"{document} still carried the publication tip's own content, so "
             "the approved mutation was applied to it"
         )
-    elif recorded is not None and current == recorded:
+    elif baseline is not None and predecessor:
         outcome, over = "applied-over-local-predecessor", recorded
         why = (
             f"{document} was byte-identical to the disposition this module "
@@ -1618,12 +1628,30 @@ def _apply_locally(
             "was written"
         )
     elif baseline is None and not expected_working_copy:
+        # The record is consulted only behind the binding here: for a document
+        # with no tip blob, the preflight is the one thing that proves what
+        # this run decided over, and the module's own last write is not that.
         outcome = "no-baseline"
         why = (
             f"{document} is absent from the publication tip, so there is no "
-            "baseline to write over and nothing was written; to apply the "
-            "mutation over the working copy the preflight observed, pass its "
-            "working_copy_blob as --expected-working-copy"
+            "baseline to write over and nothing was written"
+            + (
+                f"; it is the disposition this module last applied locally "
+                f"({recorded}), but for a document absent from the tip the "
+                "run's own preflight binding guards every write"
+                if predecessor
+                else ""
+            )
+            + "; to apply the mutation over the working copy the preflight "
+            "observed, pass its working_copy_blob as --expected-working-copy"
+        )
+    elif baseline is None and current == expected_working_copy and predecessor:
+        outcome, over = "applied-over-local-predecessor", recorded
+        why = (
+            f"{document} is absent from the publication tip but still carried "
+            f"exactly the content the preflight observed ({current}), which is "
+            "also the disposition this module last applied locally, so the "
+            "approved mutation was applied on top of it"
         )
     elif baseline is None and current == expected_working_copy:
         outcome, over = "applied-over-preflight-copy", current
@@ -1639,6 +1667,13 @@ def _apply_locally(
             f"copy ({current}) is no longer the content the preflight observed "
             f"({expected_working_copy}), so it was left untouched and nothing "
             "was written"
+            + (
+                f"; that it is the disposition this module last applied locally "
+                f"({recorded}) does not license a write this run's preflight "
+                "did not observe"
+                if predecessor
+                else ""
+            )
         )
     elif current is None:
         why = (

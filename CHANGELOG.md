@@ -23,7 +23,10 @@ created above it.
   the working copy the preflight observed — a fifth named write outcome,
   `applied-over-preflight-copy`, recorded exactly like the two existing applied
   ones — while a copy that moved since, a binding that was not passed, or a
-  file that does not exist still writes nothing. `tracker_transaction.py
+  file that does not exist still writes nothing. The binding guards every
+  write to such a document, a continuation over the helper's own recorded
+  predecessor included, so a run prepared over an older copy cannot overwrite
+  a newer disposition recorded in between. `tracker_transaction.py
   --resolve --source local` no longer refuses a document merely for being
   absent from the tip; the lane check and the applied record decide, so a
   novel document the module never wrote is still refused and one with a lane

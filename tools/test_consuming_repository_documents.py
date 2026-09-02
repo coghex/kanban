@@ -495,8 +495,10 @@ class ConsumingRepositoryTests(unittest.TestCase):
                 )
                 self.assertEqual(resolved["status"], "resolved", resolved)
 
-                # The second disposition needs no binding: the module's own
-                # record now speaks for the working copy (#385).
+                # The second disposition is bound to ITS preflight's copy, which
+                # by now is the module's own recorded predecessor (#385): for a
+                # document absent from the tip the binding guards every write,
+                # and the record names which continuation it was.
                 again = self.helper(
                     publish, "--branch", BRANCH, "--check-pending", document=self.NOVEL
                 )
@@ -522,8 +524,12 @@ class ConsumingRepositoryTests(unittest.TestCase):
                     "- [ ] CR-2. The second finding",
                     "- [x] CR-2. The second finding — [#8]",
                 )
+                self.assertEqual(
+                    again["working_copy_blob"], first["approved_blob"], again
+                )
                 second = self.publish(
-                    publish, both, again["publication_tip"], document=self.NOVEL
+                    publish, both, again["publication_tip"], document=self.NOVEL,
+                    working_copy=again["working_copy_blob"],
                 )
                 self.assertEqual(second["status"], "not-published", second)
                 self.assertEqual(
