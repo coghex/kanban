@@ -23,7 +23,7 @@ concrete precondition
 ## Status
 
 - [x] PRR-1. Claude embedded reviews still inherit local settings and hooks — [#606]
-- [ ] PRR-2. Janitor proves one remote endpoint but can delete from others
+- [x] PRR-2. Janitor proves one remote endpoint but can delete from others — [#608]
 
 ## 1. Claude embedded-review isolation
 
@@ -99,7 +99,7 @@ activating the backend as specified would expose this latent launch defect.
 
 ## 2. Janitor remote-deletion authority
 
-### PRR-2. Janitor proves one remote endpoint but can delete from others
+### [#608] PRR-2. Janitor proves one remote endpoint but can delete from others
 
 > **Captured note:** Do not let PR #581's janitor delete a remote branch until
 > the endpoint proved and reported to the user is the exact endpoint every
