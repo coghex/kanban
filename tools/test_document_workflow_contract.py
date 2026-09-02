@@ -644,10 +644,10 @@ PUBLICATION_CLAUSES = {
     # module's own unlanded predecessor — and the third is the one a second
     # disposition has to be able to continue over. An asset that stated only
     # the bare boolean would direct a run into the dead end that issue was
-    # filed for, so the four named outcomes and the record that separates them
+    # filed for, so the five named outcomes and the record that separates them
     # are pinned rather than left to prose.
     "write-outcome-names-the-write": (
-        "write_outcome names which of the four cases the write was, rather than "
+        "write_outcome names which of the five cases the write was, rather than "
         "leaving document_written to stand for all of them"
     ),
     "continues-over-its-own-write": (
@@ -655,8 +655,20 @@ PUBLICATION_CLAUSES = {
         "is its own unlanded write, and the approved mutation is applied on top "
         "of it"
     ),
+    # Issue #605. A document absent from the publication tip has no baseline
+    # to guard its write with, so the guard is the run's own preflight: the
+    # asset extracts the working copy's blob beside the tip and the helper
+    # applies the mutation over that copy only while it still holds those
+    # bytes. Pinned because it is the case that stranded every first
+    # disposition of a report processed before its owner's batch landing.
+    "applies-a-novel-document-over-the-preflight-copy": (
+        "a document absent from the publication tip is applied over the working "
+        "copy the preflight observed, provided it is still byte-identical to it"
+    ),
     "never-overwrites-a-foreign-working-copy": (
-        "a working copy the helper did not write is never overwritten, and "
+        "a working copy that is none of those — neither the publication tip's "
+        "content, the helper's own last write, nor, for a document absent from "
+        "the tip, the copy the preflight observed — is never overwritten, and "
         "nothing is applied over it"
     ),
     "only-a-recorded-write-licenses-continuation": (
@@ -699,9 +711,9 @@ QUIET_PUBLICATION_CLAUSES = {
     # write outcome is no-baseline, or whose applied_record is unrecorded, is
     # not this case and is still reported in full.
     "ordinary-outcome-is-the-exact-conjunction": (
-        "not-published, with a write_outcome of applied-over-baseline or "
-        'applied-over-local-predecessor and an applied_record of "recorded", is '
-        "the expected and healthy result"
+        "not-published, with a write_outcome of applied-over-baseline, "
+        "applied-over-local-predecessor or applied-over-preflight-copy and an "
+        'applied_record of "recorded", is the expected and healthy result'
     ),
     "suppressed-publication-vocabulary": (
         "say nothing about publication, eligibility, lanes, worktrees, write "
@@ -749,7 +761,7 @@ QUIET_PUBLICATION_CLAUSES = {
 # The result vocabulary the quiet rule must NOT swallow. Each of these names a
 # path on which the run still reports in full, and each is one substitution away
 # from the ordinary conjunction: a not-published status is quiet only when the
-# write outcome is one of the two applied ones AND the record reads "recorded".
+# write outcome is one of the three applied ones AND the record reads "recorded".
 NON_ORDINARY_RESULT_LITERALS = (
     "no-baseline",
     "unrecognized-working-copy",
@@ -786,7 +798,7 @@ PUBLICATION_INVOCATION = (
     'python3 "$PUBLISH_DOC" \\ '
     '--repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \\ '
     '--path "$DOC_RELATIVE_PATH" --content "$APPROVED" \\ '
-    '--expected-tip "$PREFLIGHT_TIP"'
+        '--expected-tip "$PREFLIGHT_TIP" --expected-working-copy "$PREFLIGHT_COPY"'
 )
 
 # The scratch path is minted by the helper, never named by the asset. An asset
@@ -799,6 +811,15 @@ PUBLICATION_INVOCATION = (
 PUBLICATION_TIP_EXTRACTION = (
     'PREFLIGHT_TIP="$(PREFLIGHT="$PREFLIGHT" python3 -c \\ '
     '\'import json, os; print(json.loads(os.environ["PREFLIGHT"])["publication_tip"])\')"'
+)
+
+# Issue #605: the second binding, extracted from the same preflight. It is what
+# a document absent from the publication tip is written over, so an asset that
+# passed the flag without extracting the blob would leave every novel document
+# unwritten — the exact strand this binding exists to end.
+PUBLICATION_COPY_EXTRACTION = (
+    'PREFLIGHT_COPY="$(PREFLIGHT="$PREFLIGHT" python3 -c \\ '
+    '\'import json, os; print(json.loads(os.environ["PREFLIGHT"])["working_copy_blob"] or "")\')"'
 )
 
 PUBLICATION_SCRATCH_INVOCATION = (
@@ -1107,11 +1128,13 @@ PUBLISHING_ASSETS = PROCESSING_ASSETS + NOTE_ASSETS
 
 # Issue #328's round-1 review blocker, pinned so it cannot come back. The
 # personal note-problem source carried a "Create a missing report" path, which
-# cannot survive §9.4's only-writer rule: publish_coordination_doc.py leaves
-# `applied` False when the document is absent from the publication tip, so it
-# declines to WRITE the document as well as to publish it. An asset promising to
-# create the report would therefore leave the user with no report at all and the
-# approved observation reachable only as a preserved blob. The boundary reads as
+# cannot survive §9.4's only-writer rule: publish_coordination_doc.py writes
+# only over a working copy it can recognize — the tip's content, its own last
+# write, or (#605) the copy the preflight observed — and never creates a
+# document that does not exist, so it declines to CREATE the report as well as
+# to publish it. An asset promising to create the report would therefore leave
+# the user with no report at all and the approved observation reachable only as
+# a preserved blob. The boundary reads as
 # a mere omission once that reason is forgotten, which is exactly why it is
 # asserted rather than left to prose.
 NOTE_NO_CREATE_CLAUSES = {
@@ -1121,8 +1144,8 @@ NOTE_NO_CREATE_CLAUSES = {
     "a-missing-path-stops": (
         "when the resolved path holds no report, stop and say so"
     ),
-    "helper-declines-to-write-an-absent-document": (
-        "a document absent from the publication tip is one it declines to write "
+    "helper-declines-to-create-an-absent-document": (
+        "a document absent from the working copy is one it declines to create "
         "as well as to publish"
     ),
     "promising-creation-leaves-no-report": (
@@ -2452,6 +2475,14 @@ class PublicationTests(unittest.TestCase):
                     "moved-tip check switched off",
                 )
                 self.assertIn('[ -n "$PREFLIGHT_TIP" ]', body, path)
+                self.assertIn(
+                    PUBLICATION_COPY_EXTRACTION,
+                    body,
+                    f"{path} must extract working_copy_blob from the preflight; a "
+                    "document absent from the publication tip is written over "
+                    "that blob and nothing else",
+                )
+                self.assertIn('[ -n "$PREFLIGHT_COPY" ]', body, path)
 
     def test_no_asset_carries_the_publication_mechanism(self):
         # The regression this issue exists to prevent: the sequence creeping

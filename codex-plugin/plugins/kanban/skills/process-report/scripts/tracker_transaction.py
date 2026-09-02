@@ -1383,11 +1383,16 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
     - a document that *does* have a coordination lane belongs on the branch, and
       clearing it from a locally edited cursor would leave the next preflight
       clear while the entry never landed; and
-    - a document absent from the publication tip was never written by the module
-      at all — it applies the content only over an existing baseline — so
-      whatever the working tree holds, the disposition reached nothing. A novel
-      document is legitimately local, but that makes its record outstanding
-      rather than resolvable.
+    - a working tree the module did not write is somebody else's edit, whether
+      the document is tracked or not.
+
+    A document absent from the publication tip is not a third case (#605): the
+    module writes one over the working copy the run's own preflight observed,
+    and records that write exactly as it records a write over a tracked
+    baseline, so whether the disposition reached the document is decided by
+    the same record below. Being novel neither licenses nor forbids a local
+    resolution by itself — a novel document with a lane still resolves on the
+    branch only, and a novel document the module never wrote is still refused.
 
     The permission is derived rather than asserted: the caller says which source
     it wants, and this decides whether that source is admissible, from the same
@@ -1397,13 +1402,6 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
     git(["fetch", "origin", branch], cwd=root)
     tip = git_out(["rev-parse", f"origin/{branch}"], cwd=root)
     document = record["document"]
-    if publisher.blob_at(root, tip, document) is None:
-        return False, (
-            f"{document} is absent from {branch}, so the publication module never "
-            "applied this disposition to it — it writes only over an existing "
-            "baseline, and a novel document stays local and unresolved until a "
-            "pull request adds it and its classification"
-        )
     try:
         publishable, why_not = publisher.eligibility(
             root, record["repository"], tip, document

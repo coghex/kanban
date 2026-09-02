@@ -207,11 +207,11 @@ class ConsumingRepositoryTests(unittest.TestCase):
         self.assertTrue(str(Path(publish)).startswith(str(install_root)), publish)
         return publish, (tracker or None)
 
-    def helper(self, script, *args, stdin=None, expect=0):
+    def helper(self, script, *args, stdin=None, expect=0, document=DOCUMENT):
         """One helper invocation, exactly as the asset runs it."""
         proc = subprocess.run(
             ["python3", script, "--repo", CONSUMING_REPOSITORY,
-             "--root", str(self.fixture.docs), "--path", DOCUMENT, *args],
+             "--root", str(self.fixture.docs), "--path", document, *args],
             capture_output=True, text=True, input=stdin,
             env=dict(
                 os.environ, HOME=str(self.home),
@@ -263,16 +263,18 @@ class ConsumingRepositoryTests(unittest.TestCase):
 
     # -- the run itself ------------------------------------------------------
 
-    def preflight(self, publish):
-        outcome = self.helper(publish, "--branch", BRANCH, "--check-pending")
+    def preflight(self, publish, document=DOCUMENT):
+        outcome = self.helper(
+            publish, "--branch", BRANCH, "--check-pending", document=document
+        )
         self.assertEqual(outcome["status"], "clear", outcome)
         self.assertTrue(outcome["publication_tip"], outcome)
         return outcome["publication_tip"]
 
-    def publish(self, publish, content, tip):
+    def publish(self, publish, content, tip, document=DOCUMENT, working_copy=None):
         approved = subprocess.run(
             ["python3", publish, "--repo", CONSUMING_REPOSITORY,
-             "--root", str(self.fixture.docs), "--path", DOCUMENT,
+             "--root", str(self.fixture.docs), "--path", document,
              "--new-content-file"],
             capture_output=True, text=True,
             env=dict(
@@ -284,15 +286,17 @@ class ConsumingRepositoryTests(unittest.TestCase):
         self.assertEqual(approved.returncode, 0, approved.stderr)
         scratch = Path(approved.stdout.strip())
         scratch.write_text(content, encoding="utf-8")
+        binding = [] if working_copy is None else ["--expected-working-copy", working_copy]
         return self.helper(
             publish, "--branch", BRANCH, "--content", str(scratch),
-            "--expected-tip", tip,
+            "--expected-tip", tip, *binding, document=document,
         )
 
-    def transaction(self, tracker_script, *args, stdin=None, expect=0):
+    def transaction(self, tracker_script, *args, stdin=None, expect=0,
+                    document=DOCUMENT):
         proc = subprocess.run(
             ["python3", tracker_script, "--repo", CONSUMING_REPOSITORY,
-             "--root", str(self.fixture.docs), "--path", DOCUMENT, *args],
+             "--root", str(self.fixture.docs), "--path", document, *args],
             capture_output=True, text=True, input=stdin,
             env=dict(
                 os.environ, HOME=str(self.home),
@@ -425,6 +429,129 @@ class ConsumingRepositoryTests(unittest.TestCase):
                     "[#7]", (self.fixture.docs / DOCUMENT).read_text(encoding="utf-8")
                 )
                 self.assertNotIn("[#7]", self.fixture.remote_content())
+
+    # -- issue #605: a report processed before its first landing -------------
+
+    NOVEL = "docs/new_findings.md"
+
+    SECOND_PLAN = PLAN.replace('"CR-1"', '"CR-2"')
+    SECOND_IDENTITY = IDENTITY.replace('"7"', '"8"').replace("/7", "/8").replace(
+        "[#7]", "[#8]"
+    )
+
+    def test_a_novel_document_takes_its_dispositions_before_it_is_ever_landed(self):
+        # The sequence observed on coghex/synarchy: the owner's documented flow
+        # is that reports accumulate untracked in the docs worktree until a
+        # batch landing, so every report is processed before it is ever on the
+        # branch. Both processing assets, through the bundled helpers exactly as
+        # the assets run them: preflight, a first disposition applied over the
+        # copy the preflight observed, the transaction resolved from the working
+        # tree, then a second disposition continuing over the first.
+        for relative_path, brand, uses_tracker in ASSETS:
+            if not uses_tracker:
+                continue
+            with self.subTest(asset=relative_path):
+                self.build_repository()
+                publish, tracker_script = self.resolve_helpers(relative_path, brand)
+                (self.fixture.docs / self.NOVEL).write_text(REPORT, encoding="utf-8")
+                preflight = self.helper(
+                    publish, "--branch", BRANCH, "--check-pending", document=self.NOVEL
+                )
+                self.assertEqual(preflight["status"], "clear", preflight)
+                self.assertTrue(preflight["working_copy_blob"], preflight)
+                tip = preflight["publication_tip"]
+
+                self.transaction(
+                    tracker_script, "--acquire", "--approved",
+                    "--publication-tip", tip, "--plan", "-", stdin=self.PLAN,
+                    document=self.NOVEL,
+                )
+                begun = self.transaction(
+                    tracker_script, "--begin-step", "0", "--approved",
+                    document=self.NOVEL,
+                )
+                self.transaction(
+                    tracker_script, "--confirm-step", "0",
+                    "--begin-token", begun["begin_token"], "--identity", "-",
+                    stdin=self.IDENTITY, document=self.NOVEL,
+                )
+                self.transaction(
+                    tracker_script, "--publication-pending", document=self.NOVEL
+                )
+                first = self.publish(
+                    publish, RESOLVED_REPORT, tip, document=self.NOVEL,
+                    working_copy=preflight["working_copy_blob"],
+                )
+                self.assertEqual(first["status"], "not-published", first)
+                self.assertEqual(first["write_outcome"], "applied-over-preflight-copy", first)
+                self.assertEqual(first["applied_record"], "recorded", first)
+                self.assertIn(
+                    "[#7]",
+                    (self.fixture.docs / self.NOVEL).read_text(encoding="utf-8"),
+                )
+                resolved = self.transaction(
+                    tracker_script, "--resolve", "--source", "local",
+                    "--branch", BRANCH, document=self.NOVEL,
+                )
+                self.assertEqual(resolved["status"], "resolved", resolved)
+
+                # The second disposition is bound to ITS preflight's copy, which
+                # by now is the module's own recorded predecessor (#385): for a
+                # document absent from the tip the binding guards every write,
+                # and the record names which continuation it was.
+                again = self.helper(
+                    publish, "--branch", BRANCH, "--check-pending", document=self.NOVEL
+                )
+                self.assertEqual(again["status"], "clear", again)
+                self.transaction(
+                    tracker_script, "--acquire", "--approved",
+                    "--publication-tip", again["publication_tip"], "--plan", "-",
+                    stdin=self.SECOND_PLAN, document=self.NOVEL,
+                )
+                begun = self.transaction(
+                    tracker_script, "--begin-step", "0", "--approved",
+                    document=self.NOVEL,
+                )
+                self.transaction(
+                    tracker_script, "--confirm-step", "0",
+                    "--begin-token", begun["begin_token"], "--identity", "-",
+                    stdin=self.SECOND_IDENTITY, document=self.NOVEL,
+                )
+                self.transaction(
+                    tracker_script, "--publication-pending", document=self.NOVEL
+                )
+                both = RESOLVED_REPORT.replace(
+                    "- [ ] CR-2. The second finding",
+                    "- [x] CR-2. The second finding — [#8]",
+                )
+                self.assertEqual(
+                    again["working_copy_blob"], first["approved_blob"], again
+                )
+                second = self.publish(
+                    publish, both, again["publication_tip"], document=self.NOVEL,
+                    working_copy=again["working_copy_blob"],
+                )
+                self.assertEqual(second["status"], "not-published", second)
+                self.assertEqual(
+                    second["write_outcome"], "applied-over-local-predecessor", second
+                )
+                resolved = self.transaction(
+                    tracker_script, "--resolve", "--source", "local",
+                    "--branch", BRANCH, document=self.NOVEL,
+                )
+                self.assertEqual(resolved["status"], "resolved", resolved)
+                self.assertEqual(
+                    self.helper(
+                        publish, "--branch", BRANCH, "--check-pending",
+                        document=self.NOVEL,
+                    )["status"],
+                    "clear",
+                )
+                # Still never on the branch, which is the owner's choice.
+                self.assertNotIn(self.NOVEL, run(
+                    ["git", "ls-tree", "-r", "--name-only", f"origin/{BRANCH}"],
+                    self.fixture.primary,
+                ))
 
     def test_a_declared_lane_for_another_document_publishes_nothing_here(self):
         # The declaration is exact and per path, so a repository with a lane is

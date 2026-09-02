@@ -615,7 +615,9 @@ def eligibility(root: Path, owner: str, tip: str, document: str) -> tuple[bool, 
 def blob_at(root: Path, revision: str, document: str) -> str | None:
     """The document's blob at `revision`, or None when it is absent there. An
     absent path is not an empty baseline: a novel document stays local until a
-    pull request adds it and its classification (#237)."""
+    pull request adds it and its classification (#237) — its working copy is
+    still written, but only over the bytes the run's own preflight observed
+    (#605, `_apply_locally`)."""
     proc = git(
         ["rev-parse", "--verify", "--quiet", f"{revision}:{document}"],
         cwd=root,
@@ -1270,6 +1272,13 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
             "document": document,
             "pending_ref": pending,
             "publication_tip": observed_tip,
+            # Issue #605: the exact bytes the working copy holds at preflight.
+            # For a document absent from the publication tip this is the only
+            # baseline there can be, and publication applies the approved
+            # mutation over it only while the copy still matches — so the
+            # assets extract it beside the tip and pass it back as
+            # --expected-working-copy. Null when the path does not exist.
+            "working_copy_blob": working_blob(resolved, document),
             "pending_kinds": kinds,
             "tracker_transaction": tracker,
         }
@@ -1424,6 +1433,7 @@ def resolve_landed_pending(
 def publish(
     *, repository: str, branch: str, root: Path, document: str, content: bytes,
     message: str, expected_tip: str | None = None,
+    expected_working_copy: str | None = None,
 ) -> dict:
     """Publish one approved mutation, or report why it was not published.
 
@@ -1481,6 +1491,7 @@ def publish(
             outcome = _publish_locked(
                 root=resolved, owner=owner, branch=branch, tip=tip, document=document,
                 content=content, message=message, pending=pending,
+                expected_working_copy=expected_working_copy,
             )
         except BaseException as error:
             # A `finally` here would release and then re-raise, and the check
@@ -1550,9 +1561,10 @@ def _apply_locally(
     baseline: str | None,
     content: bytes,
     approved: str,
+    expected_working_copy: str | None = None,
 ) -> dict:
     """Apply an unpublishable document's approved mutation to the working copy,
-    and report which of the four cases that was.
+    and report which of the five cases that was.
 
     Issue #385: writing only over the publication tip's own baseline is correct
     exactly once. For a document whose owner declares no lane and lands it out
@@ -1562,35 +1574,106 @@ def _apply_locally(
     apart from somebody's hand edit is the reference this module writes when —
     and only when — its own write succeeded, naming the exact content it wrote.
     A working copy byte-identical to that record is this module's own unlanded
-    disposition, and the approved mutation goes on top of it. Anything else is
-    still never overwritten.
+    disposition, and the approved mutation goes on top of it.
+
+    Issue #605: the *first* disposition of a document that has never been on
+    the branch is the remaining case, and for such an owner it is the ordinary
+    one — a report is processed before its first batch landing. There is no
+    tip blob to guard the write with, so the guard is the run's own preflight:
+    `check_pending` reports the working copy's blob, the caller passes it back
+    as `expected_working_copy`, and the mutation is applied over the working
+    copy only while it still holds exactly those bytes. Without that binding,
+    or once the copy has moved, nothing is written. That binding guards EVERY
+    write to a document absent from the tip, the continuation over this
+    module's own recorded predecessor included: a copy that is both the
+    preflight's blob and the recorded predecessor continues as
+    `applied-over-local-predecessor`, one that is the preflight's blob alone
+    is `applied-over-preflight-copy`, and one this run's preflight did not
+    observe is refused even when the record names it. The record says what
+    the module last wrote, not what this run decided over; consulted first,
+    it would let a run prepared over an older copy overwrite a newer
+    disposition another run recorded in between. A document that does not
+    exist at all is never created here, whatever binding is passed; creating
+    one stays the drafting assets' job. Anything else — a tracked document
+    whose working copy is neither the tip's content nor this module's own last
+    write — is still never overwritten.
 
     The distinction is in the result rather than left to `document_written`,
-    which reads identically for a novel document with no baseline, for a
-    document somebody edited by hand, and for the predecessor case this exists
-    to continue.
+    which reads identically for a novel document nobody bound, for a document
+    somebody edited by hand, and for the two continuation cases this exists to
+    serve.
     """
     recorded = read_applied(root, owner, document)
     current = working_blob(root, document)
+    predecessor = recorded is not None and current == recorded
     outcome, why, over = "unrecognized-working-copy", None, None
-    if baseline is None:
-        outcome = "no-baseline"
-        why = (
-            f"{document} is absent from the publication tip, so there is no "
-            "baseline to write over and nothing was written"
-        )
-    elif current == baseline:
+    if baseline is not None and current == baseline:
         outcome, over = "applied-over-baseline", baseline
         why = (
             f"{document} still carried the publication tip's own content, so "
             "the approved mutation was applied to it"
         )
-    elif recorded is not None and current == recorded:
+    elif baseline is not None and predecessor:
         outcome, over = "applied-over-local-predecessor", recorded
         why = (
             f"{document} was byte-identical to the disposition this module "
             f"last applied locally ({recorded}), so the approved mutation was "
             "applied on top of it"
+        )
+    elif baseline is None and current is None:
+        outcome = "no-baseline"
+        why = (
+            f"{document} is absent from the publication tip and does not exist "
+            f"under {root}; this module never creates a document, so nothing "
+            "was written"
+        )
+    elif baseline is None and not expected_working_copy:
+        # The record is consulted only behind the binding here: for a document
+        # with no tip blob, the preflight is the one thing that proves what
+        # this run decided over, and the module's own last write is not that.
+        outcome = "no-baseline"
+        why = (
+            f"{document} is absent from the publication tip, so there is no "
+            "baseline to write over and nothing was written"
+            + (
+                f"; it is the disposition this module last applied locally "
+                f"({recorded}), but for a document absent from the tip the "
+                "run's own preflight binding guards every write"
+                if predecessor
+                else ""
+            )
+            + "; to apply the mutation over the working copy the preflight "
+            "observed, pass its working_copy_blob as --expected-working-copy"
+        )
+    elif baseline is None and current == expected_working_copy and predecessor:
+        outcome, over = "applied-over-local-predecessor", recorded
+        why = (
+            f"{document} is absent from the publication tip but still carried "
+            f"exactly the content the preflight observed ({current}), which is "
+            "also the disposition this module last applied locally, so the "
+            "approved mutation was applied on top of it"
+        )
+    elif baseline is None and current == expected_working_copy:
+        outcome, over = "applied-over-preflight-copy", current
+        why = (
+            f"{document} is absent from the publication tip but still carried "
+            f"exactly the content the preflight observed ({current}), so the "
+            "approved mutation was applied over it"
+        )
+    elif baseline is None:
+        outcome = "no-baseline"
+        why = (
+            f"{document} is absent from the publication tip and its working "
+            f"copy ({current}) is no longer the content the preflight observed "
+            f"({expected_working_copy}), so it was left untouched and nothing "
+            "was written"
+            + (
+                f"; that it is the disposition this module last applied locally "
+                f"({recorded}) does not license a write this run's preflight "
+                "did not observe"
+                if predecessor
+                else ""
+            )
         )
     elif current is None:
         why = (
@@ -1646,7 +1729,10 @@ def _apply_locally(
     }
 
 
-def _publish_locked(*, root, owner, branch, tip, document, content, message, pending):
+def _publish_locked(
+    *, root, owner, branch, tip, document, content, message, pending,
+    expected_working_copy=None,
+):
     """The sequence itself, run with the lock held. Split from publish() so
     every failure leaving it passes through one place that attaches §9.5's
     three states."""
@@ -1686,7 +1772,10 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
             "approved_blob": preserved,
             "remote_contains_commit": False,
             "local_publication_commit": None,
-        } | _apply_locally(root, owner, document, baseline, content, preserved)
+        } | _apply_locally(
+            root, owner, document, baseline, content, preserved,
+            expected_working_copy=expected_working_copy,
+        )
 
     # A record that has not landed and is not being resumed is unresolved
     # work, not debris. Publishing fresh would overwrite the ref and lose the
@@ -1804,6 +1893,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="the publication tip the content was rendered against",
     )
+    parser.add_argument(
+        "--expected-working-copy",
+        default=None,
+        help="the preflight's working_copy_blob; what a document absent from "
+        "the publication tip is applied over, while it still holds those bytes",
+    )
     parser.add_argument("--clear-stale-lock", action="store_true")
     parser.add_argument(
         "--new-content-file",
@@ -1865,6 +1960,7 @@ def main(argv: list[str] | None = None) -> int:
                 message=args.message
                 or f"docs: publish the approved mutation to {args.path}",
                 expected_tip=args.expected_tip,
+                expected_working_copy=args.expected_working_copy or None,
             )
     except Exception as error:  # noqa: BLE001 - the boundary is the point
         # The envelope is guaranteed at this boundary, not only inside

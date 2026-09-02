@@ -374,7 +374,7 @@ class Fixture:
 
     # -- the document, as the publication branch carries it -------------------
 
-    def publish_document(self, text, path="docs/ui-bugs.md"):
+    def publish_document(self, text, path="docs/ui-bugs.md", expected_working_copy=None):
         """Land `text` on the publication branch the way a real publication
         would, so resolution is checked against a branch rather than a fake."""
         blob = self.dir / "approved.md"
@@ -384,6 +384,7 @@ class Fixture:
                 repository="coghex/kanban", branch="master", root=self.docs,
                 document=path, content=blob.read_bytes(),
                 message="docs: approved mutation",
+                expected_working_copy=expected_working_copy,
             )
         finally:
             blob.unlink(missing_ok=True)
@@ -1983,12 +1984,12 @@ class TrackerTransactionTests(TrackerFixture):
         )
         self.assertEqual(self.fx.resolve()["status"], "resolved")
 
-    def test_a_document_absent_from_the_tip_does_not_resolve_locally(self):
-        # A novel document is legitimately local — but the publication module
-        # applies content only over an existing baseline, so it never wrote this
-        # one and the disposition reached nothing. Being local makes the record
-        # outstanding, not resolvable; it clears when a pull request adds the
-        # document and a later run publishes to it.
+    def test_a_novel_document_the_module_never_wrote_does_not_resolve_locally(self):
+        # A novel document is legitimately local, and that alone decides
+        # nothing (#605): what decides is the same record that separates the
+        # module's own write from a hand edit on a tracked document. A novel
+        # working copy carrying a terminal entry the module never applied is
+        # somebody else's edit, so the record stays outstanding.
         for novel in ("docs/new_design.md", "docs/ui-bugs-new.md"):
             with self.subTest(document=novel):
                 self.fx.acquire(document=novel)
@@ -2006,11 +2007,73 @@ class TrackerTransactionTests(TrackerFixture):
                 with self.assertRaises(tracker.TransactionError) as caught:
                     self.fx.resolve(source="local", document=novel)
                 self.assertEqual(caught.exception.status, "local-resolution-refused")
-                self.assertIn("never applied this disposition",
-                              caught.exception.message)
+                self.assertIn("never applied a disposition", caught.exception.message)
                 self.assertEqual(
                     self.fx.check(document=novel)["status"], "outstanding"
                 )
+
+    def test_a_novel_document_the_module_applied_resolves_locally(self):
+        # Issue #605, end to end and in the order it was observed on a
+        # consuming repository: a report created in the docs worktree, never on
+        # the branch, processed before its owner's first batch landing. The
+        # first disposition is applied over the copy the preflight observed and
+        # recorded; the record is what lets the transaction resolve; and the
+        # second disposition, bound to its own preflight's copy, continues over
+        # the module's own predecessor as #385 made it for a tracked document.
+        novel = "docs/new_design.md"
+        (self.fx.docs / novel).write_text(DOCUMENT, encoding="utf-8")
+        self.assertIsNone(publisher.blob_at(self.fx.docs, "origin/master", novel))
+        preflight = publisher.check_pending(self.fx.docs, "coghex/kanban", "master", novel)
+        self.assertEqual(preflight["status"], "clear")
+
+        first = self.fx.publish_document(
+            self.APPLIED, path=novel, expected_working_copy=preflight["working_copy_blob"]
+        )
+        self.assertEqual(first["status"], "not-published")
+        self.assertEqual(first["write_outcome"], "applied-over-preflight-copy")
+        self.assertEqual(first["applied_record"], "recorded")
+        self.confirmed_pr_atomic_transaction(document=novel)
+        outcome = self.fx.resolve(source="local", document=novel)
+        self.assertEqual(outcome["status"], "resolved")
+        self.assertEqual(outcome["source"], "local")
+        self.assertIsNone(self.fx.read(document=novel)[0])
+
+        again = publisher.check_pending(self.fx.docs, "coghex/kanban", "master", novel)
+        self.assertEqual(again["status"], "clear")
+        second = self.fx.publish_document(
+            self.SECOND_APPLIED, path=novel,
+            expected_working_copy=again["working_copy_blob"],
+        )
+        self.assertEqual(second["status"], "not-published")
+        self.assertEqual(second["write_outcome"], "applied-over-local-predecessor")
+        self.fx.acquire(plan(entry_key="DW-4"), document=novel)
+        self.fx.begin(0, document=novel)
+        self.fx.confirm(0, issue_identity(number=312), document=novel)
+        self.fx.begin(1, document=novel)
+        self.fx.confirm(1, edit_identity(), document=novel)
+        self.assertEqual(
+            self.fx.resolve(source="local", document=novel)["status"], "resolved"
+        )
+        applied = (self.fx.docs / novel).read_text()
+        self.assertIn("- [x] DW-3. Checkpoint tracker mutations — [#311]", applied)
+        self.assertIn("- [x] DW-4. Something else — [#312]", applied)
+        # Still novel: nothing here published it, and nothing may (#237).
+        self.assertIsNone(publisher.blob_at(self.fx.docs, "origin/master", novel))
+
+    def test_a_novel_document_changed_after_the_module_applied_it_does_not_resolve(self):
+        novel = "docs/new_design.md"
+        (self.fx.docs / novel).write_text(DOCUMENT, encoding="utf-8")
+        preflight = publisher.check_pending(self.fx.docs, "coghex/kanban", "master", novel)
+        applied = self.fx.publish_document(
+            self.APPLIED, path=novel, expected_working_copy=preflight["working_copy_blob"]
+        )
+        self.assertEqual(applied["write_outcome"], "applied-over-preflight-copy")
+        (self.fx.docs / novel).write_text(self.APPLIED + "\nedited since\n", encoding="utf-8")
+        self.confirmed_pr_atomic_transaction(document=novel)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.resolve(source="local", document=novel)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("changed since", caught.exception.message)
 
     def test_a_coordination_document_absent_from_the_tip_does_not_resolve_either(self):
         # Classified for the direct lane but not yet on the branch: the helper
@@ -2046,6 +2109,67 @@ class TrackerTransactionTests(TrackerFixture):
         self.assertEqual(
             self.fx.check(document=classified)["status"], "outstanding"
         )
+
+    def test_a_novel_document_with_a_lane_is_written_locally_but_resolves_on_the_branch_only(self):
+        # Requirement 3's lane precedence once the applied record exists
+        # (#605). Classified for the direct lane but never on the branch, the
+        # document IS written and recorded locally: the helper declines to
+        # publish a novel document (#237) and applies the approved mutation
+        # over the copy the preflight observed like any other. That record
+        # still does not license a local resolution, because the lane says
+        # the disposition is verified on the branch, so the transaction stays
+        # outstanding until the document is enrolled and published there.
+        classified = "docs/drainer-bugs.md"
+        run(["git", "checkout", "-q", "master"], self.fx.primary)
+        (self.fx.primary / "docs" / "agent-workflow-contract.md").write_text(
+            CLASSIFICATION.replace(
+                "docs/design.md | pr-atomic | test-parsed",
+                "docs/design.md | pr-atomic | test-parsed\n"
+                "docs/drainer-bugs.md | coordination | audit-report",
+            ),
+            encoding="utf-8",
+        )
+        run(["git", "commit", "-qam", "classify"], self.fx.primary)
+        run(["git", "push", "-q", "origin", "master:master"], self.fx.primary)
+        (self.fx.docs / classified).write_text(DOCUMENT, encoding="utf-8")
+        self.assertIsNone(publisher.blob_at(self.fx.docs, "origin/master", classified))
+        preflight = publisher.check_pending(
+            self.fx.docs, "coghex/kanban", "master", classified
+        )
+        self.assertEqual(preflight["status"], "clear")
+        self.confirmed_pr_atomic_transaction(document=classified)
+
+        applied = self.fx.publish_document(
+            self.APPLIED, path=classified,
+            expected_working_copy=preflight["working_copy_blob"],
+        )
+        self.assertEqual(applied["status"], "not-published")
+        self.assertIn("novel document", applied["reason"])
+        self.assertTrue(applied["document_written"])
+        self.assertEqual(applied["write_outcome"], "applied-over-preflight-copy")
+        self.assertEqual(applied["applied_record"], "recorded")
+        self.assertEqual(
+            applied["applied_ref"], publisher.applied_ref("coghex/kanban", classified)
+        )
+        self.assertIn(
+            "- [x] DW-3. Checkpoint tracker mutations — [#311]",
+            (self.fx.docs / classified).read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            publisher.read_applied(self.fx.docs, "coghex/kanban", classified),
+            publisher.working_blob(self.fx.docs, classified),
+        )
+
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.resolve(source="local", document=classified)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("publishes directly to master", caught.exception.message)
+        self.assertEqual(
+            self.fx.check(document=classified)["status"], "outstanding"
+        )
+        self.assertIsNotNone(self.fx.read(document=classified)[0])
+        # Still novel: nothing here published it, and nothing may (#237).
+        self.assertIsNone(publisher.blob_at(self.fx.docs, "origin/master", classified))
 
     # -- abandonment ---------------------------------------------------------
 
