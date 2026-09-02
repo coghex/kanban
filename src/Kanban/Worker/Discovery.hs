@@ -27,7 +27,7 @@ import Control.Monad (filterM, unless, void, when)
 import qualified Data.ByteString as ByteString
 import Data.Either (isRight)
 import Data.List (find, sortOn)
-import Data.Maybe (catMaybes, listToMaybe)
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
@@ -85,22 +85,36 @@ discoverWorkers repository = do
 -- otherwise. Joining that worker is what makes two advancers of one action
 -- observe one turn instead of racing to start a second.
 --
--- The predicate is the caller's requested turn, and it is what keeps the
--- lease's coarseness from becoming a mix-up. Leases are keyed by /number/
--- alone, so one issue's lease is held equally by a solve and an autosolve,
--- and one pull request's by a review and a repair. Joining blind would let an
--- autosolve request adopt a plain solve and then start review rounds for work
--- nobody asked to review, or report a running review's result as a repair.
--- A holder whose task is not the requested turn is no holder to this caller.
+-- Only the lease's own owner is ever offered, and only when its task is the
+-- turn the caller asked for. Both halves matter, and neither can be relaxed
+-- into a search.
 --
--- Discovery-filtered, so a worker that has already settled and been
--- acknowledged is never offered as the holder of a live turn.
+-- The owner half: a discoverable worker matching the requested task is not
+-- evidence that /it/ holds the lease. A terminal worker stays discoverable
+-- until it is acknowledged, so an issue whose lease a live autosolve holds can
+-- also have a finished solve sitting in the cache — and a fresh solve request,
+-- refused by that lease, would adopt the finished one and report its result as
+-- this request's.
+--
+-- The task half: leases are keyed by /number/ alone, so one issue's is held
+-- equally by a solve and an autosolve, and one pull request's by a review and
+-- a repair. Joining across that would let an autosolve request adopt a plain
+-- solve and then start review rounds for work nobody asked to review, or
+-- report a running review's result as a repair.
+--
+-- So an owner that cannot be identified — a lease directory whose owner
+-- record has not been written yet, or will not decode — is no holder to this
+-- caller either, and the dispatch refuses rather than joining something. That
+-- is the fail-closed answer: a turn is running and this caller does not know
+-- which, so it must not start another and must not claim one.
 workerHoldingTurn :: Repository -> Maybe WorkerId -> (WorkerTask -> Bool) -> IO (Maybe WorkerDescriptor)
-workerHoldingTurn repository owner wanted = do
-  descriptors <- discoverWorkers repository
-  let matching = filter (wanted . (.workerTask) . (.workerDescriptorSpec)) descriptors
-      named = filter ((== owner) . Just . (.workerId) . (.workerDescriptorSpec)) matching
-  pure (listToMaybe (named <> matching))
+workerHoldingTurn repository owner wanted = case owner of
+  Nothing -> pure Nothing
+  Just identity -> do
+    descriptors <- discoverWorkers repository
+    pure $ case find ((== identity) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+      Just descriptor | wanted descriptor.workerDescriptorSpec.workerTask -> Just descriptor
+      _ -> Nothing
 
 discoverWorkerHistory :: Repository -> IO [WorkerDescriptor]
 discoverWorkerHistory repository = do

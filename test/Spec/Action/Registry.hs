@@ -17,7 +17,7 @@ import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (addUTCTime)
+import Data.Time (addUTCTime, getCurrentTime)
 import Kanban.Action
 import Kanban.ApprovalService (ApprovalActivity (..), ApprovalState (..), ApprovalStatus (..), ApprovalUnavailable (..))
 import Kanban.Domain
@@ -60,6 +60,7 @@ import Kanban.Worker
     WorkerTask (..),
     acquireWorkerLease,
     descriptorForSpec,
+    discoverWorkers,
     workerDirectory,
   )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
@@ -854,6 +855,42 @@ spec = do
         dispatched <- dispatchProviderTurn environment request plan
         either isTurnAlreadyRunning (const False) dispatched `shouldBe` True
 
+    -- A discoverable worker matching the requested task is not evidence that
+    -- it holds the lease. A terminal worker stays discoverable until it is
+    -- acknowledged, so this issue has a finished solve sitting in the cache
+    -- while a live autosolve holds its lease -- and a fresh solve request must
+    -- not adopt the finished one and report its result as its own.
+    it "joins the lease's own owner, never a stale worker that merely matches" $
+      withDispatchMachine $ \environment -> do
+        stale <- solveWorkerDescriptor environment.actionRepository 844 SolveOnly
+        publishWorkerSpec stale
+        publishWorkerState stale (WorkerTerminal SolveCompleted)
+        holder <- solveWorkerDescriptor environment.actionRepository 844 AutoSolve
+        publishWorkerSpec holder
+        publishWorkerState holder WorkerRunning
+        acquireWorkerLease holder `shouldReturn` Right ()
+        -- Both are discoverable: the stale one has not been acknowledged.
+        discovered <- discoverWorkers environment.actionRepository
+        map (.workerDescriptorSpec.workerId) discovered
+          `shouldSatisfy` elem stale.workerDescriptorSpec.workerId
+        let request =
+              (actionRequest SolveIssue identityUnderTest (TargetByKind ActionTargetIssue 844))
+                { requestSolverBrand = Just CodexSolver,
+                  requestRecordedAssignment = Just (solveCell CodexSolver)
+                }
+            plan =
+              either (error . show) id $
+                planResolvedAction
+                  defaultWorkflowConfig
+                  identityUnderTest
+                  SolveIssue
+                  (Just CodexSolver)
+                  (ActionTargetItem (resolveHeldItem environment.actionCatalog TargetPlain (IssueItem (baseIssue 844 []))))
+        dispatched <- dispatchProviderTurn environment request plan
+        -- The lease's owner is an autosolve worker, which is not the turn this
+        -- request asked for, so there is nothing to join.
+        either isTurnAlreadyRunning (const False) dispatched `shouldBe` True
+
     -- Fails closed the moment the holder cannot be identified: a turn is
     -- running and this dispatch does not know which worker owns it, so it
     -- refuses rather than starting another.
@@ -1158,12 +1195,17 @@ pullRequestTaskOf specification = case specification.workerTask of
 -- | A descriptor for a solve worker that was never launched, so a test can
 -- address its durable files directly.
 descriptorFor :: Repository -> Int -> IO WorkerDescriptor
-descriptorFor repository issueNumber =
+descriptorFor repository issueNumber = solveWorkerDescriptor repository issueNumber SolveOnly
+
+solveWorkerDescriptor :: Repository -> Int -> SolveWorkflow -> IO WorkerDescriptor
+solveWorkerDescriptor repository issueNumber workflow = do
+  directory <- workerDirectory repository
+  createDirectoryIfMissing True directory
   descriptorForSpec
     WorkerSpec
-      { workerId = WorkerId ("solve-" <> Text.pack (show issueNumber)),
+      { workerId = WorkerId ("solve-" <> Text.pack (show workflow) <> "-" <> Text.pack (show issueNumber)),
         workerRepository = repository,
-        workerTask = SolveWorkerTaskKind (SolveWorkerTask issueNumber SolveOnly ClaudeSolver),
+        workerTask = SolveWorkerTaskKind (SolveWorkerTask issueNumber workflow ClaudeSolver),
         workerExistingSession = Nothing,
         workerExistingLogPath = Nothing,
         workerResumeProvenance = ResumeAnswer,
@@ -1208,8 +1250,13 @@ publishWorkerSpec :: WorkerDescriptor -> IO ()
 publishWorkerSpec descriptor =
   LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
 
+-- | The heartbeat is current rather than the fixture epoch: the cache
+-- collects a terminal worker whose retention window has passed, and a
+-- long-expired one would be swept before the test that is about discovering
+-- it could look.
 publishWorkerState :: WorkerDescriptor -> WorkerStatus -> IO ()
-publishWorkerState descriptor status =
+publishWorkerState descriptor status = do
+  now <- getCurrentTime
   LazyByteString.writeFile
     descriptor.workerDescriptorStatePath
     ( encode
@@ -1222,7 +1269,7 @@ publishWorkerState descriptor status =
             workerStateProviderIdentity = Nothing,
             workerStateSessionId = Nothing,
             workerStateLogPath = Nothing,
-            workerStateHeartbeatAt = epoch,
+            workerStateHeartbeatAt = now,
             workerStateLastActivity = "repairing",
             workerStateKnownProcesses = []
           }
