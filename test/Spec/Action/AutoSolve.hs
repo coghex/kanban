@@ -490,6 +490,29 @@ spec = do
       outcomeOf (World [] [(Solver, workerRecord (WorkerTerminal (SolveFailed "boom")) Nothing)]) (progressAt AutoImplementing 0 Nothing) False
         >>= (`shouldBe` Left (ActionFailed "boom"))
 
+    -- The canonical coordinator switches exactly one label, so a pull request
+    -- carrying both has had two contradictory verdicts published on it and
+    -- nothing about it is settled. Completing the run on the approval would
+    -- be reading a broken review state as a good one.
+    it "stops on a pull request carrying two contradictory verdicts" $ do
+      let contradictory =
+            linkedPullRequest
+              pullRequestUnderLoop
+              ClaudeSolver
+              [label defaultWorkflowConfig.approvalLabel, label defaultWorkflowConfig.changesRequestedLabel]
+      -- After the review round...
+      outcomeOf
+        (World [contradictory] [(Solver, completed), (Reviewer, completed)])
+        (progressAt AutoReviewing 1 (Just pullRequestUnderLoop))
+        True
+        >>= (`shouldSatisfy` stoppedFor "contradictory")
+      -- ...and after the revision's canonical rereview.
+      outcomeOf
+        (World [contradictory] [(Resumed, completed)])
+        (progressAt AutoAwaitingRereview 1 (Just pullRequestUnderLoop))
+        False
+        >>= (`shouldSatisfy` stoppedFor "contradictory")
+
     it "reports a failed review as a failure rather than as a verdict" $
       outcomeOf
         (World [changesRequestedPullRequest] [(Solver, completed), (Reviewer, workerRecord (WorkerTerminal (SolveFailed "review died")) Nothing)])

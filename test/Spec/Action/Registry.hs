@@ -215,6 +215,18 @@ spec = do
       parseActionTargetRef "epic 12" `shouldSatisfy` either (Text.isInfixOf "qualifier") (const False)
       parseActionTargetRef "twelve" `shouldSatisfy` either (Text.isInfixOf "target number") (const False)
 
+    -- A digit string longer than a machine word wraps if it is read straight
+    -- into an Int, so a target that cannot exist would resolve and dispatch
+    -- against a real one that shares its low bits.
+    it "refuses a number outside the range a target can have" $ do
+      parseActionTargetRef "18446744073709551626"
+        `shouldSatisfy` either (Text.isInfixOf "out of range") (const False)
+      parseActionTargetRef "0" `shouldSatisfy` either (Text.isInfixOf "out of range") (const False)
+      -- The largest number that is still a number, and the smallest.
+      parseActionTargetRef (Text.pack (show (maxBound :: Int)))
+        `shouldBe` Right (TargetByNumber maxBound)
+      parseActionTargetRef "1" `shouldBe` Right (TargetByNumber 1)
+
   describe "resolution" $ do
     let issues = [baseIssue 10 []]
         pullRequests = [markedPullRequest 11 [10] ClaudeSolver []]
@@ -520,6 +532,15 @@ spec = do
       verdictIn [changes] `shouldBe` ActionPullRequestVerdict 90 PullRequestVerdictChangesRequested
       verdictIn [pending] `shouldSatisfy` notSucceeding
       verdictIn [] `shouldSatisfy` notSucceeding
+      -- Both labels at once: two canonical verdicts stand on it and neither
+      -- is the one it carries. An approval-first reading would call that
+      -- success.
+      let contradictory =
+            markedPullRequest 90 [80] ClaudeSolver
+              [label defaultWorkflowConfig.approvalLabel, label defaultWorkflowConfig.changesRequestedLabel]
+      verdictIn [contradictory] `shouldSatisfy` notSucceeding
+      verdictIn [contradictory]
+        `shouldSatisfy` (Text.isInfixOf "contradictory" . actionOutcomeMessage)
 
     it "calls a pending verdict, a needs-input halt, and a stop non-success" $ do
       actionOutcomeSucceeded (ActionPullRequestVerdict 1 PullRequestVerdictPending) `shouldBe` False

@@ -86,7 +86,7 @@ import Kanban.PullRequestFlow
     PullRequestVerdict (..),
     agentForAction,
     pullRequestAssignment,
-    pullRequestVerdictForLabels,
+    pullRequestVerdictEvidence,
   )
 import Kanban.Solve (SolveOutcome (..), SolveWorkflow (..), SolverBrand, solveAssignment)
 import Kanban.UI.AutoSolve
@@ -504,10 +504,14 @@ validatedPullRequestVerdict environment resolved =
     Nothing ->
       ActionStopped ("PR #" <> showNumber number <> " is no longer in this read; its verdict cannot be validated")
     Just pullRequest ->
-      case pullRequestVerdictForLabels environment.actionWorkflowConfig (map (.labelName) pullRequest.pullRequestLabels) of
-        PullRequestVerdictPending ->
+      case pullRequestVerdictEvidence environment.actionWorkflowConfig (map (.labelName) pullRequest.pullRequestLabels) of
+        -- Contradictory evidence, which requirement 7 forbids promoting: two
+        -- canonical verdicts stand on this pull request and neither is the
+        -- one it carries.
+        Left reason -> ActionStopped ("PR #" <> showNumber number <> " " <> reason)
+        Right PullRequestVerdictPending ->
           ActionStopped ("PR #" <> showNumber number <> " carries no canonical verdict yet")
-        verdict -> ActionPullRequestVerdict number verdict
+        Right verdict -> ActionPullRequestVerdict number verdict
   where
     number = resolved.resolvedTargetNumber
 

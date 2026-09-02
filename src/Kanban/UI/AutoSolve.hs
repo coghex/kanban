@@ -47,7 +47,7 @@ import Kanban.PullRequestFlow
   ( PullRequestVerdict (..),
     expectedPullRequestOrigin,
     originFromBody,
-    pullRequestVerdictForLabels,
+    pullRequestVerdictEvidence,
   )
 import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
@@ -143,10 +143,16 @@ decideReview observation progress = case boundPullRequest observation progress o
     Just SolveFailedPhase -> AutoSolveHalted AutoSolveHaltFailed ("PR #" <> showText pullRequest.pullRequestNumber <> " review failed; press " <> actionKeyText ShowProcesses <> " to inspect it")
     Just SolveKilledPhase -> AutoSolveHalted AutoSolveHaltFailed ("PR #" <> showText pullRequest.pullRequestNumber <> " review was killed")
     Just SolveAttention -> AutoSolveWaitingOn ("PR review needs input; press " <> actionKeyText ShowProcesses)
-    Just SolveFinished
-      | pullRequestHasLabel config.approvalLabel pullRequest -> AutoSolveApprove pullRequest.pullRequestNumber
-      | pullRequestHasLabel config.changesRequestedLabel pullRequest -> decideRevision observation progress pullRequest
-      | otherwise -> AutoSolveWaitingOn ("waiting for review verdict; press " <> actionKeyText RefreshAll <> " to retry")
+    Just SolveFinished -> case verdictEvidence config pullRequest of
+      -- Two contradictory verdicts stand on it, so the review settled
+      -- nothing. Stopping is the only honest move: an approval-first reading
+      -- would complete the run on a pull request whose review state is
+      -- broken.
+      Left reason -> AutoSolveHalted AutoSolveHaltStopped ("PR #" <> showText pullRequest.pullRequestNumber <> " " <> reason)
+      Right PullRequestVerdictApproved -> AutoSolveApprove pullRequest.pullRequestNumber
+      Right PullRequestVerdictChangesRequested -> decideRevision observation progress pullRequest
+      Right PullRequestVerdictPending ->
+        AutoSolveWaitingOn ("waiting for review verdict; press " <> actionKeyText RefreshAll <> " to retry")
     Just _ -> AutoSolveWaitingOn ("reviewing PR #" <> showText pullRequest.pullRequestNumber)
   where
     config = observation.autoSolveWorkflowConfig
@@ -159,11 +165,13 @@ decideRereview :: AutoSolveObservation -> AutoSolveProgress -> AutoSolveDecision
 decideRereview observation progress = case boundPullRequest observation progress of
   Nothing -> AutoSolveHalted AutoSolveHaltStopped "the autosolve PR disappeared after revision"
   Just pullRequest ->
-    case pullRequestVerdictForLabels observation.autoSolveWorkflowConfig (map (.labelName) pullRequest.pullRequestLabels) of
-      PullRequestVerdictApproved -> AutoSolveApprove pullRequest.pullRequestNumber
-      PullRequestVerdictChangesRequested ->
+    case verdictEvidence observation.autoSolveWorkflowConfig pullRequest of
+      Left reason -> AutoSolveHalted AutoSolveHaltStopped ("PR #" <> showText pullRequest.pullRequestNumber <> " " <> reason)
+      Right PullRequestVerdictApproved -> AutoSolveApprove pullRequest.pullRequestNumber
+      Right PullRequestVerdictChangesRequested ->
         decideRevision observation (progress {autoSolveReviewRound = progress.autoSolveReviewRound + 1}) pullRequest
-      PullRequestVerdictPending -> AutoSolveWaitingOn ("waiting for the canonical rereview verdict; press " <> actionKeyText RefreshAll <> " to retry")
+      Right PullRequestVerdictPending ->
+        AutoSolveWaitingOn ("waiting for the canonical rereview verdict; press " <> actionKeyText RefreshAll <> " to retry")
 
 -- | The five-round bound, and the two conditions that make a revision
 -- impossible or premature.
@@ -182,6 +190,13 @@ decideRevision observation progress pullRequest
       AutoSolveHalted AutoSolveHaltStopped "the original solver did not return a resumable session id"
   | observation.autoSolveSolverRunning = AutoSolveWait
   | otherwise = AutoSolveRevise pullRequest.pullRequestNumber progress {autoSolveStage = AutoRevising}
+
+-- | The one canonical verdict a pull request carries, or why it carries none.
+-- Both verdict arms above read it, so neither can settle a run on a pull
+-- request whose review state contradicts itself.
+verdictEvidence :: WorkflowConfig -> PullRequest -> Either Text PullRequestVerdict
+verdictEvidence config pullRequest =
+  pullRequestVerdictEvidence config (map (.labelName) pullRequest.pullRequestLabels)
 
 boundPullRequest :: AutoSolveObservation -> AutoSolveProgress -> Maybe PullRequest
 boundPullRequest observation progress =

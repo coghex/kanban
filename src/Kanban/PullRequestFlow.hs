@@ -17,6 +17,7 @@ module Kanban.PullRequestFlow
     pullRequestArguments,
     pullRequestAssignment,
     pullRequestRole,
+    pullRequestVerdictEvidence,
     pullRequestVerdictForLabels,
     runPullRequestFlow,
     runPullRequestFlowWith,
@@ -137,12 +138,33 @@ data PullRequestVerdict = PullRequestVerdictApproved | PullRequestVerdictChanges
 
 pullRequestVerdictForLabels :: WorkflowConfig -> [Text] -> PullRequestVerdict
 pullRequestVerdictForLabels config labels
-  | has config.approvalLabel = PullRequestVerdictApproved
-  | has config.changesRequestedLabel = PullRequestVerdictChangesRequested
+  | carriesLabel config labels config.approvalLabel = PullRequestVerdictApproved
+  | carriesLabel config labels config.changesRequestedLabel = PullRequestVerdictChangesRequested
   | otherwise = PullRequestVerdictPending
-  where
-    folded = map Text.toCaseFold labels
-    has value = Text.toCaseFold value `elem` folded
+
+-- | The canonical verdict a pull request /unambiguously/ carries, or why it
+-- carries none.
+--
+-- 'pullRequestVerdictForLabels' prefers approval when both labels are somehow
+-- present, which is the right answer for a badge and the wrong one for
+-- evidence: a pull request carrying both has had two contradictory verdicts
+-- published on it and nothing about it is settled. The canonical coordinator
+-- switches exactly one label, so this state means something went wrong rather
+-- than that the pull request was approved.
+--
+-- Every caller about to /act/ on a verdict asks this instead — to complete an
+-- autosolve run, or to report a registry action's terminal result — because
+-- conflicting evidence must never be promoted to success.
+pullRequestVerdictEvidence :: WorkflowConfig -> [Text] -> Either Text PullRequestVerdict
+pullRequestVerdictEvidence config labels
+  | carriesLabel config labels config.approvalLabel && carriesLabel config labels config.changesRequestedLabel =
+      Left "carries both the approval and changes-requested labels, so its canonical verdict is contradictory"
+  | otherwise = Right (pullRequestVerdictForLabels config labels)
+
+-- | Whether a label set carries one configured label, folded as GitHub
+-- compares them.
+carriesLabel :: WorkflowConfig -> [Text] -> Text -> Bool
+carriesLabel _ labels value = Text.toCaseFold value `elem` map Text.toCaseFold labels
 
 -- | Whether an action works on the pull request's own code and therefore
 -- runs on its origin brand, handing its verdict off to exactly one nested

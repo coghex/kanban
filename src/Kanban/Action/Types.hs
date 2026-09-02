@@ -93,6 +93,7 @@ module Kanban.Action.Types
 where
 
 import Data.Char (isDigit)
+import Text.Read (readMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -266,11 +267,19 @@ parseActionTargetRef raw = case Text.words (Text.toLower (Text.strip raw)) of
     targetKind "issue" = Right ActionTargetIssue
     targetKind "pr" = Right ActionTargetPullRequest
     targetKind other = Left ("unknown target qualifier " <> quoted other)
+    -- Read through 'Integer' and then bounded, rather than straight into
+    -- 'Int'. A digit string longer than a machine word wraps silently, so
+    -- @18446744073709551626@ would come back as @10@ and an external request
+    -- naming a target that cannot exist would resolve and dispatch against a
+    -- real one. Zero is refused with it: GitHub numbers start at one.
     number value =
       let digits = Text.dropWhile (== '#') value
-       in if not (Text.null digits) && Text.all isDigit digits
-            then Right (read (Text.unpack digits))
-            else Left ("cannot read " <> quoted value <> " as a target number")
+       in if Text.null digits || not (Text.all isDigit digits)
+            then Left ("cannot read " <> quoted value <> " as a target number")
+            else case readMaybe (Text.unpack digits) :: Maybe Integer of
+              Just parsed
+                | parsed >= 1 && parsed <= toInteger (maxBound :: Int) -> Right (fromInteger parsed)
+              _ -> Left ("target number " <> quoted value <> " is out of range")
 
 -- ---------------------------------------------------------------------------
 -- Resolved targets
