@@ -694,7 +694,26 @@ its column's first selectable entry instead, exactly as a closed search does.
 ### Embedded issue reviews
 
 Pressing `r` on an issue or from its open details starts its label-selected
-review stage, or reopens the issue's existing session. Canonical review and
+review stage, or reopens the issue's existing session. Two kinds of revision
+session are replaced rather than reopened: one that has *failed*, since it has
+lost the thread it would send on and so takes no further input, and any settled
+one still holding text nobody managed to send, since reopening it is the one
+press that would strand that text for good. It counts wherever it sits — a
+message handed back onto the input line, one queued behind it, or a draft typed
+while the turn was still running — because once the session cannot send, all
+three are equally lost. Both start a fresh revision carrying that text across,
+the old input line first.
+
+Text a replacement cannot take is held for the issue rather than for any one
+session. `r` starts whatever stage the labels ask for, and a revision that
+publishes its verdict moves them to a canonical stage, which runs the gate as a
+subprocess and has nothing to send on: put there the text would look kept while
+being unreachable, and dropped there it would be lost to the single keystroke
+the user made to carry on. Held for the issue it survives however many stages
+come and go, and the next session that can send is handed it. An interrupted revision is the one settled phase that
+stays resumable and keeps its input, but only while its connection lives:
+once that ends it is as finished as a failed one and is replaced the same way.
+Canonical review and
 rereview use the synchronous v2 reviewer; interactive revision uses one
 persistent Codex app-server. Pressing `r` on an epic header is a no-op that
 sets a notice instead: an epic is structure rather than reviewable work, so
@@ -922,16 +941,52 @@ since its ticks are the only thing driving review redraws, while solve and PR
 spinners also drive the board's own card badges and activity timers and so keep
 running with no overlay open.
 
-Feedback sent into a running turn is steered into it against the turn it was
-aimed at, so the app-server rejects it when that turn has moved on. A rejection
-never discards the message. With the thread now idle it becomes the follow-up
-turn the same keypress would have started a moment later — one request, and no
-second transcript entry. While any turn is running it is reported undelivered
+What feedback does to a running turn depends on the channel the review runs
+on, because only one of the two can redirect one.
+
+On the app-server, feedback sent into a running turn is steered into it against
+the turn it was aimed at, so the app-server rejects it when that turn has moved
+on. A rejection never discards the message. With the thread now idle it becomes
+the follow-up turn the same keypress would have started a moment later — one
+request, and no second transcript entry. While any turn is running it is reported undelivered
 rather than redirected into a turn the user never addressed: the transcript
 entry is marked as not delivered, and the text returns to the input line, or
 waits in the session behind whatever is already there. A draft typed after the
 send and a second rejected message are both preserved; sending frees the line
 and brings the oldest waiting message back.
+
+On the CLI's stream-json channel there is no operation that redirects a turn in
+flight at all, so feedback ends that turn and becomes the next one. The
+interrupt is confirmed before anything is sent: the message is written only
+once the backend has acknowledged the request *and* the turn it named has
+stopped, in whichever order those two arrive, so it is never written into a
+turn that is still running and never silently dropped because the interrupt did
+not land.
+
+Anything short of an answer that both names the interrupt and agrees with it
+counts as failing to land, and every one of those is reported as this failure
+rather than as an undelivered steer, which has no counterpart here. A refusal,
+an answer that cannot be read, an answer naming a request this client never
+sent, and a line that does not parse at all — which carries no record type, so
+nothing says it was not the answer — are treated alike: the channel carries one
+interrupt at a time and no other control operation, so none of them is somebody
+else's answer to keep waiting for. So are a turn that reached its verdict
+first, a turn ending that is not the one the interrupt named, and a process
+that died before answering.
+Each is bounded — the message comes back rather than waiting on something that
+has already been and gone — and the turn stays whatever it was.
+
+The message comes back the way a rejected steer does when the session can still
+send it, and waits in that session's queue when it cannot, which is where a
+session whose backend has gone keeps it: visible in the overlay, and back on
+the input line the next time one can be sent — including into the fresh
+revision `r` starts once the session holding it can no longer take it, whether
+it failed or reached a verdict. A turn ended
+this way is reported as interrupted, so a session can tell it from one that
+finished on its own, and an explicit cancellation is the same exchange with no
+message riding on it. One interrupt runs on a thread at a time: a second is
+refused while the first is unresolved, which leaves the draft where the user
+typed it.
 
 Review, solve, and PR transcripts follow the live tail only while they are
 already at the bottom. Scrolling up during a turn holds the view where it is,

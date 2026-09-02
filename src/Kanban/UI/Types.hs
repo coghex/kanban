@@ -901,6 +901,20 @@ data AppState = AppState
     appQuitPending :: Bool,
     appReviewBackend :: ReviewBackend,
     appReviewSessions :: Map Int ReviewSession,
+    -- | Text an issue's review still owes a send, held apart from any one
+    -- session: a message a failed interrupt handed back (D-16), or a draft
+    -- its user never got to send, belonging to an issue whose current
+    -- session cannot send it.
+    --
+    -- Outside the session because sessions are replaced wholesale and the
+    -- replacement is whatever the labels ask for — a revision that publishes
+    -- its verdict moves them to a canonical stage, which runs the gate as a
+    -- subprocess and has no thread at all. Carried into one of those the text
+    -- would look kept while being unreachable; dropped at that press it would
+    -- be lost to the one keystroke the user made to carry on. Held here it
+    -- survives every stage in between and is handed to the next session that
+    -- can actually send it.
+    appReviewUndelivered :: Map Int [Text],
     appSolveSessions :: Map Int SolveSession,
     appSolveProcesses :: Map Int ManagedProcess,
     appCanonicalReviewProcesses :: Map Int ManagedProcess,

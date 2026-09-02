@@ -7,7 +7,11 @@
 -- the record here is what makes that acyclic without moving the registry
 -- off the client or changing any runner's signature.
 module Kanban.Review.Client
-  ( ReviewClient (..),
+  ( InterruptAcknowledgement (..),
+    InterruptSettlement (..),
+    InterruptTarget (..),
+    PendingInterrupt (..),
+    ReviewClient (..),
     ReviewToolProxy (..),
     ToolRegistry,
     attachToolProcess,
@@ -19,9 +23,11 @@ module Kanban.Review.Client
     killReviewTools,
     killThreadToolProcesses,
     newToolRegistry,
+    pendingInterrupt,
     registerReviewToolProxy,
     releaseToolSlot,
     reserveToolSlot,
+    settleInterrupt,
     takeReviewToolProxy,
     withReservedToolSlot,
   )
@@ -66,6 +72,19 @@ data ReviewClient = ReviewClient
     -- two connections both naming a thread @thread-1@ would otherwise share
     -- one entry and answer each other's steers.
     reviewActiveTurns :: MVar (Map ReviewThreadId Text),
+    -- | The interrupt in flight on each thread, for a backend whose channel
+    -- has no operation that redirects a running turn and cancels one instead
+    -- (D-16). At most one per thread: a second guidance or cancellation
+    -- arriving while one is unresolved is refused rather than queued, so the
+    -- acknowledgement that comes back can only belong to one operation and
+    -- one waiting message.
+    --
+    -- Keyed by thread rather than held on the connection even though the only
+    -- backend that fills it gives each thread a process of its own, because
+    -- what is serialized here is a thread's operations. A connection is where
+    -- the request id is unique; a thread is what owns the turn being ended
+    -- and the guidance waiting on it.
+    reviewInterrupts :: MVar (Map ReviewThreadId PendingInterrupt),
     reviewThreadIssues :: MVar (Map ReviewThreadId Int),
     reviewToolRegistry :: ToolRegistry,
     -- | The tool re-entry serving each connection whose provider's tools go
@@ -115,6 +134,85 @@ data ReviewClient = ReviewClient
     -- cost ten real minutes to reach from a test.
     reviewClaudeBounds :: CommandBounds
   }
+
+-- | One interrupt this client has written and not yet settled, and whatever
+-- is waiting on it.
+--
+-- Two independent facts have to arrive before guidance may follow an
+-- interrupt, and the channel orders neither against the other: the CLI's
+-- acknowledgement of the control request, and the end of the turn the
+-- request targeted. Holding both here is what lets them arrive in either
+-- order and still settle once.
+data PendingInterrupt = PendingInterrupt
+  { -- | The @request_id@ the control request was written under, so the
+    -- acknowledgement that comes back can be told from one belonging to an
+    -- operation this thread has already finished with.
+    interruptRequest :: Text,
+    -- | The turn this interrupt was aimed at, which is the only turn whose
+    -- ending settles it.
+    interruptTurn :: Text,
+    -- | The message to send as the next turn once it settles, or 'Nothing'
+    -- for an explicit cancellation, which is asking for the turn to end and
+    -- nothing more.
+    interruptGuidance :: Maybe Text,
+    interruptAcknowledgement :: InterruptAcknowledgement,
+    interruptTarget :: InterruptTarget
+  }
+  deriving stock (Eq, Show)
+
+-- | What the CLI has said about the control request so far.
+data InterruptAcknowledgement
+  = AcknowledgementPending
+  | InterruptAccepted
+  | -- | The CLI answered, and the answer was not agreement. Carries what it
+    -- said, because an interrupt that was refused is the whole account of why
+    -- the guidance riding on it was never sent.
+    InterruptRefused Text
+  deriving stock (Eq, Show)
+
+-- | What has become of the turn the interrupt was aimed at.
+data InterruptTarget
+  = TargetRunning
+  | -- | It ended cut short, which is what an interrupt that landed does to it.
+    TargetAborted
+  | -- | It ended on its own, so nothing was interrupted however the control
+    -- request was answered.
+    TargetSettled
+  deriving stock (Eq, Show)
+
+-- | What a pending interrupt has become.
+data InterruptSettlement
+  = -- | Both halves are in and agree: the turn was cut short and the CLI
+    -- accepted the request, so guidance riding on it may now be written.
+    InterruptDelivered
+  | -- | It cannot be completed, and this is why. Anything riding on it has to
+    -- go back to the user rather than be sent.
+    InterruptAbandoned Text
+  deriving stock (Eq, Show)
+
+-- | A fresh interrupt, waiting on both of its halves.
+pendingInterrupt :: Text -> Text -> Maybe Text -> PendingInterrupt
+pendingInterrupt request turnId guidance =
+  PendingInterrupt request turnId guidance AcknowledgementPending TargetRunning
+
+-- | Whether an interrupt is settled, and how. 'Nothing' is an interrupt still
+-- waiting on one of its halves.
+--
+-- The one place this is decided, so the rule that releases a user's message
+-- into a provider's stdin has a single spelling. Refusal is read first
+-- because a refused request performed nothing whatever the turn went on to
+-- do; a target that ended on its own is read next, because an interrupt is
+-- still acknowledged as a success when it arrives a moment after the turn it
+-- names has finished — so the acknowledgement alone never establishes that a
+-- turn was cut short, and guidance released on it would open a turn on a
+-- review that has already reached its verdict.
+settleInterrupt :: PendingInterrupt -> Maybe InterruptSettlement
+settleInterrupt pending = case (pending.interruptAcknowledgement, pending.interruptTarget) of
+  (InterruptRefused detail, _) -> Just (InterruptAbandoned ("the backend " <> detail))
+  (_, TargetSettled) -> Just (InterruptAbandoned "the turn had already finished when the interrupt reached it")
+  (InterruptAccepted, TargetAborted) -> Just InterruptDelivered
+  (AcknowledgementPending, _) -> Nothing
+  (InterruptAccepted, TargetRunning) -> Nothing
 
 -- | Report something this client could not make sense of, under the brand of
 -- the backend it is actually running.
