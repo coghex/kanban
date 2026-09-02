@@ -669,11 +669,19 @@ preserves `githubRequestMatchesThread`'s per-thread authorization — a
 review thread may still only touch its own issue, which letting Claude Code
 run `gh` itself under an allowlist would have dropped.
 
-**Isolation.** The session launches hermetically: `--strict-mcp-config` so
-only Kanban's MCP server loads, and `--tools ""` so no built-in tool is
-available. A probe without them loaded the operator's own MCP servers and
-fired their `SessionStart` hook; the embedded review must not inherit the
-machine's Claude Code configuration.
+**Isolation.** The embedded review must not inherit the machine's Claude Code
+configuration, and that takes three separate controls rather than two, because
+each CLI flag covers only its own scope: `--strict-mcp-config` so only Kanban's
+MCP server loads, `--tools ""` so no built-in tool is available, and a
+settings-source exclusion so the operator's user, project, and local settings —
+and the hooks they declare — are never read. A probe carrying only the first
+two (2.1.258) still fired a `SessionStart` hook declared in a project
+`.claude/settings.json`, and still inherited the operator's slash commands,
+skills, and permission mode, even though `tools` and `mcp_servers` were both
+empty. Excluding the settings sources stopped that hook and left `--mcp-config`
+and `--allowedTools` in force. What no launch can promise is that no hook runs
+at all: one `SessionStart` hook still arrived from outside those three sources.
+The landed argv carries only the first two controls; issue #606 corrects it.
 
 **One process per review thread.** The CLI process is a single
 conversation, so the Claude backend spawns one per thread where the Codex
@@ -853,10 +861,15 @@ Probed directly, not read from documentation:
   HTTP, SSE, and WebSocket servers. There is no inline tool declaration and
   no `--permission-prompt-tool` in this build, so the app-server's
   declare-inline-and-call-back arrangement has no direct equivalent.
-- **The ambient environment leaks in by default.** A bare probe loaded the
-  user's own MCP servers and fired a `SessionStart` hook. `--strict-mcp-config`
-  with `--tools ""` produced `tools: []` and `mcp_servers: []`; a hermetic
-  launch is available but must be asked for explicitly.
+- **The ambient environment leaks in by default, and those two flags do not
+  close it.** A bare probe loaded the user's own MCP servers and fired a
+  `SessionStart` hook. `--strict-mcp-config` with `--tools ""` produced
+  `tools: []` and `mcp_servers: []` but left the settings sources loaded, so a
+  hook declared in user, project, or local settings still ran (reprobed on
+  2.1.258, with a marker file the hook wrote as the witness). Excluding those
+  sources as well stopped it, and `--mcp-config` and `--allowedTools` kept
+  working alongside the exclusion. A hermetic launch is available, but every
+  part of it must be asked for explicitly.
 - **Mid-turn input queues; it does not steer** (probed 2026-08-31). A user
   message written to stdin three seconds into a running turn did not reach
   that turn: the turn ran to completion and emitted `end_turn` with its full
@@ -1179,7 +1192,8 @@ Probed directly, not read from documentation:
 - **Acceptance signals:** fake-CLI tests run an embedded review end to end
   on the Claude backend and decode its structured verdict; a launch asserts
   `--strict-mcp-config` and `--tools ""`; the Codex path's tests are
-  untouched.
+  untouched. Those two flags were taken to be the whole of D-15's isolation
+  and are not — the settings-source exclusion they omit is issue #606.
 - **Out of scope:** Kanban's review tools (MODEL-15); mid-turn guidance and
   cancellation (MODEL-16); single-agent routing (MODEL-10).
 - **Open questions:** None
