@@ -37,12 +37,17 @@ import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.GitHub (GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), HistoryOutcome (..) )
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
+import Kanban.Action
+  ( AutoSolveConclusion (..),
+    AutoSolveMove (..),
+    AutoSolveTick (..),
+    autoSolveTick,
+  )
 import Kanban.Review
   ( ReviewStage (..)
     )
 import Kanban.Solve
-  ( ResumeProvenance (..),
-    SolveWorkflow (..)
+  ( SolveWorkflow (..)
     )
 import Kanban.Text (sanitizeText)
 import Kanban.Workflow (deriveBoard )
@@ -474,8 +479,21 @@ advanceAutoSolve snapshot issueNumber session = case session.sessionDetail.solve
   Nothing -> pure ()
   Just progress -> do
     state <- get
+    -- The move is the registry's, from the one function a headless tick also
+    -- takes its move from: this adapter gathers the observation out of
+    -- @AppState@ and then only renders and launches what that move says.
     let observation = autoSolveObservation state snapshot issueNumber session progress
-    runAutoSolveDecision snapshot issueNumber session (decideAutoSolve observation progress)
+    runAutoSolveTick
+      snapshot
+      issueNumber
+      session
+      ( autoSolveTick
+          state.appConfig.resolvedWorkflow
+          state.appOptions.optionConfig
+          state.appRepository
+          observation
+          progress
+      )
 
 autoSolveObservation :: AppState -> RepoSnapshot -> Int -> SolveSession -> AutoSolveProgress -> AutoSolveObservation
 autoSolveObservation state snapshot issueNumber session progress =
@@ -491,41 +509,43 @@ autoSolveObservation state snapshot issueNumber session progress =
           <$> (progress.autoSolvePullRequest >>= (`Map.lookup` state.appPullRequestReviewSessions))
     }
 
-runAutoSolveDecision :: RepoSnapshot -> Int -> SolveSession -> AutoSolveDecision -> EventM Name AppState ()
-runAutoSolveDecision snapshot issueNumber session decision = case decision of
-  AutoSolveWait -> pure ()
-  AutoSolveWaitingOn activity ->
+-- | Render and launch one move of the loop.
+--
+-- Every arm below is presentation and session state -- the transcript line,
+-- the phase, the notice -- plus the launch that move asks for. Which move it
+-- is was decided by 'Kanban.Action.AutoSolve.autoSolveTick', so a refresh
+-- cannot advance this session in a way a headless runner would not, and
+-- neither can start a turn the other already started: both read the same
+-- guards, the solver process this board holds and the review session bound to
+-- the pull request.
+runAutoSolveTick :: RepoSnapshot -> Int -> SolveSession -> AutoSolveTick -> EventM Name AppState ()
+runAutoSolveTick snapshot issueNumber session tick = case tick.tickMove of
+  AutoSolveHold Nothing -> pure ()
+  AutoSolveHold (Just activity) ->
     modifySolveSession issueNumber (\current -> current {sessionActivity = activity})
-  AutoSolveStartReview number -> startAutoSolveReview snapshot number
-  AutoSolveOpenReview number progress -> do
+  -- A round the loop was already on: start the review the bound pull request
+  -- is missing, and announce nothing, because nothing about the run changed.
+  AutoSolveReviewRound number False -> startAutoSolveReview snapshot number
+  AutoSolveReviewRound number True -> do
     appendToSolveSession
       issueNumber
       ( \current ->
-          (withAutoSolveProgress progress current)
+          (withAutoSolveProgress tick.tickProgress current)
             { sessionPhase = SolveRunning,
               sessionActivity = "reviewing PR #" <> showText number,
               sessionTranscript =
                 appendTranscript
                   current.sessionTranscript
-                  ("\n[kanban] Discovered PR #" <> showText number <> "; starting review round " <> showText progress.autoSolveReviewRound <> ".\n")
+                  ("\n[kanban] Discovered PR #" <> showText number <> "; starting review round " <> showText tick.tickProgress.autoSolveReviewRound <> ".\n")
             }
       )
     startAutoSolveReview snapshot number
     setNotice ("Autosolve #" <> showText issueNumber <> " discovered PR #" <> showText number <> " and started review")
-  AutoSolveRevise number progress -> do
-    state <- get
-    let prompt =
-          autoSolveRevisionPrompt
-            state.appConfig.resolvedWorkflow
-            state.appOptions.optionConfig
-            state.appRepository
-            session.sessionDetail.solveSessionBrand
-            number
-            progress.autoSolveReviewRound
+  AutoSolveRevisionRound number turn -> do
     appendToSolveSession
       issueNumber
       ( \current ->
-          (withAutoSolveProgress progress current)
+          (withAutoSolveProgress tick.tickProgress current)
             { sessionPhase = SolveStarting,
               sessionActivity = "resuming solver for requested changes",
               sessionTranscript =
@@ -534,15 +554,19 @@ runAutoSolveDecision snapshot issueNumber session decision = case decision of
                   ("\n[kanban] Review requested changes on PR #" <> showText number <> "; resuming the original solver.\n")
             }
       )
-    mapM_
-      (\sessionId -> launchSolveInvocation issueNumber AutoSolve session.sessionDetail.solveSessionBrand (Just sessionId) ResumeAutomatedChangesRequested prompt)
-      session.sessionDetail.solveSessionId
+    launchSolveInvocation
+      issueNumber
+      AutoSolve
+      session.sessionDetail.solveSessionBrand
+      (Just turn.autoSolveRevisionSession)
+      turn.autoSolveRevisionProvenance
+      turn.autoSolveRevisionMessage
     setNotice ("Autosolve #" <> showText issueNumber <> " resumed its original solver for PR #" <> showText number)
-  AutoSolveApprove number -> do
+  AutoSolveConcluded (AutoSolveConcludedApproved number) -> do
     appendToSolveSession
       issueNumber
       ( \current ->
-          (mapAutoSolveProgress autoSolveCompleted current)
+          (withAutoSolveProgress tick.tickProgress current)
             { sessionPhase = SolveFinished,
               sessionActivity = "approved PR #" <> showText number,
               sessionTranscript =
@@ -552,11 +576,11 @@ runAutoSolveDecision snapshot issueNumber session decision = case decision of
             }
       )
     setNotice ("Autosolve #" <> showText issueNumber <> " completed: PR #" <> showText number <> " is approved")
-  AutoSolveHalted haltKind reason -> do
+  AutoSolveConcluded (AutoSolveConcludedHalted haltKind reason) -> do
     appendToSolveSession
       issueNumber
       ( \current ->
-          (mapAutoSolveProgress autoSolveStopped current)
+          (withAutoSolveProgress tick.tickProgress current)
             { sessionPhase = haltPhase haltKind,
               sessionActivity = reason,
               sessionTranscript =
@@ -572,7 +596,6 @@ runAutoSolveDecision snapshot issueNumber session decision = case decision of
     haltWord AutoSolveHaltStopped = "stopped"
     haltWord AutoSolveHaltFailed = "failed"
     withAutoSolveProgress progress = withSessionDetail (\detail -> detail {solveSessionAutoProgress = Just progress})
-    mapAutoSolveProgress advance = withSessionDetail (\detail -> detail {solveSessionAutoProgress = advance <$> detail.solveSessionAutoProgress})
 
 -- | Autosolve's own review launch. It stays on the label-derived route, and
 -- never the user's direct @r@ dispatch, so a problem status on the pull

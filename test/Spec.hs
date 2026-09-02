@@ -16,6 +16,8 @@
 -- module states is checked by the suite it composes.
 module Main (main) where
 
+import qualified Spec.Action.AutoSolve as ActionAutoSolve
+import qualified Spec.Action.Registry as ActionRegistry
 import qualified Spec.Agent.Adapter as Adapter
 import qualified Spec.Agent.Capture as Capture
 import qualified Spec.Agent.Compatibility as Compatibility
@@ -207,6 +209,12 @@ suiteGroups =
     SuiteGroup "Spec.Config.Consumers" PingLane ConfigConsumers.spec,
     SuiteGroup "Spec.UI.Cards" PingLane Cards.spec,
     SuiteGroup "Spec.UI.AutoSolve" PingLane AutoSolve.spec,
+    -- Beside the preflight group rather than spread for cost: its dispatch
+    -- examples install fake providers on a temporary PATH and let a launch
+    -- write its specification, which is the same machinery that lane already
+    -- serialises.
+    SuiteGroup "Spec.Action.Registry" SupervisionLane ActionRegistry.spec,
+    SuiteGroup "Spec.Action.AutoSolve" PingLane ActionAutoSolve.spec,
     SuiteGroup "Spec.Config.Loading" PingLane ConfigLoading.spec,
     SuiteGroup "Spec.UI.Layout" PingLane Layout.spec,
     SuiteGroup "Spec.UI.OpenData" PingLane OpenData.spec,

@@ -82,6 +82,16 @@ data WorkerParent = WorkerParent
     workerParentSolverLogPath :: Maybe FilePath,
     workerParentStartedAt :: UTCTime,
     workerParentKnownPullRequests :: Set Int,
+    -- | The pull request the run has bound, once discovery has bound one.
+    --
+    -- Durable because a restart has nowhere else to learn it: the loop's
+    -- discovery arm only ever binds a /new/ pull request, so a run reattached
+    -- mid-revision with this absent would reach its rereview with nothing
+    -- bound and halt on a pull request that is still there and may already be
+    -- approved. 'Nothing' is a run that has not bound one yet -- and a parent
+    -- recorded before this field existed, which is the same thing for every
+    -- run that had not.
+    workerParentPullRequest :: Maybe Int,
     -- | The assignment the solver's own worker recorded, so a revision
     -- launched after a restart replays the solver's cell rather than the
     -- reviewer's (D-7). 'Nothing' for a parent recorded before this field
@@ -92,10 +102,10 @@ data WorkerParent = WorkerParent
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
 
--- | Hand-written for the same reason 'WorkerSpec's is: a pull-request
--- worker's durable specification written before 'workerParentSolverAssignment'
--- existed still decodes, so an upgrade cannot drop a running autosolve loop
--- out of discovery.
+-- | Hand-written for the same reason 'WorkerSpec's is: a durable
+-- specification written before 'workerParentPullRequest' or
+-- 'workerParentSolverAssignment' existed still decodes, so an upgrade cannot
+-- drop a running autosolve loop out of discovery.
 instance FromJSON WorkerParent where
   parseJSON = withObject "WorkerParent" $ \object ->
     WorkerParent
@@ -106,6 +116,7 @@ instance FromJSON WorkerParent where
       <*> object .: "workerParentSolverLogPath"
       <*> object .: "workerParentStartedAt"
       <*> object .: "workerParentKnownPullRequests"
+      <*> object .:? "workerParentPullRequest" .!= Nothing
       <*> object .:? "workerParentSolverAssignment" .!= Nothing
 
 data WorkerSpec = WorkerSpec

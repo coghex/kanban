@@ -108,14 +108,22 @@ spec = do
         classifyBundleListing (Right (ExitSuccess, "[]")) `shouldBe` BundleAbsent
       it "never reads an undecodable listing as an absent bundle" $
         classifyBundleListing (Right (ExitSuccess, "not json")) `shouldSatisfy` isUnknownBundle
-      it "accepts the versions the tracked bundles were verified against" $ do
+      it "accepts the versions everything Kanban asks of each CLI was verified against" $ do
         classifyVersion minimumCodexVersion (Right (ExitSuccess, "codex-cli 0.144.6\n"))
           `shouldBe` VersionSupported "0.144.6"
-        classifyVersion minimumClaudeVersion (Right (ExitSuccess, "2.1.220 (Claude Code)\n"))
-          `shouldBe` VersionSupported "2.1.220"
+        classifyVersion minimumClaudeVersion (Right (ExitSuccess, "2.1.251 (Claude Code)\n"))
+          `shouldBe` VersionSupported "2.1.251"
       it "rejects a release older than the one the bundle install path needs" $
         classifyVersion minimumClaudeVersion (Right (ExitSuccess, "2.1.100 (Claude Code)\n"))
-          `shouldBe` VersionUnsupported "2.1.100" "2.1.216"
+          `shouldBe` VersionUnsupported "2.1.100" "2.1.251"
+      -- The floor Claude's own probe raised it to (D-16). A release that
+      -- installs the workflow bundle perfectly well is still below what the
+      -- embedded review's interrupt exchange has been verified on, so the two
+      -- reasons have to be able to disagree -- and the remediation an
+      -- operator reads has to name the one that is actually blocking them.
+      it "rejects a release that can install the bundle but predates the verified interrupt exchange" $
+        classifyVersion minimumClaudeVersion (Right (ExitSuccess, "2.1.216 (Claude Code)\n"))
+          `shouldBe` VersionUnsupported "2.1.216" "2.1.251"
       it "never reads an unparseable version banner as unsupported" $
         classifyVersion minimumCodexVersion (Right (ExitSuccess, "dev build\n"))
           `shouldSatisfy` isUnknownVersion
@@ -138,6 +146,23 @@ spec = do
         -- A Codex-origin PR is reviewed by Claude.
         blockedProblems environment (ActionPullRequestFlow PullRequestCodex PullRequestReview)
           `shouldBe` [ProviderUnauthenticated]
+      -- The two floors no longer sit at the same capability, so the
+      -- remediation cannot be one sentence: Claude's has been raised past
+      -- what the bundle install path needs, and an operator on such a release
+      -- would otherwise be sent looking for an install failure that is not
+      -- happening.
+      it "says why each brand's version floor is where it is" $ do
+        let below brand = withProbe brand (readyProviderProbe brand) {probeVersion = VersionUnsupported "0.0.1" "9.9.9"}
+            withProbe CodexSolver = withCodexProbe
+            withProbe ClaudeSolver = withClaudeProbe
+            remediationFor brand = blockingRemediation (actionReport (below brand) (ActionSolve brand))
+        remediationFor ClaudeSolver
+          `shouldSatisfy` maybe False (Data.Text.isInfixOf "embedded issue review's turn interruption is unverified")
+        remediationFor CodexSolver
+          `shouldSatisfy` maybe False (not . Data.Text.isInfixOf "turn interruption")
+        mapM_
+          (\brand -> remediationFor brand `shouldSatisfy` maybe False (Data.Text.isInfixOf "cannot install the Kanban workflow bundle"))
+          [CodexSolver, ClaudeSolver]
       it "names the setup command when a workflow bundle is absent" $ do
         let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeBundle = BundleAbsent}
         blockedProblems environment (ActionSolve ClaudeSolver) `shouldBe` [WorkflowBundleUnavailable]

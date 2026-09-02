@@ -125,6 +125,16 @@ Modules live in `src/Kanban/`; search the group that matches the change.
   and `UI.SessionEvents`, `UI.Solve`, `UI.Review`, `UI.PullRequest`, `UI.Worker`
   (lifecycles), `UI.Transcript`, `UI.Refresh` and `UI.Reconcile` (refresh),
   `UI.AutoSolve`, the autosolve loop as pure functions, and `UI.Util`.
+- `Action` with `Action.*` — the workflow action registry: the one plain-IO
+  boundary the dashboard's launches and a headless mission runner both call
+  through. `Action.Types` is the closed vocabulary of kinds, refusals, handles
+  and results (and the decode boundary an unregistered kind is refused at),
+  `Action.Target` resolution and the compatibility rules, `Action.Capability`
+  routing and readiness, `Action.Dispatch` the dispatch/observation split and
+  its terminal validation, and `Action.AutoSolve` the complete loop.
+  It adds no authority: routing is `PullRequestFlow`'s, readiness is
+  `Preflight`'s, the spawn is `Worker`'s, and the loop's progression is
+  `UI.AutoSolve.decideAutoSolve`'s.
 - `Worker` with `Worker.*`, `Solve` with `Solve.*`, `Review` with `Review.*`,
   `PullRequestFlow`, `ProviderAdapter`, `Codex`, `Claude`, `Process`, `Transcript`,
   `Preflight` with `Preflight.*`, `Provider`, `StreamReader`, `CommandCapture` —

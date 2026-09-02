@@ -12,6 +12,9 @@
 -- module's public contract promises.
 module Kanban.Worker.Lease
   ( acquireWorkerLease,
+    acquireWorkerLeaseFor,
+    WorkerLeaseRefusal (..),
+    workerLeaseRefusalMessage,
     releaseWorkerLease,
     retireStaleLease,
     leaseIsActive,
@@ -48,8 +51,34 @@ import System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
 import System.Posix.Files (setFileMode)
 import System.Process (ProcessHandle, getPid)
 
+-- | Why a lease could not be taken, with the one answer a caller can act on
+-- told apart from the rest.
+--
+-- The lease is keyed by /item/ rather than by worker id, so it is already an
+-- atomic reservation of one issue's or one pull request's next turn: whoever
+-- creates the directory owns that turn. What a losing caller could not do was
+-- tell "someone else owns this turn" from "the lease could not be taken",
+-- and a caller that cannot tell them apart reports a failure where it should
+-- be joining the turn that is already running.
+data WorkerLeaseRefusal
+  = -- | A live worker holds this item's lease. Carries that worker's id when
+    -- the owner record could be read; an owner record that will not decode
+    -- still means held, and says so without naming anyone.
+    WorkerLeaseHeld (Maybe WorkerId) Text
+  | WorkerLeaseUnavailable Text
+  deriving stock (Eq, Show)
+
+workerLeaseRefusalMessage :: WorkerLeaseRefusal -> Text
+workerLeaseRefusalMessage (WorkerLeaseHeld _ message) = message
+workerLeaseRefusalMessage (WorkerLeaseUnavailable message) = message
+
+-- | The message-shaped facade every existing caller keeps.
 acquireWorkerLease :: WorkerDescriptor -> IO (Either Text ())
-acquireWorkerLease descriptor = attempt workerLeaseAttempts
+acquireWorkerLease descriptor =
+  either (Left . workerLeaseRefusalMessage) Right <$> acquireWorkerLeaseFor descriptor
+
+acquireWorkerLeaseFor :: WorkerDescriptor -> IO (Either WorkerLeaseRefusal ())
+acquireWorkerLeaseFor descriptor = attempt workerLeaseAttempts
   where
     attempt attempts = do
       created <- try @IOException (createDirectory descriptor.workerDescriptorLeasePath)
@@ -68,18 +97,28 @@ acquireWorkerLease descriptor = attempt workerLeaseAttempts
             Right () -> pure (Right ())
             Left message -> do
               ignoreFileOperation (removeDirectory descriptor.workerDescriptorLeasePath)
-              pure (Left ("could not initialize worker lease: " <> message))
+              pure (Left (WorkerLeaseUnavailable ("could not initialize worker lease: " <> message)))
         Left exception
-          | not (isAlreadyExistsError exception) -> pure (Left ("could not acquire worker lease: " <> Text.pack (show exception)))
-          | attempts <= 0 -> pure (Left "could not acquire worker lease after concurrent recovery")
+          | not (isAlreadyExistsError exception) ->
+              pure (Left (WorkerLeaseUnavailable ("could not acquire worker lease: " <> Text.pack (show exception))))
+          | attempts <= 0 ->
+              pure (Left (WorkerLeaseUnavailable "could not acquire worker lease after concurrent recovery"))
           | otherwise -> do
               active <- leaseIsActive descriptor
               if active
-                then pure (Left (workerLeaseConflictMessage descriptor.workerDescriptorSpec.workerTask))
+                then do
+                  owner <- decodeFile descriptor.workerDescriptorLeaseOwnerPath :: IO (Either Text WorkerLease)
+                  pure
+                    ( Left
+                        ( WorkerLeaseHeld
+                            (either (const Nothing) (Just . (.workerLeaseId)) owner)
+                            (workerLeaseConflictMessage descriptor.workerDescriptorSpec.workerTask)
+                        )
+                    )
                 else do
                   retired <- retireStaleLease descriptor
                   case retired of
-                    Left message -> pure (Left message)
+                    Left message -> pure (Left (WorkerLeaseUnavailable message))
                     Right () -> attempt (attempts - 1)
 
 leaseIsActive :: WorkerDescriptor -> IO Bool

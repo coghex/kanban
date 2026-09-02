@@ -3799,6 +3799,126 @@ class ArtPolicyTests(unittest.TestCase):
         self.assertEqual(offenders, [], "\n".join(offenders))
 
 
+# The workflow action registry (issue #593): every module of it, and the two
+# dashboard launch boundaries whose spawn it took over.
+ACTION_REGISTRY_FILES = (
+    "src/Kanban/Action.hs",
+    "src/Kanban/Action/AutoSolve.hs",
+    "src/Kanban/Action/Capability.hs",
+    "src/Kanban/Action/Dispatch.hs",
+    "src/Kanban/Action/Target.hs",
+    "src/Kanban/Action/Types.hs",
+)
+
+# What "no registry path adds a second brand decision" (issue #593
+# requirement 9) means as a fact about the source: not one module of the
+# registry writes a SolverBrand constructor, so not one of them can answer
+# "which agent runs this?" for itself. Comparing a registry-computed brand
+# against `agentForAction` would not catch this -- a duplicated table returns
+# the same answers -- which is why the gate is where the answer is written
+# rather than what it comes out as.
+SOLVER_BRAND_CONSTRUCTORS = ("CodexSolver", "ClaudeSolver")
+
+# The existing authorities each registry module reaches instead. Named per
+# module so a module that stopped reaching one, and started deciding for
+# itself, fails here rather than passing on another module's import.
+ACTION_REGISTRY_ROUTING_IMPORTS = {
+    "src/Kanban/Action/Capability.hs": {"originFromBody"},
+    "src/Kanban/Action/Dispatch.hs": {"agentForAction", "pullRequestAssignment"},
+    "src/Kanban/Action/Target.hs": {
+        "directPullRequestAction",
+        "labelPullRequestAction",
+    },
+}
+
+# The dashboard types the registry's boundary may not name, so the same API
+# answers for a target no dashboard is showing.
+DASHBOARD_BOUNDARY_TOKENS = ("AppState", "EventM", "BChan")
+
+# The board launch boundaries that now dispatch through the registry. Neither
+# may reach the worker spawn itself any more: that is what "board launches go
+# through the registry" (requirement 13) is, as a fact about the source.
+ACTION_REGISTRY_ADAPTERS = (
+    "src/Kanban/UI/Solve.hs",
+    "src/Kanban/UI/PullRequest.hs",
+)
+
+WORKER_LAUNCH_FUNCTIONS = ("launchSolveWorker", "launchPullRequestWorker")
+
+# The board launches this slice deliberately leaves alone. `r` is one key over
+# both issues and pull requests, and the registry refuses its two issue verbs
+# as not-yet-runner-owned (SAG-10 supplies those runners), so routing the
+# board's own issue review through the registry would replace a working review
+# session with a refusal. Only the compatibility rules moved.
+ACTION_REGISTRY_UNROUTED_ADAPTERS = ("src/Kanban/UI/Review.hs",)
+
+# Autosolve's progression, as a fact about which modules may name it.
+#
+# The loop has one owner: `decideAutoSolve` decides, `autoSolveTick` is the one
+# reading of that decision, and `autoSolveRevisionTurn` is the one construction
+# of the turn an arm of it asks for. A dashboard refresh and a headless tick
+# both take their whole move from the tick and then only render or dispatch it,
+# so neither can advance one action in a way the other would not (issue #593
+# requirement 12).
+#
+# Stated as an allowlist over the whole of src/ rather than as a per-surface
+# check: a third module that started reading the decision, or building the
+# revision turn, is exactly the second implementation this forbids, and only a
+# tree-wide scan sees one arrive.
+AUTOSOLVE_PROGRESSION_MODULE = "src/Kanban/UI/AutoSolve.hs"
+AUTOSOLVE_REGISTRY_MODULE = "src/Kanban/Action/AutoSolve.hs"
+AUTOSOLVE_DASHBOARD_SURFACE = "src/Kanban/UI/Reconcile.hs"
+
+# The registry's dispatch reads the decision for a second, narrower purpose:
+# a finished *solve* attributes the pull request it opened through the very
+# same discovery arm, so solve and autosolve cannot disagree about which pull
+# request a run produced. That reuse is the point rather than a leak, so it is
+# named here with its reason instead of being excluded by silence.
+AUTOSOLVE_ATTRIBUTION_READER = "src/Kanban/Action/Dispatch.hs"
+
+# token -> the modules allowed to name it. The engine declares each; the
+# registry's tick is the reader of the first two.
+AUTOSOLVE_SINGLE_OWNER_TOKENS = {
+    "decideAutoSolve": {
+        AUTOSOLVE_PROGRESSION_MODULE,
+        AUTOSOLVE_REGISTRY_MODULE,
+        AUTOSOLVE_ATTRIBUTION_READER,
+    },
+    "autoSolveRevisionTurn": {AUTOSOLVE_PROGRESSION_MODULE, AUTOSOLVE_REGISTRY_MODULE},
+    "autoSolveRevisionPrompt": {AUTOSOLVE_PROGRESSION_MODULE},
+}
+
+# Both surfaces reach the tick: the registry declares it, the dashboard adapter
+# takes its move from it.
+AUTOSOLVE_PROGRESSION_ENTRY = "autoSolveTick"
+AUTOSOLVE_TICK_SURFACES = (AUTOSOLVE_REGISTRY_MODULE, AUTOSOLVE_DASHBOARD_SURFACE)
+
+
+def haskell_modules_naming(token):
+    """Every module under src/ whose code (comments dropped) names `token`."""
+    named = set()
+    for path in sorted((REPO_ROOT / "src").rglob("*.hs")):
+        relative_path = path.relative_to(REPO_ROOT).as_posix()
+        if token in haskell_code_lines(relative_path):
+            named.add(relative_path)
+    return named
+
+
+def haskell_code_lines(relative_path):
+    """A Haskell module's source with its full-line comments dropped.
+
+    Every gate below is about what the code says rather than about what its
+    prose says about itself, and these modules document the very rules being
+    checked -- `Kanban.Action.Dispatch`'s header names @AppState@ to say it
+    takes none. Reading the comments would make each of those documentation
+    lines a failure.
+    """
+    content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+    return "\n".join(
+        line for line in content.splitlines() if not line.lstrip().startswith("--")
+    )
+
+
 class ProviderAdapterBoundaryTests(unittest.TestCase):
     def test_provider_adapter_owns_every_provider_process(self):
         # Issue #522 requirements 4, 5, 6, and 8.
@@ -3893,6 +4013,179 @@ class ProviderAdapterBoundaryTests(unittest.TestCase):
             haskell_import_names("import System.Processes (proc)\n", "System.Process"),
             set(),
         )
+
+
+class WorkflowActionRegistryBoundaryTests(unittest.TestCase):
+    """Issue #593 requirements 1, 9 and 13.
+
+    Three source-level facts, each with a control that proves the detector
+    detects: the registry decides no brand of its own, its boundary names no
+    dashboard type, and the two board launch boundaries reach the registry
+    rather than the worker spawn.
+    """
+
+    def test_no_registry_module_writes_a_solver_brand(self):
+        offenders = []
+        for relative_path in ACTION_REGISTRY_FILES:
+            code = haskell_code_lines(relative_path)
+            for constructor in SOLVER_BRAND_CONSTRUCTORS:
+                if constructor in code:
+                    offenders.append(
+                        f"{relative_path} writes {constructor}; the registry "
+                        "reads its brand from agentForAction and "
+                        "pullRequestAssignment rather than deciding one"
+                    )
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_the_brand_detector_detects(self):
+        # The negative control. Without it the check above would keep passing
+        # over a renamed constructor, or over a comment filter that had eaten
+        # the whole file, for the same reason an empty loop passes.
+        code = haskell_code_lines("src/Kanban/PullRequestFlow.hs")
+        for constructor in SOLVER_BRAND_CONSTRUCTORS:
+            self.assertIn(
+                constructor,
+                code,
+                "the routing authority no longer writes this brand; the "
+                "registry gate above is asserting nothing",
+            )
+
+    def test_the_registry_reaches_the_existing_routing_authorities(self):
+        for relative_path, expected in sorted(ACTION_REGISTRY_ROUTING_IMPORTS.items()):
+            with self.subTest(module=relative_path):
+                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                imported = haskell_import_names(content, "Kanban.PullRequestFlow")
+                self.assertIsNotNone(
+                    imported,
+                    f"{relative_path} imports Kanban.PullRequestFlow without "
+                    "an explicit import list; name what routing it reaches",
+                )
+                missing = expected - imported
+                self.assertEqual(
+                    missing,
+                    set(),
+                    f"{relative_path} no longer reaches {sorted(missing)}; a "
+                    "registry module that stopped reading the existing "
+                    "decision is deciding for itself",
+                )
+
+    def test_the_registry_boundary_names_no_dashboard_type(self):
+        offenders = []
+        for relative_path in ACTION_REGISTRY_FILES:
+            code = haskell_code_lines(relative_path)
+            for token in DASHBOARD_BOUNDARY_TOKENS:
+                if token in code:
+                    offenders.append(
+                        f"{relative_path} names {token}; the registry's action "
+                        "boundary answers for targets no dashboard is showing "
+                        "and so takes none of them"
+                    )
+            if "import Brick" in code:
+                offenders.append(f"{relative_path} imports Brick")
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_the_dashboard_type_detector_detects(self):
+        # The control for the check above, over the adapter that legitimately
+        # is a Brick lifecycle.
+        code = haskell_code_lines("src/Kanban/UI/Solve.hs")
+        self.assertIn("EventM", code)
+        self.assertIn("AppState", code)
+
+    def test_the_board_launches_go_through_the_registry(self):
+        offenders = []
+        for relative_path in ACTION_REGISTRY_ADAPTERS:
+            code = haskell_code_lines(relative_path)
+            for launcher in WORKER_LAUNCH_FUNCTIONS:
+                if launcher in code:
+                    offenders.append(
+                        f"{relative_path} still calls {launcher}; the board's "
+                        "launches dispatch through Kanban.Action so the same "
+                        "preflight, cell replay and refusals answer for a "
+                        "headless caller"
+                    )
+            imported = haskell_import_names(
+                (REPO_ROOT / relative_path).read_text(encoding="utf-8"), "Kanban.Action"
+            )
+            if imported is None or "dispatchProviderTurn" not in imported:
+                offenders.append(
+                    f"{relative_path} no longer imports dispatchProviderTurn "
+                    "from Kanban.Action"
+                )
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_the_board_issue_review_does_not_reach_the_registry(self):
+        # Requirement 11's other half, as a fact about the source. The two
+        # issue verbs are declared and refused; the dashboard's own issue
+        # review and revision keep their existing EventM lifecycles until
+        # SAG-10 gives them runners, and pressing `r` on an issue still opens
+        # a review session rather than reporting a refusal.
+        for relative_path in ACTION_REGISTRY_UNROUTED_ADAPTERS:
+            with self.subTest(module=relative_path):
+                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                self.assertEqual(
+                    haskell_import_names(content, "Kanban.Action"),
+                    set(),
+                    f"{relative_path} now imports Kanban.Action; the board's "
+                    "issue review would reach the not-yet-runner-owned "
+                    "refusal and stop opening a session",
+                )
+
+    def test_autosolve_progression_has_one_owner(self):
+        # Issue #593 requirement 12. Each token below is named by the module
+        # that declares it and by the one module that reads it, and by nothing
+        # else: a third naming is a second implementation of the loop.
+        offenders = []
+        for token, allowed in sorted(AUTOSOLVE_SINGLE_OWNER_TOKENS.items()):
+            named = haskell_modules_naming(token)
+            for extra in sorted(named - allowed):
+                offenders.append(
+                    f"{extra} names {token}; only {sorted(allowed)} may, so "
+                    "that a dashboard refresh and a headless tick advance one "
+                    f"action the same way -- take the whole move from "
+                    f"{AUTOSOLVE_PROGRESSION_ENTRY} instead"
+                )
+            for missing in sorted(allowed - named):
+                offenders.append(
+                    f"{missing} no longer names {token}; the allowlist for it "
+                    "is asserting nothing about a module that has stopped "
+                    "owning it"
+                )
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_both_autosolve_surfaces_take_their_move_from_the_tick(self):
+        named = haskell_modules_naming(AUTOSOLVE_PROGRESSION_ENTRY)
+        for relative_path in AUTOSOLVE_TICK_SURFACES:
+            with self.subTest(module=relative_path):
+                self.assertIn(
+                    relative_path,
+                    named,
+                    f"{relative_path} no longer takes its move from "
+                    f"{AUTOSOLVE_PROGRESSION_ENTRY}; the dashboard adapter and "
+                    "the plain-IO loop must read one progression",
+                )
+
+    def test_the_progression_detector_detects(self):
+        # The control for both checks above. A scanner that recovered nothing
+        # would satisfy the allowlist's "extra" half by finding an empty set,
+        # and would report no drift for the same reason an empty loop does.
+        self.assertEqual(
+            haskell_modules_naming("decideAutoSolve"),
+            AUTOSOLVE_SINGLE_OWNER_TOKENS["decideAutoSolve"],
+        )
+        self.assertEqual(haskell_modules_naming("thisIdentifierExistsNowhere"), set())
+
+    def test_the_worker_spawn_detector_detects(self):
+        # The control: the registry is where those two functions are now
+        # called, so a filter that recovered nothing would exempt the adapters
+        # silently.
+        code = haskell_code_lines("src/Kanban/Action/Dispatch.hs")
+        for launcher in WORKER_LAUNCH_FUNCTIONS:
+            self.assertIn(
+                launcher,
+                code,
+                "the registry no longer reaches the persistent worker's "
+                "spawn; the adapter gate above is asserting nothing",
+            )
 
 
 class CensusDynamicExecutableTests(unittest.TestCase):
