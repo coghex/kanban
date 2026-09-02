@@ -47,6 +47,10 @@ and deletes branches, is the one mistake that cannot be undone by re-reading:
 ```bash
 ROOT="$(git rev-parse --show-toplevel)"
 REPO="$(git -C "$ROOT" remote get-url origin | sed -E 's#\.git$##; s#.*(/|:)([^/:]+/[^/:]+)$#\2#')"
+ENDPOINT="$(git -C "$ROOT" remote get-url origin \
+  | sed -E -e 's%^([A-Za-z0-9+.-]+://)[^@/]*@%\1<redacted>@%' \
+           -e 's%^[^/@:]*(:[^/@]*)?@%<redacted>@%' \
+           -e 's%[?#].*%%')"
 ```
 
 Name the resolved `$REPO` and `$ROOT` before the first census run, and never
@@ -54,6 +58,23 @@ re-resolve either afterwards. Announcing them is what catches a wrong
 resolution, and it catches it only while nothing has been read or written
 against the wrong repository. Pass `-R "$REPO"` on every `gh` invocation in
 this workflow.
+
+`$REPO` is an `owner/name` with the host thrown away. That is everything a
+`gh` call needs and not enough to name a Git endpoint, so `$ENDPOINT` keeps the
+effective fetch URL whole: it is the endpoint `git ls-remote origin` reads, and
+the only thing a remote deletion can be bound to. Announce it beside the other
+two.
+
+`$ENDPOINT` is announced redacted, because a fetch URL may carry a credential.
+The whole userinfo goes, not merely the part after a `:` — a bare
+`https://<token>@host/owner/name.git` puts the secret in the username position,
+and nothing can tell a secret username from an ordinary one — and so does
+everything from the first `?` or `#`. **Every endpoint identity this run
+shows** — that one, and every push destination §2 reads into the report or a
+refusal below names — is shown through that same redaction. A push URL carries
+a credential exactly as a fetch URL does. Redaction is for display only: the
+destination proof in §5 compares the URLs Git itself reports, because two
+endpoints differing only in their credentials are two endpoints.
 
 ## 1. Compact census
 
@@ -149,7 +170,30 @@ item being confirmed, and run one per candidate rather than one per category.
 
   ```bash
   git -C "$ROOT" ls-remote --heads origin
+  git -C "$ROOT" remote get-url --push --all origin \
+    | sed -E -e 's%^([A-Za-z0-9+.-]+://)[^@/]*@%\1<redacted>@%' \
+             -e 's%^[^/@:]*(:[^/@]*)?@%<redacted>@%' \
+             -e 's%[?#].*%%'
   ```
+
+  Those two reads answer different questions, and a remote branch needs both
+  before it is proposed for deletion. `ls-remote` reads through `origin`'s
+  **fetch** endpoint — `$ENDPOINT`, the one this run announced — while a push
+  goes to `origin`'s **push** destinations, which are a separate, multi-valued
+  setting. `git remote get-url --push --all origin` reports those destinations
+  after Git's own rewriting, so it is the read that says where a deletion would
+  actually land. It goes through §0's redaction, character for character,
+  because this read is what puts a destination into the report and a push URL
+  can carry a token as readily as a fetch URL can. A branch whose deletion
+  would reach any destination other than `$ENDPOINT` is reported as visible
+  cleanup debt — named, with the reason — and no remote deletion is proposed
+  for it.
+
+  Nothing here is the proof. Redaction is a function, so two destinations that
+  were equal stay equal and this comparison never refuses a branch it should
+  have kept; two that differ only in their credentials read as one here, and
+  §5's own read — of what Git reports, unredacted, immediately before the push
+  — is what refuses them. This one only decides what to report.
 - **PR and drainer state:** the controller status the census carries is
   authoritative for service health and cleanup debt; do not recreate its
   eligibility algorithm. Route an incident or a stopped service to
@@ -220,8 +264,8 @@ item being confirmed, and run one per candidate rather than one per category.
 
 An item qualifies for bulk `all-safe` only when **every** applicable fact below
 is current and proved. One unproved fact disqualifies the item and moves it to
-item-level approval; it never downgrades to a warning. The near-miss named
-beside each gate is the case that most often reads as a pass and is not.
+item-level approval; it never downgrades to a warning. The near-misses named
+beside each gate are the cases that most often read as a pass and are not.
 
 - **Worktree removal:** the exact registered path from the porcelain listing,
   not a repository-declared permanent worktree, no operation in progress, an
@@ -232,13 +276,17 @@ beside each gate is the case that most often reads as a pass and is not.
   the tip merged into the remote default branch; for a remote branch,
   `ls-remote` additionally proves the branch still exists at that SHA, the
   deletion carries that SHA as a `--force-with-lease` so the proof and the push
-  describe one commit, and remote deletions go **one push per branch**.
+  describe one commit, every effective push destination for `origin` is proved
+  to be that same endpoint, and remote deletions go **one push per branch**.
   *Near-miss:* a tip merged into
   the local default branch but not into the remote one is unmerged for this
   gate; and a remote name `ls-remote` no longer lists is a stale tracking ref
   rather than a deletion target — one already-gone branch name aborts an
   entire multi-branch `git push origin --delete` client-side, so nothing at
   all gets deleted while the report reads as though everything did.
+  *Near-miss:* a push destination that reduces to the same `owner/name` as the
+  audited endpoint is not that endpoint — the reduction discarded the host, so
+  two repositories of the same name on different hosts read as one.
 - **Review metadata prune:** the directory is already missing *and* the
   `--expire now` dry run names it. *Near-miss:* an entry the dry run does not
   name is still registered, whatever the filesystem suggests.
@@ -295,7 +343,10 @@ the apply is refused rather than deleted:
 ```bash
 git -C "$ROOT" worktree remove "$WORKTREE"
 git -C "$ROOT" branch -d "$BRANCH"
-git -C "$ROOT" push origin "--force-with-lease=refs/heads/$BRANCH:$SHA" ":refs/heads/$BRANCH"
+PUSH_ENDPOINTS="$(git -C "$ROOT" remote get-url --push --all origin)" &&
+  [ -n "$PUSH_ENDPOINTS" ] &&
+  [ "$PUSH_ENDPOINTS" = "$(git -C "$ROOT" remote get-url origin)" ] &&
+  git -C "$ROOT" push origin "--force-with-lease=refs/heads/$BRANCH:$SHA" ":refs/heads/$BRANCH"
 [ "$(git -C "$ROOT" rev-parse --verify --quiet "$STASH^{commit}")" = "$STASH_SHA" ] &&
   DROPPED="$(git -C "$ROOT" stash drop "$STASH")" &&
   DROPPED_SHA="${DROPPED##*\(}" &&
@@ -314,6 +365,22 @@ that deletes whatever the branch points at *now*, so a branch someone pushed to
 after the `ls-remote` proof loses work nothing ever reviewed. The
 `--force-with-lease` naming the recorded SHA refuses that push instead, and the
 proof and the deletion then describe the same commit.
+
+**The lease binds the branch; nothing in it binds the destination.** `git push`
+does not necessarily write to the URL `ls-remote` read: `remote.origin.pushurl`
+replaces the fetch URL for pushes when it is set, it is multi-valued and every
+one of its values receives the same push, and a `url.<base>.pushInsteadOf` rule
+redirects the push with no `pushurl` in the configuration at all. So the
+deletion is a chain, and its push is reached only while
+`git remote get-url --push --all origin` — which reports the destinations after
+all of that rewriting — answers with exactly one entry equal to `origin`'s own
+effective fetch URL: the endpoint `$ENDPOINT` names, and the one `ls-remote`
+proved the branch on. Any other answer refuses the push, an empty one included.
+Nothing is deleted, the branch stays as visible cleanup debt, and the report
+names the destination that could not be proved. That comparison is made against
+the URLs Git reports rather than against the redacted `$ENDPOINT` or the
+reduced `$REPO`, because a redaction and a reduction each make two different
+endpoints look like one.
 
 **A stash selector is a position in a reflog, not an identity**, which is why
 the drop above is three steps rather than one. Anyone who runs `git stash push`
