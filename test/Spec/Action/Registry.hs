@@ -503,6 +503,41 @@ spec = do
         )
         [PullRequestReview, PullRequestRereview, PullRequestRevision, PullRequestRepair]
 
+    -- The dashboard's own half of the same rule: a repair records no
+    -- autosolve parent, and neither does any launch against a pull request
+    -- whose loop has already retired.
+    it "records an autosolve parent only for a live loop's own rounds" $ do
+      let bound number stage =
+            AutoSolveProgress
+              { autoSolveStage = stage,
+                autoSolvePullRequest = Just number,
+                autoSolveReviewRound = 1,
+                autoSolveKnownPullRequests = Set.empty,
+                autoSolveStartedAt = epoch
+              }
+          looping progress session =
+            session {sessionDetail = session.sessionDetail {solveSessionAutoProgress = Just progress}}
+          stateWith progress = do
+            base <- testAppState (fixtureBoard [])
+            pure
+              base
+                { appSolveSessions =
+                    Map.singleton 844 (looping progress (testSolveSession (baseIssue 844 []) SolveRunning)),
+                  appPullRequestReviewSessions =
+                    Map.singleton 60 (testPullRequestSession (pullRequestFor PullRequestReview) SolveRunning)
+                }
+          parentOf state action =
+            either (const Nothing) ((.requestParent) . fst)
+              (pullRequestLaunchPlan state (solveCell CodexSolver) 60 action Nothing ResumeAnswer "")
+      live <- stateWith (bound 60 AutoReviewing)
+      -- A round of the live loop records it...
+      parentOf live PullRequestReview `shouldSatisfy` maybe False (const True)
+      -- ...a manual repair of the same pull request does not...
+      parentOf live PullRequestRepair `shouldBe` Nothing
+      -- ...and neither does a round against a loop that has retired.
+      retired <- stateWith (bound 60 AutoSolveComplete)
+      parentOf retired PullRequestReview `shouldBe` Nothing
+
     -- The refusals reach the adapter too: a launch for a session that has
     -- gone, and one whose issue the completed generation has since settled,
     -- both come back as refusals rather than plans.

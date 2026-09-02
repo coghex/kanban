@@ -866,6 +866,51 @@ spec = do
           opening.autoSolveActionProgress.autoSolvePullRequest `shouldBe` Nothing
           opening.autoSolveActionProgress.autoSolveReviewRound `shouldBe` 0
 
+    -- A manual repair is not one of the loop's rounds. Read as one, a repair
+    -- of a pull request some finished run once bound would rebuild that run as
+    -- reviewing -- and then report it approved, or resume its solver, on the
+    -- strength of the repair's verdict.
+    it "does not read a manual repair as one of the loop's rounds" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+          solver <-
+            descriptorCarrying
+              repository
+              "solve-initial"
+              (SolveWorkerTaskKind (SolveWorkerTask issueUnderLoop AutoSolve ClaudeSolver))
+              (Just (baselineParent Set.empty))
+              epoch
+          -- A repair worker carrying the very parent record a review round
+          -- would carry: only its action tells the two apart.
+          repair <-
+            descriptorCarrying
+              repository
+              "pr-repair"
+              (PullRequestWorkerTaskKind (PullRequestWorkerTask pullRequestUnderLoop PullRequestClaude PullRequestRepair))
+              (Just (reviewParent 1))
+              (addUTCTime 60 epoch)
+          case autoSolveStateFromWorkers targetUnderLoop Set.empty [solver, repair] of
+            Nothing -> error "expected the solver alone to rebuild an action"
+            Just recovered -> do
+              -- The run is where its solver says, not reviewing.
+              recovered.autoSolveActionProgress.autoSolveStage `shouldBe` AutoImplementing
+              recovered.autoSolveActionReviewer `shouldBe` Nothing
+              recovered.autoSolveActionProgress.autoSolvePullRequest `shouldBe` Nothing
+          -- The control: the same worker as a review round /is/ one.
+          review <-
+            descriptorCarrying
+              repository
+              "pr-review"
+              (PullRequestWorkerTaskKind (PullRequestWorkerTask pullRequestUnderLoop PullRequestClaude PullRequestReview))
+              (Just (reviewParent 1))
+              (addUTCTime 60 epoch)
+          case autoSolveStateFromWorkers targetUnderLoop Set.empty [solver, review] of
+            Nothing -> error "expected the review round to rebuild an action"
+            Just recovered -> do
+              recovered.autoSolveActionProgress.autoSolveStage `shouldBe` AutoReviewing
+              recovered.autoSolveActionReviewer `shouldSatisfy` maybe False (const True)
+
     it "takes over nothing when no autosolve solver worker is discoverable" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do

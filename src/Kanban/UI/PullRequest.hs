@@ -291,6 +291,11 @@ pullRequestLaunchPlan state assignment number action existingSession provenance 
     session = Map.lookup number state.appPullRequestReviewSessions
     environment = dashboardActionEnvironment state
     kind = workflowActionKindForAction action
+    -- Repair is the one verb this loop never selects: it comes only from the
+    -- user's own @r@ on a Done pull request reporting a problem. Recording an
+    -- autosolve parent on it would make a manual repair look like one of that
+    -- run's rounds to anything reading the durable records.
+    parent = if action == PullRequestRepair then Nothing else autoSolveWorkerParent state number
     request =
       (actionRequest kind (catalogIdentity environment.actionCatalog) (TargetByKind ActionTargetPullRequest number))
         { requestRecordedAssignment = Just assignment,
@@ -298,7 +303,7 @@ pullRequestLaunchPlan state assignment number action existingSession provenance 
           requestExistingLogPath = session >>= (.sessionLogPath),
           requestResumeProvenance = provenance,
           requestUserMessage = input,
-          requestParent = autoSolveWorkerParent state number
+          requestParent = parent
         }
 
 autoSolveWorkerParent :: AppState -> Int -> Maybe WorkerParent
@@ -317,7 +322,12 @@ autoSolveWorkerParent state pullRequestNumber =
           }
         | (issueNumber, session) <- Map.toList state.appSolveSessions,
           Just progress <- [session.sessionDetail.solveSessionAutoProgress],
-          progress.autoSolvePullRequest == Just pullRequestNumber
+          progress.autoSolvePullRequest == Just pullRequestNumber,
+          -- A retired loop owns no further turns. Its session keeps the pull
+          -- request it bound, so without this a launch against that pull
+          -- request months later would still record a parent naming the
+          -- finished run, and a restart would rebuild it as live.
+          progress.autoSolveStage `notElem` [AutoSolveComplete, AutoSolveStopped]
       ] of
     parent : _ -> Just parent
     [] -> Nothing

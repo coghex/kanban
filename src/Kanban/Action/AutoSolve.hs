@@ -62,6 +62,7 @@ import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Action.Target (workflowActionKindForLabelledPullRequest)
+import Kanban.PullRequestFlow (PullRequestAction (..))
 import Kanban.Cache (normalizedRepositoryIdentity)
 import Kanban.Action.Types
 import Kanban.Domain (PullRequest (..), RepoSnapshot, Repository, WorkflowConfig)
@@ -531,7 +532,7 @@ autoSolveStateFromWorkers target boardPullRequests descriptors =
     issueNumber = target.resolvedTargetNumber
     lastOf values = listToMaybe (reverse values)
     solver = lastOf [descriptor | descriptor <- descriptors, isAutoSolveFor issueNumber descriptor]
-    reviewer = lastOf [descriptor | descriptor <- descriptors, isReviewFor issueNumber descriptor]
+    reviewer = lastOf [descriptor | descriptor <- descriptors, isAutoSolveRoundFor issueNumber descriptor]
 
     fromReviewer held = do
       let parent = held.workerDescriptorSpec.workerParent
@@ -617,10 +618,20 @@ isAutoSolveFor issueNumber descriptor = case descriptor.workerDescriptorSpec.wor
     task.solveWorkerIssueNumber == issueNumber && task.solveWorkerWorkflow == AutoSolve
   PullRequestWorkerTaskKind _ -> False
 
-isReviewFor :: Int -> WorkerDescriptor -> Bool
-isReviewFor issueNumber descriptor = case descriptor.workerDescriptorSpec.workerTask of
-  PullRequestWorkerTaskKind _ ->
+-- | Whether a pull-request worker is one of /this loop's own/ rounds.
+--
+-- The parent record naming the issue is necessary and not sufficient. An
+-- autosolve round is always label-derived, so it is a review, a rereview, or
+-- a revision -- never a repair, which only the user's own @r@ on a Done pull
+-- request reporting a problem selects. Reading a repair as a round would let
+-- a manual repair of a pull request some finished run once bound rebuild that
+-- run as reviewing, and then report it approved, or resume its solver, on the
+-- strength of the repair's verdict.
+isAutoSolveRoundFor :: Int -> WorkerDescriptor -> Bool
+isAutoSolveRoundFor issueNumber descriptor = case descriptor.workerDescriptorSpec.workerTask of
+  PullRequestWorkerTaskKind task ->
     ((.workerParentIssueNumber) <$> descriptor.workerDescriptorSpec.workerParent) == Just issueNumber
+      && task.pullRequestWorkerAction /= PullRequestRepair
   SolveWorkerTaskKind _ -> False
 
 reviewNumberOf :: WorkerDescriptor -> Maybe Int
