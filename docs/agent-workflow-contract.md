@@ -1677,7 +1677,11 @@ state.
   machinery is already unavailable, the branch is left instead: a repository
   with `delete_branch_on_merge` has GitHub remove it as part of the merge,
   `tools/drain_prs.py` removes it after its own merges, and otherwise it stays
-  as a visible, reversible leftover.
+  as a visible, reversible leftover. `janitor` (§2.11) meets that same hazard
+  on an item whose whole value *is* the deletion, so it proves the destination
+  rather than dropping the mutation; the analysis behind the two outcomes is
+  the one written here, and §2.11 states the difference rather than restating
+  it.
 
   Two
   further values resolve to nothing as ordinary *skips* rather than refusals —
@@ -1701,6 +1705,73 @@ state.
   recorded above.
 - **Mandatory/optional:** optional — user-invoked only, reached by asking for
   it, and spawned by no Kanban code path.
+
+### 2.11 Pipeline janitor (`$janitor` / `/janitor`)
+
+**Remote-write authority.** The audit is read-only until the user approves
+individual items, and the one write it makes outside the audited checkout is
+the deletion of a single remote branch. That deletion is recorded here because
+it meets the same hazard §2.10 records for `finalize` and resolves it
+differently on purpose: writing down only one of the two is what let the
+mutation reappear on the other (issues #544/#575, #608).
+
+- **Owning source:** the packaged workflows themselves
+  (`codex-plugin/plugins/kanban/skills/janitor/SKILL.md`,
+  `claude-plugin/plugins/kanban/commands/janitor.md`), both rendered from the
+  one authored source `tools/command_sources/janitor.md` by
+  `tools/render_command_sources.py`, reasoning over the `janitor-census/v1`
+  document both bundles' `scripts/census.py` emits (§4, issue #574). There is
+  no Haskell invocation, so `janitor` is deliberately absent from the
+  name-parity sets in `tools/test_codex_plugin.py` and
+  `tools/test_claude_plugin.py`. It is not a drafting workflow, and is not part
+  of the declared drafting surface
+  ([drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)).
+  Its behavioral contract is `tools/test_janitor_workflow.py`.
+- **Invocation:** user-invoked only, as `$janitor` / `/janitor`. No Kanban code
+  path spawns it, and it merges nothing: an approved pull request stays
+  drainer-managed (§2.4).
+- **Gate for a remote branch deletion:** the branch has no worktree and no open
+  pull request, its tip is merged into the remote default branch, the report
+  records its full SHA, `git ls-remote --heads origin` proves the branch still
+  exists at that SHA, the user approves that item on its own, and — immediately
+  before the push rather than at report time — every effective push destination
+  `git remote get-url --push --all origin` reports is exactly `origin`'s own
+  effective fetch URL, the endpoint `ls-remote` just read. Only then is the
+  push run, carrying the recorded SHA as
+  `--force-with-lease=refs/heads/<branch>:<sha>`, one push per branch. Both
+  endpoint reads are of the URLs Git reports rather than of the `owner/name`
+  the report names or the redacted spelling it announces, because a reduction
+  and a redaction each make two different endpoints look like one.
+- **Refusal:** a destination that cannot be proved refuses the push and changes
+  nothing else. No branch is deleted, no remote configuration is touched, and
+  the branch is reported as visible cleanup debt naming the destination that
+  failed the proof. An empty answer is a refusal, not a pass.
+- **Required authority:** GitHub read on the audited issues, pull requests,
+  comment feeds and checks; GitHub write only to release a stale claim, which
+  is its assignees and its `wip` label and nothing else. Local write, per
+  approved item, to remove a worktree, delete a local branch, delete a ref or a
+  stale tracking ref through `git update-ref -d <ref> <old-value>`, drop a
+  stash, prune worktree metadata, and fast-forward the default branch. Remote
+  write to exactly one endpoint: the one the gate above proved.
+- **Durable state:** none of its own beyond the repository-local retention
+  ledger `janitor-retain.json` in the Git common directory, which records
+  machine-local keep decisions outside every worktree and is mutated only with
+  explicit approval. It reads the PR drainer's managed state (§2.4) and writes
+  none of it.
+- **Mandatory/optional:** optional — user-invoked only, and spawned by no
+  Kanban code path.
+
+**Why the two actions differ.** The hazard is one hazard: a repository identity
+resolved from the remote's fetch URL and reduced to an `owner/name` that has
+lost its host, while `git push` follows `remote.origin.pushurl` — which
+replaces the fetch URL for pushes, is multi-valued, and delivers the same push
+to every one of its values — or a `url.<base>.pushInsteadOf` rewrite that names
+no `pushurl` at all. §2.10 resolves it by not deleting: there the branch is
+tidiness on a fallback that only runs when the ordinary machinery is already
+unavailable, so dropping the step costs nothing. Here the deletion is the
+approved item itself, so the destination is proved instead. The outcomes
+differ; the analysis does not, and neither action may write to an endpoint its
+report did not name.
 
 ## 3. Migration boundary
 

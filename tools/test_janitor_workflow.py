@@ -13,7 +13,7 @@ Its reconciliation is the widest in the arc after `project-review`'s -- 143
 differing lines between a 23-line Claude copy and a 134-line Codex copy -- and
 design D-12 resolved it in the Codex copy's favour, so almost nothing here is
 carried over on the strength of a personal file having said it. The assertions
-fall into five kinds.
+fall into six kinds.
 
 * **The helper, resolved rather than described.** Each brand resolves the
   census from its own install location, and the body says an unresolvable
@@ -47,8 +47,20 @@ fall into five kinds.
   approval, so what it covers is the one piece of prose in this asset that
   decides whether work is destroyed without a second look.
   `PreservationGateTests` enumerates all five gates, every condition of each,
-  and the near-miss each gate names -- the case that reads as a pass and is not
-  -- against both renderings, with a control per gate that plants its deletion.
+  and the near-misses each gate names -- the cases that read as a pass and are
+  not -- against both renderings, with a control per gate that plants its
+  deletion.
+* **Where an approved deletion lands.** `ls-remote` proves a branch through
+  `origin`'s *fetch* endpoint; `git push` writes to its *push* destinations,
+  which `remote.origin.pushurl` and `url.*.pushInsteadOf` can point somewhere
+  else entirely -- and the `owner/name` the report names has already discarded
+  the host that would have shown it. `RemoteDeletionEndpointTests` splits the
+  two apart against real Git and asserts on the bare repositories themselves
+  that neither the audited endpoint nor the unreported one loses a ref, and
+  `EndpointRedactionTests` drives the announcement the proof is reported
+  against a `remote.origin.url` carrying a credential. Both run the asset's
+  complete check-and-delete statement rather than its `push` line, since an
+  extractor that starts at the push is exactly what would step over the guard.
 
 Every rule is measured over BOTH rendered assets, and each class carries a
 control that plants the failure it is meant to catch: a rule matching
@@ -451,6 +463,15 @@ class Harness:
     def script_commands(self) -> None:
         self.fake.script("git", ["rev-parse", "--show-toplevel"],
                          stdout=CHECKOUT_ROOT + "\n")
+        # Two reads, not one: the second reports where a push would land
+        # after `pushurl`/`pushInsteadOf` rewriting, and the deletion is
+        # gated on the two agreeing. Scripted equal here, which is the
+        # ordinary repository; `RemoteDeletionEndpointTests` splits them.
+        self.fake.script(
+            "git",
+            ["-C", CHECKOUT_ROOT, "remote", "get-url", "--push", "--all", "origin"],
+            stdout=f"https://github.com/{REPO_SLUG}.git\n",
+        )
         self.fake.script(
             "git",
             ["-C", CHECKOUT_ROOT, "remote", "get-url", "origin"],
@@ -1114,6 +1135,383 @@ class RemoteDeletionLeaseTests(HarnessCase):
                 self.assertNotIn(f"refs/heads/{BRANCH}", self.remote_heads(work))
 
 
+
+# The endpoints §0 must be able to announce without disclosing a credential,
+# paired with what the announcement leaves of each and the secret that may not
+# survive it. A fetch URL is not merely a host and a path: a token can sit in
+# the userinfo -- in the password position or, for a GitHub app token, in the
+# username position -- or in the query, and announcing the endpoint whole is
+# what would put it into a report.
+REDACTION_CASES = (
+    (
+        "https://x-access-token:ghp_s3cret@github.com/coghex/kanban.git",
+        "https://<redacted>@github.com/coghex/kanban.git",
+        "ghp_s3cret",
+    ),
+    (
+        "https://ghp_s3cret@github.com/coghex/kanban.git",
+        "https://<redacted>@github.com/coghex/kanban.git",
+        "ghp_s3cret",
+    ),
+    (
+        "https://github.com/coghex/kanban.git?token=s3cret",
+        "https://github.com/coghex/kanban.git",
+        "s3cret",
+    ),
+    (
+        "ssh://git@github.com/coghex/kanban.git",
+        "ssh://<redacted>@github.com/coghex/kanban.git",
+        None,
+    ),
+    (
+        "git@github.com:coghex/kanban.git",
+        "<redacted>@github.com:coghex/kanban.git",
+        None,
+    ),
+    # The control: an endpoint carrying no credential is announced whole. A
+    # redaction that swallowed the host and path would satisfy every case
+    # above while telling the user nothing about which repository was audited.
+    (
+        "https://github.com/coghex/kanban.git",
+        "https://github.com/coghex/kanban.git",
+        None,
+    ),
+)
+
+
+class EndpointRedactionTests(HarnessCase):
+    """The announced endpoint names the repository and no credential.
+
+    §0 keeps the fetch URL whole because the `owner/name` it also derives has
+    thrown the host away, and a remote deletion has to be bound to a host. The
+    URL it keeps is the one Git was configured with, so it may carry a token;
+    the announcement is driven here against a real `remote.origin.url` rather
+    than against a string, because it is `git remote get-url` that decides what
+    the workflow is redacting.
+    """
+
+    def endpoint_lines(self, relative_path: str) -> str:
+        """§0's whole `ENDPOINT` assignment, continuations included."""
+        lines = self.fences(relative_path)["resolution"].splitlines()
+        start = [
+            position
+            for position, line in enumerate(lines)
+            if line.startswith('ENDPOINT="$(')
+        ]
+        self.assertEqual(len(start), 1, "expected one endpoint resolution")
+        end = start[0]
+        while lines[end].rstrip().endswith("\\"):
+            end += 1
+        return "\n".join(lines[start[0] : end + 1])
+
+    def announce(self, relative_path: str, url: str) -> subprocess.CompletedProcess:
+        root = self.temporary_directory()
+        env = isolated_git_env(root)
+        work = root / "work"
+        for arguments, cwd in (
+            (["init", "-q", "-b", DEFAULT_BRANCH, str(work)], None),
+            (["remote", "add", "origin", url], work),
+        ):
+            created = subprocess.run(
+                ["git", *arguments],
+                cwd=str(cwd) if cwd else None,
+                env=env,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+        env["ROOT"] = str(work)
+        script = (
+            "set -e\n"
+            + self.endpoint_lines(relative_path)
+            + "\nprintf '%s\\n' \"$ENDPOINT\""
+        )
+        return subprocess.run(
+            ["sh", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def test_the_announced_endpoint_is_the_redacted_url(self):
+        for relative_path in RENDERED_ASSETS:
+            for url, announced, _ in REDACTION_CASES:
+                with self.subTest(asset=relative_path, url=url):
+                    result = self.announce(relative_path, url)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), announced)
+
+    def test_no_credential_survives_into_the_announcement(self):
+        for relative_path in RENDERED_ASSETS:
+            for url, _, secret in REDACTION_CASES:
+                if secret is None:
+                    continue
+                with self.subTest(asset=relative_path, url=url):
+                    self.assertIn(secret, url)
+                    result = self.announce(relative_path, url)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotIn(secret, result.stdout)
+
+
+class RemoteDeletionEndpointTests(HarnessCase):
+    """An approved deletion mutates the endpoint the report proved, or none.
+
+    `git ls-remote --heads origin` reads `origin`'s *fetch* endpoint, which is
+    what §2 proves the branch and its SHA against and what §0 announces. A push
+    goes somewhere else the moment `remote.origin.pushurl` is set -- it
+    replaces the fetch URL, and it is multi-valued -- or a `url.*.pushInsteadOf`
+    rule rewrites the destination with no `pushurl` present at all. Neither is
+    visible in the `owner/name` the report names, because the reduction
+    discarded the host.
+
+    Every case is driven against real Git with the two split apart, and asserts
+    on the bare repositories themselves: the audited one must keep its branch,
+    and so must the one the report never named.
+    """
+
+    def git(self, *args, cwd=None) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd) if cwd else None,
+            env=self.git_env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def delete_sequence(self, relative_path: str) -> str:
+        """The complete endpoint-check-and-delete statement, not just its push.
+
+        `RemoteDeletionLeaseTests.push_line` deliberately takes the one line,
+        which is what keeps its lease assertions independent of anything
+        around it -- and is exactly why it cannot be reused here: an extractor
+        that starts at the `push` steps straight over a guard placed before it
+        and would report a bypassed gate as a passing one.
+        """
+        lines = self.fences(relative_path)["deletions"].splitlines()
+        index = [
+            position
+            for position, line in enumerate(lines)
+            if " push origin " in line
+        ]
+        self.assertEqual(len(index), 1, "expected exactly one remote deletion")
+        start = end = index[0]
+        while start > 0 and lines[start - 1].rstrip().endswith(("&&", "\\")):
+            start -= 1
+        while lines[end].rstrip().endswith(("&&", "\\")):
+            end += 1
+        block = "\n".join(lines[start : end + 1])
+        self.assertIn("remote get-url --push --all", block)
+        self.assertIn("push origin", block)
+        return block
+
+    def reduction(self, relative_path: str) -> str:
+        """§0's `owner/name` reduction, as a filter over stdin."""
+        candidates = [
+            line
+            for line in self.fences(relative_path)["resolution"].splitlines()
+            if line.startswith('REPO="$(')
+        ]
+        self.assertEqual(len(candidates), 1, "expected one repository reduction")
+        match = re.search(r"\| (sed .*)\)\"$", candidates[0])
+        self.assertIsNotNone(match, "the reduction is no longer a `sed` filter")
+        return match.group(1)
+
+    def reduce(self, relative_path: str, url: str) -> str:
+        result = subprocess.run(
+            ["sh", "-c", f"printf '%s\\n' \"$1\" | {self.reduction(relative_path)}",
+             "sh", url],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def build(self, root: Path, names) -> tuple:
+        """A work repository whose `origin` fetches from the first named bare
+        repository, with `BRANCH` present at one SHA in every one of them.
+
+        Every bare repository carries the branch, so a deletion that reaches
+        the wrong one is observed as a lost ref rather than as an error.
+        """
+        env = isolated_git_env(root)
+        self.git_env = env
+        bare = {}
+        for name in names:
+            path = root / "remotes" / f"{name}.git"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.git("init", "-q", "--bare", "-b", DEFAULT_BRANCH, str(path))
+            bare[name] = path
+
+        work = root / "work"
+        self.git("init", "-q", "-b", DEFAULT_BRANCH, str(work))
+        (work / "a").write_text("a\n", encoding="utf-8")
+        self.git("add", "a", cwd=work)
+        self.git("commit", "-qm", "one", cwd=work)
+        self.git("remote", "add", "origin", str(bare[names[0]]), cwd=work)
+        self.git("push", "-q", "-u", "origin", DEFAULT_BRANCH, cwd=work)
+        self.git("checkout", "-qb", BRANCH, cwd=work)
+        (work / "b").write_text("b\n", encoding="utf-8")
+        self.git("add", "b", cwd=work)
+        self.git("commit", "-qm", "two", cwd=work)
+        self.git("push", "-q", "-u", "origin", BRANCH, cwd=work)
+        for name in names[1:]:
+            self.git("push", "-q", str(bare[name]),
+                     f"{DEFAULT_BRANCH}:{DEFAULT_BRANCH}", f"{BRANCH}:{BRANCH}",
+                     cwd=work)
+        recorded = self.git("rev-parse", BRANCH, cwd=work).strip()
+        for name in names:
+            self.assertIn(f"refs/heads/{BRANCH}", self.heads(bare[name]), name)
+        return work, bare, recorded
+
+    def heads(self, bare: Path) -> set:
+        listing = self.git(
+            "--git-dir", str(bare), "for-each-ref", "--format=%(refname)",
+            "refs/heads",
+        )
+        return set(listing.split())
+
+    def apply(self, relative_path: str, work: Path, sha: str):
+        """The asset's own statement, under the shell an agent actually has."""
+        env = dict(self.git_env)
+        env.update({"ROOT": str(work), "BRANCH": BRANCH, "SHA": sha})
+        return subprocess.run(
+            ["sh", "-c", self.delete_sequence(relative_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def assert_nothing_was_deleted(self, result, bare):
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        for name, path in sorted(bare.items()):
+            with self.subTest(endpoint=name):
+                self.assertIn(f"refs/heads/{BRANCH}", self.heads(path))
+
+    def test_one_push_url_elsewhere_deletes_from_no_endpoint(self):
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                root = self.temporary_directory()
+                work, bare, sha = self.build(root, ("audited", "unreported"))
+                self.git("config", "--add", "remote.origin.pushurl",
+                         str(bare["unreported"]), cwd=work)
+                self.assert_nothing_was_deleted(
+                    self.apply(relative_path, work, sha), bare
+                )
+
+    def test_two_push_urls_delete_from_no_endpoint(self):
+        # `remote.origin.pushurl` is multi-valued and one push reaches every
+        # value of it, so a single approved deletion fans out to both.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                root = self.temporary_directory()
+                work, bare, sha = self.build(
+                    root, ("audited", "unreported-one", "unreported-two")
+                )
+                for name in ("unreported-one", "unreported-two"):
+                    self.git("config", "--add", "remote.origin.pushurl",
+                             str(bare[name]), cwd=work)
+                self.assert_nothing_was_deleted(
+                    self.apply(relative_path, work, sha), bare
+                )
+
+    def test_a_multi_valued_fetch_url_deletes_from_no_endpoint(self):
+        # No `pushurl` and no rewrite rule: `remote.origin.url` is itself
+        # multi-valued, so a push reaches every value while `ls-remote` reads
+        # only the first. The report describes one endpoint; the deletion
+        # would have reached two.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                root = self.temporary_directory()
+                work, bare, sha = self.build(root, ("audited", "unreported"))
+                self.git("config", "--add", "remote.origin.url",
+                         str(bare["unreported"]), cwd=work)
+                self.assert_nothing_was_deleted(
+                    self.apply(relative_path, work, sha), bare
+                )
+
+    def test_a_same_name_repository_on_another_host_deletes_from_neither(self):
+        # The case the report itself cannot show: both endpoints reduce to the
+        # same `owner/name`, so §0's announcement is identical for the audited
+        # repository and the one the push would reach.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                root = self.temporary_directory()
+                names = ("host-a/coghex/kanban", "host-b/coghex/kanban")
+                work, bare, sha = self.build(root, names)
+                self.assertEqual(
+                    self.reduce(relative_path, str(bare[names[0]])),
+                    self.reduce(relative_path, str(bare[names[1]])),
+                )
+                self.git("config", "--add", "remote.origin.pushurl",
+                         str(bare[names[1]]), cwd=work)
+                self.assert_nothing_was_deleted(
+                    self.apply(relative_path, work, sha), bare
+                )
+
+    def test_a_push_instead_of_rule_deletes_from_neither(self):
+        # No `remote.origin.pushurl` at all: the rewrite lives in `url.*`, so
+        # a check that read the remote's own configuration would see an
+        # ordinary single-endpoint repository and delete.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                root = self.temporary_directory()
+                work, bare, sha = self.build(root, ("audited", "unreported"))
+                self.git("config",
+                         f"url.{bare['unreported']}.pushInsteadOf",
+                         str(bare["audited"]), cwd=work)
+                # The premise, asserted rather than assumed: the remote itself
+                # names no push URL, so the redirection is invisible to any
+                # check that reads `remote.origin.pushurl`.
+                configured = subprocess.run(
+                    ["git", "config", "--get-all", "remote.origin.pushurl"],
+                    cwd=str(work),
+                    env=self.git_env,
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                )
+                self.assertEqual(configured.stdout, "")
+                self.assert_nothing_was_deleted(
+                    self.apply(relative_path, work, sha), bare
+                )
+
+    def test_an_undivided_endpoint_still_deletes(self):
+        # The control. Without it every assertion above would pass over a
+        # guard that refuses every deletion, which is the other way to be
+        # wrong about push destinations.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                root = self.temporary_directory()
+                work, bare, sha = self.build(root, ("audited",))
+                result = self.apply(relative_path, work, sha)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(
+                    f"refs/heads/{BRANCH}", self.heads(bare["audited"])
+                )
+
+    def test_a_push_url_naming_the_audited_endpoint_still_deletes(self):
+        # The second control: a `pushurl` is not itself the anomaly. One that
+        # names the audited endpoint is proved, and the deletion proceeds.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                root = self.temporary_directory()
+                work, bare, sha = self.build(root, ("audited",))
+                self.git("config", "--add", "remote.origin.pushurl",
+                         str(bare["audited"]), cwd=work)
+                result = self.apply(relative_path, work, sha)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(
+                    f"refs/heads/{BRANCH}", self.heads(bare["audited"])
+                )
+
+
 class RealGitApplyTests(HarnessCase):
     """The two apply-path gates, driven against Git itself.
 
@@ -1398,7 +1796,7 @@ class RepositoryScopeTests(unittest.TestCase):
 
 
 # The five `all-safe` gates, each with every condition it requires and the
-# near-miss it names. Enumerated rather than summarized: `all-safe` is bulk
+# near-misses it names. Enumerated rather than summarized: `all-safe` is bulk
 # approval, so a gate that lost a condition would widen what gets destroyed
 # without a second look, and a summary assertion would not notice.
 ALL_SAFE_GATES = {
@@ -1411,9 +1809,9 @@ ALL_SAFE_GATES = {
             "a terminal target",
             "a HEAD merged into the remote default branch",
         ),
-        "near_miss": (
+        "near_misses": (
             "*Near-miss:* a worktree whose only dirt is untracked files has a "
-            "non-empty status and stays item-level."
+            "non-empty status and stays item-level.",
         ),
     },
     "branch deletion": {
@@ -1424,11 +1822,18 @@ ALL_SAFE_GATES = {
             "`ls-remote` additionally proves the branch still exists at that SHA",
             "the deletion carries that SHA as a `--force-with-lease` so the proof "
             "and the push describe one commit",
+            # `ls-remote` reads the fetch endpoint and `git push` writes to the
+            # push destinations. Without this condition the gate proves a
+            # branch in one repository and deletes it from another.
+            "every effective push destination for `origin` is proved to be "
+            "that same endpoint",
             "remote deletions go **one push per branch**",
         ),
-        "near_miss": (
+        "near_misses": (
             "*Near-miss:* a tip merged into the local default branch but not "
-            "into the remote one is unmerged for this gate"
+            "into the remote one is unmerged for this gate",
+            "*Near-miss:* a push destination that reduces to the same "
+            "`owner/name` as the audited endpoint is not that endpoint",
         ),
     },
     "review metadata prune": {
@@ -1436,16 +1841,16 @@ ALL_SAFE_GATES = {
             "the directory is already missing *and* the `--expire now` dry run "
             "names it",
         ),
-        "near_miss": (
+        "near_misses": (
             "*Near-miss:* an entry the dry run does not name is still "
-            "registered, whatever the filesystem suggests."
+            "registered, whatever the filesystem suggests.",
         ),
     },
     "tracking-ref prune": {
         "conditions": ("`ls-remote` proves the origin head absent",),
-        "near_miss": (
+        "near_misses": (
             "*Near-miss:* a `refs/remotes/` entry with no local branch proves "
-            "nothing on its own"
+            "nothing on its own",
         ),
     },
     "default fast-forward": {
@@ -1455,9 +1860,9 @@ ALL_SAFE_GATES = {
             "the local branch not ahead",
             "the drainer reporting no active operation",
         ),
-        "near_miss": (
+        "near_misses": (
             "*Near-miss:* a default branch that is ahead or diverged needs "
-            "diagnosis"
+            "diagnosis",
         ),
     },
 }
@@ -1478,7 +1883,7 @@ ALL_SAFE_EXCLUSIONS = (
 
 
 class PreservationGateTests(unittest.TestCase):
-    """Every gate, every condition, and the near-miss each one names."""
+    """Every gate, every condition, and the near-misses each one names."""
 
     def test_every_gate_states_all_of_its_conditions(self):
         for relative_path in RENDERED_ASSETS:
@@ -1487,12 +1892,12 @@ class PreservationGateTests(unittest.TestCase):
                 with self.subTest(asset=relative_path, gate=gate):
                     self.assertEqual(missing(text, contract["conditions"]), [])
 
-    def test_every_gate_names_its_near_miss(self):
+    def test_every_gate_names_its_near_misses(self):
         for relative_path in RENDERED_ASSETS:
             text = read(relative_path)
             for gate, contract in sorted(ALL_SAFE_GATES.items()):
                 with self.subTest(asset=relative_path, gate=gate):
-                    self.assertEqual(missing(text, (contract["near_miss"],)), [])
+                    self.assertEqual(missing(text, contract["near_misses"]), [])
 
     def test_deleting_a_condition_or_near_miss_is_detected(self):
         # The control, per gate and per condition rather than once: a rule that
@@ -1504,7 +1909,7 @@ class PreservationGateTests(unittest.TestCase):
         # of one of them is not a deletion of the rule.
         text = read(CLAUDE_ASSET)
         for gate, contract in sorted(ALL_SAFE_GATES.items()):
-            for phrase in (*contract["conditions"], contract["near_miss"]):
+            for phrase in (*contract["conditions"], *contract["near_misses"]):
                 with self.subTest(gate=gate, phrase=phrase):
                     self.assertEqual(missing(text, (phrase,)), [])
                     planted = flat(text).replace(flat(phrase), "")
@@ -1529,6 +1934,50 @@ class PreservationGateTests(unittest.TestCase):
                     ),
                     [],
                 )
+
+
+# What the assets say about where an approved deletion lands, and about what a
+# report may show of an endpoint. The mechanism is asserted against real Git
+# above; these are the sentences an agent reads to know that a refused push is
+# cleanup debt to report rather than a failure to retry, and that an endpoint
+# is shown redacted.
+ENDPOINT_PROOF_CONTRACT = (
+    "**The lease binds the branch; nothing in it binds the destination.**",
+    "`remote.origin.pushurl` replaces the fetch URL for pushes when it is "
+    "set, it is multi-valued and every one of its values receives the same "
+    "push, and a `url.<base>.pushInsteadOf` rule redirects the push with no "
+    "`pushurl` in the configuration at all",
+    "answers with exactly one entry equal to `origin`'s own effective fetch "
+    "URL",
+    "Any other answer refuses the push, an empty one included.",
+    "the branch stays as visible cleanup debt, and the report names the "
+    "destination that could not be proved",
+    "That comparison is made against the URLs Git reports rather than against "
+    "the redacted `$ENDPOINT` or the reduced `$REPO`",
+    "A branch whose deletion would reach any destination other than "
+    "`$ENDPOINT` is reported as visible cleanup debt",
+    "`$ENDPOINT` is announced redacted, because a fetch URL may carry a "
+    "credential.",
+    "The whole userinfo goes, not merely the part after a `:`",
+    "**Every endpoint identity this run shows**",
+    "Redaction is for display only",
+)
+
+
+class EndpointProofContractTests(unittest.TestCase):
+    def test_the_rules_survive_in_both_renderings(self):
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertEqual(
+                    missing(read(relative_path), ENDPOINT_PROOF_CONTRACT), []
+                )
+
+    def test_the_control_catches_a_dropped_rule(self):
+        text = read(CODEX_ASSET)
+        for phrase in ENDPOINT_PROOF_CONTRACT:
+            with self.subTest(phrase=phrase):
+                planted = flat(text).replace(flat(phrase), "")
+                self.assertNotEqual(missing(planted, (phrase,)), [])
 
 
 # The retention ledger's contract, from design D-14. It is machine-local state
