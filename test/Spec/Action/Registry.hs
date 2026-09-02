@@ -720,6 +720,23 @@ spec = do
           either Just (const Nothing) dispatched
             `shouldBe` Just (ActionTargetStructural StructuralTrackerHeader 844)
 
+    -- The repository-wide action has no worker, so nothing downstream of it
+    -- would notice the mismatch: a catalog for one repository and an
+    -- environment naming another would have it read the wrong repository's
+    -- approval controller and report that as this one's queue.
+    it "refuses the queue action when the environment names another repository" $
+      withPreflightMachine fullyProvisionedFakes BackendInstalled $ \workingDirectory probeLog ->
+        withEnvironmentValue "XDG_CACHE_HOME" (takeDirectory workingDirectory) $ do
+          let catalog = (catalogOf [] [] emptyHistory) {catalogRepository = Repository workingDirectory "coghex" "kanban"}
+              -- Resolved against coghex/kanban, dispatched with an
+              -- environment for coghex/other.
+              environment =
+                (environmentOf catalog) {actionRepository = Repository workingDirectory "coghex" "other"}
+          dispatched <- dispatchAction environment (actionRequest ObserveApprovalQueue identityUnderTest TargetRepositoryWide)
+          either isRepositoryMismatch (const False) dispatched `shouldBe` True
+          -- Nothing was discovered and nothing was run.
+          probeInvocations probeLog >>= (`shouldBe` [])
+
     it "hands back a queue handle without touching the service" $
       withPreflightMachine fullyProvisionedFakes BackendInstalled $ \workingDirectory probeLog ->
         withEnvironmentValue "XDG_CACHE_HOME" (takeDirectory workingDirectory) $ do

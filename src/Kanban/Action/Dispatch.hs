@@ -31,6 +31,7 @@ module Kanban.Action.Dispatch
     planAction,
     planResolvedAction,
     checkTargetRepository,
+    checkedAgainst,
 
     -- * Dispatch and observation
     dispatchAction,
@@ -150,6 +151,20 @@ planResolvedAction config requested kind solverBrand target = do
     Just refusal -> Left refusal
     Nothing -> ActionPlan kind target <$> actionRoute config kind solverBrand target
 
+-- | One planned action, checked against the repository the environment would
+-- actually act on.
+--
+-- Every dispatch passes through this, the repository-wide approval-queue
+-- action included: a request can resolve and plan cleanly against a catalog
+-- for one repository while the environment beside it names another, and that
+-- environment is what supplies the controller to read and the checkout to
+-- spawn in. Checking only the actions that own a worker would leave the one
+-- that reads a queue silently observing the wrong repository's.
+checkedAgainst :: ActionEnvironment -> ActionPlan -> Either ActionRefusal ActionPlan
+checkedAgainst environment plan =
+  plan
+    <$ checkTargetRepository (normalizedRepositoryIdentity environment.actionRepository) plan.planTarget
+
 -- | Refuse a target that belongs to a repository other than the one the
 -- caller means.
 --
@@ -180,7 +195,7 @@ checkTargetRepository requested target = case target of
 -- never writes an approval verdict label, and never starts or stops the
 -- approval service.
 dispatchAction :: ActionEnvironment -> ActionRequest -> IO (Either ActionRefusal ActionHandle)
-dispatchAction environment request = case planAction environment request of
+dispatchAction environment request = case planAction environment request >>= checkedAgainst environment of
   Left refusal -> pure (Left refusal)
   Right plan -> case plan.planKind of
     -- Declared, and refused before anything is reached for. No canonical
@@ -204,8 +219,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
   -- against the identity its request named; this is the boundary a worker
   -- crosses, and the repository it crosses into is this environment's.
   ActionTargetItem resolved
-    | Left refusal <- checkTargetRepository (normalizedRepositoryIdentity environment.actionRepository) plan.planTarget ->
-        pure (Left refusal)
+    | Left refusal <- checkedAgainst environment plan -> pure (Left refusal)
     | otherwise -> do
         capability <- actionCapabilityIO environment.actionRepository plan.planRoute
         case capability of

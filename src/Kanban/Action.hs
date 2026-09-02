@@ -143,6 +143,7 @@ module Kanban.Action
     planAction,
     planResolvedAction,
     checkTargetRepository,
+    checkedAgainst,
     dispatchAction,
     dispatchProviderTurn,
     observeAction,
