@@ -494,7 +494,42 @@ action kinds are expected to include:
 | Autosolve issue | approved open issue | existing solve/PR loop | PR approved, needs input, stopped |
 | Review or rereview PR | open PR | canonical PR workflow | approved, changes requested |
 | Revise PR | changes-requested PR | canonical `pr-revise` workflow | rereviewed, needs input, failed |
+| Repair pull request | approved Done PR reporting a problem | existing `repair` authority | rereviewed, needs input, failed |
 | Observe approval queue | repository | issue-approval controller | idle, reviewing, barrier, failed |
+
+Repair is its own row rather than a flavour of revision. `$repair` and
+`$pr-revise` are different workflows, and only `directPullRequestAction`
+selects repair — an approved Done pull request reporting a merge conflict, a
+failed check, or a blocking label — which is the rule the board's own `r` key
+already applies. Kanban's automated progressions stay on the label-derived
+route and therefore never select it: a problem status on the pull request an
+autosolve run is looping over must not silently become a repair launch.
+
+The autosolve row's `PR approved` is the whole action's result, not one turn's,
+so observing an autosolve action advances it: the handle its dispatch returns
+carries the loop's cursor, each observation moves that loop one tick and
+reports where it now is, and only the last reports the approval.
+Reporting the pull request the opening solve opened would let a caller stop
+before the review, the revision, and the approval it asked for. A provider's
+question or failure still ends the action wherever the loop has reached.
+
+One progression owns that advance. The dashboard's refresh adapter and the
+headless loop both take their next move from the same reading of the same
+decision and then only render or dispatch it, so a refresh cannot advance an
+action in a way a runner would not.
+
+Neither can start a turn beside one the other started, and that guarantee is
+the persistent worker's own lease rather than anything new: it is keyed by
+item, so one issue's or one pull request's next turn is reserved by whoever
+creates that directory first. A dispatch that loses the reservation joins the
+turn already running; one that cannot identify its holder refuses rather than
+starting a second.
+
+The queue row's `idle, reviewing, barrier, failed` is this table's summary
+rather than the result type. The controller distinguishes more states than
+that — a child failure is not a controller failure, an unsupported host is not
+a stopped service — and the registry reports the distinctions it makes rather
+than flattening them.
 
 The implementation should extract or wrap the current UI launch boundaries so
 both a board key and a mission step call one action API. The registry must not
@@ -1412,9 +1447,9 @@ unless their typed contract exposes an override.
   same typed canonical capabilities without simulating keystrokes.
 - **Scope:** Action/target/policy types; live target resolution; capability and
   preflight queries; adapters around the already persistent solve/autosolve and
-  PR review/revise workers plus approval-service observation; the issue-action
-  interface SAG-10 will implement; provider/model policy boundaries; validated
-  result vocabulary; fake-executable tests.
+  PR review/revise/repair workers plus approval-service observation; the
+  issue-action interface SAG-10 will implement; provider/model policy
+  boundaries; validated result vocabulary; fake-executable tests.
 - **Phase:** 2 — authority boundary.
 - **Depends on:** `SAG-1`.
 - **Ordering:** `critical path`.
@@ -1422,7 +1457,8 @@ unless their typed contract exposes an override.
   `D-29`.
 - **Acceptance signals:** Each action reaches its existing authority with exact
   repository/config/target data; incompatible and historical targets refuse;
-  no registry path forces approval or merges.
+  repair dispatches through its own authority rather than through revision; no
+  registry path forces approval or merges.
 - **Out of scope:** Mission scheduling, console UI, broad selectors, and
   planner-generated actions.
 - **Open questions:** `None`; general project actions are future extensions by

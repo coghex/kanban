@@ -17,6 +17,8 @@ module Kanban.UI.AutoSolve
     AutoSolveHalt (..),
     AutoSolveHandoff (..),
     AutoSolveObservation (..),
+    AutoSolveRevision (..),
+    autoSolveRevisionTurn,
     autoSolveAfterCompletion,
     autoSolveCompleted,
     autoSolveCompletionNotice,
@@ -45,9 +47,9 @@ import Kanban.PullRequestFlow
   ( PullRequestVerdict (..),
     expectedPullRequestOrigin,
     originFromBody,
-    pullRequestVerdictForLabels,
+    pullRequestVerdictEvidence,
   )
-import Kanban.Solve (SolveWorkflow (..), SolverBrand (..))
+import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..), SolvePhase (..))
 import Kanban.UI.Util (allColumns, entriesForBoard, showText)
@@ -141,10 +143,16 @@ decideReview observation progress = case boundPullRequest observation progress o
     Just SolveFailedPhase -> AutoSolveHalted AutoSolveHaltFailed ("PR #" <> showText pullRequest.pullRequestNumber <> " review failed; press " <> actionKeyText ShowProcesses <> " to inspect it")
     Just SolveKilledPhase -> AutoSolveHalted AutoSolveHaltFailed ("PR #" <> showText pullRequest.pullRequestNumber <> " review was killed")
     Just SolveAttention -> AutoSolveWaitingOn ("PR review needs input; press " <> actionKeyText ShowProcesses)
-    Just SolveFinished
-      | pullRequestHasLabel config.approvalLabel pullRequest -> AutoSolveApprove pullRequest.pullRequestNumber
-      | pullRequestHasLabel config.changesRequestedLabel pullRequest -> decideRevision observation progress pullRequest
-      | otherwise -> AutoSolveWaitingOn ("waiting for review verdict; press " <> actionKeyText RefreshAll <> " to retry")
+    Just SolveFinished -> case verdictEvidence config pullRequest of
+      -- Two contradictory verdicts stand on it, so the review settled
+      -- nothing. Stopping is the only honest move: an approval-first reading
+      -- would complete the run on a pull request whose review state is
+      -- broken.
+      Left reason -> AutoSolveHalted AutoSolveHaltStopped ("PR #" <> showText pullRequest.pullRequestNumber <> " " <> reason)
+      Right PullRequestVerdictApproved -> AutoSolveApprove pullRequest.pullRequestNumber
+      Right PullRequestVerdictChangesRequested -> decideRevision observation progress pullRequest
+      Right PullRequestVerdictPending ->
+        AutoSolveWaitingOn ("waiting for review verdict; press " <> actionKeyText RefreshAll <> " to retry")
     Just _ -> AutoSolveWaitingOn ("reviewing PR #" <> showText pullRequest.pullRequestNumber)
   where
     config = observation.autoSolveWorkflowConfig
@@ -157,11 +165,13 @@ decideRereview :: AutoSolveObservation -> AutoSolveProgress -> AutoSolveDecision
 decideRereview observation progress = case boundPullRequest observation progress of
   Nothing -> AutoSolveHalted AutoSolveHaltStopped "the autosolve PR disappeared after revision"
   Just pullRequest ->
-    case pullRequestVerdictForLabels observation.autoSolveWorkflowConfig (map (.labelName) pullRequest.pullRequestLabels) of
-      PullRequestVerdictApproved -> AutoSolveApprove pullRequest.pullRequestNumber
-      PullRequestVerdictChangesRequested ->
+    case verdictEvidence observation.autoSolveWorkflowConfig pullRequest of
+      Left reason -> AutoSolveHalted AutoSolveHaltStopped ("PR #" <> showText pullRequest.pullRequestNumber <> " " <> reason)
+      Right PullRequestVerdictApproved -> AutoSolveApprove pullRequest.pullRequestNumber
+      Right PullRequestVerdictChangesRequested ->
         decideRevision observation (progress {autoSolveReviewRound = progress.autoSolveReviewRound + 1}) pullRequest
-      PullRequestVerdictPending -> AutoSolveWaitingOn ("waiting for the canonical rereview verdict; press " <> actionKeyText RefreshAll <> " to retry")
+      Right PullRequestVerdictPending ->
+        AutoSolveWaitingOn ("waiting for the canonical rereview verdict; press " <> actionKeyText RefreshAll <> " to retry")
 
 -- | The five-round bound, and the two conditions that make a revision
 -- impossible or premature.
@@ -180,6 +190,13 @@ decideRevision observation progress pullRequest
       AutoSolveHalted AutoSolveHaltStopped "the original solver did not return a resumable session id"
   | observation.autoSolveSolverRunning = AutoSolveWait
   | otherwise = AutoSolveRevise pullRequest.pullRequestNumber progress {autoSolveStage = AutoRevising}
+
+-- | The one canonical verdict a pull request carries, or why it carries none.
+-- Both verdict arms above read it, so neither can settle a run on a pull
+-- request whose review state contradicts itself.
+verdictEvidence :: WorkflowConfig -> PullRequest -> Either Text PullRequestVerdict
+verdictEvidence config pullRequest =
+  pullRequestVerdictEvidence config (map (.labelName) pullRequest.pullRequestLabels)
 
 boundPullRequest :: AutoSolveObservation -> AutoSolveProgress -> Maybe PullRequest
 boundPullRequest observation progress =
@@ -264,9 +281,12 @@ initialAutoSolveProgress AutoSolve known startedAt =
 
 -- | The loop a reattached persistent worker resumes. The durable parent
 -- record is authoritative wherever it exists: its round is what tells an
--- implementation run apart from a revision, and its recorded start and known
--- pull requests are what keep discovery from binding a pull request this run
--- did not open.
+-- implementation run apart from a revision, its recorded start and known pull
+-- requests are what keep discovery from binding a pull request this run did
+-- not open, and its bound pull request is what a run reattached mid-revision
+-- would otherwise have no way to learn -- discovery only ever binds a /new/
+-- one, so a restored revision without it reaches its rereview with nothing
+-- bound and halts on a pull request that is still there.
 recoveredAutoSolveProgress :: SolveWorkflow -> Maybe WorkerParent -> Set Int -> UTCTime -> Maybe AutoSolveProgress
 recoveredAutoSolveProgress SolveOnly _ _ _ = Nothing
 recoveredAutoSolveProgress AutoSolve parent boardPullRequests createdAt =
@@ -274,11 +294,39 @@ recoveredAutoSolveProgress AutoSolve parent boardPullRequests createdAt =
    in Just
         AutoSolveProgress
           { autoSolveStage = if reviewRound == 0 then AutoImplementing else AutoRevising,
-            autoSolvePullRequest = Nothing,
+            autoSolvePullRequest = parent >>= (.workerParentPullRequest),
             autoSolveReviewRound = reviewRound,
             autoSolveKnownPullRequests = maybe boardPullRequests (.workerParentKnownPullRequests) parent,
             autoSolveStartedAt = maybe createdAt (.workerParentStartedAt) parent
           }
+
+-- | Everything the resumed-solver turn of one revision round is: which
+-- provider session to resume, under what provenance, and what to tell it.
+--
+-- Declared here, beside the decision that asks for it, because two surfaces
+-- start that turn -- the dashboard's refresh adapter and the plain-IO action
+-- registry -- and a second construction of it is how the two would come to
+-- resume under a different provenance or with a different prompt.
+data AutoSolveRevision = AutoSolveRevision
+  { autoSolveRevisionSession :: Text,
+    autoSolveRevisionProvenance :: ResumeProvenance,
+    autoSolveRevisionMessage :: Text
+  }
+  deriving stock (Eq, Show)
+
+-- | The turn a revision round starts, or 'Nothing' when the original solver
+-- returned no resumable session id.
+--
+-- 'decideRevision' has already halted on that absence by the time either
+-- surface gets here, so the 'Nothing' is a totality guarantee rather than a
+-- reachable path: a caller that arrived without a session starts nothing
+-- instead of opening a fresh provider session that would not carry the
+-- solve's own context.
+autoSolveRevisionTurn :: WorkflowConfig -> Maybe FilePath -> Repository -> SolverBrand -> Maybe Text -> Int -> Int -> Maybe AutoSolveRevision
+autoSolveRevisionTurn config configPath repository brand sessionId pullRequestNumber reviewRound =
+  (\session -> AutoSolveRevision session ResumeAutomatedChangesRequested prompt) <$> sessionId
+  where
+    prompt = autoSolveRevisionPrompt config configPath repository brand pullRequestNumber reviewRound
 
 autoSolveRevisionPrompt :: WorkflowConfig -> Maybe FilePath -> Repository -> SolverBrand -> Int -> Int -> Text
 autoSolveRevisionPrompt config configPath repository brand pullRequestNumber reviewRound =
