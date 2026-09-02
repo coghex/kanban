@@ -356,6 +356,16 @@ spec = do
               (4, sessionOn onFirst ReviewFinished)
             ]
         phasesAfter ended = Map.map (.sessionPhase) (markReviewSessionsDisconnected ended "backend gone" sessions)
+        interruptedSessions = Map.singleton 5 (sessionOn onFirst ReviewInterrupted)
+
+    -- An interrupted revision keeps its input line because it is resumable,
+    -- which is true only while there is something to resume it on. Its
+    -- connection ending is what makes it as finished as a failed one, and
+    -- leaving it resumable leaves that line offering a send into a dead
+    -- process.
+    it "terminalizes an interrupted revision whose connection has gone" $
+      Map.lookup 5 (Map.map (.sessionPhase) (markReviewSessionsDisconnected (Just (ConnectionId 0)) "backend gone" interruptedSessions))
+        `shouldBe` Just ReviewFailed
 
     it "terminalizes every live session when the whole client stopped" $
       phasesAfter Nothing

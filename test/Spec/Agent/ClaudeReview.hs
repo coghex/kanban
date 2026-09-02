@@ -66,6 +66,7 @@ import Kanban.UI.Review
     markReviewSessionsDisconnected,
     newReviewSession,
     reviewOutcomePhase,
+    reviewSessionHoldsUnsentText,
   )
 import Kanban.UI.Session (reviewSessionInputLive, reviewSessionReusable)
 import Kanban.UI.SessionCore (newAgentSession)
@@ -865,6 +866,57 @@ spec = do
       restarted.sessionInput `shouldBe` guidance
       reviewSessionInputLive restarted.sessionDetail.reviewSessionStage restarted.sessionPhase
         `shouldBe` True
+
+    -- The ordering that defeats a queue-only rule. A refused interrupt is
+    -- handled while its target still runs, so the message goes back onto a
+    -- line that is live at that moment and stays there -- and then the turn
+    -- reaches its verdict, settling the session under it. Nothing moved the
+    -- text anywhere, so a rule reading only the queue sees an empty one and
+    -- reopens a session that can no longer send.
+    it "carries a message left on a live line by a turn that then reached its verdict" $ do
+      let refused = applyFailedInterrupt cause (Just guidance) (interruptedSession "")
+          settledPhase = reviewOutcomePhase IssueRevision TurnSucceeded (Just (verdictResult 588))
+          completed = refused {sessionPhase = settledPhase}
+      -- It went to the line, not the queue: the session could still send
+      -- when the interrupt failed.
+      refused.sessionInput `shouldBe` guidance
+      refused.sessionDetail.reviewSessionUndelivered `shouldBe` []
+      -- And the turn's own completion left it somewhere it cannot.
+      reviewSessionInputLive IssueRevision settledPhase `shouldBe` False
+      reviewSessionHoldsUnsentText completed `shouldBe` True
+      reviewSessionReusable settledPhase IssueRevision IssueRevision False (reviewSessionHoldsUnsentText completed)
+        `shouldBe` False
+      let restarted = carryUndelivered (Just completed) (newReviewSession (baseIssue 588 []) IssueRevision 0)
+      restarted.sessionInput `shouldBe` guidance
+      reviewSessionInputLive restarted.sessionDetail.reviewSessionStage restarted.sessionPhase
+        `shouldBe` True
+
+    -- The other late ordering: the interrupt succeeded, the turn was cut
+    -- short, and the follow-up write failed. That leaves the session
+    -- interrupted -- a phase whose line is deliberately live, because an
+    -- interrupted revision is resumable. It stops being resumable when its
+    -- connection goes, and nothing used to say so.
+    it "carries a message left on an interrupted session whose connection then stopped" $ do
+      let interrupted = (interruptedSession "") {sessionPhase = ReviewInterrupted}
+          held = applyFailedInterrupt cause (Just guidance) interrupted
+          serving = fmap (.reviewThreadConnection) held.sessionDetail.reviewSessionThreadId
+          settled = markReviewSessionsDisconnected serving "Claude stream-json session exited" (Map.singleton 588 held)
+      -- Live while the thread was merely interrupted, so the message is on
+      -- the line ready to resend.
+      reviewSessionInputLive IssueRevision ReviewInterrupted `shouldBe` True
+      held.sessionInput `shouldBe` guidance
+      stopped <- maybe (fail "the connection's end dropped the session it served") pure (Map.lookup 588 settled)
+      -- The connection's end is what makes it unresumable, and says so.
+      stopped.sessionPhase `shouldBe` ReviewFailed
+      reviewSessionReusable
+        stopped.sessionPhase
+        stopped.sessionDetail.reviewSessionStage
+        IssueRevision
+        False
+        (reviewSessionHoldsUnsentText stopped)
+        `shouldBe` False
+      let restarted = carryUndelivered (Just stopped) (newReviewSession (baseIssue 588 []) IssueRevision 0)
+      restarted.sessionInput `shouldBe` guidance
 
     -- A draft the user typed after the send is not overwritten by the
     -- message coming across: the line the fresh session opens with is the

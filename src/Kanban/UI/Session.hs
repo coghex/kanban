@@ -822,23 +822,29 @@ reviewSessionActive session = reviewPhaseActive session.sessionPhase
 -- 'Kanban.UI.Review.carryUndelivered' brings across whatever the failed one
 -- never managed to send.
 --
--- @holdsUndelivered@ generalises that second exception to the settled phases
--- a /successful/ turn leaves behind. A verdict reached while an interrupt
--- was still unconfirmed hands the message back into a session that has since
--- stopped accepting one (D-16), and 'ReviewFinished' and 'ReviewNeedsChanges'
--- are otherwise perfectly reusable -- they hold a verdict worth reopening to
--- read. So the message itself decides: a session still holding text it can no
--- longer send is replaced rather than reopened, because reopening it is the
--- one press that would strand the text for good, and every session holding
--- nothing keeps the ordinary rule. A settled canonical stage is unaffected
--- either way: it has no thread, so it never holds an undelivered message, and
--- its retry remains the label change that moves the stage.
+-- @holdsUnsentText@ generalises that second exception to every settled phase,
+-- including the ones a /successful/ turn leaves behind. A verdict reached
+-- while an interrupt was still unconfirmed hands the message back into a
+-- session that has since stopped accepting one (D-16), and 'ReviewFinished'
+-- and 'ReviewNeedsChanges' are otherwise the most reusable phases there are
+-- -- they hold the verdict worth reopening to read. So the text itself
+-- decides: a session still holding text it can no longer send is replaced
+-- rather than reopened, because reopening it is the one press that would
+-- strand that text for good, and every session holding none keeps the
+-- ordinary rule.
+--
+-- The text counts wherever it sits, and whoever put it there. A message
+-- handed back onto a live input line, one queued behind it, and a draft its
+-- user typed mid-turn are indistinguishable to the person looking at them,
+-- and all three are equally lost once the session cannot send — so telling
+-- them apart would only decide which of them to lose. A settled canonical
+-- stage is unaffected either way: it never had a line to type on.
 reviewSessionReusable :: ReviewPhase -> ReviewStage -> ReviewStage -> Bool -> Bool -> Bool
-reviewSessionReusable phase sessionStage requestedStage hasLiveCanonicalProcess holdsUndelivered
+reviewSessionReusable phase sessionStage requestedStage hasLiveCanonicalProcess holdsUnsentText
   | phase == ReviewInterrupted, sessionStage /= IssueRevision = hasLiveCanonicalProcess
   | reviewPhaseActive phase = True
   | phase == ReviewFailed, sessionStage == IssueRevision = False
-  | holdsUndelivered, not (reviewSessionInputLive sessionStage phase) = False
+  | holdsUnsentText, not (reviewSessionInputLive sessionStage phase) = False
   | sessionStage == requestedStage = True
   | otherwise = False
 

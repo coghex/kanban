@@ -697,10 +697,15 @@ Pressing `r` on an issue or from its open details starts its label-selected
 review stage, or reopens the issue's existing session. Two kinds of revision
 session are replaced rather than reopened: one that has *failed*, since it has
 lost the thread it would send on and so takes no further input, and any settled
-one still holding a message it never delivered, since reopening it is the one
-press that would strand that message for good. Both start a fresh revision
-carrying across the draft on the old input line and anything still waiting
-behind it. Canonical review and
+one still holding text nobody managed to send, since reopening it is the one
+press that would strand that text for good. It counts wherever it sits — a
+message handed back onto the input line, one queued behind it, or a draft typed
+while the turn was still running — because once the session cannot send, all
+three are equally lost. Both start a fresh revision carrying that text across,
+the old input line first. An interrupted revision is the one settled phase that
+stays resumable and keeps its input, but only while its connection lives:
+once that ends it is as finished as a failed one and is replaced the same way.
+Canonical review and
 rereview use the synchronous v2 reviewer; interactive revision uses one
 persistent Codex app-server. Pressing `r` on an epic header is a no-op that
 sets a notice instead: an epic is structure rather than reviewable work, so

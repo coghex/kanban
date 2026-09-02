@@ -26,6 +26,7 @@ module Kanban.UI.Review
     markReviewSessionsDisconnected,
     newReviewSession,
     reviewOutcomePhase,
+    reviewSessionHoldsUnsentText,
     numberedChoicePrompt,
     resolveReviewCancelAction,
     reviewDigitActionFor,
@@ -338,6 +339,20 @@ holdUndelivered inputLive message session =
 -- and the queue follows in the order it accumulated; empty text is dropped
 -- rather than carried as a blank entry. The fresh session's line is live, so
 -- what lands there is immediately sendable again.
+-- | Whether a session is still holding text nobody has managed to send.
+--
+-- The input line as well as the queue, because that is where a message
+-- handed back lands while the session is still live — and a turn reaching
+-- its verdict a moment later is exactly what turns that offer into a dead
+-- one. A draft typed mid-turn counts for the same reason: once the session
+-- cannot send, it is as stranded as anything the backend refused, and
+-- telling the two apart would only decide which of them to lose.
+reviewSessionHoldsUnsentText :: ReviewSession -> Bool
+reviewSessionHoldsUnsentText session =
+  any
+    (not . Text.null . Text.strip)
+    (session.sessionInput : session.sessionDetail.reviewSessionUndelivered)
+
 carryUndelivered :: Maybe ReviewSession -> ReviewSession -> ReviewSession
 carryUndelivered Nothing session = session
 carryUndelivered (Just previous) session =
@@ -600,7 +615,7 @@ startIssueReview issue = do
           session.sessionDetail.reviewSessionStage
           requestedStage
           (Map.member issue.issueNumber state.appCanonicalReviewProcesses)
-          (not (null session.sessionDetail.reviewSessionUndelivered)) -> do
+          (reviewSessionHoldsUnsentText session) -> do
           modify (\current -> noticeCleared current {appOverlay = Just (ReviewOverlay issue.issueNumber)})
           presentTranscriptTail
           armVisibleReviewTicks
@@ -1216,8 +1231,15 @@ markReviewSessionsDisconnected endedConnection message = Map.map disconnect
   where
     disconnect session
       | not (servedByEndedConnection session) = session
+      -- 'ReviewInterrupted' among them, unlike every other settled phase.
+      -- An interrupted revision is resumable only while there is something
+      -- to resume it on: its thread outlives the interrupt but not the
+      -- connection carrying it, so once that connection is gone it is
+      -- exactly as finished as a failed one -- and leaving it resumable
+      -- leaves its input line offering a send that can only reach a dead
+      -- process, and 'reviewSessionReusable' reopening it forever.
       | session.sessionDetail.reviewSessionStage == IssueRevision,
-        session.sessionPhase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting] =
+        session.sessionPhase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting, ReviewInterrupted] =
           session
             { sessionPhase = ReviewFailed,
               sessionActivity = "disconnected",
