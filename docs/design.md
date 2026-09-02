@@ -702,7 +702,9 @@ press that would strand that text for good. It counts wherever it sits — a
 message handed back onto the input line, one queued behind it, or a draft typed
 while the turn was still running — because once the session cannot send, all
 three are equally lost. Both start a fresh revision carrying that text across,
-the old input line first. An interrupted revision is the one settled phase that
+the old input line first — and only into a revision, since a canonical stage
+runs the gate as a subprocess and has nothing to send on, so text carried there
+would look kept while being unreachable. An interrupted revision is the one settled phase that
 stays resumable and keeps its input, but only while its connection lives:
 once that ends it is as finished as a failed one and is replaced the same way.
 Canonical review and

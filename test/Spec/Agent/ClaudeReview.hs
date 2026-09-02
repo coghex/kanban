@@ -32,6 +32,7 @@ import Kanban.Models
     RoleName (..),
     defaultRoster,
   )
+import Kanban.Domain (defaultWorkflowConfig)
 import Kanban.Process (killManagedProcess)
 import Kanban.Review
   ( InterruptAcknowledgement (..),
@@ -46,6 +47,7 @@ import Kanban.Review
     ReviewThreadId (..),
     ReviewTurnOutcome (..),
     StreamRecord (..),
+    reviewStageForLabels,
     StreamTurnResult (..),
     beginIssueReview,
     decodeStreamRecord,
@@ -917,6 +919,28 @@ spec = do
         `shouldBe` False
       let restarted = carryUndelivered (Just stopped) (newReviewSession (baseIssue 588 []) IssueRevision 0)
       restarted.sessionInput `shouldBe` guidance
+
+    -- Where carrying it forward stops. A revision that published its verdict
+    -- moves the labels on, so the next `r` asks for the canonical rereview --
+    -- a stage that runs the gate as a subprocess and holds no thread. The
+    -- stage is derived from the labels that revision publishes rather than
+    -- named, so this is the sequence the board actually produces.
+    it "does not carry the message into a stage that could never send it" $ do
+      let stranded = applyFailedInterrupt cause (Just guidance) (settledSession "")
+          -- What a published revision leaves on the issue, and what `r` then
+          -- asks for.
+          nextStage = reviewStageForLabels defaultWorkflowConfig ["reviewed:revised"]
+          canonical = newReviewSession (baseIssue 588 []) nextStage 0
+          replacement = carryUndelivered (Just stranded) canonical
+      nextStage `shouldNotBe` IssueRevision
+      reviewSessionInputLive nextStage canonical.sessionPhase `shouldBe` False
+      -- Not carried, and so not shown waiting in a session that will never
+      -- send it -- nor dragged into every canonical stage after this one.
+      replacement.sessionInput `shouldBe` ""
+      replacement.sessionDetail.reviewSessionUndelivered `shouldBe` []
+      -- A revision asked for instead does take it.
+      (carryUndelivered (Just stranded) (newReviewSession (baseIssue 588 []) IssueRevision 0)).sessionInput
+        `shouldBe` guidance
 
     -- A draft the user typed after the send is not overwritten by the
     -- message coming across: the line the fresh session opens with is the

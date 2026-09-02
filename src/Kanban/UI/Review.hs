@@ -323,22 +323,6 @@ holdUndelivered inputLive message session =
       | inputLive, Text.null (Text.strip session.sessionInput) = takeNextUndelivered queued
       | otherwise = (session.sessionInput, queued)
 
--- | Carries what a session being replaced never managed to send into the
--- session replacing it: the draft on its input line, and everything still
--- waiting behind it, oldest first.
---
--- The other half of handing a message back. A message that failed to reach
--- the provider is put where the session can still act on it, but a session
--- whose backend has gone cannot act on anything — so it holds the message in
--- its queue, and the press that starts the review it needs is the one press
--- that would otherwise throw it away with the session it was parked in. This
--- is what makes "kept in the review session" true across that press rather
--- than only until it.
---
--- The old line goes first because it is what the user was last looking at,
--- and the queue follows in the order it accumulated; empty text is dropped
--- rather than carried as a blank entry. The fresh session's line is live, so
--- what lands there is immediately sendable again.
 -- | Whether a session is still holding text nobody has managed to send.
 --
 -- The input line as well as the queue, because that is where a message
@@ -353,10 +337,37 @@ reviewSessionHoldsUnsentText session =
     (not . Text.null . Text.strip)
     (session.sessionInput : session.sessionDetail.reviewSessionUndelivered)
 
+-- | Carries what a session being replaced never managed to send into the
+-- session replacing it: the draft on its input line, and everything still
+-- waiting behind it, oldest first.
+--
+-- The other half of handing a message back. A message that failed to reach
+-- the provider is put where the session can still act on it, but a session
+-- whose backend has gone cannot act on anything — so it holds the message in
+-- its queue, and the press that starts the review it needs is the one press
+-- that would otherwise throw it away with the session it was parked in. This
+-- is what makes "kept in the review session" true across that press rather
+-- than only until it.
+--
+-- The old line goes first because it is what the user was last looking at,
+-- and the queue follows in the order it accumulated; empty text is dropped
+-- rather than carried as a blank entry.
+--
+-- Only into a session that can send it. @r@ starts whatever stage the labels
+-- ask for, and a revision that published its verdict moves them on — so the
+-- session replacing it is often a canonical stage, which runs the gate as a
+-- subprocess and holds no thread to send anything on. Carrying the message
+-- there would preserve it in the one place it can never leave, and then into
+-- every canonical stage after that: a message that looks kept and is not.
+-- The user has already been told it was not delivered, by the notice at the
+-- time and the transcript entry beside it, so it is better let go of at the
+-- moment they ask for something that cannot carry it than shown waiting in a
+-- session that will never send it.
 carryUndelivered :: Maybe ReviewSession -> ReviewSession -> ReviewSession
 carryUndelivered Nothing session = session
-carryUndelivered (Just previous) session =
-  (withUndelivered stillUndelivered session) {sessionInput = nextInput}
+carryUndelivered (Just previous) session
+  | not (reviewSessionInputLive session.sessionDetail.reviewSessionStage session.sessionPhase) = session
+  | otherwise = (withUndelivered stillUndelivered session) {sessionInput = nextInput}
   where
     (nextInput, stillUndelivered) = takeNextUndelivered (filter (not . Text.null . Text.strip) carried)
     carried = previous.sessionInput : previous.sessionDetail.reviewSessionUndelivered
