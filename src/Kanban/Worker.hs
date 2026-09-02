@@ -31,6 +31,11 @@ module Kanban.Worker
     WorkerStatus (..),
     SupervisorCells (..),
     acquireWorkerLease,
+    acquireWorkerLeaseFor,
+    WorkerLeaseRefusal (..),
+    WorkerLaunchRefusal (..),
+    workerLaunchRefusalMessage,
+    workerHoldingItem,
     acknowledgeWorker,
     acknowledgeSupersededWorkers,
     collectWorkerCache,
@@ -101,9 +106,16 @@ import Kanban.Worker.Discovery
     collectWorkerCacheWith,
     discoverWorkerHistory,
     discoverWorkers,
+    workerHoldingItem,
   )
 import Kanban.Worker.Journal (EventJournalLock, appendWorkerEvent, consumeJournalLines, newEventJournalLock)
-import Kanban.Worker.Lease (acquireWorkerLease, recordLaunchedSupervisorIdentity, releaseWorkerLease)
+import Kanban.Worker.Lease
+  ( WorkerLeaseRefusal (..),
+    acquireWorkerLease,
+    acquireWorkerLeaseFor,
+    recordLaunchedSupervisorIdentity,
+    releaseWorkerLease,
+  )
 import Kanban.Worker.Monitor (monitorWorker, recoverIfWorkerStoppedWith)
 import Kanban.Worker.Paths
   ( decodeFile,
@@ -150,7 +162,7 @@ import System.Process (CreateProcess (..), ProcessHandle, StdStream (UseHandle),
 -- roster to resolve for itself: the launch boundary is where a session's
 -- cell is decided once (see 'Kanban.UI.Util.launchAssignment'), and this is
 -- where that decision becomes durable.
-launchSolveWorker :: RecordedAssignment -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either Text WorkerDescriptor)
+launchSolveWorker :: RecordedAssignment -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
 launchSolveWorker assignment repository issueNumber workflow brand existingSession existingLogPath provenance userMessage parent configPath workflowConfig = do
   now <- getCurrentTime
   workerId <- newWorkerId "solve" issueNumber
@@ -172,7 +184,7 @@ launchSolveWorker assignment repository issueNumber workflow brand existingSessi
       }
 
 -- | The pull-request twin of 'launchSolveWorker', assignment and all.
-launchPullRequestWorker :: RecordedAssignment -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either Text WorkerDescriptor)
+launchPullRequestWorker :: RecordedAssignment -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
 launchPullRequestWorker assignment repository number origin action existingSession existingLogPath provenance userMessage parent configPath workflowConfig = do
   now <- getCurrentTime
   workerId <- newWorkerId "pr" number
@@ -243,18 +255,35 @@ spawnDetachedSupervisor executable arguments =
 -- lease, specification, or cache directory entry existed. Writing it into
 -- the specification is what carries it to the detached supervisor, which
 -- reads no roster of its own.
-launchWorker :: WorkerSpec -> IO (Either Text WorkerDescriptor)
+-- | Why a launch produced no worker.
+--
+-- The two are different answers to different questions and a caller acts on
+-- them differently: an item whose turn is already running is one to /join/,
+-- while everything else is a launch that failed. Collapsing them is what made
+-- a second advancer of one autosolve action report a stopped run instead of
+-- observing the turn that was already under way.
+data WorkerLaunchRefusal
+  = WorkerTurnAlreadyRunning (Maybe WorkerId) Text
+  | WorkerLaunchFailed Text
+  deriving stock (Eq, Show)
+
+workerLaunchRefusalMessage :: WorkerLaunchRefusal -> Text
+workerLaunchRefusalMessage (WorkerTurnAlreadyRunning _ message) = message
+workerLaunchRefusalMessage (WorkerLaunchFailed message) = message
+
+launchWorker :: WorkerSpec -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
 launchWorker spec = do
   descriptor <- descriptorForSpec spec
   directory <- workerDirectory spec.workerRepository
   createPrivateDirectory XdgCache directory
-  leased <- acquireWorkerLease descriptor
+  leased <- acquireWorkerLeaseFor descriptor
   case leased of
-    Left message -> pure (Left message)
+    Left (WorkerLeaseHeld owner message) -> pure (Left (WorkerTurnAlreadyRunning owner message))
+    Left (WorkerLeaseUnavailable message) -> pure (Left (WorkerLaunchFailed message))
     Right () -> do
       written <- writePrivateJson descriptor.workerDescriptorSpecPath spec
       case written of
-        Left message -> releaseWorkerLease descriptor >> pure (Left message)
+        Left message -> releaseWorkerLease descriptor >> pure (Left (WorkerLaunchFailed message))
         Right () -> do
           executable <- getExecutablePath
           started <- spawnDetachedSupervisor executable ["--worker-spec", descriptor.workerDescriptorSpecPath]
@@ -262,7 +291,7 @@ launchWorker spec = do
             Left exception -> do
               acknowledgeWorker descriptor
               releaseWorkerLease descriptor
-              pure (Left ("could not start persistent worker: " <> Text.pack (show exception)))
+              pure (Left (WorkerLaunchFailed ("could not start persistent worker: " <> Text.pack (show exception))))
             Right processHandle -> do
               recordLaunchedSupervisorIdentity descriptor processHandle
               result <- waitForWorkerStart descriptor processHandle workerStartupAttempts
@@ -285,7 +314,9 @@ launchWorker spec = do
                     Just _ -> releaseWorkerLease descriptor
                     Nothing -> pure ()
                 Right _ -> pure ()
-              pure result
+              -- A supervisor that never started is a failed launch, never a
+              -- turn someone else owns: this process took the lease.
+              pure (either (Left . WorkerLaunchFailed) Right result)
 
 runWorker :: FilePath -> IO (Either Text ())
 runWorker = runWorkerWith readProcessSnapshot

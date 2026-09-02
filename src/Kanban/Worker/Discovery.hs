@@ -14,6 +14,7 @@
 module Kanban.Worker.Discovery
   ( discoverWorkers,
     discoverWorkerHistory,
+    workerHoldingItem,
     acknowledgeWorker,
     acknowledgeSupersededWorkers,
     collectWorkerCache,
@@ -26,11 +27,11 @@ import Control.Monad (filterM, unless, void, when)
 import qualified Data.ByteString as ByteString
 import Data.Either (isRight)
 import Data.List (find, sortOn)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
-import Kanban.Domain (Repository (..))
+import Kanban.Domain (ItemId (..), Repository (..))
 import Kanban.Process (IdentityPresence (..), ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot)
 import Kanban.Worker.Paths
   ( decodeFile,
@@ -75,6 +76,30 @@ discoverWorkers repository = do
           WorkerOrphaned _ -> True
           WorkerTerminal _ -> not acknowledged
         Left _ -> not acknowledged && diffUTCTime now descriptor.workerDescriptorSpec.workerCreatedAt < workerDiscoveryStartupGraceSeconds
+
+-- | The live worker that currently owns one item's turn.
+--
+-- The lease is keyed by item, so a launch that lost it lost to exactly one
+-- worker, and this is how a caller finds the one it lost to: by the owner id
+-- the lease record names when that record could be read, and by the item
+-- otherwise. Joining that worker is what makes two advancers of one action
+-- observe one turn instead of racing to start a second.
+--
+-- Discovery-filtered, so a worker that has already settled and been
+-- acknowledged is never offered as the holder of a live turn.
+workerHoldingItem :: Repository -> Maybe WorkerId -> ItemId -> IO (Maybe WorkerDescriptor)
+workerHoldingItem repository owner item = do
+  descriptors <- discoverWorkers repository
+  let forItem = filter (acts item) descriptors
+      named = filter ((== owner) . Just . (.workerId) . (.workerDescriptorSpec)) forItem
+  pure (listToMaybe (named <> forItem))
+  where
+    acts (IssueId number) descriptor = case descriptor.workerDescriptorSpec.workerTask of
+      SolveWorkerTaskKind task -> task.solveWorkerIssueNumber == number
+      PullRequestWorkerTaskKind _ -> False
+    acts (PullRequestId number) descriptor = case descriptor.workerDescriptorSpec.workerTask of
+      PullRequestWorkerTaskKind task -> task.pullRequestWorkerNumber == number
+      SolveWorkerTaskKind _ -> False
 
 discoverWorkerHistory :: Repository -> IO [WorkerDescriptor]
 discoverWorkerHistory repository = do

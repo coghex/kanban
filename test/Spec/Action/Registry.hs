@@ -58,6 +58,7 @@ import Kanban.Worker
     WorkerState (..),
     WorkerStatus (..),
     WorkerTask (..),
+    acquireWorkerLease,
     descriptorForSpec,
     workerDirectory,
   )
@@ -88,7 +89,7 @@ import Kanban.UI.Types
 import Spec.Support.Roster (cellOf)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, listDirectory)
 import System.FilePath (takeDirectory, (</>))
-import Test.Hspec (Spec, describe, it, shouldBe, shouldNotBe, shouldSatisfy)
+import Test.Hspec (Spec, describe, it, shouldBe, shouldNotBe, shouldReturn, shouldSatisfy)
 
 -- ---------------------------------------------------------------------------
 -- Fixtures
@@ -778,6 +779,72 @@ spec = do
     -- repository entirely, while the record it came from still named the
     -- right one -- so the identity the record carries is checked again here,
     -- before anything is probed or spawned.
+    -- Two advancers of one action -- a dashboard refresh and a headless
+    -- runner that has taken the same run over -- can both decide the same
+    -- turn is next. The worker lease is keyed by item, so exactly one of them
+    -- creates it; the other must join that turn rather than start a second or
+    -- report the run stopped over work that is proceeding perfectly well.
+    it "joins the turn a live worker already owns instead of starting a second" $
+      withDispatchMachine $ \environment -> do
+        let repairable =
+              (markedPullRequest 42 [844] CodexSolver [label defaultWorkflowConfig.approvalLabel])
+                { pullRequestMergeState = MergeConflicting,
+                  pullRequestReviewDecision = ReviewApproved
+                }
+        -- The turn another advancer already started: a live worker, holding
+        -- this pull request's lease.
+        running <- pullRequestWorkerDescriptor environment.actionRepository 42
+        publishWorkerSpec running
+        publishWorkerState running WorkerRunning
+        acquireWorkerLease running `shouldReturn` Right ()
+        let request =
+              (actionRequest RepairPullRequest identityUnderTest (TargetByKind ActionTargetPullRequest 42))
+                { requestRecordedAssignment = Just (cellOf (pullRequestAssignment defaultRoster PullRequestCodex PullRequestRepair))
+                }
+            plan =
+              either (error . show) id $
+                planResolvedAction
+                  defaultWorkflowConfig
+                  identityUnderTest
+                  RepairPullRequest
+                  Nothing
+                  (ActionTargetItem (resolveHeldItem environment.actionCatalog TargetPlain (PullRequestItem repairable)))
+        dispatched <- dispatchProviderTurn environment request plan
+        -- The handle names the worker that already owns the turn...
+        (actionHandleWorker =<< either (const Nothing) Just dispatched)
+          `shouldSatisfy` maybe False ((== running.workerDescriptorSpecPath) . (.workerDescriptorSpecPath))
+        -- ...and no second worker was specified into existence.
+        written <- specifications environment.actionRepository
+        map (.workerId) written `shouldBe` [running.workerDescriptorSpec.workerId]
+
+    -- Fails closed the moment the holder cannot be identified: a turn is
+    -- running and this dispatch does not know which worker owns it, so it
+    -- refuses rather than starting another.
+    it "refuses rather than starting a second turn when the holder cannot be found" $
+      withDispatchMachine $ \environment -> do
+        let repairable =
+              (markedPullRequest 42 [844] CodexSolver [label defaultWorkflowConfig.approvalLabel])
+                { pullRequestMergeState = MergeConflicting,
+                  pullRequestReviewDecision = ReviewApproved
+                }
+        -- A lease whose owner reads as live, held by a worker discovery
+        -- cannot offer: its state file is there, so the lease stands, but no
+        -- specification is, so nothing can be built from it.
+        running <- pullRequestWorkerDescriptor environment.actionRepository 42
+        publishWorkerState running WorkerRunning
+        acquireWorkerLease running `shouldReturn` Right ()
+        let request = actionRequest RepairPullRequest identityUnderTest (TargetByKind ActionTargetPullRequest 42)
+            plan =
+              either (error . show) id $
+                planResolvedAction
+                  defaultWorkflowConfig
+                  identityUnderTest
+                  RepairPullRequest
+                  Nothing
+                  (ActionTargetItem (resolveHeldItem environment.actionCatalog TargetPlain (PullRequestItem repairable)))
+        dispatched <- dispatchProviderTurn environment request plan
+        either isTurnAlreadyRunning (const False) dispatched `shouldBe` True
+
     it "refuses a resolved target that belongs to another repository, spawning nothing" $
       withDispatchMachine $ \environment -> do
         let elsewhere = (catalogOf [baseIssue 844 []] [] emptyHistory) {catalogRepository = Repository "/tmp/other" "coghex" "other"}
@@ -950,6 +1017,10 @@ isRepositoryMismatch :: ActionRefusal -> Bool
 isRepositoryMismatch (ActionRepositoryMismatch _ _) = True
 isRepositoryMismatch _ = False
 
+isTurnAlreadyRunning :: ActionRefusal -> Bool
+isTurnAlreadyRunning (ActionTurnAlreadyRunning _ _) = True
+isTurnAlreadyRunning _ = False
+
 isUndiscoverable :: ApprovalQueueObservation -> Bool
 isUndiscoverable (ApprovalQueueUndiscoverable _) = True
 isUndiscoverable _ = False
@@ -1067,6 +1138,58 @@ descriptorFor repository issueNumber =
         workerWorkflowConfig = defaultWorkflowConfig,
         workerAssignment = Nothing
       }
+
+-- | A pull-request worker's descriptor, with no durable file written yet.
+--
+-- The three below are separate so a test can leave exactly the files a
+-- scenario is about: a worker discovery can offer needs its specification,
+-- while a lease only needs its owner's state to read as live.
+pullRequestWorkerDescriptor :: Repository -> Int -> IO WorkerDescriptor
+pullRequestWorkerDescriptor repository number = do
+  descriptor <-
+    descriptorForSpec
+      WorkerSpec
+        { workerId = WorkerId ("pr-" <> Text.pack (show number)),
+          workerRepository = repository,
+          workerTask = PullRequestWorkerTaskKind (PullRequestWorkerTask number PullRequestCodex PullRequestRepair),
+          workerExistingSession = Nothing,
+          workerExistingLogPath = Nothing,
+          workerResumeProvenance = ResumeAnswer,
+          workerUserMessage = "",
+          workerParent = Nothing,
+          workerCreatedAt = epoch,
+          workerMaxRuntimeSeconds = 600,
+          workerConfigPath = Nothing,
+          workerWorkflowConfig = defaultWorkflowConfig,
+          workerAssignment = Nothing
+        }
+  directory <- workerDirectory repository
+  createDirectoryIfMissing True directory
+  pure descriptor
+
+publishWorkerSpec :: WorkerDescriptor -> IO ()
+publishWorkerSpec descriptor =
+  LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+
+publishWorkerState :: WorkerDescriptor -> WorkerStatus -> IO ()
+publishWorkerState descriptor status =
+  LazyByteString.writeFile
+    descriptor.workerDescriptorStatePath
+    ( encode
+        WorkerState
+          { workerStateId = descriptor.workerDescriptorSpec.workerId,
+            workerStateStatus = status,
+            workerStateWorkerPid = 1,
+            workerStateWorkerIdentity = Nothing,
+            workerStateProviderPid = Nothing,
+            workerStateProviderIdentity = Nothing,
+            workerStateSessionId = Nothing,
+            workerStateLogPath = Nothing,
+            workerStateHeartbeatAt = epoch,
+            workerStateLastActivity = "repairing",
+            workerStateKnownProcesses = []
+          }
+    )
 
 -- | The durable state a supervisor would have written, hand-placed so
 -- observation can be exercised against every status without one.

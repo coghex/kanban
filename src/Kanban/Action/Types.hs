@@ -411,6 +411,10 @@ data ActionRefusal
     ActionCapabilityBlocked WorkflowActionKind Text
   | -- | The model roster could not supply the cell this launch runs on.
     ActionRoutingUnavailable WorkflowActionKind Text
+  | -- | This target's turn is already running, and the worker that owns it
+    -- could not be found to join. Distinct from a failed dispatch: nothing
+    -- went wrong, and starting a second turn is exactly what must not happen.
+    ActionTurnAlreadyRunning WorkflowActionKind Text
   | -- | The owning authority refused or could not be started.
     ActionDispatchFailed WorkflowActionKind Text
   deriving stock (Eq, Show)
@@ -445,6 +449,7 @@ actionRefusalMessage refusal = case refusal of
   -- what happened. The constructor still carries the kind for a caller that
   -- wants to say more.
   ActionRoutingUnavailable _ detail -> detail
+  ActionTurnAlreadyRunning _ detail -> detail
   ActionDispatchFailed _ detail -> detail
   where
     article ActionTargetIssue = "an issue"

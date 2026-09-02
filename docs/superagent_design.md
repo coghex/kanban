@@ -516,8 +516,14 @@ question or failure still ends the action wherever the loop has reached.
 One progression owns that advance. The dashboard's refresh adapter and the
 headless loop both take their next move from the same reading of the same
 decision and then only render or dispatch it, so a refresh cannot advance an
-action in a way a runner would not, and neither can start a turn beside one the
-other started.
+action in a way a runner would not.
+
+Neither can start a turn beside one the other started, and that guarantee is
+the persistent worker's own lease rather than anything new: it is keyed by
+item, so one issue's or one pull request's next turn is reserved by whoever
+creates that directory first. A dispatch that loses the reservation joins the
+turn already running; one that cannot identify its holder refuses rather than
+starting a second.
 
 The queue row's `idle, reviewing, barrier, failed` is this table's summary
 rather than the result type. The controller distinguishes more states than

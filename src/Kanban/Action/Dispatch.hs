@@ -77,7 +77,7 @@ import Kanban.ApprovalService
     queryApprovalStatus,
   )
 import Kanban.Cache (normalizedRepositoryIdentity)
-import Kanban.Domain (Label (..), PullRequest (..), Repository, WorkflowConfig)
+import Kanban.Domain (ItemId (..), Label (..), PullRequest (..), Repository, WorkflowConfig)
 import Kanban.Models (RecordedAssignment)
 import Kanban.Preflight (PreflightAction (..))
 import Kanban.PullRequestFlow
@@ -98,12 +98,14 @@ import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..))
 import Kanban.UI.Util (launchAssignment)
 import Kanban.Worker
   ( WorkerDescriptor (..),
+    WorkerLaunchRefusal (..),
     WorkerParent (..),
     WorkerState (..),
     WorkerStatus (..),
     launchPullRequestWorker,
     launchSolveWorker,
     readWorkerState,
+    workerHoldingItem,
   )
 
 -- ---------------------------------------------------------------------------
@@ -255,25 +257,50 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
 
     launchFor resolved cell = case plan.planRoute of
       RouteProvider (ActionSolve brand) ->
-        workerHandle resolved brand <$> launchSolve resolved SolveOnly brand cell request.requestParent
+        launchSolve resolved SolveOnly brand cell request.requestParent
+          >>= settled resolved (workerHandle resolved brand)
       RouteProvider (ActionAutoSolve brand) ->
         launchSolve resolved AutoSolve brand cell (Just (autoSolveParent resolved brand cell))
-          >>= autoSolveHandle resolved brand
+          >>= settled resolved (autoSolveHandle resolved brand)
       RouteProvider (ActionPullRequestFlow origin action) ->
-        workerHandle resolved (agentForAction origin action) <$> launchPullRequest resolved origin action cell
+        launchPullRequest resolved origin action cell
+          >>= settled resolved (workerHandle resolved (agentForAction origin action))
       _ -> pure (Left (ActionRoutingUnavailable plan.planKind "this action starts no provider"))
 
-    workerHandle resolved brand =
-      either
-        (Left . ActionDispatchFailed plan.planKind)
-        (Right . (\descriptor -> WorkerActionHandle plan.planKind resolved descriptor (attribution brand)))
+    -- What a launch's answer means, with the one refusal a caller can act on
+    -- treated as such.
+    --
+    -- An item whose turn is already running is one to /join/. The worker
+    -- lease is keyed by item, so a launch that lost it lost to exactly one
+    -- worker; adopting that worker is what makes two advancers of the same
+    -- action -- a dashboard refresh and a headless runner, say -- observe one
+    -- turn rather than race to start a second. Reporting it as a failure is
+    -- what made the loser record a stopped run over work that was proceeding
+    -- perfectly well.
+    --
+    -- Fails closed when the holder cannot be found: a turn is running and
+    -- this dispatch does not know which, so it refuses rather than starting
+    -- another.
+    settled resolved build outcome = case outcome of
+      Right descriptor -> build descriptor
+      Left (WorkerLaunchFailed detail) -> pure (Left (ActionDispatchFailed plan.planKind detail))
+      Left (WorkerTurnAlreadyRunning owner detail) -> do
+        held <- workerHoldingItem environment.actionRepository owner (itemFor resolved)
+        case held of
+          Just descriptor -> build descriptor
+          Nothing -> pure (Left (ActionTurnAlreadyRunning plan.planKind detail))
+
+    itemFor resolved = case resolved.resolvedTargetKind of
+      ActionTargetIssue -> IssueId resolved.resolvedTargetNumber
+      ActionTargetPullRequest -> PullRequestId resolved.resolvedTargetNumber
+
+    workerHandle resolved brand descriptor =
+      pure (Right (WorkerActionHandle plan.planKind resolved descriptor (attribution brand)))
 
     -- The one place an autosolve handle is made, so every one of them carries
     -- a cursor observing it can advance.
-    autoSolveHandle resolved brand =
-      either
-        (pure . Left . ActionDispatchFailed plan.planKind)
-        (fmap Right . autoSolveActionHandle liveAutoSolveTurns resolved (attribution brand))
+    autoSolveHandle resolved brand descriptor =
+      Right <$> autoSolveActionHandle liveAutoSolveTurns resolved (attribution brand) descriptor
 
     -- An autosolve launch records the run's own baseline on the solver it
     -- starts, because nothing else will. The loop's discovery arm binds only a
@@ -314,7 +341,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         environment.actionConfigPath
         environment.actionWorkflowConfig
 
-    launchPullRequest :: ResolvedTarget -> PullRequestOrigin -> PullRequestAction -> RecordedAssignment -> IO (Either Text WorkerDescriptor)
+    launchPullRequest :: ResolvedTarget -> PullRequestOrigin -> PullRequestAction -> RecordedAssignment -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
     launchPullRequest resolved origin action cell =
       launchPullRequestWorker
         cell

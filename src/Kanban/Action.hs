@@ -45,6 +45,14 @@
 -- board press and a headless runner therefore drive one action, in one state
 -- model, through one progression.
 --
+-- One action's next turn is reserved atomically, by the worker lease that is
+-- already keyed by item. Two advancers of the same action — a dashboard
+-- refresh and a headless runner that has taken the same run over — therefore
+-- contend on one directory creation, and the one that loses /joins/ the turn
+-- the winner started rather than starting a second or reporting the run
+-- stopped. A dispatch that cannot identify the holder refuses instead, which
+-- is the fail-closed half of the same rule.
+--
 -- Three things this registry never does, on any path: merge a pull request,
 -- add or remove an approval verdict label, or start or stop the approval
 -- service while observing it. A result it cannot establish is reported as
