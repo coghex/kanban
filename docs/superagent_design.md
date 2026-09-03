@@ -1737,6 +1737,17 @@ unless their typed contract exposes an override.
   terminal phase — dropped by the very envelope that proves the command was
   never read. Both now hold wherever the action ends.
 
+  The twentieth round closed three crash and failure paths. Settling now
+  closes the journal before it records the terminal state, because only that
+  prefix is one anything repairs. Having asked the provider for a thread is
+  recorded before the request goes out rather than when the thread comes back,
+  since under a shared connection nothing else distinguishes a host that died
+  mid-request from one that died before asking — and the rerun that followed
+  ran beside a request still live on a connection that outlived its host. And
+  a gesture announces what it asked for only when the command was actually
+  written: every one of them was overwriting the submission's own failure
+  notice with a promise, which is the thing round 13 said must not happen.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

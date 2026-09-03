@@ -248,12 +248,16 @@ submitReviewInput issueNumber = do
 -- that reattaches later (requirement 4). Only the input line is cleared here,
 -- because that is this dashboard's own draft rather than the action's
 -- evidence.
-submitReviewCommand :: Int -> ReviewCommandPayload -> EventM Name AppState ()
+-- Reports whether the command was actually written. A caller that goes on
+-- to announce what it asked for must not announce it when the ledger could not
+-- take it: nothing was requested, and the failure notice this already set is
+-- the one the user needs to see.
+submitReviewCommand :: Int -> ReviewCommandPayload -> EventM Name AppState Bool
 submitReviewCommand issueNumber payload = do
   state <- get
   case (issueActionWorkerFor state issueNumber, Map.lookup issueNumber state.appReviewSessions) of
-    (Nothing, _) -> setNotice issueActionGoneNotice
-    (_, Nothing) -> setNotice issueActionGoneNotice
+    (Nothing, _) -> False <$ setNotice issueActionGoneNotice
+    (_, Nothing) -> False <$ setNotice issueActionGoneNotice
     (Just descriptor, Just session) -> do
       -- The child's own durable state, not the dashboard's picture of it.
       -- Settling writes that state before the monitor delivers the terminal
@@ -264,11 +268,11 @@ submitReviewCommand issueNumber payload = do
       -- silently went nowhere.
       recorded <- liftIO (readWorkerState descriptor)
       case recorded of
-        Right held | terminalStatus held.workerStateStatus -> setNotice issueActionGoneNotice
+        Right held | terminalStatus held.workerStateStatus -> False <$ setNotice issueActionGoneNotice
         _ -> submitToLiveChild issueNumber descriptor session payload
 
 -- | Writes one command to a child this dashboard has just confirmed is live.
-submitToLiveChild :: Int -> WorkerDescriptor -> ReviewSession -> ReviewCommandPayload -> EventM Name AppState ()
+submitToLiveChild :: Int -> WorkerDescriptor -> ReviewSession -> ReviewCommandPayload -> EventM Name AppState Bool
 submitToLiveChild issueNumber descriptor session payload = do
     identifier <- liftIO newReviewCommandId
     now <- liftIO getCurrentTime
@@ -293,8 +297,8 @@ submitToLiveChild issueNumber descriptor session payload = do
             }
     written <- liftIO (appendReviewCommand descriptor command)
     case written of
-      Left message -> setNotice (agentFailureNotice "Issue review" message)
-      Right () -> modifyReviewSession issueNumber (clearedInput identifier)
+      Left message -> False <$ setNotice (agentFailureNotice "Issue review" message)
+      Right () -> True <$ modifyReviewSession issueNumber (clearedInput identifier)
   where
     -- Cleared even for a command the host may reject: a rejection comes back
     -- as an undelivered message that is offered to the line again, and
@@ -361,11 +365,11 @@ issueActionGoneNotice = "This review is no longer running; press " <> actionKeyT
 
 submitQuestionAnswer :: Int -> ReviewRequestId -> ReviewAnswer -> Text -> EventM Name AppState ()
 submitQuestionAnswer issueNumber requestId answer displayAnswer =
-  submitReviewCommand issueNumber (AnswerReviewQuestion requestId answer displayAnswer)
+  void (submitReviewCommand issueNumber (AnswerReviewQuestion requestId answer displayAnswer))
 
 submitApprovalAnswer :: Int -> ReviewRequestId -> Bool -> Bool -> Text -> EventM Name AppState ()
 submitApprovalAnswer issueNumber requestId accepted forSession displayAnswer =
-  submitReviewCommand issueNumber (AnswerReviewApproval requestId accepted forSession displayAnswer)
+  void (submitReviewCommand issueNumber (AnswerReviewApproval requestId accepted forSession displayAnswer))
 
 -- | Ordinary feedback, or the deliberate resend of a steer the provider
 -- refused.
@@ -377,7 +381,7 @@ submitApprovalAnswer issueNumber requestId accepted forSession displayAnswer =
 -- puts one there — so the queue is consulted here rather than at the send.
 sendReviewFeedback :: Int -> ReviewSession -> EventM Name AppState ()
 sendReviewFeedback issueNumber session =
-  submitReviewCommand issueNumber (reviewSubmission session)
+  void (submitReviewCommand issueNumber (reviewSubmission session))
 
 -- | Which command the message on a session's input line is.
 --
@@ -625,8 +629,12 @@ cancelReviewSession issueNumber = do
           stage = session.sessionDetail.reviewSessionStage
       case resolveReviewCancelAction actionLive session.sessionDetail.reviewSessionThreadId session.sessionDetail.reviewSessionTurnId stage session.sessionPhase actionLive of
         ReviewCancelInterruptTurn _ _ -> do
-          submitReviewCommand issueNumber InterruptReviewTurn
-          setNotice ("Interrupting review #" <> showText issueNumber <> "; type guidance when the turn stops")
+          requested <- submitReviewCommand issueNumber InterruptReviewTurn
+          -- Same rule as the two gestures that end an action: a ledger that
+          -- would not take the command means nothing was asked for, and the
+          -- failure notice is what the user needs rather than a promise.
+          when requested $
+            setNotice ("Interrupting review #" <> showText issueNumber <> "; type guidance when the turn stops")
         ReviewCancelInterruptProcess -> cancelCanonicalIssueAction issueNumber
         ReviewCancelStillStarting -> setNotice ("Issue review #" <> showText issueNumber <> " is still starting; try Ctrl-C again once it is running")
         ReviewCancelNotRunning -> setNotice ("Issue review #" <> showText issueNumber <> " is not running")
@@ -649,7 +657,7 @@ cancelReviewSession issueNumber = do
 -- with the wording a kill has always used. Child-scoped: its host settles
 -- this action's thread or process and its descendants and leaves every
 -- sibling — and itself — running (requirement 11).
-terminateIssueAction :: Int -> EventM Name AppState ()
+terminateIssueAction :: Int -> EventM Name AppState Bool
 terminateIssueAction issueNumber = do
   appendToReviewSession issueNumber appliedIssueActionTermination
   submitReviewCommand issueNumber TerminateIssueAction
@@ -657,8 +665,12 @@ terminateIssueAction issueNumber = do
 cancelCanonicalIssueAction :: Int -> EventM Name AppState ()
 cancelCanonicalIssueAction issueNumber = do
   appendToReviewSession issueNumber appliedIssueActionTermination
-  submitReviewCommand issueNumber TerminateIssueAction
-  setNotice ("Interrupting issue review #" <> showText issueNumber <> "; canonical stages don't resume — Esc, then r starts a fresh one")
+  requested <- submitReviewCommand issueNumber TerminateIssueAction
+  -- Only for a termination that was actually written. A ledger that could not
+  -- take it means nothing was asked for, and saying an interruption is under
+  -- way would overwrite the one notice that says otherwise.
+  when requested $
+    setNotice ("Interrupting issue review #" <> showText issueNumber <> "; canonical stages don't resume — Esc, then r starts a fresh one")
 
 -- | What ending an action does to its session at the moment of the gesture:
 -- nothing.

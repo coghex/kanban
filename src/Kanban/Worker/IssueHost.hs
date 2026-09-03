@@ -53,6 +53,7 @@ module Kanban.Worker.IssueHost
     childCommandOutcome,
     canonicalStageOutcome,
     issueHostGone,
+    neverAdopted,
     terminalStatus,
     revisionTurnOutcome,
     issueActionPreflightAction,
@@ -714,6 +715,14 @@ neverAdopted :: WorkerDescriptor -> IO Bool
 neverAdopted descriptor = do
   stateResult <- readWorkerState descriptor
   pure $ case stateResult of
+    -- 'WorkerStarting' is the whole of the claim: a child that has asked its
+    -- provider for a thread leaves that status before the call, precisely so
+    -- this cannot read a request already on the wire as one never made. A
+    -- thread and a provider pid are checked too, but neither is what makes a
+    -- shared-connection revision unsafe to rerun — under 'SharedProcess' it
+    -- owns no process and has no thread until the announcement arrives, and
+    -- a host dying in between would otherwise look identical to one that
+    -- died before asking at all.
     Right state ->
       state.workerStateStatus == WorkerStarting
         && state.workerStateReviewThread == Nothing
@@ -1103,6 +1112,19 @@ runRevisionChild host child = do
       if not exclusive
         then pure (Left settledActionReason)
         else do
+          -- Durably no longer "never started", before the request goes out.
+          -- Under a shared connection this child owns no process and holds no
+          -- thread until the provider announces one, so a host dying between
+          -- the request and that announcement would leave a record a
+          -- replacement reads as an action that never asked for anything —
+          -- and reruns, while the original request is still live on a
+          -- connection that outlived its host. Requirement 15 is explicit
+          -- that such an action is reported, not silently run again.
+          updateChildState child $ \state ->
+            state
+              { workerStateStatus = runningUnlessSettled state.workerStateStatus,
+                workerStateLastActivity = "asking for a review thread"
+              }
           begun <- connected.providerBeginReview task.issueActionIssueNumber
           -- A process-per-thread backend spawns this thread's process during
           -- that call, so its identity is recorded now rather than at the
@@ -1568,6 +1590,15 @@ settleSettledChild host child outcome = do
     -- child's recorded census. A @gh@ or @python3@ the gate started outlives
     -- the process that spawned it otherwise.
     terminateRecordedProcesses child.hostChildState
+    -- The envelope before the state, because these are two writes and a host
+    -- dying between them leaves whichever prefix landed. This order's prefix
+    -- is a closed journal over a state that still reads as running, which
+    -- stale recovery already repairs — it terminalizes the state and, finding
+    -- the envelope already there, adds no second one. The other order's
+    -- prefix is a terminal state over an open journal, which nothing repairs:
+    -- a reattaching dashboard replays an action that never ends, and the
+    -- journal stays open to the appends the envelope exists to stop.
+    journalChildTerminal child (WorkerFinished outcome)
     updateChildState child $ \current ->
       current
         { workerStateStatus = WorkerTerminal outcome,
@@ -1581,7 +1612,6 @@ settleSettledChild host child outcome = do
           workerStateReviewRequest = Nothing,
           workerStateLastActivity = terminalActivity outcome
         }
-    journalChildTerminal child (WorkerFinished outcome)
     releaseWorkerLease child.hostChildDescriptor
     -- Retired first, live entry removed second. The two maps are separate
     -- cells, so a lookup landing between the updates sees whichever order

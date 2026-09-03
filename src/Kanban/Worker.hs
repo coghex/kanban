@@ -56,6 +56,7 @@ module Kanban.Worker
     -- which preflight each stage owes.
     canonicalStageOutcome,
     issueHostGone,
+    neverAdopted,
     terminalStatus,
     childCommandOutcome,
     issueActionPreflightAction,
@@ -163,6 +164,7 @@ import Kanban.Worker.IssueHost
     IssueHostTuning (..),
     canonicalStageOutcome,
     issueHostGone,
+    neverAdopted,
     terminalStatus,
     defaultIssueHostTuning,
     runIssueReviewHostWith,

@@ -93,6 +93,7 @@ import Kanban.Worker
     readReviewCommands,
     issueActionTask,
     issueHostGone,
+    neverAdopted,
     reconcileIssueActionClaims,
     confirmIssueActionAdoptedWith,
     readWorkerJournal,
@@ -725,6 +726,95 @@ lifecycleSpec = describe "one running host" $ do
       -- And re-applies nothing: the provider never sees this message.
       calls <- providerCalls host
       filter isSendCall calls `shouldBe` []
+
+  -- Round 20's first blocker. Closing the journal and recording the terminal
+  -- state are two writes, and a host dying between them leaves whichever
+  -- prefix landed. The envelope goes first because that prefix — a closed
+  -- journal over a state that still reads as running — is the one something
+  -- repairs; this is that repair, and it is what makes the order safe.
+  it "completes a settle that died between its journal and its state" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        now <- getCurrentTime
+        descriptor <-
+          descriptorForSpec
+            ( specFor
+                (WorkerId "half-settled-action")
+                (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-that-died") IssueOriginClaude))
+            )
+        createDirectoryIfMissing True (takeDirectory descriptor.workerDescriptorSpecPath)
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        -- The surviving prefix: the journal closed, the state not yet
+        -- written, and the host that was writing them gone.
+        writeChildState
+          descriptor
+          (runningChildState descriptor (addUTCTime (-600) now))
+            {workerStateWorkerIdentity = Just departedIdentity}
+        seedJournal descriptor [WorkerFinished (SolveFailed "the issue action was terminated")]
+        emitted <- newMVar []
+        recovered <-
+          recoverIfWorkerStoppedWith
+            (pure (Right []))
+            descriptor
+            (\_ _ event -> modifyMVar_ emitted (pure . (<> [event])))
+            0
+        recovered `shouldBe` True
+        -- The state is finished, and the journal still carries exactly one
+        -- envelope: a second would be a record after the last record.
+        recordedState <- decodeChildState descriptor
+        fmap (terminalState . (.workerStateStatus)) recordedState `shouldBe` Just True
+        journaled <- journalEvents descriptor
+        [event | event@(WorkerFinished _) <- journaled]
+          `shouldBe` [WorkerFinished (SolveFailed "the issue action was terminated")]
+
+  -- Round 20's second blocker. Under a shared connection a revision owns no
+  -- process and holds no thread until its provider announces one, so a host
+  -- dying between the request and that announcement left a record identical
+  -- to a child that never asked for anything — and a replacement reran it,
+  -- while the original request was still live on a connection that outlived
+  -- its host.
+  it "records that it has asked before the request goes out" $
+    withRunningHost $ \host -> do
+      inside <- newEmptyMVar
+      release <- newEmptyMVar
+      entered <- newIORef False
+      -- Parked inside the begin: the request is on the wire and no thread has
+      -- been announced, which is the whole of the window.
+      modifyMVar_ host.hostBeginGate . const . pure $ do
+        first <- atomicModifyIORef' entered (\seen -> (True, not seen))
+        when first (putMVar inside () >> takeMVar release)
+      child <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitJust "the begin never reached its gate" (tryReadMVar inside)
+      recorded <- decodeChildState child
+      -- No longer "never started", so a replacement host settles it rather
+      -- than running it a second time.
+      fmap (.workerStateStatus) recorded `shouldNotBe` Just WorkerStarting
+      neverAdopted child `shouldReturn` False
+      putMVar release ()
+
+  -- And the reading that rests on it: a child in that state is recovered,
+  -- not rerun, which is what requirement 15 asks for.
+  it "settles rather than reruns a child whose start was already sent" $
+    withRunningHost $ \host -> do
+      descriptor <- childDescriptorNaming host (WorkerId "host-that-died") "action-1" 594 IssueRevision
+      now <- getCurrentTime
+      LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec {workerCreatedAt = now})
+      -- Exactly what the write above leaves: no thread, no provider pid, and
+      -- a status that is no longer starting.
+      writeChildState
+        descriptor
+        (runningChildState descriptor now)
+          { workerStateStatus = WorkerRunning,
+            workerStateLastActivity = "asking for a review thread"
+          }
+      publishTerminalHost host (WorkerId "host-that-died")
+      state <- awaitState descriptor (\recorded -> terminalState recorded.workerStateStatus)
+      state.workerStateStatus
+        `shouldBe` WorkerTerminal (SolveFailed "the review host that owned this action stopped before it finished; its provider session cannot be resumed")
+      -- Nothing was asked for a second time, which is what requirement 15
+      -- forbids.
+      calls <- providerCalls host
+      filter isBeginCall calls `shouldBe` []
 
   -- Round 17's blocker. Settling takes a child off the live list, and a
   -- dashboard that has not yet seen its terminal event still writes to it.

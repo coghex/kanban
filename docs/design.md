@@ -986,6 +986,11 @@ dashboard that never closed would be showing — and no overlay bound, replay
 path, or transcript reconstruction ever truncates evidence the journal still
 holds.
 
+A gesture announces what it asked for only once the command carrying it was
+written. An unwritable ledger means nothing was requested, and the failure the
+submission reports is the notice that says so — one an announcement would
+overwrite with a promise.
+
 Every input the overlay sends — a structured answer, an approval decision,
 feedback or steering, a deliberate resend of a refused steer, an active-turn
 interrupt, and ending the whole action — travels to that child as a durable,
@@ -4025,6 +4030,11 @@ The first solve/autosolve-compatible slice is implemented.
   asks for that backend and the reviewers it selects and for no in-app
   provider session at all, so requiring one to exist before any child had been
   seen would have failed every gate on an install that has none.
+  Settling a child closes its journal before it records the terminal state,
+  because those are two writes and a host dying between them leaves whichever
+  prefix landed. A closed journal over a state that still reads as running is
+  repaired by stale recovery, which terminalizes the state and adds no second
+  envelope; a terminal state over an open journal is repaired by nothing.
   A child settled between asking for a provider thread and the provider
   announcing one stays addressable until that announcement arrives, and the
   thread it names is closed rather than left owned by nothing; a canonical
@@ -4075,6 +4085,12 @@ The first solve/autosolve-compatible slice is implemented.
   fail-closed rule lease recovery applies. A child that had never started is
   re-homed and run; one that had started is re-homed and settled without being
   restarted, because its provider session belonged to a host that is gone.
+  Having started is recorded before the request goes out, not when a thread
+  comes back: under a shared connection a revision owns no process and holds
+  no thread until its provider announces one, so a host dying in between would
+  otherwise leave a record indistinguishable from a child that never asked for
+  anything — and the rerun that followed would run beside a request still live
+  on a connection that outlived its host.
   Either way the specification is rewritten to name the host now serving it,
   since discovery and the collection pass both read ownership from there — and
   a rewrite that fails refuses the adoption rather than proceeding under the

@@ -1061,8 +1061,12 @@ killReviewAgent issueNumber = do
   if not (issueActionLive state issueNumber)
     then setNotice ("Issue review #" <> showText issueNumber <> " has no live process to kill")
     else do
-      terminateIssueAction issueNumber
-      setNotice ("Killing issue review #" <> showText issueNumber <> " and its process tree…")
+      requested <- terminateIssueAction issueNumber
+      -- Only for a kill that was actually recorded. An unwritable command
+      -- ledger means nothing was asked for, and the failure notice the
+      -- submission set is what the user needs to see instead.
+      when requested $
+        setNotice ("Killing issue review #" <> showText issueNumber <> " and its process tree…")
 
 killSelectedWorkingProcess :: EventM Name AppState ()
 killSelectedWorkingProcess = do
@@ -1132,7 +1136,7 @@ killLiveItemWorkingProcess (IssueItem issue) = do
           void . liftIO . forkIO $ case worker of
             Just descriptor -> terminateWorker descriptor
             Nothing -> mapM_ killManagedProcess process
-      when liveReview (terminateIssueAction issueNumber)
+      when liveReview (void (terminateIssueAction issueNumber))
       setNotice ("Killing work for issue #" <> showText issueNumber <> " and its process tree…")
 
 scrollDetails :: Int -> EventM Name AppState ()
