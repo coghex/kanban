@@ -921,15 +921,19 @@ fakeGitHubRecorder recordings scriptLines =
 -- for D-15, rechecked on 2.1.252).
 --
 -- Everything an embedded review has to survive is here, not only the three
--- records it acts on: the hook and status notices a machine's own
--- configuration produces, the aggregate @assistant@ message that repeats the
--- deltas verbatim, and the rate-limit report that closes the exchange. A
--- fake that emitted only the records the decoder understands would leave the
--- ones it must ignore untested, and duplicated transcript text is exactly
--- what the aggregate would cause.
+-- records it acts on: both halves of the notice a hook produces, the status
+-- ticks, the aggregate @assistant@ message that repeats the deltas verbatim,
+-- and the rate-limit report that closes the exchange. A fake that emitted
+-- only the records the decoder understands would leave the ones it must
+-- ignore untested, and duplicated transcript text is exactly what the
+-- aggregate would cause. The launch excludes the user, project, and local
+-- settings sources and so the hooks declared in them, which is not every
+-- hook: one from outside those three still runs, and a review that fell over
+-- on its records would be no review at all.
 claudeReviewTurn :: ByteString.ByteString -> ByteString.ByteString -> [ByteString.ByteString]
 claudeReviewTurn thinking spoken =
   [ "printf '{\"type\":\"system\",\"subtype\":\"hook_started\",\"hook_name\":\"SessionStart\",\"session_id\":\"%s\"}\\n' \"$session\"",
+    "printf '{\"type\":\"system\",\"subtype\":\"hook_response\",\"hook_name\":\"SessionStart\",\"session_id\":\"%s\"}\\n' \"$session\"",
     "printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"%s\",\"uuid\":\"turn-%s\",\"model\":\"claude-opus-5\",\"tools\":[],\"mcp_servers\":[]}\\n' \"$session\" \"$turn\"",
     "printf '{\"type\":\"system\",\"subtype\":\"status\",\"status\":\"requesting\",\"session_id\":\"%s\"}\\n' \"$session\"",
     "printf '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}},\"session_id\":\"%s\"}\\n' \"$session\"",

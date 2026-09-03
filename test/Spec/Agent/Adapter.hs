@@ -189,8 +189,13 @@ spec = do
     -- of them be dropped. Requirement 3's other half is the process shape it
     -- is handed under, which is Codex's exactly. The tool group sits inside
     -- the isolation the earlier flags establish: `--strict-mcp-config` is
-    -- what holds the session to exactly the one server `--mcp-config` names.
-    it "launches Claude on the CLI's stream-json channel, hermetically, on the roster's cell" $
+    -- what holds the session to exactly the one server `--mcp-config` names,
+    -- and the empty `--setting-sources` is what keeps the operator's user,
+    -- project, and local settings — the hooks they declare, the plugins they
+    -- load, the permission mode they set — out of the session, which neither
+    -- of the other two covers. It does not exclude a hook reaching the
+    -- session from somewhere else, and nothing here says it does.
+    it "launches Claude on the CLI's stream-json channel, isolated from the machine's settings, MCP servers, and built-in tools, on the roster's cell" $
       fmap (\backend -> shape (backend.backendProcess (ReviewLaunch "/tmp/worktree" claudeReviewCell (Just claudeToolServer)))) ((adapterFor ClaudeProvider).adapterEmbeddedReview)
         `shouldBe` Just
           ( RawCommand
@@ -206,6 +211,8 @@ spec = do
                 LazyByteString.unpack (encode finalOutputSchema),
                 "--strict-mcp-config",
                 "--tools",
+                "",
+                "--setting-sources",
                 "",
                 "--mcp-config",
                 LazyByteString.unpack (encode (reviewToolServerConfig "/opt/bin/kanban" "/tmp/endpoint")),

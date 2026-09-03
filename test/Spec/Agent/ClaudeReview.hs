@@ -112,7 +112,14 @@ spec = do
     -- separately: the executable must be exactly the one this process is
     -- running (never a PATH lookup), and the endpoint must be a fresh
     -- directory under this run's own private review-tools root.
-    it "runs the CLI's stream-json channel hermetically, on the roster's issue_review.claude cell" $
+    --
+    -- The three isolation flags each cover their own scope, and the empty
+    -- `--setting-sources` is the one that keeps the operator's user,
+    -- project, and local settings — and the hooks they declare — out of the
+    -- spawned session. What it does not do is stop every hook: one can still
+    -- arrive from outside those three sources, which is why the decoder
+    -- below goes on ignoring the hook records.
+    it "runs the CLI's stream-json channel with the machine's settings, MCP servers, and built-in tools excluded, on the roster's issue_review.claude cell" $
       withClaudeReviewClient (reviewTurn <> [approvedResult 844]) $ \fixture -> do
         beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
         _ <- awaitOneCompletedTurn fixture
@@ -138,6 +145,8 @@ spec = do
                        encodedText finalOutputSchema,
                        "--strict-mcp-config",
                        "--tools",
+                       "",
+                       "--setting-sources",
                        "",
                        "--mcp-config",
                        encodedText (reviewToolServerConfig executable endpoint),
@@ -999,14 +1008,22 @@ spec = do
       decodeStreamRecord "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s-1\",\"uuid\":\"t-1\"}"
         `shouldBe` Right (StreamTurnOpened "s-1" "t-1")
 
-    -- The records a hermetic launch still emits, and the aggregate that
-    -- would otherwise duplicate the transcript. Recognised and ignored
-    -- rather than warned about, so a CLI release adding a record type does
-    -- not fill the review panel with warnings.
+    -- The records the launch still emits, and the aggregate that would
+    -- otherwise duplicate the transcript. Recognised and ignored rather than
+    -- warned about, so a CLI release adding a record type does not fill the
+    -- review panel with warnings.
+    --
+    -- Both halves of a hook's report are here on purpose. Excluding the user,
+    -- project, and local settings sources stops the hooks those files declare
+    -- and nothing past them, so a `SessionStart` hook can still run in an
+    -- embedded review from a source the launch does not reach — and it is
+    -- announced twice, once opening and once answering. Neither record may
+    -- become a warning in the panel.
     it "ignores every record a review has no use for" $
       map
         decodeStreamRecord
         [ "{\"type\":\"system\",\"subtype\":\"hook_started\",\"hook_name\":\"SessionStart\"}",
+          "{\"type\":\"system\",\"subtype\":\"hook_response\",\"hook_name\":\"SessionStart\"}",
           "{\"type\":\"system\",\"subtype\":\"status\",\"status\":\"requesting\"}",
           "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":50}",
           "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"already streamed\"}]}}",
@@ -1016,7 +1033,7 @@ spec = do
           "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"signature_delta\",\"signature\":\"AbCd\"}}}",
           "{\"type\":\"something_a_later_cli_adds\"}"
         ]
-        `shouldBe` replicate 9 (Right StreamIgnored)
+        `shouldBe` replicate 10 (Right StreamIgnored)
 
     it "splits the two delta kinds a transcript is made of" $
       map
