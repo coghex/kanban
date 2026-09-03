@@ -103,6 +103,8 @@ module Kanban.Worker
     terminateWorker,
     terminateWorkerWith,
     waitForOrphanResolution,
+    workerDeadlineAt,
+    workerDeadlinePassed,
     workerDeadlineReason,
     waitForWorkerStart,
     workerDirectory,
@@ -112,13 +114,13 @@ where
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, withMVar)
 import Control.Exception (Exception, IOException, SomeException, bracket, mask, throwIO, try, uninterruptibleMask_)
-import Control.Monad (filterM, unless, void, when)
+import Control.Monad (filterM, forM_, unless, void, when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (find)
 import Data.Maybe (isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (addUTCTime, diffUTCTime, getCurrentTime)
+import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Kanban.Cache (normalizedRepositoryIdentity)
 import Kanban.Domain (Repository, WorkflowConfig)
 import Kanban.Models (RecordedAssignment (..), recordedAssignmentCell)
@@ -916,8 +918,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
           -- scheduled.
           complete outcome = uninterruptibleMask_ $ do
             completeNow <- getCurrentTime
-            let completeDeadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
-            unless (completeNow >= completeDeadline) (claimCompletion cells >>= \won -> when won (completeBody True outcome))
+            unless (workerDeadlinePassed spec completeNow) (claimCompletion cells >>= \won -> when won (completeBody True outcome))
           -- 'WorkerProviderSpawning' is intercepted here rather than
           -- flowing through 'emitRaw': it exists purely to bracket the
           -- spawn-to-registration window in 'supervisorProviderSlot' for
@@ -1158,8 +1159,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
           Just settled -> pure settled
           Nothing -> do
             releaseCheckNow <- getCurrentTime
-            let deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
-            if releaseCheckNow >= deadline then pure False else claimLeaseRelease cells
+            if workerDeadlinePassed spec releaseCheckNow then pure False else claimLeaseRelease cells
         unless wonLeaseRelease (takeMVar cells.supervisorWatchdogDone)
         releaseWorkerLease descriptor
       -- Restored on both paths so an in-process caller does not inherit the
@@ -1276,7 +1276,7 @@ updateWorkerState descriptor stateLock event = modifyMVar_ stateLock $ \state ->
         WorkerReviewEvent _ -> state {workerStateLastActivity = "review protocol event"}
         -- Written only into a child action's journal, by the host applying a
         -- dashboard's command. Present so the fold stays total.
-        WorkerReviewInput _ _ -> state {workerStateLastActivity = "review input applied"}
+        WorkerReviewInput _ _ _ -> state {workerStateLastActivity = "review input applied"}
         -- Written only into a child action's journal, by the host that ran
         -- the canonical gate. Present so the fold stays total.
         WorkerCanonicalReviewFinished _ _ -> state {workerStateLastActivity = "canonical gate finished"}
@@ -1425,7 +1425,6 @@ processCensusLoop descriptor cells = do
 waitForOrphanResolution :: WorkerDescriptor -> WorkerSpec -> IO (Either Text [ProcessIdentity]) -> SupervisorCells -> (WorkerEvent -> IO ()) -> IO Bool
 waitForOrphanResolution descriptor spec takeSnapshot cells emit = loop Nothing
   where
-    deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
     loop lastDiagnostic = do
       current <- readIORef cells.supervisorPendingOutcome
       case current of
@@ -1455,7 +1454,7 @@ waitForOrphanResolution descriptor spec takeSnapshot cells emit = loop Nothing
                   unless wonLease (readMVar cells.supervisorWatchdogAdjudicated)
                   final <- atomicModifyIORef' cells.supervisorPendingOutcome (\value -> (Nothing, value))
                   let priorOutcome = maybe outcome snd final
-                  pastDeadline <- if wonLease then (>= deadline) <$> getCurrentTime else pure False
+                  pastDeadline <- if wonLease then workerDeadlinePassed spec <$> getCurrentTime else pure False
                   emit (WorkerFinished (if pastDeadline then workerDeadlineOutcome else priorOutcome))
                   pure wonLease
               | otherwise -> threadDelay workerOrphanCheckIntervalMicros >> loop Nothing
@@ -1540,10 +1539,12 @@ waitForOrphanResolution descriptor spec takeSnapshot cells emit = loop Nothing
 -- has): there is nothing left here to kill or commit, another worker may
 -- already be acquiring that lease, and this does nothing further at all.
 watchdogLoop :: IO (Either Text [ProcessIdentity]) -> WorkerSpec -> SupervisorCells -> (Bool -> SolveOutcome -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
-watchdogLoop takeSnapshot spec cells completeBody emitRaw = do
+-- Never forked for a task with no deadline, and defensive about it anyway: a
+-- watchdog that fired for one would commit a deadline outcome nothing else in
+-- this module is expecting.
+watchdogLoop takeSnapshot spec cells completeBody emitRaw = forM_ (workerDeadlineAt spec) $ \deadline -> do
   now <- getCurrentTime
-  let deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
-      delayMicros = max 0 (round (diffUTCTime deadline now * 1000000))
+  let delayMicros = max 0 (round (diffUTCTime deadline now * 1000000))
   threadDelay delayMicros
   wonLeaseRelease <- claimLeaseRelease cells
   if wonLeaseRelease
@@ -1612,6 +1613,33 @@ watchdogLoop takeSnapshot spec cells completeBody emitRaw = do
 boundedByDeadline :: WorkerTask -> Bool
 boundedByDeadline (IssueHostWorkerTaskKind _) = False
 boundedByDeadline _ = True
+
+-- | When this task's deadline falls, or 'Nothing' for a task that has none.
+--
+-- One spelling, and it has to be one. Four separate places consult the
+-- deadline, and every one of them responds to "it has passed" by standing
+-- aside for the watchdog — waiting on 'supervisorWatchdogDone', waiting on
+-- 'supervisorWatchdogAdjudicated', declining 'claimCompletion', or reporting
+-- the deadline outcome. All four are correct only because a watchdog exists
+-- to take over. A task that has none and deferred at any of them would wait
+-- for a handshake nobody will ever complete: the repository review host is
+-- exactly that task, and past its four-hour mark an ordinary idle exit
+-- blocked forever, holding this repository's host lease and keeping every
+-- later host from starting.
+--
+-- So the exemption lives here rather than at the fork alone. Skipping
+-- 'watchdogLoop' removes the actor; this removes every deferral to it.
+workerDeadlineAt :: WorkerSpec -> Maybe UTCTime
+workerDeadlineAt spec
+  | boundedByDeadline spec.workerTask =
+      Just (addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt)
+  | otherwise = Nothing
+
+-- | Whether this task's deadline has already passed. Always 'False' for a
+-- task with no deadline, which is what keeps every deferral above from
+-- firing for one.
+workerDeadlinePassed :: WorkerSpec -> UTCTime -> Bool
+workerDeadlinePassed spec now = maybe False (now >=) (workerDeadlineAt spec)
 
 unassignedIssueTaskMessage :: Text
 unassignedIssueTaskMessage = "an issue review task reached the assignment-replaying task runner"

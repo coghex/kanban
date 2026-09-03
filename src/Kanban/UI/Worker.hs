@@ -99,7 +99,7 @@ applyWorkerProtocolEvent descriptor workerEvent = do
       WorkerFinished outcome -> applySolveEvent (SolveProcessFinished task.solveWorkerIssueNumber outcome)
       -- A solve worker journals none of the three review kinds.
       WorkerReviewEvent _ -> pure ()
-      WorkerReviewInput _ _ -> pure ()
+      WorkerReviewInput _ _ _ -> pure ()
       WorkerCanonicalReviewFinished _ _ -> pure ()
     PullRequestWorkerTaskKind task ->
       -- This worker is already running, so its brand is the one its own
@@ -129,7 +129,7 @@ applyWorkerProtocolEvent descriptor workerEvent = do
             WorkerFinished outcome -> applyPullRequestFlowEvent (PullRequestProcessFinished task.pullRequestWorkerNumber outcome)
             -- A pull-request worker journals none of the three review kinds.
             WorkerReviewEvent _ -> pure ()
-            WorkerReviewInput _ _ -> pure ()
+            WorkerReviewInput _ _ _ -> pure ()
             WorkerCanonicalReviewFinished _ _ -> pure ()
     -- One durable issue action, replayed into the overlay it belongs to.
     --
@@ -142,7 +142,7 @@ applyWorkerProtocolEvent descriptor workerEvent = do
     -- activity, and the same follow state.
     IssueActionWorkerTaskKind task -> case workerEvent of
       WorkerReviewEvent reviewEvent -> applyReviewEvent task.issueActionIssueNumber reviewEvent
-      WorkerReviewInput display rejected -> applyReviewInput task.issueActionIssueNumber display rejected
+      WorkerReviewInput _ display rejected -> applyReviewInput task.issueActionIssueNumber display rejected
       WorkerCanonicalReviewFinished stage result ->
         applyCanonicalIssueReview task.issueActionIssueNumber stage result
       WorkerDiagnostic message -> applyReviewDiagnostic task.issueActionIssueNumber message

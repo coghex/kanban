@@ -75,6 +75,10 @@ import Kanban.Worker
     childCommandOutcome,
     issueActionPreflightAction,
     liveIssueReviewHost,
+    acquireWorkerLease,
+    runWorkerWithTask,
+    workerDeadlineAt,
+    workerDeadlinePassed,
     revisionTurnOutcome,
     runIssueReviewHostWith,
     appendReviewCommand,
@@ -94,7 +98,8 @@ import Kanban.Worker
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Preflight (BackendFixture (..), fullyProvisionedFakes, withPreflightMachine)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.FilePath (takeDirectory, takeFileName)
+import System.Timeout (timeout)
+import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.Posix.IO (OpenMode (ReadOnly), closeFd, defaultFileFlags, openFd)
 import System.Posix.IO.ByteString (fdRead)
 import Test.Hspec
@@ -107,6 +112,7 @@ spec = describe "the repository issue review host" $ do
   evidenceSpec
   outcomeSpec
   hostLivenessSpec
+  hostDeadlineSpec
   collectionSpec
   compatibilitySpec
 
@@ -170,7 +176,7 @@ lifecycleSpec = describe "one running host" $ do
       -- The line the user typed is in the child's evidence, so a dashboard
       -- that never saw the press still shows it.
       journaled <- journalEvents child
-      journaled `shouldContain` [WorkerReviewInput "the solve lease" Nothing]
+      journaled `shouldContain` [WorkerReviewInput answer.reviewCommandId "the solve lease" Nothing]
 
   -- Requirement 9's rejection half. A command aimed at a turn that has since
   -- ended is refused rather than retargeted, and the refusal is durable so it
@@ -504,7 +510,7 @@ lifecycleSpec = describe "one running host" $ do
       -- replay offers it back rather than showing it as sent.
       journaled <- journalEvents child
       journaled
-        `shouldContain` [WorkerReviewInput "look again" (Just "the review host stopped before this command's result was observed")]
+        `shouldContain` [WorkerReviewInput inherited.reviewCommandId "look again" (Just "the review host stopped before this command's result was observed")]
 
   -- Round 4's first blocker. A message written to steer one turn and read
   -- after that turn ended would steer the next one — or, with no turn left,
@@ -577,7 +583,7 @@ lifecycleSpec = describe "one running host" $ do
       settledOutcome inherited.reviewCommandId settled `shouldBe` Just ReviewCommandOutcomeUnknown
       journaled <- journalEvents child
       journaled
-        `shouldContain` [WorkerReviewInput "look again" (Just "the review host stopped before this command's result was observed")]
+        `shouldContain` [WorkerReviewInput inherited.reviewCommandId "look again" (Just "the review host stopped before this command's result was observed")]
       -- And the specification now names the host that served it, so
       -- discovery and collection read one owner rather than two.
       adopted <- discoverWorkerHistory host.hostRepository
@@ -587,6 +593,47 @@ lifecycleSpec = describe "one running host" $ do
                 Just task <- [issueActionTask candidate.workerDescriptorSpec.workerTask]
             ]
       owners `shouldBe` [hostIdUnderTest]
+
+  -- Round 5's second blocker. A delivery journals what it delivered before
+  -- acknowledging it, so an acknowledgement write that fails leaves the
+  -- ledger holding only the claim while the journal already holds the answer.
+  -- Reporting that command as unobserved would tell the operator a message
+  -- that did reach the provider never did, and hand back text already sent.
+  it "recovers a delivered command's outcome from the journal, not as unknown" $
+    withRunningHost $ \host -> do
+      descriptor <- childDescriptorFor host "action-1" 594 IssueRevision
+      delivered <- commandNumbered 1 descriptor (SendReviewFeedback "look again")
+      Right () <- appendReviewCommand descriptor delivered
+      claim <- acknowledged delivered ReviewCommandClaimed
+      Right () <- acknowledgeReviewCommand descriptor claim
+      -- The journal record a completed delivery leaves, with the final
+      -- acknowledgement missing exactly as a failed append leaves it.
+      seedJournal descriptor [WorkerReviewInput delivered.reviewCommandId "look again" Nothing]
+      child <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitCallsFor host 1 isBeginCall
+      settled <- awaitAcknowledgements child 2
+      settledOutcome delivered.reviewCommandId settled `shouldBe` Just ReviewCommandAccepted
+      -- Still never re-applied, and never reported back as undelivered.
+      calls <- providerCalls host
+      filter isSendCall calls `shouldBe` []
+      journaled <- journalEvents child
+      journaled
+        `shouldNotContain` [WorkerReviewInput delivered.reviewCommandId "look again" (Just "the review host stopped before this command's result was observed")]
+
+  -- And a rejection recovers as the rejection it was, not as unknown.
+  it "recovers a refused command's own reason from the journal" $
+    withRunningHost $ \host -> do
+      descriptor <- childDescriptorFor host "action-1" 594 IssueRevision
+      refused <- commandNumbered 1 descriptor (SendReviewFeedback "look again")
+      Right () <- appendReviewCommand descriptor refused
+      claim <- acknowledged refused ReviewCommandClaimed
+      Right () <- acknowledgeReviewCommand descriptor claim
+      seedJournal descriptor [WorkerReviewInput refused.reviewCommandId "look again" (Just "that turn has already ended")]
+      child <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitCallsFor host 1 isBeginCall
+      settled <- awaitAcknowledgements child 2
+      settledOutcome refused.reviewCommandId settled
+        `shouldBe` Just (ReviewCommandRejected "that turn has already ended")
 
   -- The host is not a provider turn, and must not record itself as one: a
   -- recorded provider pid with no recorded identity is what every termination
@@ -783,8 +830,8 @@ evidenceSpec = describe "the durable review evidence" $ do
     withIssueAction $ \descriptor -> do
       let events =
             [ WorkerReviewEvent (ReviewThreadCreated 594 sampleThread),
-              WorkerReviewInput "yes" Nothing,
-              WorkerReviewInput "no" (Just "that review request is no longer pending"),
+              WorkerReviewInput (ReviewCommandId "command-1") "yes" Nothing,
+              WorkerReviewInput (ReviewCommandId "command-2") "no" (Just "that review request is no longer pending"),
               WorkerCanonicalReviewFinished InitialReview (Right canonicalResult),
               WorkerFinished SolveCompleted
             ]
@@ -949,6 +996,60 @@ collectionSpec = describe "collecting host and child records" $ do
 -- ---------------------------------------------------------------------------
 -- Durable-record compatibility
 -- ---------------------------------------------------------------------------
+
+-- | Round 5's first blocker: a host is exempt from the deadline watchdog, but
+-- three other places still deferred to that watchdog once the deadline
+-- elapsed — and every deferral waits on a handshake only the watchdog fills.
+hostDeadlineSpec :: Spec
+hostDeadlineSpec = describe "a host past the ordinary worker deadline" $ do
+  it "gives a host no deadline at all, and every other task one" $ do
+    let hostSpec = specFor (WorkerId "host-1") (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban"))
+        solveSpec = specFor (WorkerId "solve-1") (SolveWorkerTaskKind legacySolveTask)
+        actionSpec = specFor (WorkerId "action-1") (IssueActionWorkerTaskKind sampleAction)
+    workerDeadlineAt hostSpec `shouldBe` Nothing
+    workerDeadlineAt solveSpec `shouldNotBe` Nothing
+    workerDeadlineAt actionSpec `shouldNotBe` Nothing
+
+  -- The whole point: however long ago the host was created, its deadline has
+  -- never passed, so nothing stands aside for a watchdog that does not exist.
+  it "never reports a host's deadline as passed, however old it is" $ do
+    now <- getCurrentTime
+    let ancient = addUTCTime (negate (365 * 24 * 60 * 60)) now
+        hostSpec = (specFor (WorkerId "host-1") (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban"))) {workerCreatedAt = ancient}
+        solveSpec = (specFor (WorkerId "solve-1") (SolveWorkerTaskKind legacySolveTask)) {workerCreatedAt = ancient}
+    workerDeadlinePassed hostSpec now `shouldBe` False
+    workerDeadlinePassed solveSpec now `shouldBe` True
+
+  -- And the behaviour that pure rule exists for, through the real supervisor:
+  -- an aged host whose task returns must complete and release its lease, not
+  -- block forever holding this repository's host lease against every later
+  -- host.
+  it "exits and releases its lease when its task returns long past that deadline" $
+    withTemporaryCacheRoot $ \temporaryRoot -> do
+      now <- getCurrentTime
+      let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+          longAgo = addUTCTime (-3600) now
+          hostSpec =
+            (specFor (WorkerId "issue-host-aged") (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")))
+              { workerRepository = repository,
+                workerCreatedAt = longAgo,
+                workerMaxRuntimeSeconds = 60
+              }
+          workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+          specPath = workerRoot </> "issue-host-aged.spec.json"
+      createDirectoryIfMissing True repository.repositoryRoot
+      createDirectoryIfMissing True workerRoot
+      LazyByteString.writeFile specPath (encode hostSpec)
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        descriptor <- descriptorForSpec hostSpec
+        acquireWorkerLease descriptor `shouldReturn` Right ()
+        -- The host's own loop, standing in for one that has just gone idle.
+        let finishInstantly _spec _aggregator _rememberProvider emit = emit (WorkerFinished SolveCompleted)
+        result <- timeout 5000000 (runWorkerWithTask readProcessSnapshot finishInstantly specPath)
+        result `shouldBe` Just (Right ())
+        -- Released, so a later host can take it. Before this fix the call
+        -- above never returned at all.
+        acquireWorkerLease descriptor `shouldReturn` Right ()
 
 -- | Round 3's second blocker: a host that died the instant after persisting a
 -- fresh running state leaves a record that reads as live forever, and a child
@@ -1315,6 +1416,14 @@ publishStartedChildNaming host named identifier issueNumber stage = do
         workerStateReviewThread = Just (ReviewThreadId (ConnectionId 1) "thread-of-dead-host")
       }
   pure descriptor {workerDescriptorSpec = started}
+
+-- | Writes journal records a previous host would have left behind.
+seedJournal :: WorkerDescriptor -> [WorkerEvent] -> IO ()
+seedJournal descriptor events = do
+  now <- getCurrentTime
+  LazyByteString.appendFile
+    descriptor.workerDescriptorEventPath
+    (LazyByteString.concat [encode (WorkerEnvelope now event) <> "\n" | event <- events])
 
 -- | Ends one child through the durable termination command and waits for the
 -- host to settle it.

@@ -1570,6 +1570,18 @@ unless their typed contract exposes an override.
   to name the host serving it, because leaving it naming a dead one gave
   discovery and the cache collection pass a different owner from the truth.
 
+  The fifth round closed two. Exempting the host from the deadline watchdog
+  was not one edit: the supervisor's completion claim, its orphan poll, and
+  its lease release each defer to that watchdog once the bound elapses, and
+  each waits on a handshake only the watchdog fills — so a host older than
+  four hours never exited and held this repository's host lease against every
+  later one. The deadline now has a single spelling that answers "none" for an
+  unbounded task, and every deferral reads it. And a delivery's journal entry
+  is written before its acknowledgement, so a failed acknowledgement leaves the
+  ledger holding only a claim while the journal holds the answer; the next host
+  reconciles the two by command id rather than reporting a delivered message as
+  one nobody observed.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

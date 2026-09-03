@@ -118,12 +118,14 @@ import Kanban.Worker.Command
     undeliveredReviewCommands,
   )
 import Kanban.Worker.Discovery (discoverWorkerHistory)
-import Kanban.Worker.Journal (EventJournalLock, appendWorkerEvent, newEventJournalLock)
+import Kanban.Worker.Journal (EventJournalLock, appendWorkerEvent, newEventJournalLock, readWorkerJournal)
 import Kanban.Worker.Lease (releaseWorkerLease)
 import Kanban.Worker.Paths (descriptorForSpec, readWorkerState, writePrivateJson, writeState)
 import Kanban.Worker.Types
   ( IssueActionWorkerTask (..),
+    ReviewCommandId,
     WorkerDescriptor (..),
+    WorkerEnvelope (..),
     WorkerEvent (..),
     WorkerId (..),
     WorkerSpec (..),
@@ -636,10 +638,35 @@ settleInheritedClaims :: HostChild -> IO ()
 settleInheritedClaims child = do
   commands <- readReviewCommands child.hostChildDescriptor
   acknowledgements <- readReviewCommandAcknowledgements child.hostChildDescriptor
+  delivered <- deliveredCommandOutcomes child
   forM_ (unsettledReviewCommands commands acknowledgements) $ \command -> do
-    journalChild child (WorkerReviewInput (commandDisplay command.reviewCommandPayload) (Just unobservedCommandReason))
-    acknowledgement <- reviewCommandAcknowledgement command ReviewCommandOutcomeUnknown
-    void (acknowledgeReviewCommand child.hostChildDescriptor acknowledgement)
+    -- The journal is consulted before the outcome is called unknown. A
+    -- delivery writes its journal record /before/ the final acknowledgement,
+    -- so a failed acknowledgement write leaves the ledger holding only the
+    -- claim while the journal already holds the answer. Reporting that
+    -- command as unobserved would tell the operator a message that did reach
+    -- the provider never did — and hand them back text that was already sent.
+    case Map.lookup command.reviewCommandId delivered of
+      Just reason -> settleWith command (maybe ReviewCommandAccepted ReviewCommandRejected reason)
+      Nothing -> do
+        journalChild child (WorkerReviewInput command.reviewCommandId (commandDisplay command.reviewCommandPayload) (Just unobservedCommandReason))
+        settleWith command ReviewCommandOutcomeUnknown
+  where
+    settleWith command outcome = do
+      acknowledgement <- reviewCommandAcknowledgement command outcome
+      void (acknowledgeReviewCommand child.hostChildDescriptor acknowledgement)
+
+-- | What this child's journal already records about each command it
+-- delivered: the command's id, and the reason it was not delivered if there
+-- was one.
+--
+-- The journal is the evidence and the ledger is the deduplication record, and
+-- this is where a gap between the two is closed. Only the last record for a
+-- command counts, for the same reason the ledger reads its last entry.
+deliveredCommandOutcomes :: HostChild -> IO (Map ReviewCommandId (Maybe Text))
+deliveredCommandOutcomes child = do
+  journaled <- readWorkerJournal child.hostChildDescriptor
+  pure (Map.fromList [(identifier, reason) | WorkerReviewInput identifier _ reason <- map (.workerEnvelopeEvent) journaled])
 
 unresumableActionDiagnostic :: Text
 unresumableActionDiagnostic = "the review host that owned this action stopped before it finished; its provider session cannot be resumed"
@@ -1052,9 +1079,16 @@ deliverToLiveChild host child command = do
       journalChild child (WorkerDiagnostic ("a review command could not be claimed and was not applied: " <> message))
     Right () -> do
       outcome <- applyChildCommand host child command
-      journalChild child (WorkerReviewInput (commandDisplay command.reviewCommandPayload) (rejectionReason outcome))
+      journalChild child (WorkerReviewInput command.reviewCommandId (commandDisplay command.reviewCommandPayload) (rejectionReason outcome))
       acknowledgement <- reviewCommandAcknowledgement command outcome
-      void (acknowledgeReviewCommand child.hostChildDescriptor acknowledgement)
+      settled <- acknowledgeReviewCommand child.hostChildDescriptor acknowledgement
+      -- A final acknowledgement that will not write leaves the ledger holding
+      -- only the claim. The command is still never re-applied — that is what
+      -- the claim is for — and the journal entry just above is what lets the
+      -- next host recover the real outcome instead of calling it unobserved,
+      -- so this says so rather than passing silently.
+      forM_ (either Just (const Nothing) settled) $ \message ->
+        journalChild child (WorkerDiagnostic ("a review command's outcome could not be acknowledged: " <> message))
 
 -- | What the overlay showed for a command, which is what its transcript entry
 -- reads. The three payloads a person types or chooses carry their own display

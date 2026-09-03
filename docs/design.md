@@ -977,10 +977,12 @@ correlated command with an acknowledgement written back. A command is claimed
 before it is applied and settled after, and a command carrying any
 acknowledgement is never applied again — so a retry, a replay, a restart, and
 an acknowledgement that could not be written all still deliver it exactly
-once. A claim left standing is an attempt whose result was never observed: the next
-host to adopt that action settles it as exactly that and journals it as
-undelivered, so the message a dashboard cleared its draft for is offered back
-rather than lost. Command identifiers carry a process-local sequence as well
+once. A claim left standing is an attempt whose result was never observed, and the
+next host to adopt that action answers it — from the child's journal where
+that records what was delivered, and as unobserved only where it does not.
+The journal entry is written before the acknowledgement precisely so a failed
+acknowledgement leaves the answer recoverable rather than turning a delivered
+message into one reported as lost. Command identifiers carry a process-local sequence as well
 as a clock and a pid, because two presses in one clock tick would otherwise
 deduplicate to one. Every
 command that acts on a thread names the thread, turn, or request it was
@@ -3943,7 +3945,11 @@ The first solve/autosolve-compatible slice is implemented.
   The host takes no deadline of its own: each child is bounded individually
   from its own creation, and the host exits once it holds no live child, so no
   host-level bound settles a child still inside its own bound and a host
-  serving nobody leaves neither a lease nor a discovery record behind. It
+  serving nobody leaves neither a lease nor a discovery record behind. Having
+  no deadline means having none anywhere — the supervisor's completion claim,
+  its orphan poll, and its lease release all stand aside for the deadline
+  watchdog once the bound elapses, and a worker with no watchdog that stood
+  aside at any of them would wait for a handshake nobody completes. It
   records no provider of its own either — it runs no provider turn, and a
   recorded provider process with no verifiable identity is what every
   termination path reads as unresolvable — and instead registers its client's

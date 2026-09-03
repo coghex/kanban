@@ -15,6 +15,7 @@
 -- module's public contract promises.
 module Kanban.Worker.Types
   ( WorkerId (..),
+    ReviewCommandId (..),
     SolveWorkerTask (..),
     PullRequestWorkerTask (..),
     IssueHostWorkerTask (..),
@@ -54,6 +55,17 @@ import Kanban.Review
 import Kanban.Solve (AgentEvent, ResumeProvenance (..), SolveOutcome, SolveWorkflow, SolverBrand)
 
 newtype WorkerId = WorkerId {unWorkerId :: Text}
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | One dashboard-to-child command's identity.
+--
+-- Declared here rather than beside the command protocol in
+-- "Kanban.Worker.Command" because the /journal/ names it too: a delivery
+-- writes what it delivered, and that record has to be matchable against the
+-- ledger entry for the same command. The protocol built on it stays there;
+-- this is just the identity, next to every other durable identity.
+newtype ReviewCommandId = ReviewCommandId {unReviewCommandId :: Text}
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -280,7 +292,14 @@ data WorkerEvent
     -- 'Nothing' is delivered; 'Just' carries why it was not, which is the
     -- account a rejected steer needs so it can be offered back rather than
     -- left looking sent.
-    WorkerReviewInput Text (Maybe Text)
+    --
+    -- It names its command, and that is load-bearing rather than decorative.
+    -- This record is written before the command's final acknowledgement, so
+    -- when that write fails the ledger keeps only the claim while the journal
+    -- already holds the answer. A later host reconciles the two by this id,
+    -- rather than reporting a command it can see was delivered as one whose
+    -- outcome nobody observed.
+    WorkerReviewInput ReviewCommandId Text (Maybe Text)
   | -- | What the canonical @approve_issues.py@ backend reported for an
     -- initial review or rereview, including the reviewer route and models it
     -- selected.

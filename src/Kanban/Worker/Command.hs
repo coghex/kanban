@@ -61,7 +61,7 @@ import qualified Data.Text as Text
 import Data.Time (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
 import Kanban.Review (ReviewAnswer, ReviewRequestId, ReviewThreadId)
-import Kanban.Worker.Types (WorkerDescriptor (..), WorkerId (..))
+import Kanban.Worker.Types (ReviewCommandId (..), WorkerDescriptor (..), WorkerId (..))
 import System.IO (Handle, hClose)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (setFdMode)
@@ -69,7 +69,8 @@ import System.Posix.IO (OpenFileFlags (append, creat), OpenMode (WriteOnly), clo
 import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.Process (getProcessID)
 
--- | A command's identity, and the only thing deduplication is keyed by.
+-- | Allocates a command's identity, which is the only thing deduplication is
+-- keyed by.
 --
 -- Three parts, and each closes a different collision. The pid separates two
 -- dashboards writing to one child's ledger. The clock separates one
@@ -78,11 +79,8 @@ import System.Posix.Process (getProcessID)
 -- identically, and two commands sharing an id are one command as far as
 -- deduplication is concerned: the second is silently discarded, which is a
 -- person's typed answer disappearing.
-newtype ReviewCommandId = ReviewCommandId {unReviewCommandId :: Text}
-  deriving stock (Eq, Ord, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
-
--- | The process-local sequence that makes two ids from one clock tick
+--
+-- The process-local sequence that makes two ids from one clock tick
 -- distinct. Global because uniqueness has to hold across every child this
 -- process writes to, not per child.
 commandSequence :: IORef Int
