@@ -506,6 +506,88 @@ lifecycleSpec = describe "one running host" $ do
       journaled
         `shouldContain` [WorkerReviewInput "look again" (Just "the review host stopped before this command's result was observed")]
 
+  -- Round 4's first blocker. A message written to steer one turn and read
+  -- after that turn ended would steer the next one — or, with no turn left,
+  -- open a fresh turn carrying text meant to redirect a finished one.
+  it "rejects feedback written for a turn that has since been replaced" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      thread <- awaitThreadFor host 594
+      deliver host (ReviewTurnStarted thread "turn-1")
+      _ <- awaitState child (\recorded -> recorded.workerStateReviewTurn == Just "turn-1")
+      stale <- commandNumbered 1 child (SendReviewFeedback "look again")
+      -- The turn ends and another starts on the same thread before the
+      -- command is read.
+      deliver host (ReviewTurnCompleted thread TurnInterrupted Nothing Nothing)
+      deliver host (ReviewTurnStarted thread "turn-2")
+      _ <- awaitState child (\recorded -> recorded.workerStateReviewTurn == Just "turn-2")
+      Right () <- appendReviewCommand child stale
+      settled <- awaitAcknowledgements child 1
+      settledOutcome stale.reviewCommandId settled `shouldBe` Just (ReviewCommandRejected "that turn has already ended")
+      calls <- providerCalls host
+      filter isSendCall calls `shouldBe` []
+
+  -- Round 4's second blocker. A termination settles the child part-way
+  -- through a batch this pass already snapshotted, and everything queued
+  -- behind it is addressed to an action that no longer exists — under a
+  -- shared connection, feedback read after that point would open a new turn
+  -- on a thread the settle had finished with.
+  it "refuses commands queued behind a termination rather than acting on them" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      thread <- awaitThreadFor host 594
+      deliver host (ReviewTurnStarted thread "turn-1")
+      _ <- awaitState child (\recorded -> recorded.workerStateReviewTurn == Just "turn-1")
+      termination <- commandNumbered 1 child TerminateIssueAction
+      queued <- commandNumbered 2 child (SendReviewFeedback "carry on")
+      -- Both in the ledger before the host's next poll, so one batch holds
+      -- the termination and the command behind it.
+      Right () <- appendReviewCommand child termination
+      Right () <- appendReviewCommand child queued
+      _ <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      settled <- awaitAcknowledgements child 3
+      settledOutcome queued.reviewCommandId settled
+        `shouldBe` Just (ReviewCommandRejected "this issue action has already ended")
+      calls <- providerCalls host
+      filter isSendCall calls `shouldBe` []
+
+  -- Round 4's third and fourth blockers together. A child that had already
+  -- started under a host that then died is recovered rather than restarted
+  -- (requirement 15), its standing claim is answered, and the specification
+  -- is rewritten to name the host actually serving it — because startup
+  -- discovery and the cache collection pass both read ownership from there.
+  it "recovers a started child whose host died, without restarting it" $
+    withRunningHost $ \host -> do
+      descriptor <- childDescriptorNaming host (WorkerId "host-that-died") "action-1" 594 IssueRevision
+      inherited <- commandNumbered 1 descriptor (SendReviewFeedback "look again")
+      Right () <- appendReviewCommand descriptor inherited
+      claim <- acknowledged inherited ReviewCommandClaimed
+      Right () <- acknowledgeReviewCommand descriptor claim
+      -- Published as a child that had started: a thread recorded, so it is
+      -- not the never-adopted case.
+      child <- publishStartedChildNaming host (WorkerId "host-that-died") "action-1" 594 IssueRevision
+      publishTerminalHost host (WorkerId "host-that-died")
+      state <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      state.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed "the review host that owned this action stopped before it finished; its provider session cannot be resumed")
+      -- Nothing was restarted, which is what requirement 15 forbids.
+      calls <- providerCalls host
+      filter isBeginCall calls `shouldBe` []
+      -- The standing claim was answered, and its message offered back.
+      settled <- readReviewCommandAcknowledgements child
+      settledOutcome inherited.reviewCommandId settled `shouldBe` Just ReviewCommandOutcomeUnknown
+      journaled <- journalEvents child
+      journaled
+        `shouldContain` [WorkerReviewInput "look again" (Just "the review host stopped before this command's result was observed")]
+      -- And the specification now names the host that served it, so
+      -- discovery and collection read one owner rather than two.
+      adopted <- discoverWorkerHistory host.hostRepository
+      let owners =
+            [ task.issueActionHost
+              | candidate <- adopted,
+                Just task <- [issueActionTask candidate.workerDescriptorSpec.workerTask]
+            ]
+      owners `shouldBe` [hostIdUnderTest]
+
   -- The host is not a provider turn, and must not record itself as one: a
   -- recorded provider pid with no recorded identity is what every termination
   -- path reads as "started, but unverifiable", which leaves a host kill
@@ -1206,6 +1288,33 @@ childDescriptorFor host identifier issueNumber stage =
          (IssueActionWorkerTaskKind (IssueActionWorkerTask issueNumber stage hostIdUnderTest IssueOriginClaude)))
         {workerRepository = host.hostRepository}
     )
+
+-- | The descriptor a child naming some other host would be published under.
+childDescriptorNaming :: HostUnderTest -> WorkerId -> Text -> Int -> ReviewStage -> IO WorkerDescriptor
+childDescriptorNaming host named identifier issueNumber stage =
+  descriptorForSpec
+    ( (specFor
+         (WorkerId identifier)
+         (IssueActionWorkerTaskKind (IssueActionWorkerTask issueNumber stage named IssueOriginClaude)))
+        {workerRepository = host.hostRepository}
+    )
+
+-- | Publishes a child that had already started under another host: running,
+-- with a thread recorded, which is what makes it a recovery rather than a
+-- never-adopted re-home.
+publishStartedChildNaming :: HostUnderTest -> WorkerId -> Text -> Int -> ReviewStage -> IO WorkerDescriptor
+publishStartedChildNaming host named identifier issueNumber stage = do
+  now <- getCurrentTime
+  descriptor <- childDescriptorNaming host named identifier issueNumber stage
+  let started = descriptor.workerDescriptorSpec {workerCreatedAt = now}
+  LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode started)
+  writeChildState
+    descriptor
+    (runningChildState descriptor now)
+      { workerStateStatus = WorkerRunning,
+        workerStateReviewThread = Just (ReviewThreadId (ConnectionId 1) "thread-of-dead-host")
+      }
+  pure descriptor {workerDescriptorSpec = started}
 
 -- | Ends one child through the durable termination command and waits for the
 -- host to settle it.

@@ -120,7 +120,7 @@ import Kanban.Worker.Command
 import Kanban.Worker.Discovery (discoverWorkerHistory)
 import Kanban.Worker.Journal (EventJournalLock, appendWorkerEvent, newEventJournalLock)
 import Kanban.Worker.Lease (releaseWorkerLease)
-import Kanban.Worker.Paths (descriptorForSpec, readWorkerState, writeState)
+import Kanban.Worker.Paths (descriptorForSpec, readWorkerState, writePrivateJson, writeState)
 import Kanban.Worker.Types
   ( IssueActionWorkerTask (..),
     WorkerDescriptor (..),
@@ -130,6 +130,7 @@ import Kanban.Worker.Types
     WorkerState (..),
     WorkerStatus (..),
     issueActionTask,
+    WorkerTask (..),
   )
 import System.Posix.Process (getProcessID)
 
@@ -459,41 +460,81 @@ adoptNewChildren host = do
   history <- discoverWorkerHistory host.hostSpec.workerRepository
   held <- readMVar host.hostChildren
   candidates <- catMaybes <$> mapM (childCandidate host) history
-  forM_ candidates $ \(descriptor, task) ->
+  forM_ candidates $ \(descriptor, task, adoption) ->
     unless (Map.member descriptor.workerDescriptorSpec.workerId held) $ do
       stateResult <- readWorkerState descriptor
       case stateResult of
         Right state | terminalStatus state.workerStateStatus -> pure ()
-        _ -> adoptChild host descriptor task
+        _ -> do
+          (owned, ownedTask) <- rehomeChild host descriptor task
+          adoptChild host owned ownedTask adoption
 
--- | Whether this host may run this child.
+-- | What this host may do with a child, if anything.
 --
 -- Naming this host is the ordinary claim, and the only one that reaches a
 -- child another host is already serving (requirement 16).
 --
--- The second arm is recovery, and it is needed because host selection and
+-- The other two are recovery, and they are needed because host selection and
 -- child admission cannot be made atomic from the launch side: a dispatch
--- reads a live host, and that host can reach its idle grace and exit before
--- the child's specification is written. The child then names a host that has
--- terminated, and under the first arm alone it would sit unadopted until
--- stale recovery — an action the operator started that simply never runs.
+-- reads a live host, and that host can reach its idle grace and exit — or
+-- simply die — before or after the child's specification is written. Under
+-- the first arm alone such a child sits unadopted until stale recovery: an
+-- action the operator started that never runs, and whose dashboard commands
+-- are never answered.
 --
--- So a host also adopts a child whose named host is provably finished and
--- which no host has ever adopted. Both halves are load-bearing. "Provably
--- finished" excludes a live host's children, so this can never steal one; a
--- host record that will not decode is not proof and is left alone. "Never
--- adopted" means still starting, with no thread and no provider recorded —
--- an action that has done nothing yet, so re-homing it repeats nothing and
--- loses nothing.
-childCandidate :: IssueReviewHost -> WorkerDescriptor -> IO (Maybe (WorkerDescriptor, IssueActionWorkerTask))
+-- Which of the two recoveries applies turns on whether the child ever
+-- started. One that has done nothing is re-homed and run, because repeating
+-- nothing loses nothing. One that /had/ started is re-homed and settled
+-- without being restarted: its provider session belonged to a host that is
+-- gone and cannot be resumed, and requirement 15 is explicit that such an
+-- action is reported rather than silently run again as a new one.
+--
+-- "Provably gone" is what keeps either from being theft. A live host's
+-- children are never candidates, and a host record that cannot be read is not
+-- proof.
+data ChildAdoption
+  = -- | Run this child's stage.
+    AdoptToRun
+  | -- | Settle it, without restarting anything.
+    AdoptToRecover
+  deriving stock (Eq, Show)
+
+childCandidate :: IssueReviewHost -> WorkerDescriptor -> IO (Maybe (WorkerDescriptor, IssueActionWorkerTask, ChildAdoption))
 childCandidate host descriptor = case issueActionTask descriptor.workerDescriptorSpec.workerTask of
   Nothing -> pure Nothing
   Just task
-    | task.issueActionHost == host.hostSpec.workerId -> pure (Just (descriptor, task))
+    | task.issueActionHost == host.hostSpec.workerId -> pure (Just (descriptor, task, AdoptToRun))
     | otherwise -> do
         orphaned <- namedHostGone host task.issueActionHost
-        untouched <- neverAdopted descriptor
-        pure (if orphaned && untouched then Just (descriptor, task) else Nothing)
+        if not orphaned
+          then pure Nothing
+          else do
+            untouched <- neverAdopted descriptor
+            pure (Just (descriptor, task, if untouched then AdoptToRun else AdoptToRecover))
+
+-- | Rewrites an orphaned child's specification to name this host.
+--
+-- Persisted rather than held in memory, because the ownership it records is
+-- read by things outside this process: startup discovery decides which host a
+-- child reattaches to from it, and the cache collection pass decides whether
+-- a child's records may be removed by whether /its named host/ is live. A
+-- child running under this host while its specification still names a dead
+-- one is two answers to one question, and the collection pass would take the
+-- dead one.
+rehomeChild :: IssueReviewHost -> WorkerDescriptor -> IssueActionWorkerTask -> IO (WorkerDescriptor, IssueActionWorkerTask)
+rehomeChild host descriptor task
+  | task.issueActionHost == host.hostSpec.workerId = pure (descriptor, task)
+  | otherwise = do
+      let rehomed = task {issueActionHost = host.hostSpec.workerId}
+          spec = descriptor.workerDescriptorSpec {workerTask = IssueActionWorkerTaskKind rehomed}
+      written <- writePrivateJson descriptor.workerDescriptorSpecPath spec
+      pure $ case written of
+        -- A specification that cannot be rewritten leaves the child named to
+        -- its dead host. It is still adopted and still answered for; what is
+        -- lost is only the durable record of who is serving it, which the
+        -- next pass tries again.
+        Left _ -> (descriptor, task)
+        Right () -> (descriptor {workerDescriptorSpec = spec}, rehomed)
 
 -- | Whether the host a child names is definitely not going to run it.
 --
@@ -537,8 +578,8 @@ terminalStatus (WorkerTerminal _) = True
 terminalStatus (WorkerOrphaned _) = True
 terminalStatus _ = False
 
-adoptChild :: IssueReviewHost -> WorkerDescriptor -> IssueActionWorkerTask -> IO ()
-adoptChild host descriptor task = do
+adoptChild :: IssueReviewHost -> WorkerDescriptor -> IssueActionWorkerTask -> ChildAdoption -> IO ()
+adoptChild host descriptor task adoption = do
   journal <- newEventJournalLock
   now <- getCurrentTime
   rawLog <- openChildLog descriptor task
@@ -564,9 +605,21 @@ adoptChild host descriptor task = do
   modifyMVar_ host.hostChildren (pure . Map.insert descriptor.workerDescriptorSpec.workerId child)
   persistChild child
   journalChild child (WorkerDiagnostic (adoptionDiagnostic task))
+  -- Before anything else, and for both adoptions: a claim a previous host
+  -- left standing is answered whether this host goes on to run the action or
+  -- only to settle it.
   settleInheritedClaims child
-  threadId <- forkIO (runChildStage host child)
-  writeIORef stageThread (Just threadId)
+  case adoption of
+    AdoptToRun -> do
+      threadId <- forkIO (runChildStage host child)
+      writeIORef stageThread (Just threadId)
+    -- Recovered, not restarted. Its provider session belonged to a host that
+    -- is gone; replaying its evidence and reporting an unknown outcome is
+    -- what requirement 15 asks for, and starting a fresh turn under the same
+    -- action is what it forbids.
+    AdoptToRecover -> do
+      journalChild child (WorkerDiagnostic unresumableActionDiagnostic)
+      settleChild host child (SolveFailed unresumableActionDiagnostic)
 
 -- | Answers for the commands a previous host claimed and never settled.
 --
@@ -587,6 +640,9 @@ settleInheritedClaims child = do
     journalChild child (WorkerReviewInput (commandDisplay command.reviewCommandPayload) (Just unobservedCommandReason))
     acknowledgement <- reviewCommandAcknowledgement command ReviewCommandOutcomeUnknown
     void (acknowledgeReviewCommand child.hostChildDescriptor acknowledgement)
+
+unresumableActionDiagnostic :: Text
+unresumableActionDiagnostic = "the review host that owned this action stopped before it finished; its provider session cannot be resumed"
 
 unobservedCommandReason :: Text
 unobservedCommandReason = "the review host stopped before this command's result was observed"
@@ -968,6 +1024,24 @@ applyPendingCommands host = do
 -- outcome-unknown discipline every other terminal path here follows.
 deliverChildCommand :: IssueReviewHost -> HostChild -> ReviewCommand -> IO ()
 deliverChildCommand host child command = do
+  -- Asked again here, per command, rather than once for the batch. A
+  -- termination settles the child part-way through a list this pass already
+  -- snapshotted, and everything queued behind it is addressed to an action
+  -- that no longer exists — under a shared connection, a feedback command
+  -- read after that point would open a new turn on a thread the settle had
+  -- finished with.
+  settled <- readIORef child.hostChildSettleClaim
+  if settled
+    then do
+      acknowledgement <- reviewCommandAcknowledgement command (ReviewCommandRejected settledActionReason)
+      void (acknowledgeReviewCommand child.hostChildDescriptor acknowledgement)
+    else deliverToLiveChild host child command
+
+settledActionReason :: Text
+settledActionReason = "this issue action has already ended"
+
+deliverToLiveChild :: IssueReviewHost -> HostChild -> ReviewCommand -> IO ()
+deliverToLiveChild host child command = do
   claim <- reviewCommandAcknowledgement command ReviewCommandClaimed
   claimed <- acknowledgeReviewCommand child.hostChildDescriptor claim
   case claimed of
@@ -1039,12 +1113,21 @@ applyChildCommand host child command = do
         requireRequest state requestId (connected.providerAnswerQuestion requestId answer)
       AnswerReviewApproval requestId accepted forSession _ ->
         requireRequest state requestId (connected.providerApproveAction requestId accepted forSession)
-      SendReviewFeedback message -> sendOnThread connected state message
-      ResendReviewSteer message -> sendOnThread connected state message
+      SendReviewFeedback message -> sendOnThread connected state command message
+      ResendReviewSteer message -> sendOnThread connected state command message
   where
-    sendOnThread connected state message = case state.workerStateReviewThread of
+    -- The turn as well as the thread. A message written to steer one turn and
+    -- read after that turn ended would otherwise steer the next one, or —
+    -- with no turn left — open a fresh turn carrying text meant to redirect a
+    -- finished one. Requiring the two to agree covers both: a follow-up
+    -- deliberately sent between turns carries no turn and is accepted only
+    -- while the child holds none.
+    sendOnThread connected state issued message = case state.workerStateReviewThread of
       Nothing -> pure (ReviewCommandRejected "this action has no provider thread to send to")
-      Just threadId -> childCommandOutcome <$> connected.providerSendMessage threadId state.workerStateReviewTurn message
+      Just threadId
+        | issued.reviewCommandTurn /= state.workerStateReviewTurn ->
+            pure (ReviewCommandRejected "that turn has already ended")
+        | otherwise -> childCommandOutcome <$> connected.providerSendMessage threadId state.workerStateReviewTurn message
     -- The request the command answers has to be the one the child is actually
     -- waiting on. A question answered twice, or an answer racing the
     -- provider's own timeout, would otherwise be written against whatever
@@ -1128,6 +1211,10 @@ settleChild host child outcome = do
         { workerStateStatus = WorkerTerminal outcome,
           workerStateProviderPid = Nothing,
           workerStateProviderIdentity = Nothing,
+          -- The thread goes with the turn. A settled child holding a thread
+          -- still reads as addressable to every thread-scoped check, which is
+          -- what let a command queued behind a termination pass one.
+          workerStateReviewThread = Nothing,
           workerStateReviewTurn = Nothing,
           workerStateReviewRequest = Nothing,
           workerStateLastActivity = terminalActivity outcome

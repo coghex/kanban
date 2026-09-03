@@ -1558,6 +1558,18 @@ unless their typed contract exposes an override.
   outcome nobody observed, and journaled as undelivered, so the command is
   never re-applied and the message is not silently lost.
 
+  The fourth round closed four more. Feedback and resend validate the turn
+  they were written for, not only the thread, so a message meant to steer one
+  turn cannot steer the next or open a fresh one. A command queued behind a
+  termination in the same batch is refused rather than acted on, and settling
+  clears the thread as well as the turn so no thread-scoped check still reads
+  a settled child as addressable. A child that had already started under a
+  host that then died is recovered rather than restarted — its claims
+  answered, its evidence replayed, an unknown outcome reported — which is what
+  requirement 15 asks for. And a re-homed child's specification is rewritten
+  to name the host serving it, because leaving it naming a dead one gave
+  discovery and the cache collection pass a different owner from the truth.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

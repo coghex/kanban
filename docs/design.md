@@ -985,8 +985,11 @@ as a clock and a pid, because two presses in one clock tick would otherwise
 deduplicate to one. Every
 command that acts on a thread names the thread, turn, or request it was
 correlated to, and is refused rather than retargeted when the child has since
-moved on; ending the action is the one command that names none, because it
-ends the child whichever thread it is on. A
+moved on — including feedback, whose turn must still be the turn the child is
+on, so a message meant to steer one turn never steers the next or opens a
+fresh one. Ending the action is the one command that names none, because it
+ends the child whichever thread it is on, and everything queued behind it is
+refused rather than acted on. A
 question raised while no dashboard was running stays pending and is answerable
 by the one that arrives next; a command the owning session rejects is
 acknowledged as rejected and its text handed back to the input line rather
@@ -3958,11 +3961,15 @@ The first solve/autosolve-compatible slice is implemented.
   client transcript, which the host records as its own and which is no
   child's evidence.
   Host selection and child admission cannot be made one step from the launch
-  side, so a host also adopts a child whose named host is provably gone and
-  which nothing has ever adopted — never one a live host is serving. A host
-  counts as live unless it is disproven: terminal, or recording an identity a
-  successful process snapshot does not contain. An unreadable snapshot keeps
-  it, which is the same fail-closed rule lease recovery applies.
+  side, so a host also adopts a child whose named host is provably gone —
+  never one a live host is serving. A host counts as live unless it is
+  disproven: terminal, or recording an identity a successful process snapshot
+  does not contain. An unreadable snapshot keeps it, which is the same
+  fail-closed rule lease recovery applies. A child that had never started is
+  re-homed and run; one that had started is re-homed and settled without being
+  restarted, because its provider session belonged to a host that is gone.
+  Either way the specification is rewritten to name the host now serving it,
+  since discovery and the collection pass both read ownership from there.
   The provider's process shape is the adapter's, unchanged: a shared-process
   backend multiplexes concurrent children through the host's one connection,
   and a process-per-thread backend gives each child its own. Ending or
