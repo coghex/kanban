@@ -18,7 +18,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import qualified Graphics.Vty as Vty
 import Kanban.Domain (BoardItem (..), Issue (..), PullRequest (..))
-import Kanban.Models (OperatingMode (..), noAgentModeMessage)
+import Kanban.Models (OperatingMode (..), ProviderName (..), noAgentModeMessage)
 import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (SolveWorkflow (..))
 import Kanban.UI.Board (boardFooterHintLine, boardHintLine, filterFooterHintLine, footerHintLine, overlayHintChips, searchFooterHintLine)
@@ -392,7 +392,7 @@ spec = describe "keybinding table" $ do
       sequence_
         [ (show mode, action, isNothing (agentSurfaceRefusal mode action))
             `shouldBe` (show mode, action, action `elem` map (.bindingAction) (modeBoardBindings mode))
-          | mode <- [DualMode, SingleAgentMode, NoAgentMode],
+          | mode <- NoAgentMode : map snd loadedModes,
             action <- map (.bindingAction) boardBindings
         ]
 
@@ -480,11 +480,20 @@ spec = describe "keybinding table" $ do
           declaredOnly = filter (`notElem` documented) declaredBindings
       (documentedOnly, declaredOnly) `shouldBe` ([], [])
 
--- | The two modes that load a provider, which hide nothing at all. Named
--- rather than written @[DualMode, SingleAgentMode]@ inline so a failure says
--- which one moved.
+-- | Every mode that loads a provider, which hide nothing at all. Named
+-- rather than written inline so a failure says which one moved.
+--
+-- Both singletons, not one standing in for the other: issue #589 gives
+-- 'SingleAgentMode' the provider it loads, and key visibility is the one
+-- surface that decision deliberately does not move
+-- ("Kanban.UI.Keys" -- which brand a role runs on is decided at the spawn
+-- boundary, not on the footer). Listing each is what holds that.
 loadedModes :: [(String, OperatingMode)]
-loadedModes = [("dual", DualMode), ("single-agent", SingleAgentMode)]
+loadedModes =
+  [ ("dual", DualMode),
+    ("single-agent codex", SingleAgentMode CodexProvider),
+    ("single-agent claude", SingleAgentMode ClaudeProvider)
+  ]
 
 -- | The four bindings a no-agent board is left without -- issue #521's six,
 -- less the two issue #546 gave back -- written out rather than filtered from

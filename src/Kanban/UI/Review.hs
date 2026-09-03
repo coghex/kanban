@@ -809,7 +809,7 @@ launchLiveCanonicalIssueReview issue stage = do
         stage
         identity
         state.appApprovalController
-        (preflightBlocker state.appRepository (ActionIssueReview (issueOriginFromBody issue.issueBody)))
+        (preflightBlocker state.appRepository state.appOperatingMode (ActionIssueReview (issueOriginFromBody issue.issueBody)))
         (runCanonicalIssueReview state.appOptions.optionConfig state.appRepository issueNumber stage (writeBChan channel . CanonicalIssueReviewProcessStarted issueNumber))
     writeBChan channel (CanonicalIssueReviewFinished issueNumber stage result)
 
@@ -887,7 +887,7 @@ startReviewBackend = do
         . liftIO
         . forkIO
         $ do
-          blocked <- preflightBlocker state.appRepository reviewBackendAction
+          blocked <- preflightBlocker state.appRepository state.appOperatingMode reviewBackendAction
           case blocked of
             Just message -> writeBChan eventChannel (ReviewBackendStarted (Left message))
             Nothing -> startReviewClient roster state.appConfig.resolvedWorkflow state.appRepository eventSink >>= writeBChan eventChannel . ReviewBackendStarted
@@ -916,7 +916,7 @@ launchLiveIssueReview client issue = do
     . liftIO
     . forkIO
     $ do
-      blocked <- preflightBlocker state.appRepository (issueRevisionPreflightAction issue)
+      blocked <- preflightBlocker state.appRepository state.appOperatingMode (issueRevisionPreflightAction issue)
       result <- case blocked of
         Just message -> pure (Left message)
         Nothing -> beginIssueReview client issueNumber

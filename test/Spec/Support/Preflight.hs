@@ -9,6 +9,7 @@ module Spec.Support.Preflight
     withCodexProbe,
     withClaudeProbe,
     blockedProblems,
+    blockedProblemsIn,
     isConflictingBackend,
     isMissingBackend,
     isReadyBackend,
@@ -35,6 +36,7 @@ where
 
 import qualified Data.ByteString.Char8 as ByteString
 import Data.List (sortOn)
+import Kanban.Models (OperatingMode (..))
 import Kanban.Preflight
   ( AuthObservation (..),
     BundleObservation (..),
@@ -102,9 +104,14 @@ withClaudeProbe :: ProviderProbe -> PreflightEnvironment
 withClaudeProbe probe = readyPreflightEnvironment {environmentClaude = probe}
 
 blockedProblems :: PreflightEnvironment -> PreflightAction -> [PreflightProblem]
-blockedProblems environment action =
+blockedProblems environment action = blockedProblemsIn environment DualMode action
+
+-- | 'blockedProblems' under a chosen operating mode, for the singleton
+-- installs that require a different provider set than dual routing does.
+blockedProblemsIn :: PreflightEnvironment -> OperatingMode -> PreflightAction -> [PreflightProblem]
+blockedProblemsIn environment mode action =
   [ problem
-    | check <- (actionReport environment action).reportChecks,
+    | check <- (actionReport environment mode action).reportChecks,
       PreflightBlocked problem _ _ <- [check.checkStatus]
   ]
 

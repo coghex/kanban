@@ -3,6 +3,7 @@ module Spec.Agent.Preflight (spec) where
 
 import Control.Monad (forM_)
 import qualified Data.Text
+import Kanban.Models (OperatingMode (..))
 import Kanban.Preflight
   ( AuthObservation (..),
     BundleObservation (..),
@@ -131,7 +132,7 @@ spec = do
     describe "per-action readiness" $ do
       it "reports a fully provisioned environment as ready for every action" $
         mapM_
-          (\action -> blockingRemediation (actionReport readyPreflightEnvironment action) `shouldBe` Nothing)
+          (\action -> blockingRemediation (actionReport readyPreflightEnvironment DualMode action) `shouldBe` Nothing)
           doctorActions
       it "blocks only the actions that reach for a missing provider executable" $ do
         let environment = withCodexProbe (readyProviderProbe CodexSolver) {probeExecutable = Nothing}
@@ -155,7 +156,7 @@ spec = do
         let below brand = withProbe brand (readyProviderProbe brand) {probeVersion = VersionUnsupported "0.0.1" "9.9.9"}
             withProbe CodexSolver = withCodexProbe
             withProbe ClaudeSolver = withClaudeProbe
-            remediationFor brand = blockingRemediation (actionReport (below brand) (ActionSolve brand))
+            remediationFor brand = blockingRemediation (actionReport (below brand) DualMode (ActionSolve brand))
         remediationFor ClaudeSolver
           `shouldSatisfy` maybe False (Data.Text.isInfixOf "embedded issue review's turn interruption is unverified")
         remediationFor CodexSolver
@@ -166,7 +167,7 @@ spec = do
       it "names the setup command when a workflow bundle is absent" $ do
         let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeBundle = BundleAbsent}
         blockedProblems environment (ActionSolve ClaudeSolver) `shouldBe` [WorkflowBundleUnavailable]
-        blockingRemediation (actionReport environment (ActionSolve ClaudeSolver))
+        blockingRemediation (actionReport environment DualMode (ActionSolve ClaudeSolver))
           `shouldSatisfy` maybe False (Data.Text.isInfixOf "tools/setup_workflows.py --component claude-plugin")
       it "blocks the canonical review gate, but not issue revision, on a missing backend" $ do
         let environment = readyPreflightEnvironment {environmentReviewBackend = ReviewBackendMissing "/nowhere/approve_issues.py"}
@@ -332,7 +333,7 @@ spec = do
       it "tells an occupied install path apart from a never-installed one" $ do
         let environment = readyPreflightEnvironment {environmentReviewBackend = ReviewBackendConflicting "/occupied" "a directory"}
         blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ConflictingInstallation]
-        blockingRemediation (actionReport environment (ActionIssueReview IssueOriginCodex))
+        blockingRemediation (actionReport environment DualMode (ActionIssueReview IssueOriginCodex))
           `shouldSatisfy` maybe False (Data.Text.isInfixOf "move or remove that path yourself")
       it "reports an unavailable GitHub CLI for every action" $ do
         let environment = readyPreflightEnvironment {environmentGitHub = GitHubExecutableMissing}

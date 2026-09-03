@@ -97,7 +97,8 @@ import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
 import Kanban.Usage.Render (usageResetCountdownText, usageResetLocalText, usageSnapshotAgeText, usageSolveRoundsLeft, usageSolveRoundsSuffix)
 import Kanban.Workflow (entryItem, isApproved, isProblem, itemLifecycleBadge, orderCardLabels )
 import Kanban.UI.Types
-import Kanban.Models (OperatingMode (..), agentsLoaded)
+import Kanban.Models (OperatingMode (..))
+import Kanban.Usage (usageProviders)
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), KeyBinding (..), actionKeyText, footerHint, footerHintRow, modeScopeBindings)
 import Kanban.UI.SessionCore
 import Kanban.UI.Session (incidentsFooterHints, processesFooterHints)
@@ -177,22 +178,29 @@ drawUsage state
     -- was drawn, so a press cannot reach 'ApprovalButton' when this branch
     -- draws none -- and `a` itself refuses through
     -- 'Kanban.UI.Keys.agentSurfaceRefusal' whether or not it is on screen.
-    usageContents
-      | not (agentsLoaded state.appOperatingMode) =
-          vBox
-            [ drawUpdateButton state,
-              padTop Max (drawDrainerButton state)
-            ]
-      | otherwise =
-          vBox
-            [ vBox [drawProvider state Codex, txt "", drawProvider state Claude],
-              drawUpdateButton state,
-              -- One padded stack rather than two, so the pair stays together at
-              -- the sidebar's foot: padding each separately would push the
-              -- approval control up to the update button and leave the gap
-              -- between two service controls that belong beside each other.
-              padTop Max (vBox [drawApprovalButton state, drawDrainerButton state])
-            ]
+    --
+    -- Above that floor it is one block per provider this install actually
+    -- reads, taken from the same list the refreshes are started from rather
+    -- than from a pair written here, so the sidebar can never show a window
+    -- for an account 'Kanban.UI.Refresh.startUsageRefreshes' never probes --
+    -- which in single-agent mode would be a stale cached entry for the
+    -- unloaded brand presented as this install's own reading.
+    usageContents = case usageProviders state.appOperatingMode of
+      [] ->
+        vBox
+          [ drawUpdateButton state,
+            padTop Max (drawDrainerButton state)
+          ]
+      providers ->
+        vBox
+          [ vBox (intersperse (txt "") (map (drawProvider state) providers)),
+            drawUpdateButton state,
+            -- One padded stack rather than two, so the pair stays together at
+            -- the sidebar's foot: padding each separately would push the
+            -- approval control up to the update button and leave the gap
+            -- between two service controls that belong beside each other.
+            padTop Max (vBox [drawApprovalButton state, drawDrainerButton state])
+          ]
 
 -- | One nested sidebar control, drawn under §10's convention: its own box out
 -- of 'innerBorderStyle' rather than the label wrapped in Brick's

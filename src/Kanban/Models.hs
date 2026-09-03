@@ -67,6 +67,7 @@ module Kanban.Models
     loadedOperatingMode,
     operatingModeLabel,
     agentsLoaded,
+    soleAgent,
     recordAssignment,
     recordedAssignmentCell,
     rosterDefectMessage,
@@ -264,26 +265,30 @@ data ModelRoster = ModelRoster
 -- there is no fourth state: an unusable @models.toml@ derives 'NoAgentMode'
 -- through 'loadedOperatingMode' rather than leaving the mode undefined.
 --
--- Counted rather than matched pair by pair, so a third compiled provider
--- widens dual instead of falling through to a mode it does not mean.
+-- Matched by shape rather than counted, so a third compiled provider still
+-- widens dual instead of falling through to a mode it does not mean, and the
+-- singleton arm names the one provider it matched.
 --
--- Which single provider is loaded is deliberately not carried here. Both
--- singleton sets are one mode, and a consumer that needs the brand reads
--- 'rosterAgents' from the roster it already holds.
+-- Single-agent carries that provider because every routing decision the mode
+-- collapses needs an identity rather than a count (D-8): which brand a pull
+-- request reviews on, which backend the embedded review starts, which agent a
+-- solve spawns, and which provider the usage surfaces probe. Carrying it on
+-- the mode is what lets a surface holding only 'Kanban.UI.Types.appOperatingMode'
+-- ask, and 'soleAgent' below is the one place that question is answered.
 data OperatingMode
   = -- | Two or more providers: today's cross-brand pipeline, unchanged.
     DualMode
   | -- | Exactly one provider: every role resolves through that brand.
-    SingleAgentMode
+    SingleAgentMode ProviderName
   | -- | No provider at all: a board-only Kanban that spawns nothing.
     NoAgentMode
   deriving stock (Eq, Show)
 
 -- | The mode a roster's own @agents@ list derives.
 operatingModeFor :: ModelRoster -> OperatingMode
-operatingModeFor roster = case length roster.rosterAgents of
-  0 -> NoAgentMode
-  1 -> SingleAgentMode
+operatingModeFor roster = case roster.rosterAgents of
+  [] -> NoAgentMode
+  [provider] -> SingleAgentMode provider
   _ -> DualMode
 
 -- | The mode a startup load derives, which is the projection the dashboard
@@ -310,15 +315,35 @@ loadedOperatingMode = either (const NoAgentMode) operatingModeFor
 agentsLoaded :: OperatingMode -> Bool
 agentsLoaded mode = case mode of
   DualMode -> True
-  SingleAgentMode -> True
+  SingleAgentMode _ -> True
   NoAgentMode -> False
+
+-- | The provider every role resolves through, when exactly one is loaded.
+--
+-- The one spelling of /which/ provider a single-agent install runs on, as
+-- 'agentsLoaded' above is the one spelling of whether any is loaded. Every
+-- surface the mode collapses asks here — pull-request routing, the embedded
+-- issue review's backend, the solve chooser, the usage probes and the
+-- sidebar's provider blocks, preflight, and @--ping@'s brand refusal — and
+-- none of them re-derives it from 'rosterAgents', which is what would let two
+-- surfaces disagree about the brand one run is on.
+--
+-- 'Nothing' in both other modes, and deliberately the same answer for each:
+-- dual has no single provider to name and no-agent has none at all, so a
+-- caller that asks this question falls back to its dual-mode behavior in both
+-- and refuses separately on 'agentsLoaded' where that matters.
+soleAgent :: OperatingMode -> Maybe ProviderName
+soleAgent mode = case mode of
+  DualMode -> Nothing
+  SingleAgentMode provider -> Just provider
+  NoAgentMode -> Nothing
 
 -- | What the mode is called wherever one is shown, in the vocabulary
 -- @models.toml.example@ and the design already use.
 operatingModeLabel :: OperatingMode -> Text
 operatingModeLabel mode = case mode of
   DualMode -> "dual"
-  SingleAgentMode -> "single-agent"
+  SingleAgentMode _ -> "single-agent"
   NoAgentMode -> "no-agent"
 
 -- | The version 'encodeRoster' stamps on every file written and the only one

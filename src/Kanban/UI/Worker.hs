@@ -22,11 +22,11 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain
-import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
+import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError, loadedOperatingMode)
 import Kanban.Process (managedProcessGroup )
 import Kanban.PullRequestFlow
   ( PullRequestFlowEvent (..),
-    agentForAction
+    recordedPullRequestBrand
     )
 import Kanban.Solve
   ( ResumeProvenance (..),
@@ -72,6 +72,7 @@ registerWorker descriptor = do
 applyWorkerProtocolEvent :: WorkerDescriptor -> WorkerEvent -> EventM Name AppState ()
 applyWorkerProtocolEvent descriptor workerEvent = do
   ensureWorkerSession descriptor
+  mode <- (.appOperatingMode) <$> get
   case descriptor.workerDescriptorSpec.workerTask of
     SolveWorkerTaskKind task -> case workerEvent of
       WorkerProviderStarted processId ->
@@ -88,7 +89,17 @@ applyWorkerProtocolEvent descriptor workerEvent = do
       WorkerOrphansDetected outcome processes -> applySolveOrphans task.solveWorkerIssueNumber outcome processes
       WorkerFinished outcome -> applySolveEvent (SolveProcessFinished task.solveWorkerIssueNumber outcome)
     PullRequestWorkerTaskKind task ->
-      let brand = agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction
+      -- This worker is already running, so its brand is the one its own
+      -- specification recorded rather than one resolved live: a mode change
+      -- between the launch and this event must not relabel the process that
+      -- is still going. Only a specification predating the record falls
+      -- through to live routing.
+      let brand =
+            recordedPullRequestBrand
+              mode
+              descriptor.workerDescriptorSpec.workerAssignment
+              task.pullRequestWorkerOrigin
+              task.pullRequestWorkerAction
        in case workerEvent of
             WorkerProviderStarted processId ->
               suppressIfResolvedPullRequest
@@ -296,7 +307,15 @@ recoveredSolveSession state assignment descriptor issue task =
 
 recoveredPullRequestSession :: Either RosterLoadError ModelRoster -> Int -> WorkerDescriptor -> PullRequest -> PullRequestWorkerTask -> PullRequestReviewSession
 recoveredPullRequestSession rosterResult priorGeneration descriptor pullRequest task =
-  let brand = agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction
+  -- See 'applyWorkerProtocolEvent': a recovered worker replays what it
+  -- recorded, and the live mode answers only for a legacy specification that
+  -- recorded nothing.
+  let brand =
+        recordedPullRequestBrand
+          (loadedOperatingMode rosterResult)
+          descriptor.workerDescriptorSpec.workerAssignment
+          task.pullRequestWorkerOrigin
+          task.pullRequestWorkerAction
    in ( newAgentSession
           priorGeneration
           SolveStarting

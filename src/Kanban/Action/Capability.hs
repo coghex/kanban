@@ -8,8 +8,8 @@
 -- 'Kanban.PullRequestFlow.agentForAction' for a pull request's brand,
 -- 'Kanban.Preflight.issueOriginFromBody' for an issue's — so no registry path
 -- adds a second brand decision, and the readiness answer is
--- 'Kanban.Preflight.actionReport' over the matching 'PreflightAction' rather
--- than another readiness model.
+-- 'Kanban.Preflight.actionReport' over the matching 'PreflightAction' and the
+-- operating mode the roster derives, rather than another readiness model.
 --
 -- Seven of the eight actions map to a 'PreflightAction'. Observing the
 -- approval queue is the one that does not, because it starts no provider: its
@@ -32,6 +32,7 @@ import Kanban.Action.Target (pullRequestActionForKind)
 import Kanban.Action.Types
 import Kanban.ApprovalService (approvalUnavailableMessage, discoverApprovalController)
 import Kanban.Domain (Issue (..), PullRequest (..), Repository (..), WorkflowConfig)
+import Kanban.Models (ModelRoster, OperatingMode, RosterLoadError, loadedOperatingMode)
 import Kanban.Preflight
   ( PreflightAction (..),
     PreflightEnvironment,
@@ -106,20 +107,24 @@ actionCapableMessage (ActionIncapable detail) = Just detail
 
 -- | The pure half: readiness for a provider route, derived from one gathered
 -- environment exactly as the board's own preflight derives it.
-actionCapability :: PreflightEnvironment -> ActionRoute -> ActionCapability
-actionCapability environment route = case routePreflightAction route of
+actionCapability :: PreflightEnvironment -> OperatingMode -> ActionRoute -> ActionCapability
+actionCapability environment mode route = case routePreflightAction route of
   Nothing -> ActionCapable
   Just action ->
-    maybe ActionCapable (ActionIncapable . preflightDiagnostic) (blockingRemediation (actionReport environment action))
+    maybe ActionCapable (ActionIncapable . preflightDiagnostic) (blockingRemediation (actionReport environment mode action))
 
 -- | The gathering half. Read-only on both branches: the provider branch runs
 -- the board's own probes, and the approval branch discovers the controller
 -- without starting or stopping the service.
-actionCapabilityIO :: Repository -> ActionRoute -> IO ActionCapability
-actionCapabilityIO repository route = case route of
+-- The roster rather than a mode, so this reads the operating mode through
+-- 'loadedOperatingMode' exactly as the dashboard's own state does: a
+-- @models.toml@ that will not load is no-agent here too, rather than a mode
+-- the caller had to decide on its own.
+actionCapabilityIO :: Repository -> Either RosterLoadError ModelRoster -> ActionRoute -> IO ActionCapability
+actionCapabilityIO repository roster route = case route of
   RouteProvider _ -> do
     environment <- gatherPreflightEnvironment repository.repositoryRoot
-    pure (actionCapability environment route)
+    pure (actionCapability environment (loadedOperatingMode roster) route)
   RouteApprovalQueue -> do
     discovered <- discoverApprovalController repository
     pure $ case discovered of

@@ -9,7 +9,7 @@ import qualified Data.Text
 import qualified Data.Text.IO as TextIO
 import Data.Time (UTCTime (..), fromGregorian)
 import Kanban.Domain
-import Kanban.Models (Assignment (..), ModelRoster, defaultRoster, recordedAssignmentCell)
+import Kanban.Models (Assignment (..), ModelRoster, OperatingMode (..), defaultRoster, recordedAssignmentCell)
 import Kanban.Process (identityForPid, managedProcessPid, matchingIdentities, readProcessSnapshot)
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
@@ -107,14 +107,14 @@ spec = do
       actionForLabels (defaultWorkflowConfig {changesRequestedLabel = "needs-work"}) ["needs-work"] `shouldBe` PullRequestRevision
 
     it "uses the opposite brand to review and the origin brand to revise or repair" $ do
-      agentForAction PullRequestCodex PullRequestReview `shouldBe` ClaudeSolver
-      agentForAction PullRequestCodex PullRequestRevision `shouldBe` CodexSolver
-      agentForAction PullRequestClaude PullRequestReview `shouldBe` CodexSolver
-      agentForAction PullRequestClaude PullRequestRevision `shouldBe` ClaudeSolver
+      agentForAction DualMode PullRequestCodex PullRequestReview `shouldBe` ClaudeSolver
+      agentForAction DualMode PullRequestCodex PullRequestRevision `shouldBe` CodexSolver
+      agentForAction DualMode PullRequestClaude PullRequestReview `shouldBe` CodexSolver
+      agentForAction DualMode PullRequestClaude PullRequestRevision `shouldBe` ClaudeSolver
       -- Repair works on the PR's own code, so like revision it launches on
       -- the PR's own origin brand rather than the reviewer's.
-      agentForAction PullRequestCodex PullRequestRepair `shouldBe` CodexSolver
-      agentForAction PullRequestClaude PullRequestRepair `shouldBe` ClaudeSolver
+      agentForAction DualMode PullRequestCodex PullRequestRepair `shouldBe` CodexSolver
+      agentForAction DualMode PullRequestClaude PullRequestRepair `shouldBe` ClaudeSolver
 
     -- The fourth derived meaning of r: a Done card whose status is a problem
     -- needs its own code worked on, not another review round. Both halves of
@@ -538,7 +538,7 @@ migratedRoutes =
 
 assertRosterDrivenArguments :: ModelRoster -> (PullRequestOrigin, PullRequestAction, SolverBrand) -> Expectation
 assertRosterDrivenArguments roster (origin, action, brand) = do
-  agentForAction origin action `shouldBe` brand
+  agentForAction DualMode origin action `shouldBe` brand
   let arguments = pullRequestArgumentsOn roster 42 origin action brand Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
       cell = pullRequestCell roster origin action
   arguments `shouldContain` (if brand == CodexSolver then codexFlags cell else claudeFlags cell)

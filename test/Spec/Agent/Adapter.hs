@@ -31,7 +31,7 @@ import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain (defaultWorkflowConfig)
-import Kanban.Models (Assignment (..), ProviderName (..), RoleName (..), allProviders, assignmentFor, defaultRoster)
+import Kanban.Models (Assignment (..), OperatingMode (..), ProviderName (..), RoleName (..), allProviders, assignmentFor, defaultRoster)
 import Kanban.Review
   ( EmbeddedReviewBackend (..),
     ReviewLaunch (..),
@@ -151,12 +151,15 @@ spec = do
           )
 
   describe "the embedded issue-review backend" $ do
-    -- Requirement 9: Claude now carries a backend, and yet nothing routes to
-    -- it. Both halves are asserted together, because the second is the whole
-    -- promise this slice makes about an install's behavior and the first is
-    -- what would otherwise quietly break it.
-    it "carries one for each provider while still running every install's review on Codex" $ do
-      embeddedReviewProvider `shouldBe` CodexProvider
+    -- Each provider carries a backend, and which one an install starts is
+    -- the operating mode's answer (issue #589): a singleton install runs its
+    -- embedded review on the provider it loads, in both variants, and a dual
+    -- install is Codex as it has always been. Asserted together, because a
+    -- backend that exists and is never routed to is the state MODEL-13 left
+    -- and this slice ends.
+    it "carries one for each provider and routes each mode to the right one" $ do
+      map embeddedReviewProvider [DualMode, NoAgentMode] `shouldBe` [CodexProvider, CodexProvider]
+      map (embeddedReviewProvider . SingleAgentMode) allProviders `shouldBe` allProviders
       map (fmap (.backendLabel) . adapterEmbeddedReview . adapterFor) allProviders
         `shouldBe` [Just "codex app-server", Just "claude stream-json session"]
       map (fmap (.backendProvider) . adapterEmbeddedReview . adapterFor) allProviders

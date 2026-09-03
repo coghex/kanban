@@ -56,6 +56,7 @@ import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
 import qualified Spec.Repository.Lease as RepositoryLease
 import qualified Spec.Repository.State as RepositoryState
+import qualified Spec.SingleAgentMode as SingleAgentMode
 import Spec.Support.Lanes
   ( Colocation (..),
     Lane (..),
@@ -203,6 +204,7 @@ suiteGroups =
     SuiteGroup "Spec.Drainer" PingLane Drainer.spec, -- 17.6s
     SuiteGroup "Spec.ManagedPaths" PingLane ManagedPaths.spec,
     SuiteGroup "Spec.OperatingMode" PingLane OperatingMode.spec,
+    SuiteGroup "Spec.SingleAgentMode" PingLane SingleAgentMode.spec,
     SuiteGroup "Spec.ApprovalService" DeadlineLane ApprovalService.spec, -- 8.9s
     SuiteGroup "Spec.Repository.State" PingLane RepositoryState.spec,
     SuiteGroup "Spec.GitHub.PullRequestStatus" PingLane PullRequestStatus.spec,

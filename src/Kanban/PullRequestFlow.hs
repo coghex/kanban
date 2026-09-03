@@ -18,6 +18,7 @@ module Kanban.PullRequestFlow
     pullRequestAssignment,
     pullRequestRole,
     pullRequestVerdictEvidence,
+    recordedPullRequestBrand,
     pullRequestVerdictForLabels,
     runPullRequestFlow,
     runPullRequestFlowWith,
@@ -41,13 +42,16 @@ import Kanban.Models
   ( Assignment (..),
     AssignmentUnavailable,
     ModelRoster,
-    RecordedAssignment,
+    OperatingMode,
+    RecordedAssignment (..),
     RoleName (..),
     assignmentFor,
+    operatingModeFor,
     recordAssignment,
+    soleAgent,
   )
 import Kanban.Process (ManagedProcess, managedProcess)
-import Kanban.ProviderAdapter (ProcessRequest (..), ProviderAdapter (..), adapterForBrand, providerForBrand)
+import Kanban.ProviderAdapter (ProcessRequest (..), ProviderAdapter (..), adapterForBrand, brandForProvider, providerForBrand)
 import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, agentOutcome, emitStreamEvent, parseSolveOutputLine, resumeProvenanceHeader, sealUnknownAggregates)
 import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
@@ -168,17 +172,59 @@ carriesLabel _ labels value = Text.toCaseFold value `elem` map Text.toCaseFold l
 
 -- | Whether an action works on the pull request's own code and therefore
 -- runs on its origin brand, handing its verdict off to exactly one nested
--- canonical rereview spawned on the opposite brand
--- (agent-workflow-contract §2.2, §2.7). Review and rereview are that
--- canonical gate themselves, so they run on the opposite brand instead.
+-- canonical rereview (agent-workflow-contract §2.2, §2.7). Review and
+-- rereview are that canonical gate themselves.
+--
+-- The split alone, not the brands: which side of it an action is on is a
+-- property of the action, while which brand each side actually spawns is
+-- 'agentForAction''s answer and moves with the operating mode. In dual mode
+-- the nested rereview is the opposite brand and the gate is the opposite
+-- brand; in single-agent both are the one loaded provider.
 authoredOnOwnBrand :: PullRequestAction -> Bool
 authoredOnOwnBrand action = action `elem` [PullRequestRevision, PullRequestRepair]
 
-agentForAction :: PullRequestOrigin -> PullRequestAction -> SolverBrand
-agentForAction PullRequestCodex action | authoredOnOwnBrand action = CodexSolver
-agentForAction PullRequestClaude action | authoredOnOwnBrand action = ClaudeSolver
-agentForAction PullRequestCodex _ = ClaudeSolver
-agentForAction PullRequestClaude _ = CodexSolver
+-- | The brand one pull-request action runs on.
+--
+-- In dual mode this is the cross-brand routing 'crossBrandAgentForAction'
+-- below spells out: the origin marker decides, and the action decides which
+-- side of it. In single-agent mode the marker decides nothing — there is one
+-- loaded provider and every action runs on it, whatever the pull request was
+-- authored by and including a pull request whose origin is unknown or
+-- external (D-8, agent-workflow-contract §2.2). The markers are still written
+-- in that mode (D-12); it is the routing that stops reading them, not the
+-- solve that stops stamping them.
+--
+-- No-agent mode answers as dual does. It routes nothing, because
+-- 'Kanban.UI.Keys.availableIn' refuses the bindings that would reach here and
+-- 'pullRequestAssignment' below finds no cell for either brand, so the value
+-- this returns is never spawned on.
+agentForAction :: OperatingMode -> PullRequestOrigin -> PullRequestAction -> SolverBrand
+agentForAction mode origin action = case soleAgent mode of
+  Just provider -> brandForProvider provider
+  Nothing -> crossBrandAgentForAction origin action
+
+-- | The dual-mode half of 'agentForAction': an action on the pull request's
+-- own code runs on its origin brand, and the canonical gate runs on the
+-- opposite one. Unchanged, and separated out so the mode-aware routing above
+-- has one thing to fall back to rather than four arms to interleave.
+crossBrandAgentForAction :: PullRequestOrigin -> PullRequestAction -> SolverBrand
+crossBrandAgentForAction PullRequestCodex action | authoredOnOwnBrand action = CodexSolver
+crossBrandAgentForAction PullRequestClaude action | authoredOnOwnBrand action = ClaudeSolver
+crossBrandAgentForAction PullRequestCodex _ = ClaudeSolver
+crossBrandAgentForAction PullRequestClaude _ = CodexSolver
+
+-- | The brand a pull-request worker that already exists is running on.
+--
+-- The recorded assignment wins whenever there is one, for the reason
+-- @docs\/design.md@ gives for replaying a cell rather than resolving it: the
+-- launch that started this worker refused or allowed itself against a
+-- specific provider, and a @models.toml@ edited since — including one that
+-- moved the install between modes — must not change what a running process is
+-- reported as. Live routing is only the answer for a specification written
+-- before the record existed.
+recordedPullRequestBrand :: OperatingMode -> Maybe RecordedAssignment -> PullRequestOrigin -> PullRequestAction -> SolverBrand
+recordedPullRequestBrand mode recorded origin action =
+  maybe (agentForAction mode origin action) (brandForProvider . (.recordedAssignmentProvider)) recorded
 
 -- | An action that edits the pull request's own code is authored work and
 -- takes the author-side role; review and rereview are the canonical gate and
@@ -198,7 +244,11 @@ pullRequestAssignment :: ModelRoster -> PullRequestOrigin -> PullRequestAction -
 pullRequestAssignment roster origin action =
   recordAssignment provider <$> assignmentFor roster (pullRequestRole action) provider
   where
-    provider = providerForBrand (agentForAction origin action)
+    -- The mode comes off the same roster the cell is looked up in rather than
+    -- being threaded in beside it, so the routing and the lookup can never be
+    -- asked of two different rosters. That is the same 'operatingModeFor' the
+    -- dashboard's own 'Kanban.UI.Types.appOperatingMode' is built from.
+    provider = providerForBrand (agentForAction (operatingModeFor roster) origin action)
 
 -- | The origin marker the pull request a solve of this brand opens will
 -- carry, and therefore the routing every later action on it takes.

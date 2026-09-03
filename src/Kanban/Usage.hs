@@ -21,6 +21,7 @@ module Kanban.Usage
     runUsageMode,
     runUsageProvider,
     usageDurationDayBound,
+    usageProviderFor,
     usageProviderKey,
     usageProviderName,
     usageProviders,
@@ -46,6 +47,7 @@ import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), UsageCommandConfig (..), UsageConfig (..), usageSolveRoundEstimates)
 import Kanban.Domain (UsageProvider (..), UsageSnapshot (..))
+import Kanban.Models (OperatingMode, ProviderName (..), agentsLoaded, soleAgent)
 import Kanban.Provider (ProviderError (..))
 import Kanban.Usage.Render
   ( UsageOutcome (..),
@@ -64,9 +66,30 @@ import Kanban.Usage.Render
 import Kanban.UsageCommand (runUsageCommand)
 import System.IO (hPutStrLn, stderr)
 
+-- | The roster's vocabulary read as the usage surface's.
+--
+-- 'Kanban.Models.ProviderName' names the table a roster cell is read from and
+-- 'Kanban.Domain.UsageProvider' names the account whose windows are probed
+-- and displayed. The one mapping between them, as
+-- 'Kanban.ProviderAdapter.providerForBrand' is the one mapping to the
+-- executable vocabulary.
+usageProviderFor :: ProviderName -> UsageProvider
+usageProviderFor CodexProvider = Codex
+usageProviderFor ClaudeProvider = Claude
+
 -- | Every provider the mode reports on, in the order it reports them.
-usageProviders :: [UsageProvider]
-usageProviders = [Codex, Claude]
+--
+-- The one declaration for every usage surface, so the sidebar's blocks, the
+-- @u@ and @↻@ refreshes, and both the cached and the forced-live @--usage@
+-- report on the same set. Single-agent probes and shows only the provider it
+-- loads: the other brand's account is not this install's to spend a request
+-- on, and an entry the cache still holds for it stays on disk unread rather
+-- than being displayed as though it were live (D-8).
+usageProviders :: OperatingMode -> [UsageProvider]
+usageProviders mode
+  | Just provider <- soleAgent mode = [usageProviderFor provider]
+  | agentsLoaded mode = [Codex, Claude]
+  | otherwise = []
 
 -- | Which acquisition path a run selects.
 data UsageAcquisition
@@ -127,10 +150,10 @@ data Acquired
 -- The report always describes what the selected path produced: a forced-live
 -- run that fails reports that failure rather than substituting the older
 -- cached snapshot, even though an enabled cache keeps that snapshot on disk.
-acquireUsageReport :: UsageAcquisition -> Bool -> ResolvedConfig -> IO (UsageReport, [Text])
-acquireUsageReport acquisition cacheOn config = do
+acquireUsageReport :: UsageAcquisition -> Bool -> OperatingMode -> ResolvedConfig -> IO (UsageReport, [Text])
+acquireUsageReport acquisition cacheOn mode config = do
   (cached, loadWarnings) <- if cacheOn then loadCached else pure (Map.empty, [])
-  acquired <- mapM (\provider -> (,) provider <$> acquireOne cached provider) usageProviders
+  acquired <- mapM (\provider -> (,) provider <$> acquireOne cached provider) (usageProviders mode)
   writeWarnings <- writeBack acquired
   -- Both halves can report the same corrupt file: the load above read it, and
   -- the commit below reads it again inside its own transaction. It is one
@@ -181,9 +204,9 @@ usableCached cached provider = do
 -- Warnings go to stderr in both renderings, so a @--json@ consumer's stdout
 -- carries the document and nothing else.  The clock and zone are read once
 -- here and handed to the pure renderer; nothing below this point reads either.
-runUsageMode :: UsageMode -> ResolvedConfig -> IO Bool
-runUsageMode mode config = do
-  (report, warnings) <- acquireUsageReport mode.usageModeAcquisition mode.usageModeCache config
+runUsageMode :: UsageMode -> OperatingMode -> ResolvedConfig -> IO Bool
+runUsageMode mode operatingMode config = do
+  (report, warnings) <- acquireUsageReport mode.usageModeAcquisition mode.usageModeCache operatingMode config
   mapM_ (\warning -> hPutStrLn stderr ("kanban: warning: " <> Text.unpack warning)) warnings
   if mode.usageModeJson
     then LazyChar8.putStrLn (encode (usageReportDocument report))

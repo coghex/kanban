@@ -33,7 +33,7 @@ import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), UsageCommandConfig (..), UsageConfig (..))
 import Kanban.Domain
-import Kanban.Models (OperatingMode, agentsLoaded)
+import Kanban.Models (OperatingMode)
 import Kanban.GitHub
   ( CoordinatorNotice (..),
     GhFetchGuard,
@@ -56,7 +56,7 @@ import Kanban.GitHub
     )
 import Kanban.Process (ProcessIdentity)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
-import Kanban.Usage (claudeRefreshTimeoutMicros, codexRefreshTimeoutMicros, runUsageProvider)
+import Kanban.Usage (claudeRefreshTimeoutMicros, codexRefreshTimeoutMicros, runUsageProvider, usageProviders)
 import System.Timeout (timeout)
 import Kanban.UI.Notice (NoticeActivity (..), NoticeLife (..))
 import Kanban.UI.Types
@@ -86,13 +86,15 @@ startUsageRefreshes = do
 
 -- | The providers one update probes.
 --
--- Both or neither today. Single-agent probes both deliberately: narrowing it
--- to the loaded brand is that mode's own question, and this slice leaves
--- single-agent exactly as it was.
+-- 'Kanban.Usage.usageProviders' rather than a list of its own, so the board's
+-- refresh, the sidebar's blocks, and @kanban --usage@ cannot disagree about
+-- which accounts this install reads: both in dual mode, the loaded one alone
+-- in single-agent, and none at all with no provider loaded.
+--
+-- Kept as a name here because it is the arm 'startUsageRefreshes' holds and
+-- the suite reaches, not because the decision is this module's.
 usageRefreshProviders :: OperatingMode -> [UsageProvider]
-usageRefreshProviders mode
-  | agentsLoaded mode = [Codex, Claude]
-  | otherwise = []
+usageRefreshProviders = usageProviders
 
 -- | The refresh one provider starts. Total in 'UsageProvider', so a provider
 -- added to that type cannot be listed above without a refresh to start.

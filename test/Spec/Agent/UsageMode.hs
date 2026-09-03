@@ -29,6 +29,7 @@ import Kanban.Config
     usageSolveRoundEstimates,
   )
 import Kanban.Domain (UsageProvider (..), UsageSnapshot (..), UsageWindow (..))
+import Kanban.Models (OperatingMode (..))
 import Kanban.Usage
   ( UsageAcquisition (..),
     UsageOutcome (..),
@@ -290,7 +291,7 @@ spec = do
         outsideRepository <- createTemporaryDirectory
         report <-
           withCurrentDirectory outsideRepository $
-            fst <$> acquireUsageReport UsageCacheFirst False (configuredWith codexScript claudeScript)
+            fst <$> acquireUsageReport UsageCacheFirst False DualMode (configuredWith codexScript claudeScript)
         removePathForcibly outsideRepository
         reportWindows report
           `shouldBe` [ (Codex, Right [("codex-window", 71)]),
@@ -302,7 +303,7 @@ spec = do
       withUsageCacheRoot $ \root -> do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
-        (report, warnings) <- acquireUsageReport UsageCacheFirst False (configuredWith codexScript claudeScript)
+        (report, warnings) <- acquireUsageReport UsageCacheFirst False DualMode (configuredWith codexScript claudeScript)
         warnings `shouldBe` []
         reportWindows report
           `shouldBe` [ (Codex, Right [("codex-window", 71)]),
@@ -318,7 +319,7 @@ spec = do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
         seedCache (Map.fromList [(Codex, cachedSnapshot), (Claude, cachedSnapshot)])
-        (report, _) <- acquireUsageReport UsageCacheFirst True (configuredWith codexScript claudeScript)
+        (report, _) <- acquireUsageReport UsageCacheFirst True DualMode (configuredWith codexScript claudeScript)
         reportWindows report
           `shouldBe` [ (Codex, Right [("cached", 12)]),
                        (Claude, Right [("cached", 12)])
@@ -330,7 +331,7 @@ spec = do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
         seedCache (Map.fromList [(Codex, cachedSnapshot)])
-        (report, _) <- acquireUsageReport UsageCacheFirst True (configuredWith codexScript claudeScript)
+        (report, _) <- acquireUsageReport UsageCacheFirst True DualMode (configuredWith codexScript claudeScript)
         reportWindows report
           `shouldBe` [ (Codex, Right [("cached", 12)]),
                        (Claude, Right [("claude-window", 22)])
@@ -342,7 +343,7 @@ spec = do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
         seedCache (Map.fromList [(Codex, UsageSnapshot [] (instant "2026-07-16T11:30:00Z")), (Claude, cachedSnapshot)])
-        (report, _) <- acquireUsageReport UsageCacheFirst True (configuredWith codexScript claudeScript)
+        (report, _) <- acquireUsageReport UsageCacheFirst True DualMode (configuredWith codexScript claudeScript)
         reportWindows report
           `shouldBe` [ (Codex, Right [("codex-window", 71)]),
                        (Claude, Right [("cached", 12)])
@@ -354,7 +355,7 @@ spec = do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
         seedCache (Map.fromList [(Codex, cachedSnapshot), (Claude, cachedSnapshot)])
-        (report, _) <- acquireUsageReport UsageForceFresh True (configuredWith codexScript claudeScript)
+        (report, _) <- acquireUsageReport UsageForceFresh True DualMode (configuredWith codexScript claudeScript)
         reportWindows report
           `shouldBe` [ (Codex, Right [("codex-window", 71)]),
                        (Claude, Right [("claude-window", 22)])
@@ -364,7 +365,7 @@ spec = do
     it "reports one provider's failure without suppressing the other's windows" $
       withUsageCacheRoot $ \root -> do
         codexScript <- recordingProvider root "codex" 71
-        (report, _) <- acquireUsageReport UsageCacheFirst False (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
+        (report, _) <- acquireUsageReport UsageCacheFirst False DualMode (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
         case reportWindows report of
           [(Codex, Right windows), (Claude, Left message)] -> do
             windows `shouldBe` [("codex-window", 71)]
@@ -376,7 +377,7 @@ spec = do
       withUsageCacheRoot $ \root -> do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
-        _ <- acquireUsageReport UsageCacheFirst True (configuredWith codexScript claudeScript)
+        _ <- acquireUsageReport UsageCacheFirst True DualMode (configuredWith codexScript claudeScript)
         stored <- storedCache
         fmap (map (.usagePercentLeft) . (.usageWindows)) stored `shouldBe` Map.fromList [(Codex, [71]), (Claude, [22])]
 
@@ -384,7 +385,7 @@ spec = do
       withUsageCacheRoot $ \root -> do
         codexScript <- recordingProvider root "codex" 71
         seedCache (Map.fromList [(Claude, cachedSnapshot)])
-        _ <- acquireUsageReport UsageForceFresh True (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
+        _ <- acquireUsageReport UsageForceFresh True DualMode (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
         stored <- storedCache
         fmap (map (.usagePercentLeft) . (.usageWindows)) stored `shouldBe` Map.fromList [(Codex, [71]), (Claude, [12])]
 
@@ -394,7 +395,7 @@ spec = do
       withUsageCacheRoot $ \root -> do
         codexScript <- recordingProvider root "codex" 71
         seedCache (Map.fromList [(Claude, cachedSnapshot)])
-        (report, _) <- acquireUsageReport UsageForceFresh True (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
+        (report, _) <- acquireUsageReport UsageForceFresh True DualMode (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
         case lookup Claude report.usageReportEntries of
           Just (UsageFailed _) -> pure ()
           other -> expectationFailure ("expected the live failure to be reported, got " <> show other)
@@ -404,7 +405,7 @@ spec = do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
         seedCache (Map.fromList [(Codex, cachedSnapshot), (Claude, cachedSnapshot)])
-        (report, _) <- acquireUsageReport UsageForceFresh False (configuredWith codexScript claudeScript)
+        (report, _) <- acquireUsageReport UsageForceFresh False DualMode (configuredWith codexScript claudeScript)
         reportWindows report
           `shouldBe` [ (Codex, Right [("codex-window", 71)]),
                        (Claude, Right [("claude-window", 22)])
@@ -422,7 +423,7 @@ spec = do
       withUsageCacheRoot $ \root -> do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
-        _ <- acquireUsageReport UsageForceFresh False (configuredWith codexScript claudeScript)
+        _ <- acquireUsageReport UsageForceFresh False DualMode (configuredWith codexScript claudeScript)
         snapshotPath <- usageCachePath
         lockPath <- usageCacheLockPath
         doesFileExist snapshotPath `shouldReturn` False
@@ -430,7 +431,7 @@ spec = do
         -- The paired positive control: the same fixture, caching on, creates
         -- both. Without it "did not create" would pass on a run that could
         -- not have created anything anyway.
-        _ <- acquireUsageReport UsageForceFresh True (configuredWith codexScript claudeScript)
+        _ <- acquireUsageReport UsageForceFresh True DualMode (configuredWith codexScript claudeScript)
         doesFileExist snapshotPath `shouldReturn` True
         doesFileExist lockPath `shouldReturn` True
 
@@ -458,7 +459,7 @@ spec = do
             (root </> "writers")
             (UsageWriter "outside-claude" Claude (UsageSnapshot [UsageWindow "outside-window" 99 laterInstant] laterInstant))
         codexScript <- providerCommittingFirst root "codex" 71 outsideCommit
-        (report, warnings) <- acquireUsageReport UsageCacheFirst True (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
+        (report, warnings) <- acquireUsageReport UsageCacheFirst True DualMode (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
         warnings `shouldBe` []
         lookup Codex (reportWindows report) `shouldBe` Just (Right [("codex-window", 71)])
         stored <- storedCache

@@ -12,7 +12,9 @@ import Data.List (find, nub)
 import Data.Maybe (isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Kanban.Models (OperatingMode (..), soleAgent)
 import Kanban.Preflight.Environment
+import Kanban.ProviderAdapter (brandForProvider, embeddedReviewProvider)
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..), agentForAction, authoredOnOwnBrand)
 import Kanban.Solve (SolverBrand (..))
 
@@ -119,6 +121,19 @@ canonicalReviewBrands IssueOriginUnmarked = [CodexSolver, ClaudeSolver]
 -- problem, which is a malformed issue rather than missing setup.
 canonicalReviewBrands IssueOriginConflicting = []
 
+-- | 'canonicalReviewBrands' as the operating mode actually spawns them.
+--
+-- Single-agent collapses every routed reviewer onto the one loaded provider,
+-- exactly as @reviewers_for_origin@ already does on the Python side (issue
+-- #572), so an unmarked issue requires one CLI there rather than both. A body
+-- declaring both origins still requires none: the backend rejects it before
+-- it reaches a reviewer in every mode, and collapsing an empty list would
+-- demand a provider for an issue no reviewer is ever spawned for.
+canonicalReviewBrandsIn :: OperatingMode -> IssueOrigin -> [SolverBrand]
+canonicalReviewBrandsIn mode origin = case canonicalReviewBrands origin of
+  [] -> []
+  routed -> maybe routed (pure . brandForProvider) (soleAgent mode)
+
 -- | The dependencies of the *shared* revision coordinator itself, as
 -- distinct from any one issue's amendment authoring: Kanban's own
 -- @codex app-server@ thread and @gh@.
@@ -172,6 +187,18 @@ versionFloorReason ClaudeSolver =
 oppositeBrand :: SolverBrand -> SolverBrand
 oppositeBrand CodexSolver = ClaudeSolver
 oppositeBrand ClaudeSolver = CodexSolver
+
+-- | The brand on the /other/ side of a two-brand handoff, as the mode
+-- actually reaches it: an autosolve run's review of its own pull request, and
+-- the one nested canonical rereview a revision or repair spawns after
+-- pushing.
+--
+-- Dual mode is 'oppositeBrand', unchanged. Single-agent hands off to the one
+-- loaded provider, which is the brand that already ran the first half, so the
+-- checks this contributes are the ones already present rather than a second
+-- CLI the install does not have.
+counterpartBrand :: OperatingMode -> SolverBrand -> SolverBrand
+counterpartBrand mode brand = maybe (oppositeBrand brand) brandForProvider (soleAgent mode)
 
 actionLabel :: PreflightAction -> Text
 actionLabel (ActionIssueReview origin) = "issue review/rereview (r) · " <> originLabel origin
@@ -332,18 +359,25 @@ providerChecks needsBundle probe =
   [executableCheck probe, authCheck probe] <> [bundleCheck probe | needsBundle]
 
 -- | The checks one action actually depends on. Issue revision runs Kanban's
--- own @codex app-server@ prompts rather than a packaged workflow, so it
--- needs no bundle; auto-solve drives the PR review itself, so it needs the
--- opposite brand too.
-actionReport :: PreflightEnvironment -> PreflightAction -> PreflightReport
-actionReport environment action = PreflightReport action (checksFor action)
+-- own embedded-review prompts rather than a packaged workflow, so it needs no
+-- bundle; auto-solve drives the PR review itself, so it needs the reviewing
+-- brand too.
+--
+-- The mode is asked rather than assumed because a check is a claim that this
+-- machine must be able to run a specific executable, and single-agent mode
+-- never spawns the brand it does not load. Blocking a Claude-only install on
+-- a missing @codex@ would refuse every action it is perfectly able to run,
+-- and every place below that used to name the opposite brand asks the mode
+-- for the brand that is really on the other side of the handoff.
+actionReport :: PreflightEnvironment -> OperatingMode -> PreflightAction -> PreflightReport
+actionReport environment mode action = PreflightReport action (checksFor action)
   where
     -- The canonical backend spawns the opposite brand itself (both, for an
     -- unmarked issue under the dual policy Kanban passes), so a review is
     -- only ready if that reviewer's CLI is installed and signed in. No
     -- packaged bundle: the backend runs `codex exec`/`claude -p` directly.
     checksFor (ActionIssueReview origin) =
-      concatMap (providerChecks False . environmentProbe environment) (canonicalReviewBrands origin)
+      concatMap (providerChecks False . environmentProbe environment) (canonicalReviewBrandsIn mode origin)
         <> [gitHubCheck environment, reviewBackendCheck environment]
     -- The revision coordinator is always Kanban's own @codex app-server@
     -- thread, and neither brand's packaged bundle is involved: it runs
@@ -352,18 +386,32 @@ actionReport environment action = PreflightReport action (checksFor action)
     -- installed and signed in too, or the session fails inside the tool
     -- call instead of at the door.
     checksFor (ActionIssueRevision origin) =
-      providerChecks False (environmentProbe environment CodexSolver)
+      providerChecks False (environmentProbe environment coordinator)
         <> [ check
-             | revisionAuthorBrand origin == ClaudeSolver,
-               check <- providerChecks False (environmentProbe environment ClaudeSolver)
+             | author /= coordinator,
+               check <- providerChecks False (environmentProbe environment author)
            ]
         <> [gitHubCheck environment]
+      where
+        -- The coordinator is the brand whose embedded-review backend this
+        -- install actually starts, which single-agent mode moves
+        -- ('Kanban.Review.embeddedReviewProvider'), and the author is the
+        -- brand that writes the amendment, which that mode collapses onto the
+        -- same provider. Compared rather than tested against Claude by name,
+        -- so a Claude-only install checks one CLI instead of listing the same
+        -- probe twice.
+        coordinator = brandForProvider (embeddedReviewProvider mode)
+        author = maybe (revisionAuthorBrand origin) brandForProvider (soleAgent mode)
     checksFor (ActionSolve brand) =
       providerChecks True (environmentProbe environment brand)
         <> [gitHubCheck environment, reviewBackendCheck environment]
     checksFor (ActionAutoSolve brand) =
       providerChecks True (environmentProbe environment brand)
-        <> providerChecks True (environmentProbe environment (oppositeBrand brand))
+        <> [ check
+             | reviewer <- [counterpartBrand mode brand],
+               reviewer /= brand,
+               check <- providerChecks True (environmentProbe environment reviewer)
+           ]
         <> [gitHubCheck environment, reviewBackendCheck environment]
     -- Review and rereview run on the opposite brand from the PR's origin
     -- and are themselves the canonical reviewer, so they need only that
@@ -377,11 +425,13 @@ actionReport environment action = PreflightReport action (checksFor action)
       providerChecks True (environmentProbe environment launched)
         <> [ check
              | authoredOnOwnBrand pullRequestAction,
-               check <- providerChecks False (environmentProbe environment (oppositeBrand launched))
+               nested <- [counterpartBrand mode launched],
+               nested /= launched,
+               check <- providerChecks False (environmentProbe environment nested)
            ]
         <> [gitHubCheck environment, reviewBackendCheck environment]
       where
-        launched = agentForAction origin pullRequestAction
+        launched = agentForAction mode origin pullRequestAction
 
 -- | The one-line diagnostic for the first blocking check, or 'Nothing' when
 -- nothing definite stands in the action's way.
@@ -422,9 +472,20 @@ doctorActions =
     ActionPullRequestFlow PullRequestClaude PullRequestRepair
   ]
 
+-- | The doctor reports the whole matrix rather than this install's mode.
+--
+-- @--doctor@ is answered ahead of configuration and repository resolution --
+-- a fresh clone with no remote still has to be able to ask why an action
+-- would not start -- so it reads no @models.toml@ and has no mode to report
+-- against. Every action a user could select is listed under dual routing,
+-- which is the superset: an install that is ready for all of them is ready
+-- for any singleton subset of them.
+doctorMode :: OperatingMode
+doctorMode = DualMode
+
 doctorReady :: PreflightEnvironment -> Bool
 doctorReady environment =
-  all (isNothing . blockingRemediation . actionReport environment) doctorActions
+  all (isNothing . blockingRemediation . actionReport environment doctorMode) doctorActions
 
 doctorLines :: PreflightEnvironment -> [Text]
 doctorLines environment =
@@ -441,7 +502,7 @@ doctorLines environment =
         <> [gitHubCheck environment, reviewBackendCheck environment]
     renderCheck check = ["  " <> pad labelWidth check.checkName <> statusText check.checkStatus]
     renderAction action =
-      let report = actionReport environment action
+      let report = actionReport environment doctorMode action
        in case blockingRemediation report of
             Nothing -> ["  " <> pad labelWidth (actionLabel action) <> unresolvedSuffix report]
             Just remediation -> ["  " <> pad labelWidth (actionLabel action) <> "blocked — " <> remediation]

@@ -1085,7 +1085,7 @@ settingsCases =
       { frameCaseName = "overlay-settings-single-agent",
         frameCaseWidth = 200,
         frameCaseHeight = 48,
-        frameCaseSummary = "a roster loading Claude alone: single-agent on the mode line, and only that brand's rows",
+        frameCaseSummary = "a roster loading Claude alone: single-agent on the mode line, only that brand's rows, and one usage block in the sidebar",
         frameCaseState = openSettings . withModelRoster (Right claudeOnlyRoster)
       },
     FrameCase
