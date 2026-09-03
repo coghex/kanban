@@ -292,10 +292,13 @@ lifecycleSpec = describe "one running host" $ do
       awaitCalls host 1 isFinishCall
       calls <- providerCalls host
       filter isFinishCall calls `shouldBe` [FinishThread late]
-      -- And the child's own evidence says what happened to it, rather than
-      -- the event being logged to the host where no dashboard would find it.
+      -- The child's journal ended at its terminal envelope, so what became of
+      -- the late thread is recorded on the host instead — where an operator
+      -- can find it without a replay reading past a terminal event.
       journaled <- journalEvents child
-      journaled `shouldContain` [WorkerReviewEvent (ReviewThreadCreated 594 late)]
+      journaled `shouldNotContain` [WorkerReviewEvent (ReviewThreadCreated 594 late)]
+      _ <- awaitHostDiagnostic host "announced this action's thread after it had already been settled"
+      pure ()
 
   -- Round 1's third blocker. A command correlated to one thread must not be
   -- retargeted at whichever thread the child is on when it is read.
@@ -594,6 +597,29 @@ lifecycleSpec = describe "one running host" $ do
             ]
       owners `shouldBe` [hostIdUnderTest]
 
+  -- Round 8's second blocker. A termination can settle a canonical child
+  -- while its gate is still running, and the gate's result would then be
+  -- appended after the child's terminal envelope — invisible to a monitor
+  -- that stopped there, replayed by one that reattaches, and able to replace
+  -- a killed session with an approval. Nothing follows the terminal envelope.
+  it "keeps a canonical result that lands after termination out of the journal" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 InitialReview
+      _ <- awaitCallsFor host 1 isCanonicalCall
+      termination <- commandNumbered 1 child TerminateIssueAction
+      Right () <- appendReviewCommand child termination
+      _ <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      -- The gate reports its process and then its verdict, both too late.
+      putMVar host.hostCanonicalProcess (managedProcessGroup 1)
+      -- Give the stage every chance to append after the terminal envelope.
+      threadDelay 300000
+      journaled <- journalEvents child
+      let terminalAt = findIndex (\event -> case event of WorkerFinished _ -> True; _ -> False) journaled
+      -- The terminal envelope is the last record, whatever else happened.
+      fmap (+ 1) terminalAt `shouldBe` Just (length journaled)
+      journaled
+        `shouldSatisfy` all (\event -> case event of WorkerCanonicalReviewFinished _ _ -> False; _ -> True)
+
   -- Round 7's first blocker. A termination settles the child, and settling
   -- writes its terminal envelope; a monitor stops replaying there, so an
   -- input record written afterwards is either never seen or, if it is, moves
@@ -645,11 +671,10 @@ lifecycleSpec = describe "one running host" $ do
       _ <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
       -- Only now does the gate report its subprocess.
       putMVar host.hostCanonicalProcess (managedProcessGroup 1)
-      -- The child's own evidence records that the late process was ended
-      -- rather than installed onto an action nothing would settle again.
-      _ <- awaitJust "the late canonical subprocess was not ended" $ do
-        journaled <- journalEvents child
-        pure (find (== WorkerDiagnostic "the canonical gate started after this action had already been settled; the subprocess was ended") journaled)
+      -- The host records that the late process was ended rather than
+      -- installed onto an action nothing would settle again. On the host,
+      -- because the child's journal ended at its terminal envelope.
+      _ <- awaitHostDiagnostic host "the canonical gate started after this action had already been settled"
       pure ()
 
   -- Round 6's third blocker. Retirement moves a settled child between two
@@ -1287,7 +1312,10 @@ data HostUnderTest = HostUnderTest
     hostRegistered :: MVar [ManagedProcess],
     -- | Filled by a test to hand the canonical gate's subprocess to the host,
     -- at a moment the test chooses. Empty means the gate has not reported one.
-    hostCanonicalProcess :: MVar ManagedProcess
+    hostCanonicalProcess :: MVar ManagedProcess,
+    -- | The host's own journal, where anything that outlived a child's
+    -- terminal envelope is recorded.
+    hostEmitted :: MVar [WorkerEvent]
   }
 
 -- | Runs a real host against a provider this test controls, hands the body a
@@ -1354,7 +1382,8 @@ withRunningHostOutcome body =
             hostCalls = calls,
             hostThreads = threads,
             hostRegistered = registeredProcesses,
-            hostCanonicalProcess = canonicalProcess
+            hostCanonicalProcess = canonicalProcess,
+            hostEmitted = emitted
           }
       -- The host exits when it holds no live child, so a body that left one
       -- running would wait forever. Ending them is done the way anything ends
@@ -1568,6 +1597,13 @@ deliver host = host.hostSink
 
 providerCalls :: HostUnderTest -> IO [ProviderCall]
 providerCalls host = readMVar host.hostCalls
+
+-- | Waits for a diagnostic on the host's own journal containing this text.
+awaitHostDiagnostic :: HostUnderTest -> Text -> IO Text
+awaitHostDiagnostic host wanted =
+  awaitJust ("the host recorded no diagnostic mentioning " <> Text.unpack wanted) $ do
+    emitted <- readMVar host.hostEmitted
+    pure (find (Text.isInfixOf wanted) [message | WorkerDiagnostic message <- emitted])
 
 -- | Waits for the host to ask for this issue's review, then announces the
 -- thread the provider would have named and waits for the child to record it.

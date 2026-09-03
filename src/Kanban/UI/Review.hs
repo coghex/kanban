@@ -104,9 +104,7 @@ import Kanban.Worker
     ReviewCommandPayload (..),
     appendReviewCommand,
     newReviewCommandId,
-    readWorkerState,
     WorkerSpec (..),
-    WorkerState (..),
     WorkerDescriptor (..),
     ProcessIdentity,
   )
@@ -245,10 +243,10 @@ submitReviewInput issueNumber = do
 submitReviewCommand :: Int -> ReviewCommandPayload -> EventM Name AppState ()
 submitReviewCommand issueNumber payload = do
   state <- get
-  case issueActionWorkerFor state issueNumber of
-    Nothing -> setNotice issueActionGoneNotice
-    Just descriptor -> do
-      recorded <- liftIO (readWorkerState descriptor)
+  case (issueActionWorkerFor state issueNumber, Map.lookup issueNumber state.appReviewSessions) of
+    (Nothing, _) -> setNotice issueActionGoneNotice
+    (_, Nothing) -> setNotice issueActionGoneNotice
+    (Just descriptor, Just session) -> do
       identifier <- liftIO newReviewCommandId
       now <- liftIO getCurrentTime
       let command =
@@ -256,8 +254,17 @@ submitReviewCommand issueNumber payload = do
               { reviewCommandId = identifier,
                 reviewCommandTarget = descriptor.workerDescriptorSpec.workerId,
                 reviewCommandIssue = issueNumber,
-                reviewCommandThread = either (const Nothing) (.workerStateReviewThread) recorded,
-                reviewCommandTurn = either (const Nothing) (.workerStateReviewTurn) recorded,
+                -- The thread and turn the /overlay is showing/, not the
+                -- newest the child has recorded. The two differ for as long
+                -- as it takes a journal event to reach Brick, and in that
+                -- window a durable read would address the turn that started
+                -- while the user was typing rather than the one they were
+                -- answering. The host refuses a command whose turn has moved
+                -- on, so naming what was on screen is what turns this race
+                -- into a refusal the user is told about instead of a message
+                -- steering a turn they never saw.
+                reviewCommandThread = session.sessionDetail.reviewSessionThreadId,
+                reviewCommandTurn = session.sessionDetail.reviewSessionTurnId,
                 reviewCommandIssuedAt = now,
                 reviewCommandPayload = payload
               }

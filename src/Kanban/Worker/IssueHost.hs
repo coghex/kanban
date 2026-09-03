@@ -262,6 +262,18 @@ data HostChild = HostChild
     -- only. A revision has none; its provider work happens on a review thread
     -- inside the host's client.
     hostChildProcess :: IORef (Maybe ManagedProcess),
+    -- | Closed the instant this child's terminal envelope is written, under
+    -- the same lock that writes it.
+    --
+    -- A monitor stops replaying at that envelope, so anything appended after
+    -- it is seen by a dashboard that reattaches and not by one that was
+    -- watching — which is the live-versus-reattached divergence requirement 4
+    -- exists to rule out. Stage threads are cancelled by a settle rather than
+    -- joined, so a canonical invocation can return its result while the
+    -- settle is committing; making "nothing follows the terminal envelope" a
+    -- property of the journal itself is what makes that harmless, rather than
+    -- a discipline every writer has to remember.
+    hostChildJournalGate :: MVar Bool,
     -- | Won once. Whoever wins commits this child's terminal outcome,
     -- releases its lease, and stops its stage; every later claimant is a
     -- no-op. Without it a turn completing while a termination command is
@@ -612,6 +624,7 @@ adoptChild host descriptor task adoption = do
       )
   stageThread <- newIORef Nothing
   process <- newIORef Nothing
+  journalGate <- newMVar False
   settleClaim <- newIORef False
   let child =
         HostChild
@@ -619,6 +632,7 @@ adoptChild host descriptor task adoption = do
             hostChildTask = task,
             hostChildJournal = journal,
             hostChildLog = rawLog,
+            hostChildJournalGate = journalGate,
             hostChildState = stateCell,
             hostChildStageThread = stageThread,
             hostChildProcess = process,
@@ -788,8 +802,14 @@ runCanonicalChild host child stage = do
         host.hostRepositoryIdentity
         host.hostApprovalController
         (preflightBlocker spec.workerRepository host.hostOperatingMode (issueActionPreflightAction stage task.issueActionOrigin))
-        (connected.providerRunCanonical stage task.issueActionIssueNumber (recordCanonicalProcess child))
-  journalChild child (WorkerCanonicalReviewFinished stage result)
+        (connected.providerRunCanonical stage task.issueActionIssueNumber (recordCanonicalProcess host child))
+  -- The gate can finish while a termination is settling this child, and the
+  -- settle closes the journal. Recording the result on the host instead of
+  -- dropping it keeps the evidence an operator needs — the gate may well have
+  -- posted its comment and moved the labels — without appending to a
+  -- transcript a reattaching dashboard would replay past the terminal event.
+  recorded <- journalChildRecord child (WorkerCanonicalReviewFinished stage result)
+  unless recorded (hostDiagnostic host (lateCanonicalResultDiagnostic child.hostChildTask result))
   writeIORef child.hostChildProcess Nothing
   settleChild host child (canonicalStageOutcome result)
 
@@ -813,8 +833,8 @@ canonicalStageOutcome (Right _) = SolveCompleted
 -- ownership: the identity and its descendant group land in this child's
 -- 'workerStateKnownProcesses', and settling this child terminates exactly
 -- that group.
-recordCanonicalProcess :: HostChild -> ManagedProcess -> IO ()
-recordCanonicalProcess child process = do
+recordCanonicalProcess :: IssueReviewHost -> HostChild -> ManagedProcess -> IO ()
+recordCanonicalProcess host child process = do
   -- Installed first, then checked. Checking first and installing second is a
   -- read that a termination can win behind: the settle would find no process
   -- to kill and release the child, and this callback would then record a
@@ -827,12 +847,27 @@ recordCanonicalProcess child process = do
   recordLiveCanonicalProcess child process
   settled <- readIORef child.hostChildSettleClaim
   when settled $ do
-    journalChild child (WorkerDiagnostic lateCanonicalProcessDiagnostic)
+    -- On the host, for the same reason the late thread is: the child's
+    -- journal ended at its terminal envelope.
+    hostDiagnostic host (lateCanonicalProcessDiagnostic <> " (issue #" <> Text.pack (show child.hostChildTask.issueActionIssueNumber) <> ")")
     writeIORef child.hostChildProcess Nothing
     interruptThenKillManagedProcess process
 
 lateThreadDiagnostic :: Text
 lateThreadDiagnostic = "the provider announced this action's thread after it had already been settled; the thread was closed"
+
+-- | What a canonical result that arrived after its child was settled reads as
+-- on the host's own journal.
+lateCanonicalResultDiagnostic :: IssueActionWorkerTask -> Either Text CanonicalIssueReviewResult -> Text
+lateCanonicalResultDiagnostic task result =
+  "issue #"
+    <> Text.pack (show task.issueActionIssueNumber)
+    <> " was terminated while its canonical gate was running; the gate then reported: "
+    <> either id reportedVerdict result
+  where
+    reportedVerdict reported
+      | reported.canonicalReviewApproved = "approved"
+      | otherwise = "changes requested"
 
 lateCanonicalProcessDiagnostic :: Text
 lateCanonicalProcessDiagnostic = "the canonical gate started after this action had already been settled; the subprocess was ended"
@@ -905,8 +940,8 @@ routeReviewEvent host event = case event of
     case found of
       Nothing -> hostDiagnostic host ("a review thread was created for issue #" <> Text.pack (show issueNumber) <> ", which this host holds no pending start for")
       Just child -> do
-        journalChild child (WorkerReviewEvent event)
         settled <- readIORef child.hostChildSettleClaim
+        unless settled (journalChild child (WorkerReviewEvent event))
         if settled
           then do
             -- The child asked for this thread and was settled before the
@@ -914,7 +949,12 @@ routeReviewEvent host event = case event of
             -- settled child stays addressable: the alternative is a live
             -- provider thread — and, under a process-per-thread backend, a
             -- live process — that nothing owns and nothing will ever stop.
-            journalChild child (WorkerDiagnostic lateThreadDiagnostic)
+            --
+            -- Recorded on the host rather than the child, because the child's
+            -- journal ends at its terminal envelope and this happened after
+            -- it. The host's log is where an operator finds what became of a
+            -- thread that outlived the action that asked for it.
+            hostDiagnostic host (lateThreadDiagnostic <> " (issue #" <> Text.pack (show issueNumber) <> ")")
             provider <- readMVar host.hostProvider
             forM_ provider (\connected -> connected.providerFinishThread threadId)
           else do
@@ -1295,7 +1335,7 @@ settleChild host child outcome = do
           workerStateReviewRequest = Nothing,
           workerStateLastActivity = terminalActivity outcome
         }
-    journalChild child (WorkerFinished outcome)
+    journalChildTerminal child (WorkerFinished outcome)
     releaseWorkerLease child.hostChildDescriptor
     -- Retired first, live entry removed second. The two maps are separate
     -- cells, so a lookup landing between the updates sees whichever order
@@ -1399,7 +1439,33 @@ childHoldsThread threadId child = do
 -- traffic an operator reads when they want to know what the provider actually
 -- said, and it is this child's share of it rather than the whole client's.
 journalChild :: HostChild -> WorkerEvent -> IO ()
-journalChild child event = do
+journalChild child = void . journalChildRecord child
+
+-- | Records one event, reporting whether the journal was still open.
+--
+-- 'False' is a write refused because this child's terminal envelope has
+-- already been written. The caller decides what to do about it; most have
+-- nothing to say, and the one that does — a canonical result that finished
+-- while a termination was settling — reports it on the host's own journal
+-- instead, where it is evidence without being replay.
+journalChildRecord :: HostChild -> WorkerEvent -> IO Bool
+journalChildRecord child event =
+  modifyMVar child.hostChildJournalGate $ \closed -> do
+    unless closed (writeChildRecord child event)
+    pure (closed, not closed)
+
+-- | The terminal envelope, and the closure of the journal, as one step.
+--
+-- Under the same lock so no write can slip between them: a concurrent
+-- 'journalChildRecord' either lands entirely before this or is refused.
+journalChildTerminal :: HostChild -> WorkerEvent -> IO ()
+journalChildTerminal child event =
+  modifyMVar_ child.hostChildJournalGate $ \closed -> do
+    unless closed (writeChildRecord child event)
+    pure True
+
+writeChildRecord :: HostChild -> WorkerEvent -> IO ()
+writeChildRecord child event = do
   appendWorkerEvent child.hostChildDescriptor child.hostChildJournal event
   -- Best-effort, and deliberately so. The event journal above is the evidence
   -- a replay needs; the raw log is what an operator reads afterwards. A log

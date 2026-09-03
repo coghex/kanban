@@ -962,7 +962,14 @@ app-server process, not the dashboard.
 Two different retentions meet in that overlay, and they are not the same
 contract. The child's event journal and raw log hold every event the action
 ever produced, bounded only by the worker cache's own retention. The overlay's
-transcript is bounded as it always was. A dashboard reattaching to a live
+transcript is bounded as it always was. A child's terminal envelope is the last record in its journal: a monitor stops
+replaying there, so anything appended after it would be seen by a dashboard
+that reattaches and not by one that was watching. Whatever outlives an action
+— a provider thread announced after it was settled, a canonical gate that
+finished while it was being terminated — is recorded on the host's own journal
+instead, where it is evidence without being replay.
+
+A dashboard reattaching to a live
 action replays that whole journal through the same transitions a live event
 takes, so it arrives at the same bounded transcript suffix, the same pending
 question or approval, the same activity, and the same scroll-follow state a
@@ -985,8 +992,9 @@ acknowledgement leaves the answer recoverable rather than turning a delivered
 message into one reported as lost. Command identifiers carry a process-local sequence as well
 as a clock and a pid, because two presses in one clock tick would otherwise
 deduplicate to one. Every
-command that acts on a thread names the thread, turn, or request it was
-correlated to, and is refused rather than retargeted when the child has since
+command that acts on a thread names the thread, turn, or request the overlay
+was showing when it was submitted — not the newest the action has recorded,
+which can already have moved on while a journal event was still in flight — and is refused rather than retargeted when the child has since
 moved on — including feedback, whose turn must still be the turn the child is
 on, so a message meant to steer one turn never steers the next or opens a
 fresh one. Ending the action is the one command that names none, because it

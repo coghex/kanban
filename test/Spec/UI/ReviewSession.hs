@@ -507,6 +507,44 @@ spec = do
             phase <- allPhases
         ]
 
+  -- Round 8's first blocker. A command must name the thread and turn the
+  -- overlay is showing, not the newest the child has recorded: the two differ
+  -- for as long as a journal event takes to reach Brick, and a durable read
+  -- in that window addresses a turn the user never saw. Naming what was on
+  -- screen turns the race into a refusal they are told about.
+  describe "which turn a submitted command names" $ do
+    let showing turnId =
+          newAgentSession
+            0
+            ReviewWaiting
+            ""
+            Nothing
+            (ChatTranscript "" "" "")
+            ReviewDetail
+              { reviewSessionIssue = baseIssue 151 [],
+                reviewSessionStage = IssueRevision,
+                reviewSessionThreadId = Just (fixtureReviewThread "thread-1"),
+                reviewSessionTurnId = turnId,
+                reviewSessionPending = Nothing,
+                reviewSessionUndelivered = [],
+                reviewSessionRestored = Nothing
+              }
+
+    it "takes the thread and turn from the session on screen" $ do
+      let displayed = showing (Just "turn-1")
+      ( displayed.sessionDetail.reviewSessionThreadId,
+        displayed.sessionDetail.reviewSessionTurnId
+        )
+        `shouldBe` (Just (fixtureReviewThread "thread-1"), Just "turn-1")
+
+    -- A session that has not been told a turn yet names none, which the host
+    -- accepts only while the child holds none either. The refusal half of
+    -- that rule is exercised against a real host in
+    -- "Spec.Agent.IssueHost" — "rejects feedback written for a turn that has
+    -- since been replaced" — because it is the host that decides it.
+    it "names no turn when the overlay has not been told one" $
+      (showing Nothing).sessionDetail.reviewSessionTurnId `shouldBe` Nothing
+
   -- Which durable command a submission becomes (requirement 9). The two are
   -- not interchangeable: one is new guidance, the other is the recovery of a
   -- specific message the provider refused, and a review's evidence should say

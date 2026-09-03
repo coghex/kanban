@@ -1604,6 +1604,17 @@ unless their typed contract exposes an override.
   while still reporting a running state, so predicting adoption is impossible
   from the launch side and observing it is not.
 
+  The eighth round closed two. A command names the thread and turn the overlay
+  was showing rather than the newest the child has recorded: the two differ for
+  as long as a journal event takes to reach Brick, and a durable read in that
+  window addresses a turn the user never saw, which the host's own staleness
+  check would then accept. And "nothing follows the terminal envelope" became a
+  property of the journal rather than a discipline — the envelope and the
+  journal's closure happen under one lock, so a canonical result returning
+  while a termination commits cannot append past it and give a reattached
+  dashboard an approval a live one never saw. What outlives an action is
+  recorded on the host instead.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard
