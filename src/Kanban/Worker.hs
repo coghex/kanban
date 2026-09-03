@@ -553,7 +553,7 @@ defaultRunTask spec aggregator rememberProvider emit = case spec.workerTask of
   -- answer to a question this worker never asks, and 'ActionIssueReview' is
   -- routed to that same resolution at the launch boundary rather than to a
   -- roster read of its own.
-  IssueHostWorkerTaskKind _ -> runIssueReviewHost spec emit
+  IssueHostWorkerTaskKind _ -> runIssueReviewHost spec rememberProvider emit
   -- Unreachable in practice and refused rather than assumed impossible: a
   -- child action has no supervisor process of its own — its host runs it —
   -- so nothing ever spawns one with @--worker-spec@ naming a child. A

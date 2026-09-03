@@ -10,6 +10,7 @@ module Spec.Agent.IssueHost (spec) where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (void)
+import Data.List (find)
 import Data.Maybe (isJust)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar)
 import Data.Aeson (FromJSON, ToJSON, Value (..), decode, eitherDecode, encode, toJSON)
@@ -22,6 +23,7 @@ import qualified Data.Text as Text
 import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import Kanban.Domain (Repository (..), defaultWorkflowConfig)
 import Kanban.Models (ProviderName (..))
+import Kanban.Process (ManagedProcess, managedProcessGroup, managedProcessPid)
 import Kanban.Preflight (IssueOrigin (..), PreflightAction (..))
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
@@ -251,6 +253,90 @@ lifecycleSpec = describe "one running host" $ do
       _ <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
       pure ()
     outcome `shouldBe` (Just (WorkerFinished SolveCompleted), True)
+
+  -- Round 1's first blocker. A child can be settled — by a termination
+  -- command, a deadline, or a dead connection — between asking the provider
+  -- for a thread and the provider announcing one, because the announcement is
+  -- asynchronous. The announcement then lands on a child that has left the
+  -- live map, and a thread nobody owns is a thread nobody closes: under a
+  -- process-per-thread backend, a leaked process.
+  it "closes a thread the provider announces after its child was settled" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      -- Settled after the review was asked for and before its thread was
+      -- announced, which is the ordering the race produces.
+      _ <- awaitCallsFor host 1 isBeginCall
+      termination <- commandNumbered 1 child TerminateIssueAction
+      Right () <- appendReviewCommand child termination
+      _ <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      -- Nothing was finished on the way out: the child never held a thread.
+      settledCalls <- providerCalls host
+      filter isFinishCall settledCalls `shouldBe` []
+      let late = ReviewThreadId (ConnectionId 1) "thread-late"
+      deliver host (ReviewThreadCreated 594 late)
+      awaitCalls host 1 isFinishCall
+      calls <- providerCalls host
+      filter isFinishCall calls `shouldBe` [FinishThread late]
+      -- And the child's own evidence says what happened to it, rather than
+      -- the event being logged to the host where no dashboard would find it.
+      journaled <- journalEvents child
+      journaled `shouldContain` [WorkerReviewEvent (ReviewThreadCreated 594 late)]
+
+  -- Round 1's third blocker. A command correlated to one thread must not be
+  -- retargeted at whichever thread the child is on when it is read.
+  it "rejects a command naming a thread the child has left" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      thread <- awaitThreadFor host 594
+      deliver host (ReviewTurnStarted thread "turn-1")
+      _ <- awaitState child (\recorded -> recorded.workerStateReviewTurn == Just "turn-1")
+      stale <- commandNumbered 1 child (SendReviewFeedback "look again")
+      Right () <- appendReviewCommand child stale {reviewCommandThread = Just (ReviewThreadId (ConnectionId 1) "thread-other")}
+      settled <- awaitAcknowledgements child 1
+      map (.acknowledgedOutcome) settled `shouldBe` [ReviewCommandRejected "that provider thread has already ended"]
+      calls <- providerCalls host
+      filter isSendCall calls `shouldBe` []
+
+  it "rejects a thread-scoped command that names no thread at all" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      thread <- awaitThreadFor host 594
+      deliver host (ReviewTurnStarted thread "turn-1")
+      _ <- awaitState child (\recorded -> recorded.workerStateReviewTurn == Just "turn-1")
+      unaddressed <- commandNumbered 1 child (SendReviewFeedback "look again")
+      Right () <- appendReviewCommand child unaddressed {reviewCommandThread = Nothing}
+      settled <- awaitAcknowledgements child 1
+      map (.acknowledgedOutcome) settled `shouldBe` [ReviewCommandRejected "that command names no provider thread"]
+
+  -- Termination is the exception, and has to be: it ends the child whichever
+  -- thread it is on, and refusing it for a thread that moved would leave an
+  -- action nobody can stop.
+  it "accepts a termination that names a thread the child has left" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitThreadFor host 594
+      stale <- commandNumbered 1 child TerminateIssueAction
+      Right () <- appendReviewCommand child stale {reviewCommandThread = Just (ReviewThreadId (ConnectionId 1) "thread-other")}
+      state <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      state.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed "the issue action was terminated")
+
+  -- The host is not a provider turn, and must not record itself as one: a
+  -- recorded provider pid with no recorded identity is what every termination
+  -- path reads as "started, but unverifiable", which leaves a host kill
+  -- recording a pending termination it can never complete. What it does
+  -- record is its client's own processes, through the supervisor's
+  -- registration, so they are identified, censused, and killable.
+  it "registers its client's processes rather than claiming to be one" $
+    withRunningHost $ \host -> do
+      registered <- awaitJust "the host registered no provider process" $ do
+        held <- readMVar host.hostRegistered
+        pure (if null held then Nothing else Just held)
+      pids <- mapM managedProcessPid registered
+      pids `shouldBe` [Just 1]
+      _ <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitThreadFor host 594
+      -- Registered once, however many polls have run.
+      readMVar host.hostRegistered >>= (\held -> length held `shouldBe` 1)
 
   -- A provider that will not start is the backend's own failure, reported on
   -- the host's journal and ending it rather than leaving a host serving
@@ -640,7 +726,9 @@ data ProviderCall
   | StopProvider
   deriving stock (Eq, Show)
 
-isAnswerCall, isInterruptCall, isFinishCall, isSendCall :: ProviderCall -> Bool
+isAnswerCall, isInterruptCall, isFinishCall, isSendCall, isBeginCall :: ProviderCall -> Bool
+isBeginCall (BeginReview _) = True
+isBeginCall _ = False
 isAnswerCall (AnswerQuestion _) = True
 isAnswerCall _ = False
 isInterruptCall InterruptTurn {} = True
@@ -659,7 +747,9 @@ data HostUnderTest = HostUnderTest
     hostCalls :: MVar [ProviderCall],
     -- | Allocated per @thread\/start@, so two concurrent children get
     -- distinct threads on one connection — the shared-process shape.
-    hostThreads :: MVar (Map.Map Int ReviewThreadId)
+    hostThreads :: MVar (Map.Map Int ReviewThreadId),
+    -- | What the host handed its supervisor's provider registration.
+    hostRegistered :: MVar [ManagedProcess]
   }
 
 -- | Runs a real host against a provider this test controls, hands the body a
@@ -685,6 +775,7 @@ withRunningHostOutcome body =
       createDirectoryIfMissing True directory
       calls <- newMVar []
       threads <- newMVar Map.empty
+      registeredProcesses <- newMVar []
       sinkCell <- newEmptyMVar
       emitted <- newMVar []
       let hostSpecification =
@@ -693,7 +784,7 @@ withRunningHostOutcome body =
           record call = modifyMVar_ calls (pure . (<> [call]))
           startProvider _ sink = do
             putMVar sinkCell sink
-            pure (Right (recordingProvider record threads sink))
+            pure (Right (recordingProvider record))
       hostDescriptor <- descriptorForSpec hostSpecification
       LazyByteString.writeFile hostDescriptor.workerDescriptorSpecPath (encode hostSpecification)
       -- Forked rather than spawned: what is under test is the host's own
@@ -705,6 +796,10 @@ withRunningHostOutcome body =
           (IssueHostTuning 20000 1)
           startProvider
           hostSpecification
+          -- The supervisor's own provider registration, recorded so a test can
+          -- assert the host registers its client's processes rather than
+          -- claiming to be one itself.
+          (\process -> modifyMVar_ registeredProcesses (pure . (<> [process])))
           (\event -> modifyMVar_ emitted (pure . (<> [event])))
         putMVar finished ()
       sink <- takeMVar sinkCell
@@ -713,7 +808,8 @@ withRunningHostOutcome body =
           { hostRepository = repository,
             hostSink = sink,
             hostCalls = calls,
-            hostThreads = threads
+            hostThreads = threads,
+            hostRegistered = registeredProcesses
           }
       -- The host exits when it holds no live child, so a body that left one
       -- running would wait forever. Ending them is done the way anything ends
@@ -741,6 +837,7 @@ withHostStartFailure message =
         (IssueHostTuning 20000 1)
         (\_ _ -> pure (Left message))
         (specFor hostIdUnderTest (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")))
+        (\_ -> pure ())
         (\event -> modifyMVar_ emitted (pure . (<> [event])))
       readMVar emitted
 
@@ -751,22 +848,29 @@ withHostStartFailure message =
 -- faithful stand-in: a real backend names a thread by emitting
 -- 'ReviewThreadCreated', and the host binds the child to it there rather than
 -- from the return of the call.
-recordingProvider :: (ProviderCall -> IO ()) -> MVar (Map.Map Int ReviewThreadId) -> (ReviewEvent -> IO ()) -> IssueHostProvider
-recordingProvider record threads sink =
+-- | A provider that records what it was asked and announces nothing on its
+-- own.
+--
+-- Announcing nothing is what makes the fixture faithful. A real backend names
+-- a thread by emitting 'ReviewThreadCreated' over the client's event sink,
+-- asynchronously and an unbounded time after the call that asked for it — so
+-- a fake that announced synchronously inside 'providerBeginReview' would make
+-- the settled-before-announced ordering unreachable, which is exactly the
+-- race round 1 found. Every test drives the announcement itself.
+recordingProvider :: (ProviderCall -> IO ()) -> IssueHostProvider
+recordingProvider record =
   IssueHostProvider
-    { providerBeginReview = \issueNumber -> do
-        record (BeginReview issueNumber)
-        thread <- modifyMVar threads $ \held ->
-          let allocated = ReviewThreadId (ConnectionId 1) (Text.pack ("thread-" <> show (Map.size held + 1)))
-           in pure (Map.insert issueNumber allocated held, allocated)
-        sink (ReviewThreadCreated issueNumber thread)
-        pure (Right ()),
+    { providerBeginReview = \issueNumber -> Right () <$ record (BeginReview issueNumber),
       providerAnswerQuestion = \requested _ -> Right () <$ record (AnswerQuestion requested),
       providerApproveAction = \requested accepted forSession ->
         Right () <$ record (ApproveAction requested accepted forSession),
       providerSendMessage = \thread _ message -> Right () <$ record (SendMessage thread message),
       providerInterruptTurn = \thread turnId -> Right () <$ record (InterruptTurn thread turnId),
       providerFinishThread = record . FinishThread,
+      -- One connection, as a shared-process backend holds. Identity 1 is
+      -- init, which is always present, so registering it exercises the real
+      -- path without spawning anything.
+      providerProcesses = pure [managedProcessGroup 1],
       providerStop = record StopProvider
     }
 
@@ -775,7 +879,7 @@ recordingProvider record threads sink =
 endEveryChild :: Repository -> IO ()
 endEveryChild repository = do
   history <- discoverWorkerHistory repository
-  let children = [descriptor | descriptor <- history, isJust (issueActionTask descriptor.workerDescriptorSpec.workerTask)]
+  let children = issueActionsIn history
   sequence_
     [ do
         termination <- commandNumbered (900 + ordinal) descriptor TerminateIssueAction
@@ -818,26 +922,53 @@ deliver host = host.hostSink
 providerCalls :: HostUnderTest -> IO [ProviderCall]
 providerCalls host = readMVar host.hostCalls
 
--- | Waits until the host has begun this issue's review and the provider has
--- named its thread.
+-- | Waits for the host to ask for this issue's review, then announces the
+-- thread the provider would have named and waits for the child to record it.
+--
+-- The two halves are one helper because that is one wire exchange: a real
+-- backend is asked, and later says which thread it gave. Splitting them in
+-- every test would only repeat the wait.
 awaitThreadFor :: HostUnderTest -> Int -> IO ReviewThreadId
 awaitThreadFor host issueNumber = do
-  found <- awaitMaybe (Map.lookup issueNumber <$> readMVar host.hostThreads)
-  case found of
-    Just thread -> pure thread
+  thread <- announceThreadFor host issueNumber
+  _ <- awaitJust
+    ("issue #" <> show issueNumber <> " never recorded its thread")
+    ( do
+        history <- discoverWorkerHistory host.hostRepository
+        recorded <- mapM decodeChildState (issueActionsIn history)
+        pure (find (\state -> maybe False ((== Just thread) . (.workerStateReviewThread)) state) recorded)
+    )
+  pure thread
+
+-- | Waits for the review to be asked for, then names its thread — without
+-- waiting for the child to record it, which is what a test of the
+-- settled-before-announced race needs.
+announceThreadFor :: HostUnderTest -> Int -> IO ReviewThreadId
+announceThreadFor host issueNumber = do
+  begun <- awaitMaybe (readMVar host.hostCalls >>= \calls -> pure (find (== BeginReview issueNumber) calls))
+  case begun of
     Nothing -> do
       -- The child's own journal is the account of why its stage never
       -- started -- a preflight blocker, a refused coordinator -- so a failure
       -- here reports that rather than only the absence.
       history <- discoverWorkerHistory host.hostRepository
-      journals <- mapM journalEvents history
-      fail ("no thread was allocated for issue #" <> show issueNumber <> "; journals: " <> show journals)
+      journals <- mapM journalEvents (issueActionsIn history)
+      fail ("no review was begun for issue #" <> show issueNumber <> "; journals: " <> show journals)
+    Just _ -> do
+      thread <- modifyMVar host.hostThreads $ \held ->
+        let allocated = ReviewThreadId (ConnectionId 1) (Text.pack ("thread-" <> show (Map.size held + 1)))
+         in pure (Map.insert issueNumber allocated held, allocated)
+      deliver host (ReviewThreadCreated issueNumber thread)
+      pure thread
 
 awaitCalls :: HostUnderTest -> Int -> (ProviderCall -> Bool) -> IO ()
-awaitCalls host expected wanted =
+awaitCalls host expected wanted = void (awaitCallsFor host expected wanted)
+
+awaitCallsFor :: HostUnderTest -> Int -> (ProviderCall -> Bool) -> IO [ProviderCall]
+awaitCallsFor host expected wanted =
   awaitJust "the provider was not called as expected" $ do
     calls <- readMVar host.hostCalls
-    pure (if length (filter wanted calls) >= expected then Just () else Nothing)
+    pure (if length (filter wanted calls) >= expected then Just calls else Nothing)
 
 awaitJournal :: WorkerDescriptor -> Int -> IO ()
 awaitJournal descriptor expected =
@@ -1039,8 +1170,15 @@ runningChildState descriptor now =
 writeChildState :: WorkerDescriptor -> WorkerState -> IO ()
 writeChildState descriptor = LazyByteString.writeFile descriptor.workerDescriptorStatePath . encode
 
+-- | A child's durable state, or 'Nothing' when it has none yet.
+--
+-- Tolerant of an absent file on purpose: a worker that has not written state
+-- is a normal state to read, and every caller here is either waiting for one
+-- to appear or scanning a directory that also holds a host.
 decodeChildState :: WorkerDescriptor -> IO (Maybe WorkerState)
-decodeChildState descriptor = decode <$> LazyByteString.readFile descriptor.workerDescriptorStatePath
+decodeChildState descriptor = do
+  present <- doesFileExist descriptor.workerDescriptorStatePath
+  if not present then pure Nothing else decode <$> LazyByteString.readFile descriptor.workerDescriptorStatePath
 
 commandFor :: WorkerDescriptor -> ReviewCommandPayload -> IO ReviewCommand
 commandFor = commandNumbered 0
@@ -1053,18 +1191,31 @@ commandNumbered :: Int -> WorkerDescriptor -> ReviewCommandPayload -> IO ReviewC
 commandNumbered ordinal descriptor payload = do
   identifier <- newReviewCommandId
   now <- getCurrentTime
+  -- Correlated against what the child currently records, which is exactly
+  -- what 'Kanban.UI.Review.submitReviewCommand' reads when the overlay
+  -- submits one. A fixture that named a thread of its own would be testing a
+  -- command no dashboard writes.
+  recorded <- decodeChildState descriptor
   pure
     ReviewCommand
       { reviewCommandId = distinct identifier,
         reviewCommandTarget = descriptor.workerDescriptorSpec.workerId,
-        reviewCommandIssue = 594,
-        reviewCommandThread = Just sampleThread,
-        reviewCommandTurn = Just "turn-1",
+        reviewCommandIssue = issueNumberOf descriptor,
+        reviewCommandThread = recorded >>= (.workerStateReviewThread),
+        reviewCommandTurn = recorded >>= (.workerStateReviewTurn),
         reviewCommandIssuedAt = now,
         reviewCommandPayload = payload
       }
   where
     distinct (ReviewCommandId value) = ReviewCommandId (value <> "-" <> Text.pack (show ordinal))
+
+issueActionsIn :: [WorkerDescriptor] -> [WorkerDescriptor]
+issueActionsIn history =
+  [descriptor | descriptor <- history, isJust (issueActionTask descriptor.workerDescriptorSpec.workerTask)]
+
+issueNumberOf :: WorkerDescriptor -> Int
+issueNumberOf descriptor =
+  maybe 594 (.issueActionIssueNumber) (issueActionTask descriptor.workerDescriptorSpec.workerTask)
 
 owedBy :: WorkerDescriptor -> IO [ReviewCommand]
 owedBy descriptor =

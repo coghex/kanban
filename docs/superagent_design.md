@@ -1521,6 +1521,17 @@ unless their typed contract exposes an override.
   collected, and a host with a live or unacknowledged-terminal child is never
   collected either, on top of every rule the pass already applied.
 
+  Two orderings the first review round found are closed explicitly. A child can
+  be settled — by a termination command, its own bound, or a dead connection —
+  between asking the provider for a thread and the provider announcing one,
+  because that announcement is asynchronous; settled children therefore stay
+  addressable, and a thread or canonical subprocess that arrives afterwards is
+  closed rather than left owned by nothing. And the host registers its client's
+  connection processes with its own supervisor rather than recording itself as
+  its own provider: a provider pid with no verifiable identity is what every
+  termination path reads as unresolvable, which left a host kill recording a
+  pending termination it could never complete.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

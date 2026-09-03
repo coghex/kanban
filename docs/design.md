@@ -975,7 +975,11 @@ feedback or steering, a deliberate resend of a refused steer, an active-turn
 interrupt, and ending the whole action — travels to that child as a durable,
 correlated command with an acknowledgement written back. A command is applied
 when its identifier carries no acknowledgement, and applying it writes one, so
-a retry, a replay, and a dashboard restart all deliver it exactly once. A
+a retry, a replay, and a dashboard restart all deliver it exactly once. Every
+command that acts on a thread names the thread, turn, or request it was
+correlated to, and is refused rather than retargeted when the child has since
+moved on; ending the action is the one command that names none, because it
+ends the child whichever thread it is on. A
 question raised while no dashboard was running stays pending and is answerable
 by the one that arrives next; a command the owning session rejects is
 acknowledged as rejected and its text handed back to the input line rather
@@ -3929,7 +3933,16 @@ The first solve/autosolve-compatible slice is implemented.
   The host takes no deadline of its own: each child is bounded individually
   from its own creation, and the host exits once it holds no live child, so no
   host-level bound settles a child still inside its own bound and a host
-  serving nobody leaves neither a lease nor a discovery record behind.
+  serving nobody leaves neither a lease nor a discovery record behind. It
+  records no provider of its own either — it runs no provider turn, and a
+  recorded provider process with no verifiable identity is what every
+  termination path reads as unresolvable — and instead registers its client's
+  actual connection processes with its own supervisor, so they are identified,
+  censused, and reachable by the ordinary kill and recovery paths.
+  A child settled between asking for a provider thread and the provider
+  announcing one stays addressable until that announcement arrives, and the
+  thread it names is closed rather than left owned by nothing; a canonical
+  subprocess that starts after its child was settled is ended the same way.
   The provider's process shape is the adapter's, unchanged: a shared-process
   backend multiplexes concurrent children through the host's one connection,
   and a process-per-thread backend gives each child its own. Ending or

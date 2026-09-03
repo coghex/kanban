@@ -93,6 +93,7 @@ import Kanban.Review
     canonicalLaunchOutcome,
     finishReviewThread,
     interruptReview,
+    reviewConnectionProcesses,
     reviewTurnResumable,
     runCanonicalIssueReview,
     sendReviewMessage,
@@ -171,6 +172,11 @@ data IssueHostProvider = IssueHostProvider
     -- 'ProcessPerThread' is its own process and under 'SharedProcess' is its
     -- tool descendants alone.
     providerFinishThread :: ReviewThreadId -> IO (),
+    -- | Every provider process the client currently holds, so the host can
+    -- register them with its own supervisor. A host that died uncleanly
+    -- otherwise leaves them orphaned with nothing durable naming them, and
+    -- nothing for a recovery pass to verify.
+    providerProcesses :: IO [ManagedProcess],
     providerStop :: IO ()
   }
 
@@ -188,6 +194,7 @@ embeddedIssueHostProvider client =
       providerSendMessage = sendReviewMessage client,
       providerInterruptTurn = interruptReview client,
       providerFinishThread = finishReviewThread client,
+      providerProcesses = reviewConnectionProcesses client,
       providerStop = stopReviewClient client
     }
 
@@ -231,7 +238,29 @@ data IssueReviewHost = IssueReviewHost
     hostEmit :: WorkerEvent -> IO (),
     hostTuning :: IssueHostTuning,
     hostChildren :: MVar (Map WorkerId HostChild),
+    -- | Children this host has settled, kept addressable by issue number.
+    --
+    -- A child is settled the instant a termination command, a deadline, or a
+    -- dead connection says so, and that can be before the provider has
+    -- finished creating the thread the child asked for. The creation is
+    -- announced asynchronously, so the announcement can arrive after the
+    -- child has left 'hostChildren' entirely — and a thread nobody owns is a
+    -- thread nobody closes.
+    --
+    -- Retained for the host's whole life rather than expired: the set is
+    -- bounded by the actions one host serves, and the alternative is a second
+    -- timer whose expiry is exactly the race it was added to close.
+    hostRetired :: MVar (Map Int HostChild),
     hostProvider :: MVar (Maybe IssueHostProvider),
+    -- | The supervisor's own provider registration, which records a process's
+    -- identity, adds it to this worker's census, and makes it reachable by
+    -- termination and recovery.
+    hostRememberProvider :: ManagedProcess -> IO (),
+    -- | Which of the client's processes have already been registered, so each
+    -- is registered once. Repeated registration is what accumulates the whole
+    -- set in the census: each call adds the newest and retains what a
+    -- previous one recorded.
+    hostRegisteredProcesses :: IORef [Int],
     hostApprovalController :: Either ApprovalUnavailable ApprovalController,
     hostRepositoryIdentity :: Text,
     hostOperatingMode :: OperatingMode,
@@ -247,7 +276,7 @@ data IssueReviewHost = IssueReviewHost
 -- thread and no further (requirement 11). A client that will not start is
 -- reported to every child waiting on it and ends the host, because a host
 -- with no client can serve nobody.
-runIssueReviewHost :: WorkerSpec -> (WorkerEvent -> IO ()) -> IO ()
+runIssueReviewHost :: WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
 runIssueReviewHost = runIssueReviewHostWith defaultIssueHostTuning startEmbeddedProvider
   where
     startEmbeddedProvider spec sink = do
@@ -266,16 +295,19 @@ runIssueReviewHostWith ::
   IssueHostTuning ->
   (WorkerSpec -> (ReviewEvent -> IO ()) -> IO (Either Text IssueHostProvider)) ->
   WorkerSpec ->
+  (ManagedProcess -> IO ()) ->
   (WorkerEvent -> IO ()) ->
   IO ()
-runIssueReviewHostWith tuning startProvider spec emit = do
+runIssueReviewHostWith tuning startProvider spec rememberProvider emit = do
   descriptor <- descriptorForSpec spec
   rosterResult <- loadModelRoster
   controller <- discoverApprovalController spec.workerRepository
   pid <- fromIntegral <$> getProcessID
   snapshot <- readProcessSnapshot
   children <- newMVar Map.empty
+  retired <- newMVar Map.empty
   providerCell <- newMVar Nothing
+  registered <- newIORef []
   stopped <- newIORef False
   let host =
         IssueReviewHost
@@ -284,7 +316,10 @@ runIssueReviewHostWith tuning startProvider spec emit = do
             hostEmit = emit,
             hostTuning = tuning,
             hostChildren = children,
+            hostRetired = retired,
             hostProvider = providerCell,
+            hostRememberProvider = rememberProvider,
+            hostRegisteredProcesses = registered,
             hostApprovalController = controller,
             hostRepositoryIdentity = normalizedRepositoryIdentity spec.workerRepository,
             hostOperatingMode = loadedOperatingMode rosterResult,
@@ -298,7 +333,14 @@ runIssueReviewHostWith tuning startProvider spec emit = do
     Left message -> finishHost host (SolveFailed message)
     Right provider -> do
       modifyMVar_ providerCell (pure . const (Just provider))
-      emit (WorkerProviderStarted pid)
+      -- Deliberately not 'WorkerProviderStarted' with this host's own pid.
+      -- The host is not a provider turn, and a recorded provider pid with no
+      -- recorded identity is precisely the shape every termination path reads
+      -- as "started, but unverifiable" — which leaves a host kill recording a
+      -- pending termination it can never complete. What the host does record
+      -- is its client's actual processes, below, each through the supervisor's
+      -- own registration so they are identified, censused, and killable.
+      emit (WorkerDiagnostic ("repository review host running as pid " <> Text.pack (show pid)))
       now <- getCurrentTime
       outcome <- hostLoop host now
       provider.providerStop
@@ -309,6 +351,7 @@ runIssueReviewHostWith tuning startProvider spec emit = do
 hostLoop :: IssueReviewHost -> UTCTime -> IO SolveOutcome
 hostLoop host lastLive = do
   threadDelay host.hostTuning.hostPollMicros
+  registerProviderProcesses host
   adoptNewChildren host
   applyPendingCommands host
   enforceChildBounds host
@@ -500,6 +543,26 @@ canonicalStageOutcome (Right _) = SolveCompleted
 -- that group.
 recordCanonicalProcess :: HostChild -> ManagedProcess -> IO ()
 recordCanonicalProcess child process = do
+  -- The canonical spawn is the same race the late thread announcement is: a
+  -- termination between the interlock and the process existing would leave a
+  -- gate subprocess running under a child that is already terminal. Settling
+  -- first means this claim is already taken, and the process is ended here
+  -- rather than recorded onto a child nothing will settle again.
+  alreadySettled <- readIORef child.hostChildSettleClaim
+  if alreadySettled
+    then do
+      journalChild child (WorkerDiagnostic lateCanonicalProcessDiagnostic)
+      interruptThenKillManagedProcess process
+    else recordLiveCanonicalProcess child process
+
+lateThreadDiagnostic :: Text
+lateThreadDiagnostic = "the provider announced this action's thread after it had already been settled; the thread was closed"
+
+lateCanonicalProcessDiagnostic :: Text
+lateCanonicalProcessDiagnostic = "the canonical gate started after this action had already been settled; the subprocess was ended"
+
+recordLiveCanonicalProcess :: HostChild -> ManagedProcess -> IO ()
+recordLiveCanonicalProcess child process = do
   writeIORef child.hostChildProcess (Just process)
   processId <- managedProcessPid process
   forM_ processId $ \pid -> do
@@ -550,7 +613,6 @@ routeReviewEvent host event = case event of
   ReviewThreadCreated issueNumber threadId -> do
     found <- childForIssue host issueNumber
     case found of
-      Nothing -> hostDiagnostic host ("a review thread was created for issue #" <> Text.pack (show issueNumber) <> ", which this host holds no action for")
       Just child -> do
         updateChildState child $ \state ->
           state
@@ -559,6 +621,20 @@ routeReviewEvent host event = case event of
               workerStateLastActivity = "session ready"
             }
         journalChild child (WorkerReviewEvent event)
+      -- The child asked for this thread and was settled before the provider
+      -- announced it. Closing it here is the whole reason settled children
+      -- stay addressable: the alternative is a live provider thread — and,
+      -- under a process-per-thread backend, a live process — that nothing
+      -- owns and nothing will ever stop.
+      Nothing -> do
+        settled <- Map.lookup issueNumber <$> readMVar host.hostRetired
+        case settled of
+          Nothing -> hostDiagnostic host ("a review thread was created for issue #" <> Text.pack (show issueNumber) <> ", which this host holds no action for")
+          Just child -> do
+            journalChild child (WorkerReviewEvent event)
+            journalChild child (WorkerDiagnostic lateThreadDiagnostic)
+            provider <- readMVar host.hostProvider
+            forM_ provider (\connected -> connected.providerFinishThread threadId)
   ReviewStartFailed issueNumber message -> do
     found <- childForIssue host issueNumber
     forM_ found $ \child -> do
@@ -722,6 +798,12 @@ applyChildCommand host child command = do
   state <- readMVar child.hostChildState
   case provider of
     Nothing -> pure (ReviewCommandRejected "the review backend is not connected")
+    -- Every command that acts on a thread is checked against the thread the
+    -- child is actually on before any provider call. A command written for
+    -- one thread and read after the child moved to another must not be
+    -- retargeted: the user meant the turn they were looking at, and silently
+    -- moving it is worse than saying it did not land.
+    Just _ | Just refusal <- staleThread state command -> pure (ReviewCommandRejected refusal)
     Just connected -> case command.reviewCommandPayload of
       TerminateIssueAction -> do
         settleChild host child (SolveFailed "the issue action was terminated")
@@ -756,6 +838,26 @@ applyChildCommand host child command = do
           pure (ReviewCommandRejected "that review request is no longer pending")
       | otherwise = childCommandOutcome <$> action
     staleTurn issued turnId = maybe False (/= turnId) issued.reviewCommandTurn
+
+-- | Whether a command names a thread other than the one its child is on.
+--
+-- Termination is the one command that names no thread and needs none: it ends
+-- the child whichever thread it is on, and refusing it for a thread that
+-- moved would leave an action nobody can stop.
+--
+-- Everything else is thread-scoped, so a command carrying no thread at all is
+-- refused as firmly as one carrying the wrong thread. A dashboard only offers
+-- these operations once a thread exists, so a command without one was written
+-- against state this child has since left behind.
+staleThread :: WorkerState -> ReviewCommand -> Maybe Text
+staleThread state command = case command.reviewCommandPayload of
+  TerminateIssueAction -> Nothing
+  _ -> case (command.reviewCommandThread, state.workerStateReviewThread) of
+    (_, Nothing) -> Just "this action has no provider thread to send to"
+    (Nothing, Just _) -> Just "that command names no provider thread"
+    (Just named, Just held)
+      | named /= held -> Just "that provider thread has already ended"
+      | otherwise -> Nothing
 
 childCommandOutcome :: Either Text () -> ReviewCommandOutcome
 childCommandOutcome (Left message) = ReviewCommandRejected message
@@ -817,6 +919,10 @@ settleChild host child outcome = do
     journalChild child (WorkerFinished outcome)
     releaseWorkerLease child.hostChildDescriptor
     modifyMVar_ host.hostChildren (pure . Map.delete child.hostChildDescriptor.workerDescriptorSpec.workerId)
+    -- Out of the live map and into the retired one in the same step, so a
+    -- thread or process the provider is still creating for this child has
+    -- somewhere to be closed against.
+    modifyMVar_ host.hostRetired (pure . Map.insert child.hostChildTask.issueActionIssueNumber child)
     -- Last, and from outside the thread being stopped: a stage thread that
     -- reached here itself would otherwise kill itself before its own journal
     -- write landed.
@@ -886,6 +992,26 @@ updateChildState child transform = do
 
 persistChild :: HostChild -> IO ()
 persistChild child = readMVar child.hostChildState >>= writeState child.hostChildDescriptor
+
+-- | Registers each of the client's processes with this host's supervisor
+-- exactly once.
+--
+-- Polled rather than done at startup because a process-per-thread backend
+-- spawns a process per review thread, so the set grows as children arrive.
+-- Each registration records that process's identity and refreshes the census,
+-- and the census retains what earlier registrations recorded — which is what
+-- accumulates the whole set rather than replacing it.
+registerProviderProcesses :: IssueReviewHost -> IO ()
+registerProviderProcesses host = do
+  provider <- readMVar host.hostProvider
+  forM_ provider $ \connected -> do
+    processes <- connected.providerProcesses
+    forM_ processes $ \process -> do
+      processId <- managedProcessPid process
+      forM_ processId $ \pid -> do
+        fresh <- atomicModifyIORef' host.hostRegisteredProcesses $ \known ->
+          if fromIntegral pid `elem` known then (known, False) else (fromIntegral pid : known, True)
+        when fresh (host.hostRememberProvider process)
 
 -- | Keeps every live child's heartbeat fresh.
 --

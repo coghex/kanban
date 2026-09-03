@@ -105,6 +105,7 @@ module Kanban.Review
     missingEmbeddedReviewMessage,
     newRecordingReviewClientForTesting,
     newReviewClientForTesting,
+    reviewConnectionProcesses,
     reviewConnectionsForTesting,
     reviewDeveloperInstructions,
     newToolRegistry,
@@ -170,7 +171,7 @@ import Kanban.Models
     assignmentFor,
     assignmentUnavailableMessage,
   )
-import Kanban.Process (killManagedProcess, managedProcess)
+import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess)
 import Kanban.ProviderAdapter
   ( EmbeddedReviewBackend (..),
     ProviderAdapter (..),
@@ -776,6 +777,16 @@ addRecordingReviewConnectionForTesting client = do
 -- them or assert on what shutdown reaped.
 reviewConnectionsForTesting :: ReviewClient -> IO [ReviewConnection]
 reviewConnectionsForTesting client = attachedConnections client.reviewConnections
+
+-- | Every provider process this client currently holds.
+--
+-- One for a shared-process backend, one per live review thread for a
+-- process-per-thread one. The repository review host registers these with its
+-- own supervisor so they are recorded, verifiable, and reachable by the
+-- ordinary recovery path: a host that dies uncleanly otherwise leaves them
+-- orphaned with nothing durable naming them.
+reviewConnectionProcesses :: ReviewClient -> IO [ManagedProcess]
+reviewConnectionProcesses client = map (.connectionManaged) <$> attachedConnections client.reviewConnections
 
 -- | A 'newReviewClientForTesting' whose one connection records what the
 -- client writes to it.
