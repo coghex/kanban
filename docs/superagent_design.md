@@ -1718,6 +1718,17 @@ unless their typed contract exposes an override.
   refuse anything that slips past, on the ledger rather than the journal,
   since the terminal envelope is still the last record the journal takes.
 
+  The eighteenth round closed both halves of the previous one. Checking the
+  action's durable state and writing the command are two steps, and no path
+  read the ledger the refusal was written to — so the residual race still lost
+  the text. The overlay now holds every command it writes until the child's
+  journal accounts for it, and offers back whatever is still held when the
+  terminal event arrives; a command that reached its action journals its line
+  before that envelope, so the two cases are exactly distinguishable. And the
+  dead-host termination fallback writes that envelope at all: it had been
+  recording a terminal state and releasing the lease while leaving the journal
+  open, so a reattaching dashboard replayed an action that never ended.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

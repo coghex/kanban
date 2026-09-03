@@ -13,6 +13,7 @@ import Kanban.Domain
 import Kanban.Models (ProviderName (..))
 import Kanban.Review
   ( ConnectionId (..),
+    ReviewAnswer (..),
     ReviewApproval (..),
     ReviewOutputKind (..),
     ReviewThreadId (..),
@@ -24,13 +25,16 @@ import Kanban.Review
   )
 import Kanban.UI.Board (reviewPhaseGlyphFor)
 import qualified Data.Text as Text
-import Kanban.Worker (ReviewCommandPayload (..), reviewCommandDisplay)
+import Kanban.Worker (ReviewCommandId (..), ReviewCommandPayload (..), reviewCommandDisplay)
 import Kanban.UI.Events (OverlayExtent (..), OverlayMouseAction (..), QuitRequest (..), dashboardQuitRequest, overlayMouseAction)
 import Kanban.UI.Overlay (reviewPhaseLabel)
 import Kanban.UI.Reconcile (reconcileReviewSessions)
 import Kanban.UI.Review
   ( appliedIssueActionTermination,
     appliedReviewInput,
+    awaitedCommandText,
+    dropAwaiting,
+    releaseAwaiting,
     applyUndeliveredSteer,
     carryUndelivered,
     newReviewSession,
@@ -351,6 +355,7 @@ spec = do
                 reviewSessionTurnId = Nothing,
                 reviewSessionPending = Nothing,
                 reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
                 reviewSessionRestored = Nothing
               }
         onFirst = Just (ReviewThreadId (ConnectionId 0) "thread-1")
@@ -452,6 +457,7 @@ spec = do
                 reviewSessionTurnId = turnId,
                 reviewSessionPending = Nothing,
                 reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
                 reviewSessionRestored = Nothing
               }
         allPhases =
@@ -529,6 +535,7 @@ spec = do
                 reviewSessionTurnId = turnId,
                 reviewSessionPending = Nothing,
                 reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
                 reviewSessionRestored = Nothing
               }
 
@@ -566,6 +573,7 @@ spec = do
                 reviewSessionTurnId = Just "turn-1",
                 reviewSessionPending = Nothing,
                 reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
                 reviewSessionRestored = Nothing
               }
 
@@ -627,6 +635,7 @@ spec = do
                 reviewSessionTurnId = Nothing,
                 reviewSessionPending = Nothing,
                 reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
                 reviewSessionRestored = Nothing
               }
 
@@ -666,6 +675,7 @@ spec = do
                 reviewSessionTurnId = Nothing,
                 reviewSessionPending = Nothing,
                 reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
                 reviewSessionRestored = Nothing
               }
 
@@ -683,6 +693,59 @@ spec = do
       afterInput.sessionTranscript.standardTranscript `shouldBe` "\nYou: end this action\n"
       Text.unpack afterInput.sessionTranscript.standardTranscript `shouldNotContain` "[killed by user]"
       Text.unpack afterInput.sessionTranscript.standardTranscript `shouldNotContain` "[interrupted by user]"
+
+  -- Round 18's first blocker. Checking the action's durable state and writing
+  -- the command are two steps, so a settle between them leaves a command
+  -- nothing will hand back — and the draft it came from was cleared on the
+  -- assumption that something would. The dashboard holds what it wrote until
+  -- the child's journal accounts for it, and the terminal event is the last
+  -- thing that journal can say.
+  describe "a command the child's journal never accounts for" $ do
+    let running =
+          newAgentSession
+            0
+            ReviewRunning
+            "thinking"
+            Nothing
+            (ChatTranscript "" "" "")
+            ReviewDetail
+              { reviewSessionIssue = baseIssue 151 [],
+                reviewSessionStage = IssueRevision,
+                reviewSessionThreadId = Nothing,
+                reviewSessionTurnId = Nothing,
+                reviewSessionPending = Nothing,
+                reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [(fixtureCommandId, "look again")],
+                reviewSessionRestored = Nothing
+              }
+
+    it "offers its text back when the action ends without it" $ do
+      let ended = releaseAwaiting running
+      ended.sessionDetail.reviewSessionAwaiting `shouldBe` []
+      -- Onto the line, since nothing else is holding it: the message is
+      -- recoverable rather than lost.
+      ended.sessionInput `shouldBe` "look again"
+
+    -- And a command the journal did account for is not offered twice: it was
+    -- shown as sent, or handed back with its own reason, when its line
+    -- arrived.
+    -- Which commands are held at all. A payload dropped from this list is a
+    -- message that goes silently missing in the window above, and a payload
+    -- added to it offers a category word back to the input line.
+    it "holds exactly the commands that carry a person's own words" $
+      map awaitedCommandText everyCommandPayload
+        `shouldBe` [ Just "a",
+                     Just "Allowed similar actions for this review session",
+                     Just "feedback",
+                     Just "steer",
+                     Nothing,
+                     Nothing
+                   ]
+
+    it "forgets a command the journal accounted for" $ do
+      let seen = appliedReviewInput "look again" Nothing (dropAwaiting fixtureCommandId running)
+      seen.sessionDetail.reviewSessionAwaiting `shouldBe` []
+      releaseAwaiting seen `shouldBe` seen
 
   -- Requirement 3. The quoted refusal is gone, and with it the only reason
   -- the dashboard ever declined to quit for an agent.
@@ -707,6 +770,7 @@ spec = do
                             reviewSessionTurnId = Just "turn-1",
                             reviewSessionPending = Nothing,
                             reviewSessionUndelivered = [],
+                            reviewSessionAwaiting = [],
                             reviewSessionRestored = Nothing
                           }
                     )
@@ -897,6 +961,7 @@ spec = do
                   reviewSessionTurnId = Nothing,
                   reviewSessionPending = Nothing,
                   reviewSessionUndelivered = [],
+                  reviewSessionAwaiting = [],
                   reviewSessionRestored = Nothing
                 }
           )
@@ -970,6 +1035,7 @@ spec = do
                 reviewSessionTurnId = Nothing,
                 reviewSessionPending = Nothing,
                 reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
                 reviewSessionRestored = Nothing
               }
         reconciledPhaseFor issue session =
@@ -1373,3 +1439,19 @@ spec = do
       selectedReviewTarget ordinary `shouldBe` ReviewTargetItem (IssueItem (baseIssue 10 []))
       selectedReviewTarget child `shouldBe` ReviewTargetItem (IssueItem (baseIssue 811 []))
       selectedReviewTarget selectedPullRequest `shouldBe` ReviewTargetItem (PullRequestItem pullRequest)
+
+-- | One command identifier, for a session fixture that has written a command
+-- and not yet seen its journal.
+fixtureCommandId :: ReviewCommandId
+fixtureCommandId = ReviewCommandId "command-under-test"
+
+-- | Every command a dashboard can write, in the vocabulary's own order.
+everyCommandPayload :: [ReviewCommandPayload]
+everyCommandPayload =
+  [ AnswerReviewQuestion (ReviewRequestId (ConnectionId 1) (String "request-1")) (ReviewAnswer ["a"] Nothing) "a",
+    AnswerReviewApproval (ReviewRequestId (ConnectionId 1) (String "request-2")) True True "Allowed similar actions for this review session",
+    SendReviewFeedback "feedback",
+    ResendReviewSteer "steer",
+    InterruptReviewTurn,
+    TerminateIssueAction
+  ]

@@ -1461,6 +1461,12 @@ terminationSpec = describe "ending one child" $ do
         state <- decodeChildState descriptor
         fmap (.workerStateStatus) state `shouldBe` Just (WorkerTerminal (SolveFailed "killed by user"))
         shouldHaveBeenSwept identity.processIdentityPid "a per-thread review connection"
+        -- Round 18's second blocker. A dashboard reattaching to this action
+        -- replays its journal and nothing else, so a terminal state with no
+        -- envelope in that journal leaves it reading an action that never
+        -- ends — and leaves the journal open to the appends the envelope
+        -- exists to stop.
+        journalEvents descriptor `shouldReturn` [WorkerFinished (SolveFailed "killed by user")]
 
 -- ---------------------------------------------------------------------------
 -- Durable evidence (requirements 4 and 5)

@@ -10,6 +10,9 @@ module Kanban.UI.Review
     applyReviewEvent,
     appliedReviewInput,
     appliedIssueActionTermination,
+    releaseAwaiting,
+    dropAwaiting,
+    awaitedCommandText,
     applyReviewInput,
     reviewOutputPrefix,
     reviewProtocolWarningNotice,
@@ -102,6 +105,7 @@ import Kanban.Solve (SolveOutcome (..))
 import Kanban.Text (sanitizeText)
 import Kanban.Worker
   ( readWorkerState,
+    ReviewCommandId,
     terminalStatus,
     WorkerState (..), ReviewCommand (..),
     ReviewCommandPayload (..),
@@ -265,38 +269,91 @@ submitReviewCommand issueNumber payload = do
 -- | Writes one command to a child this dashboard has just confirmed is live.
 submitToLiveChild :: Int -> WorkerDescriptor -> ReviewSession -> ReviewCommandPayload -> EventM Name AppState ()
 submitToLiveChild issueNumber descriptor session payload = do
-      identifier <- liftIO newReviewCommandId
-      now <- liftIO getCurrentTime
-      let command =
-            ReviewCommand
-              { reviewCommandId = identifier,
-                reviewCommandTarget = descriptor.workerDescriptorSpec.workerId,
-                reviewCommandIssue = issueNumber,
-                -- The thread and turn the /overlay is showing/, not the
-                -- newest the child has recorded. The two differ for as long
-                -- as it takes a journal event to reach Brick, and in that
-                -- window a durable read would address the turn that started
-                -- while the user was typing rather than the one they were
-                -- answering. The host refuses a command whose turn has moved
-                -- on, so naming what was on screen is what turns this race
-                -- into a refusal the user is told about instead of a message
-                -- steering a turn they never saw.
-                reviewCommandThread = session.sessionDetail.reviewSessionThreadId,
-                reviewCommandTurn = session.sessionDetail.reviewSessionTurnId,
-                reviewCommandIssuedAt = now,
-                reviewCommandPayload = payload
-              }
-      written <- liftIO (appendReviewCommand descriptor command)
-      case written of
-        Left message -> setNotice (agentFailureNotice "Issue review" message)
-        Right () -> modifyReviewSession issueNumber clearedInput
+    identifier <- liftIO newReviewCommandId
+    now <- liftIO getCurrentTime
+    let command =
+          ReviewCommand
+            { reviewCommandId = identifier,
+              reviewCommandTarget = descriptor.workerDescriptorSpec.workerId,
+              reviewCommandIssue = issueNumber,
+              -- The thread and turn the /overlay is showing/, not the
+              -- newest the child has recorded. The two differ for as long
+              -- as it takes a journal event to reach Brick, and in that
+              -- window a durable read would address the turn that started
+              -- while the user was typing rather than the one they were
+              -- answering. The host refuses a command whose turn has moved
+              -- on, so naming what was on screen is what turns this race
+              -- into a refusal the user is told about instead of a message
+              -- steering a turn they never saw.
+              reviewCommandThread = session.sessionDetail.reviewSessionThreadId,
+              reviewCommandTurn = session.sessionDetail.reviewSessionTurnId,
+              reviewCommandIssuedAt = now,
+              reviewCommandPayload = payload
+            }
+    written <- liftIO (appendReviewCommand descriptor command)
+    case written of
+      Left message -> setNotice (agentFailureNotice "Issue review" message)
+      Right () -> modifyReviewSession issueNumber (clearedInput identifier)
   where
     -- Cleared even for a command the host may reject: a rejection comes back
     -- as an undelivered message that is offered to the line again, and
     -- leaving the text there in the meantime would show it twice. What the
     -- line was holding goes with it, so a later draft that happens to read
     -- the same is not mistaken for a resend.
-    clearedInput held = (withRestored Nothing held) {sessionInput = ""}
+    --
+    -- Clearing it is only safe because the message is held below until the
+    -- child's journal accounts for it. A command written into the window
+    -- between the action being settled and this dashboard being told is one
+    -- nothing will ever hand back, and the draft would go with it.
+    clearedInput identifier held = (withAwaiting identifier held) {sessionInput = ""}
+    withAwaiting identifier held = case awaitedText of
+      Nothing -> withRestored Nothing held
+      Just text -> holdAwaiting identifier text (withRestored Nothing held)
+    awaitedText = awaitedCommandText payload
+
+-- | The text a command carries back to the input line if its action never
+-- reads it.
+--
+-- Only what a person typed or chose. Ending an action and interrupting a turn
+-- carry no text of their own, and offering their category word back to the
+-- line would be nonsense.
+awaitedCommandText :: ReviewCommandPayload -> Maybe Text
+awaitedCommandText payload = case payload of
+  AnswerReviewQuestion _ _ display -> Just display
+  AnswerReviewApproval _ _ _ display -> Just display
+  SendReviewFeedback message -> Just message
+  ResendReviewSteer message -> Just message
+  InterruptReviewTurn -> Nothing
+  TerminateIssueAction -> Nothing
+
+-- | Remembers one written command until its action's journal accounts for it.
+holdAwaiting :: ReviewCommandId -> Text -> ReviewSession -> ReviewSession
+holdAwaiting identifier text =
+  withSessionDetail (\detail -> detail {reviewSessionAwaiting = detail.reviewSessionAwaiting <> [(identifier, text)]})
+
+-- | Forgets a command the journal has now accounted for, however it went.
+--
+-- A rejection is accounted for too: it arrives as a journaled input carrying
+-- its reason, and the restoration that follows is 'applyUndeliveredSteer'\'s,
+-- not this list's.
+dropAwaiting :: ReviewCommandId -> ReviewSession -> ReviewSession
+dropAwaiting identifier =
+  withSessionDetail
+    (\detail -> detail {reviewSessionAwaiting = filter ((/= identifier) . fst) detail.reviewSessionAwaiting})
+
+-- | Offers back every command the journal never accounted for.
+--
+-- Reached at the terminal event, which is the last thing a child's journal
+-- can say: a command that reached the action journaled its line before that
+-- envelope, so whatever is still held here was written into the window
+-- between the action being settled and this dashboard being told, and no poll
+-- or reconciliation will hand it back.
+releaseAwaiting :: ReviewSession -> ReviewSession
+releaseAwaiting session =
+  foldl'
+    (\held (_, text) -> applyUndeliveredSteer text held)
+    (withSessionDetail (\detail -> detail {reviewSessionAwaiting = []}) session)
+    session.sessionDetail.reviewSessionAwaiting
 
 issueActionGoneNotice :: Text
 issueActionGoneNotice = "This review is no longer running; press " <> actionKeyText ReviewSelection <> " to start a fresh one"
@@ -851,6 +908,7 @@ newReviewSession issue stage priorGeneration =
         reviewSessionTurnId = Nothing,
         reviewSessionPending = Nothing,
         reviewSessionUndelivered = [],
+        reviewSessionAwaiting = [],
         reviewSessionRestored = Nothing
       }
 
@@ -1192,9 +1250,9 @@ markReviewSessionDisconnected message session
 -- carries its reason and hands the text back through the same
 -- undelivered-steer path a rejected steer takes, so nothing the user typed is
 -- lost and nothing they never sent is shown as sent (issue #17).
-applyReviewInput :: Int -> Text -> Maybe Text -> EventM Name AppState ()
-applyReviewInput issueNumber display rejected = do
-  appendToReviewSession issueNumber (appliedReviewInput display rejected)
+applyReviewInput :: Int -> ReviewCommandId -> Text -> Maybe Text -> EventM Name AppState ()
+applyReviewInput issueNumber identifier display rejected = do
+  appendToReviewSession issueNumber (appliedReviewInput display rejected . dropAwaiting identifier)
   tailReviewSession issueNumber
   case rejected of
     Nothing -> armReviewTick issueNumber
@@ -1274,11 +1332,12 @@ applyIssueActionFinished issueNumber outcome = do
     _ -> do
       appendToReviewSession issueNumber
         ( \session ->
-            session
-              { sessionPhase = ReviewFailed,
-                sessionActivity = canonicalReviewActivity detail,
-                sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> sanitizeText detail <> "\n")
-              }
+            releaseAwaiting
+              session
+                { sessionPhase = ReviewFailed,
+                  sessionActivity = canonicalReviewActivity detail,
+                  sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> sanitizeText detail <> "\n")
+                }
         )
       setNotice (agentFailureNotice "Issue review" detail)
   where

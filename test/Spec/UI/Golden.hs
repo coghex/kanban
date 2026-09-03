@@ -968,6 +968,7 @@ revisionSession press state =
             reviewSessionTurnId = Nothing,
             reviewSessionPending = Nothing,
             reviewSessionUndelivered = [],
+            reviewSessionAwaiting = [],
             reviewSessionRestored = Nothing
           }
 

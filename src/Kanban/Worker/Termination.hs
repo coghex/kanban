@@ -54,7 +54,7 @@ import Kanban.Process
 import Kanban.Solve (SolveOutcome (..))
 import Kanban.Worker.Census (processKey)
 import Kanban.Worker.Command
-  ( ReviewCommand (..),
+  ( reconcileIssueActionClaims, ReviewCommand (..),
     ReviewCommandPayload (..),
     appendReviewCommand,
     newReviewCommandId,
@@ -126,6 +126,18 @@ terminateIssueActionWith takeSnapshot descriptor state = do
         then do
           now <- getCurrentTime
           let outcome = SolveFailed "killed by user"
+          -- Before the envelope, because nothing may follow one: a claim this
+          -- action's dead host left standing is answered while the journal
+          -- can still say so, rather than by a later pass appending input
+          -- evidence after the action had already ended.
+          reconcileIssueActionClaims descriptor
+          -- The journal's own terminal record, not only the state file's.
+          -- A dashboard reattaching to this action replays the journal and
+          -- nothing else, so a terminal state with no envelope leaves it
+          -- reading an action that never ends — and leaves the journal open
+          -- to exactly the appends the envelope exists to stop.
+          journal <- newEventJournalLock
+          appendWorkerEvent descriptor journal (WorkerFinished outcome)
           writeState
             descriptor
             state

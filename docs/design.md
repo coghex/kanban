@@ -998,10 +998,16 @@ owed: settling takes a child off the host's live list, and a dashboard that
 has not yet seen its terminal event still writes to it — so nothing would ever
 look at that command again while the draft it came from had been cleared. The
 overlay refuses such a submission itself, from the action's own durable state
-rather than its picture of it, and keeps the text on the line; the host and
-the reconciliation each refuse anything that slips past, on the ledger rather
-than the journal, because the terminal envelope is still the last record that
-journal takes.
+rather than its picture of it, and keeps the text on the line. That check and
+the write are still two steps, so the overlay also holds what it wrote until
+the child's journal accounts for it: a command that reached its action
+journals its line before that action's terminal envelope, so anything still
+held when the terminal event arrives is a message the action never read, and
+it is offered back to the input line rather than lost. Ending an action and
+interrupting a turn are held by nothing, carrying no text of their own. The
+host and the reconciliation each refuse anything that slips past, on the
+ledger rather than the journal, because the terminal envelope is still the
+last record that journal takes.
 
 A claim left standing is an attempt whose result was never observed, and
 whatever next reaches that action answers it — including the action's own live
@@ -3977,7 +3983,13 @@ The first solve/autosolve-compatible slice is implemented.
   escalation and verifies the supervisor stopped before writing terminal
   state; if a snapshot failure leaves recorded descendants unverified, it
   reports a visible diagnostic and retains the lease instead, and a later
-  successful snapshot completes the pending "killed by user" outcome.
+  successful snapshot completes the pending "killed by user" outcome. An
+  issue action settled this way closes its journal with the same terminal
+  envelope a host would have written, after answering any claim its dead host
+  left standing: a dashboard reattaching to it replays that journal and
+  nothing else, so a terminal state with no envelope in it leaves an action
+  that never appears to end — and leaves the journal open to the appends the
+  envelope exists to stop.
 - Issue review, rereview, and revision are runner-owned too, under one durable
   detached review host per canonical repository. That host owns the
   repository's app-server client and its connection pool; each action is an

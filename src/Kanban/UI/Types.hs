@@ -106,7 +106,8 @@ import Kanban.Settings
   ( Settings (..)
     )
 import Kanban.Worker
-  ( WorkerDescriptor (..),
+  ( ReviewCommandId,
+    WorkerDescriptor (..),
     WorkerEvent (..),
     WorkerId
     )
@@ -408,6 +409,18 @@ data ReviewDetail = ReviewDetail
     -- rejected steer — survives, and 'takeNextUndelivered' hands the queue
     -- back one message at a time as the line frees up (issue #17).
     reviewSessionUndelivered :: [Text],
+    -- | Commands this dashboard has written and not yet seen the child
+    -- journal, newest last, as the identifier each was written under and the
+    -- text it carried.
+    --
+    -- A command that reached its action journals its line before that
+    -- action's terminal envelope, so anything still here when the terminal
+    -- event arrives is a message the action never read — written into the
+    -- window between the child being settled and this dashboard being told,
+    -- which no poll and no reconciliation will ever hand back. Those are
+    -- offered to the line as undelivered rather than lost, and the draft that
+    -- produced them was cleared on the strength of this list holding them.
+    reviewSessionAwaiting :: [(ReviewCommandId, Text)],
     -- | The handed-back message currently sitting on the input line, if the
     -- line is holding one rather than a draft the user typed.
     --

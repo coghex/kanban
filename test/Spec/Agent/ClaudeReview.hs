@@ -786,6 +786,7 @@ spec = do
                   reviewSessionTurnId = Just "turn-1",
                   reviewSessionPending = Nothing,
                   reviewSessionUndelivered = [],
+                  reviewSessionAwaiting = [],
                   reviewSessionRestored = Nothing
                 }
           )

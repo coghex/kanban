@@ -206,6 +206,7 @@ testReviewSession issue phase =
           reviewSessionTurnId = Nothing,
           reviewSessionPending = Nothing,
           reviewSessionUndelivered = [],
+          reviewSessionAwaiting = [],
           reviewSessionRestored = Nothing
         }
 

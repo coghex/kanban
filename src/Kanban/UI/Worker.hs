@@ -142,7 +142,7 @@ applyWorkerProtocolEvent descriptor workerEvent = do
     -- activity, and the same follow state.
     IssueActionWorkerTaskKind task -> case workerEvent of
       WorkerReviewEvent reviewEvent -> applyReviewEvent task.issueActionIssueNumber reviewEvent
-      WorkerReviewInput _ display rejected -> applyReviewInput task.issueActionIssueNumber display rejected
+      WorkerReviewInput identifier display rejected -> applyReviewInput task.issueActionIssueNumber identifier display rejected
       WorkerCanonicalReviewFinished stage result ->
         applyCanonicalIssueReview task.issueActionIssueNumber stage result
       WorkerDiagnostic message -> applyReviewDiagnostic task.issueActionIssueNumber message
@@ -337,6 +337,7 @@ recoveredReviewSession state descriptor issue task =
         reviewSessionTurnId = Nothing,
         reviewSessionPending = Nothing,
         reviewSessionUndelivered = [],
+        reviewSessionAwaiting = [],
         reviewSessionRestored = Nothing
       }
 
