@@ -977,8 +977,12 @@ correlated command with an acknowledgement written back. A command is claimed
 before it is applied and settled after, and a command carrying any
 acknowledgement is never applied again — so a retry, a replay, a restart, and
 an acknowledgement that could not be written all still deliver it exactly
-once. A claim left standing is an attempt whose result was never observed, and
-is reported as that rather than guessed either way. Every
+once. A claim left standing is an attempt whose result was never observed: the next
+host to adopt that action settles it as exactly that and journals it as
+undelivered, so the message a dashboard cleared its draft for is offered back
+rather than lost. Command identifiers carry a process-local sequence as well
+as a clock and a pid, because two presses in one clock tick would otherwise
+deduplicate to one. Every
 command that acts on a thread names the thread, turn, or request it was
 correlated to, and is refused rather than retargeted when the child has since
 moved on; ending the action is the one command that names none, because it
@@ -3954,8 +3958,11 @@ The first solve/autosolve-compatible slice is implemented.
   client transcript, which the host records as its own and which is no
   child's evidence.
   Host selection and child admission cannot be made one step from the launch
-  side, so a host also adopts a child whose named host has provably terminated
-  and which nothing has ever adopted — never one a live host is serving.
+  side, so a host also adopts a child whose named host is provably gone and
+  which nothing has ever adopted — never one a live host is serving. A host
+  counts as live unless it is disproven: terminal, or recording an identity a
+  successful process snapshot does not contain. An unreadable snapshot keeps
+  it, which is the same fail-closed rule lease recovery applies.
   The provider's process shape is the adapter's, unchanged: a shared-process
   backend multiplexes concurrent children through the host's one connection,
   and a process-per-thread backend gives each child its own. Ending or

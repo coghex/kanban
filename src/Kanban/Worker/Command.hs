@@ -43,6 +43,7 @@ module Kanban.Worker.Command
     reviewCommandAcknowledgement,
     acknowledgementFor,
     reviewCommandSettled,
+    unsettledReviewCommands,
   )
 where
 
@@ -51,6 +52,7 @@ import Data.Aeson (FromJSON, ToJSON, eitherDecodeStrict', encode)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString8
 import qualified Data.ByteString.Lazy as LazyByteString
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.List (find)
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
@@ -64,23 +66,35 @@ import System.IO (Handle, hClose)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (setFdMode)
 import System.Posix.IO (OpenFileFlags (append, creat), OpenMode (WriteOnly), closeFd, defaultFileFlags, fdToHandle, openFd)
+import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.Process (getProcessID)
 
 -- | A command's identity, and the only thing deduplication is keyed by.
 --
--- Allocated by the dashboard that issues the command, from its own pid and
--- the clock, so two dashboards writing to one child's journal at the same
--- instant cannot collide — and so an id survives being read back, compared,
--- and acknowledged by a process that never saw the press.
+-- Three parts, and each closes a different collision. The pid separates two
+-- dashboards writing to one child's ledger. The clock separates one
+-- dashboard's runs. The counter separates two commands within a single run —
+-- which the clock alone does not, because two presses can be timestamped
+-- identically, and two commands sharing an id are one command as far as
+-- deduplication is concerned: the second is silently discarded, which is a
+-- person's typed answer disappearing.
 newtype ReviewCommandId = ReviewCommandId {unReviewCommandId :: Text}
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | The process-local sequence that makes two ids from one clock tick
+-- distinct. Global because uniqueness has to hold across every child this
+-- process writes to, not per child.
+commandSequence :: IORef Int
+commandSequence = unsafePerformIO (newIORef 0)
+{-# NOINLINE commandSequence #-}
 
 newReviewCommandId :: IO ReviewCommandId
 newReviewCommandId = do
   now <- getCurrentTime
   pid <- getProcessID
-  pure (ReviewCommandId (timestampKey now <> "-" <> Text.pack (show pid)))
+  ordinal <- atomicModifyIORef' commandSequence (\held -> (held + 1, held))
+  pure (ReviewCommandId (timestampKey now <> "-" <> Text.pack (show pid) <> "-" <> Text.pack (show ordinal)))
   where
     timestampKey = Text.filter (`notElem` ("-:.TZ " :: String)) . Text.pack . show
 
@@ -167,6 +181,18 @@ data ReviewCommandOutcome
   = ReviewCommandClaimed
   | ReviewCommandAccepted
   | ReviewCommandRejected Text
+  | -- | The command was claimed, and whatever happened next was never
+    -- recorded — the host died between applying it and writing the result.
+    --
+    -- Written by the next host to adopt the child, because a claim on its own
+    -- is indistinguishable from a claim whose host is still working on it,
+    -- and a dashboard cannot wait forever to be told which. It is a settled
+    -- outcome: the command is never applied again, and what it says is that
+    -- nobody knows whether it reached the provider. That is the same
+    -- outcome-unknown discipline the canonical review result and the worker
+    -- deadline both follow, and it is honest in the one way "rejected" and
+    -- "accepted" would each be a guess.
+    ReviewCommandOutcomeUnknown
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -175,6 +201,21 @@ reviewCommandSettled :: ReviewCommandOutcome -> Bool
 reviewCommandSettled ReviewCommandClaimed = False
 reviewCommandSettled ReviewCommandAccepted = True
 reviewCommandSettled (ReviewCommandRejected _) = True
+reviewCommandSettled ReviewCommandOutcomeUnknown = True
+
+-- | The commands a host inherited mid-delivery: claimed, and never settled.
+--
+-- What a newly adopting host owes an answer for. The command must not be
+-- applied again — the claim is exactly the record that stops that — but
+-- leaving it unsettled would leave the dashboard that submitted it with a
+-- cleared draft and no account of where its message went.
+unsettledReviewCommands :: [ReviewCommand] -> [ReviewCommandAcknowledgement] -> [ReviewCommand]
+unsettledReviewCommands commands acknowledgements =
+  [ command
+    | command <- commands,
+      Just standing <- [acknowledgementFor command.reviewCommandId acknowledgements],
+      not (reviewCommandSettled standing.acknowledgedOutcome)
+  ]
 
 data ReviewCommandAcknowledgement = ReviewCommandAcknowledgement
   { acknowledgedCommandId :: ReviewCommandId,

@@ -75,7 +75,7 @@ import Kanban.ApprovalService (ApprovalController, ApprovalUnavailable, discover
 import Kanban.Cache (normalizedRepositoryIdentity)
 import Kanban.Models (OperatingMode, loadModelRoster, loadedOperatingMode)
 import Kanban.Preflight (IssueOrigin, PreflightAction (..), preflightBlocker)
-import Kanban.Process (ManagedProcess, ProcessIdentity, identityForPid, interruptThenKillManagedProcess, managedProcessPid, readProcessSnapshot)
+import Kanban.Process (IdentityPresence (..), ManagedProcess, ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot, identityForPid, interruptThenKillManagedProcess, managedProcessPid, readProcessSnapshot)
 import Kanban.Worker.Census (recordProviderIdentity, refreshProcessCensus)
 import Kanban.Worker.Termination (terminateRecordedProcesses)
 import Kanban.Review
@@ -112,6 +112,7 @@ import Kanban.Worker.Command
     acknowledgeReviewCommand,
     readReviewCommandAcknowledgements,
     readReviewCommands,
+    unsettledReviewCommands,
     reviewCommandAcknowledgement,
     reviewCommandPayloadSummary,
     undeliveredReviewCommands,
@@ -259,7 +260,7 @@ data IssueReviewHost = IssueReviewHost
     hostEmit :: WorkerEvent -> IO (),
     hostTuning :: IssueHostTuning,
     hostChildren :: MVar (Map WorkerId HostChild),
-    -- | Children this host has settled, kept addressable by issue number.
+    -- | Children this host has settled, kept addressable by action id.
     --
     -- A child is settled the instant a termination command, a deadline, or a
     -- dead connection says so, and that can be before the provider has
@@ -268,10 +269,15 @@ data IssueReviewHost = IssueReviewHost
     -- child has left 'hostChildren' entirely — and a thread nobody owns is a
     -- thread nobody closes.
     --
+    -- By action id and not by issue: an issue can have several settled
+    -- actions, each with its own pending announcement, and keying by issue
+    -- would let the newest overwrite the ones before it — whose threads would
+    -- then resolve to nothing and never be closed.
+    --
     -- Retained for the host's whole life rather than expired: the set is
     -- bounded by the actions one host serves, and the alternative is a second
     -- timer whose expiry is exactly the race it was added to close.
-    hostRetired :: MVar (Map Int HostChild),
+    hostRetired :: MVar (Map WorkerId HostChild),
     -- | The children that have asked the provider for a thread and not yet
     -- been told which one, oldest first, per issue.
     --
@@ -485,24 +491,34 @@ childCandidate host descriptor = case issueActionTask descriptor.workerDescripto
   Just task
     | task.issueActionHost == host.hostSpec.workerId -> pure (Just (descriptor, task))
     | otherwise -> do
-        orphaned <- namedHostFinished host task.issueActionHost
+        orphaned <- namedHostGone host task.issueActionHost
         untouched <- neverAdopted descriptor
         pure (if orphaned && untouched then Just (descriptor, task) else Nothing)
 
--- | Whether the host a child names has provably finished.
+-- | Whether the host a child names is definitely not going to run it.
 --
--- Fails closed in both directions: a host whose record cannot be found or
--- cannot be read is not proven finished, and its children are left to it.
-namedHostFinished :: IssueReviewHost -> WorkerId -> IO Bool
-namedHostFinished host named = do
+-- Terminal is the obvious case. The other is a host that died without
+-- recording anything — killed, or stopped between persisting a running state
+-- and doing anything with it — which leaves a record that reads as running
+-- forever. Its recorded identity is what tells the two apart, so it is
+-- checked against a live process snapshot.
+--
+-- Fails closed: a record that cannot be read, and a snapshot that cannot be
+-- taken, both leave the child to the host it names.
+namedHostGone :: IssueReviewHost -> WorkerId -> IO Bool
+namedHostGone host named = do
   history <- discoverWorkerHistory host.hostSpec.workerRepository
   case find ((== named) . (.workerId) . (.workerDescriptorSpec)) history of
     Nothing -> pure True
     Just descriptor -> do
       stateResult <- readWorkerState descriptor
-      pure $ case stateResult of
-        Right state -> terminalStatus state.workerStateStatus
-        Left _ -> False
+      case stateResult of
+        Left _ -> pure False
+        Right state
+          | terminalStatus state.workerStateStatus -> pure True
+          | otherwise -> case state.workerStateWorkerIdentity of
+              Nothing -> pure False
+              Just identity -> (== IdentityAbsent) <$> checkIdentityPresenceWith defaultProcessSnapshot [identity]
 
 -- | Whether a child has done nothing at all yet, which is what makes
 -- re-homing it safe.
@@ -548,8 +564,32 @@ adoptChild host descriptor task = do
   modifyMVar_ host.hostChildren (pure . Map.insert descriptor.workerDescriptorSpec.workerId child)
   persistChild child
   journalChild child (WorkerDiagnostic (adoptionDiagnostic task))
+  settleInheritedClaims child
   threadId <- forkIO (runChildStage host child)
   writeIORef stageThread (Just threadId)
+
+-- | Answers for the commands a previous host claimed and never settled.
+--
+-- A claim is what stops a command being applied twice, so these must not be
+-- applied again — but a claim on its own is indistinguishable from one whose
+-- host is still working on it, and the dashboard that submitted the command
+-- cleared its draft when it did. Left alone, that message simply vanishes:
+-- no journal entry, no acknowledgement, nothing to put it back on the line.
+--
+-- So each is settled as an outcome nobody observed, and journaled as an
+-- undelivered input — which is exactly what hands the text back to the
+-- overlay's input line on replay.
+settleInheritedClaims :: HostChild -> IO ()
+settleInheritedClaims child = do
+  commands <- readReviewCommands child.hostChildDescriptor
+  acknowledgements <- readReviewCommandAcknowledgements child.hostChildDescriptor
+  forM_ (unsettledReviewCommands commands acknowledgements) $ \command -> do
+    journalChild child (WorkerReviewInput (commandDisplay command.reviewCommandPayload) (Just unobservedCommandReason))
+    acknowledgement <- reviewCommandAcknowledgement command ReviewCommandOutcomeUnknown
+    void (acknowledgeReviewCommand child.hostChildDescriptor acknowledgement)
+
+unobservedCommandReason :: Text
+unobservedCommandReason = "the review host stopped before this command's result was observed"
 
 -- | Opens this child's raw log, named for the action rather than the host so
 -- two concurrent revisions never share one.
@@ -957,7 +997,8 @@ commandDisplay payload = case payload of
 
 rejectionReason :: ReviewCommandOutcome -> Maybe Text
 rejectionReason ReviewCommandAccepted = Nothing
-rejectionReason ReviewCommandClaimed = Just "the outcome of this command was never observed"
+rejectionReason ReviewCommandClaimed = Just unobservedCommandReason
+rejectionReason ReviewCommandOutcomeUnknown = Just unobservedCommandReason
 rejectionReason (ReviewCommandRejected message) = Just message
 
 -- | One command, against the child it names.
@@ -1097,7 +1138,7 @@ settleChild host child outcome = do
     -- Out of the live map and into the retired one in the same step, so a
     -- thread or process the provider is still creating for this child has
     -- somewhere to be closed against.
-    modifyMVar_ host.hostRetired (pure . Map.insert child.hostChildTask.issueActionIssueNumber child)
+    modifyMVar_ host.hostRetired (pure . Map.insert child.hostChildDescriptor.workerDescriptorSpec.workerId child)
     -- Last, and from outside the thread being stopped: a stage thread that
     -- reached here itself would otherwise kill itself before its own journal
     -- write landed.
@@ -1156,9 +1197,7 @@ takePendingStart host issueNumber = do
       live <- readMVar host.hostChildren
       case Map.lookup identifier live of
         Just child -> pure (Just child)
-        Nothing -> do
-          settled <- readMVar host.hostRetired
-          pure (find ((== identifier) . (.workerId) . (.workerDescriptorSpec) . (.hostChildDescriptor)) (Map.elems settled))
+        Nothing -> Map.lookup identifier <$> readMVar host.hostRetired
 
 liveChildren :: IssueReviewHost -> IO [HostChild]
 liveChildren host = Map.elems <$> readMVar host.hostChildren

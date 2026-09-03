@@ -124,8 +124,11 @@ import Kanban.Domain (Repository, WorkflowConfig)
 import Kanban.Models (RecordedAssignment (..), recordedAssignmentCell)
 import Kanban.Paths (createPrivateDirectory)
 import Kanban.Process
-  ( ManagedProcess,
+  ( IdentityPresence (..),
+    ManagedProcess,
     ProcessIdentity (..),
+    checkIdentityPresenceWith,
+    defaultProcessSnapshot,
     identityForPid,
     killManagedProcess,
     liveProcessesWith,
@@ -280,9 +283,20 @@ launchPullRequestWorker assignment repository number origin action existingSessi
 
 -- | The repository's live review host, if it has one.
 --
--- Starting and running only. An orphaned or terminal host serves nobody, and
--- adopting one as this action's owner would leave the child waiting forever
--- for a process that is not going to read its specification.
+-- Live means /proven/ live, not merely recorded as running. A host that dies
+-- the instant after persisting a fresh running state leaves exactly that
+-- record behind, and a child assigned to it would name a host that can never
+-- adopt it — stranded until stale monitoring eventually noticed. So the
+-- recorded status is the first question and the recorded identity is the
+-- second, checked against a live process snapshot.
+--
+-- Only a /disproven/ host is rejected: a recorded identity that a successful
+-- snapshot does not contain. Everything else keeps the host, including a
+-- snapshot that could not be taken and a host that has not recorded an
+-- identity yet — absence of proof is not proof, and this is the same
+-- fail-closed rule 'leaseIsActive' applies to the same question. Guessing
+-- "dead" from an unreadable snapshot would make every dispatch attempt a
+-- second host on a machine where @ps@ cannot run.
 liveIssueReviewHost :: Repository -> IO (Maybe WorkerDescriptor)
 liveIssueReviewHost repository = do
   history <- discoverWorkerHistory repository
@@ -291,12 +305,18 @@ liveIssueReviewHost repository = do
   where
     running descriptor = do
       stateResult <- readWorkerState descriptor
-      pure $ case stateResult of
+      case stateResult of
+        Left _ -> pure False
         Right state -> case state.workerStateStatus of
-          WorkerStarting -> True
-          WorkerRunning -> True
-          _ -> False
-        Left _ -> False
+          WorkerStarting -> proven state
+          WorkerRunning -> proven state
+          _ -> pure False
+    -- A host that has not recorded an identity yet is one whose supervisor
+    -- has only just started; the launch it came from waited for that start,
+    -- so the window is real but brief and nothing here can disprove it.
+    proven state = case state.workerStateWorkerIdentity of
+      Nothing -> pure True
+      Just identity -> (/= IdentityAbsent) <$> checkIdentityPresenceWith defaultProcessSnapshot [identity]
 
 -- | The host this repository's issue actions belong to, started if it has
 -- none.

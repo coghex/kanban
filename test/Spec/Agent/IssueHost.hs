@@ -11,7 +11,7 @@ module Spec.Agent.IssueHost (spec) where
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (void, when)
-import Data.List (find, isInfixOf)
+import Data.List (find, isInfixOf, nub)
 import Data.Maybe (isJust)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, tryTakeMVar)
 import Data.Aeson (FromJSON, ToJSON, Value (..), decode, eitherDecode, encode, toJSON)
@@ -26,7 +26,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import Kanban.Domain (Repository (..), defaultWorkflowConfig)
 import Kanban.Models (ProviderName (..))
-import Kanban.Process (ManagedProcess, managedProcessGroup, managedProcessPid)
+import Kanban.Process (ManagedProcess, ProcessIdentity (..), identityForPid, managedProcessGroup, managedProcessPid, readProcessSnapshot)
 import Kanban.Preflight (IssueOrigin (..), PreflightAction (..))
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
@@ -74,6 +74,7 @@ import Kanban.Worker
     canonicalStageOutcome,
     childCommandOutcome,
     issueActionPreflightAction,
+    liveIssueReviewHost,
     revisionTurnOutcome,
     runIssueReviewHostWith,
     appendReviewCommand,
@@ -105,6 +106,7 @@ spec = describe "the repository issue review host" $ do
   terminationSpec
   evidenceSpec
   outcomeSpec
+  hostLivenessSpec
   collectionSpec
   compatibilitySpec
 
@@ -447,6 +449,63 @@ lifecycleSpec = describe "one running host" $ do
       secondContents `shouldSatisfy` isInfixOf "reading 595"
       secondContents `shouldSatisfy` (not . isInfixOf "reading 594")
 
+  -- Round 3's first blocker. Retiring settled children by issue number let
+  -- each later one overwrite the last, so the earlier action's pending
+  -- announcement resolved to nothing and its thread was never closed. Two
+  -- replacements, each settled before its announcement, and both threads have
+  -- to be closed.
+  it "closes the late thread of every settled action, not only the newest" $
+    withRunningHost $ \host -> do
+      first <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitCallsFor host 1 isBeginCall
+      endChild first
+      -- The second action takes the freed lease, and is settled before its
+      -- own announcement too.
+      second <- publishChild host "action-2" 594 IssueRevision
+      _ <- awaitCallsFor host 2 isBeginCall
+      endChild second
+      -- A third is live when both late announcements arrive.
+      third <- publishChild host "action-3" 594 IssueRevision
+      _ <- awaitCallsFor host 3 isBeginCall
+      let firstThread = ReviewThreadId (ConnectionId 1) "thread-first"
+          secondThread = ReviewThreadId (ConnectionId 1) "thread-second"
+      deliver host (ReviewThreadCreated 594 firstThread)
+      deliver host (ReviewThreadCreated 594 secondThread)
+      awaitCalls host 2 isFinishCall
+      calls <- providerCalls host
+      filter isFinishCall calls `shouldBe` [FinishThread firstThread, FinishThread secondThread]
+      -- The live action took neither, and still gets its own.
+      held <- decodeChildState third
+      (held >>= (.workerStateReviewThread)) `shouldBe` Nothing
+
+  -- Round 3's fourth blocker. A claim with no outcome is what a host that
+  -- died mid-delivery leaves, and the command must never be applied again —
+  -- but the dashboard that submitted it cleared its draft, so leaving the
+  -- claim standing loses the message with no account of where it went. The
+  -- next host to adopt the child settles it as unobserved and journals it as
+  -- undelivered, which is what hands the text back to the input line.
+  it "settles a claim a previous host left standing, and reports it as undelivered" $
+    withRunningHost $ \host -> do
+      -- Written the way a host that died mid-delivery leaves the ledger: the
+      -- command, its claim, and nothing else.
+      descriptor <- childDescriptorFor host "action-1" 594 IssueRevision
+      inherited <- commandNumbered 1 descriptor (SendReviewFeedback "look again")
+      Right () <- appendReviewCommand descriptor inherited
+      claim <- acknowledged inherited ReviewCommandClaimed
+      Right () <- acknowledgeReviewCommand descriptor claim
+      child <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitCallsFor host 1 isBeginCall
+      settled <- awaitAcknowledgements child 2
+      settledOutcome inherited.reviewCommandId settled `shouldBe` Just ReviewCommandOutcomeUnknown
+      -- Never re-applied, which is what the claim was for.
+      calls <- providerCalls host
+      filter isSendCall calls `shouldBe` []
+      -- And the child's own evidence says the message was not delivered, so a
+      -- replay offers it back rather than showing it as sent.
+      journaled <- journalEvents child
+      journaled
+        `shouldContain` [WorkerReviewInput "look again" (Just "the review host stopped before this command's result was observed")]
+
   -- The host is not a provider turn, and must not record itself as one: a
   -- recorded provider pid with no recorded identity is what every termination
   -- path reads as "started, but unverifiable", which leaves a host kill
@@ -524,6 +583,29 @@ commandProtocolSpec = describe "the durable input protocol" $ do
       owedBy descriptor `shouldReturn` []
       settled <- readReviewCommandAcknowledgements descriptor
       map (.acknowledgedOutcome) settled `shouldBe` [ReviewCommandRejected "that turn has already ended"]
+
+  -- Round 3's third blocker. The ledger deduplicates by command id, so two
+  -- ids that collide are one command: the second input is silently discarded.
+  --
+  -- The count is chosen so this cannot pass vacuously. A timestamp and a pid
+  -- were the whole of an id before, and the clock is nowhere near fine enough
+  -- to separate rapid calls: measured on this platform, 2000 successive
+  -- 'getCurrentTime' readings produced 180 distinct values. At 512 the old
+  -- generator collides many times over, so a green run here is the sequence
+  -- doing the work rather than the clock happening to.
+  it "allocates a distinct identifier for every command, however fast" $ do
+    identifiers <- mapM (const newReviewCommandId) [1 .. (512 :: Int)]
+    length (nub identifiers) `shouldBe` 512
+
+  -- And the ledger really is keyed by it, so a collision would lose an input.
+  it "deduplicates by that identifier, so a collision would discard an input" $
+    withIssueAction $ \descriptor -> do
+      first <- commandNumbered 1 descriptor (SendReviewFeedback "one")
+      let collided = first {reviewCommandPayload = SendReviewFeedback "two"}
+      Right () <- appendReviewCommand descriptor first
+      Right () <- appendReviewCommand descriptor collided
+      owed <- owedBy descriptor
+      map (.reviewCommandPayload) owed `shouldBe` [SendReviewFeedback "one"]
 
   it "carries every command in the vocabulary through the journal unchanged" $
     withIssueAction $ \descriptor -> do
@@ -785,6 +867,66 @@ collectionSpec = describe "collecting host and child records" $ do
 -- ---------------------------------------------------------------------------
 -- Durable-record compatibility
 -- ---------------------------------------------------------------------------
+
+-- | Round 3's second blocker: a host that died the instant after persisting a
+-- fresh running state leaves a record that reads as live forever, and a child
+-- assigned to it can never be adopted.
+hostLivenessSpec :: Spec
+hostLivenessSpec = describe "which host a child is assigned to" $ do
+  it "reports a host whose recorded identity is gone as no live host at all" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <- descriptorForSpec (specFor (WorkerId "host-1") (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        now <- getCurrentTime
+        -- Running, freshly heartbeaten, and dead: exactly what a host killed
+        -- straight after persisting its state leaves behind.
+        writeChildState
+          descriptor
+          (runningChildState descriptor now) {workerStateWorkerIdentity = Just departedIdentity}
+        liveIssueReviewHost testRepository `shouldReturn` Nothing
+
+  -- The other direction, so this is not passing by reporting every host dead.
+  -- Identity 1 is init, which is always present.
+  it "reports a host whose recorded identity is present as live" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <- descriptorForSpec (specFor (WorkerId "host-1") (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        now <- getCurrentTime
+        present <- initIdentity
+        writeChildState descriptor (runningChildState descriptor now) {workerStateWorkerIdentity = present}
+        found <- liveIssueReviewHost testRepository
+        fmap ((.workerId) . (.workerDescriptorSpec)) found `shouldBe` Just (WorkerId "host-1")
+
+  -- Absence of proof is not proof. A host that has not recorded an identity
+  -- yet is one whose supervisor has only just started, and treating that as
+  -- dead would make every dispatch attempt a second host — including on a
+  -- machine where a process snapshot cannot be taken at all.
+  it "keeps a host that has recorded no identity, since nothing disproves it" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <- descriptorForSpec (specFor (WorkerId "host-1") (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        now <- getCurrentTime
+        writeChildState descriptor (runningChildState descriptor now)
+        found <- liveIssueReviewHost testRepository
+        fmap ((.workerId) . (.workerDescriptorSpec)) found `shouldBe` Just (WorkerId "host-1")
+
+-- | An identity for a process that is certainly gone: a pid far above the
+-- system maximum, so no snapshot can match it.
+departedIdentity :: ProcessIdentity
+departedIdentity = ProcessIdentity 999999999 1 999999999 "1970-01-01T00:00:00Z" "kanban-departed-host"
+
+-- | Init's identity as the running system reports it.
+initIdentity :: IO (Maybe ProcessIdentity)
+initIdentity = either (const Nothing) (identityForPid 1) <$> readProcessSnapshot
 
 compatibilitySpec :: Spec
 compatibilitySpec = describe "records written before this change" $ do
@@ -1053,6 +1195,26 @@ hostIdUnderTest = WorkerId "host-under-test"
 -- the registry's launch does, and returns its descriptor.
 publishChild :: HostUnderTest -> Text -> Int -> ReviewStage -> IO WorkerDescriptor
 publishChild host = publishChildNaming host hostIdUnderTest
+
+-- | The descriptor a child /would/ be published under, so a test can write
+-- its durable files before the host ever sees it.
+childDescriptorFor :: HostUnderTest -> Text -> Int -> ReviewStage -> IO WorkerDescriptor
+childDescriptorFor host identifier issueNumber stage =
+  descriptorForSpec
+    ( (specFor
+         (WorkerId identifier)
+         (IssueActionWorkerTaskKind (IssueActionWorkerTask issueNumber stage hostIdUnderTest IssueOriginClaude)))
+        {workerRepository = host.hostRepository}
+    )
+
+-- | Ends one child through the durable termination command and waits for the
+-- host to settle it.
+endChild :: WorkerDescriptor -> IO ()
+endChild descriptor = do
+  termination <- commandNumbered 0 descriptor TerminateIssueAction
+  written <- appendReviewCommand descriptor termination
+  either (fail . Text.unpack) pure written
+  void (awaitJust "the child was never settled" (fmap (fmap (const ()) . (\state -> if maybe False (terminalState . (.workerStateStatus)) state then state else Nothing)) (decodeChildState descriptor)))
 
 -- | Publishes a child naming some other host, for the orphaned-child rules.
 publishChildNaming :: HostUnderTest -> WorkerId -> Text -> Int -> ReviewStage -> IO WorkerDescriptor

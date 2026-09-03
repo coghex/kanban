@@ -1546,6 +1546,18 @@ unless their typed contract exposes an override.
   shared-process backend, whose one client transcript interleaves every
   thread; each child now keeps its own, and the client's belongs to the host.
 
+  The third round closed four more. Settled children are retained by action id
+  rather than by issue, so two settled actions for one issue cannot overwrite
+  each other and lose a pending announcement. A host is live only until it is
+  disproven — terminal, or an identity a successful snapshot does not contain
+  — because a host that died just after persisting a running state would
+  otherwise be handed children it can never adopt. Command identifiers carry a
+  process-local sequence, since a clock and a pid do not separate two presses
+  in one tick and the ledger deduplicates by that identifier. And a claim left
+  standing by a host that died mid-delivery is settled by the next host as an
+  outcome nobody observed, and journaled as undelivered, so the command is
+  never re-applied and the message is not silently lost.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

@@ -1137,6 +1137,8 @@ spec = do
                     environment = (environmentOf catalog) {actionRepository = repository}
                 dispatched <-
                   dispatchAction environment (actionRequest kind identityUnderTest (TargetByNumber number))
+                (kind, either (Just . actionRefusalMessage) (const Nothing) dispatched)
+                  `shouldBe` (kind, Nothing)
                 (kind, issueActionOf <$> either (const Nothing) Just dispatched)
                   `shouldBe` (kind, Just (Just (number, stage, host)))
             | (kind, number, labels, stage) <-
@@ -1477,6 +1479,11 @@ seedLiveIssueHost repository = do
           workerAssignment = Nothing
         }
   publishWorkerSpec descriptor
+  -- Running, with no recorded identity: a host whose supervisor has only just
+  -- started, which 'liveIssueReviewHost' keeps because nothing disproves it.
+  -- Being adopted is what this seed is for — a dispatch that refused it would
+  -- go on to spawn a real host, which in this suite means spawning the test
+  -- binary.
   publishWorkerState descriptor WorkerRunning
   pure hostId
   where
