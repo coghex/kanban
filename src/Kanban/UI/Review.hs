@@ -5,6 +5,7 @@ module Kanban.UI.Review
     applyReviewAnimationTick,
     applyReviewBackendStarted,
     applyReviewEvent,
+    reviewBackendCell,
     reviewOutputPrefix,
     reviewProtocolWarningNotice,
     applyFailedInterrupt,
@@ -62,7 +63,7 @@ import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.Drainer (normalizedRepositoryIdentity)
-import Kanban.Models (ProviderName (..), RoleName (..), assignmentFor, providerDisplayName, providerKey)
+import Kanban.Models (Assignment, ModelRoster, ProviderName (..), RoleName (..), RosterLoadError, assignmentFor, providerDisplayName, providerKey)
 import Kanban.Preflight
   ( PreflightAction (..),
     issueOriginFromBody,
@@ -88,6 +89,7 @@ import Kanban.Review
     answerReviewQuestion,
     approveReviewAction,
     beginIssueReview,
+    embeddedReviewProviderFor,
     interruptReview,
     killReviewTools,
     outcomeUnknownDiagnostic,
@@ -869,18 +871,21 @@ canonicalReviewNotice message
 -- preflight from 'launchIssueReview' once the coordinator is up.
 --
 -- The roster is unwrapped here, before any process is started, exactly as it
--- is at the solve and pull-request boundaries: only @issue_review.codex@ is
--- consulted, because the Claude embedded-review backend is MODEL-13's and
--- @kanban_run_claude@ refuses on its own cell at its own boundary. A refusal
--- travels the backend's existing failure surface, which already fails every
--- session waiting on it.
+-- is at the solve and pull-request boundaries. Which provider's
+-- @issue_review@ cell is consulted is 'reviewBackendCell' below, and it is
+-- the one this install will actually start a backend on, not a fixed brand:
+-- a boundary that refused for want of a Codex cell would keep a Claude-only
+-- install's own backend from ever starting. @kanban_run_claude@ still
+-- refuses on its own cell at its own boundary. A refusal travels the
+-- backend's existing failure surface, which already fails every session
+-- waiting on it.
 startReviewBackend :: EventM Name AppState ()
 startReviewBackend = do
   state <- get
   modify (\current -> current {appReviewBackend = ReviewBackendStarting})
   let eventChannel = state.appEventChannel
       eventSink = writeBChan eventChannel . ReviewProtocolEvent
-  case resolvedRosterCellFor (\roster -> assignmentFor roster IssueReviewRole CodexProvider) state.appModelRoster of
+  case reviewBackendCell state.appModelRoster of
     Left message -> liftIO (writeBChan eventChannel (ReviewBackendStarted (Left message)))
     Right (roster, _) ->
       void
@@ -891,6 +896,20 @@ startReviewBackend = do
           case blocked of
             Just message -> writeBChan eventChannel (ReviewBackendStarted (Left message))
             Nothing -> startReviewClient roster state.appConfig.resolvedWorkflow state.appRepository eventSink >>= writeBChan eventChannel . ReviewBackendStarted
+
+-- | The cell starting the embedded review backend needs, and the roster it
+-- was resolved from.
+--
+-- A pure function for the reason 'Kanban.UI.Refresh.usageRefreshProviders' is
+-- one: an 'EventM' cannot be run outside brick, and this is the whole of what
+-- the arm above decides before it forks. It resolves through
+-- 'embeddedReviewProviderFor', which is the same function
+-- 'Kanban.Review.startReviewClient' routes its backend by, so this boundary
+-- cannot refuse a roster that spawn would have accepted or accept one it
+-- would refuse.
+reviewBackendCell :: Either RosterLoadError ModelRoster -> Either Text (ModelRoster, Assignment)
+reviewBackendCell =
+  resolvedRosterCellFor (\roster -> assignmentFor roster IssueReviewRole (embeddedReviewProviderFor roster))
 
 -- | Preflighted here too, not only in 'startReviewBackend': a backend
 -- already running for an earlier issue is reused as-is, so this is the only

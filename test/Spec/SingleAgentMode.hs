@@ -27,6 +27,7 @@
 module Spec.SingleAgentMode (spec) where
 
 import Data.Aeson (Value (..))
+import qualified Data.Map.Strict as Map
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)
@@ -35,7 +36,7 @@ import Kanban.Domain (UsageProvider (..), defaultWorkflowConfig)
 import Kanban.Models
   ( Assignment (..),
     AssignmentUnavailable,
-    ModelRoster,
+    ModelRoster (..),
     OperatingMode (..),
     ProviderName (..),
     RecordedAssignment (..),
@@ -66,6 +67,7 @@ import Kanban.Review (EmbeddedReviewBackend (..), claudeToolName, embeddedReview
 import Kanban.Solve (ProviderAdapter (..), SolverBrand (..), adapterFor)
 import Kanban.UI.Board (drawBase, usageSidebarWidth)
 import Kanban.UI.Refresh (usageRefreshProviders)
+import Kanban.UI.Review (reviewBackendCell)
 import Kanban.UI.Solve (SolveChooserDecision (..), solveChooserDecision)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types (withModelRoster)
@@ -288,6 +290,39 @@ reviewSpec = describe "the embedded review it starts" $ do
   it "leaves dual mode on the Codex app-server" $
     map backendLabelFor [DualMode, NoAgentMode] `shouldBe` [Just "codex app-server", Just "codex app-server"]
 
+  -- The dashboard boundary that resolves a cell and refuses before starting
+  -- anything. It must ask about the provider the spawn will actually route
+  -- to: a boundary fixed on Codex refuses a Claude-only install for want of a
+  -- cell it would never have run on, and its backend never starts at all.
+  --
+  -- Asserted as the same cell 'Kanban.Review.startReviewClient' resolves,
+  -- rather than as "some Right", so a boundary that started resolving a
+  -- different provider's cell would fail here even while still succeeding.
+  it "resolves the launch boundary's cell on the provider the spawn will route to" $
+    sequence_
+      [ (variant.variantName, snd <$> reviewBackendCell (Right variant.variantRoster))
+          `shouldBe` ( variant.variantName,
+                       Right (cellOf (assignmentFor variant.variantRoster IssueReviewRole variant.variantProvider))
+                     )
+      | variant <- variants
+      ]
+
+  it "leaves that boundary on issue_review.codex in dual mode" $
+    (snd <$> reviewBackendCell (Right defaultRoster))
+      `shouldBe` Right (cellOf (assignmentFor defaultRoster IssueReviewRole CodexProvider))
+
+  -- The negative control the pair above needs: the boundary still refuses,
+  -- and still names the provider it was asking about, when the routed cell is
+  -- genuinely absent.
+  it "still refuses when the routed provider has no issue_review cell" $
+    reviewBackendCell (Right noIssueReviewClaude)
+      `shouldSatisfy` either (Data.Text.isInfixOf "claude") (const False)
+
+  -- The integration half the pure arms cannot cover -- a Claude-only install
+  -- started through the real routing, reaching the real stream-json backend
+  -- and running a turn on it -- lives in "Spec.Agent.ClaudeReview", beside
+  -- the fake CLI and the launch assertions it needs.
+
   -- Requirement 7 on the coordinator's own identity. A thread told it is
   -- issue_review.codex while running on Claude would be telling the reviewing
   -- model it is something it is not.
@@ -358,6 +393,13 @@ reviewSpec = describe "the embedded review it starts" $ do
         (embeddedReviewProvider (variantMode variant))
     coordinatorDisplay variant =
       (cellOf (assignmentFor variant.variantRoster IssueReviewRole variant.variantProvider)).assignmentDisplay
+    -- A roster that loads Claude and carries no issue_review cell for it, so
+    -- the boundary's refusal is about an absent cell rather than an unloaded
+    -- provider.
+    noIssueReviewClaude =
+      claudeOnlyRoster
+        { rosterAssignments = Map.delete (IssueReviewRole, ClaudeProvider) claudeOnlyRoster.rosterAssignments
+        }
     toolNamesOf roster provider =
       map toolName ((adapterFor provider).adapterReviewTools roster defaultWorkflowConfig)
     toolName (Object fields) = case KeyMap.lookup (Key.fromString "name") fields of

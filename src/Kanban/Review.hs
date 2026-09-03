@@ -81,6 +81,7 @@ module Kanban.Review
     decodeStreamRecord,
     drainToolRegistry,
     embeddedReviewProvider,
+    embeddedReviewProviderFor,
     finalOutputSchema,
     githubCommandBounds,
     githubIssueCommentArguments,
@@ -164,7 +165,6 @@ import Kanban.Models
     RoleName (..),
     assignmentFor,
     assignmentUnavailableMessage,
-    operatingModeFor,
   )
 import Kanban.Process (killManagedProcess, managedProcess)
 import Kanban.ProviderAdapter
@@ -177,6 +177,7 @@ import Kanban.ProviderAdapter
     adapterFor,
     claudeReviewArguments,
     embeddedReviewProvider,
+    embeddedReviewProviderFor,
   )
 import Kanban.Review.Canonical
   ( IssueReviewerRecord (..),
@@ -376,10 +377,12 @@ backendAssignment client =
 
 -- | Start the embedded review on the provider this install routes it to.
 --
--- The mode comes off the roster the cell is looked up in, the same way
--- 'Kanban.PullRequestFlow.pullRequestAssignment' takes it, so the backend
--- that starts and the @issue_review@ cell it runs on cannot be resolved
--- against two different rosters.
+-- The provider comes off the roster the cell is looked up in, the same way
+-- 'Kanban.PullRequestFlow.pullRequestAssignment' takes its mode, so the
+-- backend that starts and the @issue_review@ cell it runs on cannot be
+-- resolved against two different rosters — and through the same
+-- 'embeddedReviewProviderFor' the dashboard's own launch boundary refuses on,
+-- so a roster it allowed cannot be one this refuses.
 startReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
 startReviewClient roster workflowConfig repository eventSink = case issueReviewAssignment provider roster of
   -- Resolved before the backend is spawned, not after: a roster that loads
@@ -392,7 +395,7 @@ startReviewClient roster workflowConfig repository eventSink = case issueReviewA
     Nothing -> pure (Left (missingEmbeddedReviewMessage provider))
     Just backend -> startResolvedReviewClient backend roster workflowConfig repository eventSink
   where
-    provider = embeddedReviewProvider (operatingModeFor roster)
+    provider = embeddedReviewProviderFor roster
 
 -- | Start a client against a chosen backend, rather than the one
 -- 'Kanban.ProviderAdapter.embeddedReviewProvider' resolves. Exported so a

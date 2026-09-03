@@ -41,6 +41,7 @@ module Kanban.ProviderAdapter
     brandForProvider,
     claudeReviewArguments,
     embeddedReviewProvider,
+    embeddedReviewProviderFor,
     providerForBrand,
   )
 where
@@ -51,7 +52,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain (WorkflowConfig)
-import Kanban.Models (Assignment (..), ModelRoster, OperatingMode, ProviderName (..), soleAgent)
+import Kanban.Models (Assignment (..), ModelRoster, OperatingMode, ProviderName (..), operatingModeFor, soleAgent)
 import Kanban.Review.Prompts (claudeRevisionAvailable, claudeTool, finalOutputSchema, githubTool, githubToolName, questionTool, questionToolName)
 import Kanban.ReviewToolServer (mcpToolAllowance, reviewToolServerConfig)
 import Kanban.Solve.Event (SolverBrand (..))
@@ -238,6 +239,20 @@ brandForProvider ClaudeProvider = ClaudeSolver
 -- provider says whether it has one at all.
 embeddedReviewProvider :: OperatingMode -> ProviderName
 embeddedReviewProvider = fromMaybe CodexProvider . soleAgent
+
+-- | 'embeddedReviewProvider' reached through the roster a caller already
+-- holds, which is how both sites that need it actually have the mode.
+--
+-- One spelling because two of them ask, at two different moments: the
+-- dashboard boundary that resolves the @issue_review@ cell and refuses before
+-- starting any process, and 'Kanban.Review.startReviewClient', which resolves
+-- it again for the backend it is about to spawn. Deriving the provider from
+-- the roster each is given, rather than from a mode threaded in beside it, is
+-- what stops the refusal being made about one provider and the spawn about
+-- another -- which is exactly how a Claude-only install came to be refused
+-- for want of a Codex cell it would never have run on.
+embeddedReviewProviderFor :: ModelRoster -> ProviderName
+embeddedReviewProviderFor = embeddedReviewProvider . operatingModeFor
 
 codexAdapter :: ProviderAdapter
 codexAdapter =
