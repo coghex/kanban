@@ -521,6 +521,7 @@ repairWorkerDescriptor task =
       workerDescriptorLeasePath = "/tmp/pr-900-repair.lease",
       workerDescriptorLeaseOwnerPath = "/tmp/pr-900-repair.lease.owner",
       workerDescriptorPendingTerminationPath = "/tmp/pr-900-repair.terminating",
+      workerDescriptorHandoffPath = "/tmp/pr-900-repair.handing-off",
       workerDescriptorCommandPath = "/tmp/pr-900-repair.commands.jsonl",
       workerDescriptorCommandAckPath = "/tmp/pr-900-repair.command-acks.jsonl"
     }

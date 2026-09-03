@@ -10,7 +10,8 @@ module Spec.Agent.IssueHost (spec) where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (IOException, bracket, try)
-import Control.Monad (void, when)
+import Control.Monad (join, void, when)
+import Data.IORef (atomicModifyIORef', newIORef)
 import Data.List (find, findIndex, isInfixOf, nub)
 import Data.Maybe (isJust)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, tryReadMVar, tryTakeMVar)
@@ -90,6 +91,8 @@ import Kanban.Worker
     readReviewCommandAcknowledgements,
     readReviewCommands,
     issueActionTask,
+    issueHostGone,
+    confirmIssueActionAdoptedWith,
     readWorkerJournal,
     reviewCommandDisplay,
     reviewCommandPayloadSummary,
@@ -598,6 +601,43 @@ lifecycleSpec = describe "one running host" $ do
                 Just task <- [issueActionTask candidate.workerDescriptorSpec.workerTask]
             ]
       owners `shouldBe` [hostIdUnderTest]
+
+  -- Round 10's blocker. A launch cannot make host selection and child
+  -- admission one step, and round 7's answer — wait for durable evidence of
+  -- adoption — left the exit itself unordered: between the scan that finds no
+  -- children and the supervisor recording the host terminal, a child written
+  -- by a launch is missed by that scan while still reading the host as live.
+  -- The host now writes a handoff marker before that scan, so a child written
+  -- before the marker is seen by it.
+  it "adopts a child written into its handoff window rather than exiting" $
+    withRunningHost $ \host -> do
+      arrived <- newEmptyMVar
+      release <- newEmptyMVar
+      opened <- newIORef False
+      -- Inside the window: the marker is up and the scan the exit rests on
+      -- has not run. This is the ordering no test can produce from outside.
+      -- The window is held open until the test has looked at it, because the
+      -- host closes it the moment this returns.
+      modifyMVar_ host.hostHandoff . const . pure $ do
+        first <- atomicModifyIORef' opened (\seen -> (True, not seen))
+        when first $ do
+          void (publishChild host "action-late" 594 IssueRevision)
+          putMVar arrived ()
+          takeMVar release
+      -- The marker is up while the window is open, which is what makes a
+      -- launch reading liveness in it ensure another host rather than hand
+      -- its child to this one.
+      _ <- awaitJust "the host never opened a handoff window" (tryReadMVar arrived)
+      marked <- doesFileExist host.hostRecords.workerDescriptorHandoffPath
+      marked `shouldBe` True
+      putMVar release ()
+      -- Adopted rather than stranded, and the marker comes back down because
+      -- the exit is off.
+      _ <- awaitCallsFor host 1 isBeginCall
+      cleared <- awaitJust "the host never cleared its handoff marker" $ do
+        present <- doesFileExist host.hostRecords.workerDescriptorHandoffPath
+        pure (if present then Nothing else Just ())
+      cleared `shouldBe` ()
 
   -- Round 9's second blocker, and the path no host runs. A dashboard that
   -- reattaches after the host died monitors the child directly, and generic
@@ -1194,8 +1234,13 @@ collectionSpec = describe "collecting host and child records" $ do
       Right () <- appendReviewCommand child command
       acknowledgeWorker child
       acknowledgeWorker host
+      -- Derived for every worker even though only a host writes one, on the
+      -- same reasoning as the ledger beside it: a record a collection pass
+      -- does not name is one nothing ever removes.
+      writeFile child.workerDescriptorHandoffPath "handing off\n"
       collectWorkerCache testRepository
       doesFileExist child.workerDescriptorCommandPath `shouldReturn` False
+      doesFileExist child.workerDescriptorHandoffPath `shouldReturn` False
 
 -- ---------------------------------------------------------------------------
 -- Durable-record compatibility
@@ -1260,6 +1305,48 @@ hostDeadlineSpec = describe "a host past the ordinary worker deadline" $ do
 -- assigned to it can never be adopted.
 hostLivenessSpec :: Spec
 hostLivenessSpec = describe "which host a child is assigned to" $ do
+  -- Round 10's blocker, at the point it was reported. Ensuring a host is not
+  -- evidence that anything took the child on: the host ensuring hands back
+  -- can be one already inside its own handoff, and a host it starts still has
+  -- to come up and poll. Returning at the ensure is what leaves an action
+  -- leased, starting, and run by nobody while its launch reports success.
+  it "keeps waiting after ensuring a host, until something has actually adopted" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <-
+          descriptorForSpec
+            (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-1") IssueOriginClaude)))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        ensured <- newMVar (0 :: Int)
+        -- Adoption lands part-way through, the way a host that had to start
+        -- first would deliver it — well after the first ensure returned.
+        let ensureHost = do
+              count <- modifyMVar ensured (\held -> pure (held + 1, held + 1))
+              when (count >= 3) (seedJournal descriptor [WorkerDiagnostic "adopted"])
+              pure (Right (WorkerId "host-2"))
+        confirmIssueActionAdoptedWith 40 1000 ensureHost testRepository descriptor
+          `shouldReturn` Right ()
+        attempts <- readMVar ensured
+        attempts `shouldSatisfy` (>= 3)
+
+  -- And the disposition when nothing ever does. Reporting success here is
+  -- what the round found; the launch that reads this failure removes the
+  -- child's records and releases its lease, so no host started later runs an
+  -- action whose launch was refused.
+  it "reports a failure when nothing adopts the child at all" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <-
+          descriptorForSpec
+            (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-1") IssueOriginClaude)))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        confirmIssueActionAdoptedWith 5 1000 (pure (Right (WorkerId "host-2"))) testRepository descriptor
+          `shouldReturn` Left "no review host took this action on"
+
   it "reports a host whose recorded identity is gone as no live host at all" $
     withTemporaryCacheRoot $ \temporaryRoot ->
       withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
@@ -1289,6 +1376,45 @@ hostLivenessSpec = describe "which host a child is assigned to" $ do
         writeChildState descriptor (runningChildState descriptor now) {workerStateWorkerIdentity = present}
         found <- liveIssueReviewHost testRepository
         fmap ((.workerId) . (.workerDescriptorSpec)) found `shouldBe` Just (WorkerId "host-1")
+
+  -- Round 10's blocker, from the launch's side. A host inside its handoff
+  -- window is alive by every process measure and is still not one to hand a
+  -- new child to, because the scan its exit rests on has already been
+  -- ordered against this read.
+  it "reports a host that has begun handing off as no host to launch into" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <- descriptorForSpec (specFor (WorkerId "host-1") (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        now <- getCurrentTime
+        present <- initIdentity
+        writeChildState descriptor (runningChildState descriptor now) {workerStateWorkerIdentity = present}
+        -- Live without the marker, which is what makes the marker the thing
+        -- being tested rather than the state beside it.
+        found <- liveIssueReviewHost testRepository
+        fmap ((.workerId) . (.workerDescriptorSpec)) found `shouldBe` Just (WorkerId "host-1")
+        writeFile descriptor.workerDescriptorHandoffPath "handing off\n"
+        liveIssueReviewHost testRepository `shouldReturn` Nothing
+
+  -- And the other question the marker must not answer. "May a new child go
+  -- here" and "has this child's host gone" are different, and reading the
+  -- marker as death in the second would let a passing host take the children
+  -- of one that is merely on its way out — which is the theft requirement 16
+  -- forbids.
+  it "keeps a handing-off host's own children out of another host's reach" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <- descriptorForSpec (specFor (WorkerId "host-1") (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        now <- getCurrentTime
+        present <- initIdentity
+        writeChildState descriptor (runningChildState descriptor now) {workerStateWorkerIdentity = present}
+        writeFile descriptor.workerDescriptorHandoffPath "handing off\n"
+        issueHostGone testRepository (WorkerId "host-1") `shouldReturn` False
 
   -- Absence of proof is not proof. A host that has not recorded an identity
   -- yet is one whose supervisor has only just started, and treating that as
@@ -1424,6 +1550,10 @@ data HostUnderTest = HostUnderTest
     hostCanonicalProcess :: MVar ManagedProcess,
     -- | Filled by a test to let the fake gate return its verdict.
     hostCanonicalFinished :: MVar (),
+    -- | What the host runs inside its handoff window, for a test to replace.
+    hostHandoff :: MVar (IO ()),
+    -- | The host's own durable records, for a test that reads its marker.
+    hostRecords :: WorkerDescriptor,
     -- | The host's own journal, where anything that outlived a child's
     -- terminal envelope is recorded.
     hostEmitted :: MVar [WorkerEvent]
@@ -1506,6 +1636,9 @@ withRunningHostUsing overrideProvider body =
                 putMVar sinkCell sink
                 register (managedProcessGroup 1)
                 pure (Right (recordingProvider record))
+      -- Replaced by a test that needs to act inside the handoff window; a
+      -- run that does not is unaffected.
+      handoffBarrier <- newMVar (pure ())
       hostDescriptor <- descriptorForSpec hostSpecification
       LazyByteString.writeFile hostDescriptor.workerDescriptorSpecPath (encode hostSpecification)
       -- Forked rather than spawned: what is under test is the host's own
@@ -1514,7 +1647,7 @@ withRunningHostUsing overrideProvider body =
       finished <- newEmptyMVar
       void . forkIO $ do
         runIssueReviewHostWith
-          (IssueHostTuning 20000 1)
+          (IssueHostTuning 20000 1 (join (readMVar handoffBarrier)))
           startProvider
           runCanonical
           hostSpecification
@@ -1533,6 +1666,8 @@ withRunningHostUsing overrideProvider body =
             hostRegistered = registeredProcesses,
             hostCanonicalProcess = canonicalProcess,
             hostCanonicalFinished = canonicalFinished,
+            hostHandoff = handoffBarrier,
+            hostRecords = hostDescriptor,
             hostEmitted = emitted
           }
       -- The host exits when it holds no live child, so a body that left one

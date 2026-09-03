@@ -19,6 +19,7 @@ module Kanban.Worker.Discovery
     acknowledgeSupersededWorkers,
     collectWorkerCache,
     collectWorkerCacheWith,
+    removeWorkerArtifacts,
   )
 where
 
@@ -453,7 +454,8 @@ companionArtifactPaths descriptor =
     -- ever writes them, but deriving them unconditionally is what stops a
     -- future kind acquiring a command ledger that nothing collects.
     descriptor.workerDescriptorCommandPath,
-    descriptor.workerDescriptorCommandAckPath
+    descriptor.workerDescriptorCommandAckPath,
+    descriptor.workerDescriptorHandoffPath
   ]
 
 -- | Removes a collected worker's files, the @.spec.json@ anchor last on

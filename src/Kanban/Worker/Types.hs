@@ -433,6 +433,11 @@ data WorkerDescriptor = WorkerDescriptor
     -- action ever has either; the paths are derived for every worker so the
     -- collection pass names them unconditionally and cannot leave one behind
     -- (see 'companionArtifactPaths').
+    -- | Written by a review host that has decided to exit, before the
+    -- final scan that decision rests on. Everything asking whether that host
+    -- is live reads it as no, which is what orders a child's admission
+    -- against the host's exit rather than leaving the two to race.
+    workerDescriptorHandoffPath :: FilePath,
     workerDescriptorCommandPath :: FilePath,
     workerDescriptorCommandAckPath :: FilePath
   }

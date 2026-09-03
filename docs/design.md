@@ -3988,9 +3988,26 @@ The first solve/autosolve-compatible slice is implemented.
   client transcript, which the host records as its own and which is no
   child's evidence.
   Host selection and child admission cannot be made one step from the launch
-  side, so a launch waits for evidence that a host has taken its child on and
-  ensures one itself if none does; a host also adopts a child whose named host
-  is provably gone —
+  side, so the ordering is established on the host's side instead: a host that
+  has decided to exit records a handoff marker before the scan that decision
+  rests on, and everything asking which host a new child may go to reads a
+  marked host as none. A child written before the marker is therefore seen by
+  that scan and adopted — the marker comes down and the host keeps running —
+  and one written after it belongs to a launch that reads the host as gone and
+  ensures another. A launch writes its child's specification before it reads
+  liveness, so the one interleaving that would strand a child, missed by the
+  scan while reading the host as live, cannot occur.
+  The marker answers that question and no other. Whether a child's named host
+  has gone, which is what permits re-homing, is answered from that host's
+  recorded identity and is deliberately blind to the marker: a host on its way
+  out has not gone, and reading it as gone would let another host take
+  children it is still serving.
+  On top of that ordering a launch waits for evidence that a host has actually
+  taken its child on, since a host ensured is not a child adopted; ensuring
+  never ends that wait, and a wait that ends with no evidence at all is
+  reported as a failed launch whose child's records are removed and whose
+  lease is released, rather than as a success nothing is running. A host also
+  adopts a child whose named host is provably gone —
   never one a live host is serving. A host counts as live unless it is
   disproven: terminal, or recording an identity a successful process snapshot
   does not contain. An unreadable snapshot keeps it, which is the same

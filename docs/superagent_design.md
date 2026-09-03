@@ -1629,6 +1629,19 @@ unless their typed contract exposes an override.
   claim and lost the message the dashboard had already cleared from its input
   line.
 
+  The tenth round closed the last of the admission race. Round 7 replaced
+  predicting which host would take a child with observing that one had, and
+  the timeout arm of that wait went on predicting: it ensured a host and
+  returned, and the host ensuring hands back can be the one already inside its
+  idle teardown. Two things changed. The host now records a handoff marker
+  before the final scan its exit rests on, and everything asking which host a
+  new child may go to reads a marked host as none — which orders admission
+  against exit, since a launch writes its child before it reads liveness, and
+  makes the stranding interleaving unreachable rather than unlikely. And the
+  wait no longer ends at an ensure: every arm loops back to the same question,
+  and exhausting it is reported as a failed launch that removes the child's
+  records, not as a success with nothing running.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

@@ -68,6 +68,7 @@ descriptorForSpec spec = do
         workerDescriptorLeasePath = leasePath,
         workerDescriptorLeaseOwnerPath = leasePath </> "owner.json",
         workerDescriptorPendingTerminationPath = directory </> base <> ".pending-termination",
+        workerDescriptorHandoffPath = directory </> base <> ".handing-off",
         workerDescriptorCommandPath = directory </> base <> ".commands.jsonl",
         workerDescriptorCommandAckPath = directory </> base <> ".command-acks.jsonl"
       }

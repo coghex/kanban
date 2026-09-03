@@ -47,12 +47,14 @@ module Kanban.Worker
     undeliveredReviewCommands,
     ensureIssueReviewHost,
     launchIssueAction,
+    confirmIssueActionAdoptedWith,
     liveIssueReviewHost,
     issueHostIdleGraceSeconds,
     -- | Re-exported for the suite, which pins the host's rules without
     -- starting one: what settles a child, what a canonical result means, and
     -- which preflight each stage owes.
     canonicalStageOutcome,
+    issueHostGone,
     childCommandOutcome,
     issueActionPreflightAction,
     revisionTurnOutcome,
@@ -118,7 +120,7 @@ import Control.Exception (Exception, IOException, SomeException, bracket, mask, 
 import Control.Monad (filterM, forM_, unless, void, when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (find)
-import Data.Maybe (isJust, listToMaybe)
+import Data.Maybe (isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
@@ -151,12 +153,14 @@ import Kanban.Worker.Discovery
     collectWorkerCacheWith,
     discoverWorkerHistory,
     discoverWorkers,
+    removeWorkerArtifacts,
     workerHoldingTurn,
   )
 import Kanban.Worker.IssueHost
   ( IssueHostProvider (..),
     IssueHostTuning (..),
     canonicalStageOutcome,
+    issueHostGone,
     defaultIssueHostTuning,
     runIssueReviewHostWith,
     childCommandOutcome,
@@ -308,13 +312,28 @@ liveIssueReviewHost repository = do
   pure (listToMaybe hosts)
   where
     running descriptor = do
-      stateResult <- readWorkerState descriptor
-      case stateResult of
-        Left _ -> pure False
-        Right state -> case state.workerStateStatus of
-          WorkerStarting -> proven state
-          WorkerRunning -> proven state
-          _ -> pure False
+      -- A host that has decided to exit is not one to hand a new child to,
+      -- however alive its process still is. It writes this marker before the
+      -- final scan its exit rests on, so a child written before the marker is
+      -- seen by that scan and one written after it belongs to a caller that
+      -- reads this host as gone. That ordering is the whole reason the
+      -- marker exists; see 'Kanban.Worker.IssueHost.handOffOrKeepGoing'.
+      --
+      -- This answers "which host may take a new child", and only that. Whether
+      -- a child's named host has gone — which is what decides re-homing, and
+      -- would be theft if it read a live host as dead — is 'namedHostGone',
+      -- answered from the recorded identity and deliberately blind to this.
+      handingOff <- doesFileExist descriptor.workerDescriptorHandoffPath
+      if handingOff
+        then pure False
+        else do
+          stateResult <- readWorkerState descriptor
+          case stateResult of
+            Left _ -> pure False
+            Right state -> case state.workerStateStatus of
+              WorkerStarting -> proven state
+              WorkerRunning -> proven state
+              _ -> pure False
     -- A host that has not recorded an identity yet is one whose supervisor
     -- has only just started; the launch it came from waited for that start,
     -- so the window is real but brief and nothing here can disprove it.
@@ -415,8 +434,20 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
       case written of
         Left message -> releaseWorkerLease descriptor >> pure (Left (WorkerLaunchFailed message))
         Right () -> do
-          confirmIssueActionAdopted repository descriptor host configPath workflowConfig
-          pure (Right descriptor)
+          confirmed <- confirmIssueActionAdopted repository descriptor configPath workflowConfig
+          case confirmed of
+            Right () -> pure (Right descriptor)
+            -- Nothing took the child on, and the wait above has already tried
+            -- every repair there is. Reporting the launch as succeeded is what
+            -- leaves an action the operator started that never runs and that
+            -- nothing accounts for, so it is reported as the failure it is and
+            -- its records go with it: the specification is the only way
+            -- discovery reaches a child, so removing it is what stops a host
+            -- started later from running an action whose launch was refused.
+            Left message -> do
+              removeWorkerArtifacts descriptor
+              releaseWorkerLease descriptor
+              pure (Left (WorkerLaunchFailed message))
   where
     -- A host whose state has not landed yet leaves the child recording pid 0
     -- and no identity, which the startup grace window in 'discoverWorkers'
@@ -441,23 +472,41 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
 -- a host is ensured regardless, so a child is never left with nobody asked.
 --
 -- Fast in the ordinary case: adoption lands within one host poll.
-confirmIssueActionAdopted :: Repository -> WorkerDescriptor -> WorkerId -> Maybe FilePath -> WorkflowConfig -> IO ()
-confirmIssueActionAdopted repository descriptor named configPath workflowConfig = poll issueActionAdoptionAttempts
+confirmIssueActionAdopted :: Repository -> WorkerDescriptor -> Maybe FilePath -> WorkflowConfig -> IO (Either Text ())
+confirmIssueActionAdopted repository descriptor configPath workflowConfig =
+  confirmIssueActionAdoptedWith
+    issueActionAdoptionAttempts
+    issueActionAdoptionPollMicros
+    (ensureIssueReviewHost repository configPath workflowConfig)
+    repository
+    descriptor
+
+-- | The wait itself, with its bound and the host it ensures injected.
+--
+-- Ensuring a host is what a suite must not do for real — it spawns a
+-- supervisor, and under test that supervisor is the test binary — so the
+-- seam is here rather than in a fixture that reproduces the loop.
+confirmIssueActionAdoptedWith :: Int -> Int -> IO (Either Text WorkerId) -> Repository -> WorkerDescriptor -> IO (Either Text ())
+confirmIssueActionAdoptedWith attempts delayMicros ensureHost repository descriptor = poll attempts
   where
     poll remaining = do
       adopted <- not . null <$> readWorkerJournal descriptor
-      unless adopted $
-        if remaining <= (0 :: Int)
-          then ensureAnotherHost
-          else do
-            alive <- namedHostAlive
-            if alive
-              then threadDelay issueActionAdoptionPollMicros >> poll (remaining - 1)
-              else ensureAnotherHost
-    ensureAnotherHost = void (ensureIssueReviewHost repository configPath workflowConfig)
-    namedHostAlive = do
-      live <- liveIssueReviewHost repository
-      pure (fmap ((.workerId) . (.workerDescriptorSpec)) live == Just named)
+      if adopted
+        then pure (Right ())
+        else
+          if remaining <= (0 :: Int)
+            then pure (Left "no review host took this action on")
+            else do
+              -- Ensuring is not evidence, so it never ends the wait. A host
+              -- ensured here still has to start, poll, and adopt, and the one
+              -- ensuring hands back can be a host already on its way out —
+              -- which is the whole reason this waits for the journal rather
+              -- than for a host to name. Every arm loops back to the same
+              -- question.
+              live <- liveIssueReviewHost repository
+              when (isNothing live) (void ensureHost)
+              threadDelay delayMicros
+              poll (remaining - 1)
 
 -- | How long a launch waits for a host to take its child on before ensuring
 -- one itself. Long enough to cover several host polls, short enough that a

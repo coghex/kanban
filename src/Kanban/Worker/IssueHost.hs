@@ -52,6 +52,7 @@ module Kanban.Worker.IssueHost
     issueActionStartingState,
     childCommandOutcome,
     canonicalStageOutcome,
+    issueHostGone,
     revisionTurnOutcome,
     issueActionPreflightAction,
   )
@@ -73,6 +74,7 @@ import qualified Data.Text as Text
 import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Kanban.ApprovalService (ApprovalController, ApprovalUnavailable, discoverApprovalController)
 import Kanban.Cache (normalizedRepositoryIdentity)
+import Kanban.Domain (Repository)
 import Kanban.Models (OperatingMode, loadModelRoster, loadedOperatingMode)
 import Kanban.Preflight (IssueOrigin, PreflightAction (..), preflightBlocker)
 import Kanban.Process (IdentityPresence (..), ManagedProcess, ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot, identityForPid, interruptThenKillManagedProcess, managedProcessPid, readProcessSnapshot)
@@ -133,6 +135,7 @@ import Kanban.Worker.Types
     issueActionTask,
     WorkerTask (..),
   )
+import System.Directory (removeFile)
 import System.Posix.Process (getProcessID)
 
 -- | How often the host looks for new children, new commands, and children
@@ -209,16 +212,22 @@ embeddedIssueHostProvider client =
       providerStop = stopReviewClient client
     }
 
--- | The host's two timings, injected for the same reason the provider is: a
--- suite that waited out the production idle grace would spend half a minute
--- proving a host exits.
+-- | The host's two timings and its one ordering seam, injected for the same
+-- reason the provider is: a suite that waited out the production idle grace
+-- would spend half a minute proving a host exits, and no suite at all can
+-- land a write inside a two-statement window from the outside.
 data IssueHostTuning = IssueHostTuning
   { hostPollMicros :: Int,
-    hostIdleGraceSeconds :: Int
+    hostIdleGraceSeconds :: Int,
+    -- | Run between recording the handoff marker and the scan that decision
+    -- rests on. Production does nothing here; the window is real and a test
+    -- writing a child into it is the only way to drive the ordering
+    -- 'handOffOrKeepGoing' exists to establish.
+    hostHandoffBarrier :: IO ()
   }
 
 defaultIssueHostTuning :: IssueHostTuning
-defaultIssueHostTuning = IssueHostTuning issueHostPollIntervalMicros issueHostIdleGraceSeconds
+defaultIssueHostTuning = IssueHostTuning issueHostPollIntervalMicros issueHostIdleGraceSeconds (pure ())
 
 -- | One child action, as the host holds it while it runs.
 --
@@ -457,8 +466,58 @@ hostLoop host lastLive = do
     then hostLoop host now
     else
       if diffUTCTime now lastLive >= fromIntegral host.hostTuning.hostIdleGraceSeconds
-        then pure SolveCompleted
+        then handOffOrKeepGoing host now
         else hostLoop host lastLive
+
+-- | The exit, ordered against a launch writing a child that names this host.
+--
+-- A launch cannot make host selection and child admission one step, and it
+-- cannot predict this exit either: between the scan above finding nothing and
+-- the supervisor recording this host terminal, a child written by a launch is
+-- missed by the scan while still reading the host as live. Nothing on the
+-- launch side closes that, because both of the things it could observe are
+-- already stale by the time it observes them.
+--
+-- So the ordering is established here, where it can be. The marker is written
+-- first and everything asking whether this host is live reads it as no; only
+-- then does the scan that the exit rests on run. A child written before the
+-- marker is therefore seen by that scan, and one written after it is written
+-- by a launch that will read this host as gone and ensure another. A launch
+-- writes its child's specification before it reads liveness, so "missed by
+-- the scan and read as live" would need that launch to have read the marker
+-- before writing the specification, which is the one order it never takes.
+--
+-- Finding work means the exit is off: the marker comes back down and the poll
+-- resumes, which is why this is a handoff rather than a farewell.
+handOffOrKeepGoing :: IssueReviewHost -> UTCTime -> IO SolveOutcome
+handOffOrKeepGoing host now = do
+  marked <- try @IOException (writeFile host.hostDescriptor.workerDescriptorHandoffPath "handing off\n")
+  case marked of
+    -- An unwritable marker means the ordering above cannot be established, so
+    -- the exit it protects does not happen either: staying up serves every
+    -- child that arrives, where exiting on an unestablished ordering is what
+    -- strands one.
+    Left failure -> do
+      hostDiagnostic host ("could not record the handoff marker, so this host stays up: " <> Text.pack (show failure))
+      hostLoop host now
+    Right () -> do
+      host.hostTuning.hostHandoffBarrier
+      isolateHostStep host ("adopting children in the handoff window", adoptNewChildren host)
+      arrived <- liveChildren host
+      if null arrived
+        then pure SolveCompleted
+        else do
+          removed <- try @IOException (removeFile host.hostDescriptor.workerDescriptorHandoffPath)
+          case removed of
+            Right () -> hostLoop host =<< getCurrentTime
+            -- The marker stays up, so launches read this host as gone and
+            -- ensure another. That costs a redundant host which idles out; it
+            -- does not cost these children, because whether a child's named
+            -- host has gone is a different question, answered from that
+            -- host's recorded identity, and this one is running.
+            Left failure -> do
+              hostDiagnostic host ("could not clear the handoff marker, so launches will start another host: " <> Text.pack (show failure))
+              hostLoop host =<< getCurrentTime
 
 -- | Runs one poll step, reporting a failure rather than letting it end the
 -- host.
@@ -537,7 +596,7 @@ childCandidate host descriptor = case issueActionTask descriptor.workerDescripto
   Just task
     | task.issueActionHost == host.hostSpec.workerId -> pure (Just (descriptor, task, AdoptToRun))
     | otherwise -> do
-        orphaned <- namedHostGone host task.issueActionHost
+        orphaned <- issueHostGone host.hostSpec.workerRepository task.issueActionHost
         if not orphaned
           then pure Nothing
           else do
@@ -570,6 +629,13 @@ rehomeChild host descriptor task
 
 -- | Whether the host a child names is definitely not going to run it.
 --
+-- Deliberately blind to the handoff marker that
+-- 'Kanban.Worker.liveIssueReviewHost' reads. That marker answers "may a new
+-- child go to this host"; this answers "has this child's host gone", and a
+-- host on its way out has not gone. Reading it here would let any passing
+-- host take the children of one still serving them, which is the theft
+-- requirement 16 forbids.
+--
 -- Terminal is the obvious case. The other is a host that died without
 -- recording anything — killed, or stopped between persisting a running state
 -- and doing anything with it — which leaves a record that reads as running
@@ -578,9 +644,9 @@ rehomeChild host descriptor task
 --
 -- Fails closed: a record that cannot be read, and a snapshot that cannot be
 -- taken, both leave the child to the host it names.
-namedHostGone :: IssueReviewHost -> WorkerId -> IO Bool
-namedHostGone host named = do
-  history <- discoverWorkerHistory host.hostSpec.workerRepository
+issueHostGone :: Repository -> WorkerId -> IO Bool
+issueHostGone repository named = do
+  history <- discoverWorkerHistory repository
   case find ((== named) . (.workerId) . (.workerDescriptorSpec)) history of
     Nothing -> pure True
     Just descriptor -> do

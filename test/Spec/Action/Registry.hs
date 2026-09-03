@@ -9,11 +9,13 @@
 -- authority with the request's own values.
 module Spec.Action.Registry (spec) where
 
-import Control.Monad (void)
+import Control.Concurrent (forkIO, killThread, threadDelay)
+import Control.Exception (bracket)
+import Control.Monad (forever, void, when)
 import Data.Aeson (eitherDecodeFileStrict, encode)
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.List (isSuffixOf, sortOn)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (isJust, mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -53,6 +55,10 @@ import Kanban.Worker
   ( IssueActionWorkerTask (..),
     IssueHostWorkerTask (..),
     issueActionTask,
+    discoverWorkerHistory,
+    WorkerEnvelope (..),
+    WorkerEvent (..),
+    readWorkerJournal,
     PullRequestWorkerTask (..),
     SolveWorkerTask (..),
     WorkerDescriptor (..),
@@ -1125,8 +1131,7 @@ spec = do
       withPreflightMachine fullyProvisionedFakes BackendInstalled $ \workingDirectory _ ->
         withEnvironmentValue "XDG_CACHE_HOME" (takeDirectory workingDirectory) $ do
           let repository = Repository workingDirectory "coghex" "kanban"
-          host <- seedLiveIssueHost repository
-          sequence_
+          withAdoptingIssueHost repository $ \host -> sequence_
             [ do
                 let issue =
                       (baseIssue number [])
@@ -1457,6 +1462,34 @@ issueActionDescriptor repository issueNumber stage host = do
 -- | Publishes a running repository review host, so a dispatch adopts it
 -- instead of spawning one. Returns its id, which is what a child's
 -- specification has to name.
+-- | The seeded record, plus the one thing a real host does that a launch now
+-- waits on: writing to a child's journal to say it has taken it on.
+--
+-- A record alone stopped being enough when the launch started waiting for
+-- adoption evidence, and it should not be enough: a record is exactly what a
+-- host that died leaves behind. Nothing here runs a host — this writes the
+-- single line the wait reads, which keeps this test about what the registry
+-- writes rather than about the host's lifecycle.
+withAdoptingIssueHost :: Repository -> (WorkerId -> IO a) -> IO a
+withAdoptingIssueHost repository body = do
+  hostId <- seedLiveIssueHost repository
+  bracket (forkIO (adopt hostId)) killThread (const (body hostId))
+  where
+    adopt hostId = forever $ do
+      history <- discoverWorkerHistory repository
+      sequence_
+        [ do
+            journalled <- readWorkerJournal descriptor
+            when (null journalled) $ do
+              now <- getCurrentTime
+              LazyByteString.appendFile
+                descriptor.workerDescriptorEventPath
+                (encode (WorkerEnvelope now (WorkerDiagnostic ("adopted by " <> hostId.unWorkerId))) <> "\n")
+          | descriptor <- history,
+            isJust (issueActionTask descriptor.workerDescriptorSpec.workerTask)
+        ]
+      threadDelay 5000
+
 seedLiveIssueHost :: Repository -> IO WorkerId
 seedLiveIssueHost repository = do
   directory <- workerDirectory repository
