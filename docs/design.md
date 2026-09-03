@@ -4002,6 +4002,11 @@ The first solve/autosolve-compatible slice is implemented.
   announcing one stays addressable until that announcement arrives, and the
   thread it names is closed rather than left owned by nothing; a canonical
   subprocess that starts after its child was settled is ended the same way.
+  Attaching that thread and settling the child are one step against each
+  other, not two reads racing: a settle between the check and the attach would
+  find no thread to finish while the attach installed one on an action already
+  terminal, leaving it running under a shared connection with nothing owning
+  it.
   The wire names only an issue number, and an issue outlives the action that
   asked, so an announcement resolves to the action whose start is still
   waiting rather than to whichever child holds that issue now — and one issue
@@ -4049,6 +4054,11 @@ The first solve/autosolve-compatible slice is implemented.
   old name, because an adopted child is one the host already holds and every
   later scan skips it, so nothing would ever revisit the disagreement.
   Refusing leaves the child a candidate again on the next poll.
+  A re-homed child keeps the processes its own state records, as well: under a
+  process-per-thread backend those name the connection the dead host left
+  running, and a recovery that rebuilt the child's state from scratch would
+  discard the only durable name for it in the moment before settling the
+  action and releasing its lease.
   A re-homed child continues its own raw log rather than opening another: the
   name a new one takes carries the issue number and a timestamp but no action
   id, so a child pointed at a fresh log leaves the evidence it actually

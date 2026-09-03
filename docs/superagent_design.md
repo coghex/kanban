@@ -1688,6 +1688,17 @@ unless their typed contract exposes an override.
   reader treats a claim as settled, so that one stood until a later adoption
   or a stale-worker recovery happened to arrive.
 
+  The fifteenth round closed two, and both were of shapes earlier rounds had
+  already named. Attaching an announced thread read the settle claim and then
+  acted on it, which is the check-then-act rounds 6 and 11 each found
+  elsewhere; a termination landing between the two left the settle with no
+  thread to finish and the attach installing one on a terminal action. And
+  recovery adoption rebuilt the child's state from scratch, discarding the
+  connection round 12 had just made it record — in the moment before settling
+  the action and releasing its lease, which is exactly when that record is the
+  only name the process has left. A fix that adds durable state is not done
+  until every path that rebuilds that state carries it.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

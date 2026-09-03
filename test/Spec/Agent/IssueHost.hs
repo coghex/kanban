@@ -617,6 +617,48 @@ lifecycleSpec = describe "one running host" $ do
             ]
       owners `shouldBe` [hostIdUnderTest]
 
+  -- Round 15's first blocker, and the third instance of one shape: read the
+  -- settle claim, then act on what it said. A termination landing between the
+  -- two leaves the settle finding no thread to finish and this installing one
+  -- on an action already terminal — which under a shared connection goes on
+  -- running with nothing owning it.
+  it "closes a thread announced while its child is being settled" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      -- Begun, so this child's own start is outstanding and the announcement
+      -- below resolves to it; no thread yet, which is the state a settle in
+      -- this window would find nothing to finish in.
+      _ <- awaitCallsFor host 1 isBeginCall
+      inside <- newEmptyMVar
+      release <- newEmptyMVar
+      entered <- newIORef False
+      -- Parked between reading the settle claim and acting on it, which is
+      -- the whole window. A test cannot land a termination there from
+      -- outside, and losing that race by luck is not a regression anyone can
+      -- rely on.
+      modifyMVar_ host.hostAttach . const . pure $ do
+        first <- atomicModifyIORef' entered (\seen -> (True, not seen))
+        when first (putMVar inside () >> takeMVar release)
+      let announced = ReviewThreadId (ConnectionId 1) "thread-racing-the-settle"
+      void . forkIO $ deliver host (ReviewThreadCreated 594 announced)
+      _ <- awaitJust "the attach never reached its barrier" (tryReadMVar inside)
+      -- The termination now runs while the attach is parked. Ordered, it
+      -- waits; unordered, it settles a child that holds no thread and
+      -- finishes nothing, and the attach then installs one on an action
+      -- already terminal.
+      ended <- newEmptyMVar
+      void . forkIO $ endChild child >> putMVar ended ()
+      threadDelay 200000
+      putMVar release ()
+      _ <- awaitMaybe (tryTakeMVar ended)
+      _ <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      -- The thread was closed, whichever of the two got there first. Never
+      -- neither, which is the leak: under a shared connection that thread and
+      -- its turn go on running with nothing owning them.
+      awaitCalls host 1 isFinishCall
+      calls <- providerCalls host
+      filter isFinishCall calls `shouldBe` [FinishThread announced]
+
   -- Round 14's first blocker. An announcement names only an issue on the
   -- wire, and a settled action keeps its start outstanding on purpose so its
   -- late thread is still closed — while its released lease lets a replacement
@@ -682,6 +724,27 @@ lifecycleSpec = describe "one running host" $ do
       -- And re-applies nothing: the provider never sees this message.
       calls <- providerCalls host
       filter isSendCall calls `shouldBe` []
+
+  -- Round 15's second blocker, and the cost of round 12's fix not being
+  -- carried through every path that rebuilds a child's state. A recovering
+  -- host built a fresh state for the child it adopted, discarding the
+  -- connection the dead host had recorded on it — moments before settling the
+  -- action and releasing its lease, leaving that process running.
+  it "keeps a recovered child's recorded connection long enough to end it" $
+    withManagedShell "sleep 30" $ \handle -> do
+      identity <- identityForProcess handle
+      withRunningHost $ \host -> do
+        child <- publishStartedChildNaming host (WorkerId "host-that-died") "action-1" 594 IssueRevision
+        -- The connection the dead host recorded on this child, which is the
+        -- only durable name for it once that host is gone.
+        recorded <- decodeChildState child
+        forM_ recorded $ \state ->
+          writeChildState child state {workerStateKnownProcesses = [identity]}
+        publishTerminalHost host (WorkerId "host-that-died")
+        settled <- awaitState child (\state -> terminalState state.workerStateStatus)
+        settled.workerStateStatus
+          `shouldBe` WorkerTerminal (SolveFailed "the review host that owned this action stopped before it finished; its provider session cannot be resumed")
+        shouldHaveBeenSwept identity.processIdentityPid "a recovered child's per-thread connection"
 
   -- Round 12's blocker, at the point the record is made. A per-thread
   -- connection is registered with the host's supervisor, and that record is
@@ -1816,6 +1879,8 @@ data HostUnderTest = HostUnderTest
     hostHandoff :: MVar (IO ()),
     -- | What the fake provider runs inside a send, for a test to replace.
     hostSendGate :: MVar (IO ()),
+    -- | What the host runs inside a thread attach, for a test to replace.
+    hostAttach :: MVar (IO ()),
     -- | What the fake provider reports as a thread's own processes. Empty is
     -- a shared connection; a test giving it one is the per-thread shape.
     hostThreadProcesses :: MVar [ManagedProcess],
@@ -1872,6 +1937,7 @@ withRunningHostUsing overrideProvider body =
       -- inside a send; a run that does neither is unaffected.
       handoffBarrier <- newMVar (pure ())
       sendGate <- newMVar (pure ())
+      attachBarrier <- newMVar (pure ())
       threadProcesses <- newMVar []
       sinkCell <- newEmptyMVar
       emitted <- newMVar []
@@ -1919,7 +1985,7 @@ withRunningHostUsing overrideProvider body =
       finished <- newEmptyMVar
       void . forkIO $ do
         runIssueReviewHostWith
-          (IssueHostTuning 20000 1 (join (readMVar handoffBarrier)))
+          (IssueHostTuning 20000 1 (join (readMVar handoffBarrier)) (join (readMVar attachBarrier)))
           startProvider
           runCanonical
           hostSpecification
@@ -1940,6 +2006,7 @@ withRunningHostUsing overrideProvider body =
             hostCanonicalFinished = canonicalFinished,
             hostHandoff = handoffBarrier,
             hostSendGate = sendGate,
+            hostAttach = attachBarrier,
             hostThreadProcesses = threadProcesses,
             hostRecords = hostDescriptor,
             hostEmitted = emitted

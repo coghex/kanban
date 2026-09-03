@@ -236,11 +236,17 @@ data IssueHostTuning = IssueHostTuning
     -- rests on. Production does nothing here; the window is real and a test
     -- writing a child into it is the only way to drive the ordering
     -- 'handOffOrKeepGoing' exists to establish.
-    hostHandoffBarrier :: IO ()
+    hostHandoffBarrier :: IO (),
+    -- | Run inside 'attachAnnouncedThread', after it has read the settle
+    -- claim and before it acts on it. The same reason as the barrier above:
+    -- the window this closes is two statements wide, and a test that cannot
+    -- stop time inside it can only hope to lose the race often enough to
+    -- notice. Production does nothing here.
+    hostAttachBarrier :: IO ()
   }
 
 defaultIssueHostTuning :: IssueHostTuning
-defaultIssueHostTuning = IssueHostTuning issueHostPollIntervalMicros issueHostIdleGraceSeconds (pure ())
+defaultIssueHostTuning = IssueHostTuning issueHostPollIntervalMicros issueHostIdleGraceSeconds (pure ()) (pure ())
 
 -- | One child action, as the host holds it while it runs.
 --
@@ -729,7 +735,20 @@ adoptChild host descriptor task adoption = do
   stateCell <-
     newMVar
       ( (issueActionStartingState host.hostPid host.hostProcessIdentity now descriptor.workerDescriptorSpec)
-          {workerStateLogPath = sessionLogPath <$> rawLog}
+          { workerStateLogPath = sessionLogPath <$> rawLog,
+            -- Carried, not rebuilt. Under a process-per-thread backend a
+            -- child records the connection serving it, and settling one with
+            -- no host left to ask reads that record and nothing else — so
+            -- replacing it here with a fresh state would discard the only
+            -- durable name for a process that is still running, moments
+            -- before this adoption settles the action and releases its lease.
+            -- The census verifies each entry against a live snapshot on its
+            -- next pass, so an entry whose process has gone is dropped rather
+            -- than believed.
+            workerStateKnownProcesses = maybe [] (.workerStateKnownProcesses) inherited,
+            workerStateProviderPid = inherited >>= (.workerStateProviderPid),
+            workerStateProviderIdentity = inherited >>= (.workerStateProviderIdentity)
+          }
       )
   stageThread <- newIORef Nothing
   process <- newIORef Nothing
@@ -984,6 +1003,41 @@ recordLiveCanonicalProcess child process = do
           workerStateLastActivity = "running canonical gate"
         }
 
+-- | Attaches an announced thread to its child, reporting whether the child
+-- was settled instead — in which case the caller closes the thread.
+--
+-- Under the settle's own lock, because reading the claim and then attaching
+-- is the check-then-act this container keeps growing: a termination landing
+-- between the two leaves 'settleChild' finding no thread to finish and this
+-- installing one on an action already terminal — and under a shared
+-- connection that thread and its turn go on running with nothing owning them.
+-- Holding the lock makes the two orderings exhaustive: either the attach
+-- completes first and the settle finds the thread, or the settle completes
+-- first and this reports it as settled.
+attachAnnouncedThread :: IssueReviewHost -> HostChild -> ReviewEvent -> ReviewThreadId -> IO Bool
+attachAnnouncedThread host child event threadId =
+  withMVar child.hostChildDelivery . const $ do
+    settled <- readIORef child.hostChildSettleClaim
+    host.hostTuning.hostAttachBarrier
+    if settled
+      then pure True
+      else do
+        journalChild child (WorkerReviewEvent event)
+        updateChildState child $ \state ->
+          state
+            { workerStateReviewThread = Just threadId,
+              workerStateStatus = runningUnlessSettled state.workerStateStatus,
+              workerStateLastActivity = "session ready"
+            }
+        -- Registered here rather than left to the next poll. A
+        -- process-per-thread backend spawns this thread's process in order to
+        -- announce it, and a host killed in between would leave that process
+        -- with no recorded identity for any recovery pass to verify or
+        -- terminate.
+        registerProviderProcesses host
+        recordThreadProcess host child threadId
+        pure False
+
 -- | Records the process serving this child's thread on the child itself,
 -- where a process-per-thread backend gives it one of its own.
 --
@@ -1083,37 +1137,21 @@ routeReviewEvent host event = case event of
     case found of
       Nothing -> hostDiagnostic host ("a review thread was created for issue #" <> Text.pack (show issueNumber) <> ", which this host holds no pending start for")
       Just child -> do
-        settled <- readIORef child.hostChildSettleClaim
-        unless settled (journalChild child (WorkerReviewEvent event))
-        if settled
-          then do
-            -- The child asked for this thread and was settled before the
-            -- provider announced it. Closing it here is the whole reason a
-            -- settled child stays addressable: the alternative is a live
-            -- provider thread — and, under a process-per-thread backend, a
-            -- live process — that nothing owns and nothing will ever stop.
-            --
-            -- Recorded on the host rather than the child, because the child's
-            -- journal ends at its terminal envelope and this happened after
-            -- it. The host's log is where an operator finds what became of a
-            -- thread that outlived the action that asked for it.
-            hostDiagnostic host (lateThreadDiagnostic <> " (issue #" <> Text.pack (show issueNumber) <> ")")
-            provider <- readMVar host.hostProvider
-            forM_ provider (\connected -> connected.providerFinishThread threadId)
-          else do
-            updateChildState child $ \state ->
-              state
-                { workerStateReviewThread = Just threadId,
-                  workerStateStatus = runningUnlessSettled state.workerStateStatus,
-                  workerStateLastActivity = "session ready"
-                }
-            -- Registered here rather than left to the next poll. A
-            -- process-per-thread backend spawns this thread's process in
-            -- order to announce it, and a host killed in between would leave
-            -- that process with no recorded identity for any recovery pass to
-            -- verify or terminate.
-            registerProviderProcesses host
-            recordThreadProcess host child threadId
+        settled <- attachAnnouncedThread host child event threadId
+        when settled $ do
+          -- The child asked for this thread and was settled before the
+          -- provider announced it. Closing it here is the whole reason a
+          -- settled child stays addressable: the alternative is a live
+          -- provider thread — and, under a process-per-thread backend, a
+          -- live process — that nothing owns and nothing will ever stop.
+          --
+          -- Recorded on the host rather than the child, because the child's
+          -- journal ends at its terminal envelope and this happened after
+          -- it. The host's log is where an operator finds what became of a
+          -- thread that outlived the action that asked for it.
+          hostDiagnostic host (lateThreadDiagnostic <> " (issue #" <> Text.pack (show issueNumber) <> ")")
+          provider <- readMVar host.hostProvider
+          forM_ provider (\connected -> connected.providerFinishThread threadId)
   ReviewStartFailed issueNumber message -> do
     -- A start that failed is a start that will never be announced, so it is
     -- the one this issue is waiting on.
