@@ -359,9 +359,15 @@ lifecycleSpec = describe "one running host" $ do
       termination <- commandNumbered 1 first TerminateIssueAction
       Right () <- appendReviewCommand first termination
       _ <- awaitState first (\recorded -> terminalState recorded.workerStateStatus)
-      -- The replacement takes the freed lease and asks for its own thread.
+      -- The replacement takes the freed lease. It waits for the first
+      -- action's start to be answered before asking for a thread of its own
+      -- (round 14), and it is present and adopted the whole time — which is
+      -- what makes the announcement below a choice between two actions rather
+      -- than a foregone conclusion.
       second <- publishChild host "action-2" 594 IssueRevision
-      _ <- awaitCallsFor host 2 isBeginCall
+      _ <- awaitJust "the replacement was never adopted" $ do
+        journaled <- journalEvents second
+        pure (if null journaled then Nothing else Just ())
       -- The first action's announcement, arriving now.
       let late = ReviewThreadId (ConnectionId 1) "thread-first"
       deliver host (ReviewThreadCreated 594 late)
@@ -371,7 +377,9 @@ lifecycleSpec = describe "one running host" $ do
       -- The replacement never took it, so it is still waiting for its own.
       replacement <- decodeChildState second
       (replacement >>= (.workerStateReviewThread)) `shouldBe` Nothing
-      -- And it works normally once its own announcement arrives.
+      -- And it works normally once its own start has been made — which the
+      -- announcement above is what released.
+      _ <- awaitCallsFor host 2 isBeginCall
       own <- awaitThreadFor host 594
       own `shouldNotBe` late
 
@@ -467,28 +475,33 @@ lifecycleSpec = describe "one running host" $ do
 
   -- Round 3's first blocker. Retiring settled children by issue number let
   -- each later one overwrite the last, so the earlier action's pending
-  -- announcement resolved to nothing and its thread was never closed. Two
-  -- replacements, each settled before its announcement, and both threads have
-  -- to be closed.
+  -- announcement resolved to nothing and its thread was never closed.
+  --
+  -- Two settled actions for one issue, each with a thread to close. They are
+  -- sequential rather than simultaneous because one issue has one start
+  -- outstanding at a time (round 14) — but the retirement they land in is
+  -- still keyed by action, and the second must not displace the first there.
   it "closes the late thread of every settled action, not only the newest" $
     withRunningHost $ \host -> do
       first <- publishChild host "action-1" 594 IssueRevision
       _ <- awaitCallsFor host 1 isBeginCall
       endChild first
-      -- The second action takes the freed lease, and is settled before its
-      -- own announcement too.
-      second <- publishChild host "action-2" 594 IssueRevision
-      _ <- awaitCallsFor host 2 isBeginCall
-      endChild second
-      -- A third is live when both late announcements arrive.
-      third <- publishChild host "action-3" 594 IssueRevision
-      _ <- awaitCallsFor host 3 isBeginCall
       let firstThread = ReviewThreadId (ConnectionId 1) "thread-first"
           secondThread = ReviewThreadId (ConnectionId 1) "thread-second"
+      -- The second action takes the freed lease. Its own start waits for the
+      -- first action's announcement, which arrives here and is closed.
+      second <- publishChild host "action-2" 594 IssueRevision
       deliver host (ReviewThreadCreated 594 firstThread)
+      _ <- awaitCallsFor host 2 isBeginCall
+      -- Settled before its own announcement too.
+      endChild second
+      -- A third is live when the second's late announcement arrives.
+      third <- publishChild host "action-3" 594 IssueRevision
       deliver host (ReviewThreadCreated 594 secondThread)
       awaitCalls host 2 isFinishCall
       calls <- providerCalls host
+      -- Both closed, in the order they were announced: the first action's
+      -- retirement was still there to be found when the second one landed.
       filter isFinishCall calls `shouldBe` [FinishThread firstThread, FinishThread secondThread]
       -- The live action took neither, and still gets its own.
       held <- decodeChildState third
@@ -604,6 +617,72 @@ lifecycleSpec = describe "one running host" $ do
             ]
       owners `shouldBe` [hostIdUnderTest]
 
+  -- Round 14's first blocker. An announcement names only an issue on the
+  -- wire, and a settled action keeps its start outstanding on purpose so its
+  -- late thread is still closed — while its released lease lets a replacement
+  -- for that issue begin. Two outstanding starts for one issue cannot be told
+  -- apart, so the older takes the newer's thread and the newer the older's.
+  it "holds a replacement's start until the earlier one for that issue is answered" $
+    withRunningHost $ \host -> do
+      first <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitCallsFor host 1 isBeginCall
+      -- Settled before its start was answered, which is what leaves the start
+      -- outstanding and the issue free to be claimed again.
+      endChild first
+      second <- publishChild host "action-2" 594 IssueRevision
+      -- Adopted — its journal says so — and still not begun: one start at a
+      -- time. It stays 'WorkerStarting' precisely because it is waiting.
+      _ <- awaitJust "the replacement was never adopted" $ do
+        journaled <- journalEvents second
+        pure (if null journaled then Nothing else Just ())
+      -- A negative, so it is given real time to be wrong in: the stage thread
+      -- is forked at adoption and would call the provider within a poll or
+      -- two of it.
+      tooEarly <- awaitBriefly $ do
+        calls <- providerCalls host
+        pure (if length (filter isBeginCall calls) >= 2 then Just () else Nothing)
+      tooEarly `shouldBe` Nothing
+      waiting <- decodeChildState second
+      fmap (.workerStateStatus) waiting `shouldBe` Just WorkerStarting
+      -- The first action's own thread arrives and is closed as the late
+      -- thread of a settled action, rather than becoming the replacement's.
+      let firstThread = ReviewThreadId (ConnectionId 1) "thread-of-the-first"
+      deliver host (ReviewThreadCreated 594 firstThread)
+      awaitCalls host 1 isFinishCall
+      providerCalls host >>= \recorded -> filter isFinishCall recorded `shouldBe` [FinishThread firstThread]
+      firstState <- decodeChildState second
+      (firstState >>= (.workerStateReviewThread)) `shouldBe` Nothing
+      -- And only then does the replacement begin, and take its own thread.
+      _ <- awaitCallsFor host 2 isBeginCall
+      secondThread <- awaitThreadFor host 594
+      recorded <- decodeChildState second
+      (recorded >>= (.workerStateReviewThread)) `shouldBe` Just secondThread
+
+  -- Round 14's third blocker. Every reader treats a claim as settled, which
+  -- is what stops a command being applied twice — so a final acknowledgement
+  -- that could not be written left the claim standing, and a live host
+  -- answered it never: only a later adoption or a stale-worker recovery did.
+  it "answers a claim its own acknowledgement failed to settle" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      thread <- awaitThreadFor host 594
+      deliver host (ReviewTurnStarted thread "turn-1")
+      _ <- awaitState child (\recorded -> recorded.workerStateReviewTurn == Just "turn-1")
+      -- The ledger as a delivery that applied and journaled its line, then
+      -- failed to write the outcome, leaves it.
+      delivered <- commandNumbered 1 child (SendReviewFeedback "look again")
+      Right () <- appendReviewCommand child delivered
+      claim <- acknowledged delivered ReviewCommandClaimed
+      Right () <- acknowledgeReviewCommand child claim
+      seedJournal child [WorkerReviewInput delivered.reviewCommandId "look again" Nothing]
+      -- A live host settles it from that evidence, on its own poll, with the
+      -- real outcome rather than as one nobody observed.
+      settled <- awaitAcknowledgements child 2
+      settledOutcome delivered.reviewCommandId settled `shouldBe` Just ReviewCommandAccepted
+      -- And re-applies nothing: the provider never sees this message.
+      calls <- providerCalls host
+      filter isSendCall calls `shouldBe` []
+
   -- Round 12's blocker, at the point the record is made. A per-thread
   -- connection is registered with the host's supervisor, and that record is
   -- exactly as useful as the host: a host that has died is precisely when a
@@ -624,6 +703,27 @@ lifecycleSpec = describe "one running host" $ do
             child
             (\state -> identity.processIdentityPid `elem` map (.processIdentityPid) state.workerStateKnownProcesses)
         recorded.workerStateProviderPid `shouldBe` Just identity.processIdentityPid
+
+  -- Round 14's second blocker. The connection exists from the moment the
+  -- review is begun, and the thread that names it is announced an unbounded
+  -- time later. A host that died in between left a child whose own state knew
+  -- of no process at all, so terminating it settled the action and left its
+  -- provider running.
+  it "records a per-thread connection before any thread has been announced" $
+    withManagedShell "sleep 30" $ \handle -> do
+      connection <- managedProcessFor handle
+      identity <- identityForProcess handle
+      withRunningHost $ \host -> do
+        modifyMVar_ host.hostThreadProcesses (const (pure [connection]))
+        child <- publishChild host "action-1" 594 IssueRevision
+        -- Only the begin has happened: no thread has been announced, and the
+        -- child's own state already names the process.
+        _ <- awaitCallsFor host 1 isBeginCall
+        recorded <-
+          awaitState
+            child
+            (\state -> identity.processIdentityPid `elem` map (.processIdentityPid) state.workerStateKnownProcesses)
+        recorded.workerStateReviewThread `shouldBe` Nothing
 
   -- And the other shape, which must not record: one process serves every
   -- thread, so a child holding it would end all of them when it was
@@ -1875,7 +1975,12 @@ withRunningHostUsing overrideProvider body =
 recordingProvider :: MVar (IO ()) -> MVar [ManagedProcess] -> (ProviderCall -> IO ()) -> IssueHostProvider
 recordingProvider gate threadProcesses record =
   IssueHostProvider
-    { providerBeginReview = \issueNumber -> Right () <$ record (BeginReview issueNumber),
+    { providerBeginReview = \issueNumber -> do
+        record (BeginReview issueNumber)
+        -- The same cell the thread accessor reads: a per-thread backend
+        -- reports its connection here, before any thread exists, which is
+        -- the window a host's death would otherwise lose.
+        Right <$> readMVar threadProcesses,
       providerAnswerQuestion = \requested _ -> Right () <$ record (AnswerQuestion requested),
       providerApproveAction = \requested accepted forSession ->
         Right () <$ record (ApproveAction requested accepted forSession),
@@ -2113,6 +2218,23 @@ awaitAcknowledgements descriptor expected =
 -- for load rather than for a defect.
 awaitJust :: String -> IO (Maybe result) -> IO result
 awaitJust reason probe = awaitMaybe probe >>= maybe (fail reason) pure
+
+-- | A short bounded probe, for asserting that something does /not/ happen.
+--
+-- 'awaitMaybe' waits half a minute, which is right for a signal that is
+-- coming and wrong for one that must not: a negative assertion pays its whole
+-- bound on every passing run. Forty polls is many times the host's own
+-- interval under test, so anything that was going to happen has.
+awaitBriefly :: IO (Maybe result) -> IO (Maybe result)
+awaitBriefly probe = go (40 :: Int)
+  where
+    go remaining = do
+      found <- probe
+      case found of
+        Just result -> pure (Just result)
+        Nothing
+          | remaining <= 0 -> pure Nothing
+          | otherwise -> threadDelay 25000 >> go (remaining - 1)
 
 awaitMaybe :: IO (Maybe result) -> IO (Maybe result)
 awaitMaybe probe = go (1200 :: Int)

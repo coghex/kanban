@@ -994,7 +994,10 @@ before it is applied and settled after, and a command carrying any
 acknowledgement is never applied again — so a retry, a replay, a restart, and
 an acknowledgement that could not be written all still deliver it exactly
 once. A claim left standing is an attempt whose result was never observed, and
-whatever next reaches that action answers it — from the child's journal where
+whatever next reaches that action answers it — including the action's own live
+host, on its next poll, since every reader treats a claim as settled and a
+final acknowledgement that could not be written would otherwise stand until
+some later host or recovery pass arrived — from the child's journal where
 that records what was delivered, and as unobserved only where it does not.
 Adoption by a replacement host is one such arrival and the reattached
 dashboard's own stale-worker recovery is the other, so the reconciliation is
@@ -4001,7 +4004,14 @@ The first solve/autosolve-compatible slice is implemented.
   subprocess that starts after its child was settled is ended the same way.
   The wire names only an issue number, and an issue outlives the action that
   asked, so an announcement resolves to the action whose start is still
-  waiting rather than to whichever child holds that issue now.
+  waiting rather than to whichever child holds that issue now — and one issue
+  has at most one start outstanding at a time. A settled action keeps its
+  start outstanding on purpose, so its late thread is still closed, while its
+  released lease lets a replacement for that issue begin; two outstanding
+  starts cannot be told apart from an announcement naming only the issue, and
+  a response is not promised in request order, so each would take the other's
+  thread. A replacement therefore waits for the earlier start to be answered,
+  bounded by its own deadline rather than waiting forever.
   Each child keeps a raw log of its own, recorded on its own state: a
   shared-process backend writes every thread's traffic to one interleaved
   client transcript, which the host records as its own and which is no
@@ -4049,7 +4059,9 @@ The first solve/autosolve-compatible slice is implemented.
   terminal.
   Under a process-per-thread backend the thread /is/ a process, so the action
   owning it records that process on its own durable state and not only on the
-  host's census. That is what a termination or a stale-worker recovery reads
+  host's census — from the moment the review is begun, which is when the
+  process exists, rather than when its thread is announced an unbounded time
+  later. That is what a termination or a stale-worker recovery reads
   when the host is the thing that has died — exactly the case where nobody is
   left to ask for a thread to be finished — and without it the connection went
   on running past the action it served, beside a replacement action for the

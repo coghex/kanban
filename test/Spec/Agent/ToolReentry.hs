@@ -254,7 +254,7 @@ spec = do
     -- session's own handshake and tool list came off the same wire.
     it "serves a kanban_github_issue read through the re-entry, with the Codex path's events" $
       withClaudeMcpReviewClient defaultWorkflowConfig issueEchoGh (githubReadTurn 844) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         recorded <-
           waitForReviewEvents
             "the github call and the verdict"
@@ -283,7 +283,7 @@ spec = do
     -- tools/list reply this same session read back carries it.
     it "refuses a call naming another thread's issue as a tool failure, spawning nothing" $
       withClaudeMcpReviewClient blessedConfig issueEchoGh (githubReadTurn 999) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         recorded <- waitForReviewEvents "the refusal and the verdict" fixture.claudeReviewEvents (\events -> not (null (turnCompletions events)) && not (null (protocolWarnings events)))
         traffic <- recordedMcpTraffic fixture.claudeReviewRecordings 0
         (_, listReply, callReply) <- threeFrames traffic
@@ -301,7 +301,7 @@ spec = do
     -- app-server path uses, and the answer document is the same one.
     it "blocks kanban_prompt_user until the user answers, and completes with that answer" $
       withClaudeMcpReviewClient defaultWorkflowConfig issueEchoGh questionTurn $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         asked <- waitForReviewEvents "the question" fixture.claudeReviewEvents (not . null . questionRequests)
         (requestId, question) <- soleQuestion asked
         question.reviewQuestionText `shouldBe` "Ship it?"
@@ -323,7 +323,7 @@ spec = do
     -- sweeps the server process, and leaves no endpoint behind.
     it "fails an outstanding question on shutdown and leaves no server process and no FIFO behind" $
       withClaudeMcpReviewClient defaultWorkflowConfig issueEchoGh questionTurn $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         asked <- waitForReviewEvents "the question" fixture.claudeReviewEvents (not . null . questionRequests)
         (requestId, _) <- soleQuestion asked
         serverPid <- recordedMcpServerPid fixture.claudeReviewRecordings 0
@@ -342,8 +342,8 @@ spec = do
     -- threads at once.
     it "keeps colliding request ids on two thread endpoints apart" $
       withClaudeMcpReviewClient defaultWorkflowConfig issueEchoGh perIssueGithubTurn $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
-        beginIssueReview fixture.claudeReviewClient 845 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 845) `shouldReturn` Right ()
         _ <- waitForReviewEvents "both verdicts" fixture.claudeReviewEvents ((>= 2) . length . turnCompletions)
         -- Each process is identified by the opening message it read, not by
         -- its position in the spawn log: the two spawns race to record
@@ -373,7 +373,7 @@ spec = do
 
     it "carries a tool answer larger than the pipe buffer whole through the re-entry" $
       withClaudeMcpReviewClient defaultWorkflowConfig bigOutputGh (githubReadTurn 844) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         _ <- waitForReviewEvents "the verdict" fixture.claudeReviewEvents (not . null . turnCompletions)
         traffic <- recordedMcpTraffic fixture.claudeReviewRecordings 0
         (_, _, callReply) <- threeFrames traffic

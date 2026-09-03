@@ -1675,6 +1675,19 @@ unless their typed contract exposes an override.
   press: the host journals the command's own line before applying it and the
   terminal envelope after, and both overlays apply those two records alike.
 
+  The fourteenth round closed three. One issue now has at most one start
+  outstanding at a time: a settled action keeps its start outstanding so its
+  late thread is still closed, its released lease lets a replacement begin,
+  and two starts for one issue cannot be told apart from an announcement that
+  names only the issue — so each took the other's thread. A per-thread
+  connection is recorded on its child when the review is begun rather than
+  when the thread is announced, because the process exists for the whole of
+  that gap and a host dying inside it left a child whose own state knew of no
+  process to end. And a live host answers a claim its own acknowledgement
+  failed to settle, on its next poll and without re-applying anything; every
+  reader treats a claim as settled, so that one stood until a later adoption
+  or a stale-worker recovery happened to arrive.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

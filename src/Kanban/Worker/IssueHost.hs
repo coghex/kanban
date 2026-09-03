@@ -119,6 +119,7 @@ import Kanban.Worker.Command
     reviewCommandAcknowledgement,
     reviewCommandDisplay,
     undeliveredReviewCommands,
+    unsettledReviewCommands,
     unobservedCommandOutcome,
   )
 import Kanban.Worker.Discovery (discoverWorkerHistory)
@@ -174,7 +175,10 @@ issueHostIdleGraceSeconds = 30
 -- own shutdown reaches: a child ending must never be able to end the client
 -- (requirement 11).
 data IssueHostProvider = IssueHostProvider
-  { providerBeginReview :: Int -> IO (Either Text ()),
+  { -- | Begins a review, reporting the processes its own connection is
+    -- served by so the action that asked can record them before any thread
+    -- exists. Empty under a shared connection.
+    providerBeginReview :: Int -> IO (Either Text [ManagedProcess]),
     providerAnswerQuestion :: ReviewRequestId -> ReviewAnswer -> IO (Either Text ()),
     providerApproveAction :: ReviewRequestId -> Bool -> Bool -> IO (Either Text ()),
     providerSendMessage :: ReviewThreadId -> Maybe Text -> Text -> IO (Either Text ()),
@@ -998,6 +1002,17 @@ recordThreadProcess :: IssueReviewHost -> HostChild -> ReviewThreadId -> IO ()
 recordThreadProcess host child threadId = do
   provider <- readMVar host.hostProvider
   processes <- maybe (pure []) (\connected -> connected.providerThreadProcesses threadId) provider
+  recordChildProcesses child processes
+
+-- | Records processes this child owns on the child's own durable state.
+--
+-- Idempotent, and deliberately reached twice for one connection: once when
+-- the review is begun, which is the earliest moment the process exists, and
+-- again when its thread is announced. The first is what a host's death in
+-- between would otherwise lose, and the second is what covers a backend that
+-- reports nothing until it has a thread to name.
+recordChildProcesses :: HostChild -> [ManagedProcess] -> IO ()
+recordChildProcesses child processes = do
   pids <- catMaybes <$> mapM managedProcessPid processes
   forM_ pids $ \pid -> do
     recordProviderIdentity child.hostChildDescriptor child.hostChildState (fromIntegral pid)
@@ -1025,15 +1040,23 @@ runRevisionChild host child = do
     (Nothing, Right connected) -> do
       -- Recorded before the call, because the provider announces the thread
       -- through the event sink and that announcement can arrive before this
-      -- call has returned.
-      recordPendingStart host child
-      begun <- connected.providerBeginReview task.issueActionIssueNumber
-      -- A process-per-thread backend spawns this thread's process during that
-      -- call, so its identity is recorded now rather than at the next poll:
-      -- a host killed in the gap would otherwise leak it with nothing durable
-      -- naming it.
-      registerProviderProcesses host
-      pure begun
+      -- call has returned — and recorded only once this issue has no other
+      -- start outstanding, which is what makes that announcement this
+      -- child's rather than a coin toss between two.
+      exclusive <- awaitExclusiveStart host child
+      if not exclusive
+        then pure (Left settledActionReason)
+        else do
+          begun <- connected.providerBeginReview task.issueActionIssueNumber
+          -- A process-per-thread backend spawns this thread's process during
+          -- that call, so its identity is recorded now rather than at the
+          -- next poll: a host killed in the gap would otherwise leak it with
+          -- nothing durable naming it. On the child as well as the host,
+          -- because a child settled with no host left to ask reads only its
+          -- own state — and that is exactly the case a host's death creates.
+          registerProviderProcesses host
+          forM_ begun (recordChildProcesses child)
+          pure (void begun)
   case result of
     Left message -> do
       -- A start that failed will never be announced, so the pending start it
@@ -1216,6 +1239,33 @@ applyPendingCommands host = do
               command.reviewCommandTarget == child.hostChildDescriptor.workerDescriptorSpec.workerId
           ]
     forM_ owed (deliverChildCommand host child)
+    -- A final acknowledgement that could not be written leaves the ledger
+    -- holding a claim and nothing else. Every reader treats a claim as
+    -- settled — that is what stops the command being applied twice — so
+    -- without this the claim stood until some later host adopted the child or
+    -- a stale-worker recovery reached it, and a live host answered it never.
+    -- The journal already proves what happened, so the same reconciliation
+    -- both of those paths run settles it here, and it re-applies nothing.
+    settleStandingClaims child
+
+
+-- | Answers a claim this host wrote and could not settle, from the evidence
+-- it already left.
+--
+-- Under the delivery lock, because a claim written moments ago by a delivery
+-- still in flight is not a standing claim at all — it is the ordinary middle
+-- of one, and answering it would race the delivery to the acknowledgement.
+-- Holding the lock means every claim seen here belongs to a delivery that has
+-- finished, whatever it managed to record.
+settleStandingClaims :: HostChild -> IO ()
+settleStandingClaims child = do
+  standing <- withMVar child.hostChildDelivery . const $ do
+    commands <- readReviewCommands child.hostChildDescriptor
+    acknowledgements <- readReviewCommandAcknowledgements child.hostChildDescriptor
+    pure (not (null (unsettledReviewCommands commands acknowledgements)))
+  when standing $
+    withMVar child.hostChildDelivery . const $
+      reconcileIssueActionClaims child.hostChildDescriptor
 
 -- | One command, claimed before it is applied and settled after.
 --
@@ -1502,14 +1552,46 @@ runningUnlessSettled _ = WorkerRunning
 -- Child lookup and record keeping
 -- ---------------------------------------------------------------------------
 
--- | Records that this child has asked the provider for a thread.
-recordPendingStart :: IssueReviewHost -> HostChild -> IO ()
+-- | Records that this child has asked the provider for a thread, but only
+-- while no other start for its issue is outstanding.
+--
+-- An announcement names an issue on the wire and nothing else, and a response
+-- is not promised in request order, so two starts outstanding for one issue
+-- cannot be told apart: the older would take the newer's thread and the newer
+-- the older's, leaving each action commanding a thread it never asked for.
+-- That is reachable — an action settled before its start was answered keeps
+-- its start outstanding, deliberately, so the late thread is still closed,
+-- while its released lease lets a replacement for the same issue begin.
+--
+-- One outstanding start per issue makes the correlation exact with nothing
+-- new on the wire. The check and the record are one step, or two children
+-- would both find the issue free.
+recordPendingStart :: IssueReviewHost -> HostChild -> IO Bool
 recordPendingStart host child =
-  modifyMVar_ host.hostPendingStarts $ \pending ->
-    pure (Map.insertWith (flip (<>)) issueNumber [identifier] pending)
+  modifyMVar host.hostPendingStarts $ \pending ->
+    case Map.findWithDefault [] issueNumber pending of
+      [] -> pure (Map.insert issueNumber [identifier] pending, True)
+      _ -> pure (pending, False)
   where
     issueNumber = child.hostChildTask.issueActionIssueNumber
     identifier = child.hostChildDescriptor.workerDescriptorSpec.workerId
+
+-- | Waits for this issue's outstanding start to resolve, then records this
+-- child's own. 'False' means the child was settled while it waited, which is
+-- the bound on this: a start nobody ever answers is outlived by the action's
+-- own deadline rather than waited on forever.
+awaitExclusiveStart :: IssueReviewHost -> HostChild -> IO Bool
+awaitExclusiveStart host child = loop
+  where
+    loop = do
+      settled <- readIORef child.hostChildSettleClaim
+      if settled
+        then pure False
+        else do
+          recorded <- recordPendingStart host child
+          if recorded
+            then pure True
+            else threadDelay host.hostTuning.hostPollMicros >> loop
 
 -- | Forgets a start that will never be announced.
 dropPendingStart :: IssueReviewHost -> HostChild -> IO ()

@@ -611,7 +611,7 @@ spec = do
       withTwoConnectionReviewClient $ \fixture -> do
         let client = fixture.twoConnectionClient
         -- The first connection's thread is the one that owns issue 844.
-        beginIssueReview client 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 844) `shouldReturn` Right ()
         (threadMethod, _) <- nextClientRequest fixture.firstWire
         threadMethod `shouldBe` "thread/start"
         handleWireMessage
@@ -643,8 +643,8 @@ spec = do
   describe "the connection a review thread runs on" $ do
     it "serves every review from one process when the backend shares one" $
       withFakeReviewClient SharedProcess $ \spawnLog client _ -> do
-        beginIssueReview client 844 `shouldReturn` Right ()
-        beginIssueReview client 845 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 844) `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 845) `shouldReturn` Right ()
         connections <- reviewConnectionsForTesting client
         length connections `shouldBe` 1
         pids <- readRecordedPids spawnLog
@@ -656,8 +656,8 @@ spec = do
       withFakeReviewClient ProcessPerThread $ \spawnLog client _ -> do
         -- Nothing is spawned until a review needs a thread.
         map (.connectionId) <$> reviewConnectionsForTesting client `shouldReturn` []
-        beginIssueReview client 844 `shouldReturn` Right ()
-        beginIssueReview client 845 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 844) `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 845) `shouldReturn` Right ()
         connections <- reviewConnectionsForTesting client
         length connections `shouldBe` 2
         pids <- readRecordedPids spawnLog
@@ -676,7 +676,7 @@ spec = do
     -- one action would let that action's termination kill all of them.
     it "names the process serving a thread only where the thread owns it" $ do
       withFakeReviewClient ProcessPerThread $ \_ client _ -> do
-        beginIssueReview client 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 844) `shouldReturn` Right ()
         connections <- reviewConnectionsForTesting client
         case connections of
           [connection] -> do
@@ -686,7 +686,7 @@ spec = do
           _ -> expectationFailure "expected exactly one per-thread connection"
         stopReviewClient client
       withFakeReviewClient SharedProcess $ \_ client _ -> do
-        beginIssueReview client 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 844) `shouldReturn` Right ()
         connections <- reviewConnectionsForTesting client
         case connections of
           [connection] -> do
@@ -697,8 +697,8 @@ spec = do
 
     it "resolves a response only against the connection it arrived on" $
       withFakeReviewClient ProcessPerThread $ \_ client events -> do
-        beginIssueReview client 844 `shouldReturn` Right ()
-        beginIssueReview client 845 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 844) `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 845) `shouldReturn` Right ()
         (firstConnection, secondConnection) <- twoConnectionsOf client
         -- Each connection numbered its own thread/start 2, so an id says
         -- nothing on its own about which review a response belongs to.
@@ -728,8 +728,8 @@ spec = do
 
     it "fails the review whose thread never arrived when its connection dies first" $
       withFakeReviewClient ProcessPerThread $ \_ client events -> do
-        beginIssueReview client 844 `shouldReturn` Right ()
-        beginIssueReview client 845 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 844) `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 845) `shouldReturn` Right ()
         (firstConnection, secondConnection) <- twoConnectionsOf client
         -- The second review's thread/start is answered; the first's never is,
         -- which is the state a session sits in between pressing r and the
@@ -753,8 +753,8 @@ spec = do
 
     it "reports one connection's end against that connection alone, leaving the client usable" $
       withFakeReviewClient ProcessPerThread $ \_ client events -> do
-        beginIssueReview client 844 `shouldReturn` Right ()
-        beginIssueReview client 845 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 844) `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 845) `shouldReturn` Right ()
         (firstConnection, secondConnection) <- twoConnectionsOf client
         killManagedProcess firstConnection.connectionManaged
         stopped <- waitForConnectionStops events 1
@@ -768,7 +768,7 @@ spec = do
         -- connection out of the pool.
         surviving <- waitForHeldConnections client 1
         surviving `shouldBe` [secondConnection.connectionId]
-        beginIssueReview client 846 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 846) `shouldReturn` Right ()
         stopReviewClient client
 
     -- The negative control for the stream backend's held diagnostics. A
@@ -780,7 +780,7 @@ spec = do
     -- each other.
     it "reports an app-server's stderr as it arrives, whatever process shape it takes" $
       withFakeReviewClient ProcessPerThread $ \_ client events -> do
-        beginIssueReview client 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview client 844) `shouldReturn` Right ()
         connection <- soleReviewConnection client
         diagnostics <-
           waitForReviewEvents

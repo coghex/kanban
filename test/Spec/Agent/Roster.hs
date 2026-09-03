@@ -575,7 +575,7 @@ spec = do
     -- the mirror of this, in "Spec.Agent.ClaudeReview".
     it "writes nothing to the app-server when the roster loads no codex provider" $
       withRecordingReviewClientUsing claudeOnlyRoster $ \client wire _ -> do
-        started <- beginIssueReview client 844
+        started <- ((() <$) <$> beginIssueReview client 844)
         started `shouldSatisfy` refusalMentioning "codex"
         expectNoFurtherClientRequests wire
 
@@ -1080,7 +1080,7 @@ assertReviewPayloadsFrom roster =
   withRecordingReviewClientUsing roster $ \client wire _ -> do
     let cell = cellOf (assignmentFor roster IssueReviewRole CodexProvider)
     connection <- soleReviewConnection client
-    beginIssueReview client 844 `shouldReturn` Right ()
+    fmap (() <$) (beginIssueReview client 844) `shouldReturn` Right ()
     (threadMethod, threadParams) <- nextClientRequest wire
     threadMethod `shouldBe` "thread/start"
     encodedValue threadParams `shouldMention` ("\"model\":\"" <> cell.assignmentModel <> "\"")

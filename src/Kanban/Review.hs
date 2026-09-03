@@ -914,7 +914,12 @@ initializeConnection client connection outputHandle = do
               ]
         ]
 
-beginIssueReview :: ReviewClient -> Int -> IO (Either Text ())
+-- Reports the processes this review's own connection is served by, so the
+-- action that asked for it can record them on its own durable state before
+-- any thread has been announced. Empty under a shared connection, which no
+-- one action owns; see 'reviewThreadOwnProcesses' for why that distinction
+-- has to be kept.
+beginIssueReview :: ReviewClient -> Int -> IO (Either Text [ManagedProcess])
 beginIssueReview client issueNumber = case backendAssignment client of
   -- Consulted before a connection is acquired, so a roster that cannot
   -- supply this backend's cell refuses with a visible reason and starts no
@@ -929,10 +934,15 @@ beginIssueReview client issueNumber = case backendAssignment client of
     acquired <- acquireReviewConnection client issueNumber
     case acquired of
       Left message -> pure (Left message)
-      Right connection -> case client.reviewBackend.backendProtocol of
-        AppServerProtocol -> sendRequest client connection (PendingThreadStart issueNumber) "thread/start" (threadParams assignment)
-        StreamJsonProtocol -> openStreamedReview client connection issueNumber
+      Right connection -> do
+        started <- case client.reviewBackend.backendProtocol of
+          AppServerProtocol -> sendRequest client connection (PendingThreadStart issueNumber) "thread/start" (threadParams assignment)
+          StreamJsonProtocol -> openStreamedReview client connection issueNumber
+        pure (owned connection <$ started)
   where
+    owned connection = case client.reviewBackend.backendProcessShape of
+      SharedProcess -> []
+      ProcessPerThread -> [connection.connectionManaged]
     threadParams assignment =
       object
         [ "cwd" .= client.reviewRepositoryRoot,
