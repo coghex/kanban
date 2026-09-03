@@ -28,7 +28,8 @@ import Kanban.UI.Events (OverlayExtent (..), OverlayMouseAction (..), QuitReques
 import Kanban.UI.Overlay (reviewPhaseLabel)
 import Kanban.UI.Reconcile (reconcileReviewSessions)
 import Kanban.UI.Review
-  ( applyUndeliveredSteer,
+  ( appliedReviewInput,
+    applyUndeliveredSteer,
     carryUndelivered,
     newReviewSession,
     undeliveredForIssue,
@@ -565,6 +566,45 @@ spec = do
       held `shouldBe` []
       restarted.sessionInput `shouldBe` "look again"
       reviewSubmission restarted `shouldBe` ResendReviewSteer "look again"
+
+  -- The other half of the terminal-envelope ordering (round 7). A command
+  -- that ends an action journals its line before the child's terminal event
+  -- so a replay meets them in that order — and this holds whatever order a
+  -- replay actually meets them in: a delivered line is always recorded, and
+  -- never moves a session that has already settled back to running.
+  describe "a delivered input arriving after a session settled" $ do
+    let settledAs phase =
+          newAgentSession
+            0
+            phase
+            "approved"
+            Nothing
+            (ChatTranscript "" "" "")
+            ReviewDetail
+              { reviewSessionIssue = baseIssue 151 [],
+                reviewSessionStage = IssueRevision,
+                reviewSessionThreadId = Just (fixtureReviewThread "thread-1"),
+                reviewSessionTurnId = Nothing,
+                reviewSessionPending = Nothing,
+                reviewSessionUndelivered = [],
+                reviewSessionRestored = Nothing
+              }
+
+    it "records the line without reviving the session" $
+      sequence_
+        [ (phase, applied.sessionPhase, applied.sessionTranscript.standardTranscript)
+            `shouldBe` (phase, phase, "\nYou: carry on\n")
+          | phase <- [ReviewFinished, ReviewNeedsChanges, ReviewFailed, ReviewRevised],
+            let applied = appliedReviewInput "carry on" Nothing (settledAs phase)
+        ]
+
+    -- A running session still takes the line and the phase, which is what
+    -- makes the rule above a rule rather than the function doing nothing.
+    it "still moves a running session to thinking" $ do
+      let applied = appliedReviewInput "carry on" Nothing (settledAs ReviewWaiting)
+      applied.sessionPhase `shouldBe` ReviewRunning
+      applied.sessionActivity `shouldBe` "thinking"
+      applied.sessionTranscript.standardTranscript `shouldMention` "carry on"
 
   -- Requirement 3. The quoted refusal is gone, and with it the only reason
   -- the dashboard ever declined to quit for an agent.

@@ -8,6 +8,7 @@ module Kanban.UI.Review
     applyReviewAnimationTick,
     applyReviewDiagnostic,
     applyReviewEvent,
+    appliedReviewInput,
     applyReviewInput,
     reviewOutputPrefix,
     reviewProtocolWarningNotice,
@@ -1165,19 +1166,36 @@ markReviewSessionDisconnected message session
 -- lost and nothing they never sent is shown as sent (issue #17).
 applyReviewInput :: Int -> Text -> Maybe Text -> EventM Name AppState ()
 applyReviewInput issueNumber display rejected = do
-  appendToReviewSession issueNumber apply
+  appendToReviewSession issueNumber (appliedReviewInput display rejected)
   tailReviewSession issueNumber
   case rejected of
     Nothing -> armReviewTick issueNumber
     Just reason -> setNotice ("Not delivered: " <> sanitizeText reason)
+
+-- | What one journaled input does to its session.
+--
+-- Pure and named so the terminal-safety rule below is assertable without an
+-- 'EventM' harness: the ordering it guards is a property of replay, and a
+-- replay is exactly a sequence of these applied in journal order.
+appliedReviewInput :: Text -> Maybe Text -> ReviewSession -> ReviewSession
+appliedReviewInput display rejected = apply
   where
     apply session = case rejected of
-      Nothing ->
-        (clearPendingInteraction session)
-          { sessionPhase = ReviewRunning,
-            sessionActivity = "thinking",
-            sessionTranscript = appendTranscript session.sessionTranscript ("\nYou: " <> display <> "\n")
-          }
+      -- The line is always recorded; the phase moves only for a session that
+      -- is still running. A command that ends the action journals its line
+      -- before the terminal envelope precisely so the two arrive in that
+      -- order, and this is the other half of that guarantee: a delivered
+      -- input arriving after a session has settled — by any ordering, on any
+      -- replay — records what was typed without resurrecting it.
+      Nothing
+        | not (reviewPhaseActive session.sessionPhase) ->
+            session {sessionTranscript = appendTranscript session.sessionTranscript ("\nYou: " <> display <> "\n")}
+        | otherwise ->
+            (clearPendingInteraction session)
+              { sessionPhase = ReviewRunning,
+                sessionActivity = "thinking",
+                sessionTranscript = appendTranscript session.sessionTranscript ("\nYou: " <> display <> "\n")
+              }
       Just reason ->
         holdUndelivered
           (reviewSessionInputLive session.sessionDetail.reviewSessionStage session.sessionPhase)

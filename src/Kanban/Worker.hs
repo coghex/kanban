@@ -413,23 +413,58 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
       case written of
         Left message -> releaseWorkerLease descriptor >> pure (Left (WorkerLaunchFailed message))
         Right () -> do
-          -- Asked again, after the specification exists.
-          --
-          -- Host selection and child admission cannot be made one atomic step
-          -- from here: the host read as live a moment ago can reach its idle
-          -- grace and exit before this write lands, leaving a child naming a
-          -- host that has terminated. Re-ensuring starts a replacement when
-          -- that has happened, and the host's own adoption rule re-homes a
-          -- child whose named host is provably finished and which nothing has
-          -- ever adopted — so the two together leave no window in which an
-          -- action the operator started simply never runs.
-          void (ensureIssueReviewHost repository configPath workflowConfig)
+          confirmIssueActionAdopted repository descriptor host configPath workflowConfig
           pure (Right descriptor)
   where
     -- A host whose state has not landed yet leaves the child recording pid 0
     -- and no identity, which the startup grace window in 'discoverWorkers'
     -- already covers and the host's first poll overwrites.
     hostPidOf = maybe 0 (.workerStateWorkerPid)
+
+-- | Waits until some host has actually taken this child on, and starts one if
+-- none does.
+--
+-- Host selection and child admission cannot be made one atomic step from the
+-- launch side, and re-asking for a host afterwards does not close it either:
+-- the host read as live a moment ago can complete its final adoption scan,
+-- see nothing, and be on its way out while still reporting a running state —
+-- so the re-ask returns the very host that is about to exit, and the child is
+-- left holding its lease, naming a terminal host, with no replacement coming.
+--
+-- Predicting that is not possible from here. Observing it is: an adopted
+-- child has journal entries and an unadopted one has none, so this waits for
+-- that evidence rather than for a state it cannot trust. A host that is alive
+-- and simply has not polled yet is waited on; one that has gone is replaced,
+-- and the replacement's own adoption rule re-homes the child. Past the bound
+-- a host is ensured regardless, so a child is never left with nobody asked.
+--
+-- Fast in the ordinary case: adoption lands within one host poll.
+confirmIssueActionAdopted :: Repository -> WorkerDescriptor -> WorkerId -> Maybe FilePath -> WorkflowConfig -> IO ()
+confirmIssueActionAdopted repository descriptor named configPath workflowConfig = poll issueActionAdoptionAttempts
+  where
+    poll remaining = do
+      adopted <- not . null <$> readWorkerJournal descriptor
+      unless adopted $
+        if remaining <= (0 :: Int)
+          then ensureAnotherHost
+          else do
+            alive <- namedHostAlive
+            if alive
+              then threadDelay issueActionAdoptionPollMicros >> poll (remaining - 1)
+              else ensureAnotherHost
+    ensureAnotherHost = void (ensureIssueReviewHost repository configPath workflowConfig)
+    namedHostAlive = do
+      live <- liveIssueReviewHost repository
+      pure (fmap ((.workerId) . (.workerDescriptorSpec)) live == Just named)
+
+-- | How long a launch waits for a host to take its child on before ensuring
+-- one itself. Long enough to cover several host polls, short enough that a
+-- dispatch never appears to hang.
+issueActionAdoptionAttempts :: Int
+issueActionAdoptionAttempts = 80
+
+issueActionAdoptionPollMicros :: Int
+issueActionAdoptionPollMicros = 50 * 1000
 
 issueHostState :: Repository -> WorkerId -> IO (Maybe WorkerState)
 issueHostState repository host = do

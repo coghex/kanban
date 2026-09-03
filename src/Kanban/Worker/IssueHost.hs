@@ -1099,8 +1099,17 @@ deliverToLiveChild host child command = do
       -- user gave appears to go nowhere.
       journalChild child (WorkerDiagnostic ("a review command could not be claimed and was not applied: " <> message))
     Right () -> do
+      -- A command that ends the child journals its line /before/ it is
+      -- applied, because settling writes the child's terminal envelope and
+      -- nothing may follow that: a monitor stops replaying there, so a later
+      -- record is never seen at all — and one that is seen resurrects a
+      -- session the terminal event had just settled. Its outcome is known in
+      -- advance precisely because ending an action cannot be refused.
+      let display = commandDisplay command.reviewCommandPayload
+          endsChild = command.reviewCommandPayload == TerminateIssueAction
+      when endsChild (journalChild child (WorkerReviewInput command.reviewCommandId display Nothing))
       outcome <- applyChildCommand host child command
-      journalChild child (WorkerReviewInput command.reviewCommandId (commandDisplay command.reviewCommandPayload) (rejectionReason outcome))
+      unless endsChild (journalChild child (WorkerReviewInput command.reviewCommandId display (rejectionReason outcome)))
       acknowledgement <- reviewCommandAcknowledgement command outcome
       settled <- acknowledgeReviewCommand child.hostChildDescriptor acknowledgement
       -- A final acknowledgement that will not write leaves the ledger holding
@@ -1141,6 +1150,19 @@ applyChildCommand :: IssueReviewHost -> HostChild -> ReviewCommand -> IO ReviewC
 applyChildCommand host child command = do
   provider <- readMVar host.hostProvider
   state <- readMVar child.hostChildState
+  case command.reviewCommandPayload of
+    -- Ending an action needs no provider. A backend that has gone is exactly
+    -- when an operator most needs to be able to stop the action waiting on
+    -- it, and refusing here would leave one nothing could settle.
+    TerminateIssueAction -> do
+      settleChild host child (SolveFailed "the issue action was terminated")
+      pure ReviewCommandAccepted
+    _ -> applyProviderCommand command provider state
+
+-- | Every command that reaches the provider, which is all of them but the one
+-- that ends the action.
+applyProviderCommand :: ReviewCommand -> Maybe IssueHostProvider -> WorkerState -> IO ReviewCommandOutcome
+applyProviderCommand command provider held =
   case provider of
     Nothing -> pure (ReviewCommandRejected "the review backend is not connected")
     -- Every command that acts on a thread is checked against the thread the
@@ -1148,12 +1170,11 @@ applyChildCommand host child command = do
     -- one thread and read after the child moved to another must not be
     -- retargeted: the user meant the turn they were looking at, and silently
     -- moving it is worse than saying it did not land.
-    Just _ | Just refusal <- staleThread state command -> pure (ReviewCommandRejected refusal)
+    Just _ | Just refusal <- staleThread held command -> pure (ReviewCommandRejected refusal)
     Just connected -> case command.reviewCommandPayload of
-      TerminateIssueAction -> do
-        settleChild host child (SolveFailed "the issue action was terminated")
-        pure ReviewCommandAccepted
-      InterruptReviewTurn -> case (state.workerStateReviewThread, state.workerStateReviewTurn) of
+      -- Handled by the caller, which reaches it without a provider.
+      TerminateIssueAction -> pure ReviewCommandAccepted
+      InterruptReviewTurn -> case (held.workerStateReviewThread, held.workerStateReviewTurn) of
         (Just threadId, Just turnId)
           | staleTurn command turnId -> pure (ReviewCommandRejected "that turn has already ended")
           | otherwise -> do
@@ -1165,11 +1186,11 @@ applyChildCommand host child command = do
               pure (childCommandOutcome interrupted)
         _ -> pure (ReviewCommandRejected "this action has no active turn to interrupt")
       AnswerReviewQuestion requestId answer _ ->
-        requireRequest state requestId (connected.providerAnswerQuestion requestId answer)
+        requireRequest held requestId (connected.providerAnswerQuestion requestId answer)
       AnswerReviewApproval requestId accepted forSession _ ->
-        requireRequest state requestId (connected.providerApproveAction requestId accepted forSession)
-      SendReviewFeedback message -> sendOnThread connected state command message
-      ResendReviewSteer message -> sendOnThread connected state command message
+        requireRequest held requestId (connected.providerApproveAction requestId accepted forSession)
+      SendReviewFeedback message -> sendOnThread connected held command message
+      ResendReviewSteer message -> sendOnThread connected held command message
   where
     -- The turn as well as the thread. A message written to steer one turn and
     -- read after that turn ended would otherwise steer the next one, or —
@@ -1177,18 +1198,18 @@ applyChildCommand host child command = do
     -- finished one. Requiring the two to agree covers both: a follow-up
     -- deliberately sent between turns carries no turn and is accepted only
     -- while the child holds none.
-    sendOnThread connected state issued message = case state.workerStateReviewThread of
+    sendOnThread connected onThread issued message = case onThread.workerStateReviewThread of
       Nothing -> pure (ReviewCommandRejected "this action has no provider thread to send to")
       Just threadId
-        | issued.reviewCommandTurn /= state.workerStateReviewTurn ->
+        | issued.reviewCommandTurn /= onThread.workerStateReviewTurn ->
             pure (ReviewCommandRejected "that turn has already ended")
-        | otherwise -> childCommandOutcome <$> connected.providerSendMessage threadId state.workerStateReviewTurn message
+        | otherwise -> childCommandOutcome <$> connected.providerSendMessage threadId onThread.workerStateReviewTurn message
     -- The request the command answers has to be the one the child is actually
     -- waiting on. A question answered twice, or an answer racing the
     -- provider's own timeout, would otherwise be written against whatever
     -- request came next.
-    requireRequest state requestId action
-      | state.workerStateReviewRequest /= Just requestId =
+    requireRequest pending requestId action
+      | pending.workerStateReviewRequest /= Just requestId =
           pure (ReviewCommandRejected "that review request is no longer pending")
       | otherwise = childCommandOutcome <$> action
     staleTurn issued turnId = maybe False (/= turnId) issued.reviewCommandTurn

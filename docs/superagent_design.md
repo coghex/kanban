@@ -1593,6 +1593,17 @@ unless their typed contract exposes an override.
   so the action would have been marked terminal while its thread kept
   working.
 
+  The seventh round closed two. A command that ends an action journals its own
+  line before the settle writes the child's terminal envelope, because a
+  monitor stops replaying at that envelope and a line after it is either never
+  seen or seen and mistaken for the action resuming; the overlay's own
+  transition is terminal-safe as well, so the ordering holds whichever way a
+  replay meets the two. And a launch waits for evidence that some host has
+  actually taken its child on rather than re-asking which host is live: the
+  host it was given can complete its final adoption scan and be on its way out
+  while still reporting a running state, so predicting adoption is impossible
+  from the launch side and observing it is not.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

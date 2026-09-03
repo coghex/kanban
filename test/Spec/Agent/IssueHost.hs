@@ -11,7 +11,7 @@ module Spec.Agent.IssueHost (spec) where
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (void, when)
-import Data.List (find, isInfixOf, nub)
+import Data.List (find, findIndex, isInfixOf, nub)
 import Data.Maybe (isJust)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, tryTakeMVar)
 import Data.Aeson (FromJSON, ToJSON, Value (..), decode, eitherDecode, encode, toJSON)
@@ -593,6 +593,22 @@ lifecycleSpec = describe "one running host" $ do
                 Just task <- [issueActionTask candidate.workerDescriptorSpec.workerTask]
             ]
       owners `shouldBe` [hostIdUnderTest]
+
+  -- Round 7's first blocker. A termination settles the child, and settling
+  -- writes its terminal envelope; a monitor stops replaying there, so an
+  -- input record written afterwards is either never seen or, if it is, moves
+  -- a settled session back to running. The line goes first.
+  it "journals a termination's own line before the child's terminal envelope" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitThreadFor host 594
+      termination <- commandNumbered 1 child TerminateIssueAction
+      Right () <- appendReviewCommand child termination
+      _ <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      journaled <- journalEvents child
+      let inputAt = findIndex (\event -> case event of WorkerReviewInput identifier _ _ -> identifier == termination.reviewCommandId; _ -> False) journaled
+          terminalAt = findIndex (\event -> case event of WorkerFinished _ -> True; _ -> False) journaled
+      (inputAt, terminalAt) `shouldSatisfy` \(recorded, ended) -> recorded < ended && recorded /= Nothing
 
   -- Round 6's first blocker. A shared-process connection exists by the time
   -- the client is started, so registering it at the host's first poll leaves

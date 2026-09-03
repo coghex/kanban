@@ -3969,7 +3969,9 @@ The first solve/autosolve-compatible slice is implemented.
   client transcript, which the host records as its own and which is no
   child's evidence.
   Host selection and child admission cannot be made one step from the launch
-  side, so a host also adopts a child whose named host is provably gone —
+  side, so a launch waits for evidence that a host has taken its child on and
+  ensures one itself if none does; a host also adopts a child whose named host
+  is provably gone —
   never one a live host is serving. A host counts as live unless it is
   disproven: terminal, or recording an identity a successful process snapshot
   does not contain. An unreadable snapshot keeps it, which is the same
