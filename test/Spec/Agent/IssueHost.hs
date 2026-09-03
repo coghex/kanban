@@ -93,6 +93,7 @@ import Kanban.Worker
     readReviewCommands,
     issueActionTask,
     issueHostGone,
+    reconcileIssueActionClaims,
     confirmIssueActionAdoptedWith,
     readWorkerJournal,
     reviewCommandDisplay,
@@ -725,6 +726,34 @@ lifecycleSpec = describe "one running host" $ do
       calls <- providerCalls host
       filter isSendCall calls `shouldBe` []
 
+  -- Round 17's blocker. Settling takes a child off the live list, and a
+  -- dashboard that has not yet seen its terminal event still writes to it.
+  -- The poll scans live children and reconciliation answers only commands
+  -- that were already claimed, so such a command was owed to nobody for ever
+  -- — with the draft it came from already cleared.
+  it "refuses a command written to a child it has already settled" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitThreadFor host 594
+      endChild child
+      _ <- awaitState child (\state -> terminalState state.workerStateStatus)
+      -- Written after the settle, the way a dashboard still holding a live
+      -- session writes it.
+      late <- commandNumbered 1 child (SendReviewFeedback "look again")
+      Right () <- appendReviewCommand child late
+      -- Its own acknowledgement, not the termination's: that one settled
+      -- first and would satisfy a plain count.
+      outcome <- awaitJust "the late command was never answered" $ do
+        settled <- readReviewCommandAcknowledgements child
+        pure (settledOutcome late.reviewCommandId settled)
+      outcome `shouldBe` ReviewCommandRejected "this issue action has already ended"
+      -- Nothing was applied, and nothing followed the terminal envelope.
+      calls <- providerCalls host
+      filter isSendCall calls `shouldBe` []
+      journaled <- journalEvents child
+      let afterTerminal = drop 1 (dropWhile (\event -> case event of WorkerFinished _ -> False; _ -> True) journaled)
+      afterTerminal `shouldBe` []
+
   -- Round 16's blocker. The connection is spawned inside the begin call and
   -- was recorded on its child only when that call returned. A host dying in
   -- between left a child that owned nothing, so terminating it settled the
@@ -966,6 +995,33 @@ lifecycleSpec = describe "one running host" $ do
         present <- doesFileExist host.hostRecords.workerDescriptorHandoffPath
         pure (if present then Nothing else Just ())
       cleared `shouldBe` ()
+
+  -- And the same command with no host left at all: its own reconciliation
+  -- refuses it rather than leaving it owed to a child nothing will read
+  -- again.
+  it "refuses a command written to an ended child whose host has gone too" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        now <- getCurrentTime
+        descriptor <-
+          descriptorForSpec
+            ( specFor
+                (WorkerId "ended-action")
+                (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-that-died") IssueOriginClaude))
+            )
+        createDirectoryIfMissing True (takeDirectory descriptor.workerDescriptorSpecPath)
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        writeChildState descriptor (runningChildState descriptor now) {workerStateStatus = WorkerTerminal SolveCompleted}
+        seedJournal descriptor [WorkerFinished SolveCompleted]
+        late <- commandNumbered 1 descriptor (SendReviewFeedback "look again")
+        Right () <- appendReviewCommand descriptor late
+        reconcileIssueActionClaims descriptor
+        settled <- readReviewCommandAcknowledgements descriptor
+        settledOutcome late.reviewCommandId settled
+          `shouldBe` Just (ReviewCommandRejected "this issue action has already ended")
+        -- And the journal is untouched: its terminal envelope is still last.
+        journaled <- journalEvents descriptor
+        journaled `shouldBe` [WorkerFinished SolveCompleted]
 
   -- Round 9's second blocker, and the path no host runs. A dashboard that
   -- reattaches after the host died monitors the child directly, and generic

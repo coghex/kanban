@@ -1708,6 +1708,16 @@ unless their typed contract exposes an override.
   outstanding start records it there — the same instant the host does, which
   is the only moment with no window at all.
 
+  The seventeenth round closed the window on the other side of the terminal
+  event. Settling takes a child off the host's live list, and a dashboard that
+  has not yet been told still writes to it: the poll scans live children and
+  the reconciliation answers only commands already claimed, so a command
+  written there was owed to nobody for ever — with its draft already cleared.
+  The overlay now refuses that submission from the action's own durable state
+  and keeps the text on the line, and both the host and the reconciliation
+  refuse anything that slips past, on the ledger rather than the journal,
+  since the terminal envelope is still the last record the journal takes.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

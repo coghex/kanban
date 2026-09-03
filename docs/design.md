@@ -993,7 +993,17 @@ correlated command with an acknowledgement written back. A command is claimed
 before it is applied and settled after, and a command carrying any
 acknowledgement is never applied again — so a retry, a replay, a restart, and
 an acknowledgement that could not be written all still deliver it exactly
-once. A claim left standing is an attempt whose result was never observed, and
+once. A command written to an action that has already ended is refused rather than
+owed: settling takes a child off the host's live list, and a dashboard that
+has not yet seen its terminal event still writes to it — so nothing would ever
+look at that command again while the draft it came from had been cleared. The
+overlay refuses such a submission itself, from the action's own durable state
+rather than its picture of it, and keeps the text on the line; the host and
+the reconciliation each refuse anything that slips past, on the ledger rather
+than the journal, because the terminal envelope is still the last record that
+journal takes.
+
+A claim left standing is an attempt whose result was never observed, and
 whatever next reaches that action answers it — including the action's own live
 host, on its next poll, since every reader treats a claim as settled and a
 final acknowledgement that could not be written would otherwise stand until

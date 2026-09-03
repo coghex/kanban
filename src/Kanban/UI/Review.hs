@@ -101,7 +101,9 @@ import Kanban.Action
 import Kanban.Solve (SolveOutcome (..))
 import Kanban.Text (sanitizeText)
 import Kanban.Worker
-  ( ReviewCommand (..),
+  ( readWorkerState,
+    terminalStatus,
+    WorkerState (..), ReviewCommand (..),
     ReviewCommandPayload (..),
     appendReviewCommand,
     newReviewCommandId,
@@ -248,6 +250,21 @@ submitReviewCommand issueNumber payload = do
     (Nothing, _) -> setNotice issueActionGoneNotice
     (_, Nothing) -> setNotice issueActionGoneNotice
     (Just descriptor, Just session) -> do
+      -- The child's own durable state, not the dashboard's picture of it.
+      -- Settling writes that state before the monitor delivers the terminal
+      -- event, so between the two this session still looks live and takes
+      -- input — and a command written then is owed to a child no poll will
+      -- ever look at again. Refusing here keeps the draft on the line, which
+      -- is the whole point: a rejection the user can see beats a message that
+      -- silently went nowhere.
+      recorded <- liftIO (readWorkerState descriptor)
+      case recorded of
+        Right held | terminalStatus held.workerStateStatus -> setNotice issueActionGoneNotice
+        _ -> submitToLiveChild issueNumber descriptor session payload
+
+-- | Writes one command to a child this dashboard has just confirmed is live.
+submitToLiveChild :: Int -> WorkerDescriptor -> ReviewSession -> ReviewCommandPayload -> EventM Name AppState ()
+submitToLiveChild issueNumber descriptor session payload = do
       identifier <- liftIO newReviewCommandId
       now <- liftIO getCurrentTime
       let command =
@@ -279,7 +296,7 @@ submitReviewCommand issueNumber payload = do
     -- leaving the text there in the meantime would show it twice. What the
     -- line was holding goes with it, so a later draft that happens to read
     -- the same is not mistaken for a resend.
-    clearedInput session = (withRestored Nothing session) {sessionInput = ""}
+    clearedInput held = (withRestored Nothing held) {sessionInput = ""}
 
 issueActionGoneNotice :: Text
 issueActionGoneNotice = "This review is no longer running; press " <> actionKeyText ReviewSelection <> " to start a fresh one"

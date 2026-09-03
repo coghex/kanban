@@ -53,6 +53,7 @@ module Kanban.Worker.IssueHost
     childCommandOutcome,
     canonicalStageOutcome,
     issueHostGone,
+    terminalStatus,
     revisionTurnOutcome,
     issueActionPreflightAction,
   )
@@ -118,6 +119,7 @@ import Kanban.Worker.Command
     reconcileIssueActionClaims,
     reviewCommandAcknowledgement,
     reviewCommandDisplay,
+    settledActionReason,
     undeliveredReviewCommands,
     unsettledReviewCommands,
     unobservedCommandOutcome,
@@ -1285,7 +1287,33 @@ applyPendingCommands host = do
     -- The journal already proves what happened, so the same reconciliation
     -- both of those paths run settles it here, and it re-applies nothing.
     settleStandingClaims child
+  -- A settled child is off the live list, and a dashboard that has not yet
+  -- seen its terminal event can still write to it. Nothing would look at that
+  -- command again: the poll above scans live children, and reconciliation
+  -- only answers commands that were already claimed. Refusing it here is what
+  -- turns a message that went nowhere into one the overlay is told about.
+  retired <- Map.elems <$> readMVar host.hostRetired
+  forM_ retired refuseCommandsToSettledChild
 
+
+-- | Settles anything written to a child that has already ended.
+--
+-- No journal line goes with it: this child's terminal envelope is the last
+-- record in its journal, and appending past one is what round 8 ruled out.
+-- The ledger is a separate file and carries the refusal, which is what a
+-- dashboard reads to offer the text back.
+refuseCommandsToSettledChild :: HostChild -> IO ()
+refuseCommandsToSettledChild child = do
+  commands <- readReviewCommands child.hostChildDescriptor
+  acknowledgements <- readReviewCommandAcknowledgements child.hostChildDescriptor
+  let owed =
+        [ command
+          | command <- undeliveredReviewCommands commands acknowledgements,
+            command.reviewCommandTarget == child.hostChildDescriptor.workerDescriptorSpec.workerId
+        ]
+  forM_ owed $ \command -> do
+    acknowledgement <- reviewCommandAcknowledgement command (ReviewCommandRejected settledActionReason)
+    void (acknowledgeReviewCommand child.hostChildDescriptor acknowledgement)
 
 -- | Answers a claim this host wrote and could not settle, from the evidence
 -- it already left.
@@ -1333,9 +1361,6 @@ deliverChildCommand host child command = do
       acknowledgement <- reviewCommandAcknowledgement command (ReviewCommandRejected settledActionReason)
       void (acknowledgeReviewCommand child.hostChildDescriptor acknowledgement)
     else deliverToLiveChild host child command
-
-settledActionReason :: Text
-settledActionReason = "this issue action has already ended"
 
 deliverToLiveChild :: IssueReviewHost -> HostChild -> ReviewCommand -> IO ()
 deliverToLiveChild host child command = do

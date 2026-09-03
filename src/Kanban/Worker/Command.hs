@@ -47,11 +47,12 @@ module Kanban.Worker.Command
     unsettledReviewCommands,
     reconcileIssueActionClaims,
     unobservedCommandOutcome,
+    settledActionReason,
   )
 where
 
 import Control.Exception (IOException, onException, try)
-import Control.Monad (forM_, void, unless)
+import Control.Monad (forM_, void, unless, when)
 import Data.Aeson (FromJSON, ToJSON, eitherDecodeStrict', encode)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString8
@@ -387,6 +388,14 @@ reconcileIssueActionClaims descriptor
       -- moot for an action that has ended.
       let closed = any (terminalEnvelope . (.workerEnvelopeEvent)) journaled
       journal <- newEventJournalLock
+      -- A command written to a child that had already ended, by a dashboard
+      -- that had not yet seen its terminal event. Its host is gone too, so
+      -- nothing else will ever look at it; the ledger carries the refusal,
+      -- since the journal is closed and may take nothing more.
+      when closed $
+        forM_ (undeliveredReviewCommands commands acknowledgements) $ \command -> do
+          acknowledgement <- reviewCommandAcknowledgement command (ReviewCommandRejected settledActionReason)
+          void (acknowledgeReviewCommand descriptor acknowledgement)
       forM_ (unsettledReviewCommands commands acknowledgements) $ \command -> do
         outcome <- case Map.lookup command.reviewCommandId delivered of
           Just reason -> pure (maybe ReviewCommandAccepted ReviewCommandRejected reason)
@@ -403,6 +412,12 @@ reconcileIssueActionClaims descriptor
     terminalEnvelope event = case event of
       WorkerFinished _ -> True
       _ -> False
+
+-- | What a command written to an action that had already ended is refused
+-- with. The one spelling, shared with the live host's own refusal, so a
+-- dashboard reads the same reason whichever answered it.
+settledActionReason :: Text
+settledActionReason = "this issue action has already ended"
 
 -- | What a command whose owner died mid-delivery is reported as.
 unobservedCommandOutcome :: Text
