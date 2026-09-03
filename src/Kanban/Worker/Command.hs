@@ -51,7 +51,7 @@ module Kanban.Worker.Command
 where
 
 import Control.Exception (IOException, onException, try)
-import Control.Monad (forM_, void)
+import Control.Monad (forM_, void, unless)
 import Data.Aeson (FromJSON, ToJSON, eitherDecodeStrict', encode)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString8
@@ -376,18 +376,31 @@ reconcileIssueActionClaims descriptor
       let delivered =
             Map.fromList
               [(identifier, reason) | WorkerReviewInput identifier _ reason <- map (.workerEnvelopeEvent) journaled]
+      -- A journal that has already carried a terminal envelope is closed, and
+      -- appending past one is what round 8 ruled out: a monitor stops
+      -- replaying there, so the record is either never seen or seen and
+      -- mistaken for the action resuming. The ledger is a separate file and
+      -- is always settled, so the command is still never re-applied; what a
+      -- terminal child gives up is having the text offered back, which is
+      -- moot for an action that has ended.
+      let closed = any (terminalEnvelope . (.workerEnvelopeEvent)) journaled
       journal <- newEventJournalLock
       forM_ (unsettledReviewCommands commands acknowledgements) $ \command -> do
         outcome <- case Map.lookup command.reviewCommandId delivered of
           Just reason -> pure (maybe ReviewCommandAccepted ReviewCommandRejected reason)
           Nothing -> do
-            appendWorkerEvent
-              descriptor
-              journal
-              (WorkerReviewInput command.reviewCommandId (reviewCommandDisplay command.reviewCommandPayload) (Just unobservedCommandOutcome))
+            unless closed $
+              appendWorkerEvent
+                descriptor
+                journal
+                (WorkerReviewInput command.reviewCommandId (reviewCommandDisplay command.reviewCommandPayload) (Just unobservedCommandOutcome))
             pure ReviewCommandOutcomeUnknown
         acknowledgement <- reviewCommandAcknowledgement command outcome
         void (acknowledgeReviewCommand descriptor acknowledgement)
+  where
+    terminalEnvelope event = case event of
+      WorkerFinished _ -> True
+      _ -> False
 
 -- | What a command whose owner died mid-delivery is reported as.
 unobservedCommandOutcome :: Text

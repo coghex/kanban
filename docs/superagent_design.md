@@ -1642,6 +1642,20 @@ unless their typed contract exposes an override.
   and exhausting it is reported as a failed launch that removes the child's
   records, not as a success with nothing running.
 
+  The eleventh round closed three. Applying a command and recording that it
+  was applied became one step against the action ending, because a settle
+  between them closed the journal and left the provider holding a message the
+  acknowledgement called accepted and the transcript had no trace of; and the
+  claim reconciliation stopped appending to a journal that had already carried
+  a terminal envelope, which is the same rule everything else obeys. A rehome
+  whose specification write fails now refuses the adoption instead of running
+  the child under its dead host's name — the retry that path promised could
+  never happen, since an adopted child is one the host holds and later scans
+  skip it. And a re-homed child continues its own raw log instead of opening
+  another, because a fresh log's name carries an issue number and a timestamp
+  but no action id, so the evidence the child had actually produced was left
+  addressable by nothing.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

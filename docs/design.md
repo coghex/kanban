@@ -995,7 +995,17 @@ and terminalizing it over a standing claim would lose a message the overlay
 had already cleared from its input line.
 The journal entry is written before the acknowledgement precisely so a failed
 acknowledgement leaves the answer recoverable rather than turning a delivered
-message into one reported as lost. Command identifiers carry a process-local sequence as well
+message into one reported as lost. Applying a command and recording that it
+was applied are one step against the action ending: a settle between them
+would close the journal, leaving the provider holding a message the
+acknowledgement calls accepted and the transcript has no trace of. The two
+orderings are exhaustive rather than racing — a delivery already under way
+finishes both steps before a settle takes effect, and one that has not started
+finds the action settled and is refused without being applied. The
+reconciliation above appends nothing to a journal that has already carried a
+terminal envelope, for the same reason nothing else may; it still settles the
+ledger, so the command is never re-applied, and what a terminal action gives
+up is only having its text offered back. Command identifiers carry a process-local sequence as well
 as a clock and a pid, because two presses in one clock tick would otherwise
 deduplicate to one. Every
 command that acts on a thread names the thread, turn, or request the overlay
@@ -4015,7 +4025,15 @@ The first solve/autosolve-compatible slice is implemented.
   re-homed and run; one that had started is re-homed and settled without being
   restarted, because its provider session belonged to a host that is gone.
   Either way the specification is rewritten to name the host now serving it,
-  since discovery and the collection pass both read ownership from there.
+  since discovery and the collection pass both read ownership from there — and
+  a rewrite that fails refuses the adoption rather than proceeding under the
+  old name, because an adopted child is one the host already holds and every
+  later scan skips it, so nothing would ever revisit the disagreement.
+  Refusing leaves the child a candidate again on the next poll.
+  A re-homed child continues its own raw log rather than opening another: the
+  name a new one takes carries the issue number and a timestamp but no action
+  id, so a child pointed at a fresh log leaves the evidence it actually
+  produced addressable by nothing.
   Ending a child settles its provider turn as well as its tooling: under a
   shared connection the turn is interrupted, since dropping the bookkeeping
   alone would leave the provider working for an action already marked

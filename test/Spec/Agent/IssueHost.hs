@@ -10,12 +10,12 @@ module Spec.Agent.IssueHost (spec) where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (IOException, bracket, try)
-import Control.Monad (join, void, when)
+import Control.Monad (forM_, join, void, when)
 import Data.IORef (atomicModifyIORef', newIORef)
 import Data.List (find, findIndex, isInfixOf, nub)
 import Data.Maybe (isJust)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, tryReadMVar, tryTakeMVar)
-import Data.Aeson (FromJSON, ToJSON, Value (..), decode, eitherDecode, encode, toJSON)
+import Data.Aeson (FromJSON, ToJSON, Value (..), decode, eitherDecode, eitherDecodeFileStrict', encode, toJSON)
 import qualified Data.Map.Strict as Map
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -49,6 +49,7 @@ import Kanban.Review
 import Kanban.Solve (ResumeProvenance (..), SolveOutcome (..), SolveWorkflow (..), SolverBrand (..))
 import Kanban.UI.Session (reviewSessionInputLive)
 import Kanban.UI.Review (reviewOutcomePhase)
+import Kanban.Transcript (transcriptRoot)
 import Kanban.Worker
   ( IssueActionWorkerTask (..),
     recoverIfWorkerStoppedWith,
@@ -102,7 +103,7 @@ import Kanban.Worker
   )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Preflight (BackendFixture (..), fullyProvisionedFakes, withPreflightMachine)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removeDirectory)
 import System.Timeout (timeout)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.Posix.IO (OpenMode (ReadOnly), closeFd, defaultFileFlags, openFd)
@@ -601,6 +602,108 @@ lifecycleSpec = describe "one running host" $ do
                 Just task <- [issueActionTask candidate.workerDescriptorSpec.workerTask]
             ]
       owners `shouldBe` [hostIdUnderTest]
+
+  -- Round 11's first blocker. Applying a command and recording that it was
+  -- applied are two steps, and a settle between them closes the journal: the
+  -- provider has the message, the acknowledgement says it was accepted, and
+  -- the transcript a replay reads has no trace of it.
+  it "records a delivery that a completing turn settles the child during" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      thread <- awaitThreadFor host 594
+      deliver host (ReviewTurnStarted thread "turn-1")
+      _ <- awaitState child (\recorded -> recorded.workerStateReviewTurn == Just "turn-1")
+      inFlight <- newEmptyMVar
+      release <- newEmptyMVar
+      entered <- newIORef False
+      -- The send is held open, so the delivery is genuinely mid-flight when
+      -- the turn completes rather than racing it and usually winning.
+      modifyMVar_ host.hostSendGate . const . pure $ do
+        first <- atomicModifyIORef' entered (\seen -> (True, not seen))
+        when first (putMVar inFlight () >> takeMVar release)
+      command <- commandNumbered 1 child (SendReviewFeedback "look again")
+      Right () <- appendReviewCommand child command
+      _ <- awaitJust "the delivery never reached the provider" (tryReadMVar inFlight)
+      -- Settles the child, on the client's event thread, while the send above
+      -- has not returned.
+      settled <- newEmptyMVar
+      void . forkIO $ deliver host (ReviewTurnCompleted thread TurnSucceeded Nothing Nothing) >> putMVar settled ()
+      -- The handler clears the turn before it settles, so this proves the
+      -- settle has reached the step this is ordered against — in both the
+      -- ordered and the unordered arrangement, which is what lets one test
+      -- tell them apart.
+      _ <- awaitState child (\recorded -> recorded.workerStateReviewTurn == Nothing)
+      -- Then every chance to get ahead. Ordered, the settle spends this
+      -- blocked and the delivery finishes first; unordered, it is far more
+      -- than enough to write the terminal envelope and close the journal out
+      -- from under the send still waiting below.
+      threadDelay 200000
+      putMVar release ()
+      _ <- awaitMaybe (tryTakeMVar settled)
+      _ <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      journaled <- journalEvents child
+      -- Present at all, which is what a dropped write costs, and before the
+      -- terminal envelope, which is where a replay stops reading.
+      let offered = [event | event@(WorkerReviewInput identifier _ _) <- journaled, identifier == command.reviewCommandId]
+          beforeTerminal = takeWhile (\event -> case event of WorkerFinished _ -> False; _ -> True) journaled
+      offered `shouldBe` [WorkerReviewInput command.reviewCommandId "look again" Nothing]
+      [event | event@(WorkerReviewInput identifier _ _) <- beforeTerminal, identifier == command.reviewCommandId]
+        `shouldBe` offered
+
+  -- Round 11's second blocker. Adopting on the old name and calling the
+  -- rewrite retryable could not work on its own terms: an adopted child is in
+  -- the host's map from that moment and every later scan skips a child it
+  -- already holds, so the retry never happened and discovery and the
+  -- collection pass went on reading a dead host as the owner.
+  it "refuses an adoption whose ownership will not persist, and retries it" $
+    withRunningHost $ \host -> do
+      descriptor <- childDescriptorNaming host (WorkerId "host-that-died") "action-1" 594 IssueRevision
+      -- 'writePrivateJson' writes its temporary beside the target and
+      -- renames, so a directory in that name's place is a write that fails
+      -- while leaving the specification itself perfectly readable — which is
+      -- what makes the child discoverable and un-rehomable at once.
+      createDirectoryIfMissing True (descriptor.workerDescriptorSpecPath <> ".tmp")
+      child <- publishChildNaming host (WorkerId "host-that-died") "action-1" 594 IssueRevision
+      publishTerminalHost host (WorkerId "host-that-died")
+      _ <- awaitJust "the host never reported the ownership it could not record" $ do
+        emitted <- readMVar host.hostEmitted
+        pure (if any refusesOwnership emitted then Just () else Nothing)
+      -- Not adopted: nothing was begun, and its specification still names the
+      -- host that died rather than two records disagreeing.
+      calls <- providerCalls host
+      filter isBeginCall calls `shouldBe` []
+      owner <- recordedOwnerOf child
+      owner `shouldBe` Just (WorkerId "host-that-died")
+      -- And it is a candidate again rather than held: clearing the obstacle
+      -- lets the very next scan adopt it, which is the retry the old comment
+      -- promised and could not deliver.
+      removeDirectory (descriptor.workerDescriptorSpecPath <> ".tmp")
+      _ <- awaitCallsFor host 1 isBeginCall
+      adopted <- recordedOwnerOf child
+      adopted `shouldBe` Just hostIdUnderTest
+
+  -- Round 11's third blocker. A recovering host opened a fresh log and
+  -- pointed the child's state at it, leaving the evidence the child had
+  -- actually produced on disk under a name carrying an issue number and a
+  -- timestamp but no action id — addressable by nothing, and unreachable by
+  -- the reattachment it exists for.
+  it "continues a recovered child's own raw log rather than starting another" $
+    withRunningHost $ \host -> do
+      inherited <- transcriptPathFor host.hostRepository "inherited-action.jsonl"
+      writeFile inherited "{\"stream\":\"provider\",\"raw\":\"before the host died\"}\n"
+      child <- publishStartedChildNaming host (WorkerId "host-that-died") "action-1" 594 IssueRevision
+      updateChildLogPath child inherited
+      publishTerminalHost host (WorkerId "host-that-died")
+      state <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      -- The same log, still named by the child's own durable state.
+      state.workerStateLogPath `shouldBe` Just inherited
+      -- And continued rather than truncated: what the dead host wrote is
+      -- still there, with this host's own adoption line after it.
+      -- Through a POSIX descriptor: the host still holds this log open for
+      -- writing, and GHC locks a file per process.
+      contents <- readLogBytes inherited
+      contents `shouldContain` "before the host died"
+      contents `shouldContain` "action-started"
 
   -- Round 10's blocker. A launch cannot make host selection and child
   -- admission one step, and round 7's answer — wait for durable evidence of
@@ -1552,6 +1655,8 @@ data HostUnderTest = HostUnderTest
     hostCanonicalFinished :: MVar (),
     -- | What the host runs inside its handoff window, for a test to replace.
     hostHandoff :: MVar (IO ()),
+    -- | What the fake provider runs inside a send, for a test to replace.
+    hostSendGate :: MVar (IO ()),
     -- | The host's own durable records, for a test that reads its marker.
     hostRecords :: WorkerDescriptor,
     -- | The host's own journal, where anything that outlived a child's
@@ -1598,6 +1703,10 @@ withRunningHostUsing overrideProvider body =
       registeredProcesses <- newMVar []
       canonicalProcess <- newEmptyMVar
       canonicalFinished <- newEmptyMVar
+      -- Replaced by a test that needs to act inside the handoff window, or
+      -- inside a send; a run that does neither is unaffected.
+      handoffBarrier <- newMVar (pure ())
+      sendGate <- newMVar (pure ())
       sinkCell <- newEmptyMVar
       emitted <- newMVar []
       let hostSpecification =
@@ -1635,10 +1744,7 @@ withRunningHostUsing overrideProvider body =
               Nothing -> do
                 putMVar sinkCell sink
                 register (managedProcessGroup 1)
-                pure (Right (recordingProvider record))
-      -- Replaced by a test that needs to act inside the handoff window; a
-      -- run that does not is unaffected.
-      handoffBarrier <- newMVar (pure ())
+                pure (Right (recordingProvider sendGate record))
       hostDescriptor <- descriptorForSpec hostSpecification
       LazyByteString.writeFile hostDescriptor.workerDescriptorSpecPath (encode hostSpecification)
       -- Forked rather than spawned: what is under test is the host's own
@@ -1667,6 +1773,7 @@ withRunningHostUsing overrideProvider body =
             hostCanonicalProcess = canonicalProcess,
             hostCanonicalFinished = canonicalFinished,
             hostHandoff = handoffBarrier,
+            hostSendGate = sendGate,
             hostRecords = hostDescriptor,
             hostEmitted = emitted
           }
@@ -1698,14 +1805,18 @@ withRunningHostUsing overrideProvider body =
 -- a fake that announced synchronously inside 'providerBeginReview' would make
 -- the settled-before-announced ordering unreachable, which is exactly the
 -- race round 1 found. Every test drives the announcement itself.
-recordingProvider :: (ProviderCall -> IO ()) -> IssueHostProvider
-recordingProvider record =
+recordingProvider :: MVar (IO ()) -> (ProviderCall -> IO ()) -> IssueHostProvider
+recordingProvider gate record =
   IssueHostProvider
     { providerBeginReview = \issueNumber -> Right () <$ record (BeginReview issueNumber),
       providerAnswerQuestion = \requested _ -> Right () <$ record (AnswerQuestion requested),
       providerApproveAction = \requested accepted forSession ->
         Right () <$ record (ApproveAction requested accepted forSession),
-      providerSendMessage = \thread _ message -> Right () <$ record (SendMessage thread message),
+      providerSendMessage = \thread _ message -> do
+        -- Held open by a test that needs a delivery in flight while something
+        -- else settles the child; nothing by default.
+        join (readMVar gate)
+        Right () <$ record (SendMessage thread message),
       providerInterruptTurn = \thread turnId -> Right () <$ record (InterruptTurn thread turnId),
       providerFinishThread = record . FinishThread,
       -- One connection, as a shared-process backend holds. Identity 1 is
@@ -1943,6 +2054,35 @@ awaitMaybe probe = go (1200 :: Int)
         Nothing
           | remaining <= 0 -> pure Nothing
           | otherwise -> threadDelay 25000 >> go (remaining - 1)
+
+-- | Whether the host said it could not record itself as a child's owner.
+refusesOwnership :: WorkerEvent -> Bool
+refusesOwnership event = case event of
+  WorkerDiagnostic message -> "could not record this host as the owner" `Text.isInfixOf` message
+  _ -> False
+
+-- | The host a child's own durable specification names.
+recordedOwnerOf :: WorkerDescriptor -> IO (Maybe WorkerId)
+recordedOwnerOf descriptor = do
+  decoded <- eitherDecodeFileStrict' @WorkerSpec descriptor.workerDescriptorSpecPath
+  pure $ case decoded of
+    Left _ -> Nothing
+    Right recorded -> (.issueActionHost) <$> issueActionTask recorded.workerTask
+
+-- | A path under this repository's transcript directory, for a log a test
+-- writes before the host ever sees it.
+transcriptPathFor :: Repository -> FilePath -> IO FilePath
+transcriptPathFor repository name = do
+  directory <- transcriptRoot repository
+  createDirectoryIfMissing True directory
+  pure (directory </> name)
+
+-- | Points a child's durable state at a log, the way its previous host left
+-- it.
+updateChildLogPath :: WorkerDescriptor -> FilePath -> IO ()
+updateChildLogPath descriptor path = do
+  recorded <- decodeChildState descriptor
+  forM_ recorded (\state -> writeChildState descriptor state {workerStateLogPath = Just path})
 
 journalEvents :: WorkerDescriptor -> IO [WorkerEvent]
 journalEvents descriptor = map (.workerEnvelopeEvent) <$> readWorkerJournal descriptor

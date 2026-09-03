@@ -59,7 +59,7 @@ module Kanban.Worker.IssueHost
 where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
-import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar, withMVar)
 import Control.Exception (IOException, SomeException, try)
 import Control.Monad (forM_, unless, void, when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
@@ -274,7 +274,22 @@ data HostChild = HostChild
     -- releases its lease, and stops its stage; every later claimant is a
     -- no-op. Without it a turn completing while a termination command is
     -- being applied would write two terminal states for one child.
-    hostChildSettleClaim :: IORef Bool
+    hostChildSettleClaim :: IORef Bool,
+    -- | Held for the whole of one non-terminating delivery, and by every
+    -- settle.
+    --
+    -- Applying a command and recording that it was applied are two steps, and
+    -- a settle landing between them closes the journal: the provider has the
+    -- message, the acknowledgement says so, and the transcript a replay reads
+    -- has no trace of it. Under this the two orderings are exhaustive — a
+    -- delivery that starts before a settle finishes both steps first, and one
+    -- that starts after finds the child settled and refuses without applying
+    -- anything.
+    --
+    -- A termination is deliberately outside it. Its own settle is what would
+    -- deadlock against it, and it already journals its line before applying
+    -- for the same terminal-envelope reason.
+    hostChildDelivery :: MVar ()
   }
 
 data IssueReviewHost = IssueReviewHost
@@ -557,8 +572,17 @@ adoptNewChildren host = do
       case stateResult of
         Right state | terminalStatus state.workerStateStatus -> pure ()
         _ -> do
-          (owned, ownedTask) <- rehomeChild host descriptor task
-          adoptChild host owned ownedTask adoption
+          owned <- rehomeChild host descriptor task
+          case owned of
+            Left message ->
+              hostDiagnostic
+                host
+                ( "could not record this host as the owner of "
+                    <> descriptor.workerDescriptorSpec.workerId.unWorkerId
+                    <> ", so it was left for the next pass: "
+                    <> message
+                )
+            Right (ownedDescriptor, ownedTask) -> adoptChild host ownedDescriptor ownedTask adoption
 
 -- | What this host may do with a child, if anything.
 --
@@ -612,20 +636,24 @@ childCandidate host descriptor = case issueActionTask descriptor.workerDescripto
 -- child running under this host while its specification still names a dead
 -- one is two answers to one question, and the collection pass would take the
 -- dead one.
-rehomeChild :: IssueReviewHost -> WorkerDescriptor -> IssueActionWorkerTask -> IO (WorkerDescriptor, IssueActionWorkerTask)
+--
+-- So a write that fails refuses the adoption rather than proceeding on the
+-- old name. Adopting anyway and calling the rewrite retryable was wrong on
+-- its own terms: the adopted child is in 'hostChildren' from that moment, and
+-- every later scan skips a child it already holds, so the retry the comment
+-- promised could never happen. Refusing leaves the child exactly as it was —
+-- unadopted, and a candidate again on the next poll, which is a retry that
+-- does occur.
+rehomeChild :: IssueReviewHost -> WorkerDescriptor -> IssueActionWorkerTask -> IO (Either Text (WorkerDescriptor, IssueActionWorkerTask))
 rehomeChild host descriptor task
-  | task.issueActionHost == host.hostSpec.workerId = pure (descriptor, task)
+  | task.issueActionHost == host.hostSpec.workerId = pure (Right (descriptor, task))
   | otherwise = do
       let rehomed = task {issueActionHost = host.hostSpec.workerId}
           spec = descriptor.workerDescriptorSpec {workerTask = IssueActionWorkerTaskKind rehomed}
       written <- writePrivateJson descriptor.workerDescriptorSpecPath spec
       pure $ case written of
-        -- A specification that cannot be rewritten leaves the child named to
-        -- its dead host. It is still adopted and still answered for; what is
-        -- lost is only the durable record of who is serving it, which the
-        -- next pass tries again.
-        Left _ -> (descriptor, task)
-        Right () -> (descriptor {workerDescriptorSpec = spec}, rehomed)
+        Left message -> Left message
+        Right () -> Right (descriptor {workerDescriptorSpec = spec}, rehomed)
 
 -- | Whether the host a child names is definitely not going to run it.
 --
@@ -680,7 +708,11 @@ adoptChild :: IssueReviewHost -> WorkerDescriptor -> IssueActionWorkerTask -> Ch
 adoptChild host descriptor task adoption = do
   journal <- newEventJournalLock
   now <- getCurrentTime
-  rawLog <- openChildLog descriptor task
+  -- The child's own durable state, if it has one. An adoption that is a
+  -- recovery has a predecessor, and what that predecessor recorded is what
+  -- this must continue rather than replace.
+  inherited <- either (const Nothing) Just <$> readWorkerState descriptor
+  rawLog <- openChildLog descriptor task (inherited >>= (.workerStateLogPath))
   stateCell <-
     newMVar
       ( (issueActionStartingState host.hostPid host.hostProcessIdentity now descriptor.workerDescriptorSpec)
@@ -690,6 +722,7 @@ adoptChild host descriptor task adoption = do
   process <- newIORef Nothing
   journalGate <- newMVar False
   settleClaim <- newIORef False
+  delivery <- newMVar ()
   let child =
         HostChild
           { hostChildDescriptor = descriptor,
@@ -700,7 +733,8 @@ adoptChild host descriptor task adoption = do
             hostChildState = stateCell,
             hostChildStageThread = stageThread,
             hostChildProcess = process,
-            hostChildSettleClaim = settleClaim
+            hostChildSettleClaim = settleClaim,
+            hostChildDelivery = delivery
           }
   modifyMVar_ host.hostChildren (pure . Map.insert descriptor.workerDescriptorSpec.workerId child)
   persistChild child
@@ -737,12 +771,31 @@ adoptChild host descriptor task adoption = do
 -- overlay's input line on replay.
 -- | Opens this child's raw log, named for the action rather than the host so
 -- two concurrent revisions never share one.
-openChildLog :: WorkerDescriptor -> IssueActionWorkerTask -> IO (Maybe SessionLog)
-openChildLog descriptor task = do
-  opened <- openSessionLog descriptor.workerDescriptorSpec.workerRepository "issue-action" task.issueActionIssueNumber Nothing
+-- | This child's raw log, continuing the one it already had.
+--
+-- A recovering host reopens the path its predecessor recorded rather than
+-- starting a fresh one. The name a fresh one takes carries the issue number
+-- and a timestamp but no action id, so two actions for one issue are not
+-- distinguishable in it — and a child whose durable state pointed at a new
+-- log left its real evidence on disk addressable by nothing. 'openSessionLog'
+-- appends, so continuing is one contiguous log per action.
+--
+-- A path that cannot be reopened falls back to a new one, because some
+-- evidence beats none; the diagnostic below is written either way and says
+-- which happened.
+openChildLog :: WorkerDescriptor -> IssueActionWorkerTask -> Maybe FilePath -> IO (Maybe SessionLog)
+openChildLog descriptor task existingPath = do
+  continued <- case existingPath of
+    Nothing -> pure Nothing
+    Just path -> either (const Nothing) Just <$> openSessionLog repository "issue-action" task.issueActionIssueNumber (Just path)
+  opened <- case continued of
+    Just sessionLog -> pure (Right sessionLog)
+    Nothing -> openSessionLog repository "issue-action" task.issueActionIssueNumber Nothing
   case opened of
     Left _ -> pure Nothing
     Right sessionLog -> Just sessionLog <$ logMessage sessionLog "action-started" (adoptionDiagnostic task)
+  where
+    repository = descriptor.workerDescriptorSpec.workerRepository
 
 adoptionDiagnostic :: IssueActionWorkerTask -> Text
 adoptionDiagnostic task =
@@ -1181,9 +1234,26 @@ deliverToLiveChild host child command = do
       -- advance precisely because ending an action cannot be refused.
       let display = reviewCommandDisplay command.reviewCommandPayload
           endsChild = command.reviewCommandPayload == TerminateIssueAction
-      when endsChild (journalChild child (WorkerReviewInput command.reviewCommandId display Nothing))
-      outcome <- applyChildCommand host child command
-      unless endsChild (journalChild child (WorkerReviewInput command.reviewCommandId display (rejectionReason outcome)))
+      outcome <-
+        if endsChild
+          then do
+            journalChild child (WorkerReviewInput command.reviewCommandId display Nothing)
+            applyChildCommand host child command
+          else -- Applying and recording are one step against a settle. A
+          -- settle between them closes the journal, and the message would be
+          -- with the provider, acknowledged as accepted, and absent from the
+          -- transcript a replay reads.
+            withMVar child.hostChildDelivery . const $ do
+              -- Re-read under the lock rather than trusting the check that
+              -- chose this path: that one ran before the lock, and a settle
+              -- since then is exactly what this exists to order against.
+              gone <- readIORef child.hostChildSettleClaim
+              if gone
+                then pure (ReviewCommandRejected settledActionReason)
+                else do
+                  applied <- applyChildCommand host child command
+                  journalChild child (WorkerReviewInput command.reviewCommandId display (rejectionReason applied))
+                  pure applied
       acknowledgement <- reviewCommandAcknowledgement command outcome
       settled <- acknowledgeReviewCommand child.hostChildDescriptor acknowledgement
       -- A final acknowledgement that will not write leaves the ledger holding
@@ -1331,7 +1401,15 @@ issueActionDeadlineReason = "persistent worker deadline exceeded"
 -- envelope, and releases this child's lease. It touches no sibling, no host
 -- record, and never the client.
 settleChild :: IssueReviewHost -> HostChild -> SolveOutcome -> IO ()
-settleChild host child outcome = do
+settleChild host child outcome = withMVar child.hostChildDelivery (const (settleSettledChild host child outcome))
+
+-- | The settle proper, under the delivery lock its caller takes.
+--
+-- Taking it before the claim is what makes the two orderings exhaustive: a
+-- delivery already under way finishes applying /and/ recording before this
+-- claims, and one that has not started yet finds the claim taken and refuses.
+settleSettledChild :: IssueReviewHost -> HostChild -> SolveOutcome -> IO ()
+settleSettledChild host child outcome = do
   claimed <- atomicModifyIORef' child.hostChildSettleClaim (\settled -> (True, not settled))
   when claimed $ do
     provider <- readMVar host.hostProvider
