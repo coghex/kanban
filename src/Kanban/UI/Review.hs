@@ -9,6 +9,7 @@ module Kanban.UI.Review
     applyReviewDiagnostic,
     applyReviewEvent,
     appliedReviewInput,
+    appliedIssueActionTermination,
     applyReviewInput,
     reviewOutputPrefix,
     reviewProtocolWarningNotice,
@@ -575,28 +576,31 @@ cancelReviewSession issueNumber = do
 -- sibling — and itself — running (requirement 11).
 terminateIssueAction :: Int -> EventM Name AppState ()
 terminateIssueAction issueNumber = do
-  appendToReviewSession issueNumber
-    ( \session ->
-        session
-          { sessionPhase = ReviewFailed,
-            sessionActivity = "killing process tree",
-            sessionTranscript = appendTranscript session.sessionTranscript "\n[killed by user]\n"
-          }
-    )
+  appendToReviewSession issueNumber appliedIssueActionTermination
   submitReviewCommand issueNumber TerminateIssueAction
 
 cancelCanonicalIssueAction :: Int -> EventM Name AppState ()
 cancelCanonicalIssueAction issueNumber = do
-  appendToReviewSession issueNumber
-    ( \session ->
-        session
-          { sessionPhase = ReviewInterrupted,
-            sessionActivity = "interrupted",
-            sessionTranscript = appendTranscript session.sessionTranscript "\n[interrupted by user]\n"
-          }
-    )
+  appendToReviewSession issueNumber appliedIssueActionTermination
   submitReviewCommand issueNumber TerminateIssueAction
   setNotice ("Interrupting issue review #" <> showText issueNumber <> "; canonical stages don't resume — Esc, then r starts a fresh one")
+
+-- | What ending an action does to its session at the moment of the gesture:
+-- nothing.
+--
+-- Both gestures used to mark the transcript and move the phase here, before
+-- the command had even been written. A reattached overlay cannot reconstruct
+-- that mark — it is not a journal event — so the same action read one way
+-- live and another way on replay, which is exactly what requirement 4 forbids.
+-- It also announced a kill that a failed ledger write meant had not happened.
+--
+-- So the transition belongs to the evidence: the host journals the command's
+-- own line before it applies it, and the child's terminal envelope after, and
+-- a live overlay and a reattached one apply those same two records in that
+-- same order. This is the seam that says so, and it stays a call rather than
+-- a deletion because "the gesture moves nothing" is the property under test.
+appliedIssueActionTermination :: ReviewSession -> ReviewSession
+appliedIssueActionTermination = id
 
 appendReviewOutput :: ReviewOutputKind -> Text -> ChatTranscript -> ChatTranscript
 appendReviewOutput outputKind addition transcript =

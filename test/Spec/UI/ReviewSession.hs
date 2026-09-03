@@ -23,12 +23,14 @@ import Kanban.Review
     ReviewStage (..)
   )
 import Kanban.UI.Board (reviewPhaseGlyphFor)
-import Kanban.Worker (ReviewCommandPayload (..))
+import qualified Data.Text as Text
+import Kanban.Worker (ReviewCommandPayload (..), reviewCommandDisplay)
 import Kanban.UI.Events (OverlayExtent (..), OverlayMouseAction (..), QuitRequest (..), dashboardQuitRequest, overlayMouseAction)
 import Kanban.UI.Overlay (reviewPhaseLabel)
 import Kanban.UI.Reconcile (reconcileReviewSessions)
 import Kanban.UI.Review
-  ( appliedReviewInput,
+  ( appliedIssueActionTermination,
+    appliedReviewInput,
     applyUndeliveredSteer,
     carryUndelivered,
     newReviewSession,
@@ -643,6 +645,44 @@ spec = do
       applied.sessionPhase `shouldBe` ReviewRunning
       applied.sessionActivity `shouldBe` "thinking"
       applied.sessionTranscript.standardTranscript `shouldMention` "carry on"
+
+  -- Round 13's blocker. Both gestures that end an action used to mark the
+  -- transcript and move the phase at the press, before the command was even
+  -- written. A reattached overlay cannot reconstruct that mark — it is no
+  -- journal event — so one action read one way live and another on replay,
+  -- and a ledger write that failed still announced a kill.
+  describe "ending an action from the overlay" $ do
+    let running =
+          newAgentSession
+            0
+            ReviewRunning
+            "thinking"
+            Nothing
+            (ChatTranscript "" "" "")
+            ReviewDetail
+              { reviewSessionIssue = baseIssue 151 [],
+                reviewSessionStage = InitialReview,
+                reviewSessionThreadId = Nothing,
+                reviewSessionTurnId = Nothing,
+                reviewSessionPending = Nothing,
+                reviewSessionUndelivered = [],
+                reviewSessionRestored = Nothing
+              }
+
+    -- The property both gestures rest on. Anything moved here is moved for a
+    -- live overlay and for nobody else.
+    it "moves nothing at the press, for a kill or a canonical interrupt alike" $
+      appliedIssueActionTermination running `shouldBe` running
+
+    -- And what the two journaled records do, which is the whole of what
+    -- either gesture produces. The line reads as the thing the user did, and
+    -- no bracketed marker appears in it, because no such marker is written
+    -- anywhere any more.
+    it "renders a termination from its journal alone" $ do
+      let afterInput = appliedReviewInput (reviewCommandDisplay TerminateIssueAction) Nothing running
+      afterInput.sessionTranscript.standardTranscript `shouldBe` "\nYou: end this action\n"
+      Text.unpack afterInput.sessionTranscript.standardTranscript `shouldNotContain` "[killed by user]"
+      Text.unpack afterInput.sessionTranscript.standardTranscript `shouldNotContain` "[interrupted by user]"
 
   -- Requirement 3. The quoted refusal is gone, and with it the only reason
   -- the dashboard ever declined to quit for an agent.

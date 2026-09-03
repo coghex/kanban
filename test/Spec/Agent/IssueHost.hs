@@ -1134,7 +1134,11 @@ commandProtocolSpec = describe "the durable input protocol" $ do
                    "feedback",
                    "steer",
                    "turn interrupt",
-                   "termination"
+                   -- Not the category word beside it: this line is what a
+                   -- person reads in the transcript, live and on replay
+                   -- alike, so it says what they did rather than what kind of
+                   -- command it was.
+                   "end this action"
                  ]
 
   -- The host's own answer to a provider call, which is what an

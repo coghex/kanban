@@ -969,6 +969,15 @@ that reattaches and not by one that was watching. Whatever outlives an action
 finished while it was being terminated — is recorded on the host's own journal
 instead, where it is evidence without being replay.
 
+Ending an action moves nothing in the overlay at the press. Both gestures that
+end one — the kill, and Ctrl-C on a canonical stage — used to mark the
+transcript and move the phase before the command had even been written, and no
+reattached overlay can reconstruct a mark that is not a journal event; it also
+announced a kill that a failed ledger write meant had not happened. The
+transition belongs to the evidence instead: the host journals the command's
+own line before it applies it and the child's terminal envelope after, and a
+live overlay applies those two records exactly as a reattached one does.
+
 A dashboard reattaching to a live
 action replays that whole journal through the same transitions a live event
 takes, so it arrives at the same bounded transcript suffix, the same pending

@@ -155,7 +155,9 @@ reviewCommandDisplay payload = case payload of
   SendReviewFeedback message -> message
   ResendReviewSteer message -> message
   InterruptReviewTurn -> reviewCommandPayloadSummary InterruptReviewTurn
-  TerminateIssueAction -> reviewCommandPayloadSummary TerminateIssueAction
+  -- Read by a person, in the transcript, as the thing they just did. The
+  -- category word beside it — "termination" — belongs to a diagnostic.
+  TerminateIssueAction -> "end this action"
 
 -- | How a command reads in a diagnostic, and in the acknowledgement a
 -- rejection carries.

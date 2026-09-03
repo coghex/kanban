@@ -1666,6 +1666,15 @@ unless their typed contract exposes an override.
   one process serves every thread there, so a single child's termination would
   end all of them.
 
+  The thirteenth round closed one, on the overlay's side of the same rule. The
+  two gestures that end an action marked the transcript and moved the phase at
+  the press, before the command was written. That mark is no journal event, so
+  a reattached overlay could not reconstruct it and one action read one way
+  live and another on replay — and a ledger write that failed still announced
+  a kill that had not happened. Ending an action now moves nothing at the
+  press: the host journals the command's own line before applying it and the
+  terminal envelope after, and both overlays apply those two records alike.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard
