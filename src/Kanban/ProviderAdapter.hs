@@ -293,7 +293,8 @@ claudeEmbeddedReview =
     }
 
 -- | The argv one embedded review session runs under, probed against CLI
--- 2.1.251 (D-15) and rechecked on 2.1.252.
+-- 2.1.251 (D-15), rechecked on 2.1.252, and its isolation group reprobed on
+-- 2.1.259.
 --
 -- Five groups, none of them optional:
 --
@@ -304,11 +305,23 @@ claudeEmbeddedReview =
 -- * the verdict — @--json-schema@ carrying the same schema Codex passes as
 --   @turn\/start@'s @outputSchema@, so one contract produces one
 --   'Kanban.Review.Types.ReviewResult' on either backend;
--- * the isolation — @--strict-mcp-config@ and an empty @--tools@, because a
---   bare @claude -p@ loads the operator's own MCP servers and fires their
---   @SessionStart@ hook. An embedded review must not inherit the machine's
---   Claude Code configuration, and this launch is the only thing that stops
---   it;
+-- * the isolation — three controls, because each CLI flag covers only its
+--   own scope: @--strict-mcp-config@ so no MCP server outside the one
+--   @--mcp-config@ names is loaded, an empty @--tools@ so no built-in tool
+--   is available, and an empty @--setting-sources@ so no user, project, or
+--   local settings file is read and nothing they bring — a @SessionStart@
+--   hook, the plugins whose commands come with them, the operator's
+--   permission mode — reaches the session. The first two do not stand in for
+--   the third: a launch carrying only them reported @tools: []@ and
+--   @mcp_servers: []@ while a @SessionStart@ hook declared in a project
+--   @.claude\/settings.json@ still ran and wrote its marker, the worked
+--   repository's own plugin loaded, and the session ran under the operator's
+--   @auto@ permission mode (2.1.259). An embedded review must not inherit
+--   the machine's Claude Code configuration, and this launch is the only
+--   thing that stops it — as far as those three sources reach. It cannot
+--   promise that no hook runs at all, because one still arrives from outside
+--   them, which is why "Kanban.Review.Stream" goes on ignoring the hook
+--   records rather than reading one as a breach;
 -- * the tools — @--mcp-config@ naming Kanban's own re-entry as the one
 --   server @--strict-mcp-config@ then holds the session to, and
 --   @--allowedTools@ naming that server's two tools so the noninteractive
@@ -331,6 +344,8 @@ claudeReviewArguments assignment toolServer =
     LazyByteString.unpack (encode finalOutputSchema),
     "--strict-mcp-config",
     "--tools",
+    "",
+    "--setting-sources",
     ""
   ]
     <> foldMap reviewToolServerArguments toolServer
