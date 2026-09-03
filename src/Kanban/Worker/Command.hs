@@ -34,6 +34,7 @@ module Kanban.Worker.Command
     ReviewCommandOutcome (..),
     ReviewCommandAcknowledgement (..),
     newReviewCommandId,
+    reviewCommandDisplay,
     reviewCommandPayloadSummary,
     appendReviewCommand,
     readReviewCommands,
@@ -44,10 +45,13 @@ module Kanban.Worker.Command
     acknowledgementFor,
     reviewCommandSettled,
     unsettledReviewCommands,
+    reconcileIssueActionClaims,
+    unobservedCommandOutcome,
   )
 where
 
 import Control.Exception (IOException, onException, try)
+import Control.Monad (forM_, void)
 import Data.Aeson (FromJSON, ToJSON, eitherDecodeStrict', encode)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString8
@@ -55,13 +59,23 @@ import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.List (find)
 import Data.Maybe (mapMaybe)
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
 import Kanban.Review (ReviewAnswer, ReviewRequestId, ReviewThreadId)
-import Kanban.Worker.Types (ReviewCommandId (..), WorkerDescriptor (..), WorkerId (..))
+import Kanban.Worker.Journal (appendWorkerEvent, newEventJournalLock, readWorkerJournal)
+import Kanban.Worker.Types
+  ( ReviewCommandId (..),
+    WorkerDescriptor (..),
+    WorkerEnvelope (..),
+    WorkerEvent (..),
+    WorkerId (..),
+    WorkerSpec (..),
+    issueActionTask,
+  )
 import System.IO (Handle, hClose)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (setFdMode)
@@ -126,6 +140,22 @@ data ReviewCommandPayload
     TerminateIssueAction
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | What the overlay showed for a command, which is what its transcript entry
+-- reads.
+--
+-- The three payloads a person types or chooses carry their own display text,
+-- and it matters that this is what is recorded rather than the category
+-- below: a rejected or unobserved command has its text offered back to the
+-- input line, and "feedback" is not what anyone typed.
+reviewCommandDisplay :: ReviewCommandPayload -> Text
+reviewCommandDisplay payload = case payload of
+  AnswerReviewQuestion _ _ display -> display
+  AnswerReviewApproval _ _ _ display -> display
+  SendReviewFeedback message -> message
+  ResendReviewSteer message -> message
+  InterruptReviewTurn -> reviewCommandPayloadSummary InterruptReviewTurn
+  TerminateIssueAction -> reviewCommandPayloadSummary TerminateIssueAction
 
 -- | How a command reads in a diagnostic, and in the acknowledgement a
 -- rejection carries.
@@ -315,3 +345,50 @@ openPrivateAppendHandle path = do
 acknowledgementFor :: ReviewCommandId -> [ReviewCommandAcknowledgement] -> Maybe ReviewCommandAcknowledgement
 acknowledgementFor identity acknowledgements =
   find ((== identity) . (.acknowledgedCommandId)) (reverse acknowledgements)
+
+-- | Answers for every command a dead owner claimed and never settled.
+--
+-- Reconciliation belongs on the descriptor rather than inside the host,
+-- because the host is not always the one that discovers a child is finished:
+-- generic stale-worker recovery terminalizes a child whose supervisor is
+-- provably gone, and it reaches that conclusion without any host adopting the
+-- child at all. Left only to adoption, a command claimed just before a host
+-- died would keep its claim forever — never re-applied, which is right, but
+-- also never answered, so the dashboard that cleared its draft for it is
+-- never told where the message went.
+--
+-- The journal is consulted first, exactly as adoption consults it: a delivery
+-- writes what it delivered before acknowledging it, so a failed
+-- acknowledgement leaves the answer recorded there. Only a command with no
+-- such record is called unobserved.
+--
+-- Appends the undelivered record to the journal rather than reporting it, so
+-- whoever drains that journal next — a live monitor finalizing, or a
+-- dashboard replaying — delivers it through the one path both already use.
+-- A no-op for any worker that is not an issue action.
+reconcileIssueActionClaims :: WorkerDescriptor -> IO ()
+reconcileIssueActionClaims descriptor
+  | Nothing <- issueActionTask descriptor.workerDescriptorSpec.workerTask = pure ()
+  | otherwise = do
+      commands <- readReviewCommands descriptor
+      acknowledgements <- readReviewCommandAcknowledgements descriptor
+      journaled <- readWorkerJournal descriptor
+      let delivered =
+            Map.fromList
+              [(identifier, reason) | WorkerReviewInput identifier _ reason <- map (.workerEnvelopeEvent) journaled]
+      journal <- newEventJournalLock
+      forM_ (unsettledReviewCommands commands acknowledgements) $ \command -> do
+        outcome <- case Map.lookup command.reviewCommandId delivered of
+          Just reason -> pure (maybe ReviewCommandAccepted ReviewCommandRejected reason)
+          Nothing -> do
+            appendWorkerEvent
+              descriptor
+              journal
+              (WorkerReviewInput command.reviewCommandId (reviewCommandDisplay command.reviewCommandPayload) (Just unobservedCommandOutcome))
+            pure ReviewCommandOutcomeUnknown
+        acknowledgement <- reviewCommandAcknowledgement command outcome
+        void (acknowledgeReviewCommand descriptor acknowledgement)
+
+-- | What a command whose owner died mid-delivery is reported as.
+unobservedCommandOutcome :: Text
+unobservedCommandOutcome = "the review host stopped before this command's result was observed"

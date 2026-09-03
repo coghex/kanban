@@ -984,9 +984,15 @@ correlated command with an acknowledgement written back. A command is claimed
 before it is applied and settled after, and a command carrying any
 acknowledgement is never applied again — so a retry, a replay, a restart, and
 an acknowledgement that could not be written all still deliver it exactly
-once. A claim left standing is an attempt whose result was never observed, and the
-next host to adopt that action answers it — from the child's journal where
+once. A claim left standing is an attempt whose result was never observed, and
+whatever next reaches that action answers it — from the child's journal where
 that records what was delivered, and as unobserved only where it does not.
+Adoption by a replacement host is one such arrival and the reattached
+dashboard's own stale-worker recovery is the other, so the reconciliation is
+one shared step both run rather than something only re-hosting performs: an
+action whose host died and which no replacement adopts is still terminalized,
+and terminalizing it over a standing claim would lose a message the overlay
+had already cleared from its input line.
 The journal entry is written before the acknowledgement precisely so a failed
 acknowledgement leaves the answer recoverable rather than turning a delivered
 message into one reported as lost. Command identifiers carry a process-local sequence as well
@@ -3965,6 +3971,11 @@ The first solve/autosolve-compatible slice is implemented.
   censused, and reachable by the ordinary kill and recovery paths. The client
   registers each connection as it creates one, because any later moment leaves
   an interval in which a process is running and nothing durable names it.
+  That client is started when a revision first needs one and not before. An
+  initial review or rereview runs the canonical backend, whose stage preflight
+  asks for that backend and the reviewers it selects and for no in-app
+  provider session at all, so requiring one to exist before any child had been
+  seen would have failed every gate on an install that has none.
   A child settled between asking for a provider thread and the provider
   announcing one stays addressable until that announcement arrives, and the
   thread it names is closed rather than left owned by nothing; a canonical

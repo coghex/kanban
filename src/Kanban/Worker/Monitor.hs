@@ -25,6 +25,7 @@ import Data.Text (Text)
 import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
 import Kanban.Process (IdentityPresence (..), ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot)
 import Kanban.Solve (SolveOutcome (..))
+import Kanban.Worker.Command (reconcileIssueActionClaims)
 import Kanban.Worker.Journal
   ( decodeJournalLine,
     drainJournalBeforeExit,
@@ -108,7 +109,7 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink consumedJournalByte
         presence <- if null identities then pure IdentityAbsent else checkIdentityPresenceWith takeSnapshot identities
         case presence of
           IdentityAbsent -> do
-            drained <- drainJournalBeforeExit descriptor eventSink consumedJournalBytes
+            drained <- drainAfterReconciling
             case drained of
               Nothing -> pure False
               Just sawFinished -> do
@@ -135,7 +136,7 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink consumedJournalByte
                   if not (providerOk && recordedOk)
                     then reportStaleRecoveryPending state
                     else do
-                      drained <- drainJournalBeforeExit descriptor eventSink consumedJournalBytes
+                      drained <- drainAfterReconciling
                       case drained of
                         Nothing -> pure False
                         Just sawFinished -> do
@@ -167,13 +168,22 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink consumedJournalByte
                           pure True
   where
     spec = descriptor.workerDescriptorSpec
+    -- Every finalization path drains the journal before it reports a terminal
+    -- outcome, and every one of them owes an issue action the same thing
+    -- first: an answer for any command its dead host claimed and never
+    -- settled. Reconciling before the drain is what delivers those answers
+    -- through the drain itself, so a dashboard learns where its message went
+    -- by the one path it already reads. A no-op for every other worker.
+    drainAfterReconciling = do
+      reconcileIssueActionClaims descriptor
+      drainJournalBeforeExit descriptor eventSink consumedJournalBytes
     -- Reached only once the supervisor is confirmed absent by its durably
     -- recorded launch identity — its single call site above has no other
     -- entry condition, and deliberately no elapsed-time one. No state file
     -- ever appeared, so nothing was ever started to terminate beyond the
     -- lease itself.
     finalizeMissingState = do
-      drained <- drainJournalBeforeExit descriptor eventSink consumedJournalBytes
+      drained <- drainAfterReconciling
       case drained of
         Nothing -> pure False
         Just sawFinished -> do

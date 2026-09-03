@@ -1615,6 +1615,20 @@ unless their typed contract exposes an override.
   dashboard an approval a live one never saw. What outlives an action is
   recorded on the host instead.
 
+  The ninth round closed two dependencies that were never real. A canonical
+  stage's whole work is `approve_issues.py`, and its preflight asks only for
+  that backend and the reviewers it selects — so a host that started an
+  embedded client before it had seen any child made every gate and rereview
+  fail on an install with no in-app provider session at all. The client is
+  started when a revision first needs one, and a canonical stage neither
+  requires nor spawns one. And claim reconciliation moved off the host: the
+  path that answers a claim a dead host left standing is the same one whether
+  a replacement host adopts the child or a reattached dashboard's own
+  stale-worker recovery terminalizes it, and only the first of those two ran
+  it — so the reattachment case wrote the terminal envelope over a standing
+  claim and lost the message the dashboard had already cleared from its input
+  line.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard
