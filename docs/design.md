@@ -973,9 +973,12 @@ holds.
 Every input the overlay sends — a structured answer, an approval decision,
 feedback or steering, a deliberate resend of a refused steer, an active-turn
 interrupt, and ending the whole action — travels to that child as a durable,
-correlated command with an acknowledgement written back. A command is applied
-when its identifier carries no acknowledgement, and applying it writes one, so
-a retry, a replay, and a dashboard restart all deliver it exactly once. Every
+correlated command with an acknowledgement written back. A command is claimed
+before it is applied and settled after, and a command carrying any
+acknowledgement is never applied again — so a retry, a replay, a restart, and
+an acknowledgement that could not be written all still deliver it exactly
+once. A claim left standing is an attempt whose result was never observed, and
+is reported as that rather than guessed either way. Every
 command that acts on a thread names the thread, turn, or request it was
 correlated to, and is refused rather than retargeted when the child has since
 moved on; ending the action is the one command that names none, because it
@@ -3943,6 +3946,16 @@ The first solve/autosolve-compatible slice is implemented.
   announcing one stays addressable until that announcement arrives, and the
   thread it names is closed rather than left owned by nothing; a canonical
   subprocess that starts after its child was settled is ended the same way.
+  The wire names only an issue number, and an issue outlives the action that
+  asked, so an announcement resolves to the action whose start is still
+  waiting rather than to whichever child holds that issue now.
+  Each child keeps a raw log of its own, recorded on its own state: a
+  shared-process backend writes every thread's traffic to one interleaved
+  client transcript, which the host records as its own and which is no
+  child's evidence.
+  Host selection and child admission cannot be made one step from the launch
+  side, so a host also adopts a child whose named host has provably terminated
+  and which nothing has ever adopted — never one a live host is serving.
   The provider's process shape is the adapter's, unchanged: a shared-process
   backend multiplexes concurrent children through the host's one connection,
   and a process-per-thread backend gives each child its own. Ending or

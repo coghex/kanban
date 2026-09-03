@@ -42,6 +42,7 @@ module Kanban.Worker
     readReviewCommandAcknowledgements,
     readReviewCommands,
     reviewCommandPayloadSummary,
+    reviewCommandSettled,
     undeliveredReviewCommands,
     ensureIssueReviewHost,
     launchIssueAction,
@@ -202,6 +203,7 @@ import Kanban.Worker.Command
     readReviewCommandAcknowledgements,
     readReviewCommands,
     reviewCommandPayloadSummary,
+    reviewCommandSettled,
     undeliveredReviewCommands,
   )
 import Kanban.Worker.Types
@@ -388,7 +390,19 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
       written <- writePrivateJson descriptor.workerDescriptorSpecPath spec
       case written of
         Left message -> releaseWorkerLease descriptor >> pure (Left (WorkerLaunchFailed message))
-        Right () -> pure (Right descriptor)
+        Right () -> do
+          -- Asked again, after the specification exists.
+          --
+          -- Host selection and child admission cannot be made one atomic step
+          -- from here: the host read as live a moment ago can reach its idle
+          -- grace and exit before this write lands, leaving a child naming a
+          -- host that has terminated. Re-ensuring starts a replacement when
+          -- that has happened, and the host's own adoption rule re-homes a
+          -- child whose named host is provably finished and which nothing has
+          -- ever adopted — so the two together leave no window in which an
+          -- action the operator started simply never runs.
+          void (ensureIssueReviewHost repository configPath workflowConfig)
+          pure (Right descriptor)
   where
     -- A host whose state has not landed yet leaves the child recording pid 0
     -- and no identity, which the startup grace window in 'discoverWorkers'

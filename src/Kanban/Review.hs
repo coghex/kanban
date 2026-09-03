@@ -105,6 +105,7 @@ module Kanban.Review
     missingEmbeddedReviewMessage,
     newRecordingReviewClientForTesting,
     newReviewClientForTesting,
+    reviewClientLogPath,
     reviewConnectionProcesses,
     reviewConnectionsForTesting,
     reviewDeveloperInstructions,
@@ -326,7 +327,7 @@ import Kanban.Review.Types
     renderReviewResult,
     reviewStageForLabels,
   )
-import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
+import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Environment (getExecutablePath)
 import System.Exit (ExitCode (..))
 import System.IO (BufferMode (..), Handle, hClose, hFlush, hIsEOF, hSetBuffering)
@@ -787,6 +788,16 @@ reviewConnectionsForTesting client = attachedConnections client.reviewConnection
 -- orphaned with nothing durable naming them.
 reviewConnectionProcesses :: ReviewClient -> IO [ManagedProcess]
 reviewConnectionProcesses client = map (.connectionManaged) <$> attachedConnections client.reviewConnections
+
+-- | Where this client writes the raw traffic that belongs to no one review
+-- thread — the handshake, the diagnostics, a line it could not parse.
+--
+-- The repository review host records this as its /own/ log, because it is the
+-- host's session rather than any child's. Each child keeps a raw log of the
+-- traffic routed to it, which is what a shared-process backend's one
+-- interleaved transcript cannot give any of them.
+reviewClientLogPath :: ReviewClient -> Maybe FilePath
+reviewClientLogPath client = sessionLogPath <$> client.reviewSessionLog
 
 -- | A 'newReviewClientForTesting' whose one connection records what the
 -- client writes to it.

@@ -1521,7 +1521,7 @@ unless their typed contract exposes an override.
   collected, and a host with a live or unacknowledged-terminal child is never
   collected either, on top of every rule the pass already applied.
 
-  Two orderings the first review round found are closed explicitly. A child can
+  Several orderings the review rounds found are closed explicitly. A child can
   be settled — by a termination command, its own bound, or a dead connection —
   between asking the provider for a thread and the provider announcing one,
   because that announcement is asynchronous; settled children therefore stay
@@ -1530,7 +1530,21 @@ unless their typed contract exposes an override.
   connection processes with its own supervisor rather than recording itself as
   its own provider: a provider pid with no verifiable identity is what every
   termination path reads as unresolvable, which left a host kill recording a
-  pending termination it could never complete.
+  pending termination it could never complete. Those registrations happen at
+  the moment a connection is created rather than on the next poll, because a
+  process-per-thread backend spawns one to announce a thread and a host killed
+  in that gap would leak it.
+
+  Three more come from the second round. A thread announcement names only an
+  issue on the wire, and a settled action releases its lease immediately — so
+  a replacement action for the same issue could take the first action's
+  thread; announcements now resolve by start order instead. A command applied
+  and then not acknowledged was owed again on the next poll, sending the same
+  steer twice; commands are claimed before they are applied, so an unwritable
+  ledger means nothing was applied and a written claim means it is never
+  applied again. And a child had no raw evidence of its own under a
+  shared-process backend, whose one client transcript interleaves every
+  thread; each child now keeps its own, and the client's belongs to the host.
 
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own

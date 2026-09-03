@@ -9,17 +9,20 @@
 module Spec.Agent.IssueHost (spec) where
 
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Monad (void)
-import Data.List (find)
+import Control.Exception (IOException, bracket, try)
+import Control.Monad (void, when)
+import Data.List (find, isInfixOf)
 import Data.Maybe (isJust)
-import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, tryTakeMVar)
 import Data.Aeson (FromJSON, ToJSON, Value (..), decode, eitherDecode, encode, toJSON)
 import qualified Data.Map.Strict as Map
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import Kanban.Domain (Repository (..), defaultWorkflowConfig)
 import Kanban.Models (ProviderName (..))
@@ -66,6 +69,8 @@ import Kanban.Worker
     WorkerTask (..),
     acknowledgeReviewCommand,
     acknowledgeWorker,
+    acknowledgementFor,
+    reviewCommandSettled,
     canonicalStageOutcome,
     childCommandOutcome,
     issueActionPreflightAction,
@@ -89,6 +94,8 @@ import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Preflight (BackendFixture (..), fullyProvisionedFakes, withPreflightMachine)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath (takeDirectory, takeFileName)
+import System.Posix.IO (OpenMode (ReadOnly), closeFd, defaultFileFlags, openFd)
+import System.Posix.IO.ByteString (fdRead)
 import Test.Hspec
 
 spec :: Spec
@@ -154,8 +161,8 @@ lifecycleSpec = describe "one running host" $ do
       -- Appended a second time, as a replay or a retry would.
       Right () <- appendReviewCommand child answer
       awaitCalls host 1 isAnswerCall
-      settled <- awaitAcknowledgements child 1
-      map (.acknowledgedOutcome) settled `shouldBe` [ReviewCommandAccepted]
+      settled <- awaitAcknowledgements child 2
+      settledOutcome answer.reviewCommandId settled `shouldBe` Just ReviewCommandAccepted
       calls <- providerCalls host
       length (filter isAnswerCall calls) `shouldBe` 1
       -- The line the user typed is in the child's evidence, so a dashboard
@@ -174,8 +181,8 @@ lifecycleSpec = describe "one running host" $ do
       _ <- awaitState child (\recorded -> recorded.workerStateReviewTurn == Just "turn-2")
       stale <- commandNumbered 1 child InterruptReviewTurn
       Right () <- appendReviewCommand child stale {reviewCommandTurn = Just "turn-1"}
-      settled <- awaitAcknowledgements child 1
-      map (.acknowledgedOutcome) settled `shouldBe` [ReviewCommandRejected "that turn has already ended"]
+      settled <- awaitAcknowledgements child 2
+      settledOutcome stale.reviewCommandId settled `shouldBe` Just (ReviewCommandRejected "that turn has already ended")
       calls <- providerCalls host
       filter isInterruptCall calls `shouldBe` []
 
@@ -292,8 +299,8 @@ lifecycleSpec = describe "one running host" $ do
       _ <- awaitState child (\recorded -> recorded.workerStateReviewTurn == Just "turn-1")
       stale <- commandNumbered 1 child (SendReviewFeedback "look again")
       Right () <- appendReviewCommand child stale {reviewCommandThread = Just (ReviewThreadId (ConnectionId 1) "thread-other")}
-      settled <- awaitAcknowledgements child 1
-      map (.acknowledgedOutcome) settled `shouldBe` [ReviewCommandRejected "that provider thread has already ended"]
+      settled <- awaitAcknowledgements child 2
+      settledOutcome stale.reviewCommandId settled `shouldBe` Just (ReviewCommandRejected "that provider thread has already ended")
       calls <- providerCalls host
       filter isSendCall calls `shouldBe` []
 
@@ -305,8 +312,8 @@ lifecycleSpec = describe "one running host" $ do
       _ <- awaitState child (\recorded -> recorded.workerStateReviewTurn == Just "turn-1")
       unaddressed <- commandNumbered 1 child (SendReviewFeedback "look again")
       Right () <- appendReviewCommand child unaddressed {reviewCommandThread = Nothing}
-      settled <- awaitAcknowledgements child 1
-      map (.acknowledgedOutcome) settled `shouldBe` [ReviewCommandRejected "that command names no provider thread"]
+      settled <- awaitAcknowledgements child 2
+      settledOutcome unaddressed.reviewCommandId settled `shouldBe` Just (ReviewCommandRejected "that command names no provider thread")
 
   -- Termination is the exception, and has to be: it ends the child whichever
   -- thread it is on, and refusing it for a thread that moved would leave an
@@ -319,6 +326,126 @@ lifecycleSpec = describe "one running host" $ do
       Right () <- appendReviewCommand child stale {reviewCommandThread = Just (ReviewThreadId (ConnectionId 1) "thread-other")}
       state <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
       state.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed "the issue action was terminated")
+
+  -- Round 2's first blocker. A settled child releases its lease, so a
+  -- replacement action for the same issue can start immediately — and the
+  -- first action's thread announcement, keyed on the wire by issue number
+  -- alone, would then attach to the replacement. Its thread would take the
+  -- replacement's commands and never be closed. Start order is the
+  -- correlation the protocol gives, so the announcement resolves to the
+  -- action that asked for it.
+  it "attaches a late thread to the action that asked, not to its replacement" $
+    withRunningHost $ \host -> do
+      first <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitCallsFor host 1 isBeginCall
+      termination <- commandNumbered 1 first TerminateIssueAction
+      Right () <- appendReviewCommand first termination
+      _ <- awaitState first (\recorded -> terminalState recorded.workerStateStatus)
+      -- The replacement takes the freed lease and asks for its own thread.
+      second <- publishChild host "action-2" 594 IssueRevision
+      _ <- awaitCallsFor host 2 isBeginCall
+      -- The first action's announcement, arriving now.
+      let late = ReviewThreadId (ConnectionId 1) "thread-first"
+      deliver host (ReviewThreadCreated 594 late)
+      awaitCalls host 1 isFinishCall
+      calls <- providerCalls host
+      filter isFinishCall calls `shouldBe` [FinishThread late]
+      -- The replacement never took it, so it is still waiting for its own.
+      replacement <- decodeChildState second
+      (replacement >>= (.workerStateReviewThread)) `shouldBe` Nothing
+      -- And it works normally once its own announcement arrives.
+      own <- awaitThreadFor host 594
+      own `shouldNotBe` late
+
+  -- Round 2's second blocker. A command applied and then not acknowledged is
+  -- owed again on the next poll, which sends the same steer to the same
+  -- provider thread twice. Claiming it before applying inverts that: an
+  -- unwritable ledger means nothing was applied, and a written claim means it
+  -- is never applied again.
+  it "claims a command before applying it, so a lost acknowledgement cannot replay it" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitThreadFor host 594
+      feedback <- commandNumbered 1 child (SendReviewFeedback "look again")
+      Right () <- appendReviewCommand child feedback
+      awaitCalls host 1 isSendCall
+      settled <- awaitAcknowledgements child 2
+      -- The claim, then the outcome, in that order.
+      map (.acknowledgedOutcome) settled `shouldBe` [ReviewCommandClaimed, ReviewCommandAccepted]
+      -- The last record is what a reader takes, and a claimed command is
+      -- never owed again.
+      acknowledgementFor feedback.reviewCommandId settled
+        `shouldSatisfy` maybe False (reviewCommandSettled . (.acknowledgedOutcome))
+      owedBy child `shouldReturn` []
+
+  -- The same ledger, read the way a host restarted mid-delivery reads it: a
+  -- command carrying only a claim is not owed, so the provider operation is
+  -- never repeated.
+  it "never owes a command whose claim is the only record of it" $
+    withIssueAction $ \descriptor -> do
+      command <- commandNumbered 1 descriptor (SendReviewFeedback "look again")
+      Right () <- appendReviewCommand descriptor command
+      claim <- acknowledged command ReviewCommandClaimed
+      Right () <- acknowledgeReviewCommand descriptor claim
+      owedBy descriptor `shouldReturn` []
+      -- And it reads as unsettled, which is the honest account of an attempt
+      -- whose result was never observed.
+      settled <- readReviewCommandAcknowledgements descriptor
+      acknowledgementFor command.reviewCommandId settled
+        `shouldSatisfy` maybe False (not . reviewCommandSettled . (.acknowledgedOutcome))
+
+  -- Round 2's fourth blocker. Host selection and child admission cannot be
+  -- one atomic step from the launch side, so a child can name a host that has
+  -- since terminated. A fresh host adopts such a child rather than leaving an
+  -- action the operator started to sit until stale recovery.
+  it "adopts a starting child whose named host has already finished" $
+    withRunningHost $ \host -> do
+      child <- publishChildNaming host (WorkerId "host-that-exited") "action-1" 594 IssueRevision
+      publishTerminalHost host (WorkerId "host-that-exited")
+      _ <- awaitThreadFor host 594
+      adopted <- decodeChildState child
+      fmap (.workerStateStatus) adopted `shouldBe` Just WorkerRunning
+
+  -- The other half, and the one that keeps this from being theft: a child
+  -- whose named host is still live belongs to that host, and this one leaves
+  -- it alone however long it waits.
+  it "leaves a starting child alone while its named host is still live" $
+    withRunningHost $ \host -> do
+      child <- publishChildNaming host (WorkerId "host-still-running") "action-1" 594 IssueRevision
+      publishRunningHost host (WorkerId "host-still-running")
+      -- Give the host several polls to get it wrong in.
+      threadDelay 300000
+      calls <- providerCalls host
+      filter isBeginCall calls `shouldBe` []
+      untouched <- decodeChildState child
+      fmap (.workerStateStatus) untouched `shouldBe` Just WorkerStarting
+
+  -- Round 2's fifth blocker. A shared-process backend writes every thread's
+  -- traffic to one client-wide transcript, so a child had no raw evidence of
+  -- its own to point at or replay. Each child now keeps its own, recorded on
+  -- its own state, and two concurrent revisions do not share one.
+  it "gives each concurrent child its own raw log, and the host its client's" $
+    withRunningHost $ \host -> do
+      first <- publishChild host "action-1" 594 IssueRevision
+      firstThread <- awaitThreadFor host 594
+      second <- publishChild host "action-2" 595 IssueRevision
+      secondThread <- awaitThreadFor host 595
+      deliver host (ReviewOutput firstThread AgentOutput "reading 594")
+      deliver host (ReviewOutput secondThread AgentOutput "reading 595")
+      awaitJournal first 2
+      awaitJournal second 2
+      firstLog <- awaitJust "the first child recorded no raw log" (fmap (>>= (.workerStateLogPath)) (decodeChildState first))
+      secondLog <- awaitJust "the second child recorded no raw log" (fmap (>>= (.workerStateLogPath)) (decodeChildState second))
+      firstLog `shouldNotBe` secondLog
+      -- Each holds its own traffic and not its sibling's.
+      -- Read as bytes rather than through 'readFile': the host still holds
+      -- each log open, and GHC's handle locking refuses a second reader.
+      firstContents <- readLogBytes firstLog
+      secondContents <- readLogBytes secondLog
+      firstContents `shouldSatisfy` isInfixOf "reading 594"
+      firstContents `shouldSatisfy` (not . isInfixOf "reading 595")
+      secondContents `shouldSatisfy` isInfixOf "reading 595"
+      secondContents `shouldSatisfy` (not . isInfixOf "reading 594")
 
   -- The host is not a provider turn, and must not record itself as one: a
   -- recorded provider pid with no recorded identity is what every termination
@@ -816,7 +943,12 @@ withRunningHostOutcome body =
       -- one — a durable termination command — rather than by reaching into
       -- the host, so the teardown exercises the same path the tests do.
       endEveryChild repository
-      takeMVar finished
+      -- Bounded, because a host that will not exit is a defect this suite has
+      -- to report rather than hang on: an unbounded wait here turns any
+      -- lifecycle bug into a suite that never finishes, which is the least
+      -- useful failure a test can produce.
+      exited <- awaitMaybe (tryTakeMVar finished)
+      when (exited == Nothing) (fail "the host never exited after every child was ended")
       finalCalls <- readMVar calls
       finalEvents <- readMVar emitted
       pure (lastTerminal finalEvents, StopProvider `elem` finalCalls)
@@ -871,11 +1003,33 @@ recordingProvider record =
       -- init, which is always present, so registering it exercises the real
       -- path without spawning anything.
       providerProcesses = pure [managedProcessGroup 1],
+      -- The client's own transcript, which the host records as its log and
+      -- which is deliberately not any child's.
+      providerLogPath = Nothing,
       providerStop = record StopProvider
     }
 
 -- | Ends every issue action this repository still holds, and waits until the
 -- host has settled each one.
+-- | Publishes another host's records in the status the caller names, so the
+-- orphaned-child rules have a real record to judge.
+publishHostRecord :: HostUnderTest -> WorkerId -> WorkerStatus -> IO ()
+publishHostRecord host identifier status = do
+  now <- getCurrentTime
+  descriptor <-
+    descriptorForSpec
+      ( (specFor identifier (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")))
+          {workerRepository = host.hostRepository}
+      )
+  LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+  writeChildState descriptor (runningChildState descriptor now) {workerStateStatus = status}
+
+publishTerminalHost :: HostUnderTest -> WorkerId -> IO ()
+publishTerminalHost host identifier = publishHostRecord host identifier (WorkerTerminal SolveCompleted)
+
+publishRunningHost :: HostUnderTest -> WorkerId -> IO ()
+publishRunningHost host identifier = publishHostRecord host identifier WorkerRunning
+
 endEveryChild :: Repository -> IO ()
 endEveryChild repository = do
   history <- discoverWorkerHistory repository
@@ -898,13 +1052,17 @@ hostIdUnderTest = WorkerId "host-under-test"
 -- | Publishes one child specification naming the host under test, exactly as
 -- the registry's launch does, and returns its descriptor.
 publishChild :: HostUnderTest -> Text -> Int -> ReviewStage -> IO WorkerDescriptor
-publishChild host identifier issueNumber stage = do
+publishChild host = publishChildNaming host hostIdUnderTest
+
+-- | Publishes a child naming some other host, for the orphaned-child rules.
+publishChildNaming :: HostUnderTest -> WorkerId -> Text -> Int -> ReviewStage -> IO WorkerDescriptor
+publishChildNaming host named identifier issueNumber stage = do
   now <- getCurrentTime
   descriptor <-
     descriptorForSpec
       ( (specFor
            (WorkerId identifier)
-           (IssueActionWorkerTaskKind (IssueActionWorkerTask issueNumber stage hostIdUnderTest IssueOriginClaude)))
+           (IssueActionWorkerTaskKind (IssueActionWorkerTask issueNumber stage named IssueOriginClaude)))
           { workerRepository = host.hostRepository,
             -- Dated now, not at the fixture epoch: a child is bounded from
             -- its own creation, and one dated in the past is settled by that
@@ -1013,6 +1171,28 @@ awaitMaybe probe = go (1200 :: Int)
 
 journalEvents :: WorkerDescriptor -> IO [WorkerEvent]
 journalEvents descriptor = map (.workerEnvelopeEvent) <$> readWorkerJournal descriptor
+
+-- | A log's current contents, read through a POSIX descriptor.
+--
+-- Not 'ByteString.readFile': GHC locks a file per process, and the host still
+-- holds this log open for writing, so any second 'Handle' on it is refused.
+-- Reading the descriptor directly is what lets a test look at a log its
+-- subject is still writing — which is the only moment the separation between
+-- two concurrent children is observable.
+readLogBytes :: FilePath -> IO String
+readLogBytes path =
+  bracket (openFd path ReadOnly defaultFileFlags) closeFd $ \descriptor ->
+    Text.unpack . TextEncoding.decodeUtf8Lenient . ByteString.concat <$> readChunks descriptor
+  where
+    -- 'fdRead' throws at end of file rather than returning nothing, so the
+    -- end of the log is caught rather than tested for.
+    readChunks descriptor = do
+      chunk <- try @IOException (fdRead descriptor 8192)
+      case chunk of
+        Left _ -> pure []
+        Right bytes
+          | ByteString.null bytes -> pure []
+          | otherwise -> (bytes :) <$> readChunks descriptor
 
 terminalState :: WorkerStatus -> Bool
 terminalState (WorkerTerminal _) = True
@@ -1220,6 +1400,11 @@ issueNumberOf descriptor =
 owedBy :: WorkerDescriptor -> IO [ReviewCommand]
 owedBy descriptor =
   undeliveredReviewCommands <$> readReviewCommands descriptor <*> readReviewCommandAcknowledgements descriptor
+
+-- | The outcome standing for one command, which is the last record for it:
+-- every command is claimed before it is applied and settled afterwards.
+settledOutcome :: ReviewCommandId -> [ReviewCommandAcknowledgement] -> Maybe ReviewCommandOutcome
+settledOutcome identity = fmap (.acknowledgedOutcome) . acknowledgementFor identity
 
 acknowledged :: ReviewCommand -> ReviewCommandOutcome -> IO ReviewCommandAcknowledgement
 acknowledged command outcome = do

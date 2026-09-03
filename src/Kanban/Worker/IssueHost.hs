@@ -58,14 +58,16 @@ module Kanban.Worker.IssueHost
 where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
-import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
-import Control.Exception (SomeException, try)
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
+import Control.Exception (IOException, SomeException, try)
 import Control.Monad (forM_, unless, void, when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (find)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (mapMaybe)
+import Data.Aeson (encode)
+import qualified Data.ByteString.Lazy as LazyByteString
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
@@ -93,6 +95,7 @@ import Kanban.Review
     canonicalLaunchOutcome,
     finishReviewThread,
     interruptReview,
+    reviewClientLogPath,
     reviewConnectionProcesses,
     reviewTurnResumable,
     runCanonicalIssueReview,
@@ -101,6 +104,7 @@ import Kanban.Review
     stopReviewClient,
   )
 import Kanban.Solve (SolveOutcome (..))
+import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Worker.Command
   ( ReviewCommand (..),
     ReviewCommandOutcome (..),
@@ -177,6 +181,9 @@ data IssueHostProvider = IssueHostProvider
     -- otherwise leaves them orphaned with nothing durable naming them, and
     -- nothing for a recovery pass to verify.
     providerProcesses :: IO [ManagedProcess],
+    -- | Where the client writes the traffic that belongs to no one thread.
+    -- The host records it as its own log; each child keeps its own.
+    providerLogPath :: Maybe FilePath,
     providerStop :: IO ()
   }
 
@@ -195,6 +202,7 @@ embeddedIssueHostProvider client =
       providerInterruptTurn = interruptReview client,
       providerFinishThread = finishReviewThread client,
       providerProcesses = reviewConnectionProcesses client,
+      providerLogPath = reviewClientLogPath client,
       providerStop = stopReviewClient client
     }
 
@@ -219,6 +227,19 @@ data HostChild = HostChild
   { hostChildDescriptor :: WorkerDescriptor,
     hostChildTask :: IssueActionWorkerTask,
     hostChildJournal :: EventJournalLock,
+    -- | This child's own raw log.
+    --
+    -- Its own, and not the client's. A shared-process backend writes every
+    -- thread's traffic to one client-wide transcript, interleaved and with no
+    -- record of which action any line belongs to — so a child would have no
+    -- raw evidence it could point at, let alone replay. This log holds the
+    -- provider traffic routed to this child, byte-accurate for output, and
+    -- its path is on the child's own state where a dashboard reads it.
+    --
+    -- 'Nothing' when the log could not be opened. A raw log that will not
+    -- open is a hygiene failure, never a reason to refuse the review: the
+    -- event journal is the evidence a replay actually needs.
+    hostChildLog :: Maybe SessionLog,
     hostChildState :: MVar WorkerState,
     hostChildStageThread :: IORef (Maybe ThreadId),
     -- | The canonical @approve_issues.py@ subprocess, for a canonical stage
@@ -251,6 +272,18 @@ data IssueReviewHost = IssueReviewHost
     -- bounded by the actions one host serves, and the alternative is a second
     -- timer whose expiry is exactly the race it was added to close.
     hostRetired :: MVar (Map Int HostChild),
+    -- | The children that have asked the provider for a thread and not yet
+    -- been told which one, oldest first, per issue.
+    --
+    -- The wire names only an issue number, and an issue can outlive the
+    -- action that asked: a child settled before its thread was announced
+    -- releases its lease, a replacement action for the same issue starts, and
+    -- the late announcement would then attach the first action's thread to
+    -- the second — where it would take the second's commands and never be
+    -- closed. Start order is the correlation the protocol actually gives us,
+    -- so the announcement resolves to the oldest start still waiting rather
+    -- than to whichever child holds the issue now.
+    hostPendingStarts :: MVar (Map Int [WorkerId]),
     hostProvider :: MVar (Maybe IssueHostProvider),
     -- | The supervisor's own provider registration, which records a process's
     -- identity, adds it to this worker's census, and makes it reachable by
@@ -306,6 +339,7 @@ runIssueReviewHostWith tuning startProvider spec rememberProvider emit = do
   snapshot <- readProcessSnapshot
   children <- newMVar Map.empty
   retired <- newMVar Map.empty
+  pendingStarts <- newMVar Map.empty
   providerCell <- newMVar Nothing
   registered <- newIORef []
   stopped <- newIORef False
@@ -317,6 +351,7 @@ runIssueReviewHostWith tuning startProvider spec rememberProvider emit = do
             hostTuning = tuning,
             hostChildren = children,
             hostRetired = retired,
+            hostPendingStarts = pendingStarts,
             hostProvider = providerCell,
             hostRememberProvider = rememberProvider,
             hostRegisteredProcesses = registered,
@@ -341,9 +376,22 @@ runIssueReviewHostWith tuning startProvider spec rememberProvider emit = do
       -- is its client's actual processes, below, each through the supervisor's
       -- own registration so they are identified, censused, and killable.
       emit (WorkerDiagnostic ("repository review host running as pid " <> Text.pack (show pid)))
+      forM_ provider.providerLogPath (emit . WorkerLogOpened)
       now <- getCurrentTime
-      outcome <- hostLoop host now
+      -- The loop's own failure is a terminal outcome for the host, not a
+      -- silent death. A host thread that simply ended would leave every child
+      -- it was serving recorded as running under a process that is gone, with
+      -- nothing saying why — which is the hardest state for a later dashboard
+      -- to make sense of and the one this layer exists to avoid.
+      looped <- try @SomeException (hostLoop host now)
+      let outcome = either (SolveFailed . ("the repository review host failed: " <>) . Text.pack . show) id looped
       provider.providerStop
+      -- Every child's raw log is closed here rather than when that child
+      -- settled. A settled child can still receive a late thread
+      -- announcement, and that is evidence worth keeping; closing at settle
+      -- would throw it away and, worse, leave a closed handle for the very
+      -- write that records it.
+      closeChildLogs host
       finishHost host outcome
 
 -- | The poll. Adopt, command, bound, exit — in that order, because each step
@@ -351,11 +399,19 @@ runIssueReviewHostWith tuning startProvider spec rememberProvider emit = do
 hostLoop :: IssueReviewHost -> UTCTime -> IO SolveOutcome
 hostLoop host lastLive = do
   threadDelay host.hostTuning.hostPollMicros
-  registerProviderProcesses host
-  adoptNewChildren host
-  applyPendingCommands host
-  enforceChildBounds host
-  refreshChildHeartbeats host
+  -- Each step is isolated. A step that throws — an unreadable directory, a
+  -- child whose records have gone, a provider call that failed in a way its
+  -- own result could not express — must not end the poll, because ending the
+  -- poll ends the host and every sibling action it is serving (requirement
+  -- 11). What it does instead is say so on the host's own journal.
+  mapM_
+    (isolateHostStep host)
+    [ ("registering the client's processes", registerProviderProcesses host),
+      ("adopting new children", adoptNewChildren host),
+      ("applying dashboard commands", applyPendingCommands host),
+      ("enforcing child bounds", enforceChildBounds host),
+      ("refreshing child heartbeats", refreshChildHeartbeats host)
+    ]
   live <- liveChildren host
   now <- getCurrentTime
   if not (null live)
@@ -364,6 +420,15 @@ hostLoop host lastLive = do
       if diffUTCTime now lastLive >= fromIntegral host.hostTuning.hostIdleGraceSeconds
         then pure SolveCompleted
         else hostLoop host lastLive
+
+-- | Runs one poll step, reporting a failure rather than letting it end the
+-- host.
+isolateHostStep :: IssueReviewHost -> (Text, IO ()) -> IO ()
+isolateHostStep host (what, step) = do
+  outcome <- try @SomeException step
+  case outcome of
+    Right () -> pure ()
+    Left failure -> hostDiagnostic host (what <> " failed: " <> Text.pack (show failure))
 
 -- | Commit the host's own terminal outcome. Children are already settled by
 -- the time this runs: the loop only exits when it holds none.
@@ -387,17 +452,69 @@ adoptNewChildren :: IssueReviewHost -> IO ()
 adoptNewChildren host = do
   history <- discoverWorkerHistory host.hostSpec.workerRepository
   held <- readMVar host.hostChildren
-  forM_ (mapMaybe (childCandidate host) history) $ \(descriptor, task) ->
+  candidates <- catMaybes <$> mapM (childCandidate host) history
+  forM_ candidates $ \(descriptor, task) ->
     unless (Map.member descriptor.workerDescriptorSpec.workerId held) $ do
       stateResult <- readWorkerState descriptor
       case stateResult of
         Right state | terminalStatus state.workerStateStatus -> pure ()
         _ -> adoptChild host descriptor task
 
-childCandidate :: IssueReviewHost -> WorkerDescriptor -> Maybe (WorkerDescriptor, IssueActionWorkerTask)
-childCandidate host descriptor = do
-  task <- issueActionTask descriptor.workerDescriptorSpec.workerTask
-  if task.issueActionHost == host.hostSpec.workerId then Just (descriptor, task) else Nothing
+-- | Whether this host may run this child.
+--
+-- Naming this host is the ordinary claim, and the only one that reaches a
+-- child another host is already serving (requirement 16).
+--
+-- The second arm is recovery, and it is needed because host selection and
+-- child admission cannot be made atomic from the launch side: a dispatch
+-- reads a live host, and that host can reach its idle grace and exit before
+-- the child's specification is written. The child then names a host that has
+-- terminated, and under the first arm alone it would sit unadopted until
+-- stale recovery — an action the operator started that simply never runs.
+--
+-- So a host also adopts a child whose named host is provably finished and
+-- which no host has ever adopted. Both halves are load-bearing. "Provably
+-- finished" excludes a live host's children, so this can never steal one; a
+-- host record that will not decode is not proof and is left alone. "Never
+-- adopted" means still starting, with no thread and no provider recorded —
+-- an action that has done nothing yet, so re-homing it repeats nothing and
+-- loses nothing.
+childCandidate :: IssueReviewHost -> WorkerDescriptor -> IO (Maybe (WorkerDescriptor, IssueActionWorkerTask))
+childCandidate host descriptor = case issueActionTask descriptor.workerDescriptorSpec.workerTask of
+  Nothing -> pure Nothing
+  Just task
+    | task.issueActionHost == host.hostSpec.workerId -> pure (Just (descriptor, task))
+    | otherwise -> do
+        orphaned <- namedHostFinished host task.issueActionHost
+        untouched <- neverAdopted descriptor
+        pure (if orphaned && untouched then Just (descriptor, task) else Nothing)
+
+-- | Whether the host a child names has provably finished.
+--
+-- Fails closed in both directions: a host whose record cannot be found or
+-- cannot be read is not proven finished, and its children are left to it.
+namedHostFinished :: IssueReviewHost -> WorkerId -> IO Bool
+namedHostFinished host named = do
+  history <- discoverWorkerHistory host.hostSpec.workerRepository
+  case find ((== named) . (.workerId) . (.workerDescriptorSpec)) history of
+    Nothing -> pure True
+    Just descriptor -> do
+      stateResult <- readWorkerState descriptor
+      pure $ case stateResult of
+        Right state -> terminalStatus state.workerStateStatus
+        Left _ -> False
+
+-- | Whether a child has done nothing at all yet, which is what makes
+-- re-homing it safe.
+neverAdopted :: WorkerDescriptor -> IO Bool
+neverAdopted descriptor = do
+  stateResult <- readWorkerState descriptor
+  pure $ case stateResult of
+    Right state ->
+      state.workerStateStatus == WorkerStarting
+        && state.workerStateReviewThread == Nothing
+        && state.workerStateProviderPid == Nothing
+    Left _ -> False
 
 terminalStatus :: WorkerStatus -> Bool
 terminalStatus (WorkerTerminal _) = True
@@ -408,7 +525,12 @@ adoptChild :: IssueReviewHost -> WorkerDescriptor -> IssueActionWorkerTask -> IO
 adoptChild host descriptor task = do
   journal <- newEventJournalLock
   now <- getCurrentTime
-  stateCell <- newMVar (issueActionStartingState host.hostPid host.hostProcessIdentity now descriptor.workerDescriptorSpec)
+  rawLog <- openChildLog descriptor task
+  stateCell <-
+    newMVar
+      ( (issueActionStartingState host.hostPid host.hostProcessIdentity now descriptor.workerDescriptorSpec)
+          {workerStateLogPath = sessionLogPath <$> rawLog}
+      )
   stageThread <- newIORef Nothing
   process <- newIORef Nothing
   settleClaim <- newIORef False
@@ -417,6 +539,7 @@ adoptChild host descriptor task = do
           { hostChildDescriptor = descriptor,
             hostChildTask = task,
             hostChildJournal = journal,
+            hostChildLog = rawLog,
             hostChildState = stateCell,
             hostChildStageThread = stageThread,
             hostChildProcess = process,
@@ -427,6 +550,15 @@ adoptChild host descriptor task = do
   journalChild child (WorkerDiagnostic (adoptionDiagnostic task))
   threadId <- forkIO (runChildStage host child)
   writeIORef stageThread (Just threadId)
+
+-- | Opens this child's raw log, named for the action rather than the host so
+-- two concurrent revisions never share one.
+openChildLog :: WorkerDescriptor -> IssueActionWorkerTask -> IO (Maybe SessionLog)
+openChildLog descriptor task = do
+  opened <- openSessionLog descriptor.workerDescriptorSpec.workerRepository "issue-action" task.issueActionIssueNumber Nothing
+  case opened of
+    Left _ -> pure Nothing
+    Right sessionLog -> Just sessionLog <$ logMessage sessionLog "action-started" (adoptionDiagnostic task)
 
 adoptionDiagnostic :: IssueActionWorkerTask -> Text
 adoptionDiagnostic task =
@@ -591,9 +723,23 @@ runRevisionChild host child = do
   result <- case (blocked, provider) of
     (Just message, _) -> pure (Left message)
     (Nothing, Nothing) -> pure (Left "the review backend is not connected")
-    (Nothing, Just connected) -> connected.providerBeginReview task.issueActionIssueNumber
+    (Nothing, Just connected) -> do
+      -- Recorded before the call, because the provider announces the thread
+      -- through the event sink and that announcement can arrive before this
+      -- call has returned.
+      recordPendingStart host child
+      begun <- connected.providerBeginReview task.issueActionIssueNumber
+      -- A process-per-thread backend spawns this thread's process during that
+      -- call, so its identity is recorded now rather than at the next poll:
+      -- a host killed in the gap would otherwise leak it with nothing durable
+      -- naming it.
+      registerProviderProcesses host
+      pure begun
   case result of
     Left message -> do
+      -- A start that failed will never be announced, so the pending start it
+      -- recorded must not claim a later announcement for this issue.
+      dropPendingStart host child
       journalChild child (WorkerReviewEvent (ReviewStartFailed task.issueActionIssueNumber message))
       settleChild host child (SolveFailed message)
     Right () -> updateChildState child (\state -> state {workerStateLastActivity = "starting coordinator"})
@@ -611,32 +757,39 @@ runRevisionChild host child = do
 routeReviewEvent :: IssueReviewHost -> ReviewEvent -> IO ()
 routeReviewEvent host event = case event of
   ReviewThreadCreated issueNumber threadId -> do
-    found <- childForIssue host issueNumber
+    found <- takePendingStart host issueNumber
     case found of
+      Nothing -> hostDiagnostic host ("a review thread was created for issue #" <> Text.pack (show issueNumber) <> ", which this host holds no pending start for")
       Just child -> do
-        updateChildState child $ \state ->
-          state
-            { workerStateReviewThread = Just threadId,
-              workerStateStatus = runningUnlessSettled state.workerStateStatus,
-              workerStateLastActivity = "session ready"
-            }
         journalChild child (WorkerReviewEvent event)
-      -- The child asked for this thread and was settled before the provider
-      -- announced it. Closing it here is the whole reason settled children
-      -- stay addressable: the alternative is a live provider thread — and,
-      -- under a process-per-thread backend, a live process — that nothing
-      -- owns and nothing will ever stop.
-      Nothing -> do
-        settled <- Map.lookup issueNumber <$> readMVar host.hostRetired
-        case settled of
-          Nothing -> hostDiagnostic host ("a review thread was created for issue #" <> Text.pack (show issueNumber) <> ", which this host holds no action for")
-          Just child -> do
-            journalChild child (WorkerReviewEvent event)
+        settled <- readIORef child.hostChildSettleClaim
+        if settled
+          then do
+            -- The child asked for this thread and was settled before the
+            -- provider announced it. Closing it here is the whole reason a
+            -- settled child stays addressable: the alternative is a live
+            -- provider thread — and, under a process-per-thread backend, a
+            -- live process — that nothing owns and nothing will ever stop.
             journalChild child (WorkerDiagnostic lateThreadDiagnostic)
             provider <- readMVar host.hostProvider
             forM_ provider (\connected -> connected.providerFinishThread threadId)
+          else do
+            updateChildState child $ \state ->
+              state
+                { workerStateReviewThread = Just threadId,
+                  workerStateStatus = runningUnlessSettled state.workerStateStatus,
+                  workerStateLastActivity = "session ready"
+                }
+            -- Registered here rather than left to the next poll. A
+            -- process-per-thread backend spawns this thread's process in
+            -- order to announce it, and a host killed in between would leave
+            -- that process with no recorded identity for any recovery pass to
+            -- verify or terminate.
+            registerProviderProcesses host
   ReviewStartFailed issueNumber message -> do
-    found <- childForIssue host issueNumber
+    -- A start that failed is a start that will never be announced, so it is
+    -- the one this issue is waiting on.
+    found <- takePendingStart host issueNumber
     forM_ found $ \child -> do
       journalChild child (WorkerReviewEvent event)
       settleChild host child (SolveFailed message)
@@ -757,13 +910,34 @@ applyPendingCommands host = do
             | command <- undeliveredReviewCommands commands acknowledgements,
               command.reviewCommandTarget == child.hostChildDescriptor.workerDescriptorSpec.workerId
           ]
-    forM_ owed $ \command -> do
+    forM_ owed (deliverChildCommand host child)
+
+-- | One command, claimed before it is applied and settled after.
+--
+-- The claim is what makes delivery exactly-once rather than at-least-once.
+-- Applying first and recording after leaves a window in which a host that
+-- died — or an acknowledgement write that simply failed — left the command
+-- still owed, so the next pass sent the same steer to the same provider
+-- thread a second time. Writing the claim first inverts the failure: a claim
+-- that could not be written means nothing was applied and the command is
+-- still owed, which is safe, and a claim that was written means the command
+-- is never applied again whatever happens next.
+--
+-- A claim left standing is an attempt whose result was never observed. It is
+-- reported as exactly that rather than guessed either way, which is the same
+-- outcome-unknown discipline every other terminal path here follows.
+deliverChildCommand :: IssueReviewHost -> HostChild -> ReviewCommand -> IO ()
+deliverChildCommand host child command = do
+  claim <- reviewCommandAcknowledgement command ReviewCommandClaimed
+  claimed <- acknowledgeReviewCommand child.hostChildDescriptor claim
+  case claimed of
+    Left message ->
+      -- Nothing was applied, and the command stays owed. Saying so is worth
+      -- a journal line: a ledger that cannot be written is why an answer the
+      -- user gave appears to go nowhere.
+      journalChild child (WorkerDiagnostic ("a review command could not be claimed and was not applied: " <> message))
+    Right () -> do
       outcome <- applyChildCommand host child command
-      -- Journaled before it is acknowledged. The acknowledgement is what
-      -- stops the command being applied again, so a host that stopped between
-      -- the two would replay it and write one more journal entry; a host that
-      -- stopped in the other order would apply a command whose evidence no
-      -- dashboard can ever see.
       journalChild child (WorkerReviewInput (commandDisplay command.reviewCommandPayload) (rejectionReason outcome))
       acknowledgement <- reviewCommandAcknowledgement command outcome
       void (acknowledgeReviewCommand child.hostChildDescriptor acknowledgement)
@@ -783,6 +957,7 @@ commandDisplay payload = case payload of
 
 rejectionReason :: ReviewCommandOutcome -> Maybe Text
 rejectionReason ReviewCommandAccepted = Nothing
+rejectionReason ReviewCommandClaimed = Just "the outcome of this command was never observed"
 rejectionReason (ReviewCommandRejected message) = Just message
 
 -- | One command, against the child it names.
@@ -945,12 +1120,48 @@ runningUnlessSettled _ = WorkerRunning
 -- Child lookup and record keeping
 -- ---------------------------------------------------------------------------
 
+-- | Records that this child has asked the provider for a thread.
+recordPendingStart :: IssueReviewHost -> HostChild -> IO ()
+recordPendingStart host child =
+  modifyMVar_ host.hostPendingStarts $ \pending ->
+    pure (Map.insertWith (flip (<>)) issueNumber [identifier] pending)
+  where
+    issueNumber = child.hostChildTask.issueActionIssueNumber
+    identifier = child.hostChildDescriptor.workerDescriptorSpec.workerId
+
+-- | Forgets a start that will never be announced.
+dropPendingStart :: IssueReviewHost -> HostChild -> IO ()
+dropPendingStart host child =
+  modifyMVar_ host.hostPendingStarts $ \pending ->
+    pure (Map.adjust (filter (/= identifier)) child.hostChildTask.issueActionIssueNumber pending)
+  where
+    identifier = child.hostChildDescriptor.workerDescriptorSpec.workerId
+
+-- | The child an announcement for this issue belongs to: the oldest start
+-- still waiting, live or already settled.
+--
+-- Nothing rather than whichever child currently holds the issue. A thread
+-- announced with no start waiting for it is a thread this host did not ask
+-- for, and attaching it to an unrelated action is exactly the misrouting this
+-- correlation exists to prevent — a settled action's thread taking its
+-- replacement's commands, and never being closed.
+takePendingStart :: IssueReviewHost -> Int -> IO (Maybe HostChild)
+takePendingStart host issueNumber = do
+  claimed <- modifyMVar host.hostPendingStarts $ \pending -> case Map.lookup issueNumber pending of
+    Just (oldest : remaining) -> pure (Map.insert issueNumber remaining pending, Just oldest)
+    _ -> pure (pending, Nothing)
+  case claimed of
+    Nothing -> pure Nothing
+    Just identifier -> do
+      live <- readMVar host.hostChildren
+      case Map.lookup identifier live of
+        Just child -> pure (Just child)
+        Nothing -> do
+          settled <- readMVar host.hostRetired
+          pure (find ((== identifier) . (.workerId) . (.workerDescriptorSpec) . (.hostChildDescriptor)) (Map.elems settled))
+
 liveChildren :: IssueReviewHost -> IO [HostChild]
 liveChildren host = Map.elems <$> readMVar host.hostChildren
-
-childForIssue :: IssueReviewHost -> Int -> IO (Maybe HostChild)
-childForIssue host issueNumber =
-  find ((== issueNumber) . (.hostChildTask.issueActionIssueNumber)) <$> liveChildren host
 
 childOnThread :: IssueReviewHost -> ReviewThreadId -> IO (Maybe HostChild)
 childOnThread host threadId = do
@@ -973,8 +1184,23 @@ childHoldsThread threadId child = do
   state <- readMVar child.hostChildState
   pure (state.workerStateReviewThread == Just threadId)
 
+-- | Records one event in this child's durable evidence: its event journal,
+-- and its own raw log.
+--
+-- Both, because they answer different questions. The journal is what a
+-- dashboard replays to rebuild the overlay; the raw log is the provider
+-- traffic an operator reads when they want to know what the provider actually
+-- said, and it is this child's share of it rather than the whole client's.
 journalChild :: HostChild -> WorkerEvent -> IO ()
-journalChild child = appendWorkerEvent child.hostChildDescriptor child.hostChildJournal
+journalChild child event = do
+  appendWorkerEvent child.hostChildDescriptor child.hostChildJournal event
+  -- Best-effort, and deliberately so. The event journal above is the evidence
+  -- a replay needs; the raw log is what an operator reads afterwards. A log
+  -- that cannot be written — a full disk, a handle closed by a shutdown
+  -- racing a late event — is a hygiene failure, and letting it propagate
+  -- would take down the host serving every other action for it.
+  forM_ child.hostChildLog $ \sessionLog ->
+    void (try @IOException (logRawLine sessionLog "provider" (LazyByteString.toStrict (encode event))))
 
 journalHost :: IssueReviewHost -> WorkerEvent -> IO ()
 journalHost host = host.hostEmit
@@ -1012,6 +1238,14 @@ registerProviderProcesses host = do
         fresh <- atomicModifyIORef' host.hostRegisteredProcesses $ \known ->
           if fromIntegral pid `elem` known then (known, False) else (fromIntegral pid : known, True)
         when fresh (host.hostRememberProvider process)
+
+-- | Closes every child's raw log, live and retired alike.
+closeChildLogs :: IssueReviewHost -> IO ()
+closeChildLogs host = do
+  live <- liveChildren host
+  settled <- Map.elems <$> readMVar host.hostRetired
+  forM_ (live <> settled) $ \child ->
+    forM_ child.hostChildLog (void . try @IOException . closeSessionLog)
 
 -- | Keeps every live child's heartbeat fresh.
 --

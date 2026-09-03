@@ -42,6 +42,7 @@ module Kanban.Worker.Command
     undeliveredReviewCommands,
     reviewCommandAcknowledgement,
     acknowledgementFor,
+    reviewCommandSettled,
   )
 where
 
@@ -153,11 +154,27 @@ data ReviewCommand = ReviewCommand
 -- command was seen, considered, and not applied, which is what stops a
 -- refused steer being retried forever by a dashboard that cannot tell
 -- "rejected" from "not read yet".
+--
+-- 'ReviewCommandClaimed' is the one that makes delivery exactly-once rather
+-- than at-least-once. It is written /before/ the command is applied, so a
+-- host that dies between applying and recording the result has still left a
+-- record that stops the next pass applying it again — which is what a steer
+-- being sent twice to a provider looks like from the other end. It is
+-- superseded by the real outcome the moment that lands; a claim still
+-- standing afterwards is an attempt whose result was never observed, and is
+-- reported as exactly that rather than guessed either way.
 data ReviewCommandOutcome
-  = ReviewCommandAccepted
+  = ReviewCommandClaimed
+  | ReviewCommandAccepted
   | ReviewCommandRejected Text
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | Whether an acknowledgement is the final word on its command.
+reviewCommandSettled :: ReviewCommandOutcome -> Bool
+reviewCommandSettled ReviewCommandClaimed = False
+reviewCommandSettled ReviewCommandAccepted = True
+reviewCommandSettled (ReviewCommandRejected _) = True
 
 data ReviewCommandAcknowledgement = ReviewCommandAcknowledgement
   { acknowledgedCommandId :: ReviewCommandId,
@@ -252,5 +269,10 @@ openPrivateAppendHandle path = do
 -- what the user typed never reached the provider, and is the only thing that
 -- can put a message back on their input line rather than leaving it looking
 -- delivered.
+--
+-- The /last/ record for an id, because a command is claimed before it is
+-- applied and its real outcome appended after. Reading the first would report
+-- every settled command as still in flight.
 acknowledgementFor :: ReviewCommandId -> [ReviewCommandAcknowledgement] -> Maybe ReviewCommandAcknowledgement
-acknowledgementFor identity = find ((== identity) . (.acknowledgedCommandId))
+acknowledgementFor identity acknowledgements =
+  find ((== identity) . (.acknowledgedCommandId)) (reverse acknowledgements)
